@@ -32,7 +32,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: docker-provenance-${{ inputs.version }}-${{ inputs.variant }}
+  group: docker-provenance-v${{ inputs.version }}-${{ inputs.variant }}
   cancel-in-progress: false
 
 env:
@@ -64,6 +64,10 @@ jobs:
           INPUT_OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
+          [ "$GITHUB_REF" = "refs/heads/main" ] || {
+            echo "Docker recovery must be dispatched from refs/heads/main (got $GITHUB_REF)" >&2
+            exit 1
+          }
           [[ "$INPUT_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
             echo "invalid release version: $INPUT_VERSION" >&2
             exit 1
@@ -83,7 +87,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       # A missing tag fails here, before any job receives packages:write.
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: refs/tags/v${{ steps.release.outputs.version }}
           fetch-depth: 0
@@ -131,21 +135,26 @@ jobs:
           case "$VARIANT" in
             core)
               suffix=""
-              rolling="latest"
+              stable_rolling="latest"
               target="runtime"
               expected_engine="false"
               ;;
             plsql-intelligence)
               suffix="-plsql-intelligence"
-              rolling="plsql-intelligence-latest"
+              stable_rolling="plsql-intelligence-latest"
               target="runtime-plsql-intelligence"
               expected_engine="true"
               ;;
           esac
+          if [[ "$VERSION" == *-* ]]; then
+            rolling_image=""
+          else
+            rolling_image="$IMAGE_REPOSITORY:$stable_rolling"
+          fi
           {
             echo "source_sha=$source_sha"
             echo "version_image=$IMAGE_REPOSITORY:$VERSION$suffix"
-            echo "rolling_image=$IMAGE_REPOSITORY:$rolling"
+            echo "rolling_image=$rolling_image"
             echo "target=$target"
             echo "expected_engine=$expected_engine"
           } >> "$GITHUB_OUTPUT"
@@ -162,7 +171,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: refs/tags/v${{ needs.verify-release.outputs.version }}
           fetch-depth: 0
@@ -184,10 +193,8 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Match release.yml: pin cosign 2.x. cosign-installer v4 defaults to
-          # cosign 3.x, whose sign flows broke the v0.10.0 release (Dependabot
-          # #19). See bead oraclemcp-ysvhx for the v3 migration.
-          cosign-release: 'v2.4.1'
+          # Match the normal release path's standardized bundle/referrer format.
+          cosign-release: 'v3.1.2'
 
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
@@ -253,7 +260,7 @@ jobs:
             echo "verified source-bound rebuild signature for $subject"
           fi
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         if: needs.verify-release.outputs.operation == 'rebuild'
         with:
           node-version: ${{ env.NODE_VERSION }}
@@ -300,7 +307,7 @@ jobs:
 
       - name: Attest source-bound rebuild
         if: needs.verify-release.outputs.operation == 'rebuild'
-        uses: actions/attest-build-provenance@v4.1.1
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ghcr.io/muhdur/oraclemcp
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -342,6 +349,35 @@ jobs:
           }
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
+      - name: Smoke verified immutable digest
+        shell: bash
+        env:
+          DIGEST: ${{ steps.selected.outputs.digest }}
+          VERSION: ${{ needs.verify-release.outputs.version }}
+          EXPECTED_ENGINE: ${{ needs.verify-release.outputs.expected_engine }}
+        run: |
+          set -euo pipefail
+          image="$IMAGE_REPOSITORY@$DIGEST"
+          docker pull "$image"
+          docker run --rm --entrypoint /bin/bash \
+            -e EXPECTED_VERSION="$VERSION" \
+            -e EXPECTED_ENGINE="$EXPECTED_ENGINE" \
+            "$image" -lc '
+            set -euo pipefail
+            if command -v gcc >/dev/null 2>&1; then
+              echo "runtime image unexpectedly contains gcc" >&2
+              exit 1
+            fi
+            oraclemcp info >/tmp/oraclemcp-info.json
+            grep -q "\"version\": \"$EXPECTED_VERSION\"" /tmp/oraclemcp-info.json
+            grep -q "\"engine\": $EXPECTED_ENGINE" /tmp/oraclemcp-info.json
+            if [ "$EXPECTED_ENGINE" = "true" ]; then
+              grep -q "oracle_plsql_parse" /tmp/oraclemcp-info.json
+            else
+              ! grep -q "oracle_plsql_parse" /tmp/oraclemcp-info.json
+            fi
+          '
+
       # Rebuild may repair a missing version tag, but performs a second
       # existence check immediately before creation and never overwrites one.
       - name: Publish missing immutable version tag
@@ -368,6 +404,7 @@ jobs:
       # Existing immutable version tags are only read. Promotion mutates only
       # the rolling tag after signature verification or a byte-identical build.
       - name: Promote verified digest to rolling tag
+        if: needs.verify-release.outputs.rolling_image != ''
         shell: bash
         env:
           DIGEST: ${{ steps.selected.outputs.digest }}
@@ -383,34 +420,6 @@ jobs:
             exit 1
           }
 
-      - name: Smoke promoted image
-        shell: bash
-        env:
-          IMAGE: ${{ needs.verify-release.outputs.rolling_image }}
-          VERSION: ${{ needs.verify-release.outputs.version }}
-          EXPECTED_ENGINE: ${{ needs.verify-release.outputs.expected_engine }}
-        run: |
-          set -euo pipefail
-          docker pull "$IMAGE"
-          docker run --rm --entrypoint /bin/bash \
-            -e EXPECTED_VERSION="$VERSION" \
-            -e EXPECTED_ENGINE="$EXPECTED_ENGINE" \
-            "$IMAGE" -lc '
-            set -euo pipefail
-            if command -v gcc >/dev/null 2>&1; then
-              echo "runtime image unexpectedly contains gcc" >&2
-              exit 1
-            fi
-            oraclemcp info >/tmp/oraclemcp-info.json
-            grep -q "\"version\": \"$EXPECTED_VERSION\"" /tmp/oraclemcp-info.json
-            grep -q "\"engine\": $EXPECTED_ENGINE" /tmp/oraclemcp-info.json
-            if [ "$EXPECTED_ENGINE" = "true" ]; then
-              grep -q "oracle_plsql_parse" /tmp/oraclemcp-info.json
-            else
-              ! grep -q "oracle_plsql_parse" /tmp/oraclemcp-info.json
-            fi
-          '
-
       - name: Record immutable provenance
         shell: bash
         env:
@@ -422,6 +431,11 @@ jobs:
           ROLLING_IMAGE: ${{ needs.verify-release.outputs.rolling_image }}
           DIGEST: ${{ steps.selected.outputs.digest }}
         run: |
+          if [ -n "$ROLLING_IMAGE" ]; then
+            rolling_summary="\`$ROLLING_IMAGE\`"
+          else
+            rolling_summary="not promoted (prerelease)"
+          fi
           {
             echo "## Docker provenance recovery"
             echo
@@ -430,6 +444,6 @@ jobs:
             echo "- Variant: \`$VARIANT\`"
             echo "- Source commit: \`$SOURCE_SHA\`"
             echo "- Immutable subject: \`$VERSION_IMAGE@$DIGEST\`"
-            echo "- Promoted rolling tag: \`$ROLLING_IMAGE\`"
+            echo "- Promoted rolling tag: $rolling_summary"
             echo "- Existing version tag rewritten: \`false\`"
           } >> "$GITHUB_STEP_SUMMARY"

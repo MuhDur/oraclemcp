@@ -29,6 +29,9 @@ need cargo
 need git
 need jq
 need grep
+need python3
+
+bash "$ROOT/scripts/check_release_surface_versions.sh"
 
 metadata="$(cargo metadata --no-deps --format-version 1)"
 
@@ -93,25 +96,18 @@ if grep -nE 'Publish oraclemcp [0-9]+\.[0-9]+\.[0-9]+' engineering-program-manif
 fi
 rm -f /tmp/oraclemcp-stale-publish-title.$$
 
-expected_packages=(
-  oraclemcp-error
-  oraclemcp-telemetry
-  oraclemcp-audit
-  oraclemcp-guard
-  oraclemcp-config
-  oraclemcp-db
-  oraclemcp-auth
-  oraclemcp-core
-  oraclemcp
-)
-
-for package in "${expected_packages[@]}"; do
-  pkg_version="$(
-    printf '%s\n' "${package_lines[@]}" |
-      awk -F '\t' -v p="$package" '$1 == p { print $2; exit }'
-  )"
-  [ -n "$pkg_version" ] || fail "expected workspace package missing from metadata: $package"
-  [ "$pkg_version" = "$version" ] || fail "$package metadata version '$pkg_version' != workspace '$version'"
+publish_lines="$(
+  printf '%s\n' "$metadata" |
+    python3 "$ROOT/scripts/release_surface_manifest.py" --publish-order -
+)" || fail "could not derive crates.io publish order from cargo metadata"
+mapfile -t publish_lines <<<"$publish_lines"
+[ "${#publish_lines[@]}" -gt 0 ] || fail "no crates.io-publishable workspace packages found"
+for package_line in "${publish_lines[@]}"; do
+  package="${package_line%%$'\t'*}"
+  pkg_version="${package_line#*$'\t'}"
+  [ "$package" != "$package_line" ] || fail "malformed publish-order entry: $package_line"
+  [ "$pkg_version" = "$version" ] ||
+    fail "$package metadata version '$pkg_version' != workspace '$version'"
 done
 
 for manifest in crates/oraclemcp-*/Cargo.toml; do
@@ -124,27 +120,22 @@ for manifest in crates/oraclemcp-*/Cargo.toml; do
     fail "$manifest version '$manifest_version' != workspace '$version'"
 done
 
-workspace_toml="$ROOT/Cargo.toml"
 # The driver-cx main/protocol crates version independently of the
 # server workspace version (a separate upstream release train — e.g. driver
 # 0.7.4 while the server is 0.8.0). Parse the pinned driver version from the
 # manifest and verify every driver-facing surface agrees on that SAME version
 # (internal consistency), decoupled from the server's own $version.
 driver_version="$(
-  grep -E '^oraclemcp-driver-cx = \{ version = "=[0-9]' "$workspace_toml" |
-    head -1 | sed -E 's/.*version = "=([0-9][0-9.]*)".*/\1/'
-)"
-[ -n "$driver_version" ] || fail "Cargo.toml must pin oraclemcp-driver-cx at an exact =X.Y.Z version"
+  python3 "$ROOT/scripts/release_surface_manifest.py" --value driver_version
+)" || fail "Cargo.toml must structurally pin oraclemcp-driver-cx at an exact =X.Y.Z version"
 
 asupersync_version="$(
-  grep -E '^asupersync = \{ version = "[0-9]' "$workspace_toml" |
-    head -1 | sed -E 's/.*version = "([0-9][0-9.]*)".*/\1/'
-)"
-[ -n "$asupersync_version" ] || fail "Cargo.toml must pin asupersync at X.Y.Z"
+  python3 "$ROOT/scripts/release_surface_manifest.py" --value runtime_version
+)" || fail "Cargo.toml must structurally pin asupersync at X.Y.Z"
 
-grep -Fq "oraclemcp-driver-cx = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
+grep -Fq "oraclemcp-driver-cx = { version = \"=$driver_version\", default-features = false }" "$ROOT/Cargo.toml" ||
   fail "Cargo.toml must pin oraclemcp-driver-cx exactly at =$driver_version"
-grep -Fq "oraclemcp-driver-cx-protocol = { version = \"=$driver_version\", default-features = false }" "$workspace_toml" ||
+grep -Fq "oraclemcp-driver-cx-protocol = { version = \"=$driver_version\", default-features = false }" "$ROOT/Cargo.toml" ||
   fail "Cargo.toml must pin oraclemcp-driver-cx-protocol exactly at =$driver_version"
 
 lock="$ROOT/Cargo.lock"

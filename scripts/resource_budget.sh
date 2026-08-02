@@ -154,7 +154,7 @@ EOF
 fi
 
 if $EMIT_ONLY; then
-  # The exact resource_budget block required by required-proof/v1 and
+  # The exact resource_budget block required by required-proof/v2 and
   # mutation-result/v1, so a proof embeds the budget it actually ran under
   # rather than a number someone typed.
   printf '{\n  "isolated_target_dir": "%s",\n  "memory_max_bytes": %s,\n  "pid_task_max": %s\n}\n' \

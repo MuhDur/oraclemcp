@@ -578,7 +578,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "validate server.json",
+      "check_name": "validate immutable release",
       "tier": "manual",
       "workflow": "Publish to MCP Registry",
       "workflow_file": "publish-mcp.yml",
@@ -930,7 +930,7 @@
       ],
       "jobs": [
         "publish server.json",
-        "validate server.json",
+        "validate immutable release",
         "verify registry listing"
       ]
     },
@@ -980,7 +980,7 @@
       "npm/npx release channel is retired",
       "promote attested digest",
       "publish server.json",
-      "validate server.json",
+      "validate immutable release",
       "verify immutable release source",
       "verify registry listing"
     ],

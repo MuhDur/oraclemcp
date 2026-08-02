@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Emit required-proof/v1 for the effective `required` quality graph.
+# Emit required-proof/v2 for the effective `required` quality graph.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

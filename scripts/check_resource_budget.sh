@@ -138,7 +138,7 @@ assert isinstance(b["pid_task_max"], int) and b["pid_task_max"] > 0
 assert b["isolated_target_dir"]
 PY
 then
-  ok "resource_budget block matches required-proof/v1 and mutation-result/v1"
+  ok "resource_budget block matches required-proof/v2 and mutation-result/v1"
 else
   bad "emitted resource_budget does not match the contract"
 fi

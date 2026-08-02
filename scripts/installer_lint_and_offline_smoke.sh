@@ -136,7 +136,7 @@ BIN
 run_built_artifact_smoke() {
   local built_binary="$1"
   local smoke_target="${ORACLEMCP_INSTALLER_SMOKE_TARGET:-x86_64-unknown-linux-musl}"
-  local bundle_root dist archive fake_bin fake_log fake_cosign built_prefix install_output install_status reinstall_output reinstall_status cosign_output
+  local bundle_root dist archive fake_bin fake_log fake_cosign trusted_root built_prefix install_output install_status reinstall_output reinstall_status cosign_output
 
   [ -x "$built_binary" ] || fail "ORACLEMCP_INSTALLER_BUILT_BINARY is not executable: $built_binary"
   case "$smoke_target" in
@@ -153,6 +153,7 @@ run_built_artifact_smoke() {
   fake_bin="$bundle_root/fake-bin"
   fake_log="$bundle_root/fake-cosign.log"
   fake_cosign="$fake_bin/cosign"
+  trusted_root="$bundle_root/sigstore-trusted-root.json"
   built_prefix="$SMOKE_ROOT/built-prefix-$$"
 
   mkdir -p "$dist" "$fake_bin"
@@ -160,9 +161,9 @@ run_built_artifact_smoke() {
   chmod +x "$dist/oraclemcp"
   (cd "$bundle_root" && tar czf "$(basename "$archive")" "oraclemcp-$smoke_target")
   checksum_file "$archive"
-  : >"$archive.sig"
-  : >"$archive.crt"
+  : >"$archive.sigstore.json"
   : >"$archive.attestation.sigstore.json"
+  printf '{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1"}\n' >"$trusted_root"
 
   cat >"$fake_cosign" <<'COSIGN'
 #!/usr/bin/env bash
@@ -175,7 +176,7 @@ case "${1:-}" in
     exit 2
     ;;
 esac
-printf '%s\n' "$1" >> "${ORACLEMCP_INSTALLER_FAKE_COSIGN_LOG:?}"
+printf '%s\n' "$*" >> "${ORACLEMCP_INSTALLER_FAKE_COSIGN_LOG:?}"
 COSIGN
   chmod +x "$fake_cosign"
 
@@ -189,6 +190,7 @@ COSIGN
         --version "$SMOKE_VERSION" \
         --target "$smoke_target" \
         --prefix "$built_prefix" \
+        --trusted-root "$trusted_root" \
         --force \
         --no-service 2>&1
   )"
@@ -206,6 +208,7 @@ COSIGN
   cosign_output="$(cat "$fake_log")"
   contains "$cosign_output" "verify-blob"
   contains "$cosign_output" "verify-blob-attestation"
+  contains "$cosign_output" "--trusted-root $trusted_root"
 
   set +e
   reinstall_output="$(
@@ -217,6 +220,7 @@ COSIGN
         --version "$SMOKE_VERSION" \
         --target "$smoke_target" \
         --prefix "$built_prefix" \
+        --trusted-root "$trusted_root" \
         --no-service 2>&1
   )"
   reinstall_status=$?
@@ -256,17 +260,26 @@ else
 fi
 
 ps_text="$(tr -d '\r' < install.ps1)"
-contains "$ps_text" "certutil.exe -hashfile"
+contains "$ps_text" "Get-FileHash -LiteralPath \$Archive -Algorithm SHA256"
+not_contains "$ps_text" "certutil.exe -hashfile"
 contains "$ps_text" "cosign verify-blob"
 contains "$ps_text" "cosign verify-blob-attestation"
+# shellcheck disable=SC2016 # PowerShell variables must remain literal here.
+contains "$ps_text" '--bundle $SignatureBundle'
+# shellcheck disable=SC2016 # PowerShell variables must remain literal here.
+contains "$ps_text" 'Assert-CanonicalRepository -Repository $Repo'
+contains "$ps_text" "MaximumRedirection 0 -TimeoutSec 120"
 contains "$ps_text" "Get-NormalizedVerifyPosture"
 contains "$ps_text" "cosign is required by -Verify require"
 contains "$ps_text" "authenticity unverified: cosign not installed; SHA-256 checksum verified"
 contains "$ps_text" "cosign verification intentionally skipped by -Verify checksum-only"
+contains "$ps_text" "ORACLEMCP_INSTALL_TRUSTED_ROOT_REQUIRED"
+# shellcheck disable=SC2016 # PowerShell variables must remain literal here.
+contains "$ps_text" '@("--trusted-root", $TrustedRoot)'
 contains "$ps_text" "completions powershell"
-contains "$ps_text" "Test-AlreadyCurrentByVersion"
-contains "$ps_text" "already current: installed oraclemcp \$installed matches target \$Version"
+not_contains "$ps_text" "Test-AlreadyCurrentByVersion"
 contains "$ps_text" "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED"
+contains "$ps_text" "Get-SafeBackupVersion"
 contains "$ps_text" "Backup-ExistingFile"
 contains "$ps_text" "Install-ExecutableAtomically"
 contains "$ps_text" "Write-UninstallPlan"
@@ -310,6 +323,65 @@ if command -v pwsh >/dev/null 2>&1; then
     note "PSScriptAnalyzer not installed; skipping PSSA"
     log_skip "PSScriptAnalyzer unavailable"
   fi
+
+  mkdir -p "$ROOT/target"
+  PS_FUNCTIONS="$ROOT/target/installer-smoke-powershell-functions-$$.ps1"
+  PS_BACKUP_ROOT="$ROOT/target/installer-smoke-powershell-backup-$$"
+  sed '/^Invoke-Main$/d' install.ps1 >"$PS_FUNCTIONS"
+  # shellcheck disable=SC2016 # The command is PowerShell, not Bash.
+  env ORACLEMCP_PS_FUNCTIONS="$PS_FUNCTIONS" ORACLEMCP_SEMVER_VECTORS="$ROOT/tests/fixtures/installer_semver_vectors.tsv" \
+    ORACLEMCP_PS_BACKUP_ROOT="$PS_BACKUP_ROOT" \
+    pwsh -NoLogo -NoProfile -Command '
+      . $env:ORACLEMCP_PS_FUNCTIONS
+      foreach ($row in (Import-Csv -LiteralPath $env:ORACLEMCP_SEMVER_VECTORS -Delimiter "`t" -Header kind,left,right,expected | Where-Object { -not $_.kind.StartsWith("#") })) {
+        switch ($row.kind) {
+          "valid" {
+            $actual = Get-NormalizedVersion -InputVersion $row.left
+            if ($actual -cne $row.expected) { throw "valid SemVer mismatch: $($row.left) -> $actual" }
+          }
+          "invalid" {
+            $rejected = $false
+            try { $null = Get-NormalizedVersion -InputVersion $row.left } catch { $rejected = $true }
+            if (-not $rejected) { throw "invalid SemVer accepted: $($row.left)" }
+          }
+          "compare" {
+            $actual = Compare-Semver -Left $row.left -Right $row.right
+            if ($actual -ne [int]$row.expected) { throw "SemVer order mismatch: $($row.left) ? $($row.right) = $actual" }
+          }
+          default { throw "unknown SemVer vector kind: $($row.kind)" }
+        }
+      }
+
+      New-Item -ItemType Directory -Path $env:ORACLEMCP_PS_BACKUP_ROOT -Force | Out-Null
+      $sourceFile = Join-Path $env:ORACLEMCP_PS_BACKUP_ROOT "installed-oraclemcp.exe"
+      Set-Content -LiteralPath $sourceFile -Value "untrusted installed bytes"
+      $script:ReportedInstalledVersion = ""
+      function Get-InstalledVersion { return $script:ReportedInstalledVersion }
+      $caseNumber = 0
+      foreach ($reported in @("segment/../../slash-escape", "..\..\dotdot-escape")) {
+        $script:ReportedInstalledVersion = $reported
+        $script:Prefix = Join-Path $env:ORACLEMCP_PS_BACKUP_ROOT "case-$caseNumber"
+        Backup-ExistingFile -Path $sourceFile -Name "oraclemcp.exe" | Out-Null
+        $backupDir = Join-Path $script:Prefix "backups"
+        $backupFiles = @(Get-ChildItem -LiteralPath $backupDir -File)
+        if ($backupFiles.Count -ne 1 -or
+            $backupFiles[0].Name -notmatch "^oraclemcp\.exe-unknown-[0-9]{8}T[0-9]{6}Z$") {
+          throw "malformed installed version did not produce exactly one sanitized backup: $reported"
+        }
+        $expectedParent = [IO.Path]::GetFullPath($backupDir)
+        $actualParent = [IO.Path]::GetFullPath($backupFiles[0].DirectoryName)
+        if (-not [string]::Equals($expectedParent, $actualParent, [StringComparison]::OrdinalIgnoreCase)) {
+          throw "PowerShell backup escaped its root for installed version: $reported"
+        }
+        if ((Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash -ne
+            (Get-FileHash -LiteralPath $backupFiles[0].FullName -Algorithm SHA256).Hash) {
+          throw "sanitized PowerShell backup changed the prior binary bytes"
+        }
+        $caseNumber++
+      }
+    '
+  log_pass "shared PowerShell SemVer vectors"
+  log_pass "PowerShell backup traversal containment"
 elif [ "${ORACLEMCP_INSTALLER_REQUIRE_PWSH:-0}" = "1" ]; then
   fail "pwsh is required but not installed"
 else
@@ -327,6 +399,36 @@ CONFIG_HOME="$SMOKE_ROOT/config"
 TMP_DIR="$SMOKE_ROOT/tmp"
 SMOKE_VERSION="9.9.9-installer-smoke"
 mkdir -p "$SMOKE_ROOT" "$HOME_DIR" "$CONFIG_HOME" "$TMP_DIR"
+
+INSTALLER_FUNCTIONS="$SMOKE_ROOT/install-functions.sh"
+sed '/^main "\$@"$/d' install.sh >"$INSTALLER_FUNCTIONS"
+while IFS=$'\t' read -r kind left right expected; do
+  case "$kind" in
+    \#* | "")
+      continue
+      ;;
+    valid)
+      actual="$(bash -c 'source "$1"; normalize_version "$2"' _ "$INSTALLER_FUNCTIONS" "$left")"
+      [ "$actual" = "$expected" ] || fail "valid SemVer mismatch: $left -> $actual"
+      ;;
+    invalid)
+      set +e
+      bash -c 'source "$1"; normalize_version "$2"' _ "$INSTALLER_FUNCTIONS" "$left" >/dev/null 2>&1
+      vector_status=$?
+      set -e
+      [ "$vector_status" -ne 0 ] || fail "invalid SemVer accepted: $left"
+      ;;
+    compare)
+      actual="$(bash -c 'source "$1"; version_compare "$2" "$3"' _ "$INSTALLER_FUNCTIONS" "$left" "$right")"
+      [ "$actual" = "$expected" ] \
+        || fail "SemVer order mismatch: $left ? $right = $actual (expected $expected)"
+      ;;
+    *)
+      fail "unknown SemVer vector kind: $kind"
+      ;;
+  esac
+done < tests/fixtures/installer_semver_vectors.tsv
+log_pass "shared Bash SemVer vectors"
 
 if [ -n "${ORACLEMCP_INSTALLER_BUILT_BINARY:-}" ]; then
   run_built_artifact_smoke "$ORACLEMCP_INSTALLER_BUILT_BINARY"
@@ -632,8 +734,33 @@ already_current_output="$(
       --no-completions \
       --no-service 2>&1
 )"
-contains "$already_current_output" "oraclemcp installer: already current: installed oraclemcp 1.1.0 matches target 1.1.0"
+contains "$already_current_output" "oraclemcp installer: already current: $UPDATE_PREFIX/bin/oraclemcp matches release archive"
 contains "$already_current_output" "$UPDATE_PREFIX/bin/oraclemcp --json doctor"
+
+cat >"$UPDATE_PREFIX/bin/oraclemcp" <<'SAME_VERSION_DIFFERENT_BYTES'
+#!/usr/bin/env sh
+if [ "${1:-}" = "--version" ]; then
+  echo "oraclemcp 1.1.0"
+  exit 0
+fi
+echo "same version, different unverified bytes"
+SAME_VERSION_DIFFERENT_BYTES
+chmod +x "$UPDATE_PREFIX/bin/oraclemcp"
+same_version_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    PATH="/usr/bin:/bin" \
+    bash install.sh \
+      --offline "$UPDATE_ARCHIVE" \
+      --version 1.1.0 \
+      --target "$UPDATE_TARGET" \
+      --prefix "$UPDATE_PREFIX" \
+      --verify checksum-only \
+      --no-completions \
+      --no-service 2>&1
+)"
+contains "$same_version_output" "oraclemcp installer: installed oraclemcp to $UPDATE_PREFIX/bin/oraclemcp"
+cmp -s "$UPDATE_PREFIX/bin/oraclemcp" "$UPDATE_DIR/oraclemcp-$UPDATE_TARGET/oraclemcp" \
+  || fail "same-version payload with different bytes was not replaced by the verified archive"
 
 DOWNGRADE_DIR="$SMOKE_ROOT/downgrade"
 DOWNGRADE_ARCHIVE="$DOWNGRADE_DIR/oraclemcp-$UPDATE_TARGET.tar.gz"
@@ -660,6 +787,63 @@ cp "$backup_file" "$UPDATE_PREFIX/bin/oraclemcp"
 cmp -s "$UPDATE_PREFIX/bin/oraclemcp" "$UPDATE_DIR/oraclemcp-old-copy" || fail "rollback from backup did not restore prior bytes"
 log_pass "update backup idempotency and rollback"
 
+assert_malformed_version_backup_contained() {
+  local case_name="$1" reported="$2" setup_component="$3"
+  local malicious_prefix backup_dir old_copy output backup_file backup_count escaped_file
+  malicious_prefix="$SMOKE_ROOT/malformed-version-$case_name"
+  backup_dir="$malicious_prefix/share/oraclemcp/backups"
+  old_copy="$SMOKE_ROOT/malformed-version-$case_name-old-copy"
+  mkdir -p "$malicious_prefix/bin" "$backup_dir/$setup_component"
+  cat >"$malicious_prefix/bin/oraclemcp" <<'MALICIOUS_VERSION_BIN'
+#!/usr/bin/env sh
+if [ "${1:-}" = "--version" ]; then
+  printf 'oraclemcp %s\n' "${ORACLEMCP_FAKE_INSTALLED_VERSION:?}"
+  exit 0
+fi
+printf 'untrusted installed bytes\n'
+MALICIOUS_VERSION_BIN
+  chmod +x "$malicious_prefix/bin/oraclemcp"
+  cp "$malicious_prefix/bin/oraclemcp" "$old_copy"
+
+  output="$(
+    env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+      PATH="/usr/bin:/bin" ORACLEMCP_FAKE_INSTALLED_VERSION="$reported" \
+      bash install.sh \
+        --offline "$UPDATE_ARCHIVE" \
+        --version 1.1.0 \
+        --target "$UPDATE_TARGET" \
+        --prefix "$malicious_prefix" \
+        --verify checksum-only \
+        --force \
+        --no-completions \
+        --no-service 2>&1
+  )"
+  contains "$output" "oraclemcp installer: backed up previous binary to $backup_dir/oraclemcp-unknown-"
+  backup_count="$(find "$backup_dir" -type f -name 'oraclemcp-unknown-*' | wc -l | tr -d '[:space:]')"
+  [ "$backup_count" -eq 1 ] \
+    || fail "malformed installed version created $backup_count sanitized backups for $case_name"
+  backup_file="$(find "$backup_dir" -type f -name 'oraclemcp-unknown-*' | head -n 1)"
+  case "$backup_file" in
+    "$backup_dir"/oraclemcp-unknown-*) ;;
+    *) fail "malformed installed version escaped backup root for $case_name: $backup_file" ;;
+  esac
+  cmp -s "$backup_file" "$old_copy" \
+    || fail "sanitized backup is not byte-identical for malformed version case $case_name"
+  escaped_file="$(find "$SMOKE_ROOT" -type f -name "*$case_name-escape-*" | head -n 1)"
+  [ -z "$escaped_file" ] \
+    || fail "malformed installed version wrote outside backup root for $case_name: $escaped_file"
+}
+
+assert_malformed_version_backup_contained \
+  "slash" \
+  "segment/../../../../../slash-escape" \
+  "oraclemcp-segment"
+assert_malformed_version_backup_contained \
+  "dotdot" \
+  "../../../../../dotdot-escape" \
+  "oraclemcp-.."
+log_pass "malformed installed versions stay within backup root"
+
 set +e
 require_no_cosign_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
@@ -680,9 +864,31 @@ set -e
 contains "$require_no_cosign_output" "ORACLEMCP_INSTALL_COSIGN_REQUIRED"
 log_pass "verify-require without cosign fails closed"
 
-: >"$NO_COSIGN_ARCHIVE.sig"
-: >"$NO_COSIGN_ARCHIVE.crt"
+: >"$NO_COSIGN_ARCHIVE.sigstore.json"
 : >"$NO_COSIGN_ARCHIVE.attestation.sigstore.json"
+SIGSTORE_TRUSTED_ROOT="$NO_COSIGN_DIR/sigstore-trusted-root.json"
+printf '{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1"}\n' >"$SIGSTORE_TRUSTED_ROOT"
+
+set +e
+missing_trusted_root_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    ORACLEMCP_COSIGN=/bin/true \
+    bash install.sh \
+      --offline "$NO_COSIGN_ARCHIVE" \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$SMOKE_ROOT/missing-trusted-root-prefix" \
+      --verify require \
+      --force \
+      --no-completions \
+      --no-service 2>&1
+)"
+missing_trusted_root_status=$?
+set -e
+[ "$missing_trusted_root_status" -ne 0 ] || fail "offline cosign verification without a trusted root unexpectedly succeeded"
+contains "$missing_trusted_root_output" "ORACLEMCP_INSTALL_TRUSTED_ROOT_REQUIRED"
+log_pass "offline cosign verification requires an explicit trusted root"
+
 FAILING_COSIGN="$NO_COSIGN_DIR/failing-cosign"
 cat >"$FAILING_COSIGN" <<'COSIGN'
 #!/usr/bin/env bash
@@ -711,6 +917,7 @@ bad_signature_output="$(
       --version "$SMOKE_VERSION" \
       --target x86_64-unknown-linux-musl \
       --prefix "$SMOKE_ROOT/bad-signature-prefix" \
+      --trusted-root "$SIGSTORE_TRUSTED_ROOT" \
       --verify prefer \
       --force \
       --no-completions \
@@ -863,9 +1070,62 @@ source_output="$(
 )"
 
 contains "$source_output" "mode: source"
-contains "$source_output" "cargo +nightly-2026-05-11 install oraclemcp --locked --version $SMOKE_VERSION --root $PREFIX"
+contains "$source_output" "cargo +nightly-2026-05-11 install oraclemcp --locked --root $PREFIX --version $SMOKE_VERSION --target x86_64-unknown-linux-musl"
+[ "$(grep -o -- '--target' <<<"$source_output" | wc -l)" -eq 1 ] \
+  || fail "source dry-run must forward --target exactly once"
 contains "$source_output" "source builds are explicit opt-in"
-log_pass "explicit source dry-run path"
+log_pass "explicit source dry-run path forwards target once"
+
+FAKE_CARGO_DIR="$SMOKE_ROOT/fake-cargo"
+FAKE_CARGO_LOG="$FAKE_CARGO_DIR/argv.log"
+SOURCE_PREFIX="$SMOKE_ROOT/source-prefix"
+mkdir -p "$FAKE_CARGO_DIR"
+cat >"$FAKE_CARGO_DIR/cargo" <<'FAKE_CARGO'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\0' "$@" >"${ORACLEMCP_FAKE_CARGO_LOG:?}"
+root=""
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--root" ]; then
+    shift
+    root="${1:-}"
+    break
+  fi
+  shift
+done
+[ -n "$root" ]
+mkdir -p "$root/bin"
+cat >"$root/bin/oraclemcp" <<'FAKE_BINARY'
+#!/usr/bin/env sh
+case "${1:-}" in
+  --version) printf 'oraclemcp 9.9.9-installer-smoke\n' ;;
+  completions) printf '# completion\n' ;;
+  *) printf '{"ok":true}\n' ;;
+esac
+FAKE_BINARY
+chmod +x "$root/bin/oraclemcp"
+FAKE_CARGO
+chmod +x "$FAKE_CARGO_DIR/cargo"
+env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+  PATH="$FAKE_CARGO_DIR:/usr/bin:/bin" ORACLEMCP_FAKE_CARGO_LOG="$FAKE_CARGO_LOG" \
+  bash install.sh \
+    --source \
+    --version "$SMOKE_VERSION" \
+    --target x86_64-unknown-linux-musl \
+    --prefix "$SOURCE_PREFIX" \
+    --no-completions \
+    --no-service >/dev/null 2>&1
+mapfile -d '' -t fake_cargo_argv <"$FAKE_CARGO_LOG"
+target_count=0
+for ((index = 0; index < ${#fake_cargo_argv[@]}; index++)); do
+  if [ "${fake_cargo_argv[$index]}" = "--target" ]; then
+    target_count=$((target_count + 1))
+    [ "${fake_cargo_argv[$((index + 1))]:-}" = "x86_64-unknown-linux-musl" ] \
+      || fail "source install forwarded the wrong target argument"
+  fi
+done
+[ "$target_count" -eq 1 ] || fail "source install must forward --target exactly once, observed $target_count"
+log_pass "source install forwards target exactly once"
 
 OFFLINE_DIR="$SMOKE_ROOT/offline"
 OFFLINE_ARCHIVE="$OFFLINE_DIR/oraclemcp-x86_64-unknown-linux-musl.tar.gz"
@@ -884,9 +1144,40 @@ offline_output="$(
 contains "$offline_output" "mode: offline"
 contains "$offline_output" "offline_archive: $OFFLINE_ARCHIVE"
 contains "$offline_output" "offline_checksum: $OFFLINE_ARCHIVE.sha256"
-contains "$offline_output" "offline_cosign_signature: $OFFLINE_ARCHIVE.sig + $OFFLINE_ARCHIVE.crt"
+contains "$offline_output" "offline_cosign_signature: $OFFLINE_ARCHIVE.sigstore.json"
 contains "$offline_output" "offline_cosign_attestation: $OFFLINE_ARCHIVE.attestation.sigstore.json"
+contains "$offline_output" "offline_sigstore_trusted_root: required for cosign verification"
 not_contains "$offline_output" "archive: https://github.com"
+
+set +e
+offline_latest_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --dry-run \
+      --offline "$OFFLINE_ARCHIVE" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX" 2>&1
+)"
+offline_latest_status=$?
+set -e
+[ "$offline_latest_status" -ne 0 ] || fail "offline latest dry-run unexpectedly succeeded"
+contains "$offline_latest_output" "--offline requires an explicit --version"
+
+set +e
+invalid_repo_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --dry-run \
+      --source \
+      --version "$SMOKE_VERSION" \
+      --repo 'MuhDur/oraclemcp?ref=main' \
+      --prefix "$PREFIX" 2>&1
+)"
+invalid_repo_status=$?
+set -e
+[ "$invalid_repo_status" -ne 0 ] || fail "non-canonical repository slug unexpectedly succeeded"
+contains "$invalid_repo_output" "unsupported repository"
+log_pass "offline version and repository identity fail closed"
 
 : >"$OFFLINE_ARCHIVE"
 set +e

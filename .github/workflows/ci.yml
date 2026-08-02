@@ -10,6 +10,14 @@ env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: nightly-2026-05-11
   NODE_VERSION: 22.17.0
+  # Independent policy for the local Required replay. The replay validates its
+  # derived command IDs and exact argv graph against these CI-owned commitments
+  # before running or verifying a proof; changing only the projection and proof
+  # therefore fails closed.
+  REQUIRED_LOCAL_COMMAND_IDS: "api-lock,bead-close-evidence,clippy,fixture-lint,format,honesty-grep,seam-lint,supply-chain-checks,surface-sync,test-workspace"
+  REQUIRED_LOCAL_GRAPH_SHA256: "790280daa312c26ad2a3b613944d4fc330c76006952f8e68987bd7f66c557c53"
+  PSSCRIPTANALYZER_VERSION: "1.25.0"
+  PYTHON_ORACLEDB_VERSION: "4.0.2"
   # Z2 (the fresh five-surface mutation campaign) is deferred out of the 0.9.1
   # train (plan v7 §Z2): a mutation seal binds to a source SHA and re-stales on
   # every safety-crate fix, so it is produced ONCE on the release candidate.
@@ -358,7 +366,8 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-          Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          $requiredPssaVersion = [version]$env:PSSCRIPTANALYZER_VERSION
+          Install-Module PSScriptAnalyzer -Repository PSGallery -RequiredVersion $env:PSSCRIPTANALYZER_VERSION -Scope CurrentUser -Force
 
           $parseErrors = $null
           [System.Management.Automation.PSParser]::Tokenize((Get-Content -LiteralPath "install.ps1" -Raw), [ref]$parseErrors) | Out-Null
@@ -367,7 +376,11 @@ jobs:
             exit 1
           }
 
-          Import-Module PSScriptAnalyzer
+          Import-Module PSScriptAnalyzer -RequiredVersion $requiredPssaVersion -Force
+          $loadedPssaVersions = @((Get-Module PSScriptAnalyzer).Version)
+          if ($loadedPssaVersions.Count -ne 1 -or $loadedPssaVersions[0] -ne $requiredPssaVersion) {
+            throw "Loaded PSScriptAnalyzer versions $($loadedPssaVersions -join ', '); expected exactly $requiredPssaVersion"
+          }
           $violations = Invoke-ScriptAnalyzer -Path "install.ps1" -Severity Error,Warning
           if ($violations) {
             $violations | Format-Table -AutoSize | Out-String | Write-Error
@@ -375,13 +388,36 @@ jobs:
           }
 
           $offline = Join-Path $env:RUNNER_TEMP "oraclemcp-x86_64-pc-windows-msvc.zip"
-          $dry = .\install.ps1 -DryRun -Version 9.9.9-installer-smoke -Prefix (Join-Path $env:RUNNER_TEMP "oraclemcp") -Offline $offline
+          $trustedRoot = Join-Path $env:RUNNER_TEMP "sigstore-trusted-root.json"
+          Set-Content -LiteralPath $trustedRoot -Value '{"mediaType":"application/vnd.dev.sigstore.trustedroot+json;version=0.1"}'
+          $dry = .\install.ps1 -DryRun -Version 9.9.9-installer-smoke -Prefix (Join-Path $env:RUNNER_TEMP "oraclemcp") -Offline $offline -TrustedRoot $trustedRoot
           $dryText = $dry -join "`n"
           if ($dryText -notmatch "mode: offline") {
             throw "Windows installer dry-run did not report offline mode"
           }
           if ($dryText -match "service install --yes") {
             throw "Windows installer dry-run mutated service without -Service"
+          }
+          if ($dryText -notmatch [regex]::Escape("offline_sigstore_trusted_root: $trustedRoot")) {
+            throw "Windows installer dry-run omitted the offline Sigstore trusted root"
+          }
+
+          # Execute the byte-identity decision directly: equal version strings
+          # never authorize a no-op when the verified archive bytes differ.
+          $functions = Join-Path $env:RUNNER_TEMP "oraclemcp-installer-functions.ps1"
+          (Get-Content -LiteralPath "install.ps1" | Where-Object { $_ -cne "Invoke-Main" }) |
+            Set-Content -LiteralPath $functions
+          . $functions
+          $sourceBytes = Join-Path $env:RUNNER_TEMP "verified-oraclemcp.exe"
+          $installedBytes = Join-Path $env:RUNNER_TEMP "installed-oraclemcp.exe"
+          $script:BinDir = $env:RUNNER_TEMP
+          $script:Prefix = Join-Path $env:RUNNER_TEMP "oraclemcp-byte-test"
+          Set-Content -LiteralPath $sourceBytes -Value "verified release bytes"
+          Set-Content -LiteralPath $installedBytes -Value "same version, different bytes"
+          Install-ExecutableAtomically -Source $sourceBytes -Destination $installedBytes -Name "oraclemcp.exe"
+          if ((Get-FileHash -LiteralPath $sourceBytes -Algorithm SHA256).Hash -ne
+              (Get-FileHash -LiteralPath $installedBytes -Algorithm SHA256).Hash) {
+            throw "same-version payload with different bytes was not replaced"
           }
 
           $service = .\install.ps1 -DryRun -Version 9.9.9-installer-smoke -Prefix (Join-Path $env:RUNNER_TEMP "oraclemcp") -Service -Yes -Profile db_ro -Listen 127.0.0.1:7070
@@ -629,6 +665,8 @@ jobs:
         run: |
           python3 scripts/ci_step_tool_order_lint.py --selftest
           python3 scripts/ci_step_tool_order_lint.py
+      - name: Required local projection policy
+        run: python3 scripts/verify_required_local.py --policy-check
       - name: fuzz lane budget (D4)
         run: |
           python3 scripts/ci_lane_budget.py --selftest
@@ -800,7 +838,7 @@ jobs:
     timeout-minutes: 45
     services:
       free23:
-        image: gvenzl/oracle-free:23-slim
+        image: gvenzl/oracle-free:23-slim@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
         env:
           ORACLE_PASSWORD: E2EOracle23
           APP_USER: E2E_ORACLE
@@ -839,14 +877,19 @@ jobs:
         # the design expects. Synthetic disposable CI DB; the SYSTEM password is
         # the committed fixture value in this job's service env.
         run: |
-          python3 -m pip install --quiet --disable-pip-version-check oracledb
-          python3 -c "
+          python3 -m pip install --quiet --disable-pip-version-check "oracledb==${PYTHON_ORACLEDB_VERSION}"
+          python3 - <<'PY'
+          import os
           import oracledb
+
+          expected = os.environ["PYTHON_ORACLEDB_VERSION"]
+          if oracledb.__version__ != expected:
+              raise RuntimeError(f"loaded python-oracledb {oracledb.__version__}; expected exactly {expected}")
           c = oracledb.connect(user='sys', password='E2EOracle23', dsn='localhost:1522/FREEPDB1', mode=oracledb.AUTH_MODE_SYSDBA)
           c.cursor().execute('GRANT EXECUTE ON DBMS_FLASHBACK TO E2E_ORACLE')
           c.commit()
           print('granted EXECUTE ON DBMS_FLASHBACK to E2E_ORACLE')
-          "
+          PY
       - name: 23ai matrix lane and VECTOR_DISTANCE smoke
         id: free23-matrix
         env:
@@ -907,13 +950,19 @@ jobs:
   # $ORACLEMCP_SENSITIVE_DENYLIST_FILE + a pre-push hook (see the script).
   sensitive-data:
     name: sensitive-data lint
+    needs: web-build
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
       - run: bash scripts/secret_scan.sh
+      - run: bash tests/container_supply_chain_contract_test.sh --context
 
   # Compile every cargo-fuzz target so it cannot silently rot: guard classifier
   # + ALTER SESSION, audit-chain verification, and OAuth bearer validation.

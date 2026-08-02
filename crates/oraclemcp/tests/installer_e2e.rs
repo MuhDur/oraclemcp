@@ -50,10 +50,14 @@ fn installer_lint_and_offline_smoke_passes() {
         "non-TTY dry-run agent path",
         "cosign-absent prefer install path",
         "update backup idempotency and rollback",
+        "malformed installed versions stay within backup root",
         "verify-require without cosign fails closed",
         "bad cosign signature fails closed",
         "tampered checksum fails closed",
         "checksum sidecars are bound to the selected archive",
+        "shared Bash SemVer vectors",
+        "source install forwards target exactly once",
+        "offline version and repository identity fail closed",
         "service dry-run consent plan",
         "offline plan and missing metadata failure",
         "uninstall preview remove and idempotent rerun",
@@ -137,9 +141,12 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "-Verify require",
         "-Verify checksum-only",
         "powershell -ExecutionPolicy Bypass -File .\\install.ps1 -Update -NoService",
-        "bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz",
+        "--offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz",
+        "cosign trusted-root create --with-default-services",
+        "--trusted-root ./sigstore-trusted-root.json",
         "powershell -ExecutionPolicy Bypass -File .\\install.ps1 `",
         "-Offline .\\oraclemcp-x86_64-pc-windows-msvc.zip",
+        "-TrustedRoot .\\sigstore-trusted-root.json",
         "Use the dry-run command first when you want a preview",
         "installer lock path",
         "exits before downloading, verifying, writing files, or",
@@ -183,9 +190,12 @@ fn windows_installer_verifies_before_mutating_and_requires_service_consent() {
     let installer = fs::read_to_string(root.join("install.ps1")).expect("read install.ps1");
 
     for needle in [
-        "certutil.exe -hashfile",
+        "Get-FileHash -LiteralPath $Archive -Algorithm SHA256",
         "cosign verify-blob",
         "cosign verify-blob-attestation",
+        "--bundle $SignatureBundle",
+        "Assert-CanonicalRepository -Repository $Repo",
+        "MaximumRedirection 0 -TimeoutSec 120",
         "Get-NormalizedVerifyPosture",
         "cosign is required by -Verify require",
         "authenticity unverified: cosign not installed; SHA-256 checksum verified",
@@ -193,9 +203,10 @@ fn windows_installer_verifies_before_mutating_and_requires_service_consent() {
         "x86_64-pc-windows-msvc",
         "oraclemcp-$Target.zip",
         "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING",
-        "Test-AlreadyCurrentByVersion",
-        "already current: installed oraclemcp $installed matches target $Version",
+        "ORACLEMCP_INSTALL_TRUSTED_ROOT_REQUIRED",
+        "$trustedRootArguments = @(\"--trusted-root\", $TrustedRoot)",
         "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED",
+        "Get-SafeBackupVersion",
         "Backup-ExistingFile",
         "Install-ExecutableAtomically",
         "Write-UninstallPlan",
@@ -246,7 +257,8 @@ fn unix_installer_reinstall_is_idempotent_for_identical_files() {
         "curl -fsSL \"https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)\"",
         "PROXY_ARGS=()",
         "setup_proxy()",
-        "curl --fail --location --show-error --silent --proto '=https' --tlsv1.2 \"${PROXY_ARGS[@]}\"",
+        "--proto '=https' --proto-redir '=https' --tlsv1.2",
+        "--connect-timeout 10 --max-time 120",
         "curl --fail --silent --show-error --noproxy '*' \"$url\"",
         "lock_path()",
         "acquire_lock()",
@@ -254,6 +266,7 @@ fn unix_installer_reinstall_is_idempotent_for_identical_files() {
         "another oraclemcp installer is already running",
         "already_current_by_version()",
         "guard_downgrade()",
+        "safe_backup_version()",
         "backup_existing_binary()",
         "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED",
         "mv -f \"$tmp_dest\" \"$dest\"",
@@ -279,9 +292,16 @@ fn unix_installer_reinstall_is_idempotent_for_identical_files() {
         "export PATH='$NO_COSIGN_PREFIX/bin'",
         "oraclemcp --json setup --write --profile db_ro",
         "script -qefc",
-        "already current: installed oraclemcp 1.1.0 matches target 1.1.0",
+        "already current: $UPDATE_PREFIX/bin/oraclemcp matches release archive",
+        "same-version payload with different bytes was not replaced",
         "backup is not byte-identical to prior binary",
         "rollback from backup did not restore prior bytes",
+        "segment/../../../../../slash-escape",
+        "../../../../../dotdot-escape",
+        "PowerShell backup escaped its root",
+        "tests/fixtures/installer_semver_vectors.tsv",
+        "source install must forward --target exactly once",
+        ".sigstore.json",
     ] {
         assert!(
             smoke.contains(needle),
@@ -345,6 +365,7 @@ fn release_sbom_workflow_merges_dashboard_and_rust_sboms() {
         "web/dist/oraclemcp-dashboard.cyclonedx.json",
         "bash scripts/release_sbom_check.sh --artifact",
         "artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json",
+        "artifacts/*.cdx.json.sigstore.json",
         "artifacts/*.cdx.json.attestation.sigstore.json",
     ] {
         assert!(
@@ -356,11 +377,16 @@ fn release_sbom_workflow_merges_dashboard_and_rust_sboms() {
         preflight.contains("bash \"$ROOT/scripts/release_sbom_check.sh\" --source"),
         "release preflight must check merged SBOM source wiring"
     );
-    assert!(
-        preflight.contains("crates.io/api/v1/crates/oraclemcp-driver-cx/${driver_version}"),
-        "release preflight must gate on driver-cx published on crates.io (D10); the \
-         driver versions independently of the server so the pin is parsed, not $version"
-    );
+    for needle in [
+        "registry_api_base=\"${ORACLEMCP_CRATES_IO_API_BASE:-https://crates.io/api/v1/crates}\"",
+        "driver_api=\"${registry_api_base%/}/oraclemcp-driver-cx/${driver_version}\"",
+        "--expected-version \"$driver_version\"",
+    ] {
+        assert!(
+            preflight.contains(needle),
+            "release preflight must bind the canonical registry base to the exact driver-cx version: {needle}"
+        );
+    }
     assert!(
         preflight.contains("publish the driver first"),
         "release preflight must document driver-first ordering failure"

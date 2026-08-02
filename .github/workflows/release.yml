@@ -41,10 +41,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -53,8 +53,27 @@ jobs:
         working-directory: web
       - run: npm run check
         working-directory: web
+      - name: Install dashboard Chromium runtime
+        run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Verify end-user dashboard workflows in Chromium
+        env:
+          PLAYWRIGHT_HTML_OPEN: never
+          PLAYWRIGHT_HTML_OUTPUT_DIR: ../target/playwright/dashboard-report
+        run: npm run test:e2e:dashboard -- --reporter=line,html
+        working-directory: web
+      - name: Retain dashboard Chromium failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-dashboard-playwright-${{ github.run_attempt }}
+          path: |
+            target/playwright/dashboard
+            target/playwright/dashboard-report
+          if-no-files-found: warn
+          retention-days: 14
       - run: bash scripts/dashboard_bundle_check.sh
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
@@ -70,15 +89,15 @@ jobs:
     # binary) forces a recompile that tips it over. 60 gives headroom.
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -153,10 +172,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
@@ -173,7 +192,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -188,11 +207,11 @@ jobs:
             /usr/local/lib/android /opt/hostedtoolcache/CodeQL 2>/dev/null || true
           sudo docker image prune --all --force 2>/dev/null || true
           df -h /
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: npm
@@ -266,10 +285,10 @@ jobs:
             binary_warn_bytes: 36000000
             binary_limit_bytes: 40000000
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
@@ -385,10 +404,10 @@ jobs:
           cp "target/${{ matrix.target }}/release/oraclemcp.exe" "$dist/om.exe"
           cp README.md LICENSE-APACHE LICENSE-MIT "$dist/"
           7z a "$dist.zip" "$dist" >/dev/null
-          certutil -hashfile "$dist.zip" SHA256 > "$dist.zip.sha256"
+          sha256sum "$dist.zip" > "$dist.zip.sha256"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: oraclemcp-${{ matrix.target }}
           path: |
@@ -427,15 +446,15 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           path: artifacts
           pattern: oraclemcp-*-*-*
           merge-multiple: true
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
@@ -471,7 +490,7 @@ jobs:
       # artifact and to the SBOM. The attestation is recorded in the repo's
       # attestation store and is verifiable with `gh attestation verify`.
       - name: Attest build provenance for release artifacts
-        uses: actions/attest-build-provenance@v4.1.1
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: |
             artifacts/*.tar.gz
@@ -481,14 +500,9 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Pin cosign to 2.x: the sign-blob/.sig+.crt and `cosign sign` image
-          # flows below are written for v2 semantics, and the whole verify path
-          # (install.sh/install.ps1, verify_release_exact_sha) consumes the
-          # detached .sig/.crt pair. cosign-installer v4 defaults to cosign 3.x,
-          # whose sign-blob attempts an empty-path bundle write and fails
-          # (Dependabot #19 fallout). A proper v3 bundle migration is tracked
-          # separately.
-          cosign-release: 'v2.4.1'
+          # v3 emits the standardized Sigstore bundle consumed by both
+          # installers and the pre-upload verification gate.
+          cosign-release: 'v3.1.2'
       # Downloadable cosign blob attestations for the installer and for
       # operators who want a cosign-only archive verification path. The GitHub
       # attestation above remains the canonical hosted provenance record.
@@ -541,19 +555,27 @@ jobs:
           done
 
       # Keyless (Fulcio/Rekor) signatures over each archive. cosign binds the
-      # signature to this workflow's OIDC identity; the .sig/.crt pair is what
-      # `cosign verify-blob` checks against that identity at verification time.
+      # signature to this workflow's OIDC identity. The standardized bundle
+      # carries the signature, certificate, timestamp, and transparency proof.
       - name: Sign release archives (keyless)
         env:
           COSIGN_YES: "true"
         run: |
+          set -euo pipefail
           shopt -s nullglob
           for f in artifacts/*.tar.gz artifacts/*.zip artifacts/*.cdx.json; do
             cosign sign-blob \
-              --output-signature "$f.sig" \
-              --output-certificate "$f.crt" \
+              --yes \
+              --bundle "$f.sigstore.json" \
               "$f"
           done
+
+      - name: Verify release payloads and proofs before upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+          EXPECTED_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: bash scripts/verify_release_artifacts.sh artifacts
 
       - name: Generate Homebrew and winget manifests
         env:
@@ -567,17 +589,14 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.tar.gz.sha256
-            artifacts/*.tar.gz.sig
-            artifacts/*.tar.gz.crt
+            artifacts/*.tar.gz.sigstore.json
             artifacts/*.tar.gz.attestation.sigstore.json
             artifacts/*.zip
             artifacts/*.zip.sha256
-            artifacts/*.zip.sig
-            artifacts/*.zip.crt
+            artifacts/*.zip.sigstore.json
             artifacts/*.zip.attestation.sigstore.json
             artifacts/*.cdx.json
-            artifacts/*.cdx.json.sig
-            artifacts/*.cdx.json.crt
+            artifacts/*.cdx.json.sigstore.json
             artifacts/*.cdx.json.attestation.sigstore.json
             artifacts/distribution-manifests/homebrew/Formula/oraclemcp.rb
             artifacts/distribution-manifests/winget/**/*.yaml
@@ -599,7 +618,7 @@ jobs:
     environment: crates-io
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -614,6 +633,9 @@ jobs:
   docker:
     name: publish GHCR image
     needs: [release, web-build]
+    concurrency:
+      group: docker-provenance-${{ github.ref_name }}-core
+      cancel-in-progress: false
     if: >-
       ${{
         always() &&
@@ -621,6 +643,10 @@ jobs:
         needs.release.result == 'success'
       }}
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.image.outputs.version }}
+      source_sha: ${{ steps.image.outputs.source_sha }}
+      image_digest: ${{ steps.build.outputs.digest }}
     environment: ghcr
     permissions:
       contents: read
@@ -631,26 +657,26 @@ jobs:
       attestations: write
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: oraclemcp-dashboard-dist
           path: web/dist
-      - name: Resolve Docker tags
-        id: tags
+      - name: Resolve Docker release metadata
+        id: image
         shell: bash
         run: |
+          set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          {
-            echo "tags<<EOF"
-            echo "ghcr.io/muhdur/oraclemcp:${version}"
-            if [[ "$version" != *-* ]]; then
-              echo "ghcr.io/muhdur/oraclemcp:latest"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if [[ "$version" == *-* ]]; then
+            echo "publish_latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish_latest=true" >> "$GITHUB_OUTPUT"
+          fi
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
       - name: Log in to GHCR
         uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
@@ -658,14 +684,13 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push
+      - name: Build and push candidate by digest
         id: build
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           target: runtime
-          push: true
-          tags: ${{ steps.tags.outputs.tags }}
+          outputs: type=image,name=ghcr.io/muhdur/oraclemcp,push-by-digest=true,name-canonical=true,push=true
           # SLSA provenance baked into the image manifest by BuildKit. `mode=max`
           # records the full build graph (base images, build steps).
           provenance: mode=max
@@ -673,7 +698,7 @@ jobs:
       # GitHub-native build provenance attestation for the pushed image, keyed
       # by its immutable digest. Verifiable with `gh attestation verify oci://...`.
       - name: Attest image build provenance
-        uses: actions/attest-build-provenance@v4.1.1
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-name: ghcr.io/muhdur/oraclemcp
           subject-digest: ${{ steps.build.outputs.digest }}
@@ -682,37 +707,20 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
         with:
-          # Pin cosign to 2.x: the sign-blob/.sig+.crt and `cosign sign` image
-          # flows below are written for v2 semantics, and the whole verify path
-          # (install.sh/install.ps1, verify_release_exact_sha) consumes the
-          # detached .sig/.crt pair. cosign-installer v4 defaults to cosign 3.x,
-          # whose sign-blob attempts an empty-path bundle write and fails
-          # (Dependabot #19 fallout). A proper v3 bundle migration is tracked
-          # separately.
-          cosign-release: 'v2.4.1'
+          cosign-release: 'v3.1.2'
       - name: Sign image (keyless)
         env:
           COSIGN_YES: "true"
         run: cosign sign --recursive "ghcr.io/muhdur/oraclemcp@${{ steps.build.outputs.digest }}"
-      - name: Verify pushed image
-        run: docker buildx imagetools inspect "ghcr.io/muhdur/oraclemcp:${GITHUB_REF_NAME#v}"
-      - name: Smoke pushed image
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${GITHUB_REF_NAME#v}"
-          image="ghcr.io/muhdur/oraclemcp:${version}"
-          docker pull "$image"
-          docker run --rm --entrypoint /bin/bash -e EXPECTED_VERSION="$version" "$image" -lc '
-            set -euo pipefail
-            if command -v gcc >/dev/null 2>&1; then
-              echo "runtime image unexpectedly contains gcc" >&2
-              exit 1
-            fi
-            oraclemcp info >/tmp/oraclemcp-info.json
-            grep -q "\"version\": \"$EXPECTED_VERSION\"" /tmp/oraclemcp-info.json
-            oraclemcp capabilities | head -c 1200 >/dev/null
-          '
+      - name: Verify, smoke, and promote release image
+        env:
+          IMAGE_REPOSITORY: ghcr.io/muhdur/oraclemcp
+          VERSION: ${{ steps.image.outputs.version }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+          PUBLISH_LATEST: ${{ steps.image.outputs.publish_latest }}
+          EXPECTED_CERTIFICATE_IDENTITY: https://github.com/${{ github.repository }}/.github/workflows/release.yml@${{ github.ref }}
+          EXPECTED_OIDC_ISSUER: https://token.actions.githubusercontent.com
+        run: bash scripts/promote_release_image.sh
 
   publish-mcp-registry:
     name: publish MCP registry entry
@@ -725,9 +733,22 @@ jobs:
       contents: read
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          fetch-depth: 0
           persist-credentials: false
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.2'
+      - name: Revalidate exact release before OIDC login
+        env:
+          VERSION: ${{ needs.docker.outputs.version }}
+          EXPECTED_SOURCE_SHA: ${{ needs.docker.outputs.source_sha }}
+          EXPECTED_IMAGE_DIGEST: ${{ needs.docker.outputs.image_digest }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/verify_mcp_release.sh revalidate
       - name: Install mcp-publisher
         run: bash scripts/install_mcp_publisher.sh
       - name: Authenticate to the MCP Registry (GitHub OIDC)

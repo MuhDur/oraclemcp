@@ -223,6 +223,7 @@ check_source() {
   require_grep "web/dist/oraclemcp-dashboard.cyclonedx.json" "$workflow"
   require_grep "bash scripts/release_sbom_check.sh --artifact" "$workflow"
   require_grep 'artifacts/oraclemcp-${{ steps.version.outputs.version }}.cdx.json' "$workflow"
+  require_grep "artifacts/*.cdx.json.sigstore.json" "$workflow"
   require_grep "artifacts/*.cdx.json.attestation.sigstore.json" "$workflow"
 
   echo "release-sbom-check: OK source"

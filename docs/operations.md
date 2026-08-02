@@ -56,10 +56,11 @@ In short: nightly is a property of *building* oraclemcp, not of *running* it.
 
 ### Docker
 
-The published image is `ghcr.io/muhdur/oraclemcp`. It is a two-stage build: an
-`oraclelinux:9` builder compiles the binary with the pinned nightly toolchain,
-and the runtime stage is a clean `oraclelinux:9` carrying only
-`/usr/local/bin/oraclemcp`. The pure-Rust thin `oraclemcp-driver-cx` driver is compiled in,
+The published image is `ghcr.io/muhdur/oraclemcp`. It is a multi-stage build: a
+digest-pinned `oraclelinux:9` builder compiles the binary with the pinned nightly
+toolchain, and the runtime stage is a clean digest-pinned `oraclelinux:9`
+carrying only `/usr/local/bin/oraclemcp`. The pure-Rust thin
+`oraclemcp-driver-cx` driver is compiled in,
 so the image does **not** redistribute or require Oracle Instant Client, ODPI-C,
 `libclntsh`, or a C toolchain at runtime.
 
@@ -69,13 +70,34 @@ The default entrypoint serves MCP over stdio:
 # Tool surface only — no database. Safe to inspect anywhere.
 docker run -i --rm ghcr.io/muhdur/oraclemcp:latest
 
-# Against a configured profile. Mount a read-only profiles config and pass the
-# credential the profile's credential_ref expects.
-docker run -i --rm \
-  -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
-  -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:latest
+# Against a configured profile. Keep the host config private to your account,
+# give the container a private persistent state directory, and run as that same
+# non-root numeric identity so both bind mounts retain their secure host modes.
+if [ "$(id -u)" -eq 0 ]; then
+  printf '%s\n' 'Refusing to run oraclemcp as root.' >&2
+else
+  container_state="${XDG_STATE_HOME:-$HOME/.local/state}/oraclemcp-container"
+  mkdir -p "$container_state" &&
+    chmod 0700 "$container_state" &&
+    docker run -i --rm --user "$(id -u):$(id -g)" \
+      -v "$HOME/.config/oraclemcp:/home/oraclemcp/.config/oraclemcp:ro" \
+      -v "$container_state:/home/oraclemcp/.local/state/oraclemcp" \
+      -e ORACLE_APP_PASSWORD \
+      ghcr.io/muhdur/oraclemcp:latest
+fi
 ```
+
+The image defaults to the fixed unprivileged identity `10001:10001`. Its only
+application-owned writable directories are
+`/home/oraclemcp/.config/oraclemcp` and
+`/home/oraclemcp/.local/state/oraclemcp`; mount persistent state at the latter
+path when the server must retain audit and service state across containers. The
+bind-mount example deliberately overrides the process identity with the
+invoking non-root Linux UID/GID. That keeps a host config with mode `0700` and
+profiles with mode `0600` private but readable, while making the private state
+mount writable. Do not use that override from a root account. Keep database
+passwords and tokens in environment variables; profiles should contain only
+their `credential_ref` names.
 
 `--allow-no-auth` is baked into the default `CMD` because, over stdio, the
 trusted peer is the parent process that launched the container. The flag also
@@ -138,8 +160,9 @@ spec:
       terminationGracePeriodSeconds: 45   # allow the drain in §5 to complete
       securityContext:
         runAsNonRoot: true
-        runAsUser: 65532
-        fsGroup: 65532
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
       containers:
         - name: oraclemcp
           image: ghcr.io/muhdur/oraclemcp:X.Y.Z   # pin an immutable released version, not :latest
@@ -160,10 +183,6 @@ spec:
             - --http-allowed-host
             - oraclemcp.internal
           env:
-            # Durable write intents live under $XDG_STATE_HOME/oraclemcp.
-            # Use a persistent volume for write-capable profiles so in-doubt
-            # recovery survives process restarts and pod replacement.
-            - { name: XDG_STATE_HOME, value: /var/lib/oraclemcp-state }
             # A non-loopback bind (0.0.0.0) requires this opt-in.
             - { name: ORACLEMCP_HTTP_ALLOW_REMOTE, value: "1" }
             - name: ORACLE_APP_PASSWORD
@@ -176,10 +195,12 @@ spec:
             - { name: mcp, containerPort: 7070 }
           volumeMounts:
             - name: config
-              mountPath: /home/nonroot/.config/oraclemcp
+              mountPath: /home/oraclemcp/.config/oraclemcp
               readOnly: true
             - name: state
-              mountPath: /var/lib/oraclemcp-state
+              # Durable write intents live under $XDG_STATE_HOME/oraclemcp.
+              # Keep this persistent for in-doubt recovery across replacements.
+              mountPath: /home/oraclemcp/.local/state/oraclemcp
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -1224,8 +1245,8 @@ is and *where it came from* before trusting it. The release produces, for each
 platform archive (`.tar.gz` / `.zip`):
 
 - a SHA-256 checksum (`*.sha256`),
-- a keyless [cosign](https://docs.sigstore.dev/) signature + certificate
-  (`*.sig` / `*.crt`), bound to the release workflow's OIDC identity, and
+- a standardized keyless [cosign](https://docs.sigstore.dev/) signature bundle
+  (`*.sigstore.json`), bound to the release workflow's OIDC identity, and
 - a [SLSA-style build provenance attestation](https://slsa.dev/) recorded in the
   repository's attestation store, plus a downloadable cosign blob-attestation
   bundle (`*.attestation.sigstore.json`) for archive-first installers.
@@ -1241,7 +1262,8 @@ The binary archive matrix is:
 - `oraclemcp-x86_64-pc-windows-msvc.zip`
 
 A CycloneDX 1.5 release SBOM
-(`oraclemcp-<version>.cdx.json`, plus its own `.sig`/`.crt`) is attached to the
+(`oraclemcp-<version>.cdx.json`, plus its own `.sigstore.json` and
+`.attestation.sigstore.json` bundles) is attached to the
 release. It merges the Rust Cargo graph and the dashboard npm graph from the
 lockfile-built SPA bundle, so the embedded browser UI dependencies are covered
 by the same signed release evidence. The GHCR image is built with SLSA
@@ -1265,6 +1287,21 @@ byte-identical rebuild adds a second `docker.yml@refs/heads/main` signature whos
 `oraclemcp.source_sha`, `oraclemcp.version`, and `oraclemcp.variant`
 annotations bind that signature to the checked-out release tag.
 
+On a disconnected verifier, the bundles do not replace Sigstore's root of
+trust. Prepare it independently on a connected host with a trusted Cosign v3
+binary, then transfer it through the controlled air-gap process:
+
+```sh
+cosign trusted-root create --with-default-services --out sigstore-trusted-root.json
+```
+
+Add `--trusted-root ./sigstore-trusted-root.json` to both Cosign commands below.
+The offline installers enforce the same requirement when Cosign verification is
+active; use `--verify require --trusted-root ...` on Unix or
+`-Verify require -TrustedRoot ...` on Windows. Treat the trusted root as
+independently provisioned trust material, not as a release asset authenticated
+by the adjacent checksum.
+
 ### 6.1 Checksum (integrity only — not authenticity)
 
 ```sh
@@ -1278,16 +1315,15 @@ below is what proves authenticity.
 
 ```sh
 cosign verify-blob \
-  --certificate "oraclemcp-x86_64-unknown-linux-gnu.tar.gz.crt" \
-  --signature   "oraclemcp-x86_64-unknown-linux-gnu.tar.gz.sig" \
+  --bundle "oraclemcp-x86_64-unknown-linux-gnu.tar.gz.sigstore.json" \
   --certificate-identity "$IDENTITY" \
   --certificate-oidc-issuer "$OIDC_ISSUER" \
   "oraclemcp-x86_64-unknown-linux-gnu.tar.gz"
 ```
 
-`Verified OK` means the archive was signed by the oraclemcp release workflow at
-that tag and has not changed since. The same command verifies the SBOM
-(`oraclemcp-${VERSION}.cdx.json` with its `.sig`/`.crt`).
+Successful verification means the archive was signed by the oraclemcp release
+workflow at that tag and has not changed since. The same command verifies the
+SBOM with `--bundle "oraclemcp-${VERSION}.cdx.json.sigstore.json"`.
 
 ### 6.3 Verify binary build provenance (cosign blob attestation)
 

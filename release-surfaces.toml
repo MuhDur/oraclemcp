@@ -12,7 +12,7 @@ toml_key = "package.version"
 [[canonical]]
 name = "driver_version"
 path = "Cargo.toml"
-toml_key = "workspace.dependencies.oracledb.version"
+toml_key = "workspace.dependencies.oraclemcp-driver-cx.version"
 strip_prefix = "="
 
 [[canonical]]
@@ -40,8 +40,8 @@ match_count = 1
 name = "toolchain_driver_version"
 source = "driver_version"
 path = "docs/toolchain.md"
-pattern = "oracledb` (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+) driver"
-replacement = "oracledb` {driver_version} driver"
+pattern = "oraclemcp-driver-cx` (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+) driver"
+replacement = "oraclemcp-driver-cx` {driver_version} driver"
 match_count = 1
 
 [[surface]]
@@ -56,15 +56,15 @@ match_count = 1
 name = "operations_driver_version"
 source = "driver_version"
 path = "docs/operations.md"
-pattern = "oracledb` (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+) driver"
-replacement = "oracledb` {driver_version} driver"
+pattern = "oraclemcp-driver-cx` (?P<value>[0-9]+\\.[0-9]+\\.[0-9]+) driver"
+replacement = "oraclemcp-driver-cx` {driver_version} driver"
 match_count = 1
 
 [[intentional_non_lockstep]]
 name = "driver release train"
 canonical_path = "Cargo.toml"
 independent_from = "server_version"
-rationale = "The oracledb driver is an upstream release train and must remain independently pinned."
+rationale = "The oraclemcp-driver-cx driver is an upstream release train and must remain independently pinned."
 
 [[intentional_non_lockstep]]
 name = "nightly toolchain"

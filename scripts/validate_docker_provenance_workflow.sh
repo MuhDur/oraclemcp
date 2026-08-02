@@ -37,8 +37,9 @@ before() {
 # Dispatch is explicit and serialized per immutable release/variant pair.
 require 'description: "Existing release version whose immutable image should be promoted."'
 require 'default: "rollback"'
-require 'group: docker-provenance-${{ inputs.version }}-${{ inputs.variant }}'
+require 'group: docker-provenance-v${{ inputs.version }}-${{ inputs.variant }}'
 require 'cancel-in-progress: false'
+require '[ "$GITHUB_REF" = "refs/heads/main" ]'
 
 # The read-only job validates syntax, resolves the exact tag, and proves all
 # release metadata before the registry-writing job can begin.
@@ -52,6 +53,7 @@ require '[ "$cargo_version" = "$VERSION" ]'
 require '[ "$server_version" = "$VERSION" ]'
 require 'RELEASE_TAG="v$VERSION" bash scripts/release_preflight.sh'
 before 'verify-release:' 'packages: write'
+before '[ "$GITHUB_REF" = "refs/heads/main" ]' 'packages: write'
 before 'Verify tag commit and release metadata' 'Log in to GHCR'
 
 # Recovery never writes the immutable version tag. It resolves and verifies its
@@ -72,6 +74,12 @@ require 'Publish missing immutable version tag'
 require 'refusing to race or replace newly-created version tag'
 require '--tag "$ROLLING_IMAGE"'
 require '"$IMAGE_REPOSITORY@$DIGEST"'
+require 'if [[ "$VERSION" == *-* ]]; then'
+require 'rolling_image=""'
+require 'rolling_image="$IMAGE_REPOSITORY:$stable_rolling"'
+require 'echo "rolling_image=$rolling_image"'
+require 'if: needs.verify-release.outputs.rolling_image !='
+require 'rolling_summary="not promoted (prerelease)"'
 require 'Existing version tag rewritten: \`false\`'
 before 'Resolve immutable version digest' 'Rebuild exact tag source by digest'
 before 'Refuse a non-identical rebuild' 'Sign source-bound rebuild'

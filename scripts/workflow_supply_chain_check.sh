@@ -1,30 +1,150 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC1091,SC2016 # Intentional local source and literal contract regexes.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+mode="${1:-}"
+case "$mode" in
+  "" | --action-pins-only) ;;
+  *) echo "workflow-supply-chain: usage: $0 [--action-pins-only]" >&2; exit 2 ;;
+esac
+workflow_root="${ORACLEMCP_WORKFLOW_ROOT:-.github/workflows}"
+[ -d "$workflow_root" ] || {
+  echo "workflow-supply-chain: missing workflow directory: $workflow_root" >&2
+  exit 2
+}
+
 # CI taxonomy is derived from the workflow source itself. It fails closed on
 # duplicate YAML mapping keys (notably duplicate step-level `with:` blocks),
 # missing explicit permission policy, missing job timeouts, and drift from the
 # committed cross-repo ci-taxonomy/v1 document.
-python3 scripts/ci_taxonomy.py --check
+if [ -z "$mode" ]; then
+  python3 scripts/ci_taxonomy.py --check
+fi
 
 failures=0
-while IFS=: read -r file line_number source; do
-  ref="${source#*uses:}"
-  ref="${ref%%#*}"
-  ref="$(printf '%s' "$ref" | xargs)"
-  case "$ref" in
-    ./* | docker://* | actions/*@*) continue ;;
-  esac
-  revision="${ref##*@}"
-  if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "$file:$line_number: remote action is not pinned to a full commit SHA: $ref" >&2
-    failures=1
-  fi
-done < <(grep -RInE --include='*.yml' --include='*.yaml' \
-  '^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*[^[:space:]#]+' .github/workflows)
+
+check_action_pins() {
+  local root="$1"
+  local workflow current_job line line_number ref revision key permission trust_workflow
+  local in_jobs in_permissions
+  local -A privileged_jobs=()
+  local -A privileged_workflows=()
+  local -a workflows=("$root"/*.yml "$root"/*.yaml)
+
+  # First-party version tags remain allowed in ordinary read-only jobs. Any job
+  # holding a write permission (including OIDC or attestations), and every job
+  # in the release-capable workflows, is a privileged trust boundary and must
+  # pin actions/* to an immutable reviewed commit SHA.
+  for workflow in "${workflows[@]}"; do
+    [ -f "$workflow" ] || continue
+    current_job=""
+    in_jobs=false
+    in_permissions=false
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^jobs:[[:space:]]*$ ]]; then
+        in_jobs=true
+        in_permissions=false
+        continue
+      fi
+      if [ "$in_jobs" = false ]; then
+        if [[ "$line" =~ ^permissions:[[:space:]]*write-all([[:space:]]|$) ]]; then
+          privileged_workflows["$workflow"]="write-all"
+          continue
+        fi
+        if [[ "$line" =~ ^permissions:[[:space:]]*\{.*:[[:space:]]*write([[:space:],}]|$) ]]; then
+          privileged_workflows["$workflow"]="inline-write"
+          continue
+        fi
+        if [[ "$line" =~ ^permissions:[[:space:]]*$ ]]; then
+          in_permissions=true
+          continue
+        fi
+        if [ "$in_permissions" = true ] &&
+          [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):[[:space:]]write([[:space:]]|$) ]]; then
+          privileged_workflows["$workflow"]="${BASH_REMATCH[1]}"
+          continue
+        fi
+        if [ "$in_permissions" = true ] && [[ "$line" =~ ^[^[:space:]#] ]]; then
+          in_permissions=false
+        fi
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):[[:space:]]*$ ]]; then
+        current_job="${BASH_REMATCH[1]}"
+        in_permissions=false
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]{4}permissions:[[:space:]]*write-all([[:space:]]|$) ]]; then
+        privileged_jobs["$workflow:$current_job"]="write-all"
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]{4}permissions:[[:space:]]*\{.*:[[:space:]]*write([[:space:],}]|$) ]]; then
+        privileged_jobs["$workflow:$current_job"]="inline-write"
+        continue
+      fi
+      if [[ "$line" =~ ^[[:space:]]{4}permissions:[[:space:]]*$ ]]; then
+        in_permissions=true
+        continue
+      fi
+      if [ "$in_permissions" = true ] &&
+        [[ "$line" =~ ^[[:space:]]{6}([a-zA-Z0-9_-]+):[[:space:]]write([[:space:]]|$) ]]; then
+        permission="${BASH_REMATCH[1]}"
+        privileged_jobs["$workflow:$current_job"]="$permission"
+        continue
+      fi
+      if [ "$in_permissions" = true ] && [[ "$line" =~ ^[[:space:]]{4}[^[:space:]#] ]]; then
+        in_permissions=false
+      fi
+    done <"$workflow"
+  done
+
+  for workflow in "${workflows[@]}"; do
+    [ -f "$workflow" ] || continue
+    case "$(basename "$workflow")" in
+      release.yml | publish-mcp.yml | docker.yml) trust_workflow=true ;;
+      *) trust_workflow=false ;;
+    esac
+    current_job=""
+    line_number=0
+    while IFS= read -r line; do
+      line_number=$((line_number + 1))
+      if [[ "$line" =~ ^[[:space:]]{2}([a-zA-Z0-9_-]+):[[:space:]]*$ ]]; then
+        current_job="${BASH_REMATCH[1]}"
+      fi
+      if [[ ! "$line" =~ ^[[:space:]]*-?[[:space:]]*uses:[[:space:]]*([^[:space:]#]+) ]]; then
+        continue
+      fi
+      ref="${BASH_REMATCH[1]}"
+      case "$ref" in
+        ./* | docker://*) continue ;;
+      esac
+      revision="${ref##*@}"
+      key="$workflow:$current_job"
+      if [[ "$ref" == actions/* ]] && [ "$trust_workflow" = false ] &&
+        [[ -z "${privileged_workflows[$workflow]:-}" ]] &&
+        [[ -z "${privileged_jobs[$key]:-}" ]]; then
+        continue
+      fi
+      if [[ ! "$revision" =~ ^[0-9a-f]{40}$ ]]; then
+        if [[ "$ref" == actions/* ]]; then
+          echo "$workflow:$line_number: privileged job $current_job uses mutable first-party action: $ref" >&2
+        else
+          echo "$workflow:$line_number: remote action is not pinned to a full commit SHA: $ref" >&2
+        fi
+        failures=1
+      fi
+    done <"$workflow"
+  done
+}
+
+check_action_pins "$workflow_root"
+
+if [ "$mode" = "--action-pins-only" ]; then
+  exit "$failures"
+fi
 
 if grep -RInE --include='*.yml' --include='*.yaml' \
   'releases/latest|curl[^|]*\|[[:space:]]*(sh|bash|tar)' .github/workflows; then
@@ -101,6 +221,13 @@ verify_line="$(grep -nE '^[[:space:]]*verify_sha256 \"\$archive\"' scripts/insta
 extract_line="$(grep -nE '^[[:space:]]*tar -xzf \"\$archive\"' scripts/install_mcp_publisher.sh | cut -d: -f1)"
 if [[ -z "$verify_line" || -z "$extract_line" || "$verify_line" -ge "$extract_line" ]]; then
   echo "publisher archive must be verified before extraction" >&2
+  failures=1
+fi
+
+# This hermetic suite also invokes validate_release_security_workflows.sh and
+# supplies fake GitHub, registry, Docker, and cosign clients. Its own nested
+# policy checks use --action-pins-only, which deliberately returns above.
+if ! bash tests/release_workflow_security_test.sh; then
   failures=1
 fi
 

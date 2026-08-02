@@ -256,6 +256,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/promote_release_image.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/publish_crates.sh",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -387,6 +392,21 @@
     },
     {
       "path": "scripts/validate_npm_publish_input.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/validate_release_security_workflows.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/verify_mcp_release.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/verify_release_artifacts.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },

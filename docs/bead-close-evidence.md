@@ -103,7 +103,7 @@ would be permanently red for everyone, for reasons having nothing to do with the
 work.
 
 The stricter whole-tree reading still applies where it earns its keep:
-`required-proof/v1` and `mutation-result/v1` record commands that **actually
+`required-proof/v1`, `required-proof/v2`, and `mutation-result/v1` record commands that **actually
 executed against the working tree**, so unrelated dirt genuinely can change what
 they measured. A close document runs nothing; it is a set of references to a
 commit, and a commit is by construction a clean tree.
@@ -205,7 +205,7 @@ nothing about the rest. Declaring `not-ready` on a scoped test is the honest way
 to record complete-but-unproven work, and it is what the first two close documents
 in this repo do — including this bead's own.
 
-Note the consequence, which is intended: **until `f1cl.2` ships the
-`required-proof/v1` producer, nothing here can honestly claim
-`basis: required-proof`.** That is not a gap in the tooling; it is the tooling
-telling the truth about what evidence exists.
+The `required-proof/v2` producer now ships, but the consequence remains strict:
+**nothing can honestly claim `basis: required-proof` without a valid passing
+proof for the exact source SHA.** That is the tooling telling the truth about
+what evidence exists.

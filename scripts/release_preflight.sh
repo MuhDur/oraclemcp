@@ -18,11 +18,105 @@ fail() {
   exit 1
 }
 
+bounded_integer() {
+  local name="$1"
+  local value="$2"
+  local minimum="$3"
+  local maximum="$4"
+  [[ "$value" =~ ^[0-9]+$ ]] || fail "$name must be an integer between $minimum and $maximum"
+  [ "$value" -ge "$minimum" ] && [ "$value" -le "$maximum" ] ||
+    fail "$name must be between $minimum and $maximum (got $value)"
+}
+
+curl_bin="${ORACLEMCP_CURL_BIN:-curl}"
+registry_api_base="${ORACLEMCP_CRATES_IO_API_BASE:-https://crates.io/api/v1/crates}"
+registry_connect_timeout="${ORACLEMCP_CRATES_IO_CONNECT_TIMEOUT_SECONDS:-5}"
+registry_max_time="${ORACLEMCP_CRATES_IO_MAX_TIME_SECONDS:-15}"
+registry_retries="${ORACLEMCP_CRATES_IO_RETRIES:-2}"
+registry_retry_delay="${ORACLEMCP_CRATES_IO_RETRY_DELAY_SECONDS:-1}"
+registry_retry_max_time="${ORACLEMCP_CRATES_IO_RETRY_MAX_TIME_SECONDS:-45}"
+crates_ua="oraclemcp-release-preflight (https://github.com/MuhDur/oraclemcp; release@oraclemcp.local)"
+registry_response_file=""
+
+validate_registry_limits() {
+  bounded_integer ORACLEMCP_CRATES_IO_CONNECT_TIMEOUT_SECONDS "$registry_connect_timeout" 1 30
+  bounded_integer ORACLEMCP_CRATES_IO_MAX_TIME_SECONDS "$registry_max_time" 1 60
+  bounded_integer ORACLEMCP_CRATES_IO_RETRIES "$registry_retries" 0 5
+  bounded_integer ORACLEMCP_CRATES_IO_RETRY_DELAY_SECONDS "$registry_retry_delay" 0 10
+  bounded_integer ORACLEMCP_CRATES_IO_RETRY_MAX_TIME_SECONDS "$registry_retry_max_time" 1 120
+}
+
+registry_get() {
+  local url="$1"
+  local output="$2"
+  "$curl_bin" --silent --show-error \
+    --connect-timeout "$registry_connect_timeout" \
+    --max-time "$registry_max_time" \
+    --retry "$registry_retries" \
+    --retry-delay "$registry_retry_delay" \
+    --retry-max-time "$registry_retry_max_time" \
+    --retry-connrefused \
+    -H "User-Agent: $crates_ua" \
+    -H "Accept: application/json" \
+    --output "$output" \
+    --write-out '%{http_code}' \
+    "$url"
+}
+
+check_driver_registry() {
+  local driver_version driver_api http_status validation
+  driver_version="$(
+    python3 "$ROOT/scripts/release_surface_manifest.py" --value driver_version
+  )" || fail "Cargo.toml must structurally pin oraclemcp-driver-cx at an exact =X.Y.Z version"
+  driver_api="${registry_api_base%/}/oraclemcp-driver-cx/${driver_version}"
+  registry_response_file="$(mktemp)"
+  trap 'rm -f "$registry_response_file"' EXIT
+
+  if ! http_status="$(registry_get "$driver_api" "$registry_response_file")"; then
+    fail "could not verify oraclemcp-driver-cx =${driver_version} on crates.io within the bounded retry window"
+  fi
+  case "$http_status" in
+    200) ;;
+    404)
+      fail "oraclemcp-driver-cx =${driver_version} is not published on crates.io; publish the driver first"
+      ;;
+    *)
+      fail "crates.io returned HTTP $http_status for oraclemcp-driver-cx =${driver_version}"
+      ;;
+  esac
+  if ! validation="$(
+    python3 "$ROOT/scripts/release_surface_manifest.py" \
+      --validate-registry-response "$registry_response_file" \
+      --crate oraclemcp-driver-cx \
+      --expected-version "$driver_version" 2>&1
+  )"; then
+    fail "invalid crates.io response for oraclemcp-driver-cx =${driver_version}: $validation"
+  fi
+}
+
+need python3
+validate_registry_limits
+
+mode="${1:-}"
+[ "$#" -le 1 ] || fail "usage: scripts/release_preflight.sh [--check-driver-registry]"
+case "$mode" in
+  --check-driver-registry)
+    need "$curl_bin"
+    check_driver_registry
+    echo "release-preflight: driver registry contract OK"
+    exit 0
+    ;;
+  "") ;;
+  *) fail "unknown argument: $mode" ;;
+esac
+
 need cargo
 need jq
-need curl
+need "$curl_bin"
 
 bash "$ROOT/scripts/release_surface_sync_check.sh"
+env -u ORACLEMCP_RELEASE_FAKE_CURL_MODE -u ORACLEMCP_FAKE_YANKED_CRATE \
+  bash "$ROOT/tests/release_contract_test.sh"
 
 bash "$ROOT/scripts/oraclemcp_boundary_lint.sh"
 bash "$ROOT/scripts/oraclemcp_arch_fitness_lint.sh"
@@ -54,22 +148,18 @@ version_count="$(printf '%s\n' "$versions" | sed '/^$/d' | wc -l | tr -d ' ')"
 }
 version="$versions"
 
-expected_packages=(
-  oraclemcp-error
-  oraclemcp-telemetry
-  oraclemcp-audit
-  oraclemcp-guard
-  oraclemcp-config
-  oraclemcp-db
-  oraclemcp-auth
-  oraclemcp-core
-  oraclemcp
-)
-
-for package in "${expected_packages[@]}"; do
-  if ! printf '%s\n' "${package_lines[@]}" | awk -F '\t' '{print $1}' | grep -Fx "$package" >/dev/null; then
-    fail "expected workspace package missing: $package"
-  fi
+publish_lines="$(
+  printf '%s\n' "$metadata" |
+    python3 "$ROOT/scripts/release_surface_manifest.py" --publish-order -
+)" || fail "could not derive crates.io publish order from cargo metadata"
+mapfile -t publish_lines <<<"$publish_lines"
+[ "${#publish_lines[@]}" -gt 0 ] || fail "no crates.io-publishable workspace packages found"
+for package_line in "${publish_lines[@]}"; do
+  package="${package_line%%$'\t'*}"
+  package_version="${package_line#*$'\t'}"
+  [ "$package" != "$package_line" ] || fail "malformed publish-order entry: $package_line"
+  [ "$package_version" = "$version" ] ||
+    fail "$package metadata version '$package_version' does not match workspace version '$version'"
 done
 
 tag="${RELEASE_TAG:-}"
@@ -139,26 +229,10 @@ bash "$ROOT/scripts/oraclemcp_honesty_grep.sh"
 # be on crates.io at its exact pinned version before this server release can
 # tag/publish. The driver versions independently of the server (e.g.
 # driver 0.7.4 while the server is 0.8.0), so this validates the pinned driver
-# version parsed from Cargo.toml — NOT the server's own $version.
-driver_version="$(
-  grep -E '^oraclemcp-driver-cx = \{ version = "=[0-9]' "$ROOT/Cargo.toml" |
-    head -1 | sed -E 's/.*version = "=([0-9][0-9.]*)".*/\1/'
-)"
-[ -n "$driver_version" ] || fail "Cargo.toml must pin oraclemcp-driver-cx at an exact =X.Y.Z version"
-driver_api="https://crates.io/api/v1/crates/oraclemcp-driver-cx/${driver_version}"
-driver_json="$(mktemp)"
-trap 'rm -f "$driver_json"' EXIT
-crates_ua="oraclemcp-release-preflight (https://github.com/MuhDur/oraclemcp; release@oraclemcp.local)"
-if ! curl -fsS \
-  -H "User-Agent: $crates_ua" \
-  -H "Accept: application/json" \
-  "$driver_api" -o "$driver_json"; then
-  fail "oraclemcp-driver-cx =${driver_version} is not published on crates.io; publish the driver first (GET $driver_api failed)"
-fi
-published_driver="$(jq -r '.version.num // empty' <"$driver_json")"
-[ -n "$published_driver" ] || fail "crates.io response for oraclemcp-driver-cx missing version.num"
-[ "$published_driver" = "$driver_version" ] ||
-  fail "crates.io driver-cx version '$published_driver' does not match pinned driver =$driver_version"
+# version structurally parsed from Cargo.toml — NOT the server's own $version.
+# The exact-version API response must also name the requested version and carry
+# an explicit yanked=false; existing yanked versions cannot be republished.
+check_driver_registry
 
 if [ "${RELEASE_REQUIRE_MAIN:-false}" = "true" ]; then
   need git

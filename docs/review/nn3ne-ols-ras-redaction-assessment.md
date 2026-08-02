@@ -1,13 +1,13 @@
 # nn3ne — extend the read-purity proof to OLS / RAS / Data Redaction catalogs?
 
-**Bead:** `oraclemcp-nn3ne` (P3, assess-then-act).
-**Verdict: DEFER.** This is *not* a bounded, testable mirror of the existing
-`ALL_POLICIES` proof; the naive mirror would convert a targeted fail-closed
-refusal into wholesale over-refusal on the common database, and doing it
-correctly needs catalog-visibility semantics we cannot resolve or test without
-provisioning OLS / RAS / Data-Redaction–configured databases. The operator has
-pre-approved deferral for this case. No existing path is weakened — this bead
-lands as assessment only, no code change.
+**Bead:** `oraclemcp-nn3ne` (P3, boundary assessment).
+**Verdict: the existing boundary is intentional.** The read-purity proof
+answers whether a plain fetch can invoke user-controlled side effects. VPD
+policy functions and virtual-column expressions are therefore in scope. Oracle
+Label Security (OLS), Real Application Security (RAS), and Data Redaction are
+declarative row/column enforcement applied by Oracle; reproducing their policy
+catalogs is outside this side-effect proof. This bead records that contract and
+does not add a new driver or admission path.
 
 ## What the existing proof does and *why it is sound*
 
@@ -36,7 +36,7 @@ This is sound **only because of three properties that are specific to
    current user can access, so a successful empty read is positive proof of
    *absence*, not merely of visibility.
 
-## Why OLS / RAS / Data Redaction break every one of those properties
+## Why OLS / RAS / Data Redaction are not mirror checks
 
 Source: local Oracle reference
 `~/.claude/skills/oracle/SECURITY-OPTIONS-REFERENCE.md` (Oracle Label Security
@@ -70,21 +70,28 @@ these views:
   DBA-only) on which the simple Ok-vs-error determinant is sound. This is the
   "uncertain catalog visibility semantics" the bead flags.
 
-## Testing cost
+## Evidence and non-goals
 
-The existing proof is unit-testable with a mock `OracleConnection` because the
-determinant is Ok-vs-error on one always-present view. A correct OLS/RAS/
-Redaction proof would need live coverage across four states per feature —
-installed+policy, installed+no-policy, installed+blind-principal, and
-not-installed — which requires provisioning OLS (`LBACSYS`/`SA_SYSDBA`), RAS,
-and Advanced Security Data Redaction. None of these are configured in the
-current live-test matrix (18c/21c/23ai XE/Free do not ship them enabled), so the
-"injected-failure vs. proven-absence" distinction that makes the addition safe
-cannot actually be exercised. Heavy, uncertain testing — the DEFER criterion.
+The existing proof has focused offline evidence in
+`crates/oraclemcp-db/src/catalog_resolver.rs`:
+
+- `relation_purity_requires_plain_policy_free_non_virtual_tables` proves an
+  enabled VPD policy or virtual column cannot earn `ProvenReadOnly`.
+- `c8_a_sighted_principal_on_a_clean_table_still_proves_read_only` proves a
+  readable, successfully empty `ALL_POLICIES` result remains the ordinary
+  VPD-free allow case.
+- `c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof` proves a
+  catalog error propagates fail-closed instead of masquerading as absence.
+
+Those tests define the read-purity boundary without pretending to prove the
+presence or absence of OLS, RAS, or Data Redaction policies. A separate feature
+that inventories those controls would require live coverage across installed,
+not-installed, policy-present, policy-absent, and catalog-blind states. That is
+not an acceptance condition for classifying a statement's side-effect level.
 
 ## Is a real hole being left open?
 
-No open security hole; at most a defense-in-depth gap, and a contained one:
+No gap is left in the read-purity proof's stated contract:
 
 - The read-purity proof's stated concern is **user-controlled code invoked on a
   plain fetch** — precisely what a **VPD SELECT policy function** or a **virtual
@@ -95,11 +102,11 @@ No open security hole; at most a defense-in-depth gap, and a contained one:
   `READ_ONLY`, and they do not inject arbitrary user PL/SQL into the ordinary
   fetch path the way a VPD policy function does. Extending the proof to them is
   belt-and-suspenders, not the closing of an open door.
-- The guard remains fail-closed by construction: anything not *proven*
-  `ProvenReadOnly` stays `Unknown` and is gated by the classifier at the active
-  operating level. Deferring adds no new admit path.
+- Oracle continues to apply OLS, RAS, and Data Redaction to the connected
+  principal regardless of this proof. The server does not bypass or attempt to
+  reimplement those controls.
 
-## If revisited later (design sketch, not this bead)
+## If policy inventory is added later
 
 The only sound shape is a **three-valued** probe per feature, gated on an
 explicit install/visibility check, never the `ALL_POLICIES` binary mirror:
@@ -109,6 +116,6 @@ explicit install/visibility check, never the `ALL_POLICIES` binary mirror:
    privilege error on an *existing* view to *blind ⇒ refuse*), and only then
 2. run the per-object policy probe.
 
-That requires an install-vs-blind oracle we do not have offline, and the live
-provisioning above to validate it. Track as a separate, larger bead when an
-OLS/RAS/Redaction-configured test database is available — not a P3 quick win.
+That requires an install-vs-blind oracle plus live option-specific fixtures. It
+would be a policy-observability feature, not a prerequisite for this
+side-effect-purity decision.

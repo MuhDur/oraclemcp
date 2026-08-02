@@ -36,6 +36,7 @@ UNINSTALL=0
 UPDATE_REQUESTED=0
 OFFLINE_ARCHIVE=""
 VERIFY_POSTURE="${ORACLEMCP_INSTALL_VERIFY:-prefer}"
+TRUSTED_ROOT="${ORACLEMCP_SIGSTORE_TRUSTED_ROOT:-}"
 INSTALL_COMPLETIONS=1
 SERVICE_REQUESTED=0
 PROMPT_SERVICE=1
@@ -84,6 +85,7 @@ Options:
   --source                  Build with cargo instead of downloading a release archive
   --offline <archive>       Install from a local release archive plus sibling verification files
   --verify <posture>        Verification posture: require, prefer, checksum-only (default: prefer)
+  --trusted-root <file>     Sigstore trusted_root.json for offline cosign verification
   --update                  Explicitly run the install path as an update; re-running is already update-safe
   --uninstall               Remove installed oraclemcp files; add --service to remove the service
   --no-completions          Do not install shell completions
@@ -134,20 +136,35 @@ setup_proxy() {
 }
 
 normalize_version() {
-  local version="$1"
+  local version="$1" prerelease identifier
   if [ "$version" = "latest" ]; then
     printf '%s\n' "$version"
     return
   fi
   version="${version#v}"
-  case "$version" in
-    [0-9]*.[0-9]*.[0-9]* | [0-9]*.[0-9]*.[0-9]*-*)
-      printf '%s\n' "$version"
-      ;;
-    *)
-      fail "unsupported version '$1' (expected latest, X.Y.Z, or vX.Y.Z)"
-      ;;
-  esac
+  if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?(\+([0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*))?$ ]]; then
+    fail "unsupported version '$1' (expected latest or strict SemVer, optionally prefixed with v)"
+  fi
+  prerelease="${BASH_REMATCH[5]:-}"
+  if [ -n "$prerelease" ]; then
+    while IFS= read -r identifier; do
+      if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" != "0" && "$identifier" == 0* ]]; then
+        fail "unsupported version '$1' (numeric prerelease identifiers cannot have leading zeroes)"
+      fi
+    done < <(printf '%s\n' "$prerelease" | tr . '\n')
+  fi
+  printf '%s\n' "$version"
+}
+
+validate_repo() {
+  local repository="$1" owner
+  if [[ ! "$repository" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]; then
+    fail "unsupported repository '$repository' (expected one canonical GitHub owner/repository slug)"
+  fi
+  owner="${repository%%/*}"
+  if [[ "$owner" == *- || "$owner" == *--* ]]; then
+    fail "unsupported repository '$repository' (GitHub owner contains a non-canonical hyphen)"
+  fi
 }
 
 normalize_verify_posture() {
@@ -202,6 +219,11 @@ parse_args() {
       --verify)
         [ "$#" -ge 2 ] || fail "--verify requires a value"
         VERIFY_POSTURE="$(normalize_verify_posture "$2")"
+        shift 2
+        ;;
+      --trusted-root)
+        [ "$#" -ge 2 ] || fail "--trusted-root requires a file path"
+        TRUSTED_ROOT="$2"
         shift 2
         ;;
       --update)
@@ -353,6 +375,30 @@ release_base_url() {
   fi
 }
 
+resolve_latest_version() {
+  local latest_url final_url tag_prefix resolved
+  [ "$VERSION" = "latest" ] || return 0
+  [ -z "$OFFLINE_ARCHIVE" ] || fail "--offline requires an explicit --version so signature identity is exact"
+  need curl
+  latest_url="https://github.com/${REPO}/releases/latest"
+  final_url="$(
+    curl --fail --location --show-error --silent \
+      --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 120 \
+      --retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused \
+      "${PROXY_ARGS[@]}" --output /dev/null --write-out '%{url_effective}' "$latest_url"
+  )" || fail "could not resolve the latest GitHub release within the bounded download window"
+  tag_prefix="https://github.com/${REPO}/releases/tag/v"
+  case "$final_url" in
+    "$tag_prefix"*) resolved="${final_url#"$tag_prefix"}" ;;
+    *) fail "latest release redirected outside the expected HTTPS repository tag URL: $final_url" ;;
+  esac
+  case "$resolved" in
+    *'/'* | *'?'* | *'#'*) fail "latest release resolved to a malformed tag URL: $final_url" ;;
+  esac
+  VERSION="$(normalize_version "$resolved")"
+}
+
 archive_name() {
   printf 'oraclemcp-%s.tar.gz\n' "$TARGET"
 }
@@ -382,15 +428,10 @@ acquire_lock() {
 }
 
 cosign_identity_args() {
-  if [ "$VERSION" = "latest" ]; then
-    printf '%s\0%s\0' \
-      "--certificate-identity-regexp" \
-      "https://github[.]com/${REPO}/[.]github/workflows/release[.]yml@refs/tags/v[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?"
-  else
-    printf '%s\0%s\0' \
-      "--certificate-identity" \
-      "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/v${VERSION}"
-  fi
+  [ "$VERSION" != "latest" ] || fail "release version must be resolved before constructing the signing identity"
+  printf '%s\0%s\0' \
+    "--certificate-identity" \
+    "https://github.com/${REPO}/.github/workflows/release.yml@refs/tags/v${VERSION}"
 }
 
 completion_paths() {
@@ -705,6 +746,7 @@ client_issue_args() {
 
 print_plan() {
   local asset base mode
+  local source_args=()
   if [ "$UNINSTALL" -eq 1 ]; then
     print_uninstall_plan
     return
@@ -728,23 +770,29 @@ print_plan() {
   printf '  lock: %s\n' "$(lock_path)"
 
   if [ "$SOURCE" -eq 1 ]; then
-    if [ "$VERSION" = "latest" ]; then
-      printf '  command: cargo +%s install oraclemcp --locked --root %s\n' "$RUST_TOOLCHAIN" "$PREFIX"
-    else
-      printf '  command: cargo +%s install oraclemcp --locked --version %s --root %s\n' "$RUST_TOOLCHAIN" "$VERSION" "$PREFIX"
-    fi
+    source_args=("+$RUST_TOOLCHAIN" "install" "oraclemcp" "--locked" "--root" "$PREFIX")
+    [ "$VERSION" = "latest" ] || source_args+=("--version" "$VERSION")
+    [ "$TARGET_EXPLICIT" -eq 0 ] || source_args+=("--target" "$TARGET")
+    printf '  command: cargo'
+    printf ' %q' "${source_args[@]}"
+    printf '\n'
     printf '  verification: source builds are explicit opt-in; release archive checksum/cosign verification is skipped\n'
   else
     printf '  verification_posture: %s\n' "$VERIFY_POSTURE"
     if [ -n "$OFFLINE_ARCHIVE" ]; then
       printf '  offline_archive: %s\n' "$OFFLINE_ARCHIVE"
       printf '  offline_checksum: %s.sha256\n' "$OFFLINE_ARCHIVE"
-      printf '  offline_cosign_signature: %s.sig + %s.crt\n' "$OFFLINE_ARCHIVE" "$OFFLINE_ARCHIVE"
+      printf '  offline_cosign_signature: %s.sigstore.json\n' "$OFFLINE_ARCHIVE"
       printf '  offline_cosign_attestation: %s.attestation.sigstore.json\n' "$OFFLINE_ARCHIVE"
+      if [ -n "$TRUSTED_ROOT" ]; then
+        printf '  offline_sigstore_trusted_root: %s\n' "$TRUSTED_ROOT"
+      elif [ "$VERIFY_POSTURE" != "checksum-only" ]; then
+        printf '  offline_sigstore_trusted_root: required for cosign verification; pass --trusted-root or ORACLEMCP_SIGSTORE_TRUSTED_ROOT\n'
+      fi
     else
       printf '  archive: %s/%s\n' "$base" "$asset"
       printf '  checksum: %s/%s.sha256\n' "$base" "$asset"
-      printf '  cosign_signature: %s/%s.sig + %s/%s.crt\n' "$base" "$asset" "$base" "$asset"
+      printf '  cosign_signature: %s/%s.sigstore.json\n' "$base" "$asset"
       printf '  cosign_attestation: %s/%s.attestation.sigstore.json\n' "$base" "$asset"
     fi
     case "$VERIFY_POSTURE" in
@@ -830,10 +878,14 @@ print_uninstall_plan() {
 download_file() {
   local url="$1" dest="$2"
   if have curl; then
-    curl --fail --location --show-error --silent --proto '=https' --tlsv1.2 "${PROXY_ARGS[@]}" \
-      --output "$dest" "$url"
+    curl --fail --location --show-error --silent \
+      --proto '=https' --proto-redir '=https' --tlsv1.2 \
+      --connect-timeout 10 --max-time 120 \
+      --retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused \
+      "${PROXY_ARGS[@]}" --output "$dest" "$url"
   elif have wget; then
-    wget --https-only --quiet --output-document "$dest" "$url"
+    wget --https-only --max-redirect=5 --timeout=30 --tries=4 \
+      --quiet --output-document "$dest" "$url"
   else
     fail "missing downloader: install curl or wget"
   fi
@@ -905,8 +957,8 @@ require_readable_file() {
 }
 
 verify_cosign() {
-  local archive="$1" signature="$2" certificate="$3" attestation="$4"
-  local identity_args=()
+  local archive="$1" signature_bundle="$2" attestation_bundle="$3"
+  local identity_args=() trusted_root_args=()
 
   if [ "$VERIFY_POSTURE" = "checksum-only" ]; then
     printf 'oraclemcp installer: verification posture checksum-only: SHA-256 verified; cosign authenticity/provenance checks intentionally skipped\n' >&2
@@ -924,23 +976,31 @@ verify_cosign() {
     return 0
   fi
 
-  require_readable_file "$signature"
-  require_readable_file "$certificate"
-  require_readable_file "$attestation"
+  require_readable_file "$signature_bundle"
+  require_readable_file "$attestation_bundle"
+
+  if [ -n "$OFFLINE_ARCHIVE" ]; then
+    [ -n "$TRUSTED_ROOT" ] || fail "ORACLEMCP_INSTALL_TRUSTED_ROOT_REQUIRED: offline cosign verification requires --trusted-root or ORACLEMCP_SIGSTORE_TRUSTED_ROOT"
+  fi
+  if [ -n "$TRUSTED_ROOT" ]; then
+    require_readable_file "$TRUSTED_ROOT"
+    trusted_root_args=("--trusted-root" "$TRUSTED_ROOT")
+  fi
 
   while IFS= read -r -d '' arg; do
     identity_args+=("$arg")
   done < <(cosign_identity_args)
 
   "$COSIGN_BIN" verify-blob \
-    --certificate "$certificate" \
-    --signature "$signature" \
+    --bundle "$signature_bundle" \
+    "${trusted_root_args[@]}" \
     "${identity_args[@]}" \
     --certificate-oidc-issuer "$OIDC_ISSUER" \
     "$archive"
 
   "$COSIGN_BIN" verify-blob-attestation \
-    --bundle "$attestation" \
+    --bundle "$attestation_bundle" \
+    "${trusted_root_args[@]}" \
     --type slsaprovenance1 \
     "${identity_args[@]}" \
     --certificate-oidc-issuer "$OIDC_ISSUER" \
@@ -960,9 +1020,11 @@ require_offline_bundle() {
   done
 
   should_download_cosign_metadata || return 0
+  [ -n "$TRUSTED_ROOT" ] || fail "ORACLEMCP_INSTALL_TRUSTED_ROOT_REQUIRED: offline cosign verification requires --trusted-root or ORACLEMCP_SIGSTORE_TRUSTED_ROOT"
+  [ -f "$TRUSTED_ROOT" ] || fail "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING: required Sigstore trusted root is missing: $TRUSTED_ROOT"
+  [ -r "$TRUSTED_ROOT" ] || fail "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_UNREADABLE: required Sigstore trusted root is not readable: $TRUSTED_ROOT"
   for path in \
-    "$archive.sig" \
-    "$archive.crt" \
+    "$archive.sigstore.json" \
     "$archive.attestation.sigstore.json"
   do
     [ -f "$path" ] || fail "ORACLEMCP_INSTALL_OFFLINE_BUNDLE_MISSING: required offline bundle file is missing: $path"
@@ -981,39 +1043,66 @@ assert_replaceable() {
   fi
 }
 
-parse_semver_core() {
-  local version="${1#v}" core major minor patch
-  core="${version%%-*}"
-  IFS=. read -r major minor patch <<EOF
-$core
-EOF
-  case "$major:$minor:$patch" in
-    *[!0-9:]* | :* | *: | *::*)
-      return 1
-      ;;
-  esac
-  printf '%s %s %s\n' "$major" "$minor" "$patch"
+compare_decimal_identifier() {
+  local left="$1" right="$2" LC_ALL=C
+  if [ "${#left}" -gt "${#right}" ]; then
+    printf '1\n'
+  elif [ "${#left}" -lt "${#right}" ]; then
+    printf -- '-1\n'
+  elif [ "$left" = "$right" ]; then
+    printf '0\n'
+  elif [[ "$left" > "$right" ]]; then
+    printf '1\n'
+  else
+    printf -- '-1\n'
+  fi
 }
 
 version_compare() {
-  local left="$1" right="$2" l_major l_minor l_patch r_major r_minor r_patch
-  read -r l_major l_minor l_patch < <(parse_semver_core "$left") || return 2
-  read -r r_major r_minor r_patch < <(parse_semver_core "$right") || return 2
-  if [ "$l_major" -gt "$r_major" ]; then
-    printf '1\n'
-  elif [ "$l_major" -lt "$r_major" ]; then
-    printf -- '-1\n'
-  elif [ "$l_minor" -gt "$r_minor" ]; then
-    printf '1\n'
-  elif [ "$l_minor" -lt "$r_minor" ]; then
-    printf -- '-1\n'
-  elif [ "$l_patch" -gt "$r_patch" ]; then
-    printf '1\n'
-  elif [ "$l_patch" -lt "$r_patch" ]; then
-    printf -- '-1\n'
-  else
-    printf '0\n'
-  fi
+  local left right left_core right_core left_pre="" right_pre="" comparison index pair
+  local l_major l_minor l_patch r_major r_minor r_patch left_id right_id LC_ALL=C
+  local left_ids=() right_ids=()
+  left="$(normalize_version "$1")" || return 2
+  right="$(normalize_version "$2")" || return 2
+  [ "$left" != "latest" ] && [ "$right" != "latest" ] || return 2
+  left="${left%%+*}"
+  right="${right%%+*}"
+  left_core="${left%%-*}"
+  right_core="${right%%-*}"
+  if [[ "$left" == *-* ]]; then left_pre="${left#*-}"; fi
+  if [[ "$right" == *-* ]]; then right_pre="${right#*-}"; fi
+  IFS=. read -r l_major l_minor l_patch <<<"$left_core"
+  IFS=. read -r r_major r_minor r_patch <<<"$right_core"
+  for pair in "$l_major:$r_major" "$l_minor:$r_minor" "$l_patch:$r_patch"; do
+    comparison="$(compare_decimal_identifier "${pair%%:*}" "${pair#*:}")"
+    if [ "$comparison" != "0" ]; then
+      printf '%s\n' "$comparison"
+      return 0
+    fi
+  done
+  if [ -z "$left_pre" ] && [ -z "$right_pre" ]; then printf '0\n'; return 0; fi
+  if [ -z "$left_pre" ]; then printf '1\n'; return 0; fi
+  if [ -z "$right_pre" ]; then printf -- '-1\n'; return 0; fi
+  IFS=. read -r -a left_ids <<<"$left_pre"
+  IFS=. read -r -a right_ids <<<"$right_pre"
+  for ((index = 0; index < ${#left_ids[@]} || index < ${#right_ids[@]}; index++)); do
+    if [ "$index" -ge "${#left_ids[@]}" ]; then printf -- '-1\n'; return 0; fi
+    if [ "$index" -ge "${#right_ids[@]}" ]; then printf '1\n'; return 0; fi
+    left_id="${left_ids[$index]}"
+    right_id="${right_ids[$index]}"
+    [ "$left_id" = "$right_id" ] && continue
+    if [[ "$left_id" =~ ^[0-9]+$ && "$right_id" =~ ^[0-9]+$ ]]; then
+      compare_decimal_identifier "$left_id" "$right_id"
+    elif [[ "$left_id" =~ ^[0-9]+$ ]]; then
+      printf -- '-1\n'
+    elif [[ "$right_id" =~ ^[0-9]+$ || "$left_id" > "$right_id" ]]; then
+      printf '1\n'
+    else
+      printf -- '-1\n'
+    fi
+    return 0
+  done
+  printf '0\n'
 }
 
 installed_oraclemcp_version() {
@@ -1033,6 +1122,22 @@ installed_oraclemcp_version() {
   esac
 }
 
+safe_backup_version() {
+  local installed="${1:-}" normalized
+  case "$installed" in
+    "" | latest | . | .. | */* | *\\*)
+      printf '%s\n' "unknown"
+      return
+      ;;
+  esac
+  if ! normalized="$(normalize_version "$installed" 2>/dev/null)" \
+    || [ "$normalized" != "$installed" ]; then
+    printf '%s\n' "unknown"
+    return
+  fi
+  printf '%s\n' "$normalized"
+}
+
 already_current_by_version() {
   local installed
   [ "$FORCE" -eq 0 ] || return 1
@@ -1049,7 +1154,9 @@ guard_downgrade() {
   [ "$VERSION" != "latest" ] || return 0
   installed="$(installed_oraclemcp_version || true)"
   [ -n "$installed" ] || return 0
-  cmp="$(version_compare "$installed" "$VERSION" || true)"
+  if ! cmp="$(version_compare "$installed" "$VERSION")"; then
+    fail "ORACLEMCP_INSTALL_VERSION_INVALID: installed oraclemcp reported malformed version '$installed'"
+  fi
   [ "$cmp" = "1" ] || return 0
   fail "ORACLEMCP_INSTALL_DOWNGRADE_REFUSED: installed oraclemcp $installed is newer than target $VERSION; rerun with --force only if you intentionally want to downgrade"
 }
@@ -1058,7 +1165,7 @@ backup_existing_binary() {
   local dest="$1" installed backup_dir backup_path stamp
   [ -e "$dest" ] || return 0
   installed="$(installed_oraclemcp_version || true)"
-  [ -n "$installed" ] || installed="unknown"
+  installed="$(safe_backup_version "$installed")"
   stamp="$(date -u +%Y%m%dT%H%M%SZ)"
   backup_dir="$PREFIX/share/oraclemcp/backups"
   mkdir -p "$backup_dir"
@@ -1138,12 +1245,10 @@ register_client() {
 }
 
 install_prebuilt() {
-  local work_dir asset base archive checksum signature certificate attestation extracted
+  local work_dir asset base archive checksum signature_bundle attestation_bundle extracted
   need tar
   need install
-  if already_current_by_version; then
-    return 0
-  fi
+  resolve_latest_version
   if [ -n "$OFFLINE_ARCHIVE" ]; then
     require_offline_bundle "$OFFLINE_ARCHIVE"
   fi
@@ -1155,27 +1260,24 @@ install_prebuilt() {
   if [ -n "$OFFLINE_ARCHIVE" ]; then
     archive="$OFFLINE_ARCHIVE"
     checksum="$archive.sha256"
-    signature="$archive.sig"
-    certificate="$archive.crt"
-    attestation="$archive.attestation.sigstore.json"
+    signature_bundle="$archive.sigstore.json"
+    attestation_bundle="$archive.attestation.sigstore.json"
   else
     archive="$work_dir/$asset"
     checksum="$archive.sha256"
-    signature="$archive.sig"
-    certificate="$archive.crt"
-    attestation="$archive.attestation.sigstore.json"
+    signature_bundle="$archive.sigstore.json"
+    attestation_bundle="$archive.attestation.sigstore.json"
 
     download_file "$base/$asset" "$archive"
     download_file "$base/$asset.sha256" "$checksum"
     if should_download_cosign_metadata; then
-      download_file "$base/$asset.sig" "$signature"
-      download_file "$base/$asset.crt" "$certificate"
-      download_file "$base/$asset.attestation.sigstore.json" "$attestation"
+      download_file "$base/$asset.sigstore.json" "$signature_bundle"
+      download_file "$base/$asset.attestation.sigstore.json" "$attestation_bundle"
     fi
   fi
 
   verify_checksum "$archive" "$checksum"
-  verify_cosign "$archive" "$signature" "$certificate" "$attestation"
+  verify_cosign "$archive" "$signature_bundle" "$attestation_bundle"
 
   tar -xzf "$archive" -C "$work_dir"
   extracted="$work_dir/oraclemcp-$TARGET/oraclemcp"
@@ -1271,6 +1373,9 @@ install_source() {
   if [ "$VERSION" != "latest" ]; then
     args+=("--version" "$VERSION")
   fi
+  if [ "$TARGET_EXPLICIT" -eq 1 ]; then
+    args+=("--target" "$TARGET")
+  fi
   cargo "${args[@]}"
 }
 
@@ -1339,6 +1444,7 @@ wait_readyz() {
 
 main() {
   parse_args "$@"
+  validate_repo "$REPO"
   [ -n "$PREFIX" ] || fail "HOME is unset; pass --prefix"
   if [ "$CLIENT_REGISTER" -eq 0 ] && [ "${#CLIENT_SCOPES[@]}" -gt 0 ]; then
     fail "--client-scope requires --register-client"
@@ -1351,6 +1457,9 @@ main() {
   fi
   if [ "$SOURCE" -eq 1 ] && [ -n "$OFFLINE_ARCHIVE" ]; then
     fail "--source and --offline cannot be used together"
+  fi
+  if [ -n "$OFFLINE_ARCHIVE" ] && [ "$VERSION" = "latest" ]; then
+    fail "--offline requires an explicit --version so signature identity is exact"
   fi
   if [ "$UNINSTALL" -eq 1 ] && [ "$SOURCE" -eq 1 ]; then
     fail "--uninstall cannot be combined with --source"

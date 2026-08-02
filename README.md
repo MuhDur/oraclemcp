@@ -116,18 +116,39 @@ is missing; `require` fails without cosign.
 powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -NoService
 ```
 
-For air-gapped hosts, download the release archive plus its `.sha256`, `.sig`,
-`.crt`, and `.attestation.sigstore.json` siblings, then run a downloaded copy
-of the installer:
+For air-gapped hosts, stage five inputs: the release archive, its `.sha256`,
+`.sigstore.json`, and `.attestation.sigstore.json` siblings, plus a Sigstore
+`trusted_root.json` obtained independently on a connected staging host. With a
+trusted Cosign v3 installation, refresh that root through Sigstore's TUF
+metadata before moving it across the air gap:
 
 ```sh
-bash install.sh --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz --version 0.10.0
+cosign trusted-root create --with-default-services --out sigstore-trusted-root.json
+```
+
+Then require authenticity and provenance verification during the offline
+install:
+
+```sh
+bash install.sh \
+  --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
+  --version 0.10.0 \
+  --verify require \
+  --trusted-root ./sigstore-trusted-root.json
 ```
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1 `
-  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip -Version 0.10.0
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip `
+  -Version 0.10.0 `
+  -Verify require `
+  -TrustedRoot .\sigstore-trusted-root.json
 ```
+
+The trusted root is trust material, not another self-authenticating release
+asset. Provision and protect it separately from the archive bundle. Offline
+Cosign verification fails closed when it is absent; `checksum-only` remains an
+explicit integrity-only posture.
 
 The release installer does not silently fall back from a missing release archive
 to a source build. Use `--source` explicitly when you want `cargo install`
@@ -293,13 +314,20 @@ without echoing the raw profile TOML:
 oraclemcp --json setup --write --profile db_ro
 ```
 
-**Docker:** a ready-to-run thin-driver image, published to GHCR and listed in the [MCP registry](https://registry.modelcontextprotocol.io) on release as `io.github.MuhDur/oraclemcp`. Mount a profiles config and pass the credential the profile's `credential_ref` expects:
+**Docker:** a ready-to-run thin-driver image, published to GHCR and listed in the [MCP registry](https://registry.modelcontextprotocol.io) on release as `io.github.MuhDur/oraclemcp`. The image defaults to UID/GID `10001:10001`. On Linux, run it as your invoking non-root UID/GID so a private host config remains readable and its private state mount remains writable:
 
 ```sh
-docker run -i --rm \
-  -v "$HOME/.config/oraclemcp:/root/.config/oraclemcp:ro" \
-  -e ORACLE_APP_PASSWORD \
-  ghcr.io/muhdur/oraclemcp:latest         # MCP over stdio, against the configured profile
+if [ "$(id -u)" -eq 0 ]; then
+  printf '%s\n' 'Refusing to run oraclemcp as root.' >&2
+else
+  container_state="${XDG_STATE_HOME:-$HOME/.local/state}/oraclemcp-container"
+  mkdir -p "$container_state" && chmod 0700 "$container_state" &&
+    docker run -i --rm --user "$(id -u):$(id -g)" \
+      -v "$HOME/.config/oraclemcp:/home/oraclemcp/.config/oraclemcp:ro" \
+      -v "$container_state:/home/oraclemcp/.local/state/oraclemcp" \
+      -e ORACLE_APP_PASSWORD \
+      ghcr.io/muhdur/oraclemcp:latest
+fi
 
 docker run -i --rm ghcr.io/muhdur/oraclemcp:latest  # tool surface only (no DB)
 ```

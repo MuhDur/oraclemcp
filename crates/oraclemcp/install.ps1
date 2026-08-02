@@ -10,6 +10,7 @@ param(
     [string]$Repo = "MuhDur/oraclemcp",
     [string]$Offline = "",
     [string]$Verify = "",
+    [string]$TrustedRoot = "",
     [switch]$Update,
     [switch]$Uninstall,
     [switch]$NoCompletions,
@@ -59,10 +60,35 @@ function Get-NormalizedVersion {
         return $InputVersion
     }
     $normalized = $InputVersion -replace "^v", ""
-    if ($normalized -notmatch "^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$") {
-        Write-InstallFailure "unsupported version '$InputVersion' (expected latest, X.Y.Z, or vX.Y.Z)"
+    $pattern = "^(?<major>0|[1-9][0-9]*)\.(?<minor>0|[1-9][0-9]*)\.(?<patch>0|[1-9][0-9]*)(?:-(?<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
+    $match = [regex]::Match($normalized, $pattern)
+    if (-not $match.Success) {
+        Write-InstallFailure "unsupported version '$InputVersion' (expected latest or strict SemVer, optionally prefixed with v)"
+    }
+    $prerelease = $match.Groups["prerelease"].Value
+    if (-not [string]::IsNullOrEmpty($prerelease)) {
+        foreach ($identifier in ($prerelease -split "\.")) {
+            if ($identifier -match "^[0-9]+$" -and $identifier.Length -gt 1 -and $identifier.StartsWith("0")) {
+                Write-InstallFailure "unsupported version '$InputVersion' (numeric prerelease identifiers cannot have leading zeroes)"
+            }
+        }
     }
     return $normalized
+}
+
+function Assert-CanonicalRepository {
+    param([Parameter(Mandatory = $true)][string]$Repository)
+    $match = [regex]::Match(
+        $Repository,
+        "^(?<owner>[A-Za-z0-9][A-Za-z0-9-]{0,38})/(?<name>[A-Za-z0-9][A-Za-z0-9._-]{0,99})$"
+    )
+    if (-not $match.Success) {
+        Write-InstallFailure "unsupported repository '$Repository' (expected one canonical GitHub owner/repository slug)"
+    }
+    $owner = $match.Groups["owner"].Value
+    if ($owner.EndsWith("-") -or $owner.Contains("--")) {
+        Write-InstallFailure "unsupported repository '$Repository' (GitHub owner contains a non-canonical hyphen)"
+    }
 }
 
 function Get-NormalizedVerifyPosture {
@@ -81,14 +107,33 @@ function Get-NormalizedVerifyPosture {
     return $candidate
 }
 
-function Get-SemverCore {
+function Get-SemverParts {
     param([Parameter(Mandatory = $true)][string]$InputVersion)
-    $core = ($InputVersion -replace "^v", "") -replace "-.*$", ""
-    $parts = $core -split "\."
-    if ($parts.Count -ne 3) {
+    $normalized = Get-NormalizedVersion -InputVersion $InputVersion
+    if ($normalized -eq "latest") {
         Write-InstallFailure "unsupported semantic version '$InputVersion'"
     }
-    return @([int]$parts[0], [int]$parts[1], [int]$parts[2])
+    $withoutBuild = ($normalized -split "\+", 2)[0]
+    $segments = $withoutBuild -split "-", 2
+    $core = $segments[0] -split "\."
+    $prerelease = @()
+    if ($segments.Count -eq 2) {
+        $prerelease = @($segments[1] -split "\.")
+    }
+    return [PSCustomObject]@{
+        Core = @($core)
+        Prerelease = @($prerelease)
+    }
+}
+
+function Compare-DecimalIdentifier {
+    param(
+        [Parameter(Mandatory = $true)][string]$Left,
+        [Parameter(Mandatory = $true)][string]$Right
+    )
+    if ($Left.Length -gt $Right.Length) { return 1 }
+    if ($Left.Length -lt $Right.Length) { return -1 }
+    return [Math]::Sign([string]::CompareOrdinal($Left, $Right))
 }
 
 function Compare-Semver {
@@ -96,15 +141,30 @@ function Compare-Semver {
         [Parameter(Mandatory = $true)][string]$Left,
         [Parameter(Mandatory = $true)][string]$Right
     )
-    $leftParts = @(Get-SemverCore -InputVersion $Left)
-    $rightParts = @(Get-SemverCore -InputVersion $Right)
+    $leftParts = Get-SemverParts -InputVersion $Left
+    $rightParts = Get-SemverParts -InputVersion $Right
     for ($index = 0; $index -lt 3; $index++) {
-        if ($leftParts[$index] -gt $rightParts[$index]) {
-            return 1
+        $comparison = Compare-DecimalIdentifier -Left $leftParts.Core[$index] -Right $rightParts.Core[$index]
+        if ($comparison -ne 0) { return $comparison }
+    }
+    if ($leftParts.Prerelease.Count -eq 0 -and $rightParts.Prerelease.Count -eq 0) { return 0 }
+    if ($leftParts.Prerelease.Count -eq 0) { return 1 }
+    if ($rightParts.Prerelease.Count -eq 0) { return -1 }
+    $count = [Math]::Max($leftParts.Prerelease.Count, $rightParts.Prerelease.Count)
+    for ($index = 0; $index -lt $count; $index++) {
+        if ($index -ge $leftParts.Prerelease.Count) { return -1 }
+        if ($index -ge $rightParts.Prerelease.Count) { return 1 }
+        $leftIdentifier = $leftParts.Prerelease[$index]
+        $rightIdentifier = $rightParts.Prerelease[$index]
+        if ($leftIdentifier -ceq $rightIdentifier) { continue }
+        $leftNumeric = $leftIdentifier -match "^[0-9]+$"
+        $rightNumeric = $rightIdentifier -match "^[0-9]+$"
+        if ($leftNumeric -and $rightNumeric) {
+            return (Compare-DecimalIdentifier -Left $leftIdentifier -Right $rightIdentifier)
         }
-        if ($leftParts[$index] -lt $rightParts[$index]) {
-            return -1
-        }
+        if ($leftNumeric) { return -1 }
+        if ($rightNumeric) { return 1 }
+        return [Math]::Sign([string]::CompareOrdinal($leftIdentifier, $rightIdentifier))
     }
     return 0
 }
@@ -123,16 +183,33 @@ function Get-ReleaseBaseUrl {
     return "https://github.com/$Repo/releases/download/$(Get-ReleaseTag)"
 }
 
+function Resolve-LatestVersion {
+    if ($Version -ne "latest") {
+        return
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Offline)) {
+        Write-InstallFailure "-Offline requires an explicit -Version so signature identity is exact"
+    }
+    $latestUrl = "https://github.com/$Repo/releases/latest"
+    $finalUrl = Resolve-HttpsUri -Uri $latestUrl
+    $tagPrefix = "https://github.com/$Repo/releases/tag/v"
+    if (-not $finalUrl.StartsWith($tagPrefix, [System.StringComparison]::Ordinal)) {
+        Write-InstallFailure "latest release redirected outside the expected HTTPS repository tag URL: $finalUrl"
+    }
+    $resolved = $finalUrl.Substring($tagPrefix.Length)
+    if ($resolved -match "[/\\?#]") {
+        Write-InstallFailure "latest release resolved to a malformed tag URL: $finalUrl"
+    }
+    $script:Version = Get-NormalizedVersion -InputVersion $resolved
+}
+
 function Get-ArchiveName {
     return "oraclemcp-$Target.zip"
 }
 
 function Get-CosignIdentityArgument {
     if ($Version -eq "latest") {
-        return @(
-            "--certificate-identity-regexp",
-            "https://github[.]com/$Repo/[.]github/workflows/release[.]yml@refs/tags/v[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?"
-        )
+        Write-InstallFailure "release version must be resolved before constructing the signing identity"
     }
     return @(
         "--certificate-identity",
@@ -292,12 +369,17 @@ function Write-InstallPlan {
     if (-not [string]::IsNullOrWhiteSpace($Offline)) {
         Write-Output "  offline_archive: $Offline"
         Write-Output "  offline_checksum: $Offline.sha256"
-        Write-Output "  offline_cosign_signature: $Offline.sig + $Offline.crt"
+        Write-Output "  offline_cosign_signature: $Offline.sigstore.json"
         Write-Output "  offline_cosign_attestation: $Offline.attestation.sigstore.json"
+        if (-not [string]::IsNullOrWhiteSpace($TrustedRoot)) {
+            Write-Output "  offline_sigstore_trusted_root: $TrustedRoot"
+        } elseif ($VerifyPosture -ne "checksum-only") {
+            Write-Output "  offline_sigstore_trusted_root: required for cosign verification; pass -TrustedRoot or ORACLEMCP_SIGSTORE_TRUSTED_ROOT"
+        }
     } else {
         Write-Output "  archive: $baseUrl/$asset"
         Write-Output "  checksum: $baseUrl/$asset.sha256"
-        Write-Output "  cosign_signature: $baseUrl/$asset.sig + $baseUrl/$asset.crt"
+        Write-Output "  cosign_signature: $baseUrl/$asset.sigstore.json"
         Write-Output "  cosign_attestation: $baseUrl/$asset.attestation.sigstore.json"
     }
     if ($VerifyPosture -eq "require") {
@@ -358,33 +440,90 @@ function Write-UninstallPlan {
     }
 }
 
+function Assert-HttpsUri {
+    param([Parameter(Mandatory = $true)][string]$Uri)
+    $parsed = $null
+    if (-not [System.Uri]::TryCreate($Uri, [System.UriKind]::Absolute, [ref]$parsed) -or $parsed.Scheme -ne "https") {
+        Write-InstallFailure "download URI must use HTTPS: $Uri"
+    }
+}
+
+function Get-ResponseFinalUri {
+    param([Parameter(Mandatory = $true)]$Response)
+    $baseResponse = $Response.BaseResponse
+    $responseUriProperty = $baseResponse.PSObject.Properties["ResponseUri"]
+    if ($null -ne $responseUriProperty -and $null -ne $responseUriProperty.Value) {
+        return $responseUriProperty.Value.AbsoluteUri
+    }
+    $requestMessageProperty = $baseResponse.PSObject.Properties["RequestMessage"]
+    if ($null -ne $requestMessageProperty -and $null -ne $requestMessageProperty.Value.RequestUri) {
+        return $requestMessageProperty.Value.RequestUri.AbsoluteUri
+    }
+    Write-InstallFailure "downloader did not expose the final response URI"
+}
+
+function Resolve-HttpsUri {
+    param([Parameter(Mandatory = $true)][string]$Uri)
+    Assert-HttpsUri -Uri $Uri
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            $response = Invoke-WebRequest -Uri $Uri -Method Head -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 30
+            $finalUri = Get-ResponseFinalUri -Response $response
+            Assert-HttpsUri -Uri $finalUri
+            return $finalUri
+        } catch {
+            if ($attempt -eq 4) {
+                Write-InstallFailure "HTTPS resolution failed after 4 bounded attempts: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds $attempt
+        }
+    }
+}
+
 function Invoke-DownloadFile {
     param(
         [Parameter(Mandatory = $true)][string]$Uri,
         [Parameter(Mandatory = $true)][string]$OutFile
     )
+    $finalUri = Resolve-HttpsUri -Uri $Uri
     $parent = Split-Path -Path $OutFile -Parent
     if (-not [string]::IsNullOrWhiteSpace($parent)) {
         New-Item -ItemType Directory -Path $parent -Force | Out-Null
     }
-    Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing
-}
-
-function Get-Sha256DigestFromText {
-    param([Parameter(Mandatory = $true)][string]$Text)
-    $match = [regex]::Match($Text, "(?i)[a-f0-9]{64}")
-    if (-not $match.Success) {
-        Write-InstallFailure "checksum file does not contain a SHA-256 digest"
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        try {
+            Invoke-WebRequest -Uri $finalUri -OutFile $OutFile -UseBasicParsing -MaximumRedirection 0 -TimeoutSec 120
+            return
+        } catch {
+            if ($attempt -eq 4) {
+                Write-InstallFailure "HTTPS download failed after 4 bounded attempts: $($_.Exception.Message)"
+            }
+            Start-Sleep -Seconds $attempt
+        }
     }
-    return $match.Value.ToLowerInvariant()
 }
 
 function Get-ChecksumDigest {
-    param([Parameter(Mandatory = $true)][string]$ChecksumFile)
+    param(
+        [Parameter(Mandatory = $true)][string]$ChecksumFile,
+        [Parameter(Mandatory = $true)][string]$Archive
+    )
     if (-not (Test-Path -LiteralPath $ChecksumFile -PathType Leaf)) {
         Write-InstallFailure "missing checksum file: $ChecksumFile"
     }
-    return (Get-Sha256DigestFromText -Text (Get-Content -LiteralPath $ChecksumFile -Raw))
+    $lines = @(Get-Content -LiteralPath $ChecksumFile)
+    if ($lines.Count -ne 1) {
+        Write-InstallFailure "checksum sidecar must contain exactly one record"
+    }
+    $match = [regex]::Match($lines[0], "^(?<digest>[0-9A-Fa-f]{64}) [ *](?<name>[^\s]+)$")
+    if (-not $match.Success) {
+        Write-InstallFailure "checksum sidecar record is malformed"
+    }
+    $archiveName = [System.IO.Path]::GetFileName($Archive)
+    if ($match.Groups["name"].Value -cne $archiveName) {
+        Write-InstallFailure "checksum sidecar must name the selected archive $archiveName"
+    }
+    return $match.Groups["digest"].Value.ToLowerInvariant()
 }
 
 function Test-ArchiveChecksum {
@@ -392,27 +531,22 @@ function Test-ArchiveChecksum {
         [Parameter(Mandatory = $true)][string]$Archive,
         [Parameter(Mandatory = $true)][string]$ChecksumFile
     )
-    if (-not (Test-CommandAvailable -Name "certutil.exe")) {
-        Write-InstallFailure "missing required command: certutil.exe"
+    $expected = Get-ChecksumDigest -ChecksumFile $ChecksumFile -Archive $Archive
+    $actual = (Get-FileHash -LiteralPath $Archive -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -notmatch "^[0-9a-f]{64}$") {
+        Write-InstallFailure "SHA-256 command returned malformed output for $Archive"
     }
-    $expected = Get-ChecksumDigest -ChecksumFile $ChecksumFile
-    $hashOutput = & certutil.exe -hashfile $Archive SHA256
-    if ($LASTEXITCODE -ne 0) {
-        Write-InstallFailure "certutil SHA-256 verification failed for $Archive"
-    }
-    $actual = Get-Sha256DigestFromText -Text ($hashOutput | Out-String)
     if ($actual -ne $expected) {
         Write-InstallFailure "checksum mismatch for $Archive (expected $expected, got $actual)"
     }
-    Write-Output "oraclemcp installer: SHA-256 verified with certutil"
+    Write-Output "oraclemcp installer: SHA-256 verified"
 }
 
 function Test-CosignEvidence {
     param(
         [Parameter(Mandatory = $true)][string]$Archive,
-        [Parameter(Mandatory = $true)][string]$Signature,
-        [Parameter(Mandatory = $true)][string]$Certificate,
-        [Parameter(Mandatory = $true)][string]$Attestation
+        [Parameter(Mandatory = $true)][string]$SignatureBundle,
+        [Parameter(Mandatory = $true)][string]$AttestationBundle
     )
     if ($VerifyPosture -eq "checksum-only") {
         Write-Output "oraclemcp installer: cosign verification intentionally skipped by -Verify checksum-only"
@@ -425,12 +559,22 @@ function Test-CosignEvidence {
         Write-Output "oraclemcp installer: authenticity unverified: cosign not installed; SHA-256 checksum verified"
         return
     }
+    if (-not [string]::IsNullOrWhiteSpace($Offline) -and [string]::IsNullOrWhiteSpace($TrustedRoot)) {
+        Write-InstallFailure "ORACLEMCP_INSTALL_TRUSTED_ROOT_REQUIRED: offline cosign verification requires -TrustedRoot or ORACLEMCP_SIGSTORE_TRUSTED_ROOT"
+    }
+    $trustedRootArguments = @()
+    if (-not [string]::IsNullOrWhiteSpace($TrustedRoot)) {
+        if (-not (Test-Path -LiteralPath $TrustedRoot -PathType Leaf)) {
+            Write-InstallFailure "required Sigstore trusted root is missing: $TrustedRoot"
+        }
+        $trustedRootArguments = @("--trusted-root", $TrustedRoot)
+    }
     $identityArguments = @(Get-CosignIdentityArgument)
-    & cosign verify-blob --certificate $Certificate --signature $Signature @identityArguments --certificate-oidc-issuer $OidcIssuer $Archive
+    & cosign verify-blob --bundle $SignatureBundle @trustedRootArguments @identityArguments --certificate-oidc-issuer $OidcIssuer $Archive
     if ($LASTEXITCODE -ne 0) {
         Write-InstallFailure "cosign verify-blob failed for $Archive"
     }
-    & cosign verify-blob-attestation --bundle $Attestation --type slsaprovenance1 @identityArguments --certificate-oidc-issuer $OidcIssuer $Archive
+    & cosign verify-blob-attestation --bundle $AttestationBundle --type slsaprovenance1 @trustedRootArguments @identityArguments --certificate-oidc-issuer $OidcIssuer $Archive
     if ($LASTEXITCODE -ne 0) {
         Write-InstallFailure "cosign verify-blob-attestation failed for $Archive"
     }
@@ -454,7 +598,10 @@ function Test-OfflineBundle {
     }
     $required = @($Archive, "$Archive.sha256")
     if (Test-ShouldFetchCosignEvidence) {
-        $required += @("$Archive.sig", "$Archive.crt", "$Archive.attestation.sigstore.json")
+        if ([string]::IsNullOrWhiteSpace($TrustedRoot)) {
+            Write-InstallFailure "ORACLEMCP_INSTALL_TRUSTED_ROOT_REQUIRED: offline cosign verification requires -TrustedRoot or ORACLEMCP_SIGSTORE_TRUSTED_ROOT"
+        }
+        $required += @($TrustedRoot, "$Archive.sigstore.json", "$Archive.attestation.sigstore.json")
     }
     foreach ($path in $required) {
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
@@ -491,16 +638,23 @@ function Get-InstalledVersion {
     return ""
 }
 
-function Test-AlreadyCurrentByVersion {
-    if ($Force -or $Version -eq "latest") {
-        return $false
+function Get-SafeBackupVersion {
+    param([AllowEmptyString()][string]$InstalledVersion = "")
+    if ([string]::IsNullOrWhiteSpace($InstalledVersion) -or
+        $InstalledVersion -in @("latest", ".", "..") -or
+        $InstalledVersion.Contains("/") -or
+        $InstalledVersion.Contains("\")) {
+        return "unknown"
     }
-    $installed = Get-InstalledVersion
-    if ($installed -eq $Version) {
-        Write-Output "oraclemcp installer: already current: installed oraclemcp $installed matches target $Version"
-        return $true
+    try {
+        $normalized = Get-NormalizedVersion -InputVersion $InstalledVersion
+        if ($normalized -cne $InstalledVersion) {
+            return "unknown"
+        }
+        return $normalized
+    } catch {
+        return "unknown"
     }
-    return $false
 }
 
 function Assert-NotDowngrade {
@@ -524,10 +678,7 @@ function Backup-ExistingFile {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
         return
     }
-    $installed = Get-InstalledVersion
-    if ([string]::IsNullOrWhiteSpace($installed)) {
-        $installed = "unknown"
-    }
+    $installed = Get-SafeBackupVersion -InstalledVersion (Get-InstalledVersion)
     $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
     $backupDir = Join-Path -Path $Prefix -ChildPath "backups"
     New-Item -ItemType Directory -Path $backupDir -Force | Out-Null
@@ -598,9 +749,7 @@ function Invoke-InstallCompletionSet {
 }
 
 function Invoke-PrebuiltInstall {
-    if (Test-AlreadyCurrentByVersion) {
-        return
-    }
+    Resolve-LatestVersion
     if (-not [string]::IsNullOrWhiteSpace($Offline)) {
         Test-OfflineBundle -Archive $Offline
     }
@@ -613,26 +762,23 @@ function Invoke-PrebuiltInstall {
         if (-not [string]::IsNullOrWhiteSpace($Offline)) {
             $archive = $Offline
             $checksum = "$archive.sha256"
-            $signature = "$archive.sig"
-            $certificate = "$archive.crt"
-            $attestation = "$archive.attestation.sigstore.json"
+            $signatureBundle = "$archive.sigstore.json"
+            $attestationBundle = "$archive.attestation.sigstore.json"
         } else {
             $archive = Join-Path -Path $workRoot -ChildPath $asset
             $checksum = "$archive.sha256"
-            $signature = "$archive.sig"
-            $certificate = "$archive.crt"
-            $attestation = "$archive.attestation.sigstore.json"
+            $signatureBundle = "$archive.sigstore.json"
+            $attestationBundle = "$archive.attestation.sigstore.json"
             Invoke-DownloadFile -Uri "$baseUrl/$asset" -OutFile $archive
             Invoke-DownloadFile -Uri "$baseUrl/$asset.sha256" -OutFile $checksum
             if (Test-ShouldFetchCosignEvidence) {
-                Invoke-DownloadFile -Uri "$baseUrl/$asset.sig" -OutFile $signature
-                Invoke-DownloadFile -Uri "$baseUrl/$asset.crt" -OutFile $certificate
-                Invoke-DownloadFile -Uri "$baseUrl/$asset.attestation.sigstore.json" -OutFile $attestation
+                Invoke-DownloadFile -Uri "$baseUrl/$asset.sigstore.json" -OutFile $signatureBundle
+                Invoke-DownloadFile -Uri "$baseUrl/$asset.attestation.sigstore.json" -OutFile $attestationBundle
             }
         }
 
         Test-ArchiveChecksum -Archive $archive -ChecksumFile $checksum
-        Test-CosignEvidence -Archive $archive -Signature $signature -Certificate $certificate -Attestation $attestation
+        Test-CosignEvidence -Archive $archive -SignatureBundle $signatureBundle -AttestationBundle $attestationBundle
         Expand-Archive -LiteralPath $archive -DestinationPath $workRoot -Force
         Invoke-InstallBinary -ExtractRoot $workRoot
     } finally {
@@ -788,6 +934,13 @@ function Write-NextStep {
 function Invoke-Main {
     $script:Version = Get-NormalizedVersion -InputVersion $Version
     $script:VerifyPosture = Get-NormalizedVerifyPosture -InputPosture $Verify
+    if ([string]::IsNullOrWhiteSpace($TrustedRoot) -and -not [string]::IsNullOrWhiteSpace($env:ORACLEMCP_SIGSTORE_TRUSTED_ROOT)) {
+        $script:TrustedRoot = $env:ORACLEMCP_SIGSTORE_TRUSTED_ROOT
+    }
+    Assert-CanonicalRepository -Repository $Repo
+    if (-not [string]::IsNullOrWhiteSpace($Offline) -and $Version -eq "latest") {
+        Write-InstallFailure "-Offline requires an explicit -Version so signature identity is exact"
+    }
     if ([string]::IsNullOrWhiteSpace($Prefix)) {
         $script:Prefix = Get-DefaultPrefix
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the local Required graph and emit a self-validating required-proof/v1.
+"""Run the local Required graph and emit a self-validating required-proof/v2.
 
 The graph is derived from `.github/required/_quality.yml`, not copied here.
 Every workflow step and condition must be classified below.  An unfamiliar step,
@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import re
 import subprocess
@@ -22,8 +23,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 QUALITY_WORKFLOW = ROOT / ".github/required/_quality.yml"
+CI_WORKFLOW = ROOT / ".github/workflows/ci.yml"
 RESOURCE_BUDGET = ROOT / "scripts/resource_budget.sh"
 VALIDATOR = ROOT / "scripts/validate_evidence.py"
+POLICY_VARIABLE = "REQUIRED_LOCAL_COMMAND_IDS"
+POLICY_GRAPH_VARIABLE = "REQUIRED_LOCAL_GRAPH_SHA256"
 
 META_STEPS = {
     "Validate inputs",
@@ -172,7 +176,105 @@ def parse_quality_steps(text: str) -> list[Step]:
     return steps
 
 
-def effective_plan(workflow: Path = QUALITY_WORKFLOW) -> list[dict[str, object]]:
+def parse_top_level_policy_value(text: str, variable: str) -> str:
+    values: list[str] = []
+    in_top_level_env = False
+    for raw in text.splitlines():
+        if raw and not raw.startswith(" "):
+            in_top_level_env = raw == "env:"
+            continue
+        if not in_top_level_env:
+            continue
+        match = re.fullmatch(rf"  {variable}:\s*(.+)", raw)
+        if match:
+            values.append(match.group(1))
+
+    if len(values) != 1:
+        raise ContractError(f"CI policy must define top-level {variable} exactly once")
+    try:
+        encoded = json.loads(values[0])
+    except json.JSONDecodeError as error:
+        raise ContractError(f"CI policy {variable} must be a JSON-quoted string") from error
+    if not isinstance(encoded, str):
+        raise ContractError(f"CI policy {variable} must be a string")
+    return encoded
+
+
+def parse_required_policy_ids(text: str) -> list[str]:
+    """Read the CI-owned Required replay policy from top-level workflow env."""
+
+    encoded = parse_top_level_policy_value(text, POLICY_VARIABLE)
+    identifiers = encoded.split(",") if encoded else []
+    if any(not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", item) for item in identifiers):
+        raise ContractError(f"CI policy {POLICY_VARIABLE} contains an invalid command ID")
+    if identifiers != sorted(set(identifiers)):
+        raise ContractError(
+            f"CI policy {POLICY_VARIABLE} must be unique and lexicographically sorted"
+        )
+    if not identifiers:
+        raise ContractError(f"CI policy {POLICY_VARIABLE} must not be empty")
+    return identifiers
+
+
+def parse_required_policy_graph_sha256(text: str) -> str:
+    digest = parse_top_level_policy_value(text, POLICY_GRAPH_VARIABLE)
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise ContractError(f"CI policy {POLICY_GRAPH_VARIABLE} must be lowercase SHA-256")
+    return digest
+
+
+def required_command_ids(plan: list[dict[str, object]]) -> list[str]:
+    return sorted(
+        command_id(str(row["name"]))
+        for row in plan
+        if row["classification"] == "required-command"
+    )
+
+
+def required_graph_sha256(plan: list[dict[str, object]]) -> str:
+    records = sorted(
+        (
+            {"id": command_id(str(row["name"])), "argv": row["argv"]}
+            for row in plan
+            if row["classification"] == "required-command"
+        ),
+        key=lambda record: str(record["id"]),
+    )
+    canonical = json.dumps(records, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
+def validate_policy_binding(
+    plan: list[dict[str, object]], policy_workflow: Path = CI_WORKFLOW
+) -> None:
+    """Bind the mutable replay projection to an independent CI policy list."""
+
+    policy_text = policy_workflow.read_text(encoding="utf-8")
+    policy = parse_required_policy_ids(policy_text)
+    projected = required_command_ids(plan)
+    if projected != policy:
+        missing = sorted(set(policy) - set(projected))
+        unexpected = sorted(set(projected) - set(policy))
+        detail: list[str] = []
+        if missing:
+            detail.append(f"projection missing {', '.join(missing)}")
+        if unexpected:
+            detail.append(f"projection added {', '.join(unexpected)}")
+        raise ContractError(
+            "Required projection differs from CI-owned policy (" + "; ".join(detail) + ")"
+        )
+    policy_graph = parse_required_policy_graph_sha256(policy_text)
+    projected_graph = required_graph_sha256(plan)
+    if projected_graph != policy_graph:
+        raise ContractError(
+            "Required projection argv differs from CI-owned graph SHA-256 "
+            f"(expected {policy_graph}, derived {projected_graph})"
+        )
+
+
+def effective_plan(
+    workflow: Path = QUALITY_WORKFLOW, policy_workflow: Path = CI_WORKFLOW
+) -> list[dict[str, object]]:
     entries: list[dict[str, object]] = []
     for step in parse_quality_steps(workflow.read_text()):
         if step.condition not in CONDITIONS:
@@ -220,6 +322,7 @@ def effective_plan(workflow: Path = QUALITY_WORKFLOW) -> list[dict[str, object]]
         entries.append(record)
     if not any(row["classification"] == "required-command" for row in entries):
         raise ContractError("required profile has no executable commands")
+    validate_policy_binding(entries, policy_workflow)
     return entries
 
 
@@ -232,7 +335,66 @@ def git_sha() -> str:
 
 
 def default_output(sha: str) -> Path:
-    return ROOT / "tests/artifacts/evidence/required" / f"required-proof-{sha}.json"
+    return ROOT / "target/release-evidence/required" / f"required-proof-{sha}.json"
+
+
+def command_id(name: str) -> str:
+    return name.lower().replace(" ", "-").replace("/", "-")
+
+
+def expected_command_records(
+    plan: list[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    expected: dict[str, dict[str, object]] = {}
+    for row in plan:
+        if row["classification"] != "required-command":
+            continue
+        identifier = command_id(str(row["name"]))
+        if identifier in expected:
+            raise ContractError(f"duplicate required command identifier {identifier!r}")
+        expected[identifier] = {"tier": "required", "argv": row["argv"]}
+    expected["live-matrix"] = {
+        "tier": "advisory",
+        "argv": ["scripts/version_matrix.sh", "full", "all"],
+    }
+    return expected
+
+
+def validate_command_coverage(
+    commands: list[dict[str, object]], plan: list[dict[str, object]]
+) -> None:
+    """Reject proof records that differ from the independently derived graph."""
+
+    expected = expected_command_records(plan)
+    actual: dict[str, dict[str, object]] = {}
+    for command in commands:
+        identifier = str(command["id"])
+        if identifier in actual:
+            raise ContractError(f"duplicate command record {identifier!r}")
+        actual[identifier] = command
+
+    missing = sorted(set(expected) - set(actual))
+    if missing:
+        raise ContractError(f"missing Required command records: {', '.join(missing)}")
+    unexpected = sorted(set(actual) - set(expected))
+    if unexpected:
+        raise ContractError(f"unexpected command records: {', '.join(unexpected)}")
+    for identifier, expected_record in expected.items():
+        actual_record = actual[identifier]
+        for field in ("tier", "argv"):
+            if actual_record[field] != expected_record[field]:
+                raise ContractError(
+                    f"{identifier}: recorded {field} differs from the derived Required graph"
+                )
+
+
+def command_graph_commitment(plan: list[dict[str, object]]) -> dict[str, object]:
+    command_ids = sorted(expected_command_records(plan))
+    canonical = json.dumps(command_ids, ensure_ascii=False, separators=(",", ":"))
+    return {
+        "command_ids": command_ids,
+        "sha256": hashlib.sha256(canonical.encode()).hexdigest(),
+    }
 
 
 def source_ref(sha: str, branch: str) -> dict[str, object]:
@@ -271,9 +433,9 @@ def run_required(plan: list[dict[str, object]], sha: str, output: Path, run_id: 
             outcome = "skip"
             exit_code = None
             output_text = str(exc)
-        (logs / f"{str(row['name']).lower().replace(' ', '-')}.log").write_text(output_text)
+        (logs / f"{command_id(str(row['name']))}.log").write_text(output_text)
         record: dict[str, object] = {
-            "id": str(row["name"]).lower().replace(" ", "-").replace("/", "-"),
+            "id": command_id(str(row["name"])),
             "tier": "required",
             "argv": argv,
             "sha": sha,
@@ -299,9 +461,10 @@ def run_required(plan: list[dict[str, object]], sha: str, output: Path, run_id: 
             "ended_at": None,
         }
     )
+    validate_command_coverage(commands, plan)
     verdict = "pass" if all(c["outcome"] == "pass" for c in commands if c["tier"] == "required") else "fail"
     proof = {
-        "schema": "required-proof/v1",
+        "schema": "required-proof/v2",
         "repo": "oraclemcp",
         "generated_at": utc_now(),
         "source": source_ref(sha, command_output(["git", "branch", "--show-current"])),
@@ -312,6 +475,7 @@ def run_required(plan: list[dict[str, object]], sha: str, output: Path, run_id: 
             "runner": "scripts/verify_required_local.py",
         },
         "resource_budget": emitted_budget(run_id),
+        "command_graph": command_graph_commitment(plan),
         "commands": commands,
         "verdict": verdict,
     }
@@ -374,6 +538,13 @@ def self_test() -> None:
             pass
         else:
             raise AssertionError("a GitHub expression in run: must fail closed")
+    plan = effective_plan()
+    assert required_command_ids(plan) == parse_required_policy_ids(
+        CI_WORKFLOW.read_text(encoding="utf-8")
+    )
+    assert required_graph_sha256(plan) == parse_required_policy_graph_sha256(
+        CI_WORKFLOW.read_text(encoding="utf-8")
+    )
     print("verify-required-local: self-test OK")
 
 
@@ -383,6 +554,7 @@ def main() -> int:
     parser.add_argument("--run-id")
     parser.add_argument("--internal", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--plan", action="store_true")
+    parser.add_argument("--policy-check", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     args = parser.parse_args()
 
@@ -390,6 +562,9 @@ def main() -> int:
         self_test()
         return 0
     plan = effective_plan()
+    if args.policy_check:
+        print("required-policy: projection matches CI-owned IDs and argv graph")
+        return 0
     if args.plan:
         print(json.dumps({"profile": "required", "steps": plan}, indent=2))
         return 0
