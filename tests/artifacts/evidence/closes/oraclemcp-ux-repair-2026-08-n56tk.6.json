@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:48:22Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk.6",
+  "scope": {
+    "summary": "Unifies the operator dashboard's neutral visual language, semantic information feedback, and explicit destructive action hierarchy without changing its guarded workflows.",
+    "in_scope": [
+      "web/index.html",
+      "web/src/app/App.tsx",
+      "web/src/app/ci-lane-health-panel.tsx",
+      "web/src/app/conformance.test.tsx",
+      "web/src/app/skin.tsx",
+      "web/src/app/wig-polish.test.tsx",
+      "web/src/components/ui/primitives.tsx",
+      "web/src/styles.css"
+    ],
+    "out_of_scope": [
+      "Live Oracle-backed operator workflows",
+      "Unrelated dashboard feature work",
+      "Any Orrery, Three.js, WebGL, or other 3D surface"
+    ]
+  },
+  "source": {
+    "sha": "6591a390e235281a775d96f3546a32230390fdc8",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard type, production build, and regression suite",
+        "kind": "cli",
+        "trace": "`cd web && npm run check` exited 0 at source 6591a390: TypeScript, Vite production build, SBOM and bundle checks, and 236 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "visual semantic action regression",
+        "kind": "cli",
+        "trace": "`cd web && npm exec vitest run src/app/wig-polish.test.tsx src/app/conformance.test.tsx` exited 0 with 24 tests. It proves routine primary confirmation remains gold, destructive confirmation uses the rust danger variant with a visible focus ring, information uses its separate semantic token, and the information-token contrast remains at least 3:1."
+      },
+      {
+        "name": "browser operator workflow regression",
+        "kind": "cli",
+        "trace": "`cd web && npm exec playwright test e2e/ux-shell.spec.ts e2e/ux-audit-layout.spec.ts e2e/ux-recovery.spec.ts e2e/ux-explorer-selection.spec.ts --config playwright.config.ts` exited 0 with 9 Chromium tests. It preserves keyboard navigation, narrow viewport behavior, error recovery, audit layout, and Explorer selection lifecycle."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is local dashboard and browser coverage with stubbed operator responses; it does not claim a live Oracle-backed run.",
+    "No fuzzing or mutation campaign was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
