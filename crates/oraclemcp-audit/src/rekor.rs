@@ -9,9 +9,10 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, SyncSender, TrySendError, sync_channel};
-use std::thread;
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
+use parking_lot::{Condvar as ParkingCondvar, Mutex};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -20,6 +21,10 @@ use crate::AuditRecord;
 
 /// Maximum jobs retained while an external Rekor signer is slow or unavailable.
 pub const DEFAULT_REKOR_QUEUE_CAPACITY: usize = 8;
+/// Maximum time the last owner waits for queued Rekor work during implicit
+/// shutdown. Callers that need a different service budget use
+/// [`AsyncRekorAnchor::shutdown`].
+pub const DEFAULT_REKOR_SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 /// Bound a receipt's retained Rekor entry body. Audit heads are tiny; larger
 /// responses are neither needed for verification nor safe to retain unbounded.
 pub const MAX_REKOR_ENTRY_BODY_BYTES: usize = 16 * 1024;
@@ -305,15 +310,42 @@ pub struct RekorAnchorStatus {
     pub failed: u64,
     /// Heads dropped because the bounded queue was full/disconnected.
     pub dropped: u64,
+    /// Heads accepted but not yet completed by the worker.
+    pub pending: u64,
+    /// Whether the owned worker has not yet terminated.
+    pub worker_running: bool,
+    /// Bounded shutdown calls that expired before the worker drained.
+    pub shutdown_timeouts: u64,
     /// Most recent accepted receipt, retained for operator export/offline verification.
     pub latest_receipt: Option<RekorAnchorReceipt>,
+}
+
+/// Result of a bounded Rekor drain request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RekorShutdownOutcome {
+    /// The queue drained and the owned worker was joined.
+    Drained,
+    /// The caller's budget expired. Queued work remains owned by the worker and
+    /// a later shutdown call may finish the join.
+    TimedOut,
 }
 
 /// Cloneable, bounded asynchronous Rekor anchor queue.
 #[derive(Clone)]
 pub struct AsyncRekorAnchor {
-    sender: SyncSender<AuditChainHead>,
+    shared: Arc<RekorWorkerOwner>,
+}
+
+struct RekorWorkerOwner {
+    sender: Mutex<Option<SyncSender<AuditChainHead>>>,
     status: Arc<Mutex<RekorAnchorStatus>>,
+    completion: Arc<RekorWorkerCompletion>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct RekorWorkerCompletion {
+    done: Mutex<bool>,
+    wake: ParkingCondvar,
 }
 
 impl AsyncRekorAnchor {
@@ -330,13 +362,34 @@ impl AsyncRekorAnchor {
             return Err(RekorSubmitError::Rejected);
         }
         let (sender, receiver) = sync_channel(capacity);
-        let status = Arc::new(Mutex::new(RekorAnchorStatus::default()));
+        let status = Arc::new(Mutex::new(RekorAnchorStatus {
+            worker_running: true,
+            ..RekorAnchorStatus::default()
+        }));
         let worker_status = Arc::clone(&status);
-        thread::Builder::new()
+        let completion = Arc::new(RekorWorkerCompletion {
+            done: Mutex::new(false),
+            wake: ParkingCondvar::new(),
+        });
+        let worker_completion = Arc::clone(&completion);
+        let worker = thread::Builder::new()
             .name("audit-rekor-anchor".to_owned())
-            .spawn(move || run_worker(receiver, submitter, worker_status))
+            .spawn(move || {
+                let _completion = RekorWorkerCompletionGuard {
+                    completion: worker_completion,
+                    status: Arc::clone(&worker_status),
+                };
+                run_worker(receiver, submitter, worker_status);
+            })
             .map_err(|_| RekorSubmitError::Rejected)?;
-        Ok(Self { sender, status })
+        Ok(Self {
+            shared: Arc::new(RekorWorkerOwner {
+                sender: Mutex::new(Some(sender)),
+                status,
+                completion,
+                worker: Mutex::new(Some(worker)),
+            }),
+        })
     }
 
     /// Start the worker with the production queue bound.
@@ -351,13 +404,18 @@ impl AsyncRekorAnchor {
     /// propagates to the caller: transparency anchoring is retrospective proof,
     /// not an admission condition.
     pub fn enqueue(&self, head: AuditChainHead) {
-        match self.sender.try_send(head) {
+        let mut status = self.shared.status.lock();
+        let sender = self.shared.sender.lock();
+        let result = match sender.as_ref() {
+            Some(sender) => sender.try_send(head),
+            None => Err(TrySendError::Disconnected(head)),
+        };
+        match result {
             Ok(()) => {
-                let mut status = self.status.lock();
                 status.enqueued = status.enqueued.saturating_add(1);
+                status.pending = status.pending.saturating_add(1);
             }
             Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
-                let mut status = self.status.lock();
                 status.dropped = status.dropped.saturating_add(1);
             }
         }
@@ -366,7 +424,71 @@ impl AsyncRekorAnchor {
     /// Snapshot worker status without waiting for an external submission.
     #[must_use]
     pub fn status(&self) -> RekorAnchorStatus {
-        self.status.lock().clone()
+        self.shared.status.lock().clone()
+    }
+
+    /// Close the queue, drain accepted heads, and wait at most `timeout` for
+    /// the owned worker. A timeout never discards the worker or its queue; a
+    /// later call can observe completion and join it.
+    pub fn shutdown(&self, timeout: Duration) -> RekorShutdownOutcome {
+        self.shared.shutdown(timeout)
+    }
+}
+
+impl RekorWorkerOwner {
+    fn shutdown(&self, timeout: Duration) -> RekorShutdownOutcome {
+        let started = Instant::now();
+        self.sender.lock().take();
+        let mut done = self.completion.done.lock();
+        while !*done {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                drop(done);
+                let mut status = self.status.lock();
+                status.shutdown_timeouts = status.shutdown_timeouts.saturating_add(1);
+                return RekorShutdownOutcome::TimedOut;
+            }
+            self.completion.wake.wait_for(&mut done, remaining);
+        }
+        drop(done);
+        let mut worker = self.worker.lock();
+        while worker.as_ref().is_some_and(|worker| !worker.is_finished()) {
+            if started.elapsed() >= timeout {
+                let mut status = self.status.lock();
+                status.shutdown_timeouts = status.shutdown_timeouts.saturating_add(1);
+                return RekorShutdownOutcome::TimedOut;
+            }
+            thread::yield_now();
+        }
+        if let Some(worker) = worker.take()
+            && worker.join().is_err()
+        {
+            let mut status = self.status.lock();
+            status.failed = status.failed.saturating_add(1);
+        }
+        RekorShutdownOutcome::Drained
+    }
+}
+
+impl Drop for RekorWorkerOwner {
+    fn drop(&mut self) {
+        // `RekorWorkerOwner` is destroyed exactly once by Arc, after the final
+        // `AsyncRekorAnchor` clone disappears. This avoids a racy
+        // `Arc::strong_count` last-clone guess under concurrent drops.
+        let _ = self.shutdown(DEFAULT_REKOR_SHUTDOWN_TIMEOUT);
+    }
+}
+
+struct RekorWorkerCompletionGuard {
+    completion: Arc<RekorWorkerCompletion>,
+    status: Arc<Mutex<RekorAnchorStatus>>,
+}
+
+impl Drop for RekorWorkerCompletionGuard {
+    fn drop(&mut self) {
+        self.status.lock().worker_running = false;
+        *self.completion.done.lock() = true;
+        self.completion.wake.notify_all();
     }
 }
 
@@ -376,15 +498,21 @@ fn run_worker(
     status: Arc<Mutex<RekorAnchorStatus>>,
 ) {
     for head in receiver {
-        match submitter.submit(&head) {
-            Ok(receipt) if receipt.head == head && validate_proof_shape(&receipt.proof).is_ok() => {
+        let submission =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| submitter.submit(&head)));
+        match submission {
+            Ok(Ok(receipt))
+                if receipt.head == head && validate_proof_shape(&receipt.proof).is_ok() =>
+            {
                 let mut status = status.lock();
                 status.anchored = status.anchored.saturating_add(1);
+                status.pending = status.pending.saturating_sub(1);
                 status.latest_receipt = Some(receipt);
             }
-            Ok(_) | Err(_) => {
+            Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
                 let mut status = status.lock();
                 status.failed = status.failed.saturating_add(1);
+                status.pending = status.pending.saturating_sub(1);
             }
         }
     }
@@ -804,6 +932,143 @@ mod tests {
             receipt.proof.entry_body = Vec::new();
             Ok(receipt)
         }
+    }
+
+    struct RejectingSubmitter;
+
+    impl RekorSubmitter for RejectingSubmitter {
+        fn submit(&self, _head: &AuditChainHead) -> Result<RekorAnchorReceipt, RekorSubmitError> {
+            Err(RekorSubmitError::Unavailable)
+        }
+    }
+
+    #[derive(Default)]
+    struct LifecycleGateState {
+        started: bool,
+        released: bool,
+    }
+
+    struct LifecycleGateSubmitter {
+        state: Arc<(StdMutex<LifecycleGateState>, Condvar)>,
+    }
+
+    impl RekorSubmitter for LifecycleGateSubmitter {
+        fn submit(&self, _head: &AuditChainHead) -> Result<RekorAnchorReceipt, RekorSubmitError> {
+            let (lock, wake) = &*self.state;
+            let mut state = lock.lock().expect("lifecycle gate lock");
+            state.started = true;
+            wake.notify_all();
+            while !state.released {
+                state = wake.wait(state).expect("lifecycle gate wait");
+            }
+            Err(RekorSubmitError::Unavailable)
+        }
+    }
+
+    fn wait_for_lifecycle_start(state: &Arc<(StdMutex<LifecycleGateState>, Condvar)>) {
+        let (lock, wake) = &**state;
+        let state = lock.lock().expect("lifecycle state lock");
+        let (state, _wait) = wake
+            .wait_timeout_while(state, Duration::from_secs(1), |state| !state.started)
+            .expect("lifecycle state wait");
+        assert!(state.started, "worker must enter the gated submitter");
+    }
+
+    fn release_lifecycle_gate(state: &Arc<(StdMutex<LifecycleGateState>, Condvar)>) {
+        let (lock, wake) = &**state;
+        lock.lock().expect("lifecycle state lock").released = true;
+        wake.notify_all();
+    }
+
+    #[test]
+    fn shutdown_drains_accepted_rekor_heads_and_joins_worker() {
+        let anchor = AsyncRekorAnchor::new(Box::new(AcceptingSubmitter), 2).expect("worker starts");
+        anchor.enqueue(head());
+        anchor.enqueue(head());
+
+        assert_eq!(
+            anchor.shutdown(Duration::from_secs(1)),
+            RekorShutdownOutcome::Drained
+        );
+        let status = anchor.status();
+        assert_eq!(status.enqueued, 2);
+        assert_eq!(status.anchored, 2);
+        assert_eq!(status.pending, 0);
+        assert!(!status.worker_running);
+        assert_eq!(status.shutdown_timeouts, 0);
+    }
+
+    #[test]
+    fn shutdown_drain_reports_submission_failures() {
+        let anchor = AsyncRekorAnchor::new(Box::new(RejectingSubmitter), 1).expect("worker starts");
+        anchor.enqueue(head());
+
+        assert_eq!(
+            anchor.shutdown(Duration::from_secs(1)),
+            RekorShutdownOutcome::Drained
+        );
+        let status = anchor.status();
+        assert_eq!(status.anchored, 0);
+        assert_eq!(status.failed, 1);
+        assert_eq!(status.pending, 0);
+        assert!(!status.worker_running);
+    }
+
+    #[test]
+    fn dropping_the_final_clone_closes_and_joins_the_worker() {
+        let anchor = AsyncRekorAnchor::new(Box::new(AcceptingSubmitter), 1).expect("worker starts");
+        let status = Arc::clone(&anchor.shared.status);
+        let final_clone = anchor.clone();
+
+        drop(anchor);
+        assert!(status.lock().worker_running);
+
+        drop(final_clone);
+        assert!(!status.lock().worker_running);
+    }
+
+    #[test]
+    fn shutdown_timeout_is_bounded_and_later_drain_joins_worker() {
+        let state = Arc::new((StdMutex::new(LifecycleGateState::default()), Condvar::new()));
+        let anchor = Arc::new(
+            AsyncRekorAnchor::new(
+                Box::new(LifecycleGateSubmitter {
+                    state: Arc::clone(&state),
+                }),
+                1,
+            )
+            .expect("worker starts"),
+        );
+        anchor.enqueue(head());
+        wait_for_lifecycle_start(&state);
+
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        let shutdown_anchor = Arc::clone(&anchor);
+        let caller = thread::spawn(move || {
+            let outcome = shutdown_anchor.shutdown(Duration::from_millis(20));
+            finished_tx.send(outcome).expect("report shutdown result");
+        });
+        assert_eq!(
+            finished_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("bounded shutdown must return"),
+            RekorShutdownOutcome::TimedOut
+        );
+        caller.join().expect("shutdown caller joins");
+        let status = anchor.status();
+        assert!(status.worker_running);
+        assert_eq!(status.pending, 1);
+        assert_eq!(status.shutdown_timeouts, 1);
+
+        release_lifecycle_gate(&state);
+        assert_eq!(
+            anchor.shutdown(Duration::from_secs(1)),
+            RekorShutdownOutcome::Drained
+        );
+        let status = anchor.status();
+        assert!(!status.worker_running);
+        assert_eq!(status.pending, 0);
+        assert_eq!(status.failed, 1);
     }
 
     #[test]

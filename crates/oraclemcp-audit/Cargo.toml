@@ -19,6 +19,8 @@ thiserror.workspace = true
 # D2 audit shipping: a forward failure is logged + dropped (fail-safe) rather
 # than failing the local durable chain; tracing is the warn/debug channel.
 tracing.workspace = true
+rustix = { version = "1", features = ["fs", "process"] }
+getrandom = "0.2"
 
 [dev-dependencies]
 proptest = "1"
@@ -30,6 +32,11 @@ tempfile = "3"
 # production dependency graph and adds nothing to ordinary `cargo test` builds.
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"
+
+[target.'cfg(windows)'.dependencies]
+# Safe handle-based owner/DACL wrappers keep Win32 unsafe code outside this
+# `forbid(unsafe_code)` workspace crate.
+windows-permissions = "0.2.4"
 
 [lints]
 workspace = true

@@ -20,6 +20,9 @@ use thiserror::Error;
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
+
 use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
 use crate::keyring::AuditKeyring;
 use crate::record::{
@@ -47,6 +50,47 @@ pub(crate) fn open_file_identity(file: &File) -> std::io::Result<OpenFileIdentit
         volume: metadata.dev(),
         file: metadata.ino(),
     })
+}
+
+#[cfg(unix)]
+fn metadata_identity(metadata: &std::fs::Metadata) -> std::io::Result<OpenFileIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    Ok(OpenFileIdentity {
+        volume: metadata.dev(),
+        file: metadata.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn metadata_identity(metadata: &std::fs::Metadata) -> std::io::Result<OpenFileIdentity> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    let volume = metadata.volume_serial_number().ok_or_else(|| {
+        std::io::Error::other("filesystem did not provide a volume serial number")
+    })?;
+    let file_index = metadata
+        .file_index()
+        .ok_or_else(|| std::io::Error::other("filesystem did not provide a file index"))?;
+    Ok(OpenFileIdentity {
+        volume: u64::from(volume),
+        file: file_index,
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn metadata_identity(_metadata: &std::fs::Metadata) -> std::io::Result<OpenFileIdentity> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "filesystem identity is unavailable on this platform",
+    ))
+}
+
+/// Identity reached by a path lookup. This is used only for early alias
+/// classification; callers must still perform a no-follow descriptor open
+/// before any read or write.
+pub(crate) fn path_identity(path: &Path) -> std::io::Result<OpenFileIdentity> {
+    metadata_identity(&std::fs::metadata(path)?)
 }
 
 #[cfg(windows)]
@@ -278,13 +322,464 @@ fn reject_unsafe_existing(path: &Path) -> Result<(), AuditError> {
     }
 }
 
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+
+#[cfg(windows)]
+const FILE_SHARE_READ_WRITE_DELETE: u32 = 0x0000_0001 | 0x0000_0002 | 0x0000_0004;
+
+#[cfg(windows)]
+const FILE_SHARE_READ_WRITE: u32 = 0x0000_0001 | 0x0000_0002;
+
+#[cfg(windows)]
+const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+
+#[cfg(any(test, windows))]
+fn windows_private_dacl_sddl(sid: &str, directory: bool) -> String {
+    let inheritance = if directory { "OICI" } else { "" };
+    format!("D:P(A;{inheritance};FA;;;{sid})")
+}
+
+fn configure_no_follow(options: &mut OpenOptions) {
+    #[cfg(unix)]
+    {
+        let flags = i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits())
+            .expect("O_NOFOLLOW fits OpenOptionsExt::custom_flags");
+        options.custom_flags(flags);
+    }
+    #[cfg(windows)]
+    {
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+}
+
+#[cfg(windows)]
+fn windows_security_handle(path: &Path, directory: bool) -> Result<File, AuditError> {
+    use windows_permissions::constants::AccessRights;
+
+    let access = (AccessRights::ReadControl | AccessRights::WriteDac).bits() | FILE_READ_ATTRIBUTES;
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .custom_flags(
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if directory {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                } else {
+                    0
+                },
+        );
+    options.open(path).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot open audit {} {} for Windows ACL validation: {error}",
+            if directory { "directory" } else { "file" },
+            path.display()
+        ))
+    })
+}
+
+/// Hold an authenticated, non-replaceable private parent directory across a
+/// Windows file creation. Rust's `OpenOptions` cannot pass a security
+/// descriptor to `CreateFileW`; requiring this exact inheritable DACL makes a
+/// newly created child owner-only from its first observable instant. Omitting
+/// `FILE_SHARE_DELETE` prevents the verified parent from being renamed while
+/// the caller creates and authenticates the child.
+#[cfg(windows)]
+fn windows_private_creation_parent(path: &Path) -> Result<File, AuditError> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_permissions::constants::AccessRights;
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let access = AccessRights::ReadControl.bits() | FILE_READ_ATTRIBUTES;
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(access)
+        .share_mode(FILE_SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let directory = options.open(parent).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot lock audit creation parent {} for Windows DACL validation: {error}",
+            parent.display()
+        ))
+    })?;
+    let metadata = directory.metadata().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot stat audit creation parent {}: {error}",
+            parent.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(AuditError::Io(format!(
+            "audit creation parent {} is not a non-reparse directory",
+            parent.display()
+        )));
+    }
+    let path_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot authenticate audit creation parent {}: {error}",
+            parent.display()
+        ))
+    })?;
+    if path_metadata.file_type().is_symlink()
+        || !path_metadata.file_type().is_dir()
+        || open_file_identity(&directory).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot identify audit creation parent {}: {error}",
+                parent.display()
+            ))
+        })? != metadata_identity(&path_metadata).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot identify audit creation parent path {}: {error}",
+                parent.display()
+            ))
+        })?
+    {
+        return Err(AuditError::Io(format!(
+            "audit creation parent {} changed identity during validation",
+            parent.display()
+        )));
+    }
+    let current_sid = windows_permissions::utilities::current_process_sid().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot resolve the current Windows process SID for audit creation parent {}: {error}",
+            parent.display()
+        ))
+    })?;
+    verify_windows_private_acl(&directory, parent, true, &current_sid).map_err(|error| {
+        AuditError::Io(format!(
+            "audit file creation requires an exact protected owner-only parent DACL at {}: {error}",
+            parent.display()
+        ))
+    })?;
+    Ok(directory)
+}
+
+#[cfg(windows)]
+#[derive(Clone, Copy)]
+enum WindowsPrivateOpenMode {
+    Append,
+    Lock,
+}
+
+#[cfg(windows)]
+fn windows_private_open_options(mode: WindowsPrivateOpenMode) -> OpenOptions {
+    let mut options = OpenOptions::new();
+    match mode {
+        WindowsPrivateOpenMode::Append => {
+            options.read(true).append(true);
+        }
+        WindowsPrivateOpenMode::Lock => {
+            options.read(true).write(true).truncate(false);
+        }
+    }
+    configure_no_follow(&mut options);
+    options
+}
+
+#[cfg(windows)]
+fn open_or_create_private_windows_file(
+    path: &Path,
+    mode: WindowsPrivateOpenMode,
+    description: &str,
+) -> Result<File, AuditError> {
+    match windows_private_open_options(mode).open(path) {
+        Ok(file) => {
+            harden_open_regular_file(&file, path)?;
+            return Ok(file);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(AuditError::Io(format!(
+                "cannot open {description} {}: {error}",
+                path.display()
+            )));
+        }
+    }
+
+    let _creation_parent = windows_private_creation_parent(path)?;
+    let mut create = windows_private_open_options(mode);
+    create.create_new(true);
+    let file = match create.open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            windows_private_open_options(mode)
+                .open(path)
+                .map_err(|error| {
+                    AuditError::Io(format!(
+                        "cannot authenticate concurrently created {description} {}: {error}",
+                        path.display()
+                    ))
+                })?
+        }
+        Err(error) => {
+            return Err(AuditError::Io(format!(
+                "cannot create {description} {} beneath its private Windows parent: {error}",
+                path.display()
+            )));
+        }
+    };
+    harden_open_regular_file(&file, path)?;
+    Ok(file)
+}
+
+#[cfg(windows)]
+fn verify_windows_private_acl(
+    handle: &File,
+    path: &Path,
+    directory: bool,
+    current_sid: &windows_permissions::Sid,
+) -> Result<(), AuditError> {
+    use windows_permissions::constants::{
+        AccessRights, AceFlags, AceType, SeObjectType, SecurityInformation,
+    };
+
+    let descriptor = windows_permissions::wrappers::GetSecurityInfo(
+        handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl,
+    )
+    .map_err(|error| {
+        AuditError::Io(format!(
+            "cannot read the Windows owner/DACL for audit path {}: {error}",
+            path.display()
+        ))
+    })?;
+    if descriptor.owner() != Some(current_sid) {
+        return Err(AuditError::Io(format!(
+            "audit path {} is not owned by the current Windows process user",
+            path.display()
+        )));
+    }
+    let dacl = descriptor.dacl().ok_or_else(|| {
+        AuditError::Io(format!(
+            "audit path {} has no Windows DACL; refusing a null DACL",
+            path.display()
+        ))
+    })?;
+    if dacl.len() != 1 {
+        return Err(AuditError::Io(format!(
+            "audit path {} has {} Windows DACL entries, expected one owner-only entry",
+            path.display(),
+            dacl.len()
+        )));
+    }
+    let ace = dacl.get_ace(0).ok_or_else(|| {
+        AuditError::Io(format!(
+            "audit path {} did not expose its sole Windows DACL entry",
+            path.display()
+        ))
+    })?;
+    let expected_flags = if directory {
+        AceFlags::ObjectInherit | AceFlags::ContainerInherit
+    } else {
+        AceFlags::empty()
+    };
+    if ace.ace_type() != AceType::ACCESS_ALLOWED_ACE_TYPE
+        || ace.flags() != expected_flags
+        || ace.mask() != AccessRights::FileAllAccess
+        || ace.sid() != Some(current_sid)
+    {
+        return Err(AuditError::Io(format!(
+            "audit path {} Windows DACL is not the exact protected owner-only policy",
+            path.display()
+        )));
+    }
+    let dacl_sddl =
+        windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
+            &descriptor,
+            SecurityInformation::Dacl,
+        )
+        .map_err(|error| {
+            AuditError::Io(format!(
+                "cannot render the Windows DACL control flags for audit path {}: {error}",
+                path.display()
+            ))
+        })?;
+    let dacl_sddl = dacl_sddl.to_string_lossy();
+    let control_flags = dacl_sddl
+        .strip_prefix("D:")
+        .and_then(|value| value.split_once('(').map(|(flags, _)| flags))
+        .ok_or_else(|| {
+            AuditError::Io(format!(
+                "audit path {} returned a malformed Windows DACL descriptor",
+                path.display()
+            ))
+        })?;
+    if !control_flags.contains('P') {
+        return Err(AuditError::Io(format!(
+            "audit path {} Windows DACL is inheritable instead of protected",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn harden_windows_private_acl(
+    opened: &File,
+    path: &Path,
+    directory: bool,
+) -> Result<(), AuditError> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_permissions::constants::{SeObjectType, SecurityInformation};
+    use windows_permissions::{LocalBox, SecurityDescriptor};
+
+    let expected_identity = open_file_identity(opened).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot identify opened audit path {} before Windows ACL hardening: {error}",
+            path.display()
+        ))
+    })?;
+    let mut security_handle = windows_security_handle(path, directory)?;
+    let security_metadata = security_handle.metadata().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot stat the Windows ACL handle for audit path {}: {error}",
+            path.display()
+        ))
+    })?;
+    if security_metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || security_metadata.file_type().is_dir() != directory
+        || security_metadata.file_type().is_file() == directory
+    {
+        return Err(AuditError::Io(format!(
+            "audit path {} changed type or became a reparse point before Windows ACL hardening",
+            path.display()
+        )));
+    }
+    if !directory {
+        match security_metadata.number_of_links() {
+            Some(1) => {}
+            Some(links) => {
+                return Err(AuditError::Io(format!(
+                    "audit path {} has {links} hard links; refusing Windows ACL hardening",
+                    path.display()
+                )));
+            }
+            None => {
+                return Err(AuditError::Io(format!(
+                    "audit path {} did not report a link count for Windows ACL hardening",
+                    path.display()
+                )));
+            }
+        }
+    }
+    let security_identity = open_file_identity(&security_handle).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot identify the Windows ACL handle for audit path {}: {error}",
+            path.display()
+        ))
+    })?;
+    if security_identity != expected_identity {
+        return Err(AuditError::Io(format!(
+            "audit path {} changed identity before Windows ACL hardening",
+            path.display()
+        )));
+    }
+
+    let current_sid = windows_permissions::utilities::current_process_sid().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot resolve the current Windows process SID for audit path {}: {error}",
+            path.display()
+        ))
+    })?;
+    let before = windows_permissions::wrappers::GetSecurityInfo(
+        &security_handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner,
+    )
+    .map_err(|error| {
+        AuditError::Io(format!(
+            "cannot validate the Windows owner for audit path {}: {error}",
+            path.display()
+        ))
+    })?;
+    if before.owner() != Some(&*current_sid) {
+        return Err(AuditError::Io(format!(
+            "audit path {} is not owned by the current Windows process user",
+            path.display()
+        )));
+    }
+
+    let desired: LocalBox<SecurityDescriptor> =
+        windows_private_dacl_sddl(&current_sid.to_string(), directory)
+            .parse()
+            .map_err(|error| {
+                AuditError::Io(format!(
+                    "cannot construct the private Windows DACL for audit path {}: {error}",
+                    path.display()
+                ))
+            })?;
+    let desired_dacl = desired.dacl().ok_or_else(|| {
+        AuditError::Io("constructed private Windows audit descriptor has no DACL".to_owned())
+    })?;
+    windows_permissions::wrappers::SetSecurityInfo(
+        &mut security_handle,
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        None,
+        None,
+        Some(desired_dacl),
+        None,
+    )
+    .map_err(|error| {
+        AuditError::Io(format!(
+            "cannot set the protected owner-only Windows DACL on audit path {}: {error}",
+            path.display()
+        ))
+    })?;
+    verify_windows_private_acl(&security_handle, path, directory, &current_sid)?;
+
+    let final_metadata = std::fs::symlink_metadata(path).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot re-authenticate audit path {} after Windows ACL hardening: {error}",
+            path.display()
+        ))
+    })?;
+    if final_metadata.file_type().is_symlink()
+        || final_metadata.file_type().is_dir() != directory
+        || final_metadata.file_type().is_file() == directory
+        || metadata_identity(&final_metadata).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot identify audit path {} after Windows ACL hardening: {error}",
+                path.display()
+            ))
+        })? != expected_identity
+    {
+        return Err(AuditError::Io(format!(
+            "audit path {} changed after Windows ACL hardening",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Tighten and authenticate a Windows spool directory before any control or
+/// record file is opened beneath it.
+#[cfg(windows)]
+pub(crate) fn harden_windows_private_directory(path: &Path) -> Result<(), AuditError> {
+    let directory = windows_security_handle(path, true)?;
+    harden_windows_private_acl(&directory, path, true)
+}
+
 /// After opening, confirm the OPEN handle is a regular file — catching a TOCTOU
-/// swap between [`reject_unsafe_existing`] and the open — and, on Unix, harden
-/// its mode to owner-only `0600` (bead oraclemcp-qa100 .15). `File::set_permissions`
-/// acts on the descriptor (`fchmod`), so it hardens the exact opened inode with
-/// no path race. This both tightens a create made under a permissive umask and
-/// hardens an existing overly-broad audit/lock file down to `0600`.
-fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), AuditError> {
+/// swap between [`reject_unsafe_existing`] and the open — and harden it to its
+/// platform's owner-only policy. Unix applies `0600` to the descriptor. Windows
+/// authenticates a second no-follow handle to the same file, requires current-
+/// user ownership, installs one protected full-control ACE for that SID, and
+/// reads it back before returning.
+pub(crate) fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), AuditError> {
     let metadata = file.metadata().map_err(|e| {
         AuditError::Io(format!(
             "cannot stat opened audit file {} to confirm it is a private regular file: {e}",
@@ -298,8 +793,55 @@ fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), AuditError> 
             path.display()
         )));
     }
+    let path_metadata = std::fs::symlink_metadata(path).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot authenticate audit path {} after opening it: {e}",
+            path.display()
+        ))
+    })?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.file_type().is_file() {
+        return Err(AuditError::Io(format!(
+            "audit path {} changed to a link or non-regular object while it was opened",
+            path.display()
+        )));
+    }
+    let opened_identity = open_file_identity(file).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot authenticate opened audit file {}: {e}",
+            path.display()
+        ))
+    })?;
+    let path_identity = metadata_identity(&path_metadata).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot authenticate audit path {}: {e}",
+            path.display()
+        ))
+    })?;
+    if opened_identity != path_identity {
+        return Err(AuditError::Io(format!(
+            "audit path {} changed identity while it was opened",
+            path.display()
+        )));
+    }
     #[cfg(unix)]
     {
+        use std::os::unix::fs::MetadataExt as _;
+
+        if metadata.nlink() != 1 {
+            return Err(AuditError::Io(format!(
+                "audit path {} has {} hard links; refusing a file that can alias another path",
+                path.display(),
+                metadata.nlink()
+            )));
+        }
+        let expected_uid = rustix::process::geteuid().as_raw();
+        if metadata.uid() != expected_uid {
+            return Err(AuditError::Io(format!(
+                "audit path {} is owned by uid {}, expected the effective uid {expected_uid}",
+                path.display(),
+                metadata.uid()
+            )));
+        }
         let mode = metadata.permissions().mode() & 0o777;
         if mode != 0o600 {
             let mut permissions = metadata.permissions();
@@ -312,49 +854,98 @@ fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), AuditError> 
             })?;
         }
     }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(AuditError::Io(format!(
+                "audit path {} is a reparse point; refusing to follow it",
+                path.display()
+            )));
+        }
+        match metadata.number_of_links() {
+            Some(1) => {}
+            Some(links) => {
+                return Err(AuditError::Io(format!(
+                    "audit path {} has {links} hard links; refusing a file that can alias another path",
+                    path.display()
+                )));
+            }
+            None => {
+                return Err(AuditError::Io(format!(
+                    "audit path {} did not report a link count",
+                    path.display()
+                )));
+            }
+        }
+        harden_windows_private_acl(file, path, false)?;
+    }
     Ok(())
 }
 
 /// Open (creating when absent) a private, symlink-safe append handle for the
 /// audit log at `path`: reject a pre-planted non-regular target, create with
 /// mode `0600` on Unix, then confirm/harden the opened inode.
-fn open_private_append_file(path: &Path) -> Result<File, AuditError> {
+pub(crate) fn open_private_append_file(path: &Path) -> Result<File, AuditError> {
     reject_unsafe_existing(path)?;
-    let mut options = OpenOptions::new();
-    options.create(true).append(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options
-        .open(path)
-        .map_err(|e| AuditError::Io(format!("failed to open audit log {}: {e}", path.display())))?;
-    harden_open_regular_file(&file, path)?;
-    Ok(file)
+    #[cfg(windows)]
+    {
+        open_or_create_private_windows_file(path, WindowsPrivateOpenMode::Append, "audit log")
+    }
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.create(true).read(true).append(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        configure_no_follow(&mut options);
+        let file = options.open(path).map_err(|e| {
+            AuditError::Io(format!("failed to open audit log {}: {e}", path.display()))
+        })?;
+        harden_open_regular_file(&file, path)?;
+        Ok(file)
+    }
 }
 
 /// Open (creating when absent) a private, symlink-safe read/write handle for the
 /// audit `<log>.lock` sidecar. Never truncates on open (a contender must not
 /// wipe the holder's recorded pid); creates `0600` on Unix and confirms/hardens
 /// the opened inode.
-fn open_private_lock_file(path: &Path) -> Result<File, AuditError> {
+pub(crate) fn open_private_lock_file(path: &Path) -> Result<File, AuditError> {
     reject_unsafe_existing(path)?;
-    let mut options = OpenOptions::new();
-    options.read(true).write(true).create(true).truncate(false);
-    #[cfg(unix)]
-    options.mode(0o600);
-    let file = options.open(path).map_err(|e| {
-        AuditError::Io(format!(
-            "cannot open audit lock sidecar {}: {e}",
-            path.display()
-        ))
-    })?;
-    harden_open_regular_file(&file, path)?;
-    Ok(file)
+    #[cfg(windows)]
+    {
+        open_or_create_private_windows_file(
+            path,
+            WindowsPrivateOpenMode::Lock,
+            "audit lock sidecar",
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        options.mode(0o600);
+        configure_no_follow(&mut options);
+        let file = options.open(path).map_err(|e| {
+            AuditError::Io(format!(
+                "cannot open audit lock sidecar {}: {e}",
+                path.display()
+            ))
+        })?;
+        harden_open_regular_file(&file, path)?;
+        Ok(file)
+    }
 }
 
 /// Create a brand-new private file at `path`, failing closed if it already
 /// exists (`O_CREAT|O_EXCL`, which also refuses a pre-planted symlink). Used for
 /// the anchor's unpredictable same-directory temporary (bead oraclemcp-qa100 .15).
 pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
+    #[cfg(windows)]
+    let _creation_parent = windows_private_creation_parent(path)?;
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -362,6 +953,23 @@ pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
     let file = options.open(path).map_err(|e| {
         AuditError::Io(format!(
             "cannot create private audit temporary {}: {e}",
+            path.display()
+        ))
+    })?;
+    harden_open_regular_file(&file, path)?;
+    Ok(file)
+}
+
+/// Open an existing private regular file for bounded reads without following a
+/// symlink or accepting a hard-linked/special filesystem object.
+pub(crate) fn open_private_read_file(path: &Path) -> Result<File, AuditError> {
+    reject_unsafe_existing(path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let file = options.open(path).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot open private audit file {} for reading: {e}",
             path.display()
         ))
     })?;
@@ -426,6 +1034,57 @@ pub struct FileAuditSink {
     _lock: AuditLogLock,
 }
 
+/// Opaque proof that one exact open primary audit ledger was fully
+/// authenticated under a particular keyring and checked against its head
+/// anchor. Shipping recovery and auditor resume share this token so neither can
+/// trust a merely structural tail or re-read a path after a worker starts.
+#[derive(Clone, Debug)]
+pub struct AuthenticatedAuditTail {
+    tail: Option<ResumeTail>,
+    keyring_proof: Vec<(String, String)>,
+}
+
+impl AuthenticatedAuditTail {
+    pub(crate) fn chain_tail(&self) -> Option<(u64, String)> {
+        self.tail
+            .as_ref()
+            .map(|tail| (tail.seq, tail.entry_hash.clone()))
+    }
+
+    fn matches_keyring(&self, keys: &[SigningKey]) -> bool {
+        self.keyring_proof == authenticated_tail_keyring_proof(keys)
+    }
+}
+
+const AUTHENTICATED_TAIL_KEYRING_DOMAIN: &str = "oraclemcp:audit-authenticated-tail-keyring:v1";
+
+fn authenticated_tail_keyring_proof(keys: &[SigningKey]) -> Vec<(String, String)> {
+    keys.iter()
+        .map(|key| {
+            (
+                key.key_id().to_owned(),
+                key.sign(AUTHENTICATED_TAIL_KEYRING_DOMAIN),
+            )
+        })
+        .collect()
+}
+
+fn verify_anchor_with_keys(anchor: &ChainAnchor, keys: &[SigningKey]) -> Result<(), AuditError> {
+    let Some(key) = keys.iter().find(|key| key.key_id() == anchor.key_id) else {
+        return Err(AuditError::ResumeRefused(format!(
+            "head anchor names audit key_id {:?}, which is absent from the configured active+historical keyring; add the authentic historical verification key and run `oraclemcp audit verify` before restarting",
+            anchor.key_id
+        )));
+    };
+    if !anchor.mac_is_valid(key) {
+        return Err(AuditError::ResumeRefused(
+            "head anchor MAC does not verify under its configured audit key - the sidecar was rewritten, forged, or the key bytes changed behind an existing key_id; inspect with `oraclemcp audit verify` and restore the authentic key/tail before restarting"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 impl FileAuditSink {
     /// Open (creating + appending) the audit file at `path`, taking the
     /// exclusive advisory writer lock first so a concurrent oraclemcp instance
@@ -464,6 +1123,140 @@ impl FileAuditSink {
                 "cannot establish primary audit file identity: {error}"
             ))
         })
+    }
+
+    /// Stream and structurally verify the exact open primary ledger, retaining
+    /// only its tail. WORM startup uses this to reject a new or lagging mirror
+    /// before the server can accept work.
+    pub(crate) fn structural_tail(&self) -> Result<Option<(u64, String)>, AuditError> {
+        let mut file = self.file.lock();
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot seek primary audit log for mirror verification: {error}"
+            ))
+        })?;
+        let result = (|| {
+            let mut reader = JsonlReader::new(BufReader::new(&mut *file));
+            let mut expected_seq = 1_u64;
+            let mut previous_hash = GENESIS_HASH.to_owned();
+            let mut tail = None;
+            while let Some(record) = reader.next_record().map_err(|error| {
+                AuditError::Io(format!(
+                    "cannot stream primary audit log for mirror verification: {error}"
+                ))
+            })? {
+                if record.seq != expected_seq
+                    || record.prev_hash != previous_hash
+                    || !record.hash_is_valid()
+                {
+                    return Err(AuditError::ChainBroken(record.seq));
+                }
+                expected_seq = expected_seq.saturating_add(1);
+                previous_hash.clone_from(&record.entry_hash);
+                tail = Some((record.seq, record.entry_hash));
+            }
+            Ok(tail)
+        })();
+        file.seek(SeekFrom::End(0)).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot restore primary audit log append position: {error}"
+            ))
+        })?;
+        result
+    }
+
+    /// Authenticate the complete exact-open primary ledger before any shipping
+    /// recovery can mutate state or start a worker. The walk verifies hashes,
+    /// signatures, monotonic sequence, one-way key epochs, and the optional
+    /// authenticated head anchor with bounded memory.
+    pub fn authenticate_existing_chain(
+        &self,
+        audit_path: &Path,
+        anchor_path: &Path,
+        keys: &[SigningKey],
+    ) -> Result<AuthenticatedAuditTail, AuditError> {
+        let anchor = load_anchor(anchor_path).map_err(|error| {
+            AuditError::ResumeRefused(format!(
+                "head anchor sidecar {} is present but unreadable ({error}); refusing to arm audit shipping without confirming the durable chain head",
+                anchor_path.display()
+            ))
+        })?;
+        if let Some(anchor) = anchor.as_ref() {
+            verify_anchor_with_keys(anchor, keys)?;
+        }
+
+        let mut file = self.file.lock();
+        file.seek(SeekFrom::Start(0)).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot seek primary audit log for authenticated shipping recovery: {error}"
+            ))
+        })?;
+        let result = (|| {
+            let mut reader = JsonlReader::new(BufReader::new(&mut *file));
+            let mut verifier = ChainVerifier::new(keys);
+            let mut tail = None;
+            let mut anchored_hash = None;
+            let mut index = 0_usize;
+            loop {
+                let record = match reader.next_record() {
+                    Ok(Some(record)) => record,
+                    Ok(None) => break,
+                    Err(error) => {
+                        return Err(AuditError::ResumeRefused(format!(
+                            "cannot authenticate primary audit log {} before shipping recovery: {error}",
+                            audit_path.display()
+                        )));
+                    }
+                };
+                if let Some(VerifyOutcome::Broken { seq, reason, .. }) =
+                    verifier.observe(index, &record)
+                {
+                    return Err(map_resume_break(audit_path, seq, &reason));
+                }
+                if anchor
+                    .as_ref()
+                    .is_some_and(|anchor| anchor.seq == record.seq)
+                {
+                    anchored_hash = Some(record.entry_hash.clone());
+                }
+                tail = Some(ResumeTail {
+                    seq: record.seq,
+                    entry_hash: record.entry_hash.clone(),
+                    key_id: record.key_id.clone(),
+                });
+                index = index.saturating_add(1);
+            }
+
+            if let Some(anchor) = anchor.as_ref() {
+                let chain_seq = tail.as_ref().map_or(0, |tail| tail.seq);
+                if anchor.seq > chain_seq {
+                    return Err(AuditError::ResumeRefused(format!(
+                        "head anchor attests durable seq {} but the audit log {} ends at seq {} - trailing records were removed",
+                        anchor.seq,
+                        audit_path.display(),
+                        chain_seq
+                    )));
+                }
+                if anchored_hash.as_deref() != Some(anchor.entry_hash.as_str()) {
+                    return Err(AuditError::ResumeRefused(format!(
+                        "record at the anchored seq {} in {} does not match the authenticated head anchor",
+                        anchor.seq,
+                        audit_path.display()
+                    )));
+                }
+            }
+
+            Ok(AuthenticatedAuditTail {
+                tail,
+                keyring_proof: authenticated_tail_keyring_proof(keys),
+            })
+        })();
+        file.seek(SeekFrom::End(0)).map_err(|error| {
+            AuditError::Io(format!(
+                "cannot restore primary audit log append position after authentication: {error}"
+            ))
+        })?;
+        result
     }
 
     fn write_record(
@@ -621,6 +1414,7 @@ fn structural_break(records: &[AuditRecord]) -> Option<String> {
 
 /// The resume seed captured from the last durable record of an existing audit
 /// log: enough to continue the ONE hash chain without retaining every record.
+#[derive(Clone, Debug)]
 struct ResumeTail {
     seq: u64,
     entry_hash: String,
@@ -934,6 +1728,31 @@ impl Auditor {
         Ok(self)
     }
 
+    /// Resume from a token produced by
+    /// [`FileAuditSink::authenticate_existing_chain`]. This is the startup path
+    /// used when shipping is configured: the exact primary ledger and anchor
+    /// are authenticated before any recovery worker is armed, and the auditor
+    /// then consumes that same proof without a path-based re-read.
+    pub fn resume_from_authenticated(
+        self,
+        authenticated: &AuthenticatedAuditTail,
+    ) -> Result<Self, AuditError> {
+        if !authenticated.matches_keyring(self.keyring.verification_keys()) {
+            return Err(AuditError::ResumeRefused(
+                "authenticated primary-tail proof was produced under a different audit keyring"
+                    .to_owned(),
+            ));
+        }
+        if let Some(tail) = authenticated.tail.as_ref() {
+            let mut state = self.state.lock();
+            state.seq = tail.seq;
+            state.last_hash.clone_from(&tail.entry_hash);
+            state.anchor_transition_pending =
+                tail.key_id.as_deref() != Some(self.keyring.active().key_id());
+        }
+        Ok(self)
+    }
+
     /// Fail-closed MAC/keyring cross-check of a loaded head anchor at resume time,
     /// mirroring [`crate::anchor::check_anchor`]'s posture (the `oraclemcp audit
     /// verify` reference): an anchor under an unknown `key_id`, or whose keyed
@@ -951,24 +1770,7 @@ impl Auditor {
     /// genuine cross-run key rotation is reconciled by an operator via `audit
     /// verify`, never by silently resuming past an unverifiable anchor.
     fn verify_anchor_authenticity(&self, anchor: &ChainAnchor) -> Result<(), AuditError> {
-        let Some(key) = self.keyring.key(&anchor.key_id) else {
-            return Err(AuditError::ResumeRefused(format!(
-                "head anchor names audit key_id {:?}, which is absent from the configured \
-                 active+historical keyring; add the authentic historical verification key and \
-                 run `oraclemcp audit verify` before restarting",
-                anchor.key_id
-            )));
-        };
-        if !anchor.mac_is_valid(key) {
-            return Err(AuditError::ResumeRefused(
-                "head anchor MAC does not verify under its configured audit key — the sidecar \
-                 was rewritten, forged, or the key bytes changed behind an existing key_id; \
-                 inspect with `oraclemcp audit verify` and restore the authentic key/tail before \
-                 restarting"
-                    .to_owned(),
-            ));
-        }
-        Ok(())
+        verify_anchor_with_keys(anchor, self.keyring.verification_keys())
     }
 
     /// Append a chained record. When `durable` is true the record is fsynced
@@ -2731,6 +3533,96 @@ mod tests {
                 "broad lock mode hardened to 0600"
             );
         }
+    }
+
+    #[test]
+    fn windows_private_dacl_policy_is_protected_and_owner_only() {
+        let sid = "S-1-5-21-111-222-333-444";
+        assert_eq!(
+            windows_private_dacl_sddl(sid, false),
+            "D:P(A;;FA;;;S-1-5-21-111-222-333-444)"
+        );
+        assert_eq!(
+            windows_private_dacl_sddl(sid, true),
+            "D:P(A;OICI;FA;;;S-1-5-21-111-222-333-444)"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn broad_windows_file_and_directory_dacls_are_tightened_and_read_back() {
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+        use windows_permissions::{LocalBox, SecurityDescriptor};
+
+        fn install_broad_dacl(path: &Path, directory: bool) {
+            let current_sid = windows_permissions::utilities::current_process_sid()
+                .expect("resolve current process SID");
+            let inheritance = if directory { "OICI" } else { "" };
+            let descriptor: LocalBox<SecurityDescriptor> = format!(
+                "D:(A;{inheritance};FA;;;WD)(A;{inheritance};FA;;;{})",
+                current_sid
+            )
+            .parse()
+            .expect("parse broad test DACL");
+            windows_permissions::wrappers::SetNamedSecurityInfo(
+                path.as_os_str(),
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl | SecurityInformation::UnprotectedDacl,
+                None,
+                None,
+                descriptor.dacl(),
+                None,
+            )
+            .expect("install broad test DACL");
+            let broad = windows_permissions::wrappers::GetNamedSecurityInfo(
+                path.as_os_str(),
+                SeObjectType::SE_FILE_OBJECT,
+                SecurityInformation::Dacl,
+            )
+            .expect("read broad test DACL");
+            assert!(
+                broad.dacl().expect("broad DACL exists").len() >= 2,
+                "fixture must expose more than the private owner-only ACE"
+            );
+        }
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let file_path = root.path().join("audit.jsonl");
+        std::fs::write(&file_path, b"").expect("seed audit file");
+        install_broad_dacl(&file_path, false);
+        let file = open_private_append_file(&file_path).expect("harden broad file DACL");
+        let current_sid = windows_permissions::utilities::current_process_sid()
+            .expect("resolve current process SID");
+        let file_acl_handle = windows_security_handle(&file_path, false).expect("file ACL handle");
+        verify_windows_private_acl(&file_acl_handle, &file_path, false, &current_sid)
+            .expect("file DACL must be exact after hardening");
+        drop(file);
+
+        let directory_path = root.path().join("spool");
+        std::fs::create_dir(&directory_path).expect("create spool directory");
+        install_broad_dacl(&directory_path, true);
+        let refused_child = directory_path.join("refused-new.jsonl");
+        let error = open_private_append_file(&refused_child)
+            .expect_err("a broad parent DACL must fail before child creation");
+        assert!(error.to_string().contains("owner-only parent DACL"));
+        assert!(
+            !refused_child.exists(),
+            "fail-closed Windows creation must not leave a child behind"
+        );
+        harden_windows_private_directory(&directory_path).expect("harden broad directory DACL");
+        let directory_acl_handle =
+            windows_security_handle(&directory_path, true).expect("directory ACL handle");
+        verify_windows_private_acl(&directory_acl_handle, &directory_path, true, &current_sid)
+            .expect("directory DACL must be exact after hardening");
+
+        let created_child = directory_path.join("created-private.jsonl");
+        let child = open_private_append_file(&created_child)
+            .expect("create beneath an authenticated private parent");
+        let child_acl_handle =
+            windows_security_handle(&created_child, false).expect("child ACL handle");
+        verify_windows_private_acl(&child_acl_handle, &created_child, false, &current_sid)
+            .expect("new child DACL must be exact after creation");
+        drop(child);
     }
 
     // --- Bounded streaming resume (bead oraclemcp-qa100 .29) ---

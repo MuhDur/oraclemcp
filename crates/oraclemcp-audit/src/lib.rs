@@ -50,20 +50,23 @@ pub use record::{
     normalized_sql_sha256, sha256_hex,
 };
 pub use rekor::{
-    AsyncRekorAnchor, AuditChainHead, DEFAULT_REKOR_QUEUE_CAPACITY, MAX_REKOR_CHECKPOINT_BYTES,
-    MAX_REKOR_ENTRY_BODY_BYTES, MAX_REKOR_PROOF_HASHES, RekorAnchorReceipt, RekorAnchorStatus,
-    RekorCheckpointVerifier, RekorInclusionProof, RekorProofError, RekorSubmitError,
-    RekorSubmitter,
+    AsyncRekorAnchor, AuditChainHead, DEFAULT_REKOR_QUEUE_CAPACITY, DEFAULT_REKOR_SHUTDOWN_TIMEOUT,
+    MAX_REKOR_CHECKPOINT_BYTES, MAX_REKOR_ENTRY_BODY_BYTES, MAX_REKOR_PROOF_HASHES,
+    RekorAnchorReceipt, RekorAnchorStatus, RekorCheckpointVerifier, RekorInclusionProof,
+    RekorProofError, RekorShutdownOutcome, RekorSubmitError, RekorSubmitter,
 };
 pub use shipping::{
     ShippingAuditSink, ShippingError, ShippingForwarder, WormFileForwarder, cef_line, syslog_line,
 };
 pub use shipping_spool::{
-    DEFAULT_SPOOL_MAX_RECORDS, DEFAULT_SPOOL_RETRY_INITIAL, DEFAULT_SPOOL_RETRY_MAX,
-    DurableShippingForwarder, DurableShippingStatus, DurableShippingStatusHandle,
+    DEFAULT_SPOOL_DESTINATION_TIMEOUT, DEFAULT_SPOOL_MAX_RECORDS, DEFAULT_SPOOL_RETRY_INITIAL,
+    DEFAULT_SPOOL_RETRY_MAX, DEFAULT_SPOOL_SHUTDOWN_TIMEOUT, DurableShippingForwarder,
+    DurableShippingShutdownOutcome, DurableShippingStatus, DurableShippingStatusHandle,
     DurableSpoolConfig,
 };
-pub use sink::{AuditError, AuditSink, Auditor, FileAuditSink, MemoryAuditSink};
+pub use sink::{
+    AuditError, AuditSink, Auditor, AuthenticatedAuditTail, FileAuditSink, MemoryAuditSink,
+};
 pub use unified::{UnifiedAuditError, UnifiedAuditPolicy, is_simple_identifier};
 pub use verify::{
     BrokenReason, JsonlError, MAX_AUDIT_LINE_LEN, ParseError, VerifyOutcome, parse_jsonl,

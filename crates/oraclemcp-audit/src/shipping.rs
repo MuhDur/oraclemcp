@@ -49,15 +49,19 @@
 //! Shipping is **off by default**: nothing constructs a [`ShippingAuditSink`]
 //! unless a destination is configured.
 
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::{BufReader, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
 use crate::record::{AuditRecord, BoundAuditVerdictCertificate};
-use crate::sink::{AuditError, AuditSink, FileAuditSink, open_file_identity};
+use crate::sink::{
+    AuditError, AuditSink, FileAuditSink, open_file_identity, open_private_append_file,
+    path_identity,
+};
+use crate::verify::JsonlReader;
 
 /// A shipping (forwarding) failure. Distinct from [`AuditError`] because a
 /// shipping failure is **non-fatal** to the local durable chain: the decorator
@@ -72,6 +76,14 @@ pub enum ShippingError {
     /// object. Arming it would append every signed record twice and corrupt the
     /// local chain.
     AliasedPrimaryAuditLog,
+    /// A durable spool record failed cryptographic or chain validation before
+    /// any destination call was allowed.
+    SpoolIntegrity {
+        /// Sequence encoded by the record or filename when available.
+        seq: Option<u64>,
+        /// Stable, non-secret refusal reason.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for ShippingError {
@@ -81,6 +93,13 @@ impl std::fmt::Display for ShippingError {
             ShippingError::AliasedPrimaryAuditLog => {
                 f.write_str("WORM mirror aliases the primary audit log")
             }
+            ShippingError::SpoolIntegrity { seq, reason } => match seq {
+                Some(seq) => write!(
+                    f,
+                    "audit shipping spool integrity failure at sequence {seq}: {reason}"
+                ),
+                None => write!(f, "audit shipping spool integrity failure: {reason}"),
+            },
         }
     }
 }
@@ -111,6 +130,23 @@ pub trait ShippingForwarder: Send + Sync {
     fn flush(&self) -> Result<(), ShippingError> {
         Ok(())
     }
+
+    /// Validate the authenticated records recovered from a durable spool before
+    /// its delivery worker starts. Most destinations have no readable startup
+    /// state and accept the spool's own signature/chain proof. A WORM file uses
+    /// this hook to prove that a lagging mirror plus the pending suffix reaches
+    /// the authoritative primary tail without a gap or mismatch.
+    fn validate_recovered_spool(&self, _records: &[AuditRecord]) -> Result<(), ShippingError> {
+        Ok(())
+    }
+
+    /// Return a destination tail that was independently verified while opening
+    /// the destination. Durable recovery may use this only when no signed local
+    /// delivery checkpoint exists. Network destinations normally cannot prove
+    /// remote state synchronously and therefore keep the default `None`.
+    fn trusted_recovery_tail(&self) -> Option<(u64, String)> {
+        None
+    }
 }
 
 /// An append-only WORM file mirror: each signed record is written as one JSON
@@ -131,6 +167,8 @@ pub struct WormFileForwarder {
 struct WormFileState {
     file: File,
     last: Option<(u64, String)>,
+    startup_primary_tail: Option<(u64, String)>,
+    recovery_validated: bool,
 }
 
 impl WormFileForwarder {
@@ -148,54 +186,131 @@ impl WormFileForwarder {
         path: impl AsRef<Path>,
         primary: &FileAuditSink,
     ) -> Result<Self, ShippingError> {
+        Self::open_distinct_inner(path.as_ref(), primary, false)
+    }
+
+    /// Open a WORM mirror that may be behind the primary only long enough for a
+    /// [`DurableShippingForwarder`](crate::DurableShippingForwarder) to validate
+    /// its authenticated recovered spool. The durable wrapper calls
+    /// [`ShippingForwarder::validate_recovered_spool`] before starting its worker;
+    /// a missing, gapped, or mismatched suffix therefore still fails startup.
+    ///
+    /// Callers that are not immediately wrapping the result in a durable spool
+    /// must use [`Self::open_distinct`], which requires exact tails at open time.
+    pub fn open_distinct_for_durable_recovery(
+        path: impl AsRef<Path>,
+        primary: &FileAuditSink,
+    ) -> Result<Self, ShippingError> {
+        Self::open_distinct_inner(path.as_ref(), primary, true)
+    }
+
+    fn open_distinct_inner(
+        path: &Path,
+        primary: &FileAuditSink,
+        allow_pending_suffix: bool,
+    ) -> Result<Self, ShippingError> {
         let primary_identity = primary
             .open_identity()
             .map_err(|error| ShippingError::Transport(error.to_string()))?;
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .append(true)
-            .open(path)
-            .map_err(|e| ShippingError::Transport(e.to_string()))?;
+        match path_identity(path) {
+            Ok(identity) if identity == primary_identity => {
+                return Err(ShippingError::AliasedPrimaryAuditLog);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ShippingError::Transport(format!(
+                    "cannot inspect WORM destination {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+        let file = open_private_append_file(path).map_err(|error| {
+            ShippingError::Transport(format!(
+                "cannot securely open WORM destination {}: {error}",
+                path.display()
+            ))
+        })?;
         let mirror_identity = open_file_identity(&file).map_err(|error| {
             ShippingError::Transport(format!("cannot establish WORM file identity: {error}"))
         })?;
         if mirror_identity == primary_identity {
             return Err(ShippingError::AliasedPrimaryAuditLog);
         }
-        let mut body = String::new();
-        (&file)
-            .read_to_string(&mut body)
-            .map_err(|e| ShippingError::Transport(e.to_string()))?;
-        let records = crate::parse_jsonl(&body).map_err(|error| {
-            ShippingError::Transport(format!("existing WORM mirror is malformed: {error}"))
+        let mirror_tail = stream_worm_tail(&file)?;
+        let primary_tail = primary.structural_tail().map_err(|error| {
+            ShippingError::Transport(format!(
+                "cannot verify primary audit tail before arming WORM mirror: {error}"
+            ))
         })?;
-        let mut previous_hash = crate::GENESIS_HASH;
-        for (index, record) in records.iter().enumerate() {
-            let expected_seq = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(1);
-            if record.seq != expected_seq
-                || record.prev_hash != previous_hash
-                || !record.hash_is_valid()
-            {
-                return Err(ShippingError::Transport(format!(
-                    "existing WORM mirror has a broken chain at sequence {}",
-                    record.seq
-                )));
-            }
-            previous_hash = &record.entry_hash;
+        let exact_tail = mirror_tail == primary_tail;
+        let mirror_can_be_prefix = match (mirror_tail.as_ref(), primary_tail.as_ref()) {
+            (None, Some(_)) => true,
+            (Some((mirror_seq, _)), Some((primary_seq, _))) => mirror_seq < primary_seq,
+            _ => false,
+        };
+        if !exact_tail && !(allow_pending_suffix && mirror_can_be_prefix) {
+            return Err(ShippingError::Transport(format!(
+                "WORM mirror {} is not caught up with the primary audit ledger (primary tail: {}; mirror tail: {}); backfill or repair the mirror before starting the service",
+                path.display(),
+                format_tail(primary_tail.as_ref()),
+                format_tail(mirror_tail.as_ref())
+            )));
         }
-        let last = records
-            .last()
-            .map(|record| (record.seq, record.entry_hash.clone()));
         Ok(WormFileForwarder {
-            state: Mutex::new(WormFileState { file, last }),
+            state: Mutex::new(WormFileState {
+                file,
+                last: mirror_tail,
+                startup_primary_tail: primary_tail,
+                recovery_validated: exact_tail,
+            }),
         })
     }
+}
+
+fn stream_worm_tail(file: &File) -> Result<Option<(u64, String)>, ShippingError> {
+    let mut handle = file;
+    handle
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| ShippingError::Transport(error.to_string()))?;
+    let mut reader = JsonlReader::new(BufReader::new(handle));
+    let mut expected_seq = 1_u64;
+    let mut previous_hash = crate::GENESIS_HASH.to_owned();
+    let mut tail = None;
+    while let Some(record) = reader.next_record().map_err(|error| {
+        ShippingError::Transport(format!("existing WORM mirror is malformed: {error}"))
+    })? {
+        if record.seq != expected_seq
+            || record.prev_hash != previous_hash
+            || !record.hash_is_valid()
+        {
+            return Err(ShippingError::Transport(format!(
+                "existing WORM mirror has a broken chain at sequence {}",
+                record.seq
+            )));
+        }
+        expected_seq = expected_seq.saturating_add(1);
+        previous_hash.clone_from(&record.entry_hash);
+        tail = Some((record.seq, record.entry_hash));
+    }
+    Ok(tail)
+}
+
+fn format_tail(tail: Option<&(u64, String)>) -> String {
+    tail.map_or_else(
+        || "empty".to_owned(),
+        |(seq, hash)| format!("sequence {seq} ({hash})"),
+    )
 }
 
 impl ShippingForwarder for WormFileForwarder {
     fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError> {
         let mut state = self.state.lock();
+        if !state.recovery_validated {
+            return Err(ShippingError::Transport(
+                "WORM mirror recovery was not validated against its durable spool".to_owned(),
+            ));
+        }
         if let Some((last_seq, last_hash)) = state.last.as_ref() {
             if record.seq == *last_seq && record.entry_hash == *last_hash {
                 // At-least-once spool replay after a crash between destination
@@ -246,6 +361,48 @@ impl ShippingForwarder for WormFileForwarder {
             .file
             .sync_all()
             .map_err(|e| ShippingError::Transport(e.to_string()))
+    }
+
+    fn validate_recovered_spool(&self, records: &[AuditRecord]) -> Result<(), ShippingError> {
+        let mut state = self.state.lock();
+        let mut recovered_tail = state.last.clone();
+
+        for record in records {
+            if let Some((last_seq, last_hash)) = recovered_tail.as_ref() {
+                if record.seq == *last_seq && record.entry_hash == *last_hash {
+                    // Crash after destination fsync but before spool acknowledgement:
+                    // the first pending record may be the mirror's exact tail.
+                    continue;
+                }
+                if record.seq != last_seq.saturating_add(1) || record.prev_hash != *last_hash {
+                    return Err(ShippingError::Transport(format!(
+                        "durable WORM recovery has a gap or mismatch after mirror sequence {last_seq}; expected sequence {}, got {}",
+                        last_seq.saturating_add(1),
+                        record.seq
+                    )));
+                }
+            } else if record.seq != 1 || record.prev_hash != crate::GENESIS_HASH {
+                return Err(ShippingError::Transport(format!(
+                    "durable WORM recovery from an empty mirror expected sequence 1 chained from genesis, got {}",
+                    record.seq
+                )));
+            }
+            recovered_tail = Some((record.seq, record.entry_hash.clone()));
+        }
+
+        if recovered_tail != state.startup_primary_tail {
+            return Err(ShippingError::Transport(format!(
+                "durable WORM spool does not catch the mirror up to the primary audit ledger (primary tail: {}; recovered tail: {}); restore the missing signed contiguous suffix before starting the service",
+                format_tail(state.startup_primary_tail.as_ref()),
+                format_tail(recovered_tail.as_ref())
+            )));
+        }
+        state.recovery_validated = true;
+        Ok(())
+    }
+
+    fn trusted_recovery_tail(&self) -> Option<(u64, String)> {
+        self.state.lock().last.clone()
     }
 }
 
@@ -1087,6 +1244,8 @@ mod tests {
         );
         {
             let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+            primary.append(&first).expect("append primary first");
+            primary.flush().expect("flush primary first");
             worm.forward(&first).expect("first delivery");
             worm.flush().expect("durable first delivery");
         }
@@ -1406,6 +1565,237 @@ mod tests {
             Ok(_) => panic!("symlink alias must be rejected"),
         };
         assert!(matches!(error, ShippingError::AliasedPrimaryAuditLog));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worm_open_rejects_arbitrary_symlink_and_hardlink_victims_without_mutation() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        for kind in ["symlink", "hardlink"] {
+            let victim = dir.path().join(format!("{kind}-victim"));
+            let mirror = dir.path().join(format!("{kind}-worm"));
+            let original = format!("do-not-modify-{kind}");
+            std::fs::write(&victim, &original).expect("seed victim");
+            if kind == "symlink" {
+                symlink(&victim, &mirror).expect("plant symlink");
+            } else {
+                std::fs::hard_link(&victim, &mirror).expect("plant hardlink");
+            }
+
+            let error = match WormFileForwarder::open_distinct(&mirror, &primary) {
+                Err(error) => error,
+                Ok(_) => panic!("{kind} victim must be rejected"),
+            };
+            assert!(
+                error.to_string().contains("securely open WORM destination"),
+                "unexpected {kind} refusal: {error}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&victim).expect("read victim"),
+                original,
+                "{kind} victim bytes must remain unchanged"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worm_open_rejects_fifo_without_opening_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let fifo = dir.path().join("worm.fifo");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo must create the fixture");
+
+        let error = match WormFileForwarder::open_distinct(&fifo, &primary) {
+            Err(error) => error,
+            Ok(_) => panic!("FIFO destination must fail closed"),
+        };
+        assert!(
+            error.to_string().contains("securely open WORM destination"),
+            "unexpected FIFO refusal: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worm_destination_is_hardened_to_owner_only_mode() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        std::fs::write(&worm_path, b"").expect("seed mirror");
+        std::fs::set_permissions(&worm_path, std::fs::Permissions::from_mode(0o644))
+            .expect("broaden fixture mode");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+
+        let _worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("secure open");
+        assert_eq!(
+            std::fs::metadata(&worm_path)
+                .expect("mirror metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
+    fn worm_startup_streams_large_history_and_reports_exact_failure_sequence() {
+        use std::io::BufWriter;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        let mut output = BufWriter::new(File::create(&worm_path).expect("create large mirror"));
+        let mut previous_hash = crate::GENESIS_HASH.to_owned();
+        for seq in 1..=2_048_u64 {
+            let mut record = AuditRecord::chained_signed(
+                &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+                seq,
+                &previous_hash,
+                format!("t{seq}"),
+                &key(),
+            );
+            previous_hash.clone_from(&record.entry_hash);
+            if seq == 2_048 {
+                record.entry_hash.push('0');
+            }
+            serde_json::to_writer(&mut output, &record).expect("write record");
+            output.write_all(b"\n").expect("write newline");
+        }
+        output.flush().expect("flush fixture");
+
+        let error = match WormFileForwarder::open_distinct(&worm_path, &primary) {
+            Err(error) => error,
+            Ok(_) => panic!("corrupt streamed tail must fail closed"),
+        };
+        assert!(
+            error.to_string().contains("sequence 2048"),
+            "streaming verifier must report the exact broken sequence: {error}"
+        );
+    }
+
+    #[test]
+    fn worm_startup_rejects_a_record_line_over_the_streaming_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        let mut oversized = vec![b'x'; crate::MAX_AUDIT_LINE_LEN + 1];
+        oversized.push(b'\n');
+        std::fs::write(&worm_path, oversized).expect("seed oversized line");
+
+        let error = match WormFileForwarder::open_distinct(&worm_path, &primary) {
+            Err(error) => error,
+            Ok(_) => panic!("oversized WORM line must fail closed"),
+        };
+        assert!(
+            error.to_string().contains("audit record line exceeds the"),
+            "unexpected oversized-line refusal: {error}"
+        );
+    }
+
+    #[test]
+    fn worm_startup_rejects_empty_or_lagging_mirror_before_service() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        let second = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "DESTRUCTIVE"),
+            2,
+            &first.entry_hash,
+            "t2".to_owned(),
+            &key(),
+        );
+        primary.append(&first).expect("append first primary");
+        primary.append(&second).expect("append second primary");
+        primary.flush().expect("flush primary");
+
+        let empty_path = dir.path().join("empty-worm.jsonl");
+        let empty_error = match WormFileForwarder::open_distinct(&empty_path, &primary) {
+            Err(error) => error,
+            Ok(_) => panic!("empty mirror after primary history must fail startup"),
+        };
+        assert!(empty_error.to_string().contains("not caught up"));
+        assert!(empty_error.to_string().contains("mirror tail: empty"));
+
+        let lagging_path = dir.path().join("lagging-worm.jsonl");
+        std::fs::write(
+            &lagging_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&first).expect("serialize first")
+            ),
+        )
+        .expect("seed lagging mirror");
+        let lagging_error = match WormFileForwarder::open_distinct(&lagging_path, &primary) {
+            Err(error) => error,
+            Ok(_) => panic!("lagging mirror must fail startup"),
+        };
+        assert!(lagging_error.to_string().contains("not caught up"));
+        assert!(lagging_error.to_string().contains("sequence 1"));
+    }
+
+    #[test]
+    fn caught_up_worm_accepts_the_next_primary_record() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        let second = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=2", "DESTRUCTIVE"),
+            2,
+            &first.entry_hash,
+            "t2".to_owned(),
+            &key(),
+        );
+        primary.append(&first).expect("append first primary");
+        primary.flush().expect("flush first primary");
+        std::fs::write(
+            &worm_path,
+            format!(
+                "{}\n",
+                serde_json::to_string(&first).expect("serialize first")
+            ),
+        )
+        .expect("seed caught-up mirror");
+
+        let worm =
+            WormFileForwarder::open_distinct(&worm_path, &primary).expect("caught-up mirror opens");
+        primary.append(&second).expect("append second primary");
+        primary.flush().expect("flush second primary");
+        worm.forward(&second).expect("deliver next record");
+        worm.flush().expect("flush next record");
+
+        assert_eq!(
+            std::fs::read(&worm_path).expect("read mirror"),
+            std::fs::read(&primary_path).expect("read primary")
+        );
     }
 
     #[test]
