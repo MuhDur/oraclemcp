@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:32:57Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk.5",
+  "scope": {
+    "summary": "Makes Explorer global object and source matches expose exact selected state, visible feedback, and details without retaining prior object output after a selection changes.",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/src/app/explorer-a11y.test.tsx",
+      "web/e2e/ux-explorer-selection.spec.ts"
+    ],
+    "out_of_scope": [
+      "Live Oracle search behavior",
+      "Unrelated visual semantic token repairs"
+    ]
+  },
+  "source": {
+    "sha": "30b1de36be0c29e85aa5fbfbdc54f9e88392fac4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard type, production build, and regression suite",
+        "kind": "cli",
+        "trace": "`cd web && npm run check` exited 0 at source 30b1de36: TypeScript, Vite production build, bundle check, and 234 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "browser Explorer selection behavior",
+        "kind": "cli",
+        "trace": "`cd web && npm exec playwright test e2e/ux-explorer-selection.spec.ts --config playwright.config.ts` exited 0 with one Chromium test. It selects an object match, renders its DDL, then selects one of two source-line matches and proves the exact aria-pressed state, in-context status, and cleared prior DDL."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is local browser coverage with stubbed operator responses and does not claim a live Oracle search run.",
+    "No fuzzing or mutation campaign was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
