@@ -1,7 +1,9 @@
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 
 import { toEditionTimelineViewModel } from "./presentation-model";
 import { parseEditionProposals, type EditionProposalsData } from "./operator-client";
+import { EditionTimelineRenderer } from "./skin";
 
 // Arc D edition timeline. Oracle editions are linear (each child has exactly one
 // parent base_edition). The console orders the proposal chain into a straight
@@ -78,10 +80,58 @@ describe("edition timeline view-model", () => {
     expect(model.headline).toContain("Non-linear");
   });
 
+  it("detects a two-node cycle and terminates with bounded stages", () => {
+    const model = toEditionTimelineViewModel([
+      { proposalId: "a", baseEdition: "A", childEdition: "B", status: "requested", objectCount: 1 },
+      { proposalId: "b", baseEdition: "B", childEdition: "A", status: "reviewing", objectCount: 1 }
+    ]);
+
+    expect(model.linear).toBe(false);
+    expect(model.cycleEditions).toEqual(["A", "B"]);
+    expect(model.stages.map((stage) => stage.edition)).toEqual(["A", "B"]);
+    expect(model.warnings.join(" ")).toContain("Cycle detected");
+    const markup = renderToStaticMarkup(EditionTimelineRenderer({ model }));
+    expect(markup).toContain("non-linear");
+    expect(markup).not.toContain("branched");
+    expect(markup).not.toContain("Branch points:");
+  });
+
+  it("detects a self-cycle without looping", () => {
+    const model = toEditionTimelineViewModel([
+      { proposalId: "self", baseEdition: "A", childEdition: "A", status: "requested", objectCount: 1 }
+    ]);
+
+    expect(model.linear).toBe(false);
+    expect(model.cycleEditions).toEqual(["A"]);
+    expect(model.stages).toHaveLength(1);
+  });
+
+  it("detects multiple parents and disconnected chains", () => {
+    const multipleParents = toEditionTimelineViewModel([
+      { proposalId: "a", baseEdition: "A", childEdition: "C", status: "requested", objectCount: 1 },
+      { proposalId: "b", baseEdition: "B", childEdition: "C", status: "requested", objectCount: 1 }
+    ]);
+    const disconnected = toEditionTimelineViewModel([
+      { proposalId: "a", baseEdition: "A", childEdition: "B", status: "requested", objectCount: 1 },
+      { proposalId: "b", baseEdition: "C", childEdition: "D", status: "requested", objectCount: 1 }
+    ]);
+
+    expect(multipleParents.linear).toBe(false);
+    expect(multipleParents.multipleParentEditions).toEqual(["C"]);
+    expect(disconnected.linear).toBe(false);
+    expect(disconnected.disconnectedComponents).toBe(2);
+    expect(disconnected.stages.map((stage) => stage.edition)).toEqual(["A", "B", "C", "D"]);
+    expect(disconnected.warnings.join(" ")).toContain("2 component(s)");
+    const markup = renderToStaticMarkup(EditionTimelineRenderer({ model: disconnected }));
+    expect(markup).toContain("non-linear");
+    expect(markup).not.toContain("Branch points:");
+  });
+
   it("reports an empty board without inventing a chain", () => {
     const model = toEditionTimelineViewModel([]);
     expect(model.stages).toHaveLength(0);
     expect(model.linear).toBe(true);
+    expect(model.warnings).toEqual([]);
     expect(model.headline).toBe("No edition proposals");
     expect(model.tone).toBe("off");
   });

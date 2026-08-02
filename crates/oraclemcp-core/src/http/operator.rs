@@ -41,6 +41,7 @@ use crate::change_proposal::{
 };
 use oraclemcp_guard::{Classifier, OperatingLevel};
 use serde::Deserialize;
+use std::io::Read as _;
 
 pub(super) use super::operator_action_policy::dashboard_workbench_release_gate;
 #[cfg(test)]
@@ -80,6 +81,12 @@ pub struct OperatorEventStore {
     pub(super) streams: Mutex<HashMap<OperatorEventStreamKey, OperatorEventStream>>,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct OperatorEventTarget {
+    pub(super) lane_id: String,
+    pub(super) generation: Option<u64>,
+}
+
 impl OperatorEventStore {
     #[must_use]
     pub fn new() -> Self {
@@ -89,16 +96,19 @@ impl OperatorEventStore {
     pub(super) fn append_snapshot_and_resume(
         &self,
         subject_key: &str,
-        lane_id: &str,
+        target: &OperatorEventTarget,
         cursor: Option<&str>,
         after_seq: Option<u64>,
         gap_on_expired_cursor: bool,
         data: Value,
     ) -> Result<Vec<HttpBufferedEvent>, OperatorEventReplayError> {
+        let lane_id = target.lane_id.as_str();
+        let lane_generation = target.generation;
         let subject_id_hash = operator_subject_id_hash(subject_key);
         let key = OperatorEventStreamKey {
             subject_id_hash,
             lane_id: lane_id.to_owned(),
+            lane_generation,
         };
         let mut streams = self.streams.lock();
         // Bound the number of live streams: when a NEW key would exceed the cap,
@@ -124,7 +134,14 @@ impl OperatorEventStore {
             .and_then(|event| operator_event_sequence(&event.id))
             .unwrap_or(0);
         let next_seq = previous_seq.saturating_add(1);
-        let event = operator_event(next_seq, lane_id, subject_key, "operator.snapshot", data);
+        let event = generation_bound_operator_event(
+            next_seq,
+            lane_id,
+            lane_generation,
+            subject_key,
+            "operator.snapshot",
+            data,
+        );
         debug_assert!(
             validate_operator_event(&event).is_ok(),
             "operator SSE event must match the Rust contract"
@@ -149,6 +166,7 @@ impl OperatorEventStore {
             cursor,
             gap_on_expired_cursor,
             lane_id,
+            lane_generation,
             subject_key,
         )
     }
@@ -158,6 +176,7 @@ impl OperatorEventStore {
 pub(super) struct OperatorEventStreamKey {
     subject_id_hash: String,
     lane_id: String,
+    lane_generation: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -1257,6 +1276,10 @@ fn handle_operator_lane_cancel_route(
             }),
         );
     };
+    let expected_generation = match required_operator_lane_generation(&payload) {
+        Ok(generation) => generation,
+        Err((status, data)) => return operator_json_response(status, &request.path, data),
+    };
     let Some(lifecycle) = config.session_lifecycle.as_ref() else {
         return operator_json_response(
             409,
@@ -1267,42 +1290,59 @@ fn handle_operator_lane_cancel_route(
             }),
         );
     };
-    let Some(binding) = lifecycle.lane_binding(lane_id) else {
-        return operator_json_response(
-            404,
-            &request.path,
-            json!({
-                "error": "operator_lane_not_found",
-                "message": "requested lane_id is not active",
-                "lane_id": lane_id,
-            }),
-        );
-    };
-    // Invalidate the whole MCP session, not just the lane. Remove the HTTP
-    // session first (lane.rs requires the caller to drop the HTTP session before
-    // the lane is closed), then its streaming replay buffer, then close the
-    // dispatch session. Without this an operator "kill" left the MCP session id
-    // and its buffered results usable — mirrors handle_mcp_delete's teardown.
-    if let Some(store) = &config.session_store {
-        store.remove(&binding.mcp_session_id);
-    }
-    if let Some(store) = &config.result_store {
-        store.remove_session(&binding.mcp_session_id);
-    }
-    let terminated = lifecycle.close_session_with_reason(
-        &binding.mcp_session_id,
-        &binding.principal_key,
+    let binding = match lifecycle.close_lane_with_reason(
+        lane_id,
+        expected_generation,
         DispatchCloseReason::OperatorCancel,
-    );
+        config.session_store.as_deref(),
+        config.result_store.as_deref(),
+    ) {
+        HttpLaneCloseResult::Closed(binding) => binding,
+        HttpLaneCloseResult::NotFound => {
+            return operator_json_response(
+                404,
+                &request.path,
+                json!({
+                    "error": "operator_lane_not_found",
+                    "message": "requested lane_id is not active",
+                    "lane_id": lane_id,
+                }),
+            );
+        }
+        HttpLaneCloseResult::GenerationMismatch { active_generation } => {
+            return operator_json_response(
+                409,
+                &request.path,
+                json!({
+                    "error": "operator_lane_generation_mismatch",
+                    "message": "requested lane generation is no longer active",
+                    "lane_id": lane_id,
+                    "expected_generation": expected_generation,
+                    "active_generation": active_generation,
+                }),
+            );
+        }
+        HttpLaneCloseResult::Unsupported => {
+            return operator_json_response(
+                409,
+                &request.path,
+                json!({
+                    "error": "operator_lane_atomic_cancel_unavailable",
+                    "message": "lane registry cannot atomically cancel an exact generation",
+                    "lane_id": lane_id,
+                }),
+            );
+        }
+    };
     operator_json_response(
         200,
         &request.path,
         json!({
-            "status": if terminated { "terminated" } else { "already_closed" },
+            "status": "terminated",
             "lane_id": binding.lane_id,
             "lane_generation": binding.generation,
             "reason": DispatchCloseReason::OperatorCancel.as_str(),
-            "terminated": terminated,
+            "terminated": true,
         }),
     )
 }
@@ -1769,6 +1809,8 @@ struct EditionProposalFlipRequest {
     #[serde(default)]
     lane_id: Option<String>,
     #[serde(default)]
+    lane_generation: Option<u64>,
+    #[serde(default)]
     confirm: Option<String>,
     #[serde(default)]
     idempotency_key: Option<String>,
@@ -1800,7 +1842,7 @@ fn handle_operator_edition_default_flip(
                 json!({
                     "source": "edition_proposals",
                     "error": "invalid_edition_default_flip",
-                    "message": "edition merge or rollback accepts only proposal_id, lane_id, confirmation, and idempotency_key",
+                    "message": "edition merge or rollback accepts only proposal_id, lane_id, lane_generation, confirmation, and idempotency_key",
                 }),
             );
         }
@@ -1892,6 +1934,7 @@ fn handle_operator_edition_default_flip(
         OperatorActionForward {
             idempotency_key: format!("{key_prefix}:{}:{}", flip.action(), proposal.proposal_id),
             lane_id: apply.lane_id.as_deref(),
+            lane_generation: apply.lane_generation,
             tool: "oracle_execute",
             arguments: json!({
                 "sql": sql.as_str(),
@@ -1938,6 +1981,8 @@ fn handle_operator_edition_default_flip(
             "action": flip.action(),
             "proposal": proposal.view(),
             "target_edition": target_edition,
+            "lane_id": apply.lane_id.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+            "lane_generation": apply.lane_generation,
             "sql_sha256": prefixed_sha256_hex(sql.as_bytes()),
             "reclassified": {
                 "required_level": decision.required_level,
@@ -2036,6 +2081,7 @@ fn apply_change_proposal(
         "status": status,
         "proposal": proposal.view(),
         "lane_id": apply.lane_id.as_deref().map(str::trim).filter(|value| !value.is_empty()),
+        "lane_generation": apply.lane_generation,
         "atomicity": {
             "unit": "per_statement_or_object",
             "mode": "sequential_stop_on_failure",
@@ -2086,6 +2132,7 @@ fn apply_change_proposal_statement(
         OperatorActionForward {
             idempotency_key: format!("{key_prefix}:{}:{}", proposal.id, statement.id),
             lane_id: apply.lane_id.as_deref(),
+            lane_generation: apply.lane_generation,
             tool,
             arguments,
         },
@@ -2095,6 +2142,7 @@ fn apply_change_proposal_statement(
 struct OperatorActionForward<'a> {
     idempotency_key: String,
     lane_id: Option<&'a str>,
+    lane_generation: Option<u64>,
     tool: &'a str,
     arguments: Value,
 }
@@ -2106,6 +2154,7 @@ fn forward_operator_action(
     let body = json!({
         "idempotency_key": action.idempotency_key,
         "lane_id": action.lane_id.map(str::trim).filter(|value| !value.is_empty()),
+        "lane_generation": action.lane_generation,
         "tool": action.tool,
         "arguments": action.arguments,
     });
@@ -2248,6 +2297,7 @@ fn fetch_current_source_document(
                 context.operator_audit_seq, proposal.id, statement.id
             ),
             lane_id: apply.lane_id.as_deref(),
+            lane_generation: apply.lane_generation,
             tool,
             arguments,
         },
@@ -3205,6 +3255,9 @@ struct AuditTailRead {
     proof: Value,
 }
 
+const MAX_OPERATOR_AUDIT_TAIL_RECORDS: usize = 10_000;
+const MAX_OPERATOR_AUDIT_TAIL_SCAN_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug)]
 struct AuditTailProofBuilder {
     previous_hash: String,
@@ -3333,18 +3386,59 @@ fn operator_audit_tail_data(config: &HttpTransportConfig, request: &HttpRequest)
 
 fn read_redacted_audit_tail(path: &Path, query: &AuditTailQuery) -> Result<AuditTailRead, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("audit tail unavailable: {e}"))?;
-    let reader = BufReader::new(file);
+    let mut reader = BufReader::new(file);
     let mut tail = VecDeque::with_capacity(query.limit);
     let mut proof = AuditTailProofBuilder::new();
     let mut scanned_records = 0usize;
     let mut selected_records = 0usize;
-    for (line_index, line) in reader.lines().enumerate() {
-        let line = line.map_err(|e| format!("audit tail read failed: {e}"))?;
-        if line.trim().is_empty() {
+    let mut physical_bytes = 0usize;
+    let mut line_index = 0usize;
+    let line_read_limit = u64::try_from(oraclemcp_audit::MAX_AUDIT_LINE_LEN)
+        .unwrap_or(u64::MAX)
+        .saturating_add(2);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let read = reader
+            .by_ref()
+            .take(line_read_limit)
+            .read_until(b'\n', &mut line)
+            .map_err(|e| format!("audit tail read failed: {e}"))?;
+        if read == 0 {
+            break;
+        }
+        physical_bytes = physical_bytes.checked_add(read).ok_or_else(|| {
+            "audit tail unavailable: physical scan byte accounting overflowed".to_owned()
+        })?;
+        if physical_bytes > MAX_OPERATOR_AUDIT_TAIL_SCAN_BYTES {
+            return Err(format!(
+                "audit tail unavailable: physical scan exceeds the {MAX_OPERATOR_AUDIT_TAIL_SCAN_BYTES}-byte maximum"
+            ));
+        }
+        let current_line_index = line_index;
+        line_index = line_index.saturating_add(1);
+        if line.last() == Some(&b'\n') {
+            line.pop();
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+        }
+        if line.len() > oraclemcp_audit::MAX_AUDIT_LINE_LEN {
+            return Err(format!(
+                "audit tail unavailable: record line exceeds the {}-byte maximum",
+                oraclemcp_audit::MAX_AUDIT_LINE_LEN
+            ));
+        }
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
+        if scanned_records >= MAX_OPERATOR_AUDIT_TAIL_RECORDS {
+            return Err(format!(
+                "audit tail unavailable: nonblank record count exceeds the {MAX_OPERATOR_AUDIT_TAIL_RECORDS}-record maximum"
+            ));
+        }
         let persisted: Value =
-            serde_json::from_str(&line).map_err(|e| format!("audit tail parse failed: {e}"))?;
+            serde_json::from_slice(&line).map_err(|e| format!("audit tail parse failed: {e}"))?;
         let record: AuditRecord = serde_json::from_value(persisted.clone())
             .map_err(|e| format!("audit tail parse failed: {e}"))?;
         // A certificate is evidence only when the persisted, response-side
@@ -3359,7 +3453,7 @@ fn read_redacted_audit_tail(path: &Path, query: &AuditTailQuery) -> Result<Audit
                     certificate.matches_record(&record)
                 },
             );
-        proof.observe(&record, line_index);
+        proof.observe(&record, current_line_index);
         scanned_records += 1;
         if !query.matches(&record) {
             continue;
@@ -3580,14 +3674,16 @@ fn operator_events_response(
     request: &HttpRequest,
     operator_subject: &AuditSubject,
 ) -> HttpResponse {
-    let lane_id = match operator_event_lane_id(request) {
-        Ok(lane_id) => lane_id,
+    let target = match operator_event_target(request) {
+        Ok(target) => target,
         Err(data) => return operator_json_response(400, &request.path, data),
     };
+    let lane_id = target.lane_id.as_str();
+    let stream_id = operator_event_stream_id(lane_id, target.generation);
     let cursor = request
         .query_param("cursor")
         .or_else(|| request.header("last-event-id"));
-    let cursor_seq = match parse_operator_event_cursor(cursor, &lane_id) {
+    let cursor_seq = match parse_operator_event_cursor(cursor, &stream_id) {
         Ok(cursor_seq) => cursor_seq,
         Err(data) => return operator_json_response(400, &request.path, data),
     };
@@ -3599,32 +3695,49 @@ fn operator_events_response(
     // aggregate stream is always valid. This bounds the event-stream key space to
     // the active lanes so a caller cannot mint unbounded distinct streams from
     // attacker-chosen lane ids.
-    if lane_id != OPERATOR_AGGREGATE_LANE
-        && !active_lanes["lanes"].as_array().is_some_and(|lanes| {
-            lanes
-                .iter()
-                .any(|lane| lane.get("lane_id").and_then(Value::as_str) == Some(lane_id.as_str()))
-        })
-    {
-        return operator_json_response(
-            404,
-            &request.path,
-            json!({
-                "error": "operator_lane_not_active",
-                "message": "requested lane_id is not an active lane",
-                "lane_id": lane_id,
-            }),
-        );
+    if lane_id != OPERATOR_AGGREGATE_LANE {
+        let active_generation = active_lanes["lanes"].as_array().and_then(|lanes| {
+            lanes.iter().find_map(|lane| {
+                (lane.get("lane_id").and_then(Value::as_str) == Some(lane_id))
+                    .then(|| lane.get("generation").and_then(Value::as_u64))
+                    .flatten()
+            })
+        });
+        let Some(active_generation) = active_generation else {
+            return operator_json_response(
+                404,
+                &request.path,
+                json!({
+                    "error": "operator_lane_not_active",
+                    "message": "requested lane_id is not an active lane",
+                    "lane_id": lane_id,
+                }),
+            );
+        };
+        if target.generation != Some(active_generation) {
+            return operator_json_response(
+                409,
+                &request.path,
+                json!({
+                    "error": "operator_lane_generation_mismatch",
+                    "message": "requested lane generation is no longer active",
+                    "lane_id": lane_id,
+                    "expected_generation": target.generation,
+                    "active_generation": active_generation,
+                }),
+            );
+        }
     }
     let subject_key = operator_subject.legacy_agent_identity();
     let events = match config.operator_events.append_snapshot_and_resume(
         &subject_key,
-        &lane_id,
+        &target,
         cursor,
         cursor_seq,
         gap_on_expired_cursor,
         json!({
             "protocol_version": OPERATOR_PROTOCOL_VERSION,
+            "lane_generation": target.generation,
             "active_lanes": lane_count,
             "health": operator_health_data(&config.observability),
             "metrics": operator_metrics_data(config),
@@ -3645,6 +3758,7 @@ fn operator_events_response(
                     "cursor": cursor,
                     "oldest_event_id": oldest_event_id,
                     "lane_id": lane_id,
+                    "lane_generation": target.generation,
                     "next_step": "restart the operator event stream; the missing event range is no longer available for replay",
                 }),
             );
@@ -3653,7 +3767,7 @@ fn operator_events_response(
     operator_sse_response(&events)
 }
 
-fn operator_event_lane_id(request: &HttpRequest) -> Result<String, Value> {
+fn operator_event_target(request: &HttpRequest) -> Result<OperatorEventTarget, Value> {
     let lane_id = request
         .query_param("lane_id")
         .or_else(|| request.query_param("lane"))
@@ -3665,12 +3779,59 @@ fn operator_event_lane_id(request: &HttpRequest) -> Result<String, Value> {
             "message": "operator event lane_id must be non-empty, at most 128 bytes, and must not contain /",
         }));
     }
-    Ok(lane_id.to_owned())
+    let generation = request.query_param("lane_generation");
+    if lane_id == OPERATOR_AGGREGATE_LANE {
+        if generation.is_some() {
+            return Err(json!({
+                "error": "invalid_operator_event_generation",
+                "message": "the aggregate operator event stream must not specify lane_generation",
+            }));
+        }
+        return Ok(OperatorEventTarget {
+            lane_id: lane_id.to_owned(),
+            generation: None,
+        });
+    }
+    let generation = generation
+        .and_then(|generation| generation.parse::<u64>().ok())
+        .filter(|generation| *generation > 0)
+        .ok_or_else(|| {
+            json!({
+                "error": "operator_lane_generation_required",
+                "message": "a lane-specific operator event stream requires a positive integer lane_generation",
+                "lane_id": lane_id,
+            })
+        })?;
+    Ok(OperatorEventTarget {
+        lane_id: lane_id.to_owned(),
+        generation: Some(generation),
+    })
+}
+
+fn operator_event_stream_id(lane_id: &str, lane_generation: Option<u64>) -> String {
+    lane_generation.map_or_else(
+        || lane_id.to_owned(),
+        |generation| format!("{lane_id}@{generation}"),
+    )
+}
+
+fn generation_bound_operator_event(
+    event_seq: u64,
+    lane_id: &str,
+    lane_generation: Option<u64>,
+    subject_key: &str,
+    event_type: &str,
+    data: Value,
+) -> Value {
+    let stream_id = operator_event_stream_id(lane_id, lane_generation);
+    let mut event = operator_event(event_seq, stream_id, subject_key, event_type, data);
+    event["lane_id"] = Value::String(lane_id.to_owned());
+    event
 }
 
 fn parse_operator_event_cursor(
     cursor: Option<&str>,
-    expected_lane_id: &str,
+    expected_stream_id: &str,
 ) -> Result<Option<u64>, Value> {
     let Some(cursor) = cursor.map(str::trim).filter(|cursor| !cursor.is_empty()) else {
         return Ok(None);
@@ -3678,18 +3839,18 @@ fn parse_operator_event_cursor(
     if let Ok(seq) = cursor.parse::<u64>() {
         return Ok(Some(seq));
     }
-    let Some((lane_id, seq)) = cursor.rsplit_once('/') else {
+    let Some((stream_id, seq)) = cursor.rsplit_once('/') else {
         return Err(json!({
             "error": "invalid_operator_event_cursor",
             "message": "cursor must be an operator event id such as operator/1 or a sequence number",
         }));
     };
-    if lane_id != expected_lane_id {
+    if stream_id != expected_stream_id {
         return Err(json!({
             "error": "operator_event_cursor_lane_mismatch",
-            "message": "cursor lane_id does not match the requested operator event stream",
-            "cursor_lane_id": lane_id,
-            "lane_id": expected_lane_id,
+            "message": "cursor lane generation does not match the requested operator event stream",
+            "cursor_stream_id": stream_id,
+            "stream_id": expected_stream_id,
         }));
     }
     seq.parse::<u64>().map(Some).map_err(|_| {
@@ -3710,6 +3871,7 @@ fn operator_events_after_sequence(
     cursor: Option<&str>,
     gap_on_expired_cursor: bool,
     lane_id: &str,
+    lane_generation: Option<u64>,
     subject_key: &str,
 ) -> Result<Vec<HttpBufferedEvent>, OperatorEventReplayError> {
     if let Some(oldest_event) = events.first()
@@ -3723,9 +3885,10 @@ fn operator_events_after_sequence(
             });
         }
         let gap_seq = oldest_seq.saturating_sub(1);
-        let gap_event = operator_event(
+        let gap_event = generation_bound_operator_event(
             gap_seq,
             lane_id,
+            lane_generation,
             subject_key,
             "operator.stream_gap",
             json!({
@@ -3810,6 +3973,16 @@ fn handle_operator_action_route(
         .get("lane_id")
         .and_then(Value::as_str)
         .map(str::to_owned);
+    let expected_lane_generation = if config.stateful {
+        match required_operator_lane_generation(&payload) {
+            Ok(generation) => Some(generation),
+            Err(response) => {
+                return operator_json_response(response.0, &request.path, response.1);
+            }
+        }
+    } else {
+        None
+    };
     let (tool, mut arguments) = match operator_action_target(route, &payload) {
         Ok(target) => target,
         Err(response) => return operator_json_response(400, &request.path, response),
@@ -3824,10 +3997,11 @@ fn handle_operator_action_route(
         return operator_json_response(403, &request.path, data);
     }
 
-    let binding = match operator_action_lane_binding(config, lane_id.as_deref()) {
-        Ok(binding) => binding,
-        Err(response) => return operator_json_response(response.0, &request.path, response.1),
-    };
+    let binding =
+        match operator_action_lane_binding(config, lane_id.as_deref(), expected_lane_generation) {
+            Ok(binding) => binding,
+            Err(response) => return operator_json_response(response.0, &request.path, response.1),
+        };
     let idempotency_facts = operator_idempotency_facts(OperatorIdempotencyInput {
         request,
         payload: &payload,
@@ -3855,7 +4029,8 @@ fn handle_operator_action_route(
     if let Some(binding) = binding.as_ref() {
         context = context
             .with_http_session_id(&binding.mcp_session_id)
-            .with_principal_key(&binding.principal_key);
+            .with_principal_key(&binding.principal_key)
+            .with_lane_identity(&binding.lane_id, binding.generation);
     } else {
         operator_key = operator_subject.legacy_agent_identity();
         context = context.with_principal_key(&operator_key);
@@ -3959,6 +4134,7 @@ fn operator_arguments_from_payload(payload: &serde_json::Map<String, Value>) -> 
     payload.get("arguments").cloned().unwrap_or_else(|| {
         let mut args = payload.clone();
         args.remove("lane_id");
+        args.remove("lane_generation");
         args.remove("tool");
         args.remove("idempotency_key");
         args.remove("request_id");
@@ -4064,6 +4240,7 @@ fn operator_sql_sha256(arguments: &Value) -> Option<String> {
 fn operator_action_lane_binding(
     config: &HttpTransportConfig,
     lane_id: Option<&str>,
+    expected_generation: Option<u64>,
 ) -> Result<Option<HttpLaneBinding>, (u16, Value)> {
     if !config.stateful {
         return Ok(None);
@@ -4086,7 +4263,7 @@ fn operator_action_lane_binding(
             }),
         ));
     };
-    lifecycle.lane_binding(lane_id).map(Some).ok_or_else(|| {
+    let binding = lifecycle.lane_binding(lane_id).ok_or_else(|| {
         (
             404,
             json!({
@@ -4095,5 +4272,45 @@ fn operator_action_lane_binding(
                 "lane_id": lane_id,
             }),
         )
-    })
+    })?;
+    let expected_generation = expected_generation.ok_or_else(|| {
+        (
+            400,
+            json!({
+                "error": "operator_lane_generation_required",
+                "message": "stateful operator actions require lane_generation",
+            }),
+        )
+    })?;
+    if binding.generation != expected_generation {
+        return Err((
+            409,
+            json!({
+                "error": "operator_lane_generation_mismatch",
+                "message": "requested lane generation is no longer active",
+                "lane_id": lane_id,
+                "expected_generation": expected_generation,
+                "active_generation": binding.generation,
+            }),
+        ));
+    }
+    Ok(Some(binding))
+}
+
+fn required_operator_lane_generation(
+    payload: &serde_json::Map<String, Value>,
+) -> Result<u64, (u16, Value)> {
+    payload
+        .get("lane_generation")
+        .and_then(Value::as_u64)
+        .filter(|generation| *generation > 0)
+        .ok_or_else(|| {
+            (
+                400,
+                json!({
+                    "error": "operator_lane_generation_required",
+                    "message": "stateful operator action requires a positive integer lane_generation",
+                }),
+            )
+        })
 }

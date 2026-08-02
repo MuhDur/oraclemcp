@@ -62,8 +62,8 @@ use oraclemcp::dispatch::{
 use oraclemcp::registry;
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditError, AuditKeyring, AuditOutcome, AuditSink,
-    AuditSubject, Auditor, FileAuditSink, HmacSha256Key, ShippingAuditSink, ShippingForwarder,
-    SigningKey, WormFileForwarder,
+    AuditSubject, Auditor, AuthenticatedAuditTail, FileAuditSink, HmacSha256Key, ShippingAuditSink,
+    ShippingForwarder, SigningKey, WormFileForwarder,
 };
 use oraclemcp_auth::{
     Hs256Verifier, ResourceServerConfig, SecretError, SecretResolver, SignatureVerifier,
@@ -1562,20 +1562,41 @@ fn build_auditor(
         "audit log armed"
     );
 
+    // Authenticate the complete exact-open primary chain, one-way key epochs,
+    // and head anchor BEFORE any durable shipping recovery can create a
+    // checkpoint, clean/promote spool files, start a worker, or send externally.
+    let anchor_path = oraclemcp_audit::anchor_path_for(&path);
+    let authenticated_primary = sink
+        .authenticate_existing_chain(&path, &anchor_path, keyring.verification_keys())
+        .map_err(|error| {
+            (
+                "ORACLEMCP_AUDIT_CHAIN_RESUME_REFUSED",
+                format!(
+                    "refusing to start: the existing audit log at {} failed authenticated startup preflight before shipping recovery: {error}",
+                    path.display()
+                ),
+            )
+        })?;
+
     // D2: optional WORM/SIEM shipping. Off by default — only when
     // `[audit.shipping]` configures a destination do we wrap the durable local
     // sink in the fail-safe ShippingAuditSink decorator. A forward failure never
     // loses the local record (the decorator logs + counts it).
     let local = match audit.shipping.as_ref() {
-        Some(shipping) => {
-            build_shipping_sink(sink, shipping, &path, level.is_protected(), secret_resolver)?
-        }
+        Some(shipping) => build_shipping_sink(
+            sink,
+            shipping,
+            &path,
+            level.is_protected(),
+            secret_resolver,
+            keyring.verification_keys(),
+            &authenticated_primary,
+        )?,
         None => Box::new(sink) as Box<dyn AuditSink>,
     };
     // Head anchor sidecar (bead oraclemcp-xb51): `<audit path>.anchor` tracks
     // the durable chain head so `audit verify` detects tail truncation. Record
     // fsync always precedes the anchor update (never anchor-ahead).
-    let anchor_path = oraclemcp_audit::anchor_path_for(&path);
     // Chain resume (bead oraclemcp-ow3v): a restart must continue the SAME
     // hash chain, not re-issue seq=1/genesis after the previous run's records
     // (which `audit verify` would report BROKEN at the run boundary). Seed the
@@ -1583,7 +1604,7 @@ fn build_auditor(
     // tail is malformed or contradicts the head anchor.
     let auditor = Auditor::new_with_keyring(local, keyring)
         .with_head_anchor(anchor_path)
-        .resume_from(&path)
+        .resume_from_authenticated(&authenticated_primary)
         .map_err(|e| {
             (
                 "ORACLEMCP_AUDIT_CHAIN_RESUME_REFUSED",
@@ -1793,6 +1814,8 @@ fn build_shipping_sink(
     audit_path: &Path,
     protected: bool,
     secret_resolver: &dyn SecretResolver,
+    verification_keys: &[SigningKey],
+    authenticated_primary: &AuthenticatedAuditTail,
 ) -> Result<Box<dyn AuditSink>, (&'static str, String)> {
     let mut forwarders: Vec<Box<dyn ShippingForwarder>> = Vec::new();
     let mut spool_name = audit_path.as_os_str().to_os_string();
@@ -1813,8 +1836,8 @@ fn build_shipping_sink(
                 )
             })?;
         }
-        let worm =
-            WormFileForwarder::open_distinct(worm_path, &local).map_err(|error| match error {
+        let worm = WormFileForwarder::open_distinct_for_durable_recovery(worm_path, &local)
+            .map_err(|error| match error {
                 oraclemcp_audit::ShippingError::AliasedPrimaryAuditLog => (
                     "ORACLEMCP_AUDIT_SHIPPING_INVALID",
                     "WORM mirror must be a filesystem object distinct from the primary audit log"
@@ -1843,19 +1866,19 @@ fn build_shipping_sink(
             .take(16)
             .collect();
         let spool_dir = spool_root.join(format!("worm-{destination_slug}"));
-        let worm = oraclemcp_audit::DurableShippingForwarder::open(
-            oraclemcp_audit::DurableSpoolConfig::new(&spool_dir, destination_id),
-            Box::new(worm),
-        )
-        .map_err(|error| {
-            (
-                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
-                format!(
-                    "failed to open durable WORM spool {}: {error}",
-                    spool_dir.display()
-                ),
-            )
-        })?;
+        let spool_config = oraclemcp_audit::DurableSpoolConfig::new(&spool_dir, destination_id)
+            .with_verification_keys(verification_keys.iter().cloned())
+            .with_authenticated_primary(authenticated_primary);
+        let worm = oraclemcp_audit::DurableShippingForwarder::open(spool_config, Box::new(worm))
+            .map_err(|error| {
+                (
+                    "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                    format!(
+                        "failed to open durable WORM spool {}: {error}",
+                        spool_dir.display()
+                    ),
+                )
+            })?;
         tracing::info!(
             worm_path = %worm_path.display(),
             spool_dir = %spool_dir.display(),
@@ -1905,19 +1928,20 @@ fn build_shipping_sink(
             .take(16)
             .collect();
         let spool_dir = spool_root.join(format!("siem-{destination_slug}"));
-        let forwarder = oraclemcp_audit::DurableShippingForwarder::open(
-            oraclemcp_audit::DurableSpoolConfig::new(&spool_dir, destination_id),
-            Box::new(forwarder),
-        )
-        .map_err(|error| {
-            (
-                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
-                format!(
-                    "failed to open durable SIEM spool {}: {error}",
-                    spool_dir.display()
-                ),
-            )
-        })?;
+        let spool_config = oraclemcp_audit::DurableSpoolConfig::new(&spool_dir, destination_id)
+            .with_verification_keys(verification_keys.iter().cloned())
+            .with_authenticated_primary(authenticated_primary);
+        let forwarder =
+            oraclemcp_audit::DurableShippingForwarder::open(spool_config, Box::new(forwarder))
+                .map_err(|error| {
+                    (
+                        "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                        format!(
+                            "failed to open durable SIEM spool {}: {error}",
+                            spool_dir.display()
+                        ),
+                    )
+                })?;
         tracing::info!(
             siem_origin = %endpoint.diagnostic_origin(),
             format = ?format,

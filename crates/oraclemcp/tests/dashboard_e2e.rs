@@ -270,8 +270,8 @@ fn w9_read_only_health_stats_mirror_is_flag_gated() {
         "W9 read-only operator fetchers",
         &client,
         &[
-            "operatorGet(\"/operator/v1/health\")",
-            "operatorGet(\"/operator/v1/metrics\")",
+            "return operatorGet(\"/operator/v1/health\", context);",
+            "return operatorGet(\"/operator/v1/metrics\", context);",
             "credentials: \"same-origin\"",
         ],
     );
@@ -317,6 +317,7 @@ fn w9_read_only_health_stats_mirror_is_flag_gated() {
 #[test]
 fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
     let app = read_repo_file("web/src/app/App.tsx");
+    let compact_app = app.split_whitespace().collect::<Vec<_>>().join(" ");
     let client = read_repo_file("web/src/app/operator-client.ts");
     let behavior = read_repo_file("docs/behavior-inventory.md");
     let readme = read_repo_file("README.md");
@@ -331,13 +332,19 @@ fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
             "Object matches",
             "Source matches",
             "explorerSourceSearchTypes",
-            "fetchExplorerObjects(session.data",
-            "fetchExplorerSourceSearch(session.data",
             "tool: \"oracle_search_objects\"",
             "tool: \"oracle_search_source\"",
             "owner: ownerFilter",
             "object_type: globalSearchRequest.sourceType",
             "sourceRowsFromResponse",
+        ],
+    );
+    assert_contains_all(
+        "Explorer authority-bound global object fetch",
+        &compact_app,
+        &[
+            "fetchExplorerObjects( session.data, { lane: explorerLane, owner: ownerFilter, objectType: \"\", nameLike, detailLevel: \"summary\", maxRows: globalSearchRequest.maxRows }, { signal } )",
+            "fetchExplorerSourceSearch( session.data, { lane: explorerLane, owner: ownerFilter, objectType: globalSearchRequest.sourceType, needle: globalSearchRequest.needle, maxRows: globalSearchRequest.maxRows }, { signal } )",
         ],
     );
     assert_contains_all(
@@ -578,7 +585,7 @@ fn w10_client_credentials_screen_is_redacted_and_isolated() {
         &[
             "export type ClientCredentialView",
             "export async function fetchClientCredentials",
-            "operatorGet(\"/operator/v1/client-credentials\")",
+            "return operatorGet(\"/operator/v1/client-credentials\", context);",
             "export async function rotateClientCredential",
             "operatorPost(\"/operator/v1/client-credentials/rotate\"",
             "export async function revokeClientCredential",

@@ -21,7 +21,35 @@ import {
   type VerdictProofCheckView,
   type VerdictProofInput
 } from "./presentation-model";
-import { parseOperatorHttpResponse } from "./operator-http";
+import {
+  OperatorHttpClientError,
+  boundedResponseText,
+  fetchOperatorRequest,
+  parseOperatorHttpResponse,
+  type OperatorRequestOptions
+} from "./operator-http";
+import { OperatorSessionCache } from "./operator-get-cache";
+import { clearExplorerMetadataCache } from "./explorer-metadata-cache";
+import {
+  actionTicketFor,
+  validateDashboardSession,
+  type DashboardSession
+} from "./operator-session";
+
+export { OperatorGetCache } from "./operator-get-cache";
+export {
+  cachedExplorerMetadata,
+  clearExplorerMetadataCache,
+  explorerMetadataCacheSummary,
+  type ExplorerCacheStatus,
+  type ExplorerMetadataCacheKey
+} from "./explorer-metadata-cache";
+export {
+  DashboardSessionProtocolError,
+  validateDashboardSession,
+  type DashboardActionTicket,
+  type DashboardSession
+} from "./operator-session";
 
 export type ProbeState = "loading" | "ok" | "warn" | "off";
 
@@ -44,19 +72,7 @@ export type ProbeResult = ProbeDefinition & {
   checkedAt: string;
 };
 
-export type DashboardActionTicket = {
-  method: string;
-  path: string;
-  ticket: string;
-};
-
-export type DashboardSession = {
-  csrf_token: string;
-  csrf_header: string;
-  action_ticket_header: string;
-  expires_unix: number;
-  action_tickets: DashboardActionTicket[];
-};
+export type OperatorQueryContext = Pick<OperatorRequestOptions, "signal">;
 
 export type OperatorResponse<T extends Record<string, unknown> = Record<string, unknown>> = {
   protocol_version: "operator.v1";
@@ -873,6 +889,11 @@ export type LaneCancelData = {
   terminated: boolean;
 };
 
+export type OperatorLaneTarget = {
+  laneId: string;
+  generation: number;
+};
+
 export type OperatorEventEnvelope = {
   protocol_version: "operator.v1";
   schema_version: number;
@@ -916,12 +937,13 @@ export type ClassifierLadderData = {
 
 // ── Column lineage / drift (Arc K) ───────────────────────────────────────────
 // Reads the column-lineage tool response and projects its typed edges. An edge
-// whose status the console cannot type is dropped rather than shown as verified.
+// whose status the console cannot type is retained so the presentation layer can
+// mark it unverified rather than collapsing malformed evidence into an empty graph.
 // When the response carries no lineage the input is null (not the same as an
 // empty edge set), so the console can say "not reported" honestly.
 
 export type ColumnLineageRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   owner?: string;
   object: string;
   column: string;
@@ -934,7 +956,7 @@ export async function fetchColumnLineage(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("column-lineage"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_lineage",
     arguments: {
       ...(request.owner ? { owner: request.owner } : {}),
@@ -950,17 +972,26 @@ export function parseColumnLineage(data: WorkbenchActionData | null): ColumnLine
   if (!Array.isArray(raw)) {
     return { edges: null };
   }
+  let malformedCount = 0;
   const edges = raw.flatMap((item) => {
     const record = recordValue(item);
     const from = stringValue(record?.["from"]) ?? stringValue(record?.["source"]);
     const to = stringValue(record?.["to"]) ?? stringValue(record?.["target"]);
     const status = stringValue(record?.["status"]) ?? stringValue(record?.["edge_status"]);
-    if (!from || !to || !status) {
+    if (!from || !to) {
+      malformedCount += 1;
       return [];
     }
-    return [{ from, to, status, detail: stringValue(record?.["detail"]) ?? undefined }];
+    return [
+      {
+        from,
+        to,
+        status: status ?? "unreported",
+        detail: stringValue(record?.["detail"]) ?? undefined
+      }
+    ];
   });
-  return { edges };
+  return { edges, malformedCount };
 }
 
 // ── CQN change feed (Arc C1) ─────────────────────────────────────────────────
@@ -1104,7 +1135,7 @@ export type ChangeProposalDraftData = {
 
 export type ChangeProposalApplyRequest = {
   proposalId: string;
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   confirm?: string;
   commit?: boolean;
 };
@@ -1219,33 +1250,16 @@ export const ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION = 1;
 
 export type ExplorerDetailLevel = "names" | "summary" | "standard" | "full";
 
-export type ExplorerCacheStatus = "hit" | "miss" | "stale" | "bypass";
-
-export type ExplorerMetadataCacheKey = {
-  db_fingerprint: string;
-  profile: string;
-  user: string;
-  visible_schema: string;
-  serialization_contract_version: number;
-};
-
-export type ExplorerCachedResult<T> = {
-  value: T;
-  status: ExplorerCacheStatus;
-  bytes: number;
-  cacheKey: string;
-};
-
 export type ExplorerConnectionData = WorkbenchActionData;
 
 export type ExplorerSchemasRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   nameLike?: string;
   maxRows: number;
 };
 
 export type ExplorerObjectsRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   owner?: string;
   objectType?: string;
   nameLike?: string;
@@ -1260,12 +1274,12 @@ export type ExplorerObjectRef = {
 };
 
 export type ExplorerSourceRequest = ExplorerObjectRef & {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   maxChars: number;
 };
 
 export type ExplorerSourceSearchRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   owner?: string;
   objectType?: string;
   nameLike?: string;
@@ -1276,7 +1290,7 @@ export type ExplorerSourceSearchRequest = {
 export type WorkbenchSqlRequest = {
   sql: string;
   mode: WorkbenchMode;
-  laneId?: string;
+  lane?: OperatorLaneTarget;
 };
 
 export type WorkbenchReadRequest = WorkbenchSqlRequest & {
@@ -1298,14 +1312,14 @@ export type WorkbenchPlsqlTool =
   | "oracle_plsql_doc";
 
 export type WorkbenchPlsqlRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   tool: WorkbenchPlsqlTool;
   arguments: Record<string, unknown>;
   idempotencyPrefix: string;
 };
 
 export type SessionLevelRequest = {
-  laneId?: string;
+  lane: OperatorLaneTarget;
   level?: OperatingLevel;
   ttlSeconds?: number;
   confirm?: string;
@@ -1525,16 +1539,25 @@ export function pendingProbe(definition: ProbeDefinition): ProbeResult {
   };
 }
 
-export async function fetchProbe(definition: ProbeDefinition): Promise<ProbeResult> {
+const MAX_PROBE_RESPONSE_BYTES = 64 * 1024;
+
+export async function fetchProbe(
+  definition: ProbeDefinition,
+  context: OperatorQueryContext = {}
+): Promise<ProbeResult> {
   const startedAt = performance.now();
   try {
-    const response = await fetch(definition.path, {
-      headers: {
-        accept: definition.path === "/metrics" ? "text/plain" : "application/json"
+    const response = await fetchOperatorRequest(
+      definition.path,
+      {
+        headers: {
+          accept: definition.path === "/metrics" ? "text/plain" : "application/json"
+        },
+        cache: "no-store",
+        credentials: "same-origin"
       },
-      cache: "no-store",
-      credentials: "same-origin"
-    });
+      context
+    );
     const latencyMs = Math.max(0, Math.round(performance.now() - startedAt));
     const detail = await responseDetail(response);
     return {
@@ -1547,6 +1570,9 @@ export async function fetchProbe(definition: ProbeDefinition): Promise<ProbeResu
       checkedAt: new Date().toISOString()
     };
   } catch (error) {
+    if (error instanceof OperatorHttpClientError) {
+      throw error;
+    }
     return {
       ...definition,
       state: "warn",
@@ -1559,56 +1585,81 @@ export async function fetchProbe(definition: ProbeDefinition): Promise<ProbeResu
   }
 }
 
-export async function fetchDashboardSession(): Promise<DashboardSession> {
-  const response = await fetch("/dashboard/session", {
-    headers: { accept: "application/json" },
-    cache: "no-store",
-    credentials: "same-origin"
-  });
-  return parseDashboardSession(response);
+export async function fetchDashboardSession(
+  context: OperatorQueryContext = {}
+): Promise<DashboardSession> {
+  try {
+    const response = await fetchOperatorRequest(
+      "/dashboard/session",
+      {
+        headers: { accept: "application/json" },
+        cache: "no-store",
+        credentials: "same-origin"
+      },
+      context
+    );
+    const session = await parseDashboardSession(response);
+    activateOperatorSession(session);
+    return session;
+  } catch (error) {
+    clearOperatorSessionState();
+    throw error;
+  }
 }
 
-export async function fetchOperatorMetrics(): Promise<OperatorResponse<OperatorMetricsData>> {
-  return operatorGet("/operator/v1/metrics");
+export async function fetchOperatorMetrics(
+  context: OperatorQueryContext = {}
+): Promise<OperatorResponse<OperatorMetricsData>> {
+  return operatorGet("/operator/v1/metrics", context);
 }
 
-export async function fetchOperatorHealth(): Promise<OperatorResponse<OperatorHealthData>> {
-  return operatorGet("/operator/v1/health");
+export async function fetchOperatorHealth(
+  context: OperatorQueryContext = {}
+): Promise<OperatorResponse<OperatorHealthData>> {
+  return operatorGet("/operator/v1/health", context);
 }
 
-export async function fetchOperatorConfig(): Promise<OperatorResponse<ConfigOpsStatusData>> {
-  return operatorGet("/operator/v1/config");
+export async function fetchOperatorConfig(
+  context: OperatorQueryContext = {}
+): Promise<OperatorResponse<ConfigOpsStatusData>> {
+  return operatorGet("/operator/v1/config", context);
 }
 
-export async function fetchActiveLanes(): Promise<OperatorResponse<ActiveLanesData>> {
-  return operatorGet("/operator/v1/active-lanes");
+export async function fetchActiveLanes(
+  context: OperatorQueryContext = {}
+): Promise<OperatorResponse<ActiveLanesData>> {
+  return operatorGet("/operator/v1/active-lanes", context);
 }
 
-export async function fetchCiLaneHealth(): Promise<OperatorResponse<CiLaneHealthData>> {
-  const response = await operatorGet<Record<string, unknown>>("/operator/v1/ci-lanes");
+export async function fetchCiLaneHealth(
+  context: OperatorQueryContext = {}
+): Promise<OperatorResponse<CiLaneHealthData>> {
+  const response = await operatorGet<Record<string, unknown>>("/operator/v1/ci-lanes", context);
   return { ...response, data: normalizeCiLaneHealthData(response.data) };
 }
 
 export async function cancelLane(
   session: DashboardSession,
-  laneId: string
+  lane: OperatorLaneTarget
 ): Promise<OperatorResponse<LaneCancelData>> {
   return operatorPost("/operator/v1/lanes/cancel", session, {
-    lane_id: laneId
+    ...operatorLanePayload(lane)
   });
 }
 
 export async function fetchChangeProposals(
-  cursor?: string
+  cursor?: string,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<ChangeProposalListData>> {
   const suffix = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-  return operatorGet(`/operator/v1/change-proposals${suffix}`);
+  return operatorGet(`/operator/v1/change-proposals${suffix}`, context);
 }
 
 export async function fetchChangeProposalDetail(
-  id: string
+  id: string,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<ChangeProposalDetailData>> {
-  return operatorGet(`/operator/v1/change-proposals/${encodeURIComponent(id)}`);
+  return operatorGet(`/operator/v1/change-proposals/${encodeURIComponent(id)}`, context);
 }
 
 // ── Edition timeline (Arc D) ─────────────────────────────────────────────────
@@ -1634,8 +1685,10 @@ export type EditionProposalsData = {
 
 const EDITION_STATUSES: readonly EditionStatus[] = ["requested", "reviewing", "withdrawn"];
 
-export async function fetchEditionProposals(): Promise<OperatorResponse<EditionProposalsData>> {
-  return operatorGet("/operator/v1/edition-proposals");
+export async function fetchEditionProposals(
+  context: OperatorQueryContext = {}
+): Promise<OperatorResponse<EditionProposalsData>> {
+  return operatorGet("/operator/v1/edition-proposals", context);
 }
 
 /** Project the edition-proposal list into the timeline builder's input. */
@@ -1663,15 +1716,18 @@ export function parseEditionProposals(
 }
 
 export async function fetchSourceHistory(
-  cursor?: string
+  cursor?: string,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<SourceHistoryListData>> {
   const base = "/operator/v1/source-history?max_rows=100";
   const suffix = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-  return operatorGet(`${base}${suffix}`);
+  return operatorGet(`${base}${suffix}`, context);
 }
 
-export async function fetchClientCredentials(): Promise<OperatorResponse<ClientCredentialsData>> {
-  return operatorGet("/operator/v1/client-credentials");
+export async function fetchClientCredentials(
+  context: OperatorQueryContext = {}
+): Promise<OperatorResponse<ClientCredentialsData>> {
+  return operatorGet("/operator/v1/client-credentials", context);
 }
 
 export async function rotateClientCredential(
@@ -1744,7 +1800,7 @@ export async function applyChangeProposal(
 ): Promise<OperatorResponse<ChangeProposalApplyData>> {
   return operatorPost("/operator/v1/change-proposals/apply", session, {
     proposal_id: request.proposalId,
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     confirm: request.confirm?.trim() || undefined,
     commit: request.commit,
     idempotency_key: requestId("change-proposal-apply")
@@ -1781,7 +1837,7 @@ export async function previewWorkbenchSql(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/preview", session, {
     idempotency_key: requestId("workbench-preview"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_preview_sql",
     arguments: {
       sql: request.sql
@@ -1795,7 +1851,7 @@ export async function readWorkbenchSql(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("workbench-read"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_query",
     arguments: {
       sql: request.sql,
@@ -1811,7 +1867,7 @@ export async function readWorkbenchSql(
 // sends a filter; it consumes the guarded result and the mask certificate.
 
 export type VectorSearchRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   owner?: string;
   table: string;
   column: string;
@@ -1827,7 +1883,7 @@ export async function fetchVectorCluster(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("vector-search"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_semantic_search",
     arguments: {
       over: {
@@ -1915,7 +1971,7 @@ export async function executeWorkbenchSql(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId(request.commit ? "workbench-commit" : "workbench-rollback-preview"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_execute",
     arguments: {
       sql: request.sql,
@@ -1933,7 +1989,7 @@ export async function runWorkbenchPlsqlTool(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId(request.idempotencyPrefix),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: request.tool,
     arguments: request.arguments
   });
@@ -1963,57 +2019,61 @@ export async function setSessionLevel(
   }
   return operatorPost("/operator/v1/session/set-level", session, {
     idempotency_key: requestId(`session-level-${request.action}`),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     arguments: argumentsBody
   });
 }
 
 export async function fetchExplorerConnection(
   session: DashboardSession,
-  laneId?: string
+  lane?: OperatorLaneTarget,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<ExplorerConnectionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("explorer-connection"),
-    lane_id: laneIdValue(laneId),
+    ...operatorLanePayload(lane),
     tool: "oracle_connection_info",
     arguments: {}
-  });
+  }, context);
 }
 
 export async function fetchLaneCapabilities(
   session: DashboardSession,
-  laneId?: string
+  lane?: OperatorLaneTarget,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("session-capabilities"),
-    lane_id: laneIdValue(laneId),
+    ...operatorLanePayload(lane),
     tool: "oracle_capabilities",
     arguments: {}
-  });
+  }, context);
 }
 
 export async function fetchExplorerSchemas(
   session: DashboardSession,
-  request: ExplorerSchemasRequest
+  request: ExplorerSchemasRequest,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("explorer-schemas"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_list_schemas",
     arguments: {
       name_like: optionalString(request.nameLike),
       max_rows: request.maxRows
     }
-  });
+  }, context);
 }
 
 export async function fetchExplorerObjects(
   session: DashboardSession,
-  request: ExplorerObjectsRequest
+  request: ExplorerObjectsRequest,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("explorer-objects"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_search_objects",
     arguments: {
       owner: optionalString(request.owner),
@@ -2022,32 +2082,34 @@ export async function fetchExplorerObjects(
       detail_level: request.detailLevel,
       max_rows: request.maxRows
     }
-  });
+  }, context);
 }
 
 export async function fetchExplorerDdl(
   session: DashboardSession,
-  request: ExplorerObjectRef & { laneId?: string }
+  request: ExplorerObjectRef & { lane?: OperatorLaneTarget },
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("explorer-ddl"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_get_ddl",
     arguments: {
       owner: request.owner,
       name: request.name,
       object_type: ddlObjectType(request.objectType)
     }
-  });
+  }, context);
 }
 
 export async function fetchExplorerSource(
   session: DashboardSession,
-  request: ExplorerSourceRequest
+  request: ExplorerSourceRequest,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("explorer-source"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_get_source",
     arguments: {
       owner: request.owner,
@@ -2055,16 +2117,17 @@ export async function fetchExplorerSource(
       object_type: sourceObjectType(request.objectType),
       max_chars: request.maxChars
     }
-  });
+  }, context);
 }
 
 export async function fetchExplorerSourceSearch(
   session: DashboardSession,
-  request: ExplorerSourceSearchRequest
+  request: ExplorerSourceSearchRequest,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("explorer-source-search"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_search_source",
     arguments: {
       owner: optionalString(request.owner),
@@ -2073,83 +2136,12 @@ export async function fetchExplorerSourceSearch(
       needle: request.needle.trim(),
       max_rows: request.maxRows
     }
-  });
-}
-
-export async function cachedExplorerMetadata<T>(
-  scope: ExplorerMetadataCacheKey,
-  slot: string,
-  load: () => Promise<T>
-): Promise<ExplorerCachedResult<T>> {
-  const cacheKey = explorerCacheKey(scope, slot);
-  const now = Date.now();
-  const existing = explorerMetadataCache.get(cacheKey);
-  if (existing) {
-    if (existing.expiresAt > now) {
-      existing.lastAccessed = now;
-      return {
-        value: existing.value as T,
-        status: "hit",
-        bytes: existing.bytes,
-        cacheKey
-      };
-    }
-    removeExplorerCacheEntry(cacheKey);
-  }
-
-  const pending = explorerMetadataCacheLoads.get(cacheKey);
-  if (pending && pending.generation === explorerMetadataCacheGeneration) {
-    return pending.promise as Promise<ExplorerCachedResult<T>>;
-  }
-
-  const generation = explorerMetadataCacheGeneration;
-  const promise = (async (): Promise<ExplorerCachedResult<T>> => {
-    const value = await load();
-    const bytes = approxJsonBytes(value);
-    if (bytes > EXPLORER_METADATA_CACHE_MAX_BYTES || generation !== explorerMetadataCacheGeneration) {
-      return { value, status: "bypass", bytes, cacheKey };
-    }
-
-    const loadedAt = Date.now();
-    removeExplorerCacheEntry(cacheKey);
-    explorerMetadataCache.set(cacheKey, {
-      value,
-      bytes,
-      expiresAt: loadedAt + EXPLORER_METADATA_CACHE_TTL_MS,
-      lastAccessed: loadedAt
-    });
-    explorerMetadataCacheBytes += bytes;
-    trimExplorerMetadataCache();
-    return { value, status: existing ? "stale" : "miss", bytes, cacheKey };
-  })();
-  explorerMetadataCacheLoads.set(cacheKey, { generation, promise });
-
-  try {
-    return await promise;
-  } finally {
-    if (explorerMetadataCacheLoads.get(cacheKey)?.promise === promise) {
-      explorerMetadataCacheLoads.delete(cacheKey);
-    }
-  }
-}
-
-export function clearExplorerMetadataCache(): void {
-  explorerMetadataCacheGeneration += 1;
-  explorerMetadataCache.clear();
-  explorerMetadataCacheLoads.clear();
-  explorerMetadataCacheBytes = 0;
-}
-
-export function explorerMetadataCacheSummary(): { entries: number; bytes: number } {
-  trimExplorerMetadataCache();
-  return {
-    entries: explorerMetadataCache.size,
-    bytes: explorerMetadataCacheBytes
-  };
+  }, context);
 }
 
 export async function fetchAuditTail(
-  filters: AuditTailFilters
+  filters: AuditTailFilters,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<AuditTailData>> {
   const params = new URLSearchParams();
   params.set("limit", String(filters.limit));
@@ -2160,7 +2152,7 @@ export async function fetchAuditTail(
     params.set("export", "proof-bundle");
   }
   const suffix = params.toString();
-  return operatorGet(`/operator/v1/audit-tail${suffix ? `?${suffix}` : ""}`);
+  return operatorGet(`/operator/v1/audit-tail${suffix ? `?${suffix}` : ""}`, context);
 }
 
 // ── Policy narrowing (Arc N) ─────────────────────────────────────────────────
@@ -2267,7 +2259,7 @@ const FLEET_STATUSES: Readonly<Record<string, FleetDbStatus>> = {
 };
 
 export type FleetMapRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
 };
 
 /** `oracle_orient` with `fleet: true` — one independent read per profile. */
@@ -2277,7 +2269,7 @@ export async function fetchFleetMap(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("fleet-orient"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_orient",
     arguments: { fleet: true, include: ["schema", "freshness", "ddl"] }
   });
@@ -2407,7 +2399,7 @@ export function parseMaskCertificate(
 export type AsOfTarget = { kind: "scn"; scn: number } | { kind: "timestamp"; timestamp: string };
 
 export type QueryAsOfRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   sql: string;
   maxRows: number;
   target: AsOfTarget;
@@ -2425,7 +2417,7 @@ export async function fetchQueryAsOf(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("query-as-of"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_query",
     arguments: {
       sql: request.sql,
@@ -2603,7 +2595,7 @@ export function parseActiveProfile(data: WorkbenchActionData | null): string | n
 }
 
 export type QueryCostEstimateRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   sql: string;
 };
 
@@ -2619,7 +2611,7 @@ export async function fetchQueryCostEstimate(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("query-cost-estimate"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_explain_plan",
     arguments: {
       sql: request.sql,
@@ -2725,12 +2717,12 @@ export function parseUndoOutcome(data: WorkbenchActionData | null): UndoOutcome 
 }
 
 export type WorkspaceCheckpointRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   name: string;
 };
 
 export type WorkspaceUndoRequest = {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   // Omit to discard the whole workspace (a full ROLLBACK).
   name?: string;
 };
@@ -2746,7 +2738,7 @@ export async function establishCheckpoint(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("workspace-checkpoint"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_checkpoint",
     arguments: { name: request.name.trim() }
   });
@@ -2759,7 +2751,7 @@ export async function holdWorkbenchSql(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("workspace-hold"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_execute",
     arguments: {
       sql: request.sql,
@@ -2778,7 +2770,7 @@ export async function undoToCheckpoint(
 ): Promise<OperatorResponse<WorkbenchActionData>> {
   return operatorPost("/operator/v1/actions/execute", session, {
     idempotency_key: requestId("workspace-undo"),
-    lane_id: laneIdValue(request.laneId),
+    ...operatorLanePayload(request.lane),
     tool: "oracle_undo_to",
     arguments: request.name ? { name: request.name.trim() } : {}
   });
@@ -2928,7 +2920,10 @@ export function verdictProofChecks(
   certHash: string
 ): VerdictProofCheckView[] {
   const entryHash = nestedStringField(record.proof, "entry_hash");
-  const hashValid = !!record.proof && (record.proof as Record<string, unknown>)["hash_valid"] === true;
+  const reportedHashValidity = record.proof
+    ? (record.proof as Record<string, unknown>)["hash_valid"]
+    : undefined;
+  const hashValid = reportedHashValidity === true;
   const registered = certificate.derivation.filter((step) =>
     isRegisteredDerivationStep(step.rule_id, step.construct)
   ).length;
@@ -2966,8 +2961,10 @@ export function verdictProofChecks(
       id: "chain_hash",
       label: "Chain hash",
       ok: hashValid && certHash.length > 0,
-      detail: !hashValid
-        ? "audit record hash is not valid"
+      detail: reportedHashValidity !== true && reportedHashValidity !== false
+        ? "audit record hash is unverified"
+        : !hashValid
+          ? "audit record hash is invalid"
         : certHash.length === 0
           ? "audit record carries no certificate core hash"
           : "record hash is valid"
@@ -3011,32 +3008,57 @@ export function parseVerdictProofs(data: AuditTailData | null): VerdictProofData
   return { source: "self_lane", uncertified, proofs };
 }
 
-// Per-path conditional-request cache. A polled GET revalidates with the
-// last-seen ETag; an unchanged endpoint answers 304 and we reuse the cached,
-// referentially-stable response so React skips re-rendering.
-const operatorGetCache = new Map<string, { etag: string; value: unknown }>();
+const operatorSessionCache = new OperatorSessionCache();
+
+export function activateOperatorSession(session: DashboardSession): number {
+  const { changed, epoch } = operatorSessionCache.activate(session);
+  if (changed) {
+    clearExplorerMetadataCache();
+  }
+  return epoch;
+}
+
+export function clearOperatorSessionState(): void {
+  operatorSessionCache.clear();
+  clearExplorerMetadataCache();
+}
+
+export function operatorGetCacheSummary(): { entries: number; bytes: number; epoch: number } {
+  return operatorSessionCache.summary();
+}
 
 async function operatorGet<T extends Record<string, unknown>>(
-  path: string
+  path: string,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<T>> {
+  const requestEpoch = operatorSessionCache.currentEpoch();
   const headers: Record<string, string> = { accept: "application/json" };
-  const cached = operatorGetCache.get(path);
+  const cached = operatorSessionCache.get(path, requestEpoch);
   if (cached) {
     headers["if-none-match"] = cached.etag;
   }
-  const response = await fetch(path, {
-    headers,
-    cache: "no-store",
-    credentials: "same-origin"
-  });
+  const response = await fetchOperatorRequest(
+    path,
+    {
+      headers,
+      cache: "no-store",
+      credentials: "same-origin"
+    },
+    context
+  );
+  operatorSessionCache.assertCurrent(requestEpoch);
   if (response.status === 304 && cached) {
-    return cached.value as OperatorResponse<T>;
+    const current = operatorSessionCache.get(path, requestEpoch);
+    if (current?.etag === cached.etag) {
+      return current.value as OperatorResponse<T>;
+    }
   }
   const parsed = await parseOperatorHttpResponse(response);
+  operatorSessionCache.assertCurrent(requestEpoch);
   const result = requireSuccessfulOperatorResponse<T>(response.status, parsed);
   const etag = response.headers.get("etag");
   if (etag) {
-    operatorGetCache.set(path, { etag, value: result });
+    operatorSessionCache.set(path, requestEpoch, etag, result);
   }
   return result;
 }
@@ -3078,9 +3100,13 @@ function summaryForStatus(status: number, ok: boolean): string {
 
 async function responseDetail(response: Response): Promise<string> {
   const contentType = response.headers.get("content-type") ?? "";
-  const body = await response.text();
+  const { text: body, truncated } = await boundedResponseText(
+    response,
+    MAX_PROBE_RESPONSE_BYTES,
+    "truncate"
+  );
   if (!body) {
-    return response.statusText || "empty response";
+    return truncated ? "response exceeded probe detail limit [truncated]" : response.statusText || "empty response";
   }
   if (contentType.includes("application/json")) {
     try {
@@ -3088,34 +3114,35 @@ async function responseDetail(response: Response): Promise<string> {
       if (parsed && typeof parsed === "object") {
         const object = parsed as Record<string, unknown>;
         if (typeof object["message"] === "string") {
-          return object["message"];
+          return `${object["message"]}${truncated ? " [truncated]" : ""}`;
         }
         if (typeof object["error"] === "string") {
-          return object["error"];
+          return `${object["error"]}${truncated ? " [truncated]" : ""}`;
         }
         if (typeof object["kind"] === "string") {
-          return object["kind"];
+          return `${object["kind"]}${truncated ? " [truncated]" : ""}`;
         }
       }
     } catch {
-      return body.slice(0, 160);
+      return `${body.slice(0, 160)}${truncated ? " [truncated]" : ""}`;
     }
   }
-  return body.replace(/\s+/g, " ").trim().slice(0, 160);
+  return `${body.replace(/\s+/g, " ").trim().slice(0, 160)}${truncated ? " [truncated]" : ""}`;
 }
 
 async function parseDashboardSession(response: Response): Promise<DashboardSession> {
-  const parsed = (await response.json()) as unknown;
+  const parsed = await parseOperatorHttpResponse(response);
   if (!response.ok) {
     throw new Error(errorMessage(parsed, response.status));
   }
-  return parsed as DashboardSession;
+  return validateDashboardSession(parsed);
 }
 
 async function operatorPost<T extends Record<string, unknown>>(
   path: string,
   session: DashboardSession,
-  body: Record<string, unknown>
+  body: Record<string, unknown>,
+  context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<T>> {
   const actionTicket = actionTicketFor(session, path);
   const headers: Record<string, string> = {
@@ -3124,14 +3151,21 @@ async function operatorPost<T extends Record<string, unknown>>(
   };
   headers[session.csrf_header] = session.csrf_token;
   headers[session.action_ticket_header] = actionTicket;
-  const response = await fetch(path, {
-    method: "POST",
-    headers,
-    cache: "no-store",
-    credentials: "same-origin",
-    body: JSON.stringify(body)
-  });
+  const requestEpoch = operatorSessionCache.currentEpoch();
+  const response = await fetchOperatorRequest(
+    path,
+    {
+      method: "POST",
+      headers,
+      cache: "no-store",
+      credentials: "same-origin",
+      body: JSON.stringify(body)
+    },
+    context
+  );
+  operatorSessionCache.assertCurrent(requestEpoch);
   const parsed = await parseOperatorHttpResponse(response);
+  operatorSessionCache.assertCurrent(requestEpoch);
   return requireSuccessfulOperatorResponse<T>(response.status, parsed);
 }
 
@@ -3153,19 +3187,23 @@ function requireSuccessfulOperatorResponse<T extends Record<string, unknown>>(
   return parsed as OperatorResponse<T>;
 }
 
-function actionTicketFor(session: DashboardSession, path: string): string {
-  const ticket = session.action_tickets.find(
-    (candidate) => candidate.method === "POST" && candidate.path === path
-  );
-  if (!ticket) {
-    throw new Error(`missing dashboard action ticket for ${path}`);
+function operatorLanePayload(
+  lane: OperatorLaneTarget | undefined
+): { lane_id?: string; lane_generation?: number } {
+  if (!lane) {
+    return {};
   }
-  return ticket.ticket;
-}
-
-function laneIdValue(laneId: string | undefined): string | undefined {
-  const trimmed = laneId?.trim();
-  return trimmed ? trimmed : undefined;
+  const laneId = lane.laneId.trim();
+  if (!laneId) {
+    throw new TypeError("operator lane target requires a non-empty laneId");
+  }
+  if (!Number.isSafeInteger(lane.generation) || lane.generation <= 0) {
+    throw new TypeError("operator lane target requires a positive integer generation");
+  }
+  return {
+    lane_id: laneId,
+    lane_generation: lane.generation
+  };
 }
 
 function ddlObjectType(objectType: string): string {
@@ -3178,71 +3216,6 @@ function sourceObjectType(objectType: string): string | undefined {
     return undefined;
   }
   return normalized;
-}
-
-type ExplorerMetadataCacheEntry = {
-  value: unknown;
-  bytes: number;
-  expiresAt: number;
-  lastAccessed: number;
-};
-
-type ExplorerMetadataCacheLoad = {
-  generation: number;
-  promise: Promise<ExplorerCachedResult<unknown>>;
-};
-
-const EXPLORER_METADATA_CACHE_TTL_MS = 60_000;
-const EXPLORER_METADATA_CACHE_MAX_BYTES = 512_000;
-const EXPLORER_METADATA_CACHE_MAX_ENTRIES = 64;
-const explorerMetadataCache = new Map<string, ExplorerMetadataCacheEntry>();
-const explorerMetadataCacheLoads = new Map<string, ExplorerMetadataCacheLoad>();
-let explorerMetadataCacheBytes = 0;
-let explorerMetadataCacheGeneration = 0;
-
-function explorerCacheKey(scope: ExplorerMetadataCacheKey, slot: string): string {
-  return JSON.stringify({
-    db_fingerprint: scope.db_fingerprint,
-    profile: scope.profile,
-    user: scope.user,
-    visible_schema: scope.visible_schema,
-    serialization_contract_version: scope.serialization_contract_version,
-    slot
-  });
-}
-
-function removeExplorerCacheEntry(cacheKey: string): void {
-  const existing = explorerMetadataCache.get(cacheKey);
-  if (!existing) {
-    return;
-  }
-  explorerMetadataCache.delete(cacheKey);
-  explorerMetadataCacheBytes = Math.max(0, explorerMetadataCacheBytes - existing.bytes);
-}
-
-function trimExplorerMetadataCache(): void {
-  const now = Date.now();
-  for (const [cacheKey, entry] of explorerMetadataCache) {
-    if (entry.expiresAt <= now) {
-      removeExplorerCacheEntry(cacheKey);
-    }
-  }
-  while (
-    explorerMetadataCache.size > EXPLORER_METADATA_CACHE_MAX_ENTRIES ||
-    explorerMetadataCacheBytes > EXPLORER_METADATA_CACHE_MAX_BYTES
-  ) {
-    const oldest = [...explorerMetadataCache.entries()].sort(
-      (a, b) => a[1].lastAccessed - b[1].lastAccessed
-    )[0];
-    if (!oldest) {
-      break;
-    }
-    removeExplorerCacheEntry(oldest[0]);
-  }
-}
-
-function approxJsonBytes(value: unknown): number {
-  return new TextEncoder().encode(JSON.stringify(value)).byteLength;
 }
 
 function requestId(prefix: string): string {

@@ -1282,7 +1282,7 @@ fn local_doctor_and_authorized_operator_use_transport_reserve_under_saturation()
     );
     assert!(operator.starts_with("HTTP/1.1 200 OK"), "{operator}");
 
-    let cancel_body = serde_json::json!({ "lane_id": "lane-a" }).to_string();
+    let cancel_body = serde_json::json!({ "lane_id": "lane-a", "lane_generation": 7 }).to_string();
     let cancel_request = format!(
         "POST /operator/v1/lanes/cancel HTTP/1.1\r\nhost: 127.0.0.1\r\naccept: application/json\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
         cancel_body.len(),

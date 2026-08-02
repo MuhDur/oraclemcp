@@ -164,6 +164,43 @@ fn tool_stream_response_frames_each_row_before_final_result() {
 }
 
 #[test]
+fn dropped_tool_stream_discards_its_request_owned_notifications() {
+    let server = test_server();
+    server.notifications().enqueue_progress(
+        "abandoned-request",
+        &json!("token"),
+        0.5,
+        Some(1.0),
+        None,
+    );
+    let (frames_tx, frames_rx) = mpsc::channel(1);
+    drop(frames_tx);
+    let (reply_tx, reply_rx) = oneshot::channel();
+    drop(reply_tx);
+
+    let stream = HttpToolStream::new(
+        server.clone(),
+        None,
+        HttpToolStreamBinding {
+            session_id: "session-test".to_owned(),
+            principal_key: "principal-test".to_owned(),
+        },
+        json!(7),
+        frames_rx,
+        reply_rx.into(),
+        HttpToolStreamNotifications {
+            initial: Vec::new(),
+            request_owner: Some("abandoned-request".to_owned()),
+            progress_token: Some(json!("token")),
+        },
+    );
+    assert!(!server.notifications().is_empty("abandoned-request"));
+
+    drop(stream);
+    assert!(server.notifications().is_empty("abandoned-request"));
+}
+
+#[test]
 fn sse_response_emits_chunk_frames_before_the_authoritative_result() {
     // End-to-end SSE assembly: a streaming query response frames each page as
     // its own `event: chunk` SSE event, THEN the authoritative response frame —

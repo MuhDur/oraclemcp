@@ -155,6 +155,18 @@ describe("verdict-proof inspection", () => {
     expect(uncovered.find((check) => check.id === "chain_hash")?.ok).toBe(false);
   });
 
+  it("labels missing hash validity as unverified rather than invalid", () => {
+    const checks = verdictProofChecks(
+      record({ proof: { entry_hash: ENTRY_HASH } }),
+      certificate(),
+      CORE_HASH
+    );
+    expect(checks.find((check) => check.id === "chain_hash")).toMatchObject({
+      ok: false,
+      detail: "audit record hash is unverified"
+    });
+  });
+
   it("counts records without a certificate instead of synthesizing one", () => {
     const data = parseVerdictProofs(
       tail([

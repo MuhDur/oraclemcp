@@ -12,7 +12,6 @@ import {
   useSearch
 } from "@tanstack/react-router";
 import {
-  QueryClient,
   QueryClientProvider,
   useMutation,
   useQuery
@@ -93,8 +92,10 @@ import {
   type AuditTailFilters,
   type AuditTailRecord,
   type ActiveLane,
+  type ActiveLanesData,
   type CapacityLimitSource,
   type ChangeProposalListView,
+  type ChangeProposalListData,
   type ChangeProposalView,
   type DashboardSession,
   type SchemaDiffExportData,
@@ -102,18 +103,22 @@ import {
   type SchemaDiffStepView,
   type SchemaSnapshotInput,
   type SourceSnapshotView,
+  type SourceHistoryListData,
   type ClientCredentialRotateData,
+  type ClientCredentialsData,
   type ClientCredentialStatus,
   type ClientCredentialView,
   type ExplorerCacheStatus,
   type ExplorerDetailLevel,
   type ExplorerMetadataCacheKey,
   type ExplorerObjectRef,
+  type EditionProposalsData,
   type LaneRequestDuration,
   type MetricsSnapshot,
   type OperatingLevel,
   type OperatorHealthData,
   type OperatorCapacityData,
+  type OperatorMetricsData,
   type OperatorEventEnvelope,
   type ClassifierLadderData,
   type ClassifierLadderVerdictKind,
@@ -137,25 +142,77 @@ import {
   operatorResponseFromError,
   ORACLE_METADATA_SERIALIZATION_CONTRACT_VERSION,
   type OperatorOutcome,
+  OperatorOutcomeError,
   type OperatorOutcomeState,
+  type OperatorLaneTarget,
   type WorkbenchActionData,
   type WorkbenchMode,
   type WorkbenchPlsqlTool
 } from "./operator-client";
+import {
+  BackgroundRefreshStatus,
+  DashboardSessionBanner,
+  LIVE_TELEMETRY_REFETCH_MS,
+  createDashboardQueryClient,
+  queryActivity,
+  startOperatorEventStream,
+  useDashboardAuthorityPurge,
+  useAbsoluteExpiryCountdown,
+  useDebouncedValue,
+  type EventStreamStatus
+} from "./dashboard-lifecycle";
+import {
+  CLIENT_ROTATION_MUTATION_KEY,
+  absoluteExpiryIsActive,
+  authoritativeQueryData,
+  authoritativeMetric,
+  collectionViewState,
+  connectionHealthModel,
+  configurationAuthority,
+  dashboardAuthorityIdentity,
+  elevationCompletionIsCurrent,
+  laneCancelFailure,
+  laneCancelSuccess,
+  laneIdentity,
+  nativeConnectionInfo,
+  purgeClientRotationMutation,
+  reconcileLaneSelection,
+  sameLaneIdentity,
+  sessionLevelSummary,
+  sourceAvailability,
+  type CollectionViewState,
+  type ConnectionHealthSourceRow,
+  type ConnectionHealthUiModel,
+  type DashboardQueryStatus,
+  type ElevationRequestBinding,
+  type LaneCancelNotice,
+  type LaneIdentity,
+  type SessionLevelSummary
+} from "./dashboard-view-state";
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchInterval: 10_000,
-      staleTime: 5_000,
-      retry: 1
-    }
-  }
-});
+export {
+  createDashboardQueryClient,
+  dashboardSessionIsValidAt,
+  expireDashboardAuthorityAfterSessionError,
+  expireDashboardAuthority,
+  LIVE_TELEMETRY_REFETCH_MS,
+  queryActivity,
+  startOperatorEventStream
+} from "./dashboard-lifecycle";
+
+const queryClient = createDashboardQueryClient();
 
 const WHOLE_NUMBER_FORMATTER = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 const EMPTY_ACTIVE_LANES: ActiveLane[] = [];
 const EMPTY_CHANGE_PROPOSALS: ChangeProposalListView[] = [];
+const EMPTY_SOURCE_SNAPSHOTS: SourceSnapshotView[] = [];
+
+export function authoritativeServerMode(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<ActiveLanesData> | undefined
+): boolean | null {
+  return authoritativeQueryData(status, response)?.data.stateful ?? null;
+}
 
 type NavItem = {
   to: string;
@@ -196,12 +253,17 @@ export function optionalSearchString(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
+function optionalSearchGeneration(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
 const sessionsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/sessions",
   component: SessionsPage,
-  validateSearch: (search: Record<string, unknown>): { lane?: string } => ({
-    lane: optionalSearchString(search.lane)
+  validateSearch: (search: Record<string, unknown>): { lane?: string; generation?: number } => ({
+    lane: optionalSearchString(search.lane),
+    generation: optionalSearchGeneration(search.generation)
   })
 });
 
@@ -295,9 +357,9 @@ function RootLayout(): React.ReactElement {
   const activeLanes = useQuery({
     queryKey: ["active-lanes"],
     queryFn: fetchActiveLanes,
-    refetchInterval: 5_000
+    refetchInterval: LIVE_TELEMETRY_REFETCH_MS
   });
-  const stateful = activeLanes.data?.data.stateful ?? true;
+  const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
   const operatorConfig = useQuery({
     queryKey: ["operator-config"],
     queryFn: fetchOperatorConfig,
@@ -338,50 +400,10 @@ function RootLayout(): React.ReactElement {
           </nav>
         </aside>
         <main id="main" tabIndex={-1} className="min-w-0 flex-1 space-y-4">
-          <DashboardSessionBanner />
+          <DashboardSessionBanner client={queryClient} />
           <Outlet />
         </main>
       </div>
-    </div>
-  );
-}
-
-function DashboardSessionBanner(): React.ReactElement | null {
-  const session = useQuery({
-    queryKey: ["dashboard-session"],
-    queryFn: fetchDashboardSession,
-    staleTime: 60_000,
-    refetchInterval: 60_000,
-    retry: 1
-  });
-  if (session.isError) {
-    return (
-      <div
-        className="rounded-lg border border-[var(--om-rust)] bg-[color-mix(in_srgb,var(--om-rust)_12%,transparent)] p-4"
-        role="alert"
-      >
-        <p className="font-semibold text-[var(--om-text-bright)]">Dashboard session unavailable</p>
-        <p className="mt-1 text-sm leading-6 text-[var(--om-text-muted)]">
-          Run <code className="font-mono text-[var(--om-gold)]">oraclemcp dashboard</code> on the server, open the new pairing page, and enter its one-time code.
-        </p>
-      </div>
-    );
-  }
-  if (!session.data) {
-    return null;
-  }
-  const remainingSeconds = Math.max(0, session.data.expires_unix - Math.floor(Date.now() / 1_000));
-  if (remainingSeconds > 15 * 60) {
-    return null;
-  }
-  return (
-    <div
-      className="rounded-lg border border-[var(--om-copper)] bg-[color-mix(in_srgb,var(--om-copper)_12%,transparent)] p-3 text-sm text-[var(--om-text)]"
-      role={remainingSeconds === 0 ? "alert" : "status"}
-    >
-      {remainingSeconds === 0
-        ? "This dashboard session has expired. Pair this browser again before continuing."
-        : `This dashboard session expires in about ${Math.ceil(remainingSeconds / 60)} minute(s). Finish or save your work, then pair again.`}
     </div>
   );
 }
@@ -403,6 +425,13 @@ function NavLink({
 }
 
 function OverviewPage(): React.ReactElement {
+  const session = useQuery({
+    queryKey: ["dashboard-session"],
+    queryFn: fetchDashboardSession,
+    staleTime: 60_000,
+    refetchInterval: 60_000,
+    retry: 1
+  });
   const health = useQuery({
     queryKey: ["operator-health"],
     queryFn: fetchOperatorHealth,
@@ -420,14 +449,17 @@ function OverviewPage(): React.ReactElement {
   });
   const reviews = useQuery({
     queryKey: ["change-proposals"],
-    queryFn: () => fetchChangeProposals(),
-    refetchInterval: 15_000
+    queryFn: ({ signal }) => fetchChangeProposals(undefined, { signal })
   });
-  const eventLog = useOperatorEventLog("operator");
-  const snapshot = metrics.data?.data.snapshot ?? null;
-  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
-  const stateful = activeLanes.data?.data.stateful ?? true;
-  const pending = health.isFetching || metrics.isFetching || activeLanes.isFetching;
+  const eventLog = useOperatorEventLog(
+    undefined,
+    session.status === "success" ? session.data : undefined
+  );
+  const snapshot = metrics.status === "success" ? metrics.data.data.snapshot : null;
+  const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
+  const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
+  const activity = queryActivity(health, metrics, activeLanes);
+  const pending = activity.blocking;
   const dataError = firstQueryError(health.error, metrics.error, activeLanes.error);
 
   return (
@@ -437,9 +469,11 @@ function OverviewPage(): React.ReactElement {
       description="Current Oracle connection, active MCP clients, governed activity, and service counters."
     >
       <div className="space-y-4">
+        <BackgroundRefreshStatus refreshing={activity.refreshing} />
         <OverviewServiceStatus
-          health={health.data?.data ?? null}
+          health={health.status === "success" ? health.data.data : null}
           lanes={lanes}
+          lanesStatus={activeLanes.status}
           stateful={stateful}
           snapshot={snapshot}
           pending={pending}
@@ -450,14 +484,21 @@ function OverviewPage(): React.ReactElement {
         <OverviewMetricTiles
           snapshot={snapshot}
           lanes={lanes}
+          lanesStatus={activeLanes.status}
+          metricsStatus={metrics.status}
           stateful={stateful}
           pending={pending}
         />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.15fr)_minmax(360px,0.85fr)]">
-          <LaneMetricsPanel snapshot={snapshot} lanes={lanes} stateful={stateful} />
+          <LaneMetricsPanel
+            snapshot={snapshot}
+            lanes={lanes}
+            stateful={stateful}
+            available={metrics.status === "success" && activeLanes.status === "success"}
+          />
           <OverviewReviewsPanel
             proposals={reviews.data?.data.proposals ?? []}
-            pending={reviews.isFetching}
+            pending={reviews.isPending}
             error={reviews.error}
           />
         </div>
@@ -473,6 +514,7 @@ function OverviewPage(): React.ReactElement {
 function OverviewServiceStatus({
   health,
   lanes,
+  lanesStatus,
   stateful,
   snapshot,
   pending,
@@ -481,6 +523,7 @@ function OverviewServiceStatus({
 }: {
   health: OperatorHealthData | null;
   lanes: ActiveLane[];
+  lanesStatus: "pending" | "error" | "success";
   stateful: boolean;
   snapshot: MetricsSnapshot | null;
   pending: boolean;
@@ -507,7 +550,7 @@ function OverviewServiceStatus({
         />
         <CapacityFact
           label={stateful ? "Active agent sessions" : "Connection mode"}
-          value={stateful ? lanes.length : "direct (stateless)"}
+          value={stateful ? authoritativeMetric(lanesStatus, lanes.length) : "direct (stateless)"}
         />
         <CapacityFact
           label="Open pool connections"
@@ -523,14 +566,49 @@ function OverviewServiceStatus({
 }
 
 function SessionsPage(): React.ReactElement {
+  const { lane = "", generation } = useSearch({ from: sessionsRoute.id });
+  const activeLanes = useQuery({
+    queryKey: ["active-lanes"],
+    queryFn: fetchActiveLanes,
+    refetchInterval: 5_000
+  });
+  const exactLane = activeLanes.status === "success"
+    ? activeLanes.data.data.lanes.find((item) => item.lane_id === lane && item.generation === generation)
+    : undefined;
+  return <SessionsWorkspace key={exactLane ? JSON.stringify([lane, generation]) : "no-active-lane"} />;
+}
+
+export function combinedQueryStatus(
+  ...statuses: DashboardQueryStatus[]
+): DashboardQueryStatus {
+  if (statuses.includes("error")) {
+    return "error";
+  }
+  return statuses.includes("pending") ? "pending" : "success";
+}
+
+export function sessionAuthorityQueriesReady(
+  metricsStatus: DashboardQueryStatus,
+  capabilitiesStatus: DashboardQueryStatus,
+  connectionStatus: DashboardQueryStatus
+): boolean {
+  return combinedQueryStatus(metricsStatus, capabilitiesStatus, connectionStatus) === "success";
+}
+
+function SessionsWorkspace(): React.ReactElement {
   // The selected lane lives in the URL so an operator can hand a colleague a
   // link to the exact lane they are looking at, and so reload/back keep it.
-  const { lane: selectedLaneId = "" } = useSearch({ from: sessionsRoute.id });
+  const { lane: selectedLaneId = "", generation: selectedLaneGeneration } = useSearch({
+    from: sessionsRoute.id
+  });
   const navigate = useNavigate({ from: sessionsRoute.id });
-  const setSelectedLaneId = React.useCallback(
-    (laneId: string) => {
+  const setSelectedLane = React.useCallback(
+    (identity: LaneIdentity | null) => {
       void navigate({
-        search: { lane: laneId || undefined },
+        search: {
+          lane: identity?.laneId,
+          generation: identity?.generation
+        },
         replace: true
       });
     },
@@ -540,8 +618,9 @@ function SessionsPage(): React.ReactElement {
   const [ttlSeconds, setTtlSeconds] = React.useState(900);
   const [confirm, setConfirm] = React.useState("");
   const [lastResult, setLastResult] = React.useState<SessionLevelResult | null>(null);
-  const [cancelNotice, setCancelNotice] = React.useState<string | null>(null);
-  const [pendingCancelLaneId, setPendingCancelLaneId] = React.useState<string | null>(null);
+  const [cancelNotice, setCancelNotice] = React.useState<LaneCancelNotice | null>(null);
+  const [pendingCancelLane, setPendingCancelLane] = React.useState<LaneIdentity | null>(null);
+  const elevationRequestGeneration = React.useRef(0);
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -559,74 +638,168 @@ function SessionsPage(): React.ReactElement {
     queryFn: fetchOperatorMetrics,
     refetchInterval: 5_000
   });
-  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
-  const selectedLane = lanes.find((lane) => lane.lane_id === selectedLaneId) ?? lanes[0] ?? null;
+  const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
+  const serverMode = authoritativeServerMode(activeLanes.status, activeLanes.data);
+  const requestedLane = selectedLaneId && selectedLaneGeneration !== undefined
+    ? { laneId: selectedLaneId, generation: selectedLaneGeneration }
+    : null;
+  const selection = reconcileLaneSelection(requestedLane, selectedLaneId, lanes);
+  const selectedLane = selection.identity
+    ? lanes.find(
+        (lane) =>
+          lane.lane_id === selection.identity?.laneId &&
+          lane.generation === selection.identity.generation
+      ) ?? null
+    : null;
   const selectedLaneKey = selectedLane?.lane_id ?? "";
-  const eventLog = useOperatorEventLog(selectedLaneKey || "operator");
+  const selectedLaneTarget = selectedLane ? laneIdentity(selectedLane) : undefined;
+  const invalidateElevationDraft = React.useCallback(() => {
+    elevationRequestGeneration.current += 1;
+    setConfirm("");
+    setLastResult(null);
+  }, []);
+  const sessionAuthority = dashboardAuthorityIdentity(
+    session.status === "success" ? session.data : undefined
+  );
+  const purgeSessionAuthorityState = React.useCallback(() => {
+    invalidateElevationDraft();
+    setCancelNotice(null);
+    setPendingCancelLane(null);
+  }, [invalidateElevationDraft]);
+  useDashboardAuthorityPurge(sessionAuthority, purgeSessionAuthorityState);
+  const currentElevationBindingRef = React.useRef<
+    Omit<ElevationRequestBinding, "requestGeneration"> | null
+  >(null);
+  React.useLayoutEffect(() => {
+    currentElevationBindingRef.current = selectedLane
+      ? { lane: laneIdentity(selectedLane), targetLevel, ttlSeconds }
+      : null;
+  }, [selectedLane, targetLevel, ttlSeconds]);
+  const eventLog = useOperatorEventLog(
+    selectedLaneTarget,
+    session.status === "success" ? session.data : undefined
+  );
   const selectedCapabilities = useQuery({
-    queryKey: ["sessions", "capabilities", selectedLaneKey],
-    queryFn: async () => {
-      if (!session.data || !selectedLaneKey) {
+    queryKey: [
+      "sessions",
+      "capabilities",
+      selectedLaneTarget?.laneId ?? "none",
+      selectedLaneTarget?.generation ?? 0
+    ],
+    queryFn: async ({ signal }) => {
+      if (!session.data || !selectedLaneTarget) {
         throw new Error("dashboard session is not ready");
       }
-      return fetchLaneCapabilities(session.data, selectedLaneKey);
+      return fetchLaneCapabilities(session.data, selectedLaneTarget, { signal });
     },
-    enabled: session.status === "success" && Boolean(selectedLaneKey),
+    enabled: session.status === "success" && Boolean(selectedLaneTarget),
     refetchInterval: 10_000,
     retry: 1
   });
   const selectedConnection = useQuery({
-    queryKey: ["sessions", "connection", selectedLaneKey],
-    queryFn: async () => {
-      if (!session.data || !selectedLaneKey) {
+    queryKey: [
+      "sessions",
+      "connection",
+      selectedLaneTarget?.laneId ?? "none",
+      selectedLaneTarget?.generation ?? 0
+    ],
+    queryFn: async ({ signal }) => {
+      if (!session.data || !selectedLaneTarget) {
         throw new Error("dashboard session is not ready");
       }
-      return fetchExplorerConnection(session.data, selectedLaneKey);
+      return fetchExplorerConnection(session.data, selectedLaneTarget, { signal });
     },
-    enabled: session.status === "success" && Boolean(selectedLaneKey),
+    enabled: session.status === "success" && Boolean(selectedLaneTarget),
     refetchInterval: 10_000,
     retry: 1
   });
-
-  // No auto-select effect: `selectedLane` above already falls back to the first
-  // lane for display, so mirroring that into the URL would put a lane the
-  // operator never chose into a link they might share.
+  const metricsData = authoritativeMetricsData(metrics.status, metrics.data);
+  const selectedCapabilitiesData = authoritativeQueryData(
+    selectedCapabilities.status,
+    selectedCapabilities.data
+  );
+  const selectedConnectionData = authoritativeQueryData(
+    selectedConnection.status,
+    selectedConnection.data
+  );
+  const authorityQueriesReady = sessionAuthorityQueriesReady(
+    metrics.status,
+    selectedCapabilities.status,
+    selectedConnection.status
+  );
+  React.useEffect(() => {
+    if (
+      metrics.status === "error" ||
+      selectedCapabilities.status === "error" ||
+      selectedConnection.status === "error"
+    ) {
+      invalidateElevationDraft();
+    }
+  }, [
+    invalidateElevationDraft,
+    metrics.status,
+    selectedCapabilities.status,
+    selectedConnection.status
+  ]);
 
   const levelMutation = useMutation({
-    mutationFn: async (action: SessionLevelControlAction) => {
-      if (!session.data) {
+    mutationFn: async (request: SessionLevelMutationRequest) => {
+      if (!session.data || !sessionAuthority || request.authority !== sessionAuthority) {
         throw new Error("dashboard session is not ready");
       }
-      const laneId = selectedLane?.lane_id ?? selectedLaneId.trim();
-      if (!laneId) {
-        throw new Error("select an active lane");
-      }
       return setSessionLevel(session.data, {
-        laneId,
-        level: targetLevel,
-        ttlSeconds,
-        confirm,
-        action
+        lane: request.lane,
+        level: request.targetLevel as OperatingLevel,
+        ttlSeconds: request.ttlSeconds,
+        confirm: request.confirm,
+        action: request.action
       });
     },
-    onSuccess: (response, action) => {
-      const outcome = decodeOperatorOutcome(200, response);
-      setLastResult({ state: outcome.state, action, response, outcome });
-      const nextConfirm = confirmationFromResponse(response);
-      if (action === "preview") {
-        setConfirm(nextConfirm ?? "");
-      } else if (action === "apply" || action === "drop") {
-        setConfirm("");
+    onSuccess: (response, request) => {
+      if (request.authority !== sessionAuthority) {
+        return;
       }
       queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
       queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
-      queryClient.invalidateQueries({ queryKey: ["sessions", "capabilities", selectedLaneKey] });
+      queryClient.invalidateQueries({
+        queryKey: [
+          "sessions",
+          "capabilities",
+          request.lane.laneId,
+          request.lane.generation
+        ]
+      });
+      if (!elevationCompletionIsCurrent(
+        request,
+        currentElevationBindingRef.current,
+        elevationRequestGeneration.current
+      )) {
+        return;
+      }
+      const outcome = decodeOperatorOutcome(200, response);
+      setLastResult({ state: outcome.state, action: request.action, response, outcome });
+      const nextConfirm = confirmationFromResponse(response);
+      if (request.action === "preview") {
+        setConfirm(nextConfirm ?? "");
+      } else {
+        setConfirm("");
+      }
     },
-    onError: (error, action) => {
+    onError: (error, request) => {
+      if (request.authority !== sessionAuthority) {
+        return;
+      }
+      if (!elevationCompletionIsCurrent(
+        request,
+        currentElevationBindingRef.current,
+        elevationRequestGeneration.current
+      )) {
+        return;
+      }
       const outcome = operatorOutcomeFromError(error, "session level action failed");
       setLastResult({
         state: outcome.state,
-        action,
+        action: request.action,
         response: operatorResponseFromError<WorkbenchActionData>(error),
         outcome
       });
@@ -637,71 +810,106 @@ function SessionsPage(): React.ReactElement {
   // derives the Subject from the transport principal — the browser never supplies
   // it); the confirm here only guards against an accidental click.
   const cancelMutation = useMutation({
-    mutationFn: async (laneId: string) => {
-      if (!session.data) {
+    mutationFn: async ({
+      lane,
+      authority: requestAuthority
+    }: {
+      lane: LaneIdentity;
+      authority: string;
+    }) => {
+      if (!session.data || !sessionAuthority || requestAuthority !== sessionAuthority) {
         throw new Error("dashboard session is not ready");
       }
-      return cancelLane(session.data, laneId);
+      return cancelLane(session.data, lane);
     },
-    onSuccess: (_response, laneId) => {
-      setCancelNotice(`lane ${laneId} cancelled`);
+    onSuccess: (_response, { lane, authority: requestAuthority }) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
+      setCancelNotice(laneCancelSuccess(lane.laneId));
       queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
       queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
     },
-    onError: (error) => {
-      setCancelNotice(error instanceof Error ? error.message : "lane cancel failed");
+    onError: (error, { authority: requestAuthority }) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
+      setCancelNotice(laneCancelFailure(error));
     }
   });
 
   // Ask through the console's own dialog rather than window.confirm, so the
   // prompt is styled, focus-managed, and assertable like every other gate.
-  const requestCancelLane = (laneId: string): void => {
-    if (!laneId) {
-      return;
-    }
-    setPendingCancelLaneId(laneId);
+  const requestCancelLane = (lane: LaneIdentity): void => {
+    setPendingCancelLane(lane);
   };
 
   const confirmCancelLane = (): void => {
-    const laneId = pendingCancelLaneId;
-    setPendingCancelLaneId(null);
-    if (!laneId) {
+    const lane = pendingCancelLane;
+    setPendingCancelLane(null);
+    if (!lane) {
+      return;
+    }
+    if (!lanes.some((item) => sameLaneIdentity(laneIdentity(item), lane))) {
+      setCancelNotice(laneCancelFailure(new Error("session identity changed; review the list and retry")));
       return;
     }
     setCancelNotice(null);
-    cancelMutation.mutate(laneId);
+    cancelMutation.mutate({ lane, authority: sessionAuthority ?? "" });
   };
 
   const sessionTone =
     session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
-  const canAct = session.status === "success" && Boolean(selectedLane) && !levelMutation.isPending;
-  const pending =
-    activeLanes.isFetching ||
-    metrics.isFetching ||
-    session.isFetching ||
-    selectedCapabilities.isFetching ||
-    selectedConnection.isFetching ||
-    levelMutation.isPending;
-  const snapshot = metrics.data?.data.snapshot ?? null;
-  const summary = overviewSummary(snapshot, lanes);
-  const laneRows = sessionLaneRows(
-    snapshot,
-    lanes,
-    selectedLaneKey,
-    selectedCapabilities.data,
-    selectedConnection.data
+  const canAct =
+    session.status === "success" &&
+    activeLanes.status === "success" &&
+    authorityQueriesReady &&
+    Boolean(selectedLane) &&
+    !levelMutation.isPending;
+  const activity = queryActivity(
+    activeLanes,
+    metrics,
+    session,
+    selectedCapabilities,
+    selectedConnection
   );
+  const pending = activity.blocking || levelMutation.isPending;
+  const snapshot = metricsData?.snapshot ?? null;
+  const summary = overviewSummary(snapshot, lanes);
+  const laneRowsStatus = combinedQueryStatus(activeLanes.status, metrics.status);
+  const laneRows = laneRowsStatus === "success"
+    ? sessionLaneRows(
+        snapshot,
+        lanes,
+        selectedLaneKey,
+        selectedCapabilitiesData,
+        selectedConnectionData
+      )
+    : [];
   const selectedDetail = selectedLaneDetail(
     selectedLane,
     laneRows,
-    selectedCapabilities.data,
-    selectedConnection.data,
-    selectedCapabilities.error instanceof Error ? selectedCapabilities.error.message : null,
-    selectedConnection.error instanceof Error ? selectedConnection.error.message : null,
+    selectedCapabilitiesData,
+    selectedConnectionData,
+    metrics.error instanceof Error
+      ? metrics.error.message
+      : metrics.status === "success"
+        ? null
+        : "session metrics are unavailable",
+    selectedCapabilities.error instanceof Error
+      ? selectedCapabilities.error.message
+      : selectedCapabilities.status === "success"
+        ? null
+        : "session capabilities are unavailable",
+    selectedConnection.error instanceof Error
+      ? selectedConnection.error.message
+      : selectedConnection.status === "success"
+        ? null
+        : "database connection details are unavailable",
     eventLog.events
   );
 
-  if (activeLanes.data?.data.stateful === false) {
+  if (serverMode === false) {
     return (
       <PageFrame
         title="Agent sessions"
@@ -724,7 +932,24 @@ function SessionsPage(): React.ReactElement {
       description="Inspect active client sessions, their database profile, and temporary permission level."
     >
       <div className="space-y-4">
-        {pendingCancelLaneId ? (
+        <BackgroundRefreshStatus refreshing={activity.refreshing} />
+        {activeLanes.error instanceof Error ? (
+          <QueryErrorNotice
+            title="Agent sessions are unavailable"
+            error={activeLanes.error}
+            retryLabel="Retry sessions"
+            onRetry={() => void activeLanes.refetch()}
+          />
+        ) : null}
+        {metrics.error instanceof Error ? (
+          <QueryErrorNotice
+            title="Session metrics are unavailable"
+            error={metrics.error}
+            retryLabel="Retry metrics"
+            onRetry={() => void metrics.refetch()}
+          />
+        ) : null}
+        {pendingCancelLane ? (
           <ConfirmDialog
             id="lane-cancel"
             title="End agent session"
@@ -732,35 +957,37 @@ function SessionsPage(): React.ReactElement {
               <>
                 End session{" "}
                 <span className="font-mono font-semibold text-[var(--om-text-bright)]">
-                  {pendingCancelLaneId}
+                  {pendingCancelLane.laneId}
                 </span>
                 ? This closes its Oracle connection and revokes temporary grants.
               </>
             }
             confirmLabel="End session"
             busy={cancelMutation.isPending}
-            onCancel={() => setPendingCancelLaneId(null)}
+            onCancel={() => setPendingCancelLane(null)}
             onConfirm={confirmCancelLane}
           />
         ) : null}
         <SessionMissionHeader
           summary={summary}
           eventStatus={eventLog.status}
-          source={activeLanes.data?.data.source ?? "unavailable"}
+          source={authoritativeQueryData(activeLanes.status, activeLanes.data)?.data.source ?? "unavailable"}
           pending={pending}
+          lanesStatus={activeLanes.status}
+          metricsStatus={metrics.status === "success" && !snapshot ? "error" : metrics.status}
         />
         <div className="grid gap-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.9fr)]">
           <SessionLaneTable
             rows={laneRows}
-            selectedLaneId={selectedLane?.lane_id ?? selectedLaneId}
+            selectedLaneId={selectedLane?.lane_id ?? ""}
+            state={collectionViewState(laneRowsStatus, laneRows.length)}
             pending={pending}
-            onSelect={(laneId) => {
-              setConfirm("");
-              setLastResult(null);
-              setSelectedLaneId(laneId);
+            onSelect={(identity) => {
+              invalidateElevationDraft();
+              setSelectedLane(identity);
             }}
             onCancel={requestCancelLane}
-            cancelPendingLaneId={cancelMutation.isPending ? cancelMutation.variables ?? null : null}
+            cancelPendingLaneId={cancelMutation.isPending ? cancelMutation.variables?.lane.laneId ?? null : null}
             cancelNotice={cancelNotice}
           />
           <div className="space-y-4">
@@ -775,20 +1002,30 @@ function SessionsPage(): React.ReactElement {
               targetLevel={targetLevel}
               ttlSeconds={ttlSeconds}
               onLevelChange={(level) => {
-                setConfirm("");
-                setLastResult(null);
+                invalidateElevationDraft();
                 setTargetLevel(level);
               }}
               onTtlChange={(ttl) => {
-                setConfirm("");
-                setLastResult(null);
+                invalidateElevationDraft();
                 setTtlSeconds(ttl);
               }}
               onAction={(action) => {
+                const binding = currentElevationBindingRef.current;
+                if (!binding) {
+                  return;
+                }
+                const requestGeneration = elevationRequestGeneration.current + 1;
+                elevationRequestGeneration.current = requestGeneration;
                 if (action === "preview") {
                   setConfirm("");
                 }
-                levelMutation.mutate(action);
+                levelMutation.mutate({
+                  ...binding,
+                  action,
+                  confirm,
+                  authority: sessionAuthority ?? "",
+                  requestGeneration
+                });
               }}
             />
           </div>
@@ -800,6 +1037,12 @@ function SessionsPage(): React.ReactElement {
 }
 
 type SessionLevelControlAction = "preview" | "apply" | "drop";
+
+type SessionLevelMutationRequest = ElevationRequestBinding & {
+  action: SessionLevelControlAction;
+  confirm: string;
+  authority: string;
+};
 
 type SessionLevelResult = {
   state: OperatorOutcomeState;
@@ -837,10 +1080,10 @@ type SessionLaneDetail = {
   serverVersion: string;
   databaseRole: string;
   openMode: string;
-  requests: number;
-  blocked: number;
-  meanLatencyMs: number;
-  maxLatencyMs: number;
+  requests: number | null;
+  blocked: number | null;
+  meanLatencyMs: number | null;
+  maxLatencyMs: number | null;
   lastEvent: string;
   detailState: string;
 };
@@ -857,12 +1100,16 @@ function SessionMissionHeader({
   summary,
   eventStatus,
   source,
-  pending
+  pending,
+  lanesStatus,
+  metricsStatus
 }: {
   summary: OverviewSummary;
   eventStatus: EventStreamStatus;
   source: string;
   pending: boolean;
+  lanesStatus: "pending" | "error" | "success";
+  metricsStatus: "pending" | "error" | "success";
 }): React.ReactElement {
   return (
       <Surface className="overflow-hidden" aria-busy={pending}>
@@ -870,13 +1117,13 @@ function SessionMissionHeader({
           icon={Radio}
           title="Active agent sessions"
           meta={pending ? "checking" : source}
-          tone={pending ? "info" : summary.activeLanes > 0 ? "ok" : "off"}
+          tone={lanesStatus === "error" ? "warn" : pending ? "info" : summary.activeLanes > 0 ? "ok" : "off"}
         />
         <div className="grid gap-3 p-4 sm:grid-cols-2 xl:grid-cols-5">
-          <CapacityFact label="Sessions" value={summary.activeLanes} />
-          <CapacityFact label="Requests since start" value={summary.totalRequests} />
-          <CapacityFact label="Policy refusals since start" value={summary.blocked} />
-          <CapacityFact label="Errors since start" value={summary.errors} />
+          <CapacityFact label="Sessions" value={authoritativeMetric(lanesStatus, summary.activeLanes)} />
+          <CapacityFact label="Requests since start" value={authoritativeMetric(metricsStatus, summary.totalRequests)} />
+          <CapacityFact label="Policy refusals since start" value={authoritativeMetric(metricsStatus, summary.blocked)} />
+          <CapacityFact label="Errors since start" value={authoritativeMetric(metricsStatus, summary.errors)} />
           <CapacityFact label="Live updates" value={eventStatus} mono />
         </div>
       </Surface>
@@ -886,6 +1133,7 @@ function SessionMissionHeader({
 function SessionLaneTable({
   rows,
   selectedLaneId,
+  state,
   pending,
   onSelect,
   onCancel,
@@ -894,27 +1142,31 @@ function SessionLaneTable({
 }: {
   rows: SessionLaneRow[];
   selectedLaneId: string;
+  state: CollectionViewState;
   pending: boolean;
-  onSelect: (laneId: string) => void;
-  onCancel: (laneId: string) => void;
+  onSelect: (identity: LaneIdentity) => void;
+  onCancel: (identity: LaneIdentity) => void;
   cancelPendingLaneId: string | null;
-  cancelNotice: string | null;
+  cancelNotice: LaneCancelNotice | null;
 }): React.ReactElement {
   return (
-    <ConsolePanel>
+      <ConsolePanel>
       <ConsolePanelHeader
         icon={Database}
         title="Active agent sessions"
-        meta={pending ? "checking" : `${rows.length} sessions`}
-        tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
+        meta={state === "unavailable" ? "unavailable" : pending ? "checking" : `${rows.length} sessions`}
+        tone={state === "unavailable" ? "warn" : pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {cancelNotice ? (
         <p
-          className="border-b border-[var(--om-border)] px-4 py-2 font-mono text-xs text-[var(--om-text-muted)]"
-          role="status"
+          className={cn(
+            "border-b border-[var(--om-border)] px-4 py-2 font-mono text-xs",
+            cancelNotice.kind === "error" ? "text-[var(--om-rust)]" : "text-[var(--om-text-muted)]"
+          )}
+          role={cancelNotice.kind === "error" ? "alert" : "status"}
           aria-live="polite"
         >
-          {cancelNotice}
+          {cancelNotice.message}
         </p>
       ) : null}
       <div
@@ -936,13 +1188,17 @@ function SessionLaneTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--om-border)]">
-            {rows.length === 0 ? (
+            {state !== "ready" ? (
               <tr>
                 <td
                   className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]"
                   colSpan={6}
                 >
-                  No active agent sessions. Connect an MCP client to begin.
+                  {state === "unavailable"
+                    ? "Agent sessions are unavailable. Retry the sessions request."
+                    : state === "pending"
+                      ? "Loading agent sessions…"
+                      : "No active agent sessions. Connect an MCP client to begin."}
                 </td>
               </tr>
             ) : (
@@ -950,7 +1206,7 @@ function SessionLaneTable({
                 const selected = row.laneId === selectedLaneId;
                 return (
                   <tr
-                    key={`${row.laneId}:${row.subjectIdHash}`}
+                    key={`${row.laneId}:${row.generation}`}
                     className={
                       selected
                         ? "bg-[color-mix(in_srgb,var(--om-gold)_12%,transparent)]"
@@ -1001,7 +1257,7 @@ function SessionLaneTable({
                           variant={selected ? "primary" : "secondary"}
                           aria-label={`View details for session ${row.laneId}`}
                           aria-pressed={selected}
-                          onClick={() => onSelect(row.laneId)}
+                          onClick={() => onSelect({ laneId: row.laneId, generation: row.generation })}
                         >
                           <SlidersHorizontal className="size-4" aria-hidden="true" />
                           View details
@@ -1013,7 +1269,7 @@ function SessionLaneTable({
                           disabled={!row.active || cancelPendingLaneId === row.laneId}
                           title="End this agent session"
                           aria-label={`${cancelPendingLaneId === row.laneId ? "Ending" : "End"} session ${row.laneId}`}
-                          onClick={() => onCancel(row.laneId)}
+                          onClick={() => onCancel({ laneId: row.laneId, generation: row.generation })}
                         >
                           <Ban className="size-4" aria-hidden="true" />
                           {cancelPendingLaneId === row.laneId ? "Ending…" : "End session"}
@@ -1036,13 +1292,14 @@ function SessionLaneDetailPanel({
 }: {
   detail: SessionLaneDetail | null;
 }): React.ReactElement {
+  const unavailable = Boolean(detail && detail.detailState !== "none");
   return (
     <ConsolePanel>
       <ConsolePanelHeader
         icon={Activity}
         title="Session details"
         meta={detail?.laneId ?? "no session"}
-        tone={detail ? "ok" : "off"}
+        tone={unavailable ? "warn" : detail ? "ok" : "off"}
       />
       <div className="grid gap-3 p-4 sm:grid-cols-2">
         <ConsoleFact label="Session" value={detail?.laneId ?? "none"} mono />
@@ -1058,10 +1315,18 @@ function SessionLaneDetailPanel({
         <ConsoleFact label="Server" value={detail?.serverVersion ?? "unknown"} mono />
         <ConsoleFact label="Role" value={detail?.databaseRole ?? "unknown"} mono />
         <ConsoleFact label="Open Mode" value={detail?.openMode ?? "unknown"} mono />
-        <ConsoleFact label="Requests" value={detail?.requests ?? 0} />
-        <ConsoleFact label="Blocked" value={detail?.blocked ?? 0} />
-        <ConsoleFact label="Mean Latency" value={`${Math.round(detail?.meanLatencyMs ?? 0)} ms`} mono />
-        <ConsoleFact label="Max Latency" value={`${Math.round(detail?.maxLatencyMs ?? 0)} ms`} mono />
+        <ConsoleFact label="Requests" value={detail?.requests ?? "unavailable"} />
+        <ConsoleFact label="Blocked" value={detail?.blocked ?? "unavailable"} />
+        <ConsoleFact
+          label="Mean Latency"
+          value={detail?.meanLatencyMs == null ? "unavailable" : `${Math.round(detail.meanLatencyMs)} ms`}
+          mono
+        />
+        <ConsoleFact
+          label="Max Latency"
+          value={detail?.maxLatencyMs == null ? "unavailable" : `${Math.round(detail.maxLatencyMs)} ms`}
+          mono
+        />
         <ConsoleFact label="Last Event" value={detail?.lastEvent ?? "none"} mono />
         <ConsoleFact label="Detail status" value={detail?.detailState ?? "unknown"} mono />
       </div>
@@ -1173,32 +1438,11 @@ function SessionLevelControlPanel({
   );
 }
 
-// Client-side elevation countdown: a successful non-preview grant with a TTL
-// opens a bounded window; we anchor its expiry at the moment the applied result
-// lands and tick it down once a second. When it lapses the panel reads HOLD FOR
-// GO — the grant is single-use/TTL-bounded and the server re-classifies at
-// apply (SEC-1), so a lapsed client clock never implies retained authority.
 function ElevationCountdown({ summary }: { summary: SessionLevelSummary }): React.ReactElement | null {
-  const ttl = Number.parseInt(summary.ttlSeconds, 10);
-  const applied =
-    summary.preview === "false" && summary.action !== "drop" && Number.isFinite(ttl) && ttl > 0;
-  const signature = `${summary.action}:${summary.confirm}:${summary.ttlSeconds}:${summary.targetLevel}`;
-  const [expiryMs, setExpiryMs] = React.useState<number | null>(null);
-  const [now, setNow] = React.useState<number>(() => Date.now());
-  React.useEffect(() => {
-    setExpiryMs(applied ? Date.now() + ttl * 1_000 : null);
-  }, [signature, applied, ttl]);
-  React.useEffect(() => {
-    if (expiryMs === null) {
-      return;
-    }
-    const id = window.setInterval(() => setNow(Date.now()), 1_000);
-    return () => window.clearInterval(id);
-  }, [expiryMs]);
-  if (!applied || expiryMs === null) {
+  const remainingSec = useAbsoluteExpiryCountdown(summary.elevationExpiresUnix, () => undefined);
+  if (remainingSec === null) {
     return null;
   }
-  const remainingSec = Math.max(0, Math.ceil((expiryMs - now) / 1_000));
   const live = remainingSec > 0;
   const minutes = Math.floor(remainingSec / 60);
   const seconds = remainingSec % 60;
@@ -1229,17 +1473,6 @@ function ElevationCountdown({ summary }: { summary: SessionLevelSummary }): Reac
     </div>
   );
 }
-
-type SessionLevelSummary = {
-  action: string;
-  preview: string;
-  targetLevel: string;
-  ttlSeconds: string;
-  currentLevel: string;
-  profileCeiling: string;
-  gateDecision: string;
-  confirm: string;
-};
 
 function SessionLevelSummaryPanel({
   summary
@@ -1281,40 +1514,72 @@ function HealthPage(): React.ReactElement {
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
-  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
-  const stateful = activeLanes.data?.data.stateful ?? true;
-  const connectionReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
+  const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
+  const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
+  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const connectionLane = selectedLane ? laneIdentity(selectedLane) : undefined;
+  const connectionReady =
+    activeLanes.status === "success" && (!stateful || Boolean(connectionLane));
   React.useEffect(() => {
     if (stateful && !laneId && lanes.length === 1) {
       setLaneId(lanes[0].lane_id);
     }
   }, [laneId, lanes, stateful]);
   const connection = useQuery({
-    queryKey: ["health", "connection", stateful ? laneId : "stateless"],
-    queryFn: async () => {
+    queryKey: [
+      "health",
+      "connection",
+      connectionLane?.laneId ?? "stateless",
+      connectionLane?.generation ?? 0
+    ],
+    queryFn: async ({ signal }) => {
       if (!session.data) {
         throw new Error("dashboard session is not ready");
       }
-      return fetchExplorerConnection(session.data, laneId || undefined);
+      return fetchExplorerConnection(session.data, connectionLane, { signal });
     },
     enabled: session.status === "success" && connectionReady,
     refetchInterval: 10_000,
     retry: 1
   });
+  const connectionStatus =
+    activeLanes.status === "error" || session.status === "error" ? "error" : connection.status;
   const model = connectionHealthModel(
     health.data?.data ?? null,
     metrics.data?.data.snapshot ?? null,
     connection.data,
-    connection.error instanceof Error
-      ? connection.error.message
-      : activeLanes.error instanceof Error
-        ? activeLanes.error.message
-      : session.error instanceof Error
-        ? session.error.message
-        : null
+    {
+      health: {
+        availability: sourceAvailability(health.status, Boolean(health.data), health.isStale),
+        error: health.error instanceof Error ? health.error.message : null
+      },
+      metrics: {
+        availability: sourceAvailability(
+          metrics.status,
+          Boolean(metrics.data?.data.snapshot),
+          metrics.isStale
+        ),
+        error: metrics.error instanceof Error ? metrics.error.message : null
+      },
+      connection: {
+        availability: sourceAvailability(
+          connectionStatus,
+          Boolean(connection.data),
+          connection.isStale
+        ),
+        error:
+          connection.error instanceof Error
+            ? connection.error.message
+            : activeLanes.error instanceof Error
+              ? activeLanes.error.message
+              : session.error instanceof Error
+                ? session.error.message
+                : null
+      }
+    }
   );
-  const pending =
-    health.isFetching || metrics.isFetching || activeLanes.isFetching || connection.isFetching;
+  const activity = queryActivity(health, metrics, activeLanes, connection);
+  const pending = activity.blocking;
 
   return (
     <PageFrame
@@ -1323,6 +1588,7 @@ function HealthPage(): React.ReactElement {
       description="See whether the server is ready, which database profile is connected, and where connection time is being spent."
     >
       <div className="space-y-4">
+        <BackgroundRefreshStatus refreshing={activity.refreshing} />
         <ConsolePanel className="p-4">
           {stateful ? (
             <label className="block max-w-xl">
@@ -1331,16 +1597,16 @@ function HealthPage(): React.ReactElement {
                 className={cn(OM_INPUT, "font-mono")}
                 value={laneId}
                 onChange={(event) => setLaneId(event.target.value)}
-                disabled={activeLanes.isFetching || lanes.length === 0}
+                disabled={activeLanes.isPending || lanes.length === 0}
               >
                 <option value="">Select a session</option>
                 {lanes.map((lane) => (
-                  <option key={lane.lane_id} value={lane.lane_id}>
+                  <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
                     {lane.lane_id}
                   </option>
                 ))}
               </select>
-              {lanes.length === 0 && !activeLanes.isFetching ? (
+              {lanes.length === 0 && activeLanes.status === "success" ? (
                 <span className="mt-2 block text-sm text-[var(--om-text-muted)]">
                   Connect an MCP client to inspect its session profile. Service readiness remains visible below.
                 </span>
@@ -1366,48 +1632,6 @@ function HealthPage(): React.ReactElement {
   );
 }
 
-type ConnectionHealthSourceRow = {
-  key: string;
-  source: string;
-  status: string;
-  detail: string;
-};
-
-type ConnectionNativeInfo = {
-  source: string;
-  connected: boolean;
-  activeProfile: string;
-  strategy: string;
-  serverVersion: string;
-  databaseRole: string;
-  openMode: string;
-  standby: string;
-  writePosture: string;
-  readOnlyReason: string;
-  poolOpenConnections: number | null;
-  error: string;
-};
-
-type ConnectionHealthUiModel = {
-  readiness: {
-    liveness: string;
-    readiness: string;
-    live: boolean;
-    ready: boolean;
-    dbReachable: boolean;
-    draining: boolean;
-  };
-  pool: {
-    active: number;
-    waitMeanMs: number;
-    waitMaxMs: number;
-    queryMeanMs: number;
-    queryMaxMs: number;
-  };
-  db: ConnectionNativeInfo;
-  sources: ConnectionHealthSourceRow[];
-};
-
 function HealthStatusTiles({
   model,
   pending
@@ -1415,38 +1639,40 @@ function HealthStatusTiles({
   model: ConnectionHealthUiModel;
   pending: boolean;
 }): React.ReactElement {
+  const readinessCurrent = model.readiness.availability === "available";
+  const dbCurrent = model.dbAvailability === "available";
   return (
     <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="connection health">
       <HealthStatusTile
         icon={Activity}
         label="Liveness"
-        value={model.readiness.liveness}
-        meta={model.readiness.live ? "live" : "not live"}
-        tone={model.readiness.live ? "ok" : "warn"}
+        value={healthFact(model.readiness.availability, model.readiness.liveness)}
+        meta={readinessCurrent ? (model.readiness.live ? "live" : "not live") : model.readiness.availability}
+        tone={readinessCurrent && model.readiness.live ? "ok" : "warn"}
         pending={pending}
       />
       <HealthStatusTile
         icon={CheckCircle2}
         label="Readiness"
-        value={model.readiness.readiness}
-        meta={model.readiness.ready ? "ready" : "unavailable"}
-        tone={model.readiness.ready ? "ok" : "warn"}
+        value={healthFact(model.readiness.availability, model.readiness.readiness)}
+        meta={readinessCurrent ? (model.readiness.ready ? "ready" : "unavailable") : model.readiness.availability}
+        tone={readinessCurrent && model.readiness.ready ? "ok" : "warn"}
         pending={pending}
       />
       <HealthStatusTile
         icon={Database}
         label="Oracle database"
-        value={model.db.connected ? "connected" : "degraded"}
-        meta={model.db.source}
-        tone={model.db.connected ? "ok" : "info"}
+        value={healthFact(model.dbAvailability, model.db.connected ? "connected" : "degraded")}
+        meta={dbCurrent ? model.db.source : model.dbAvailability}
+        tone={dbCurrent && model.db.connected ? "ok" : "info"}
         pending={pending}
       />
       <HealthStatusTile
         icon={ShieldCheck}
         label="Database write mode"
-        value={model.db.writePosture}
-        meta={model.db.openMode}
-        tone={model.db.writePosture === "database_read_only" ? "ok" : "info"}
+        value={healthFact(model.dbAvailability, model.db.writePosture)}
+        meta={healthFact(model.dbAvailability, model.db.openMode)}
+        tone={dbCurrent && model.db.writePosture === "database_read_only" ? "ok" : "info"}
         pending={pending}
       />
     </section>
@@ -1454,63 +1680,88 @@ function HealthStatusTiles({
 }
 
 function ServiceReadinessPanel({ model }: { model: ConnectionHealthUiModel }): React.ReactElement {
+  const current = model.readiness.availability === "available";
   return (
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={Activity}
         title="Service Readiness"
-        meta={model.readiness.ready ? "ready" : "unavailable"}
-        tone={model.readiness.ready ? "ok" : "warn"}
+        meta={current ? (model.readiness.ready ? "ready" : "unavailable") : model.readiness.availability}
+        tone={current && model.readiness.ready ? "ok" : "warn"}
       />
       <div className="grid gap-3 p-4 sm:grid-cols-2">
-        <CapacityFact label="Liveness" value={model.readiness.liveness} mono />
-        <CapacityFact label="Readiness" value={model.readiness.readiness} mono />
-        <CapacityFact label="DB reachable" value={model.readiness.dbReachable ? "true" : "false"} mono />
-        <CapacityFact label="Draining" value={model.readiness.draining ? "true" : "false"} mono />
+        <CapacityFact label="Liveness" value={healthFact(model.readiness.availability, model.readiness.liveness)} mono />
+        <CapacityFact label="Readiness" value={healthFact(model.readiness.availability, model.readiness.readiness)} mono />
+        <CapacityFact label="DB reachable" value={healthFact(model.readiness.availability, model.readiness.dbReachable ? "true" : "false")} mono />
+        <CapacityFact label="Draining" value={healthFact(model.readiness.availability, model.readiness.draining ? "true" : "false")} mono />
       </div>
     </Surface>
   );
 }
 
 function DbNativeStatusPanel({ model }: { model: ConnectionHealthUiModel }): React.ReactElement {
+  const current = model.dbAvailability === "available";
   return (
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={Database}
         title="DB Native Status"
-        meta={model.db.connected ? model.db.activeProfile : model.db.source}
-        tone={model.db.connected ? "ok" : "info"}
+        meta={current ? (model.db.connected ? model.db.activeProfile : model.db.source) : model.dbAvailability}
+        tone={current && model.db.connected ? "ok" : "info"}
       />
       <div className="grid gap-3 p-4 sm:grid-cols-3">
-        <CapacityFact label="Role" value={model.db.databaseRole} mono />
-        <CapacityFact label="Open mode" value={model.db.openMode} mono />
-        <CapacityFact label="Standby" value={model.db.standby} mono />
-        <CapacityFact label="Strategy" value={model.db.strategy} mono />
-        <CapacityFact label="Pool open" value={model.db.poolOpenConnections ?? "unavailable"} />
-        <CapacityFact label="Server" value={model.db.serverVersion} mono />
-        <CapacityFact label="Profile" value={model.db.activeProfile} mono />
-        <CapacityFact label="Read-only" value={model.db.readOnlyReason} mono />
+        <CapacityFact label="Role" value={healthFact(model.dbAvailability, model.db.databaseRole)} mono />
+        <CapacityFact label="Open mode" value={healthFact(model.dbAvailability, model.db.openMode)} mono />
+        <CapacityFact label="Standby" value={healthFact(model.dbAvailability, model.db.standby)} mono />
+        <CapacityFact label="Strategy" value={healthFact(model.dbAvailability, model.db.strategy)} mono />
+        <CapacityFact label="Pool open" value={healthFact(model.dbAvailability, model.db.poolOpenConnections ?? "unavailable")} />
+        <CapacityFact label="Server" value={healthFact(model.dbAvailability, model.db.serverVersion)} mono />
+        <CapacityFact label="Profile" value={healthFact(model.dbAvailability, model.db.activeProfile)} mono />
+        <CapacityFact label="Read-only" value={healthFact(model.dbAvailability, model.db.readOnlyReason)} mono />
         <CapacityFact label="Error" value={model.db.error} mono />
       </div>
     </Surface>
   );
 }
 
+function healthFact(
+  availability: "pending" | "available" | "stale" | "unavailable",
+  value: string | number
+): string {
+  if (availability === "pending") {
+    return "checking";
+  }
+  if (availability === "unavailable") {
+    return "unavailable";
+  }
+  return availability === "stale" ? `${value} (stale)` : String(value);
+}
+
+function formatHealthMetric(
+  value: number | null,
+  availability: "pending" | "available" | "stale" | "unavailable",
+  suffix = ""
+): string {
+  return value === null ? healthFact(availability, "unavailable") : healthFact(availability, `${formatNumber(value)}${suffix}`);
+}
+
 function PoolLatencyPanel({ model }: { model: ConnectionHealthUiModel }): React.ReactElement {
+  const metricsAvailable = model.pool.active !== null;
+  const metricsCurrent = model.pool.availability === "available";
   return (
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={Timer}
         title="Pool And Latency"
-        meta={`${formatNumber(model.pool.active)} active`}
-        tone={model.pool.waitMeanMs > 500 || model.pool.queryMeanMs > 500 ? "warn" : "ok"}
+        meta={metricsCurrent && metricsAvailable ? `${formatNumber(model.pool.active ?? 0)} active` : model.pool.availability}
+        tone={!metricsCurrent || !metricsAvailable || (model.pool.waitMeanMs ?? 0) > 500 || (model.pool.queryMeanMs ?? 0) > 500 ? "warn" : "ok"}
       />
       <div className="grid gap-3 p-4 sm:grid-cols-2">
-        <CapacityFact label="Pool active" value={model.pool.active} />
-        <CapacityFact label="Pool wait avg" value={`${formatNumber(model.pool.waitMeanMs)}ms`} mono />
-        <CapacityFact label="Pool wait max" value={`${formatNumber(model.pool.waitMaxMs)}ms`} mono />
-        <CapacityFact label="Query avg" value={`${formatNumber(model.pool.queryMeanMs)}ms`} mono />
-        <CapacityFact label="Query max" value={`${formatNumber(model.pool.queryMaxMs)}ms`} mono />
+        <CapacityFact label="Pool active" value={formatHealthMetric(model.pool.active, model.pool.availability)} />
+        <CapacityFact label="Pool wait avg" value={formatHealthMetric(model.pool.waitMeanMs, model.pool.availability, "ms")} mono />
+        <CapacityFact label="Pool wait max" value={formatHealthMetric(model.pool.waitMaxMs, model.pool.availability, "ms")} mono />
+        <CapacityFact label="Query avg" value={formatHealthMetric(model.pool.queryMeanMs, model.pool.availability, "ms")} mono />
+        <CapacityFact label="Query max" value={formatHealthMetric(model.pool.queryMaxMs, model.pool.availability, "ms")} mono />
       </div>
     </Surface>
   );
@@ -1527,7 +1778,7 @@ function HealthSourcePanel({
         icon={Gauge}
         title="Health Sources"
         meta={`${rows.length} sources`}
-        tone={rows.some((row) => row.status === "monitoring_unavailable") ? "info" : "ok"}
+        tone={rows.some((row) => row.status !== "applied") ? "warn" : "ok"}
       />
       <div className="overflow-x-auto" role="region" aria-label="Health data sources" tabIndex={0}>
         <table className="w-full min-w-[680px] border-collapse text-left">
@@ -1588,6 +1839,13 @@ function HealthStatusTile({
   );
 }
 
+export function authoritativeMetricsData(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<OperatorMetricsData> | undefined
+): OperatorMetricsData | null {
+  return authoritativeQueryData(status, response)?.data ?? null;
+}
+
 function CapacityPage(): React.ReactElement {
   const metrics = useQuery({
     queryKey: ["operator-metrics"],
@@ -1599,10 +1857,12 @@ function CapacityPage(): React.ReactElement {
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
-  const snapshot = metrics.data?.data.snapshot ?? null;
-  const capacity = metrics.data?.data.capacity ?? null;
-  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
-  const pending = metrics.isFetching || activeLanes.isFetching;
+  const metricsData = authoritativeMetricsData(metrics.status, metrics.data);
+  const snapshot = metricsData?.snapshot ?? null;
+  const capacity = metricsData?.capacity ?? null;
+  const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
+  const activity = queryActivity(metrics, activeLanes);
+  const pending = activity.blocking;
   const model = capacity ? capacityModel(capacity, snapshot, lanes) : null;
   const error = firstQueryError(metrics.error, activeLanes.error);
 
@@ -1614,6 +1874,7 @@ function CapacityPage(): React.ReactElement {
     >
       {model ? (
         <div className="space-y-4">
+          <BackgroundRefreshStatus refreshing={activity.refreshing} />
           {error ? <QueryErrorNotice title="Some resource-limit data is unavailable" error={error} /> : null}
           <CapacityMetricTiles model={model} pending={pending} />
           <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
@@ -1781,6 +2042,13 @@ function ProfileCard({
   );
 }
 
+export function authoritativeProfileReachability(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<OperatorHealthData> | undefined
+): boolean | undefined {
+  return authoritativeQueryData(status, response)?.data.readiness?.db_reachable;
+}
+
 // Profile cards (Appendix G, net-new surface): one Carved Light card per
 // connection profile — reachability, ceiling ramp, posture, read-only-standby —
 // fed from the live /operator/v1/config profile metadata plus /operator/v1/health
@@ -1789,17 +2057,17 @@ function ProfileCard({
 function ProfileCards(): React.ReactElement {
   const config = useQuery({
     queryKey: ["operator-config"],
-    queryFn: fetchOperatorConfig,
-    refetchInterval: 10_000
+    queryFn: fetchOperatorConfig
   });
   const health = useQuery({
     queryKey: ["operator-health"],
     queryFn: fetchOperatorHealth,
     refetchInterval: 5_000
   });
-  const profiles = config.data?.data.status.profiles ?? [];
-  const dbReachable = health.data?.data.readiness?.db_reachable;
-  const source = config.data?.data.source ?? "unavailable";
+  const configData = authoritativeQueryData(config.status, config.data)?.data;
+  const profiles = configData?.status.profiles ?? [];
+  const dbReachable = authoritativeProfileReachability(health.status, health.data);
+  const source = configData?.source ?? "unavailable";
   return (
     <section aria-label="connection profiles" className="space-y-3">
       <div className="flex items-center justify-between gap-3">
@@ -1813,11 +2081,26 @@ function ProfileCards(): React.ReactElement {
           {config.isError ? "blocked" : config.data ? source : "sync"}
         </Badge>
       </div>
-      {profiles.length === 0 ? (
+      {health.error instanceof Error ? (
+        <QueryErrorNotice
+          title="Default profile reachability is unavailable"
+          error={health.error}
+          retryLabel="Retry reachability"
+          onRetry={() => void health.refetch()}
+        />
+      ) : null}
+      {config.isError ? (
+        <QueryErrorNotice
+          title="Connection profiles are unavailable"
+          error={config.error instanceof Error ? config.error : new Error("profile request failed")}
+          retryLabel="Retry profiles"
+          onRetry={() => void config.refetch()}
+        />
+      ) : profiles.length === 0 ? (
         <div className="rounded-lg border border-dashed border-[var(--om-border)] bg-[var(--om-surface)] p-6 text-center">
           <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">NO PROFILES</p>
           <p className="mt-1 text-sm text-[var(--om-text-muted)]">
-            {config.isFetching ? "syncing" : "none configured"}
+            {config.isPending ? "syncing" : "none configured"}
           </p>
         </div>
       ) : (
@@ -1852,37 +2135,68 @@ function ConfigPage(): React.ReactElement {
     refetchInterval: 60_000,
     retry: 1
   });
+  const sessionAuthority = dashboardAuthorityIdentity(
+    session.status === "success" ? session.data : undefined
+  );
   const config = useQuery({
     queryKey: ["operator-config"],
-    queryFn: fetchOperatorConfig,
-    refetchInterval: 10_000
+    queryFn: fetchOperatorConfig
   });
   const status = config.data?.data ?? null;
-  const activePreview = preview;
+  const authority = configurationAuthority(config.status, session.status);
+  const previewRemaining = useAbsoluteExpiryCountdown(
+    preview?.preview_expires_unix ?? null,
+    () => {
+      setPreview(null);
+      setPreviewConfirmed(false);
+      setLastError("Configuration preview expired. Preview the current draft again.");
+    }
+  );
+  const activePreview = previewRemaining === 0 ? null : preview;
   const previewMutation = useMutation({
-    mutationFn: async () => {
-      if (!session.data) {
-        throw new Error("dashboard session is not ready");
+    mutationFn: async (requestAuthority: string) => {
+      if (
+        !session.data ||
+        !config.data ||
+        !sessionAuthority ||
+        requestAuthority !== sessionAuthority
+      ) {
+        throw new Error("authoritative configuration state is not ready");
       }
       return previewConfigDraft(session.data, draftToml);
     },
-    onSuccess: (response) => {
+    onSuccess: (response, requestAuthority) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
+      if (!absoluteExpiryIsActive(response.data.preview.preview_expires_unix)) {
+        setPreview(null);
+        setPreviewConfirmed(false);
+        setLastError("Configuration preview expired before it arrived. Preview again.");
+        return;
+      }
       setPreview(response.data.preview);
       setPreviewConfirmed(false);
       setApplyOutcome(null);
       setLastError(null);
     },
-    onError: (error) => {
+    onError: (error, requestAuthority) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setLastError(error instanceof Error ? error.message : "preview failed");
     }
   });
   const applyMutation = useMutation({
-    mutationFn: async () => {
-      if (!session.data) {
+    mutationFn: async (requestAuthority: string) => {
+      if (!session.data || !sessionAuthority || requestAuthority !== sessionAuthority) {
         throw new Error("dashboard session is not ready");
       }
       if (!activePreview) {
         throw new Error("preview the exact draft before applying");
+      }
+      if (!absoluteExpiryIsActive(activePreview.preview_expires_unix)) {
+        throw new Error("configuration preview expired; preview the current draft again");
       }
       return applyConfigDraft(
         session.data,
@@ -1892,7 +2206,10 @@ function ConfigPage(): React.ReactElement {
         previewConfirmed
       );
     },
-    onSuccess: (response) => {
+    onSuccess: (response, requestAuthority) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setApplyOutcome(response.data);
       setAppliedDraft(draftToml);
       setPreview(null);
@@ -1900,19 +2217,31 @@ function ConfigPage(): React.ReactElement {
       setLastError(null);
       queryClient.invalidateQueries({ queryKey: ["operator-config"] });
     },
-    onError: (error) => {
+    onError: (error, requestAuthority) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setLastError(error instanceof Error ? error.message : "apply failed");
     }
   });
 
   const rollbackMutation = useMutation({
-    mutationFn: async (rollbackId: string) => {
-      if (!session.data) {
+    mutationFn: async ({
+      rollbackId,
+      authority: requestAuthority
+    }: {
+      rollbackId: string;
+      authority: string;
+    }) => {
+      if (!session.data || !sessionAuthority || requestAuthority !== sessionAuthority) {
         throw new Error("dashboard session is not ready");
       }
       return rollbackConfigDraft(session.data, rollbackId);
     },
-    onSuccess: () => {
+    onSuccess: (_response, { authority: requestAuthority }) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setApplyOutcome(null);
       setAppliedDraft("");
       setPreview(null);
@@ -1920,11 +2249,25 @@ function ConfigPage(): React.ReactElement {
       setLastError(null);
       queryClient.invalidateQueries({ queryKey: ["operator-config"] });
     },
-    onError: (error) => {
+    onError: (error, { authority: requestAuthority }) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setLastError(error instanceof Error ? error.message : "rollback failed");
     }
   });
-  const canSubmit = draftToml.trim().length > 0 && session.status === "success";
+  const purgeConfigAuthorityState = React.useCallback(() => {
+    setPreview(null);
+    setPreviewConfirmed(false);
+    setApplyOutcome(null);
+    setRollbackPending(false);
+    setLastError(null);
+    previewMutation.reset();
+    applyMutation.reset();
+    rollbackMutation.reset();
+  }, [applyMutation.reset, previewMutation.reset, rollbackMutation.reset]);
+  useDashboardAuthorityPurge(sessionAuthority, purgeConfigAuthorityState);
+  const canSubmit = draftToml.trim().length > 0 && authority.ready;
   const canApply =
     canSubmit &&
     activePreview !== null &&
@@ -1950,13 +2293,29 @@ function ConfigPage(): React.ReactElement {
           />
         ) : null}
         <ProfileCards />
-        <ConfigStatusPanel data={status} pending={config.isFetching} />
+        {config.error instanceof Error ? (
+          <QueryErrorNotice
+            title="Configuration state is unavailable"
+            error={config.error}
+            retryLabel="Retry configuration"
+            onRetry={() => void config.refetch()}
+          />
+        ) : null}
+        {session.error instanceof Error ? (
+          <QueryErrorNotice
+            title="Dashboard authority is unavailable"
+            error={session.error}
+            retryLabel="Retry pairing state"
+            onRetry={() => void session.refetch()}
+          />
+        ) : null}
+        <ConfigStatusPanel data={status} state={config.status} />
         <Surface className="overflow-hidden">
           <PanelHeader
             icon={SlidersHorizontal}
             title="Draft"
-            meta={session.status === "success" ? "session ready" : "session pending"}
-            tone={session.status === "success" ? "ok" : "info"}
+            meta={authority.state === "available" ? "authoritative state loaded" : authority.state}
+            tone={authority.state === "available" ? "ok" : authority.state === "unavailable" ? "warn" : "info"}
           />
           <div className="space-y-3 p-4">
             <textarea
@@ -1969,13 +2328,14 @@ function ConfigPage(): React.ReactElement {
               spellCheck={false}
               className={cn(OM_TEXTAREA, "min-h-72 font-mono leading-6")}
               aria-label="Config draft TOML"
+              disabled={!authority.ready || busy}
             />
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 type="button"
                 variant="secondary"
                 disabled={!canSubmit || busy}
-                onClick={() => previewMutation.mutate()}
+                onClick={() => previewMutation.mutate(sessionAuthority ?? "")}
               >
                 <RefreshCcw className="size-4" aria-hidden="true" />
                 Preview
@@ -1984,7 +2344,7 @@ function ConfigPage(): React.ReactElement {
                 type="button"
                 variant="primary"
                 disabled={!canApply || busy}
-                onClick={() => applyMutation.mutate()}
+                onClick={() => applyMutation.mutate(sessionAuthority ?? "")}
               >
                 <Play className="size-4" aria-hidden="true" />
                 Apply
@@ -1999,6 +2359,11 @@ function ConfigPage(): React.ReactElement {
                   />
                   I reviewed the sensitive change: {activePreview.confirmation_reasons.join(", ")}
                 </label>
+              ) : null}
+              {activePreview && previewRemaining !== null ? (
+                <Badge tone={previewRemaining > 0 ? "info" : "warn"} role="status">
+                  Preview valid for {previewRemaining} seconds
+                </Badge>
               ) : null}
               {applyOutcome ? (
                 <Button
@@ -2029,7 +2394,10 @@ function ConfigPage(): React.ReactElement {
                   onCancel={() => setRollbackPending(false)}
                   onConfirm={() => {
                     setRollbackPending(false);
-                    rollbackMutation.mutate(applyOutcome.outcome.rollback_id);
+                    rollbackMutation.mutate({
+                      rollbackId: applyOutcome.outcome.rollback_id,
+                      authority: sessionAuthority ?? ""
+                    });
                   }}
                 />
               ) : null}
@@ -2052,28 +2420,29 @@ function ConfigPage(): React.ReactElement {
 
 function ConfigStatusPanel({
   data,
-  pending
+  state
 }: {
   data: ConfigOpsStatusData | null;
-  pending: boolean;
+  state: "pending" | "error" | "success";
 }): React.ReactElement {
-  const status = data?.status;
+  const status = state === "success" ? data?.status : undefined;
+  const unavailable = state === "pending" ? "checking" : "unavailable";
   return (
     <Surface className="overflow-hidden">
       <PanelHeader
         icon={Database}
         title="Current Target"
-        meta={status?.target_exists ? "configured" : "new file"}
-        tone={pending ? "info" : status ? "ok" : "warn"}
+        meta={status ? (status.target_exists ? "configured" : "new file") : unavailable}
+        tone={state === "pending" ? "info" : status ? "ok" : "warn"}
       />
       <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-5">
-        <CapacityFact label="Target" value={status?.target_path ?? "unavailable"} mono />
-        <CapacityFact label="Current SHA" value={shortHash(status?.current_sha256 ?? null)} mono />
-        <CapacityFact label="Default" value={status?.default_profile ?? "none"} mono />
-        <CapacityFact label="Profiles" value={status?.profiles.length ?? 0} />
+        <CapacityFact label="Target" value={status?.target_path ?? unavailable} mono />
+        <CapacityFact label="Current SHA" value={status ? shortHash(status.current_sha256) : unavailable} mono />
+        <CapacityFact label="Default" value={status?.default_profile ?? unavailable} mono />
+        <CapacityFact label="Profiles" value={status?.profiles.length ?? unavailable} />
         <CapacityFact
           label="Browser SQL"
-          value={status?.dashboard_workbench ? "enabled" : "disabled"}
+          value={status ? (status.dashboard_workbench ? "enabled" : "disabled") : unavailable}
         />
       </div>
     </Surface>
@@ -2207,6 +2576,13 @@ function ConfigApplyPanel({
   );
 }
 
+export function authoritativeClientCredentials(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<ClientCredentialsData> | undefined
+): ClientCredentialsData | null {
+  return authoritativeQueryData(status, response)?.data ?? null;
+}
+
 function ClientsPage(): React.ReactElement {
   const [rotated, setRotated] = React.useState<ClientCredentialRotateData | null>(null);
   const [lastError, setLastError] = React.useState<string | null>(null);
@@ -2225,12 +2601,12 @@ function ClientsPage(): React.ReactElement {
   });
   const clients = useQuery({
     queryKey: ["client-credentials"],
-    queryFn: fetchClientCredentials,
-    refetchInterval: 10_000
+    queryFn: fetchClientCredentials
   });
   const rotateMutation = useMutation({
+    mutationKey: CLIENT_ROTATION_MUTATION_KEY,
     mutationFn: async (client: ClientCredentialView) => {
-      if (!session.data) {
+      if (session.status !== "success" || !session.data) {
         throw new Error("dashboard session is not ready");
       }
       return rotateClientCredential(session.data, client.client_id);
@@ -2246,9 +2622,35 @@ function ClientsPage(): React.ReactElement {
       setLastError(error instanceof Error ? error.message : "rotate failed");
     }
   });
+  const resetRotation = rotateMutation.reset;
+  const clearRotatedCredential = React.useCallback(() => {
+    setRotated(null);
+    purgeClientRotationMutation(queryClient, resetRotation);
+  }, [resetRotation]);
+  const sessionAuthority = dashboardAuthorityIdentity(
+    session.status === "success" ? session.data : undefined
+  );
+  const priorSessionAuthority = React.useRef<string | null>(null);
+  React.useEffect(() => {
+    const changed = Boolean(
+      priorSessionAuthority.current &&
+      sessionAuthority &&
+      priorSessionAuthority.current !== sessionAuthority
+    );
+    if (session.status !== "success" || changed) {
+      clearRotatedCredential();
+      setPendingAction(null);
+      setTypedClientId("");
+    }
+    priorSessionAuthority.current = sessionAuthority;
+  }, [clearRotatedCredential, session.status, sessionAuthority]);
+  React.useEffect(
+    () => () => purgeClientRotationMutation(queryClient, resetRotation),
+    [resetRotation]
+  );
   const revokeMutation = useMutation({
     mutationFn: async (client: ClientCredentialView) => {
-      if (!session.data) {
+      if (session.status !== "success" || !session.data) {
         throw new Error("dashboard session is not ready");
       }
       return revokeClientCredential(session.data, client.client_id);
@@ -2257,16 +2659,16 @@ function ClientsPage(): React.ReactElement {
       setLastError(null);
       setLastNotice(`Client ${client.client_id} revoked.`);
       setLastWarning(_response.data.durability_warning ?? null);
-      setRotated((current) =>
-        current?.client.client_id === client.client_id ? null : current
-      );
+      clearRotatedCredential();
       queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
     },
     onError: (error) => {
       setLastError(error instanceof Error ? error.message : "revoke failed");
     }
   });
-  const rows = clients.data?.data.clients ?? [];
+  const clientData = authoritativeClientCredentials(clients.status, clients.data);
+  const rows = clientData?.clients ?? [];
+  const clientState = collectionViewState(clients.status, rows.length);
   const busy = rotateMutation.isPending || revokeMutation.isPending;
   const requestAction = (
     kind: ClientCredentialPendingAction["kind"],
@@ -2289,7 +2691,7 @@ function ClientsPage(): React.ReactElement {
     setPendingAction(null);
     setTypedClientId("");
     if (action.kind === "rotate") {
-      setRotated(null);
+      clearRotatedCredential();
       rotateMutation.mutate(action.client);
     } else {
       revokeMutation.mutate(action.client);
@@ -2303,13 +2705,21 @@ function ClientsPage(): React.ReactElement {
       description="Rotate or revoke credentials used by MCP clients that connect to this server."
     >
       <div className="space-y-4">
+        {clients.error instanceof Error ? (
+          <QueryErrorNotice
+            title="Client inventory is unavailable"
+            error={clients.error}
+            retryLabel="Retry clients"
+            onRetry={() => void clients.refetch()}
+          />
+        ) : null}
         <ClientCredentialSummary
           rows={rows}
-          pending={clients.isFetching}
-          source={clients.data?.data.source ?? (clients.isError ? "unavailable" : "pending")}
+          state={clientState}
+          source={clientData?.source ?? (clients.isError ? "unavailable" : "pending")}
         />
         {rotated ? (
-          <ClientCredentialBearerPanel rotated={rotated} onDismiss={() => setRotated(null)} />
+          <ClientCredentialBearerPanel rotated={rotated} onDismiss={clearRotatedCredential} />
         ) : null}
         {pendingAction ? (
           <ClientCredentialConfirmationDialog
@@ -2327,7 +2737,7 @@ function ClientsPage(): React.ReactElement {
         <ClientCredentialTable
           rows={rows}
           sessionReady={session.status === "success"}
-          pending={clients.isFetching}
+          state={clientState}
           busy={busy}
           rotatingClientId={rotateMutation.variables?.client_id ?? null}
           revokingClientId={revokeMutation.variables?.client_id ?? null}
@@ -2340,9 +2750,9 @@ function ClientsPage(): React.ReactElement {
             Credential change completed, but durability needs review: {lastWarning}
           </Badge>
         ) : null}
-        {lastError || clients.isError ? (
+        {lastError ? (
           <Badge tone="warn" role="alert" className="max-w-full whitespace-normal break-all">
-            {lastError ?? (clients.error instanceof Error ? clients.error.message : "client credentials unavailable")}
+            {lastError}
           </Badge>
         ) : null}
       </div>
@@ -2352,22 +2762,25 @@ function ClientsPage(): React.ReactElement {
 
 function ClientCredentialSummary({
   rows,
-  pending,
+  state,
   source
 }: {
   rows: ClientCredentialView[];
-  pending: boolean;
+  state: CollectionViewState;
   source: string;
 }): React.ReactElement {
   const active = rows.filter((client) => client.status === "active").length;
   const revoked = rows.filter((client) => client.status === "revoked").length;
   const used = rows.filter((client) => Boolean(client.last_used_at)).length;
+  const value = (count: number): number | string =>
+    state === "unavailable" ? "unavailable" : state === "pending" ? "checking" : count;
+  const pending = state === "pending";
   return (
     <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="client credentials">
-      <MetricTile icon={KeyRound} label="Registered" value={rows.length} suffix="" tone={rows.length > 0 ? "ok" : "off"} pending={pending} />
-      <MetricTile icon={ShieldCheck} label="Active" value={active} suffix="" tone={active > 0 ? "ok" : "off"} pending={pending} />
-      <MetricTile icon={Ban} label="Revoked" value={revoked} suffix="" tone={revoked > 0 ? "warn" : "ok"} pending={pending} />
-      <MetricTile icon={Wifi} label="Used" value={used} suffix="" tone={source === "client_credentials" ? "info" : "off"} pending={pending} />
+      <MetricTile icon={KeyRound} label="Registered" value={value(rows.length)} suffix="" tone={rows.length > 0 ? "ok" : "off"} pending={pending} />
+      <MetricTile icon={ShieldCheck} label="Active" value={value(active)} suffix="" tone={active > 0 ? "ok" : "off"} pending={pending} />
+      <MetricTile icon={Ban} label="Revoked" value={value(revoked)} suffix="" tone={revoked > 0 ? "warn" : "ok"} pending={pending} />
+      <MetricTile icon={Wifi} label="Used" value={value(used)} suffix="" tone={source === "client_credentials" ? "info" : "off"} pending={pending} />
     </section>
   );
 }
@@ -2688,7 +3101,7 @@ function ClientCredentialConfirmationDialog({
 function ClientCredentialTable({
   rows,
   sessionReady,
-  pending,
+  state,
   busy,
   rotatingClientId,
   revokingClientId,
@@ -2697,7 +3110,7 @@ function ClientCredentialTable({
 }: {
   rows: ClientCredentialView[];
   sessionReady: boolean;
-  pending: boolean;
+  state: CollectionViewState;
   busy: boolean;
   rotatingClientId: string | null;
   revokingClientId: string | null;
@@ -2709,8 +3122,8 @@ function ClientCredentialTable({
       <PanelHeader
         icon={Users}
         title="Registered Clients"
-        meta={`${rows.length} clients`}
-        tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
+        meta={state === "unavailable" ? "unavailable" : state === "pending" ? "checking" : `${rows.length} clients`}
+        tone={state === "unavailable" ? "warn" : state === "pending" ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       <div className="overflow-x-auto" role="region" aria-label="Registered MCP clients" tabIndex={0}>
         <table className="w-full min-w-[940px] border-collapse text-left">
@@ -2727,10 +3140,14 @@ function ClientCredentialTable({
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--om-border)]">
-            {rows.length === 0 ? (
+            {state !== "ready" ? (
               <tr>
                 <td className="px-4 py-4 text-sm text-[var(--om-text-muted)]" colSpan={7}>
-                  No registered clients
+                  {state === "unavailable"
+                    ? "Client inventory is unavailable. Retry the client request."
+                    : state === "pending"
+                      ? "Loading registered clients…"
+                      : "No registered clients"}
                 </td>
               </tr>
             ) : (
@@ -3120,52 +3537,49 @@ function CapacityFact({
   );
 }
 
-type EventStreamStatus = "connecting" | "live" | "reconnecting" | "closed";
-
-function useOperatorEventLog(laneId: string): {
+function useOperatorEventLog(
+  lane: OperatorLaneTarget | undefined,
+  session?: DashboardSession
+): {
   status: EventStreamStatus;
   events: OperatorEventEnvelope[];
 } {
-  const [status, setStatus] = React.useState<EventStreamStatus>("connecting");
-  const [events, setEvents] = React.useState<OperatorEventEnvelope[]>([]);
+  const streamKey = JSON.stringify([
+    lane?.laneId ?? "operator",
+    lane?.generation ?? null,
+    dashboardAuthorityIdentity(session)
+  ]);
+  const [streamStatus, setStreamStatus] = React.useState<{
+    streamKey: string;
+    status: EventStreamStatus;
+  }>({ streamKey, status: "closed" });
+  const [eventLog, setEventLog] = React.useState<{
+    streamKey: string;
+    events: OperatorEventEnvelope[];
+  }>({ streamKey, events: [] });
+  const status = streamStatus.streamKey === streamKey ? streamStatus.status : "closed";
+  const events = eventLog.streamKey === streamKey ? eventLog.events : [];
 
   React.useEffect(() => {
-    let mounted = true;
-    setStatus("connecting");
-    setEvents([]);
-    const source = new EventSource(
-      `/operator/v1/events?lane_id=${encodeURIComponent(laneId)}`,
-      { withCredentials: true }
-    );
-    const handleEvent = (message: MessageEvent<string>): void => {
-      const parsed = parseOperatorEvent(message.data);
-      if (!mounted || !parsed) {
-        return;
+    return startOperatorEventStream({
+      lane,
+      session,
+      onStatus: (nextStatus) => setStreamStatus({ streamKey, status: nextStatus }),
+      onEvent: (parsed) => {
+        setEventLog((current) => ({
+          streamKey,
+          events: [
+            parsed,
+            ...(current.streamKey === streamKey ? current.events : [])
+          ].slice(0, 24)
+        }));
+      },
+      onInvalidate: () => {
+        void queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
+        void queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
       }
-      setStatus("live");
-      setEvents((current) => [parsed, ...current].slice(0, 24));
-      queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
-      queryClient.invalidateQueries({ queryKey: ["active-lanes"] });
-    };
-    const handleSnapshot = handleEvent as EventListener;
-    source.addEventListener("operator.snapshot", handleSnapshot);
-    source.addEventListener("operator.stream_gap", handleSnapshot);
-    source.onmessage = handleEvent;
-    source.onerror = () => {
-      if (!mounted) {
-        return;
-      }
-      setStatus(source.readyState === EventSource.CLOSED ? "closed" : "reconnecting");
-    };
-    return () => {
-      mounted = false;
-      source.removeEventListener("operator.snapshot", handleSnapshot);
-      source.removeEventListener("operator.stream_gap", handleSnapshot);
-      source.onmessage = null;
-      source.onerror = null;
-      source.close();
-    };
-  }, [laneId]);
+    });
+  }, [lane?.generation, lane?.laneId, session, streamKey]);
 
   return { status, events };
 }
@@ -3173,11 +3587,15 @@ function useOperatorEventLog(laneId: string): {
 function OverviewMetricTiles({
   snapshot,
   lanes,
+  lanesStatus,
+  metricsStatus,
   stateful,
   pending
 }: {
   snapshot: MetricsSnapshot | null;
   lanes: ActiveLane[];
+  lanesStatus: "pending" | "error" | "success";
+  metricsStatus: "pending" | "error" | "success";
   stateful: boolean;
   pending: boolean;
 }): React.ReactElement {
@@ -3188,16 +3606,16 @@ function OverviewMetricTiles({
         <MetricTile
           icon={Users}
           label="Active agent sessions"
-          value={summary.activeLanes}
+          value={authoritativeMetric(lanesStatus, summary.activeLanes)}
           suffix=""
-          tone={summary.activeLanes > 0 ? "ok" : "off"}
+          tone={lanesStatus === "success" && summary.activeLanes > 0 ? "ok" : "off"}
           pending={pending}
         />
       ) : null}
       <MetricTile
         icon={BarChart3}
         label="Tool calls since start"
-        value={snapshot ? summary.totalRequests : "unavailable"}
+        value={authoritativeMetric(metricsStatus, snapshot ? summary.totalRequests : null)}
         suffix=""
         tone={snapshot ? "info" : "off"}
         pending={pending}
@@ -3339,11 +3757,13 @@ function MetricTile({
 function LaneMetricsPanel({
   snapshot,
   lanes,
-  stateful
+  stateful,
+  available
 }: {
   snapshot: MetricsSnapshot | null;
   lanes: ActiveLane[];
   stateful: boolean;
+  available: boolean;
 }): React.ReactElement {
   const rows = laneMetricRows(snapshot, lanes);
   return (
@@ -3370,7 +3790,9 @@ function LaneMetricsPanel({
             {rows.length === 0 ? (
               <tr>
                 <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={5}>
-                  {stateful
+                  {!available
+                    ? "Agent session activity is unavailable."
+                    : stateful
                     ? "No active agent sessions. Connect an MCP client to begin."
                     : "Per-session activity is available only when stateful HTTP is enabled."}
                 </td>
@@ -3739,132 +4161,6 @@ type LaneMetricRow = {
   active: boolean;
 };
 
-function connectionHealthModel(
-  health: OperatorHealthData | null,
-  snapshot: MetricsSnapshot | null,
-  connection: OperatorResponse<WorkbenchActionData> | undefined,
-  connectionError: string | null
-): ConnectionHealthUiModel {
-  const db = nativeConnectionInfo(connection, connectionError);
-  const live = health?.liveness?.live === true;
-  const ready = health?.readiness?.ready === true;
-  const dbReachable = health?.readiness?.db_reachable === true;
-  const draining = health?.readiness?.draining === true;
-  const sources: ConnectionHealthSourceRow[] = [
-    {
-      key: "operator-health",
-      source: "/operator/v1/health",
-      status: health ? "applied" : "monitoring_unavailable",
-      detail: health?.readiness?.status ?? "health endpoint has not returned"
-    },
-    {
-      key: "metrics",
-      source: "/operator/v1/metrics",
-      status: snapshot ? "applied" : "monitoring_unavailable",
-      detail: snapshot ? "pool and latency gauges available" : "metrics snapshot unavailable"
-    },
-    {
-      key: "db-native",
-      source: "oracle_connection_info",
-      status: db.connected ? "applied" : "monitoring_unavailable",
-      detail: db.connected ? "redacted lane self-check available" : db.error
-    },
-    {
-      key: "write-posture",
-      source: "write_posture",
-      status: db.writePosture === "monitoring_unavailable" ? "monitoring_unavailable" : "applied",
-      detail:
-        db.writePosture === "monitoring_unavailable"
-          ? "privilege posture is not surfaced by connection_info"
-          : db.writePosture
-    }
-  ];
-
-  return {
-    readiness: {
-      liveness: health?.liveness?.status ?? "unavailable",
-      readiness: health?.readiness?.status ?? "unavailable",
-      live,
-      ready,
-      dbReachable,
-      draining
-    },
-    pool: {
-      active: snapshot?.pool_active_connections ?? 0,
-      waitMeanMs: Math.round(snapshot?.pool_wait_ms.mean ?? 0),
-      waitMaxMs: snapshot?.pool_wait_ms.max ?? 0,
-      queryMeanMs: Math.round(snapshot?.query_duration_ms.mean ?? 0),
-      queryMaxMs: snapshot?.query_duration_ms.max ?? 0
-    },
-    db,
-    sources
-  };
-}
-
-function nativeConnectionInfo(
-  response: OperatorResponse<WorkbenchActionData> | undefined,
-  connectionError: string | null
-): ConnectionNativeInfo {
-  const unavailable = (error: string): ConnectionNativeInfo => ({
-    source: "monitoring_unavailable",
-    connected: false,
-    activeProfile: "unavailable",
-    strategy: "monitoring_unavailable",
-    serverVersion: "monitoring_unavailable",
-    databaseRole: "monitoring_unavailable",
-    openMode: "monitoring_unavailable",
-    standby: "monitoring_unavailable",
-    writePosture: "monitoring_unavailable",
-    readOnlyReason: "monitoring_unavailable",
-    poolOpenConnections: null,
-    error
-  });
-
-  if (!response) {
-    return unavailable(connectionError ?? "connection self-check pending");
-  }
-  const result = mcpResult(response.data.mcp_response);
-  if (!isRecord(result)) {
-    return unavailable(connectionError ?? "connection self-check returned no structured content");
-  }
-  const activeProfile = stringField(result, "active_profile", "unprofiled");
-  if (result["connected"] !== true) {
-    const errorClass = nestedString(result, ["connection_error", "error_class"]);
-    const message = nestedString(result, ["connection_error", "message"]);
-    return {
-      ...unavailable(message ?? connectionError ?? "connection self-check degraded"),
-      activeProfile,
-      error: errorClass ?? message ?? connectionError ?? "connection self-check degraded"
-    };
-  }
-
-  const connection = isRecord(result["connection"]) ? result["connection"] : {};
-  const databaseRole = stringField(connection, "database_role", "monitoring_unavailable");
-  const openMode = stringField(connection, "open_mode", "monitoring_unavailable");
-  const readOnly = connection["read_only"] === true;
-  const readOnlyReason = readOnly
-    ? stringField(connection, "read_only_reason", "read_only")
-    : "none";
-  const roleKnown =
-    databaseRole !== "monitoring_unavailable" || openMode !== "monitoring_unavailable";
-  const poolOpenConnections = numberField(connection, "pool_open_connections");
-
-  return {
-    source: "lane_self_check",
-    connected: true,
-    activeProfile,
-    strategy: stringField(connection, "connection_strategy", "single_session"),
-    serverVersion: stringField(connection, "server_version", "monitoring_unavailable"),
-    databaseRole,
-    openMode,
-    standby: readOnly ? readOnlyReason : roleKnown ? "no" : "monitoring_unavailable",
-    writePosture: readOnly ? "database_read_only" : "monitoring_unavailable",
-    readOnlyReason,
-    poolOpenConnections,
-    error: "none"
-  };
-}
-
 function capacityModel(
   capacity: OperatorCapacityData | null,
   snapshot: MetricsSnapshot | null,
@@ -4041,6 +4337,7 @@ function selectedLaneDetail(
   rows: SessionLaneRow[],
   capabilities: OperatorResponse<WorkbenchActionData> | undefined,
   connection: OperatorResponse<WorkbenchActionData> | undefined,
+  metricsError: string | null,
   capabilitiesError: string | null,
   connectionError: string | null,
   events: OperatorEventEnvelope[]
@@ -4068,12 +4365,12 @@ function selectedLaneDetail(
     serverVersion: db.serverVersion,
     databaseRole: db.databaseRole,
     openMode: db.openMode,
-    requests: row?.requests ?? 0,
-    blocked: row?.blocked ?? 0,
-    meanLatencyMs: row?.meanLatencyMs ?? 0,
-    maxLatencyMs: row?.maxLatencyMs ?? 0,
+    requests: row?.requests ?? null,
+    blocked: row?.blocked ?? null,
+    meanLatencyMs: row?.meanLatencyMs ?? null,
+    maxLatencyMs: row?.maxLatencyMs ?? null,
     lastEvent: events[0]?.event_type ?? "none",
-    detailState: capabilitiesError ?? connectionError ?? db.error
+    detailState: metricsError ?? capabilitiesError ?? connectionError ?? db.error
   };
 }
 
@@ -4154,29 +4451,6 @@ function atCapacityCountFromSnapshot(snapshot: MetricsSnapshot | null): number {
   return sumCounts((snapshot?.requests ?? []).filter((row) => row.status === "at_capacity"));
 }
 
-function parseOperatorEvent(raw: string): OperatorEventEnvelope | null {
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (!isRecord(parsed)) {
-      return null;
-    }
-    if (
-      parsed["protocol_version"] !== "operator.v1" ||
-      typeof parsed["event_id"] !== "string" ||
-      typeof parsed["event_seq"] !== "number" ||
-      typeof parsed["lane_id"] !== "string" ||
-      typeof parsed["subject_id_hash"] !== "string" ||
-      typeof parsed["event_type"] !== "string" ||
-      !isRecord(parsed["data"])
-    ) {
-      return null;
-    }
-    return parsed as OperatorEventEnvelope;
-  } catch {
-    return null;
-  }
-}
-
 function eventMetric(event: OperatorEventEnvelope, key: string): unknown {
   return event.data[key];
 }
@@ -4254,6 +4528,7 @@ function limitStatusTone(status: string): "neutral" | "ok" | "warn" | "off" | "i
       return "info";
     case "rejected":
     case "error":
+    case "stale":
       return "warn";
     default:
       return "neutral";
@@ -4262,15 +4537,6 @@ function limitStatusTone(status: string): "neutral" | "ok" | "warn" | "off" | "i
 
 function formatOptionalNumber(value: number | undefined): string {
   return typeof value === "number" && Number.isFinite(value) ? formatNumber(value) : "";
-}
-
-function stringField(
-  record: Record<string, unknown>,
-  key: string,
-  fallback: string
-): string {
-  const value = record[key];
-  return typeof value === "string" && value.trim().length > 0 ? value : fallback;
 }
 
 function numberField(record: Record<string, unknown>, key: string): number | null {
@@ -4383,7 +4649,7 @@ export type ExplorerObjectRow = {
   raw: Record<string, unknown>;
 };
 
-type ExplorerSourceHitRow = {
+export type ExplorerSourceHitRow = {
   owner: string;
   name: string;
   objectType: string;
@@ -4392,12 +4658,29 @@ type ExplorerSourceHitRow = {
   raw: Record<string, unknown>;
 };
 
-type ExplorerGlobalSearchRequest = {
-  needle: string;
-  includeObjects: boolean;
-  includeSource: boolean;
-  allSchemas: boolean;
-  sourceType: string;
+export type ExplorerGlobalSearchRequest = {
+  readonly needle: string;
+  readonly includeObjects: boolean;
+  readonly includeSource: boolean;
+  readonly allSchemas: boolean;
+  readonly sourceType: string;
+  readonly owner: string;
+  readonly maxRows: number;
+};
+
+export type ExplorerRowsDecode<T> = {
+  rows: T[];
+  invalidCount: number;
+};
+
+type ExplorerDetailRequest = {
+  kind: "ddl" | "source";
+  ref: ExplorerObjectRef;
+  lane?: OperatorLaneTarget;
+  cacheKey: ExplorerMetadataCacheKey;
+  maxChars: number;
+  requestGeneration: number;
+  identity: string;
 };
 
 type ExplorerDetailResult =
@@ -4408,18 +4691,54 @@ type ExplorerDetailResult =
       response: OperatorResponse<WorkbenchActionData>;
       cacheStatus: ExplorerCacheStatus;
       bytes: number;
+      requestGeneration: number;
+      identity: string;
     }
   | {
       state: "error";
       kind: "ddl" | "source";
       ref: ExplorerObjectRef | null;
       message: string;
+      requestGeneration: number;
+      identity: string;
     };
+
+export function createExplorerGlobalSearchRequest(
+  input: ExplorerGlobalSearchRequest
+): ExplorerGlobalSearchRequest {
+  return Object.freeze({ ...input });
+}
+
+export function authoritativeExplorerValue<T>(
+  status: DashboardQueryStatus,
+  result: { value: T } | undefined
+): T | undefined {
+  return authoritativeQueryData(status, result)?.value;
+}
+
+export function authoritativeExplorerConnection(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): OperatorResponse<WorkbenchActionData> | undefined {
+  return authoritativeQueryData(status, response);
+}
+
+export function explorerSearchAuthorityReady(input: {
+  includeObjects: boolean;
+  objectStatus: DashboardQueryStatus;
+  includeSource: boolean;
+  sourceStatus: DashboardQueryStatus;
+}): boolean {
+  return (
+    (!input.includeObjects || input.objectStatus !== "error") &&
+    (!input.includeSource || input.sourceStatus !== "error")
+  );
+}
 
 function ExplorerPage(): React.ReactElement {
   // The lane is the Explorer's identity — which database you are reading — so
-  // it belongs in the URL. The live text filters below stay local: they drive
-  // queries on every keystroke, and writing the URL that often would thrash it.
+  // it belongs in the URL. Text filters stay local and publish after a short
+  // quiet period, while React Query aborts any superseded in-flight request.
   const { lane: laneId = "" } = useSearch({ from: explorerRoute.id });
   const explorerNavigate = useNavigate({ from: explorerRoute.id });
   const setLaneId = React.useCallback(
@@ -4445,6 +4764,19 @@ function ExplorerPage(): React.ReactElement {
   const [globalSearchRequest, setGlobalSearchRequest] =
     React.useState<ExplorerGlobalSearchRequest | null>(null);
   const [cacheVersion, setCacheVersion] = React.useState(0);
+  const detailRequestGeneration = React.useRef(0);
+  const currentDetailIdentity = React.useRef<string | null>(null);
+  const debouncedSchemaFilter = useDebouncedValue(schemaFilter);
+  const debouncedNameLike = useDebouncedValue(nameLike);
+  const clearExplorerDetailResult = React.useCallback(() => {
+    detailRequestGeneration.current += 1;
+    currentDetailIdentity.current = null;
+    setDetailResult(null);
+  }, []);
+  const invalidateExplorerDetail = React.useCallback(() => {
+    clearExplorerDetailResult();
+    setSelectedRef(null);
+  }, [clearExplorerDetailResult]);
 
   const session = useQuery({
     queryKey: ["dashboard-session"],
@@ -4458,9 +4790,12 @@ function ExplorerPage(): React.ReactElement {
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
-  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
-  const stateful = activeLanes.data?.data.stateful ?? true;
-  const connectionReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
+  const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
+  const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
+  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const explorerLane = selectedLane ? laneIdentity(selectedLane) : undefined;
+  const connectionReady =
+    activeLanes.status === "success" && (!stateful || Boolean(explorerLane));
 
   React.useEffect(() => {
     if (stateful && !laneId && lanes.length === 1) {
@@ -4471,29 +4806,36 @@ function ExplorerPage(): React.ReactElement {
   React.useEffect(() => {
     clearExplorerMetadataCache();
     setCacheVersion((version) => version + 1);
-    setSelectedRef(null);
-    setDetailResult(null);
+    invalidateExplorerDetail();
     setGlobalSearchRequest(null);
-  }, [laneId]);
+  }, [explorerLane?.generation, invalidateExplorerDetail, laneId]);
 
   React.useEffect(() => {
-    setSelectedRef(null);
-    setDetailResult(null);
-  }, [detailLevel, nameLike, objectType, owner]);
+    invalidateExplorerDetail();
+  }, [debouncedNameLike, detailLevel, invalidateExplorerDetail, objectType, owner]);
 
   const connection = useQuery({
-    queryKey: ["explorer", "connection", stateful ? laneId : "stateless"],
-    queryFn: async () => {
+    queryKey: [
+      "explorer",
+      "connection",
+      explorerLane?.laneId ?? "stateless",
+      explorerLane?.generation ?? 0
+    ],
+    queryFn: async ({ signal }) => {
       if (!session.data) {
         throw new Error("dashboard session is not ready");
       }
-      return fetchExplorerConnection(session.data, laneId || undefined);
+      return fetchExplorerConnection(session.data, explorerLane, { signal });
     },
     enabled: session.status === "success" && connectionReady,
     retry: 1
   });
 
-  const baseCacheKey = metadataCacheKeyFromResponse(connection.data);
+  const authoritativeConnection = authoritativeExplorerConnection(
+    connection.status,
+    connection.data
+  );
+  const baseCacheKey = metadataCacheKeyFromResponse(authoritativeConnection);
   const schemasScope = baseCacheKey ? explorerScopeForVisibleSchema(baseCacheKey, "*") : null;
   const objectScope = baseCacheKey
     ? explorerScopeForVisibleSchema(baseCacheKey, owner.trim() || baseCacheKey.visible_schema)
@@ -4502,7 +4844,9 @@ function ExplorerPage(): React.ReactElement {
     baseCacheKey && globalSearchRequest
       ? explorerScopeForVisibleSchema(
           baseCacheKey,
-          globalSearchRequest.allSchemas ? "*" : owner.trim() || baseCacheKey.visible_schema
+          globalSearchRequest.allSchemas
+            ? "*"
+            : globalSearchRequest.owner || baseCacheKey.visible_schema
         )
       : null;
 
@@ -4510,13 +4854,14 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "schemas",
-      laneId,
-      schemaFilter,
+      explorerLane?.laneId ?? "stateless",
+      explorerLane?.generation ?? 0,
+      debouncedSchemaFilter,
       maxRows,
       cacheScopeToken(schemasScope),
       cacheVersion
     ],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!session.data || !schemasScope) {
         throw new Error("explorer schema cache is not ready");
       }
@@ -4524,15 +4869,19 @@ function ExplorerPage(): React.ReactElement {
         schemasScope,
         JSON.stringify({
           tool: "oracle_list_schemas",
-          name_like: schemaFilter.trim(),
+          name_like: debouncedSchemaFilter.trim(),
           max_rows: maxRows
         }),
         () =>
-          fetchExplorerSchemas(session.data, {
-            laneId,
-            nameLike: schemaFilter,
-            maxRows
-          })
+          fetchExplorerSchemas(
+            session.data,
+            {
+              lane: explorerLane,
+              nameLike: debouncedSchemaFilter,
+              maxRows
+            },
+            { signal }
+          )
       );
     },
     enabled: session.status === "success" && Boolean(schemasScope),
@@ -4543,16 +4892,17 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "objects",
-      laneId,
+      explorerLane?.laneId ?? "stateless",
+      explorerLane?.generation ?? 0,
       owner,
       objectType,
-      nameLike,
+      debouncedNameLike,
       detailLevel,
       maxRows,
       cacheScopeToken(objectScope),
       cacheVersion
     ],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!session.data || !objectScope) {
         throw new Error("explorer object cache is not ready");
       }
@@ -4562,19 +4912,23 @@ function ExplorerPage(): React.ReactElement {
           tool: "oracle_search_objects",
           owner: owner.trim(),
           object_type: objectType,
-          name_like: nameLike.trim(),
+          name_like: debouncedNameLike.trim(),
           detail_level: detailLevel,
           max_rows: maxRows
         }),
         () =>
-          fetchExplorerObjects(session.data, {
-            laneId,
-            owner,
-            objectType,
-            nameLike,
-            detailLevel,
-            maxRows
-          })
+          fetchExplorerObjects(
+            session.data,
+            {
+              lane: explorerLane,
+              owner,
+              objectType,
+              nameLike: debouncedNameLike,
+              detailLevel,
+              maxRows
+            },
+            { signal }
+          )
       );
     },
     enabled: session.status === "success" && Boolean(objectScope),
@@ -4585,16 +4939,17 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "global-objects",
-      laneId,
+      explorerLane?.laneId ?? "stateless",
+      explorerLane?.generation ?? 0,
       globalSearchRequest,
       cacheScopeToken(globalScope),
       cacheVersion
     ],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!session.data || !globalScope || !globalSearchRequest) {
         throw new Error("global object search is not ready");
       }
-      const ownerFilter = globalSearchRequest.allSchemas ? "*" : owner.trim();
+      const ownerFilter = globalSearchRequest.allSchemas ? "*" : globalSearchRequest.owner;
       const nameLike = `%${globalSearchRequest.needle}%`;
       return cachedExplorerMetadata(
         globalScope,
@@ -4604,17 +4959,21 @@ function ExplorerPage(): React.ReactElement {
           object_type: "",
           name_like: nameLike,
           detail_level: "summary",
-          max_rows: maxRows
+          max_rows: globalSearchRequest.maxRows
         }),
         () =>
-          fetchExplorerObjects(session.data, {
-            laneId,
-            owner: ownerFilter,
-            objectType: "",
-            nameLike,
-            detailLevel: "summary",
-            maxRows
-          })
+          fetchExplorerObjects(
+            session.data,
+            {
+              lane: explorerLane,
+              owner: ownerFilter,
+              objectType: "",
+              nameLike,
+              detailLevel: "summary",
+              maxRows: globalSearchRequest.maxRows
+            },
+            { signal }
+          )
       );
     },
     enabled:
@@ -4627,16 +4986,17 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "global-source",
-      laneId,
+      explorerLane?.laneId ?? "stateless",
+      explorerLane?.generation ?? 0,
       globalSearchRequest,
       cacheScopeToken(globalScope),
       cacheVersion
     ],
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       if (!session.data || !globalScope || !globalSearchRequest) {
         throw new Error("global source search is not ready");
       }
-      const ownerFilter = globalSearchRequest.allSchemas ? "*" : owner.trim();
+      const ownerFilter = globalSearchRequest.allSchemas ? "*" : globalSearchRequest.owner;
       return cachedExplorerMetadata(
         globalScope,
         JSON.stringify({
@@ -4644,16 +5004,20 @@ function ExplorerPage(): React.ReactElement {
           owner: ownerFilter,
           object_type: globalSearchRequest.sourceType,
           needle: globalSearchRequest.needle,
-          max_rows: maxRows
+          max_rows: globalSearchRequest.maxRows
         }),
         () =>
-          fetchExplorerSourceSearch(session.data, {
-            laneId,
-            owner: ownerFilter,
-            objectType: globalSearchRequest.sourceType,
-            needle: globalSearchRequest.needle,
-            maxRows
-          })
+          fetchExplorerSourceSearch(
+            session.data,
+            {
+              lane: explorerLane,
+              owner: ownerFilter,
+              objectType: globalSearchRequest.sourceType,
+              needle: globalSearchRequest.needle,
+              maxRows: globalSearchRequest.maxRows
+            },
+            { signal }
+          )
       );
     },
     enabled:
@@ -4661,62 +5025,125 @@ function ExplorerPage(): React.ReactElement {
     retry: 1
   });
 
+  React.useEffect(() => {
+    if (
+      connection.status === "error" ||
+      objectsQuery.status === "error" ||
+      globalObjectsQuery.status === "error" ||
+      globalSourceQuery.status === "error"
+    ) {
+      invalidateExplorerDetail();
+    }
+  }, [
+    connection.status,
+    globalObjectsQuery.status,
+    globalSourceQuery.status,
+    invalidateExplorerDetail,
+    objectsQuery.status
+  ]);
+
   const detailMutation = useMutation({
-    mutationFn: async ({ kind, ref }: { kind: "ddl" | "source"; ref: ExplorerObjectRef }) => {
-      if (!session.data || !baseCacheKey) {
+    mutationFn: async (request: ExplorerDetailRequest) => {
+      if (!session.data) {
         throw new Error("explorer cache key is not ready");
       }
-      const scope = explorerScopeForVisibleSchema(baseCacheKey, ref.owner);
+      const scope = explorerScopeForVisibleSchema(request.cacheKey, request.ref.owner);
       const slot = JSON.stringify({
-        tool: kind === "ddl" ? "oracle_get_ddl" : "oracle_get_source",
-        owner: ref.owner,
-        name: ref.name,
-        object_type: ref.objectType,
-        max_chars: kind === "source" ? maxChars : undefined
+        tool: request.kind === "ddl" ? "oracle_get_ddl" : "oracle_get_source",
+        owner: request.ref.owner,
+        name: request.ref.name,
+        object_type: request.ref.objectType,
+        max_chars: request.kind === "source" ? request.maxChars : undefined
       });
       const cached = await cachedExplorerMetadata(scope, slot, () =>
-        kind === "ddl"
-          ? fetchExplorerDdl(session.data, { ...ref, laneId })
-          : fetchExplorerSource(session.data, { ...ref, laneId, maxChars })
+        request.kind === "ddl"
+          ? fetchExplorerDdl(session.data, { ...request.ref, lane: request.lane })
+          : fetchExplorerSource(session.data, {
+              ...request.ref,
+              lane: request.lane,
+              maxChars: request.maxChars
+            })
       );
       return {
         state: "ok" as const,
-        kind,
-        ref,
+        kind: request.kind,
+        ref: request.ref,
         response: cached.value,
         cacheStatus: cached.status,
-        bytes: cached.bytes
+        bytes: cached.bytes,
+        requestGeneration: request.requestGeneration,
+        identity: request.identity
       };
     },
     onSuccess: (result) => {
+      if (!explorerDetailCompletionIsCurrent(
+        result,
+        currentDetailIdentity.current,
+        detailRequestGeneration.current
+      )) {
+        return;
+      }
       setDetailResult(result);
     },
-    onError: (error, variables) => {
+    onError: (error, request) => {
+      if (!explorerDetailCompletionIsCurrent(
+        request,
+        currentDetailIdentity.current,
+        detailRequestGeneration.current
+      )) {
+        return;
+      }
       setDetailResult({
         state: "error",
-        kind: variables.kind,
-        ref: variables.ref,
-        message: error instanceof Error ? error.message : "metadata request failed"
+        kind: request.kind,
+        ref: request.ref,
+        message: error instanceof Error ? error.message : "metadata request failed",
+        requestGeneration: request.requestGeneration,
+        identity: request.identity
       });
     }
   });
 
-  const schemaRows = schemaRowsFromResponse(schemasQuery.data?.value);
-  const objectRows = objectRowsFromResponse(objectsQuery.data?.value);
-  const globalObjectRows = globalSearchRequest?.includeObjects
-    ? objectRowsFromResponse(globalObjectsQuery.data?.value)
-    : [];
-  const globalSourceRows = globalSearchRequest?.includeSource
-    ? sourceRowsFromResponse(globalSourceQuery.data?.value)
-    : [];
-  const schemaLimit = explorerLimitFromResponse(schemasQuery.data?.value);
-  const objectLimit = explorerLimitFromResponse(objectsQuery.data?.value);
-  const globalObjectLimit = explorerLimitFromResponse(globalObjectsQuery.data?.value);
-  const globalSourceLimit = explorerLimitFromResponse(globalSourceQuery.data?.value);
+  const schemaValue = authoritativeExplorerValue(schemasQuery.status, schemasQuery.data);
+  const objectValue = authoritativeExplorerValue(objectsQuery.status, objectsQuery.data);
+  const globalObjectValue = authoritativeExplorerValue(
+    globalObjectsQuery.status,
+    globalObjectsQuery.data
+  );
+  const globalSourceValue = authoritativeExplorerValue(
+    globalSourceQuery.status,
+    globalSourceQuery.data
+  );
+  const schemaRows = schemaRowsFromResponse(schemaValue);
+  const objectDecode = objectRowsFromResponse(objectValue);
+  const objectRows = objectDecode.rows;
+  const globalObjectDecode = globalSearchRequest?.includeObjects
+    ? objectRowsFromResponse(globalObjectValue)
+    : { rows: [], invalidCount: 0 };
+  const globalObjectRows = globalObjectDecode.rows;
+  const globalSourceDecode = globalSearchRequest?.includeSource
+    ? sourceRowsFromResponse(globalSourceValue)
+    : { rows: [], invalidCount: 0 };
+  const globalSourceRows = globalSourceDecode.rows;
+  const schemaLimit = explorerLimitFromResponse(schemaValue);
+  const objectLimit = explorerLimitFromResponse(objectValue);
+  const globalObjectLimit = explorerLimitFromResponse(globalObjectValue);
+  const globalSourceLimit = explorerLimitFromResponse(globalSourceValue);
   const selectedRow = selectedRef
     ? objectRows.find((row) => objectRefKey(rowRef(row)) === objectRefKey(selectedRef)) ?? null
     : null;
-  const connected = connectedFromResponse(connection.data);
+  const selectedRefKey = selectedRef ? objectRefKey(selectedRef) : null;
+  const selectedReferenceIsAuthoritative = Boolean(
+    selectedRefKey &&
+      (objectRows.some((row) => objectRefKey(rowRef(row)) === selectedRefKey) ||
+        globalObjectRows.some((row) => objectRefKey(rowRef(row)) === selectedRefKey) ||
+        globalSourceRows.some(
+          (row) =>
+            objectRefKey({ owner: row.owner, name: row.name, objectType: row.objectType }) ===
+            selectedRefKey
+        ))
+  );
+  const connected = connectedFromResponse(authoritativeConnection);
   const sessionTone =
     session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
 
@@ -4728,28 +5155,55 @@ function ExplorerPage(): React.ReactElement {
 
   const selectRow = (row: ExplorerObjectRow): void => {
     const ref = rowRef(row);
+    clearExplorerDetailResult();
     setSelectedRef(ref);
-    setDetailResult(null);
   };
   const selectSourceHit = (row: ExplorerSourceHitRow): void => {
+    clearExplorerDetailResult();
     setSelectedRef({
       owner: row.owner,
       name: row.name,
       objectType: row.objectType
     });
-    setDetailResult(null);
   };
   const runGlobalSearch = (): void => {
     const needle = globalSearchText.trim();
     if (!needle || (!globalIncludeObjects && !globalIncludeSource)) {
       return;
     }
-    setGlobalSearchRequest({
+    setGlobalSearchRequest(createExplorerGlobalSearchRequest({
       needle,
       includeObjects: globalIncludeObjects,
       includeSource: globalIncludeSource,
       allSchemas: globalAllSchemas,
-      sourceType: globalSourceType
+      sourceType: globalSourceType,
+      owner: owner.trim(),
+      maxRows
+    }));
+  };
+  const requestObjectDetail = (kind: "ddl" | "source", ref: ExplorerObjectRef): void => {
+    if (!baseCacheKey || !selectedReferenceIsAuthoritative) {
+      return;
+    }
+    const requestGeneration = detailRequestGeneration.current + 1;
+    detailRequestGeneration.current = requestGeneration;
+    const identity = explorerDetailRequestIdentity({
+      kind,
+      ref,
+      lane: explorerLane,
+      maxChars,
+      requestGeneration
+    });
+    currentDetailIdentity.current = identity;
+    setDetailResult(null);
+    detailMutation.mutate({
+      kind,
+      ref,
+      lane: explorerLane,
+      cacheKey: baseCacheKey,
+      maxChars,
+      requestGeneration,
+      identity
     });
   };
 
@@ -4769,11 +5223,11 @@ function ExplorerPage(): React.ReactElement {
                   className={cn(OM_INPUT, "font-mono")}
                   value={laneId}
                   onChange={(event) => setLaneId(event.target.value)}
-                  disabled={activeLanes.isFetching || lanes.length === 0}
+                  disabled={activeLanes.isPending || lanes.length === 0}
                 >
                   <option value="">Select a session</option>
                   {lanes.map((lane) => (
-                    <option key={lane.lane_id} value={lane.lane_id}>
+                    <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
                       {lane.lane_id}
                     </option>
                   ))}
@@ -4868,11 +5322,11 @@ function ExplorerPage(): React.ReactElement {
             <Badge tone={sessionTone}>
               {session.status === "success" ? "paired" : session.status === "error" ? "blocked" : "pairing"}
             </Badge>
-            <Badge tone={connected ? "ok" : connection.isError || connection.data ? "warn" : "info"}>
-              {connected ? "database connected" : connection.isError ? "connection failed" : connection.data ? "not connected" : connectionReady ? "checking connection" : stateful ? "select a session" : "checking transport"}
+            <Badge tone={connected ? "ok" : connection.isError || authoritativeConnection ? "warn" : "info"}>
+              {connected ? "database connected" : connection.isError ? "connection failed" : authoritativeConnection ? "not connected" : connectionReady ? "checking connection" : stateful ? "select a session" : "checking transport"}
             </Badge>
           </div>
-          {stateful && lanes.length === 0 && !activeLanes.isFetching ? (
+          {stateful && lanes.length === 0 && activeLanes.status === "success" ? (
             <p className="mt-3 rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] p-3 text-sm text-[var(--om-text)]" role="status">
               No active MCP sessions. Connect a client to this server, then return here to browse its database profile.
             </p>
@@ -4892,8 +5346,8 @@ function ExplorerPage(): React.ReactElement {
           request={globalSearchRequest}
           objectRows={globalObjectRows}
           sourceRows={globalSourceRows}
-          objectPending={globalObjectsQuery.isFetching}
-          sourcePending={globalSourceQuery.isFetching}
+          objectPending={globalObjectsQuery.isPending}
+          sourcePending={globalSourceQuery.isPending}
           objectError={
             globalObjectsQuery.error instanceof Error ? globalObjectsQuery.error.message : null
           }
@@ -4902,9 +5356,18 @@ function ExplorerPage(): React.ReactElement {
           }
           objectLimit={globalObjectLimit}
           sourceLimit={globalSourceLimit}
+          invalidObjectRows={globalObjectDecode.invalidCount}
+          invalidSourceRows={globalSourceDecode.invalidCount}
           canSearch={
             session.status === "success" &&
+            connection.status === "success" &&
             connected &&
+            explorerSearchAuthorityReady({
+              includeObjects: globalIncludeObjects,
+              objectStatus: globalObjectsQuery.status,
+              includeSource: globalIncludeSource,
+              sourceStatus: globalSourceQuery.status
+            }) &&
             globalSearchText.trim().length > 0 &&
             (globalIncludeObjects || globalIncludeSource)
           }
@@ -4922,15 +5385,16 @@ function ExplorerPage(): React.ReactElement {
           <ExplorerSchemasPanel
             rows={schemaRows}
             selectedOwner={owner}
-            pending={schemasQuery.isFetching}
+            pending={schemasQuery.isPending}
             error={schemasQuery.error instanceof Error ? schemasQuery.error.message : null}
             limit={schemaLimit}
             onSelect={setOwner}
           />
           <ExplorerObjectsPanel
             rows={objectRows}
+            invalidRows={objectDecode.invalidCount}
             selectedRef={selectedRef}
-            pending={objectsQuery.isFetching}
+            pending={objectsQuery.isPending}
             error={objectsQuery.error instanceof Error ? objectsQuery.error.message : null}
             limit={objectLimit}
             onSelect={selectRow}
@@ -4943,9 +5407,12 @@ function ExplorerPage(): React.ReactElement {
           result={detailResult}
           pending={detailMutation.isPending}
           maxChars={maxChars}
-          onMaxCharsChange={setMaxChars}
-          onReadDdl={(ref) => detailMutation.mutate({ kind: "ddl", ref })}
-          onReadSource={(ref) => detailMutation.mutate({ kind: "source", ref })}
+          onMaxCharsChange={(value) => {
+            clearExplorerDetailResult();
+            setMaxChars(value);
+          }}
+          onReadDdl={(ref) => requestObjectDetail("ddl", ref)}
+          onReadSource={(ref) => requestObjectDetail("source", ref)}
         />
 
       </div>
@@ -4968,6 +5435,8 @@ function ExplorerGlobalSearchPanel({
   sourceError,
   objectLimit,
   sourceLimit,
+  invalidObjectRows,
+  invalidSourceRows,
   canSearch,
   onSearchTextChange,
   onIncludeObjectsChange,
@@ -4992,6 +5461,8 @@ function ExplorerGlobalSearchPanel({
   sourceError: string | null;
   objectLimit: number | null;
   sourceLimit: number | null;
+  invalidObjectRows: number;
+  invalidSourceRows: number;
   canSearch: boolean;
   onSearchTextChange: (value: string) => void;
   onIncludeObjectsChange: (value: boolean) => void;
@@ -5084,8 +5555,40 @@ function ExplorerGlobalSearchPanel({
             All visible schemas
           </label>
         </div>
+        {request ? (
+          <div
+            className="grid gap-2 rounded-md border border-[var(--om-border)] bg-[var(--om-surface-muted)] p-3 text-sm sm:grid-cols-2 xl:grid-cols-4"
+            data-testid="explorer-submitted-criteria"
+            role="status"
+          >
+            <ConsoleFact label="Submitted term" value={request.needle} mono />
+            <ConsoleFact
+              label="Submitted scope"
+              value={request.allSchemas ? "all visible schemas" : request.owner || "current schema"}
+            />
+            <ConsoleFact
+              label="Submitted targets"
+              value={[
+                request.includeObjects ? "objects" : null,
+                request.includeSource ? "source" : null
+              ]
+                .filter(Boolean)
+                .join(" + ")}
+            />
+            <ConsoleFact
+              label="Submitted source type"
+              value={request.includeSource ? request.sourceType || "all source" : "not requested"}
+              mono
+            />
+          </div>
+        ) : null}
         {objectError ? <ErrorNotice message={objectError} /> : null}
         {sourceError ? <ErrorNotice message={sourceError} /> : null}
+        {invalidObjectRows + invalidSourceRows > 0 ? (
+          <ErrorNotice
+            message={`Ignored ${invalidObjectRows + invalidSourceRows} malformed search result row(s) with incomplete Oracle object identity.`}
+          />
+        ) : null}
         {objectLimit || sourceLimit ? (
           <p
             className="rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] p-3 text-sm font-semibold text-[var(--om-text)]"
@@ -5104,7 +5607,7 @@ function ExplorerGlobalSearchPanel({
               <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
                 Object matches
               </span>
-              <Badge tone={includeObjects ? "ok" : "off"}>{objectRows.length}</Badge>
+              <Badge tone={request?.includeObjects ? "ok" : "off"}>{objectRows.length}</Badge>
             </div>
             <div
               ref={objectHitsRef}
@@ -5118,8 +5621,10 @@ function ExplorerGlobalSearchPanel({
                 <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
                   {pending
                     ? "Searching objects…"
-                    : objectError
-                      ? "Object search failed."
+                      : objectError
+                        ? "Object search failed."
+                        : request && !request.includeObjects
+                          ? "Objects were not included in the submitted search."
                       : request
                         ? "No object names matched this search."
                         : "Run a search to find visible objects."}
@@ -5161,7 +5666,7 @@ function ExplorerGlobalSearchPanel({
               <span className="text-2xs font-semibold uppercase tracking-[var(--tracking-label)] text-[var(--om-text-muted)]">
                 Source matches
               </span>
-              <Badge tone={includeSource ? "ok" : "off"}>{sourceRows.length}</Badge>
+              <Badge tone={request?.includeSource ? "ok" : "off"}>{sourceRows.length}</Badge>
             </div>
             <div
               ref={sourceHitsRef}
@@ -5175,8 +5680,10 @@ function ExplorerGlobalSearchPanel({
                 <p className="px-3 py-6 text-sm font-semibold text-[var(--om-text-muted)]">
                   {pending
                     ? "Searching source…"
-                    : sourceError
-                      ? "Source search failed."
+                      : sourceError
+                        ? "Source search failed."
+                        : request && !request.includeSource
+                          ? "Source was not included in the submitted search."
                       : request
                         ? "No source text matched this search."
                         : "Run a search to find text in visible PL/SQL source."}
@@ -5188,7 +5695,7 @@ function ExplorerGlobalSearchPanel({
                   ) : null}
                   {sourceHits.visible.map(({ row, index }) => (
                     <button
-                      key={`${row.owner}.${row.name}:${row.objectType}:${row.line}`}
+                      key={JSON.stringify([row.owner, row.name, row.objectType, row.line])}
                       ref={sourceHits.measure}
                       data-index={index}
                       type="button"
@@ -5389,6 +5896,7 @@ function ExplorerObjectTableRow({
 
 export function ExplorerObjectsPanel({
   rows,
+  invalidRows = 0,
   selectedRef,
   pending,
   error,
@@ -5396,6 +5904,7 @@ export function ExplorerObjectsPanel({
   onSelect
 }: {
   rows: ExplorerObjectRow[];
+  invalidRows?: number;
   selectedRef: ExplorerObjectRef | null;
   pending: boolean;
   error: string | null;
@@ -5423,6 +5932,11 @@ export function ExplorerObjectsPanel({
         tone={pending ? "info" : rows.length > 0 ? "ok" : "off"}
       />
       {error ? <ErrorNotice message={error} /> : null}
+      {invalidRows > 0 ? (
+        <ErrorNotice
+          message={`Ignored ${invalidRows} malformed object row(s) with incomplete Oracle identity.`}
+        />
+      ) : null}
       {limit ? <ExplorerLimitNotice limit={limit} noun="objects" /> : null}
       <div
         ref={scrollRef}
@@ -5525,7 +6039,7 @@ function ExplorerObjectDetailPanel({
             Object details
           </h3>
           <p className="mt-1 break-all font-mono text-sm text-[var(--om-text-muted)]">
-            {selectedRef ? objectRefKey(selectedRef) : "Select an object to inspect it"}
+            {selectedRef ? objectRefLabel(selectedRef) : "Select an object to inspect it"}
           </p>
         </div>
         <div className="flex flex-wrap items-end gap-2">
@@ -5731,35 +6245,18 @@ function schemaRowsFromResponse(
 
 function objectRowsFromResponse(
   response: OperatorResponse<WorkbenchActionData> | undefined
-): ExplorerObjectRow[] {
+): ExplorerRowsDecode<ExplorerObjectRow> {
   const result = mcpResult(response?.data.mcp_response);
   const objects = isRecord(result) && Array.isArray(result["results"]) ? result["results"] : [];
-  return objects.filter(isRecord).map((row) => ({
-    owner: cellText(row, "owner") ?? "",
-    objectName: cellText(row, "object_name") ?? "",
-    objectType: cellText(row, "object_type") ?? "",
-    status: cellText(row, "status") ?? "",
-    numRows: cellText(row, "num_rows") ?? "…",
-    columnCount: cellText(row, "column_count") ?? "…",
-    lastAnalyzed: cellText(row, "last_analyzed") ?? "…",
-    comment: cellText(row, "comment") ?? "",
-    raw: row
-  }));
+  return decodeExplorerObjectRows(objects);
 }
 
 function sourceRowsFromResponse(
   response: OperatorResponse<WorkbenchActionData> | undefined
-): ExplorerSourceHitRow[] {
+): ExplorerRowsDecode<ExplorerSourceHitRow> {
   const result = mcpResult(response?.data.mcp_response);
   const matches = isRecord(result) && Array.isArray(result["matches"]) ? result["matches"] : [];
-  return matches.filter(isRecord).map((row) => ({
-    owner: cellText(row, "owner") ?? "",
-    name: cellText(row, "name") ?? "",
-    objectType: cellText(row, "type") ?? "",
-    line: cellText(row, "line") ?? "…",
-    text: cellText(row, "text") ?? "",
-    raw: row
-  }));
+  return decodeExplorerSourceRows(matches);
 }
 
 function rowRef(row: ExplorerObjectRow): ExplorerObjectRef {
@@ -5770,8 +6267,12 @@ function rowRef(row: ExplorerObjectRow): ExplorerObjectRef {
   };
 }
 
-function objectRefKey(ref: ExplorerObjectRef): string {
-  return `${ref.owner}.${ref.name}:${ref.objectType}`;
+export function objectRefKey(ref: ExplorerObjectRef): string {
+  return JSON.stringify([ref.owner, ref.name, ref.objectType]);
+}
+
+function objectRefLabel(ref: ExplorerObjectRef): string {
+  return `${ref.owner}.${ref.name} (${ref.objectType})`;
 }
 
 function cellText(row: Record<string, unknown>, key: string): string | null {
@@ -5786,6 +6287,101 @@ function cellText(row: Record<string, unknown>, key: string): string | null {
     return value["value"];
   }
   return null;
+}
+
+export function decodeExplorerObjectRows(
+  values: readonly unknown[]
+): ExplorerRowsDecode<ExplorerObjectRow> {
+  const rows: ExplorerObjectRow[] = [];
+  let invalidCount = 0;
+  for (const value of values) {
+    if (!isRecord(value)) {
+      invalidCount += 1;
+      continue;
+    }
+    const owner = requiredIdentityCell(value, "owner");
+    const objectName = requiredIdentityCell(value, "object_name");
+    const objectType = requiredIdentityCell(value, "object_type");
+    if (!owner || !objectName || !objectType) {
+      invalidCount += 1;
+      continue;
+    }
+    rows.push({
+      owner,
+      objectName,
+      objectType,
+      status: cellText(value, "status") ?? "",
+      numRows: cellText(value, "num_rows") ?? "…",
+      columnCount: cellText(value, "column_count") ?? "…",
+      lastAnalyzed: cellText(value, "last_analyzed") ?? "…",
+      comment: cellText(value, "comment") ?? "",
+      raw: value
+    });
+  }
+  return { rows, invalidCount };
+}
+
+export function decodeExplorerSourceRows(
+  values: readonly unknown[]
+): ExplorerRowsDecode<ExplorerSourceHitRow> {
+  const rows: ExplorerSourceHitRow[] = [];
+  let invalidCount = 0;
+  for (const value of values) {
+    if (!isRecord(value)) {
+      invalidCount += 1;
+      continue;
+    }
+    const owner = requiredIdentityCell(value, "owner");
+    const name = requiredIdentityCell(value, "name");
+    const objectType = requiredIdentityCell(value, "type");
+    const line = requiredIdentityCell(value, "line");
+    if (!owner || !name || !objectType || !line) {
+      invalidCount += 1;
+      continue;
+    }
+    rows.push({
+      owner,
+      name,
+      objectType,
+      line,
+      text: cellText(value, "text") ?? "",
+      raw: value
+    });
+  }
+  return { rows, invalidCount };
+}
+
+function requiredIdentityCell(row: Record<string, unknown>, key: string): string | null {
+  const value = cellText(row, key)?.trim();
+  return value ? value : null;
+}
+
+export function explorerDetailRequestIdentity(input: {
+  kind: "ddl" | "source";
+  ref: ExplorerObjectRef;
+  lane?: OperatorLaneTarget;
+  maxChars: number;
+  requestGeneration: number;
+}): string {
+  return JSON.stringify([
+    input.lane?.laneId ?? "stateless",
+    input.lane?.generation ?? 0,
+    objectRefKey(input.ref),
+    input.kind,
+    input.kind === "source" ? input.maxChars : null,
+    input.requestGeneration
+  ]);
+}
+
+export function explorerDetailCompletionIsCurrent(
+  completion: { identity: string; requestGeneration: number },
+  currentIdentity: string | null,
+  currentRequestGeneration: number
+): boolean {
+  return (
+    completion.identity === currentIdentity &&
+    completion.requestGeneration === currentRequestGeneration
+  );
 }
 
 function canReadSource(objectType: string): boolean {
@@ -5831,12 +6427,140 @@ function reviewFailure(label: string, error: unknown, fallback: string): ReviewR
   };
 }
 
+export function resolveReviewSelection(
+  proposals: readonly ChangeProposalListView[],
+  selectedId: string
+): ChangeProposalListView | null {
+  return selectedId
+    ? proposals.find((proposal) => proposal.id === selectedId) ?? null
+    : null;
+}
+
+export function visibleReviewProposals(
+  filtered: readonly ChangeProposalListView[],
+  selected: ChangeProposalListView | null
+): ChangeProposalListView[] {
+  if (!selected || filtered.some((proposal) => proposal.id === selected.id)) {
+    return [...filtered];
+  }
+  return [selected, ...filtered];
+}
+
+export function reviewProposalRevisionIdentity(
+  proposal: ChangeProposalView | null,
+  lane: OperatorLaneTarget | undefined
+): string | null {
+  if (!proposal) {
+    return null;
+  }
+  return JSON.stringify([
+    proposal.id,
+    proposal.updated_at,
+    proposal.statements.map((statement) => [
+      statement.id,
+      statement.sql_sha256,
+      statement.sql_template,
+      statement.unit,
+      statement.bind_count,
+      statement.commit,
+      statement.capture_dbms_output
+    ]),
+    lane?.laneId ?? "stateless",
+    lane?.generation ?? 0
+  ]);
+}
+
+export function reviewCompletionIsCurrent(
+  requestIdentity: string,
+  currentIdentity: string | null
+): boolean {
+  return requestIdentity === currentIdentity;
+}
+
+export function invalidReviewCursorError(error: unknown): boolean {
+  if (!(error instanceof OperatorOutcomeError) || error.httpStatus !== 400) {
+    return false;
+  }
+  const envelope = isRecord(error.response) ? error.response : null;
+  const data = envelope && isRecord(envelope["data"]) ? envelope["data"] : envelope;
+  const code = data && typeof data["error"] === "string" ? data["error"] : null;
+  return code === "invalid_change_proposal" || code === "invalid_source_history_request";
+}
+
+export function consumedReviewGrantState(): { confirm: ""; acknowledged: false } {
+  return { confirm: "", acknowledged: false };
+}
+
+export function reviewGrantReady(
+  needsConfirm: boolean,
+  confirm: string,
+  acknowledged: boolean
+): boolean {
+  return !needsConfirm || (confirm.trim().length > 0 && acknowledged);
+}
+
+type ReviewPreviewRequest = {
+  authority: string;
+  identity: string;
+  proposalId: string;
+  lane?: OperatorLaneTarget;
+  sql: string;
+};
+
+type ReviewApplyRequest = {
+  authority: string;
+  identity: string;
+  proposalId: string;
+  lane?: OperatorLaneTarget;
+  confirm: string;
+};
+
+export function reviewsAuthoritativeState(input: {
+  sessionStatus: DashboardQueryStatus;
+  session: DashboardSession | undefined;
+  proposalsStatus: DashboardQueryStatus;
+  proposals: OperatorResponse<ChangeProposalListData> | undefined;
+  historyStatus: DashboardQueryStatus;
+  history: OperatorResponse<SourceHistoryListData> | undefined;
+}): {
+  session: DashboardSession | null;
+  proposals: ChangeProposalListView[];
+  proposalsNextCursor: string | null;
+  snapshots: SourceSnapshotView[];
+  historyNextCursor: string | null;
+} {
+  const session = authoritativeQueryData(input.sessionStatus, input.session) ?? null;
+  const proposals = authoritativeQueryData(input.proposalsStatus, input.proposals)?.data;
+  const history = authoritativeQueryData(input.historyStatus, input.history)?.data;
+  return {
+    session,
+    proposals: proposals?.proposals ?? EMPTY_CHANGE_PROPOSALS,
+    proposalsNextCursor: proposals?.nextCursor ?? null,
+    snapshots: history?.snapshots ?? EMPTY_SOURCE_SNAPSHOTS,
+    historyNextCursor: history?.nextCursor ?? null
+  };
+}
+
+export function authoritativeReviewProfiles(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<ConfigOpsStatusData> | undefined
+): ConfigProfileMetadata[] {
+  return authoritativeQueryData(status, response)?.data.status.profiles ?? [];
+}
+
+export function authoritativeReviewCapabilities(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<WorkbenchActionData> | undefined
+): OperatorResponse<WorkbenchActionData> | undefined {
+  return authoritativeQueryData(status, response);
+}
+
 function ReviewsPage(): React.ReactElement {
   const [filter, setFilter] = React.useState("");
   // Which proposal you are reviewing is the page's identity, so it is linkable.
   const { id: selectedId = "" } = useSearch({ from: reviewsRoute.id });
   const reviewsNavigate = useNavigate({ from: reviewsRoute.id });
-  const setSelectedId = React.useCallback(
+  const navigateSelectedId = React.useCallback(
     (next: string) => {
       void reviewsNavigate({ search: { id: next || undefined }, replace: true });
     },
@@ -5866,8 +6590,7 @@ function ReviewsPage(): React.ReactElement {
   });
   const proposalsQuery = useQuery({
     queryKey: ["change-proposals", proposalsCursor ?? "start"],
-    queryFn: () => fetchChangeProposals(proposalsCursor),
-    refetchInterval: 10_000
+    queryFn: ({ signal }) => fetchChangeProposals(proposalsCursor, { signal })
   });
   const config = useQuery({
     queryKey: ["operator-config"],
@@ -5879,18 +6602,32 @@ function ReviewsPage(): React.ReactElement {
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
-  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
-  const stateful = activeLanes.data?.data.stateful ?? true;
-  const laneReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
+  const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
+  const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
+  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const reviewLane = selectedLane ? laneIdentity(selectedLane) : undefined;
+  const laneReady = activeLanes.status === "success" && (!stateful || Boolean(reviewLane));
   const sourceHistoryQuery = useQuery({
     queryKey: ["source-history", historyCursor ?? "start"],
-    queryFn: () => fetchSourceHistory(historyCursor),
-    refetchInterval: 15_000
+    queryFn: ({ signal }) => fetchSourceHistory(historyCursor, { signal })
   });
-  const proposals = proposalsQuery.data?.data.proposals ?? EMPTY_CHANGE_PROPOSALS;
-  const proposalsNextCursor = proposalsQuery.data?.data.nextCursor ?? null;
-  const snapshots = sourceHistoryQuery.data?.data.snapshots ?? [];
-  const historyNextCursor = sourceHistoryQuery.data?.data.nextCursor ?? null;
+  const authoritative = reviewsAuthoritativeState({
+    sessionStatus: session.status,
+    session: session.data,
+    proposalsStatus: proposalsQuery.status,
+    proposals: proposalsQuery.data,
+    historyStatus: sourceHistoryQuery.status,
+    history: sourceHistoryQuery.data
+  });
+  const { proposals, proposalsNextCursor, snapshots, historyNextCursor } = authoritative;
+  const sessionAuthority = dashboardAuthorityIdentity(authoritative.session ?? undefined);
+  const reviewProfiles = authoritativeReviewProfiles(config.status, config.data);
+  const profileAvailable = reviewProfiles.some((item) => item.name === profile);
+  React.useEffect(() => {
+    if (profile && !profileAvailable) {
+      setProfile("");
+    }
+  }, [profile, profileAvailable]);
   const filtered = React.useMemo(() => {
     const needle = filter.trim().toLowerCase();
     if (!needle) {
@@ -5898,66 +6635,119 @@ function ReviewsPage(): React.ReactElement {
     }
     return proposals.filter((proposal) => proposalSearchText(proposal).includes(needle));
   }, [filter, proposals]);
-  const selected =
-    proposals.find((proposal) => proposal.id === selectedId) ?? filtered[0] ?? proposals[0] ?? null;
+  const selected = resolveReviewSelection(proposals, selectedId);
+  const visibleProposals = React.useMemo(
+    () => visibleReviewProposals(filtered, selected),
+    [filtered, selected]
+  );
+  const selectedOutsideFilter = Boolean(
+    selected && !filtered.some((proposal) => proposal.id === selected.id)
+  );
+  const unresolvedSelectedId = Boolean(
+    selectedId && proposalsQuery.status === "success" && !selected
+  );
   const selectedProposalId = selected?.id ?? null;
 
   // The polled list omits sql_template bodies; fetch the full detail (with SQL
   // text) for the selected proposal on demand.
   const detailQuery = useQuery({
     queryKey: ["change-proposal-detail", selectedProposalId],
-    queryFn: () => fetchChangeProposalDetail(selectedProposalId as string),
-    enabled: Boolean(selectedProposalId),
-    refetchInterval: 10_000
+    queryFn: ({ signal }) => fetchChangeProposalDetail(selectedProposalId as string, { signal }),
+    enabled: Boolean(selectedProposalId)
   });
-  const selectedDetail = detailQuery.data?.data.proposal ?? null;
+  const selectedDetail =
+    authoritativeQueryData(detailQuery.status, detailQuery.data)?.data.proposal ?? null;
+  const reviewIdentity = reviewProposalRevisionIdentity(selectedDetail, reviewLane);
+  const reviewIdentityRef = React.useRef(reviewIdentity);
+  React.useLayoutEffect(() => {
+    reviewIdentityRef.current = reviewIdentity;
+  }, [reviewIdentity]);
+  const consumeReviewGrant = React.useCallback(() => {
+    const consumed = consumedReviewGrantState();
+    setConfirm(consumed.confirm);
+    setApplyAcknowledged(consumed.acknowledged);
+  }, []);
+  const invalidateReviewGrant = React.useCallback(() => {
+    reviewIdentityRef.current = null;
+    consumeReviewGrant();
+  }, [consumeReviewGrant]);
+  const setSelectedId = React.useCallback(
+    (next: string) => {
+      invalidateReviewGrant();
+      navigateSelectedId(next);
+    },
+    [invalidateReviewGrant, navigateSelectedId]
+  );
+  const selectReviewLane = React.useCallback(
+    (next: string) => {
+      invalidateReviewGrant();
+      setLaneId(next);
+    },
+    [invalidateReviewGrant]
+  );
   const writeStatements = selectedDetail?.statements.filter((statement) => statement.unit !== "read") ?? [];
   const needsConfirm = writeStatements.length > 0;
   const hasDdl = selectedDetail?.statements.some((statement) => statement.unit === "ddl") ?? false;
   const hasHiddenBinds = selectedDetail?.statements.some((statement) => statement.bind_count > 0) ?? false;
   const laneCapabilities = useQuery({
-    queryKey: ["reviews", "capabilities", stateful ? laneId : "stateless"],
-    queryFn: async () => {
+    queryKey: [
+      "reviews",
+      "capabilities",
+      reviewLane?.laneId ?? "stateless",
+      reviewLane?.generation ?? 0
+    ],
+    queryFn: async ({ signal }) => {
       if (!session.data || !laneReady) {
         throw new Error("database connection is not ready");
       }
-      return fetchLaneCapabilities(session.data, laneId || undefined);
+      return fetchLaneCapabilities(session.data, reviewLane, { signal });
     },
     enabled: session.status === "success" && laneReady,
     retry: 1
   });
-  const selectedLaneProfile = laneCapabilities.data
-    ? sessionCapabilitiesSummary(laneCapabilities.data).activeProfile
+  const selectedLaneCapabilities = authoritativeReviewCapabilities(
+    laneCapabilities.status,
+    laneCapabilities.data
+  );
+  const selectedLaneProfile = selectedLaneCapabilities
+    ? sessionCapabilitiesSummary(selectedLaneCapabilities).activeProfile
     : "unknown";
   const profileMatches = Boolean(selectedDetail) && selectedLaneProfile === selectedDetail?.profile;
 
-  // No auto-select effect: `selected` above already falls back to the first
-  // proposal for display, so mirroring that into the URL would put a proposal
-  // the operator never chose into a link they might share.
+  React.useEffect(() => {
+    if (laneCapabilities.status === "error") {
+      invalidateReviewGrant();
+    }
+  }, [invalidateReviewGrant, laneCapabilities.status]);
 
   // An acknowledgement is about one specific proposal. Never let it carry over
-  // to the next one the operator selects.
+  // to another revision, statement digest, SQL body, or lane generation.
   React.useEffect(() => {
     setApplyAcknowledged(false);
     setConfirm("");
-  }, [selectedProposalId, laneId]);
+  }, [reviewIdentity]);
 
   // Cursors are bound to the board revision; if the store changed under a held
   // cursor the server rejects it, so fall back to the first page.
   React.useEffect(() => {
-    if (proposalsQuery.isError && proposalsCursor) {
+    if (proposalsCursor && invalidReviewCursorError(proposalsQuery.error)) {
       setProposalsCursor(undefined);
     }
-  }, [proposalsQuery.isError, proposalsCursor]);
+  }, [proposalsCursor, proposalsQuery.error]);
   React.useEffect(() => {
-    if (sourceHistoryQuery.isError && historyCursor) {
+    if (historyCursor && invalidReviewCursorError(sourceHistoryQuery.error)) {
       setHistoryCursor(undefined);
     }
-  }, [sourceHistoryQuery.isError, historyCursor]);
+  }, [historyCursor, sourceHistoryQuery.error]);
 
   const draftMutation = useMutation({
-    mutationFn: async () => {
-      if (!session.data) {
+    mutationFn: async (requestAuthority: string) => {
+      if (
+        !session.data ||
+        !sessionAuthority ||
+        requestAuthority !== sessionAuthority ||
+        !profileAvailable
+      ) {
         throw new Error("dashboard session is not ready");
       }
       const binds = parseBindsJson(bindsJson);
@@ -5975,90 +6765,156 @@ function ReviewsPage(): React.ReactElement {
         ]
       });
     },
-    onSuccess: (response) => {
+    onSuccess: (response, requestAuthority) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setLastResult(reviewSuccess("Draft", response));
       setSelectedId(response.data.proposal.id);
       setProposalsCursor(undefined);
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
     },
-    onError: (error) => {
+    onError: (error, requestAuthority) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setLastResult(reviewFailure("Draft", error, "proposal draft failed"));
     }
   });
 
   const applyMutation = useMutation({
-    mutationFn: async () => {
-      if (!session.data) {
+    mutationFn: async (request: ReviewApplyRequest) => {
+      if (
+        !session.data ||
+        !sessionAuthority ||
+        request.authority !== sessionAuthority ||
+        !reviewCompletionIsCurrent(request.identity, reviewIdentityRef.current)
+      ) {
         throw new Error("dashboard session is not ready");
       }
-      if (!selected) {
-        throw new Error("select a proposal");
+      if (!laneReady) {
+        throw new Error("select a proposal and ready database connection");
       }
       return applyChangeProposal(session.data, {
-        proposalId: selected.id,
-        laneId,
-        confirm
+        proposalId: request.proposalId,
+        lane: request.lane,
+        confirm: request.confirm
       });
     },
-    onSuccess: (response) => {
-      setLastResult(reviewSuccess("Apply", response));
+    onMutate: consumeReviewGrant,
+    onSuccess: (response, request) => {
       clearExplorerMetadataCache();
       queryClient.invalidateQueries({ queryKey: ["explorer"] });
       queryClient.invalidateQueries({ queryKey: ["operator-metrics"] });
       queryClient.invalidateQueries({ queryKey: ["audit-tail"] });
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
+      if (
+        request.authority !== sessionAuthority ||
+        !reviewCompletionIsCurrent(request.identity, reviewIdentityRef.current)
+      ) {
+        return;
+      }
+      setLastResult(reviewSuccess("Apply", response));
     },
-    onError: (error) => {
+    onError: (error, request) => {
+      if (
+        request.authority !== sessionAuthority ||
+        !reviewCompletionIsCurrent(request.identity, reviewIdentityRef.current)
+      ) {
+        return;
+      }
       setLastResult(reviewFailure("Apply", error, "proposal apply failed"));
     }
   });
 
   const previewSelectedMutation = useMutation({
-    mutationFn: async () => {
-      if (!session.data || !selectedDetail || !laneReady) {
+    mutationFn: async (request: ReviewPreviewRequest) => {
+      if (
+        !session.data ||
+        !sessionAuthority ||
+        request.authority !== sessionAuthority ||
+        !reviewCompletionIsCurrent(request.identity, reviewIdentityRef.current) ||
+        !laneReady
+      ) {
         throw new Error("select a loaded change plan and ready database connection");
       }
-      if (writeStatements.length !== 1 || writeStatements[0].unit !== "dml") {
-        throw new Error("browser preview supports exactly one DML statement");
-      }
       return previewWorkbenchSql(session.data, {
-        laneId,
+        lane: request.lane,
         mode: "dml_preview_confirm",
-        sql: writeStatements[0].sql_template
+        sql: request.sql
       });
     },
-    onSuccess: (response) => {
+    onMutate: consumeReviewGrant,
+    onSuccess: (response, request) => {
+      if (
+        request.authority !== sessionAuthority ||
+        !reviewCompletionIsCurrent(request.identity, reviewIdentityRef.current)
+      ) {
+        return;
+      }
       setConfirm(confirmationFromResponse(response) ?? "");
-      setApplyAcknowledged(false);
       setLastResult(reviewSuccess("Preview selected change", response));
     },
-    onError: (error) => {
-      setConfirm("");
+    onError: (error, request) => {
+      if (
+        request.authority !== sessionAuthority ||
+        !reviewCompletionIsCurrent(request.identity, reviewIdentityRef.current)
+      ) {
+        return;
+      }
       setLastResult(reviewFailure("Preview selected change", error, "change preview failed"));
     }
   });
 
   const revertMutation = useMutation({
-    mutationFn: async (snapshot: SourceSnapshotView) => {
-      if (!session.data) {
+    mutationFn: async ({
+      snapshot,
+      authority: requestAuthority
+    }: {
+      snapshot: SourceSnapshotView;
+      authority: string;
+    }) => {
+      if (!session.data || !sessionAuthority || requestAuthority !== sessionAuthority) {
         throw new Error("dashboard session is not ready");
       }
       return draftSourceHistoryRevert(session.data, snapshot.id, snapshot.profile);
     },
-    onSuccess: (response) => {
+    onSuccess: (response, { authority: requestAuthority }) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setLastResult(reviewSuccess("Revert draft", response));
       setSelectedId(response.data.proposal.id);
       setProposalsCursor(undefined);
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
     },
-    onError: (error) => {
+    onError: (error, { authority: requestAuthority }) => {
+      if (requestAuthority !== sessionAuthority) {
+        return;
+      }
       setLastResult(reviewFailure("Revert draft", error, "revert draft failed"));
     }
   });
+  const purgeReviewAuthorityState = React.useCallback(() => {
+    setConfirm("");
+    setApplyAcknowledged(false);
+    setLastResult(null);
+    draftMutation.reset();
+    applyMutation.reset();
+    previewSelectedMutation.reset();
+    revertMutation.reset();
+  }, [
+    applyMutation.reset,
+    draftMutation.reset,
+    previewSelectedMutation.reset,
+    revertMutation.reset
+  ]);
+  useDashboardAuthorityPurge(sessionAuthority, purgeReviewAuthorityState);
 
   const canDraft =
     session.status === "success" &&
-    profile.trim().length > 0 &&
+    config.status === "success" &&
+    profileAvailable &&
     sqlTemplate.trim().length > 0 &&
     !draftMutation.isPending;
   // Name the strongest thing this proposal does, so the acknowledgement says
@@ -6073,22 +6929,58 @@ function ReviewsPage(): React.ReactElement {
   }, [selectedDetail]);
   const canPreviewSelected =
     session.status === "success" &&
+    detailQuery.status === "success" &&
+    laneCapabilities.status === "success" &&
+    Boolean(reviewIdentity && selectedDetail) &&
     laneReady &&
     profileMatches &&
     !hasHiddenBinds &&
     writeStatements.length === 1 &&
     writeStatements[0]?.unit === "dml" &&
+    !applyMutation.isPending &&
     !previewSelectedMutation.isPending;
   const canApply =
     session.status === "success" &&
-    Boolean(selected && selectedDetail) &&
+    detailQuery.status === "success" &&
+    laneCapabilities.status === "success" &&
+    Boolean(selected && selectedDetail && reviewIdentity) &&
     laneReady &&
     profileMatches &&
     !hasHiddenBinds &&
     !hasDdl &&
     writeStatements.length <= 1 &&
     !applyMutation.isPending &&
-    (!needsConfirm || (confirm.trim().length > 0 && applyAcknowledged));
+    !previewSelectedMutation.isPending &&
+    reviewGrantReady(needsConfirm, confirm, applyAcknowledged);
+  const previewSelectedChange = (): void => {
+    if (
+      !selectedDetail ||
+      !reviewIdentity ||
+      writeStatements.length !== 1 ||
+      writeStatements[0].unit !== "dml"
+    ) {
+      return;
+    }
+    previewSelectedMutation.mutate({
+      authority: sessionAuthority ?? "",
+      identity: reviewIdentity,
+      proposalId: selectedDetail.id,
+      lane: reviewLane,
+      sql: writeStatements[0].sql_template
+    });
+  };
+  const applySelectedChange = (): void => {
+    if (!selected || !reviewIdentity) {
+      return;
+    }
+    applyMutation.mutate({
+      authority: sessionAuthority ?? "",
+      identity: reviewIdentity,
+      proposalId: selected.id,
+      lane: reviewLane,
+      confirm
+    });
+  };
 
   return (
     <PageFrame
@@ -6107,7 +6999,9 @@ function ReviewsPage(): React.ReactElement {
                     Saved change plans
                   </h3>
                   <p className="mt-1 truncate text-sm text-[var(--om-text-muted)]">
-                    {proposalsQuery.isFetching ? "loading" : `${formatNumber(filtered.length)} visible`}
+                    {proposalsQuery.isPending
+                      ? "loading"
+                      : `${formatNumber(filtered.length)} filter match(es)${selectedOutsideFilter ? " + selected" : ""}`}
                   </p>
                 </div>
                 <Badge tone={proposalsQuery.isError ? "warn" : proposalsQuery.data ? "ok" : "info"}>
@@ -6125,9 +7019,9 @@ function ReviewsPage(): React.ReactElement {
               </label>
             </div>
             <div className="max-h-[560px] overflow-auto">
-              {filtered.length === 0 ? (
+              {visibleProposals.length === 0 ? (
                 <div className="px-4 py-8 text-sm font-semibold text-[var(--om-text-muted)]">
-                  {proposalsQuery.isFetching
+                  {proposalsQuery.isPending
                     ? "Loading saved change plans…"
                     : proposalsQuery.isError
                       ? "Saved change plans are unavailable."
@@ -6136,7 +7030,7 @@ function ReviewsPage(): React.ReactElement {
                         : "No saved change plans."}
                 </div>
               ) : (
-                filtered.map((proposal) => (
+                visibleProposals.map((proposal) => (
                   <button
                     key={proposal.id}
                     type="button"
@@ -6159,6 +7053,9 @@ function ReviewsPage(): React.ReactElement {
                       <span>{proposal.author}</span>
                       <span>{formatNumber(proposal.statement_count)} stmt</span>
                       <span>{proposal.updated_at}</span>
+                      {selectedOutsideFilter && selected?.id === proposal.id ? (
+                        <span>selected outside filter</span>
+                      ) : null}
                     </div>
                   </button>
                 ))
@@ -6173,15 +7070,17 @@ function ReviewsPage(): React.ReactElement {
                     ? () => setProposalsCursor(proposalsNextCursor)
                     : undefined
                 }
-                pending={proposalsQuery.isFetching}
+                pending={proposalsQuery.isPending}
               />
             ) : null}
           </ConsolePanel>
           <SourceHistoryPanel
             snapshots={snapshots}
-            pending={sourceHistoryQuery.isFetching || revertMutation.isPending}
+            pending={sourceHistoryQuery.isPending || revertMutation.isPending}
             blocked={sourceHistoryQuery.isError}
-            onDraftRevert={(snapshot) => revertMutation.mutate(snapshot)}
+            onDraftRevert={(snapshot) =>
+              revertMutation.mutate({ snapshot, authority: sessionAuthority ?? "" })
+            }
             atStart={!historyCursor}
             onFirst={() => setHistoryCursor(undefined)}
             onNext={
@@ -6190,8 +7089,8 @@ function ReviewsPage(): React.ReactElement {
             hasPager={Boolean(historyCursor || historyNextCursor)}
           />
           <SchemaDiffPanel
-            session={session.data ?? null}
-            profile={profile}
+            session={authoritative.session}
+            profile={profileAvailable ? profile : ""}
             onDrafted={(proposal, response) => {
               setLastResult(reviewSuccess("Migration draft", response));
               setSelectedId(proposal.id);
@@ -6202,6 +7101,14 @@ function ReviewsPage(): React.ReactElement {
         </div>
 
         <div className="space-y-4">
+          {config.error instanceof Error ? (
+            <QueryErrorNotice
+              title="Review profiles are unavailable"
+              error={config.error}
+              retryLabel="Retry profiles"
+              onRetry={() => void config.refetch()}
+            />
+          ) : null}
           <ConsolePanel className="p-4">
             <div className="mb-4">
               <h3 className="text-base font-semibold text-[var(--om-text-bright)]">Create a saved change plan</h3>
@@ -6226,7 +7133,7 @@ function ReviewsPage(): React.ReactElement {
                   onChange={(event) => setProfile(event.target.value)}
                 >
                   <option value="">Select a profile</option>
-                  {(config.data?.data.status.profiles ?? []).map((item) => (
+                  {reviewProfiles.map((item) => (
                     <option key={item.name} value={item.name}>
                       {item.name}{item.is_default ? " (default)" : ""}
                     </option>
@@ -6279,7 +7186,7 @@ function ReviewsPage(): React.ReactElement {
                 type="button"
                 variant="primary"
                 disabled={!canDraft}
-                onClick={() => draftMutation.mutate()}
+                onClick={() => draftMutation.mutate(sessionAuthority ?? "")}
               >
                 <GitPullRequest className="size-4" aria-hidden="true" />
                 Save plan
@@ -6301,12 +7208,12 @@ function ReviewsPage(): React.ReactElement {
                   <select
                     className={OM_INPUT}
                     value={laneId}
-                    onChange={(event) => setLaneId(event.target.value)}
-                    disabled={activeLanes.isFetching || lanes.length === 0}
+                    onChange={(event) => selectReviewLane(event.target.value)}
+                    disabled={activeLanes.isPending || lanes.length === 0}
                   >
                     <option value="">Select a session</option>
                     {lanes.map((lane) => (
-                      <option key={lane.lane_id} value={lane.lane_id}>
+                      <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
                         {lane.lane_id}
                       </option>
                     ))}
@@ -6335,11 +7242,15 @@ function ReviewsPage(): React.ReactElement {
               )
             ) : null}
             {!selected ? (
-              <p className="mt-4 text-sm text-[var(--om-text-muted)]">Select a saved change plan to review it.</p>
+              unresolvedSelectedId ? (
+                <ErrorNotice message={`Change plan ${selectedId} was not found. No plan is selected and Apply remains disabled.`} />
+              ) : (
+                <p className="mt-4 text-sm text-[var(--om-text-muted)]">Select a saved change plan to review it.</p>
+              )
             ) : detailQuery.isError ? (
               <ErrorNotice message="The exact statement detail is unavailable, so this plan cannot be applied." />
             ) : null}
-            {laneId && laneCapabilities.data && !profileMatches ? (
+            {laneId && selectedLaneCapabilities && !profileMatches ? (
               <ErrorNotice
                 message={`This plan targets ${selectedDetail?.profile ?? "an unknown profile"}, but the selected session uses ${selectedLaneProfile}. Choose a matching session.`}
               />
@@ -6374,7 +7285,7 @@ function ReviewsPage(): React.ReactElement {
                   type="button"
                   variant="secondary"
                   disabled={!canPreviewSelected}
-                  onClick={() => previewSelectedMutation.mutate()}
+                  onClick={previewSelectedChange}
                 >
                   <Search className="size-4" aria-hidden="true" />
                   Preview selected change
@@ -6384,7 +7295,7 @@ function ReviewsPage(): React.ReactElement {
                 type="button"
                 variant="primary"
                 disabled={!canApply}
-                onClick={() => applyMutation.mutate()}
+                onClick={applySelectedChange}
               >
                 <CheckCircle2 className="size-4" aria-hidden="true" />
                 Apply selected plan
@@ -6422,24 +7333,31 @@ function ReviewsPage(): React.ReactElement {
  * as a straight timeline. A non-linear shape (a base with two children) is
  * flagged, never drawn as a line.
  */
+export function authoritativeEditionData(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<EditionProposalsData> | undefined
+): EditionProposalsData | null {
+  return authoritativeQueryData(status, response)?.data ?? null;
+}
+
 function EditionTimelinePanel(): React.ReactElement {
   const EditionTimeline = OMCP_SKIN.renderers.EditionTimeline;
   const editions = useQuery({
     queryKey: ["edition-proposals"],
-    queryFn: fetchEditionProposals,
-    refetchInterval: 15_000
+    queryFn: fetchEditionProposals
   });
-  const model = toEditionTimelineViewModel(parseEditionProposals(editions.data?.data ?? null));
+  const editionData = authoritativeEditionData(editions.status, editions.data);
+  const model = toEditionTimelineViewModel(parseEditionProposals(editionData));
   return (
     <div className="space-y-3" data-testid="edition-timeline-panel">
       <p className="text-sm leading-6 text-[var(--om-text-muted)]">
         Optional Oracle Edition-Based Redefinition proposals for profiles that use editions.
       </p>
-      {editions.data ? (
+      {editionData ? (
         <EditionTimeline model={model} />
       ) : (
         <p className="text-sm text-[var(--om-text-muted)]">
-          {editions.isFetching
+          {editions.isPending
             ? "Loading edition proposals…"
             : editions.isError
               ? "Edition proposals are unavailable."
@@ -6524,7 +7442,7 @@ function ProposalStatementTable({ proposal }: { proposal: ChangeProposalView }):
   );
 }
 
-function SourceHistoryPanel({
+export function SourceHistoryPanel({
   snapshots,
   pending,
   blocked,
@@ -6585,7 +7503,7 @@ function SourceHistoryPanel({
                 <Button
                   type="button"
                   variant="secondary"
-                  disabled={pending}
+                  disabled={pending || blocked}
                   onClick={() => onDraftRevert(snapshot)}
                   title="Create a restore plan without changing the database"
                 >
@@ -6644,7 +7562,9 @@ function SchemaDiffPanel({
   >(null);
   const [lastError, setLastError] = React.useState<string | null>(null);
   const inputIdentity = schemaDiffInputIdentity(title, beforeJson, afterJson);
-  const preview = currentSchemaDiffPreview(previewBinding, inputIdentity);
+  const sessionAuthority = dashboardAuthorityIdentity(session ?? undefined);
+  const authorityInputIdentity = JSON.stringify([sessionAuthority, inputIdentity]);
+  const preview = currentSchemaDiffPreview(previewBinding, authorityInputIdentity);
 
   const previewMutation = useMutation({
     mutationFn: async (input: {
@@ -6696,6 +7616,13 @@ function SchemaDiffPanel({
       setLastError(error instanceof Error ? error.message : "migration draft failed");
     }
   });
+  const purgeSchemaDiffAuthorityState = React.useCallback(() => {
+    setPreviewBinding(null);
+    setLastError(null);
+    previewMutation.reset();
+    draftMutation.reset();
+  }, [draftMutation.reset, previewMutation.reset]);
+  useDashboardAuthorityPurge(sessionAuthority, purgeSchemaDiffAuthorityState);
 
   const busy = previewMutation.isPending || draftMutation.isPending;
   const canPreview = Boolean(session) && !busy;
@@ -6758,7 +7685,12 @@ function SchemaDiffPanel({
             variant="secondary"
             disabled={!canPreview}
             onClick={() =>
-              previewMutation.mutate({ title, beforeJson, afterJson, inputIdentity })
+              previewMutation.mutate({
+                title,
+                beforeJson,
+                afterJson,
+                inputIdentity: authorityInputIdentity
+              })
             }
           >
             <RefreshCcw className="size-4" aria-hidden="true" />
@@ -7101,9 +8033,12 @@ type WorkbenchAction = "preview" | "read" | "rollback_preview" | "commit";
 type WorkbenchSubmission = {
   kind: WorkbenchAction;
   identity: string;
+  contextIdentity: string;
+  sourceIdentity: string;
+  authority: string;
   sql: string;
   mode: WorkbenchMode;
-  laneId: string;
+  lane?: OperatorLaneTarget;
   maxRows: number;
   confirm: string;
   captureDbmsOutput: boolean;
@@ -7111,28 +8046,124 @@ type WorkbenchSubmission = {
 
 type WorkbenchIdeAction = "parse" | "analyze" | "lineage" | "lint" | "docs" | "impact";
 
+type WorkbenchIdeSubmission = {
+  kind: WorkbenchIdeAction;
+  identity: string;
+  contextIdentity: string;
+  sourceIdentity: string;
+  input: WorkbenchIdeRequestInput;
+};
+
+type WorkbenchResultBinding = {
+  requestIdentity: string;
+  contextIdentity: string;
+  sourceIdentity: string;
+};
+
 type WorkbenchResult = {
   state: OperatorOutcomeState;
   label: string;
   response: OperatorResponse<WorkbenchActionData> | null;
   outcome: OperatorOutcome;
+  binding: WorkbenchResultBinding;
 };
+
+export function workbenchSourceIdentity(source: string): string {
+  return JSON.stringify([source]);
+}
+
+export function workbenchSourceIsDirty(
+  source: string,
+  lastSuccessfulSourceIdentity: string | null,
+  seed = WORKBENCH_SQL_SEED
+): boolean {
+  if (source.trim().length === 0 || source === seed) {
+    return false;
+  }
+  return workbenchSourceIdentity(source) !== lastSuccessfulSourceIdentity;
+}
+
+export function workbenchActionContextIdentity(input: {
+  authority: string | null;
+  source: string;
+  mode: WorkbenchMode;
+  lane?: OperatorLaneTarget;
+  maxRows: number;
+  captureDbmsOutput: boolean;
+}): string {
+  return JSON.stringify([
+    input.authority,
+    input.source,
+    input.mode,
+    input.lane?.laneId ?? "stateless",
+    input.lane?.generation ?? 0,
+    input.maxRows,
+    input.captureDbmsOutput
+  ]);
+}
+
+export function workbenchIdeInputIdentity(
+  authority: string | null,
+  input: WorkbenchIdeRequestInput
+): string {
+  return JSON.stringify([
+    authority,
+    input.source,
+    input.lane?.laneId ?? "stateless",
+    input.lane?.generation ?? 0,
+    input.projectRoot,
+    input.target,
+    input.direction,
+    input.maxDepth,
+    input.changesetJson
+  ]);
+}
+
+export function workbenchCompletionIsCurrent(
+  binding: Pick<WorkbenchResultBinding, "requestIdentity" | "contextIdentity">,
+  activeRequestIdentity: string | null,
+  currentContextIdentity: string
+): boolean {
+  return (
+    binding.requestIdentity === activeRequestIdentity &&
+    binding.contextIdentity === currentContextIdentity
+  );
+}
+
+export function workbenchRequestIdentity(
+  contextIdentity: string,
+  action: WorkbenchAction | WorkbenchIdeAction,
+  generation: number
+): string {
+  return JSON.stringify([contextIdentity, action, generation]);
+}
+
+export function consumedWorkbenchConfirmationState(): { confirm: ""; acknowledged: false } {
+  return { confirm: "", acknowledged: false };
+}
 
 function workbenchSuccess(
   label: string,
-  response: OperatorResponse<WorkbenchActionData>
+  response: OperatorResponse<WorkbenchActionData>,
+  binding: WorkbenchResultBinding
 ): WorkbenchResult {
   const outcome = decodeOperatorOutcome(200, response);
-  return { state: outcome.state, label, response, outcome };
+  return { state: outcome.state, label, response, outcome, binding };
 }
 
-function workbenchFailure(label: string, error: unknown, fallback: string): WorkbenchResult {
+function workbenchFailure(
+  label: string,
+  error: unknown,
+  fallback: string,
+  binding: WorkbenchResultBinding
+): WorkbenchResult {
   const outcome = operatorOutcomeFromError(error, fallback);
   return {
     state: outcome.state,
     label,
     response: operatorResponseFromError<WorkbenchActionData>(error),
-    outcome
+    outcome,
+    binding
   };
 }
 
@@ -7174,7 +8205,8 @@ function WorkbenchRoutePage(): React.ReactElement {
     staleTime: 30_000,
     retry: 1
   });
-  const enabled = config.data?.data.status.dashboard_workbench === true;
+  const enabled =
+    authoritativeQueryData(config.status, config.data)?.data.status.dashboard_workbench === true;
 
   if (!enabled) {
     return (
@@ -7183,12 +8215,12 @@ function WorkbenchRoutePage(): React.ReactElement {
         eyebrow="Browser SQL"
         description="The server keeps browser-submitted SQL behind an explicit opt-in."
       >
-        <Surface className="space-y-3 p-5" aria-busy={config.isFetching}>
-          <Badge tone={config.isError ? "warn" : config.isFetching ? "info" : "off"}>
-            {config.isError ? "setting unavailable" : config.isFetching ? "checking setting" : "disabled"}
+        <Surface className="space-y-3 p-5" aria-busy={config.isPending}>
+          <Badge tone={config.isError ? "warn" : config.isPending ? "info" : "off"}>
+            {config.isError ? "setting unavailable" : config.isPending ? "checking setting" : "disabled"}
           </Badge>
           <h3 className="text-lg font-semibold text-[var(--om-text-bright)]">
-            {config.isFetching
+            {config.isPending
               ? "Checking whether browser SQL is enabled…"
               : "Browser SQL is disabled on this server"}
           </h3>
@@ -7197,7 +8229,7 @@ function WorkbenchRoutePage(): React.ReactElement {
               ? "The dashboard could not verify the Workbench setting, so it is failing closed. Database Explorer remains available for governed metadata reads."
               : "Set [http].dashboard_workbench = true in Profiles & settings and restart the HTTP service to expose read, preview, and guarded DML controls. DDL and ADMIN actions remain blocked in the browser."}
           </p>
-          {!config.isFetching ? (
+          {!config.isPending ? (
             <Link
               to="/config"
               className="inline-flex min-h-11 items-center rounded-md border border-[var(--om-control-border)] px-4 py-2 text-sm font-semibold text-[var(--om-text-bright)] hover:bg-[var(--om-surface-muted)] focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--om-focus)]"
@@ -7231,25 +8263,14 @@ function WorkbenchPage(): React.ReactElement {
   const [lineageDepth, setLineageDepth] = React.useState(2);
   const [identifier, setIdentifier] = React.useState("");
   const [replacement, setReplacement] = React.useState("");
+  const [lastSuccessfulSourceIdentity, setLastSuccessfulSourceIdentity] = React.useState<
+    string | null
+  >(null);
   // Only the operator's own SQL counts as unsaved work, never the opening seed.
   const sqlGuard = useUnsavedChangesGuard(
-    sql.trim().length > 0 && sql.trim() !== WORKBENCH_SQL_SEED
+    workbenchSourceIsDirty(sql, lastSuccessfulSourceIdentity)
   );
   const [commitAcknowledged, setCommitAcknowledged] = React.useState(false);
-  const requestIdentity = JSON.stringify([sql.trim(), laneId, mode]);
-  const requestIdentityRef = React.useRef(requestIdentity);
-  // An acknowledgement is about this exact statement on this exact lane. Edit
-  // either and it must be re-earned, never inherited by different SQL.
-  React.useEffect(() => {
-    requestIdentityRef.current = requestIdentity;
-    setCommitAcknowledged(false);
-    setConfirm("");
-  }, [requestIdentity]);
-  const [changesetJson, setChangesetJson] = React.useState(
-    '{\n  "objects": [],\n  "unclassified_files": []\n}'
-  );
-  const sqlEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
-
   const session = useQuery({
     queryKey: ["dashboard-session"],
     queryFn: fetchDashboardSession,
@@ -7257,24 +8278,88 @@ function WorkbenchPage(): React.ReactElement {
     refetchInterval: 60_000,
     retry: 1
   });
+  const sessionAuthority = dashboardAuthorityIdentity(
+    session.status === "success" ? session.data : undefined
+  );
+  const [changesetJson, setChangesetJson] = React.useState(
+    '{\n  "objects": [],\n  "unclassified_files": []\n}'
+  );
+  const sqlEditorRef = React.useRef<HTMLTextAreaElement | null>(null);
+
   const activeLanes = useQuery({
     queryKey: ["active-lanes"],
     queryFn: fetchActiveLanes,
     refetchInterval: 5_000
   });
-  const lanes = activeLanes.data?.data.lanes ?? EMPTY_ACTIVE_LANES;
-  const stateful = activeLanes.data?.data.stateful ?? true;
-  const laneReady = activeLanes.status === "success" && (!stateful || Boolean(laneId));
+  const lanes = activeLanes.status === "success" ? activeLanes.data.data.lanes : EMPTY_ACTIVE_LANES;
+  const stateful = authoritativeServerMode(activeLanes.status, activeLanes.data) !== false;
+  const selectedLane = stateful ? lanes.find((lane) => lane.lane_id === laneId) : undefined;
+  const workbenchLane = selectedLane ? laneIdentity(selectedLane) : undefined;
+  const laneReady = activeLanes.status === "success" && (!stateful || Boolean(workbenchLane));
+  const requestIdentity = workbenchActionContextIdentity({
+    authority: sessionAuthority,
+    source: sql,
+    mode,
+    lane: workbenchLane,
+    maxRows,
+    captureDbmsOutput
+  });
+  const requestIdentityRef = React.useRef(requestIdentity);
+  const activeActionIdentityRef = React.useRef<string | null>(null);
+  const actionRequestGenerationRef = React.useRef(0);
+  const confirmationRef = React.useRef(confirm);
+  const consumeWorkbenchConfirmation = React.useCallback(() => {
+    const consumed = consumedWorkbenchConfirmationState();
+    confirmationRef.current = consumed.confirm;
+    setConfirm(consumed.confirm);
+    setCommitAcknowledged(consumed.acknowledged);
+  }, []);
+  // An acknowledgement is about this exact statement on this exact lane. Edit
+  // either and it must be re-earned, never inherited by different SQL.
+  React.useLayoutEffect(() => {
+    requestIdentityRef.current = requestIdentity;
+    activeActionIdentityRef.current = null;
+    consumeWorkbenchConfirmation();
+    setLastResult(null);
+  }, [consumeWorkbenchConfirmation, requestIdentity]);
+
+  const ideInput: WorkbenchIdeRequestInput = {
+    source: sql,
+    lane: workbenchLane,
+    projectRoot,
+    target: plsqlTarget,
+    direction: lineageDirection,
+    maxDepth: lineageDepth,
+    changesetJson
+  };
+  const ideInputIdentity = workbenchIdeInputIdentity(sessionAuthority, ideInput);
+  const ideInputIdentityRef = React.useRef(ideInputIdentity);
+  const activeIdeIdentityRef = React.useRef<string | null>(null);
+  const ideRequestGenerationRef = React.useRef(0);
+  React.useLayoutEffect(() => {
+    ideInputIdentityRef.current = ideInputIdentity;
+    activeIdeIdentityRef.current = null;
+    setLastIdeResult(null);
+  }, [ideInputIdentity]);
 
   const action = useMutation({
     mutationFn: async (submission: WorkbenchSubmission) => {
-      if (!session.data) {
+      if (
+        !session.data ||
+        submission.authority !== sessionAuthority ||
+        !workbenchCompletionIsCurrent(
+          { requestIdentity: submission.identity, contextIdentity: submission.contextIdentity },
+          activeActionIdentityRef.current,
+          requestIdentityRef.current
+        ) ||
+        (stateful && !submission.lane)
+      ) {
         throw new Error("dashboard session is not ready");
       }
       const request = {
         sql: submission.sql,
         mode: submission.mode,
-        laneId: submission.laneId
+        lane: submission.lane
       };
       if (submission.kind === "preview") {
         return previewWorkbenchSql(session.data, request);
@@ -7289,8 +8374,27 @@ function WorkbenchPage(): React.ReactElement {
         captureDbmsOutput: submission.captureDbmsOutput
       });
     },
+    onMutate: () => {
+      consumeWorkbenchConfirmation();
+      setLastResult(null);
+    },
     onSuccess: (response, submission) => {
-      setLastResult(workbenchSuccess(actionLabel(submission.kind), response));
+      const binding: WorkbenchResultBinding = {
+        requestIdentity: submission.identity,
+        contextIdentity: submission.contextIdentity,
+        sourceIdentity: submission.sourceIdentity
+      };
+      if (
+        !workbenchCompletionIsCurrent(
+          binding,
+          activeActionIdentityRef.current,
+          requestIdentityRef.current
+        )
+      ) {
+        return;
+      }
+      setLastResult(workbenchSuccess(actionLabel(submission.kind), response, binding));
+      setLastSuccessfulSourceIdentity(submission.sourceIdentity);
       if (submission.kind === "commit") {
         clearExplorerMetadataCache();
         queryClient.invalidateQueries({ queryKey: ["explorer"] });
@@ -7301,72 +8405,168 @@ function WorkbenchPage(): React.ReactElement {
         nextConfirm &&
         submission.identity === requestIdentityRef.current
       ) {
+        confirmationRef.current = nextConfirm;
         setConfirm(nextConfirm);
-      } else if (submission.kind === "rollback_preview" || submission.kind === "commit") {
-        setConfirm("");
-        setCommitAcknowledged(false);
       }
     },
     onError: (error, submission) => {
+      const binding: WorkbenchResultBinding = {
+        requestIdentity: submission.identity,
+        contextIdentity: submission.contextIdentity,
+        sourceIdentity: submission.sourceIdentity
+      };
+      if (
+        !workbenchCompletionIsCurrent(
+          binding,
+          activeActionIdentityRef.current,
+          requestIdentityRef.current
+        )
+      ) {
+        return;
+      }
       setLastResult(
-        workbenchFailure(actionLabel(submission.kind), error, "operator action failed")
+        workbenchFailure(actionLabel(submission.kind), error, "operator action failed", binding)
       );
     }
   });
 
   const submitAction = (kind: WorkbenchAction): void => {
-    action.mutate({
+    actionRequestGenerationRef.current += 1;
+    const identity = workbenchRequestIdentity(
+      requestIdentity,
       kind,
-      identity: requestIdentity,
-      sql: sql.trim(),
+      actionRequestGenerationRef.current
+    );
+    const submission: WorkbenchSubmission = {
+      kind,
+      identity,
+      contextIdentity: requestIdentity,
+      sourceIdentity: workbenchSourceIdentity(sql),
+      authority: sessionAuthority ?? "",
+      sql,
       mode,
-      laneId,
+      lane: workbenchLane,
       maxRows,
-      confirm,
+      confirm: confirmationRef.current,
       captureDbmsOutput
-    });
+    };
+    activeActionIdentityRef.current = identity;
+    consumeWorkbenchConfirmation();
+    action.mutate(submission);
   };
 
   const ideAction = useMutation({
-    mutationFn: async (kind: WorkbenchIdeAction) => {
-      if (!session.data) {
+    mutationFn: async (submission: WorkbenchIdeSubmission) => {
+      if (
+        !session.data ||
+        !workbenchCompletionIsCurrent(
+          { requestIdentity: submission.identity, contextIdentity: submission.contextIdentity },
+          activeIdeIdentityRef.current,
+          ideInputIdentityRef.current
+        ) ||
+        (stateful && !submission.input.lane)
+      ) {
         throw new Error("dashboard session is not ready");
       }
-      const request = workbenchIdeRequest(kind, {
-        source: sql,
-        laneId,
-        projectRoot,
-        target: plsqlTarget,
-        direction: lineageDirection,
-        maxDepth: lineageDepth,
-        changesetJson
-      });
+      const request = workbenchIdeRequest(submission.kind, submission.input);
       return runWorkbenchPlsqlTool(session.data, request);
     },
-    onSuccess: (response, kind) => {
-      setLastIdeResult(workbenchSuccess(ideActionLabel(kind), response));
+    onMutate: () => {
+      setLastIdeResult(null);
     },
-    onError: (error, kind) => {
-      setLastIdeResult(workbenchFailure(ideActionLabel(kind), error, "PL/SQL analysis failed"));
+    onSuccess: (response, submission) => {
+      const binding: WorkbenchResultBinding = {
+        requestIdentity: submission.identity,
+        contextIdentity: submission.contextIdentity,
+        sourceIdentity: submission.sourceIdentity
+      };
+      if (
+        !workbenchCompletionIsCurrent(
+          binding,
+          activeIdeIdentityRef.current,
+          ideInputIdentityRef.current
+        )
+      ) {
+        return;
+      }
+      setLastIdeResult(workbenchSuccess(ideActionLabel(submission.kind), response, binding));
+    },
+    onError: (error, submission) => {
+      const binding: WorkbenchResultBinding = {
+        requestIdentity: submission.identity,
+        contextIdentity: submission.contextIdentity,
+        sourceIdentity: submission.sourceIdentity
+      };
+      if (
+        !workbenchCompletionIsCurrent(
+          binding,
+          activeIdeIdentityRef.current,
+          ideInputIdentityRef.current
+        )
+      ) {
+        return;
+      }
+      setLastIdeResult(
+        workbenchFailure(
+          ideActionLabel(submission.kind),
+          error,
+          "PL/SQL analysis failed",
+          binding
+        )
+      );
     }
   });
+  const submitIdeAction = (kind: WorkbenchIdeAction): void => {
+    ideRequestGenerationRef.current += 1;
+    const identity = workbenchRequestIdentity(
+      ideInputIdentity,
+      kind,
+      ideRequestGenerationRef.current
+    );
+    activeIdeIdentityRef.current = identity;
+    ideAction.mutate({
+      kind,
+      identity,
+      contextIdentity: ideInputIdentity,
+      sourceIdentity: workbenchSourceIdentity(sql),
+      input: { ...ideInput }
+    });
+  };
+  const purgeWorkbenchAuthorityState = React.useCallback(() => {
+    activeActionIdentityRef.current = null;
+    activeIdeIdentityRef.current = null;
+    consumeWorkbenchConfirmation();
+    setLastResult(null);
+    setLastIdeResult(null);
+    setLastSuccessfulSourceIdentity(null);
+    action.reset();
+    ideAction.reset();
+  }, [action.reset, consumeWorkbenchConfirmation, ideAction.reset]);
+  useDashboardAuthorityPurge(sessionAuthority, purgeWorkbenchAuthorityState);
 
   const canSubmit =
     sql.trim().length > 0 &&
     laneReady &&
     session.status === "success" &&
-    !action.isPending;
+    !action.isPending &&
+    !ideAction.isPending;
   const canRunIde =
     sql.trim().length > 0 &&
     laneReady &&
     session.status === "success" &&
-    !ideAction.isPending;
-  const confirmReady = confirm.trim().length > 0;
+    !ideAction.isPending &&
+    !action.isPending;
+  const confirmReady =
+    confirm.trim().length > 0 && requestIdentityRef.current === requestIdentity;
   const sessionTone = session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
+  const visibleWorkbenchResult =
+    lastResult?.binding.contextIdentity === requestIdentity ? lastResult : null;
+  const visibleIdeResult =
+    lastIdeResult?.binding.contextIdentity === ideInputIdentity ? lastIdeResult : null;
   const definitions =
-    lastIdeResult?.state === "success" &&
-    lastIdeResult.response?.data.mcp_tool === "oracle_plsql_parse"
-      ? plsqlDefinitionsFromResponse(lastIdeResult.response)
+    visibleIdeResult?.state === "success" &&
+    visibleIdeResult.response?.data.mcp_tool === "oracle_plsql_parse"
+      ? plsqlDefinitionsFromResponse(visibleIdeResult.response)
       : [];
   const usageRows = React.useMemo(
     () => identifierOccurrences(sql, identifier),
@@ -7406,7 +8606,7 @@ function WorkbenchPage(): React.ReactElement {
         <ConfirmDialog
           id="workbench-unsaved"
           title="Leave the Workbench?"
-          body="The SQL editor holds work that has not been run. Leaving this page discards it."
+          body="The SQL editor differs from the latest successful Workbench action. Leaving this page discards those changes."
           confirmLabel="Leave and discard"
           onCancel={sqlGuard.reset}
           onConfirm={sqlGuard.proceed}
@@ -7453,11 +8653,11 @@ function WorkbenchPage(): React.ReactElement {
                     className={OM_INPUT}
                     value={laneId}
                     onChange={(event) => setLaneId(event.target.value)}
-                    disabled={activeLanes.isFetching || lanes.length === 0}
+                    disabled={activeLanes.isPending || lanes.length === 0}
                   >
                     <option value="">Select a session</option>
                     {lanes.map((lane) => (
-                      <option key={lane.lane_id} value={lane.lane_id}>
+                      <option key={`${lane.lane_id}:${lane.generation}`} value={lane.lane_id}>
                         {lane.lane_id}
                       </option>
                     ))}
@@ -7491,7 +8691,7 @@ function WorkbenchPage(): React.ReactElement {
               </label>
             </div>
 
-            {stateful && lanes.length === 0 && !activeLanes.isFetching ? (
+            {stateful && lanes.length === 0 && activeLanes.status === "success" ? (
               <p className="rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface-muted)] p-3 text-sm text-[var(--om-text)]">
                 No active MCP sessions. Connect a client before running database work.
               </p>
@@ -7567,7 +8767,7 @@ function WorkbenchPage(): React.ReactElement {
           </div>
         </ConsolePanel>
 
-        <WorkbenchResultPanel result={lastResult} pending={action.isPending} />
+        <WorkbenchResultPanel result={visibleWorkbenchResult} pending={action.isPending} />
         <div className="space-y-4 xl:col-span-2">
           <Surface className="flex flex-wrap items-center justify-between gap-3 p-4">
             <div>
@@ -7594,13 +8794,13 @@ function WorkbenchPage(): React.ReactElement {
               lineageDepth={lineageDepth}
               lineageDirection={lineageDirection}
               onJump={jumpToRange}
-              onRun={(kind) => ideAction.mutate(kind)}
+              onRun={submitIdeAction}
               onUseSelection={useSelectionAsIdentifier}
               pending={ideAction.isPending}
               projectRoot={projectRoot}
               refactorPreview={refactorPreview}
               replacement={replacement}
-              result={lastIdeResult}
+              result={visibleIdeResult}
               target={plsqlTarget}
               usageRows={usageRows}
               setChangesetJson={setChangesetJson}
@@ -7912,27 +9112,70 @@ function WorkbenchIdePanel({
   );
 }
 
-function AuditPage(): React.ReactElement {
-  const [subjectIdHash, setSubjectIdHash] = React.useState("");
-  const [tool, setTool] = React.useState("");
-  const [dangerLevel, setDangerLevel] = React.useState("");
-  const [limit, setLimit] = React.useState(50);
-  const [exportProofBundle, setExportProofBundle] = React.useState(false);
-  const filters = React.useMemo<AuditTailFilters>(
-    () => ({
-      limit,
-      subjectIdHash,
-      tool,
-      dangerLevel,
-      exportProofBundle
-    }),
-    [dangerLevel, exportProofBundle, limit, subjectIdHash, tool]
+export type AuditFilterControlState = {
+  draft: AuditTailFilters;
+  applied: AuditTailFilters;
+};
+
+const DEFAULT_AUDIT_FILTERS: AuditTailFilters = Object.freeze({
+  limit: 50,
+  subjectIdHash: "",
+  tool: "",
+  dangerLevel: "",
+  exportProofBundle: false
+});
+
+function snapshotAuditFilters(filters: AuditTailFilters): AuditTailFilters {
+  return Object.freeze({ ...filters });
+}
+
+export function createAuditFilterControlState(): AuditFilterControlState {
+  return {
+    draft: snapshotAuditFilters(DEFAULT_AUDIT_FILTERS),
+    applied: snapshotAuditFilters(DEFAULT_AUDIT_FILTERS)
+  };
+}
+
+export function updateAuditFilterDraft(
+  state: AuditFilterControlState,
+  patch: Partial<AuditTailFilters>
+): AuditFilterControlState {
+  return { ...state, draft: snapshotAuditFilters({ ...state.draft, ...patch }) };
+}
+
+export function applyAuditFilterDraft(state: AuditFilterControlState): AuditFilterControlState {
+  return { ...state, applied: snapshotAuditFilters(state.draft) };
+}
+
+function auditFiltersEqual(left: AuditTailFilters, right: AuditTailFilters): boolean {
+  return (
+    left.limit === right.limit &&
+    left.subjectIdHash === right.subjectIdHash &&
+    left.tool === right.tool &&
+    left.dangerLevel === right.dangerLevel &&
+    left.exportProofBundle === right.exportProofBundle
   );
+}
+
+function AuditPage(): React.ReactElement {
+  const [filterState, setFilterState] = React.useState(createAuditFilterControlState);
+  const { draft, applied } = filterState;
+  const updateDraft = React.useCallback((patch: Partial<AuditTailFilters>) => {
+    setFilterState((current) => updateAuditFilterDraft(current, patch));
+  }, []);
   const auditTail = useQuery({
-    queryKey: ["audit-tail", filters],
-    queryFn: () => fetchAuditTail(filters)
+    queryKey: ["audit-tail", applied],
+    queryFn: ({ signal }) => fetchAuditTail(applied, { signal })
   });
-  const data = auditTail.data?.data ?? null;
+  const rawData = auditTail.status === "success" ? auditTail.data.data : null;
+  const providerUnavailable = rawData?.source === "unavailable";
+  const auditError =
+    auditTail.error instanceof Error
+      ? auditTail.error.message
+      : providerUnavailable
+        ? (rawData.reason ?? "Audit tail provider is unavailable.")
+        : null;
+  const data = providerUnavailable ? null : rawData;
   const verdictProofs = React.useMemo(() => parseVerdictProofs(data), [data]);
 
   return (
@@ -7942,14 +9185,14 @@ function AuditPage(): React.ReactElement {
       description="Review redacted database actions, guard decisions, and hash-chain verification."
     >
       <div className="space-y-4">
-        <Surface className="p-4" aria-busy={auditTail.isFetching}>
-          <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_180px_160px_120px_auto_auto] lg:items-end">
+        <Surface className="p-4" aria-busy={auditTail.isPending}>
+          <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_180px_160px_120px_auto_auto_auto] lg:items-end">
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Client identity hash</span>
               <input
                 className="min-h-11 w-full rounded-md border border-[var(--om-control-border)] px-3 font-mono text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-                value={subjectIdHash}
-                onChange={(event) => setSubjectIdHash(event.target.value)}
+                value={draft.subjectIdHash}
+                onChange={(event) => updateDraft({ subjectIdHash: event.target.value })}
                 placeholder="subject-sha256:"
               />
             </label>
@@ -7957,8 +9200,8 @@ function AuditPage(): React.ReactElement {
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Tool</span>
               <select
                 className="min-h-11 w-full rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-                value={tool}
-                onChange={(event) => setTool(event.target.value)}
+                value={draft.tool}
+                onChange={(event) => updateDraft({ tool: event.target.value })}
               >
                 <option value="">All</option>
                 <option value="operator_api">operator_api</option>
@@ -7973,8 +9216,8 @@ function AuditPage(): React.ReactElement {
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Level</span>
               <select
                 className="min-h-11 w-full rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface)] px-3 text-sm outline-none focus-visible:border-[var(--om-focus)] focus-visible:ring-2 focus-visible:ring-[var(--om-focus)]"
-                value={dangerLevel}
-                onChange={(event) => setDangerLevel(event.target.value)}
+                value={draft.dangerLevel}
+                onChange={(event) => updateDraft({ dangerLevel: event.target.value })}
               >
                 <option value="">All</option>
                 <option value="SAFE">SAFE</option>
@@ -7990,18 +9233,27 @@ function AuditPage(): React.ReactElement {
                 min={1}
                 max={200}
                 type="number"
-                value={limit}
-                onChange={(event) => setLimit(clampAuditLimit(event.target.valueAsNumber))}
+                value={draft.limit}
+                onChange={(event) => updateDraft({ limit: clampAuditLimit(event.target.valueAsNumber) })}
               />
             </label>
             <Button
               type="button"
-              variant={exportProofBundle ? "primary" : "secondary"}
-              aria-pressed={exportProofBundle}
-              onClick={() => setExportProofBundle((enabled) => !enabled)}
+              variant={draft.exportProofBundle ? "primary" : "secondary"}
+              aria-pressed={draft.exportProofBundle}
+              onClick={() => updateDraft({ exportProofBundle: !draft.exportProofBundle })}
             >
               <Download className="size-4" aria-hidden="true" />
-              {exportProofBundle ? "Hide proof bundle" : "Include proof bundle"}
+              {draft.exportProofBundle ? "Exclude proof bundle" : "Include proof bundle"}
+            </Button>
+            <Button
+              type="button"
+              variant="primary"
+              disabled={auditFiltersEqual(draft, applied)}
+              onClick={() => setFilterState(applyAuditFilterDraft)}
+            >
+              <Search className="size-4" aria-hidden="true" />
+              Apply filters
             </Button>
             <Button type="button" variant="ghost" onClick={() => auditTail.refetch()}>
               <RefreshCcw className="size-4" aria-hidden="true" />
@@ -8012,16 +9264,26 @@ function AuditPage(): React.ReactElement {
 
         <AuditProofSummary
           data={data}
-          pending={auditTail.isFetching}
-          error={auditTail.error instanceof Error ? auditTail.error.message : null}
+          pending={auditTail.isPending}
+          error={auditError}
         />
-        <AuditTimelineTable records={data?.records ?? []} />
+        <AuditTimelineTable
+          records={data?.records ?? null}
+          pending={auditTail.isPending}
+          error={auditError}
+        />
         <VerdictProofInspectorPanel
           data={verdictProofs}
-          pending={auditTail.isFetching}
-          error={auditTail.error instanceof Error ? auditTail.error.message : null}
+          pending={auditTail.isPending}
+          error={auditError}
         />
-        {exportProofBundle ? <AuditProofBundlePanel bundle={data?.export ?? null} /> : null}
+        {applied.exportProofBundle ? (
+          <AuditProofBundlePanel
+            bundle={data?.export ?? null}
+            pending={auditTail.isPending}
+            error={auditError}
+          />
+        ) : null}
       </div>
     </PageFrame>
   );
@@ -8043,6 +9305,7 @@ function VerdictProofInspectorPanel({
 }): React.ReactElement {
   const VerdictProof = OMCP_SKIN.renderers.VerdictProof;
   const proofs = data?.proofs ?? [];
+  const unavailable = Boolean(error) || data?.source === "unavailable";
   return (
     <Surface className="space-y-3 p-4" data-testid="verdict-proof-inspector">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -8052,18 +9315,22 @@ function VerdictProofInspectorPanel({
             Redacted certificate fields and binding checks reported with the audit tail. Signing-key verification still requires the CLI.
           </p>
         </div>
-        <Badge tone={proofs.length > 0 ? "ok" : "off"}>
-          {proofs.length} {proofs.length === 1 ? "proof" : "proofs"}
+        <Badge tone={unavailable ? "warn" : pending ? "info" : proofs.length > 0 ? "ok" : "off"}>
+          {unavailable
+            ? "unavailable"
+            : pending
+              ? "loading"
+              : `${proofs.length} ${proofs.length === 1 ? "proof" : "proofs"}`}
         </Badge>
       </div>
       {error ? <p className="text-xs text-[var(--om-text-bright)]" role="alert">{error}</p> : null}
       {proofs.length === 0 ? (
         <p className="text-xs text-[var(--om-text-muted)]">
-          {pending
+          {unavailable
+            ? (data?.reason ?? "Audit tail provider is unavailable.")
+            : pending
             ? "Loading verdict certificates…"
-            : data?.source === "unavailable"
-              ? (data.reason ?? "Audit tail provider is unavailable.")
-              : `No proof-carrying records in this window (${data?.uncertified ?? 0} record(s) without a certificate).`}
+            : `No proof-carrying records in this window (${data?.uncertified ?? 0} record(s) without a certificate).`}
         </p>
       ) : (
         <div className="space-y-3">
@@ -8076,7 +9343,7 @@ function VerdictProofInspectorPanel({
   );
 }
 
-function AuditProofSummary({
+export function AuditProofSummary({
   data,
   pending,
   error
@@ -8089,27 +9356,28 @@ function AuditProofSummary({
   const macStatus = nestedString(data?.proof, ["verification", "keyed_mac", "status"]);
   const chainTone = chainStatus === "ok" ? "ok" : chainStatus === "broken" ? "warn" : "off";
   const macTone = macStatus === "ok" ? "ok" : macStatus === "not_checked" ? "info" : "off";
+  const unavailable = !pending && (Boolean(error) || data === null);
   return (
     <Surface className="p-4">
       <div className="grid gap-3 md:grid-cols-4">
         <AuditFactTile
           label="Chain"
-          value={pending ? "checking" : chainStatus ?? data?.source ?? "unavailable"}
-          tone={pending ? "info" : chainTone}
+          value={pending ? "checking" : unavailable ? "unavailable" : chainStatus ?? data?.source ?? "unverified"}
+          tone={pending ? "info" : unavailable ? "off" : chainTone}
         />
         <AuditFactTile
           label="MAC"
-          value={macStatus ?? "not checked"}
-          tone={macTone}
+          value={pending ? "checking" : unavailable ? "unavailable" : macStatus ?? "not checked"}
+          tone={pending ? "info" : unavailable ? "off" : macTone}
         />
         <AuditFactTile
           label="Scanned"
-          value={String(data?.scanned_records ?? 0)}
+          value={pending ? "checking" : unavailable ? "unavailable" : data?.scanned_records == null ? "unavailable" : String(data.scanned_records)}
           tone="neutral"
         />
         <AuditFactTile
           label="Selected"
-          value={String(data?.selected_records ?? data?.records.length ?? 0)}
+          value={pending ? "checking" : unavailable ? "unavailable" : String(data?.selected_records ?? data?.records.length ?? 0)}
           tone="neutral"
         />
       </div>
@@ -8142,18 +9410,33 @@ function AuditFactTile({
   );
 }
 
-function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.ReactElement {
-  const actions = coalesceAuditTimelineRecords(records);
+export function AuditTimelineTable({
+  records,
+  pending,
+  error
+}: {
+  records: AuditTailRecord[] | null;
+  pending: boolean;
+  error: string | null;
+}): React.ReactElement {
+  const actions = records ? coalesceAuditTimelineRecords(records) : [];
+  const unavailable = !pending && (Boolean(error) || records === null);
   return (
     <Surface className="overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div>
           <h3 className="text-base font-bold text-[var(--om-text-bright)]">Timeline</h3>
           <p className="mt-1 text-sm text-[var(--om-text-muted)]">
-            {actions.length} actions · {records.length} signed records
+            {pending
+              ? "Loading signed records…"
+              : unavailable
+                ? "Audit ledger unavailable"
+                : `${actions.length} actions · ${records?.length ?? 0} signed records`}
           </p>
         </div>
-        <Badge tone={actions.length > 0 ? "ok" : "off"}>{actions.length > 0 ? "ready" : "empty"}</Badge>
+        <Badge tone={unavailable ? "warn" : pending ? "info" : actions.length > 0 ? "ok" : "off"}>
+          {unavailable ? "unavailable" : pending ? "loading" : actions.length > 0 ? "ready" : "empty"}
+        </Badge>
       </div>
       <div className="overflow-x-auto" role="region" aria-label="Audit timeline" tabIndex={0}>
         <table className="w-full min-w-[1080px] border-collapse text-left">
@@ -8169,10 +9452,14 @@ function AuditTimelineTable({ records }: { records: AuditTailRecord[] }): React.
             </tr>
           </thead>
           <tbody className="divide-y divide-[var(--om-border)]">
-            {actions.length === 0 ? (
+            {pending || unavailable || actions.length === 0 ? (
               <tr>
                 <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={6}>
-                  No audit records
+                  {pending
+                    ? "Loading audit records…"
+                    : unavailable
+                      ? `Audit ledger unavailable${error ? `: ${error}` : "."}`
+                      : "No audit records"}
                 </td>
               </tr>
             ) : (
@@ -8245,11 +9532,27 @@ function AuditEvidenceList({
   );
 }
 
-function AuditRecordProof({ proof }: { proof: AuditTailRecord["proof"] }): React.ReactElement {
-  const hashValid = proof?.["hash_valid"] === true;
+export type AuditHashValidity = {
+  label: "hash ok" | "hash fail" | "hash unverified";
+  tone: "ok" | "warn" | "off";
+  verified: boolean | null;
+};
+
+export function auditHashValidity(proof: AuditTailRecord["proof"]): AuditHashValidity {
+  if (proof?.["hash_valid"] === true) {
+    return { label: "hash ok", tone: "ok", verified: true };
+  }
+  if (proof?.["hash_valid"] === false) {
+    return { label: "hash fail", tone: "warn", verified: false };
+  }
+  return { label: "hash unverified", tone: "off", verified: null };
+}
+
+export function AuditRecordProof({ proof }: { proof: AuditTailRecord["proof"] }): React.ReactElement {
+  const validity = auditHashValidity(proof);
   return (
     <div className="space-y-2">
-      <Badge tone={hashValid ? "ok" : "warn"}>{hashValid ? "hash ok" : "hash fail"}</Badge>
+      <Badge tone={validity.tone}>{validity.label}</Badge>
       <p className="break-all font-mono text-xs text-[var(--om-text-muted)]">
         {shortHash(typeof proof?.["entry_hash"] === "string" ? proof["entry_hash"] : null)}
       </p>
@@ -8260,24 +9563,43 @@ function AuditRecordProof({ proof }: { proof: AuditTailRecord["proof"] }): React
   );
 }
 
-function AuditProofBundlePanel({
-  bundle
+export function AuditProofBundlePanel({
+  bundle,
+  pending,
+  error
 }: {
   bundle: Record<string, unknown> | null;
+  pending: boolean;
+  error: string | null;
 }): React.ReactElement {
+  const unavailable = !pending && Boolean(error);
   return (
     <Surface className="overflow-hidden">
       <div className="flex items-center justify-between gap-3 border-b border-[var(--om-border)] px-4 py-3">
         <div>
           <h3 className="text-base font-bold text-[var(--om-text-bright)]">Proof Bundle</h3>
           <p className="mt-1 text-sm text-[var(--om-text-muted)]">
-            {bundle ? String(bundle["format"] ?? "bundle") : "unavailable"}
+            {pending
+              ? "Loading proof bundle…"
+              : unavailable
+                ? "Proof bundle unavailable"
+                : bundle
+                  ? String(bundle["format"] ?? "bundle")
+                  : "No proof bundle returned"}
           </p>
         </div>
-        <Badge tone={bundle ? "ok" : "off"}>{bundle ? "export" : "empty"}</Badge>
+        <Badge tone={unavailable ? "warn" : pending ? "info" : bundle ? "ok" : "off"}>
+          {unavailable ? "unavailable" : pending ? "loading" : bundle ? "export" : "empty"}
+        </Badge>
       </div>
       <pre className="max-h-[460px] overflow-auto bg-[var(--om-surface-elevated)] p-4 text-xs leading-5 text-[var(--om-text-bright)]">
-        {bundle ? prettyJson(bundle) : "{}"}
+        {pending
+          ? "Loading proof bundle…"
+          : unavailable
+            ? "Proof bundle unavailable."
+            : bundle
+              ? prettyJson(bundle)
+              : "{}"}
       </pre>
     </Surface>
   );
@@ -8360,7 +9682,17 @@ function PageFrame({
   );
 }
 
-function QueryErrorNotice({ title, error }: { title: string; error: Error }): React.ReactElement {
+function QueryErrorNotice({
+  title,
+  error,
+  retryLabel,
+  onRetry
+}: {
+  title: string;
+  error: Error;
+  retryLabel?: string;
+  onRetry?: () => void;
+}): React.ReactElement {
   return (
     <div
       className="rounded-lg border border-[var(--om-rust)] bg-[color-mix(in_srgb,var(--om-rust)_12%,transparent)] p-4"
@@ -8368,6 +9700,12 @@ function QueryErrorNotice({ title, error }: { title: string; error: Error }): Re
     >
       <p className="font-semibold text-[var(--om-text-bright)]">{title}</p>
       <p className="mt-1 text-sm text-[var(--om-text-muted)]">{error.message}</p>
+      {onRetry ? (
+        <Button type="button" variant="secondary" className="mt-3" onClick={onRetry}>
+          <RefreshCcw className="size-4" aria-hidden="true" />
+          {retryLabel ?? "Retry"}
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -8736,23 +10074,6 @@ function factsFromResponse(response: OperatorResponse<WorkbenchActionData>): Wor
   return facts;
 }
 
-function sessionLevelSummary(response: OperatorResponse<WorkbenchActionData>): SessionLevelSummary {
-  const result = mcpResult(response.data.mcp_response);
-  const resultRecord = isRecord(result) ? result : {};
-  const session = isRecord(resultRecord["session"]) ? resultRecord["session"] : {};
-  const gate = isRecord(resultRecord["gate"]) ? resultRecord["gate"] : {};
-  return {
-    action: stringValue(resultRecord["action"], "unknown"),
-    preview: stringValue(resultRecord["preview"], "false"),
-    targetLevel: stringValue(resultRecord["target_level"], "READ_ONLY"),
-    ttlSeconds: stringValue(resultRecord["ttl_seconds"], "0"),
-    currentLevel: stringValue(session["current_level"], "unknown"),
-    profileCeiling: stringValue(session["profile_ceiling"], "unknown"),
-    gateDecision: stringValue(gate["decision"], "not_required"),
-    confirm: confirmationFromResponse(response) ?? "none"
-  };
-}
-
 function stringValue(value: unknown, fallback: string): string {
   if (value === null || value === undefined || value === "") {
     return fallback;
@@ -8782,7 +10103,7 @@ function actionLabel(action: WorkbenchAction): string {
 
 type WorkbenchIdeRequestInput = {
   source: string;
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   projectRoot: string;
   target: string;
   direction: "upstream" | "downstream" | "bidirectional";
@@ -8794,7 +10115,7 @@ function workbenchIdeRequest(
   action: WorkbenchIdeAction,
   input: WorkbenchIdeRequestInput
 ): {
-  laneId?: string;
+  lane?: OperatorLaneTarget;
   tool: WorkbenchPlsqlTool;
   arguments: Record<string, unknown>;
   idempotencyPrefix: string;
@@ -8804,14 +10125,14 @@ function workbenchIdeRequest(
   switch (action) {
     case "parse":
       return {
-        laneId: input.laneId,
+        lane: input.lane,
         tool: "oracle_plsql_parse",
         arguments: { source: input.source },
         idempotencyPrefix: "workbench-plsql-parse"
       };
     case "docs":
       return {
-        laneId: input.laneId,
+        lane: input.lane,
         tool: "oracle_plsql_doc",
         arguments: { source: input.source, format: "json" },
         idempotencyPrefix: "workbench-plsql-doc"
@@ -8821,7 +10142,7 @@ function workbenchIdeRequest(
         throw new Error("project root is required");
       }
       return {
-        laneId: input.laneId,
+        lane: input.lane,
         tool: "oracle_plsql_analyze",
         arguments: { project_root: projectRoot },
         idempotencyPrefix: "workbench-plsql-analyze"
@@ -8831,7 +10152,7 @@ function workbenchIdeRequest(
         throw new Error("project root and target are required");
       }
       return {
-        laneId: input.laneId,
+        lane: input.lane,
         tool: "oracle_plsql_lineage",
         arguments: {
           project_root: projectRoot,
@@ -8846,14 +10167,14 @@ function workbenchIdeRequest(
         throw new Error("project root is required");
       }
       return {
-        laneId: input.laneId,
+        lane: input.lane,
         tool: "oracle_plsql_sast",
         arguments: { project_root: projectRoot, format: "json" },
         idempotencyPrefix: "workbench-plsql-sast"
       };
     case "impact":
       return {
-        laneId: input.laneId,
+        lane: input.lane,
         tool: "oracle_plsql_what_breaks",
         arguments: {
           changeset: parseChangeset(input.changesetJson),

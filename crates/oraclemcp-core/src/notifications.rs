@@ -26,15 +26,16 @@ use std::collections::{HashMap, VecDeque};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 
-/// A bounded queue of server-initiated JSON-RPC notification objects (E6). The
-/// transport drains it after handling each request and writes each object on the
-/// same outbound channel.
+/// Per-owner bounded queues of server-initiated JSON-RPC notification objects
+/// (E6). The transport drains one owner after handling each request and writes
+/// each object on the same outbound channel.
 ///
-/// The queue is bounded so a client that never reads cannot make the server
-/// accumulate unbounded progress notifications; once full, the oldest pending
-/// notification is dropped (progress is advisory — losing an intermediate tick
-/// is acceptable, and `tools/list_changed` is idempotent so a coalesced drop is
-/// harmless).
+/// The queue is bounded both per owner and in aggregate so clients that never
+/// read cannot grow either one queue or the owner map without limit. One noisy
+/// owner first evicts its own advisory progress. A previously unrepresented
+/// owner may displace progress from the largest foreign producer, preventing
+/// one producer from monopolizing every slot. Control signals are never
+/// displaced.
 pub struct NotificationHub {
     state: Mutex<NotificationState>,
     capacity: usize,
@@ -42,13 +43,20 @@ pub struct NotificationHub {
 
 #[derive(Default)]
 struct NotificationState {
-    pending: VecDeque<OwnedNotification>,
+    pending: HashMap<String, VecDeque<PendingNotification>>,
+    pending_count: usize,
     tool_catalogs: HashMap<String, Value>,
     dropped: u64,
 }
 
-struct OwnedNotification {
-    request_owner: String,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NotificationKind {
+    Progress,
+    ToolsListChanged,
+}
+
+struct PendingNotification {
+    kind: NotificationKind,
     value: Value,
 }
 
@@ -80,18 +88,48 @@ impl NotificationHub {
         }
     }
 
-    /// Push a fully-formed JSON-RPC notification object, dropping the oldest
-    /// when the queue is full (advisory delivery; see the type docs).
-    fn push(&self, request_owner: &str, notification: Value) {
+    /// Push a fully-formed JSON-RPC notification object into one owner's queue.
+    /// Duplicate catalog-change signals coalesce. When that queue is full,
+    /// advisory progress is discarded before the catalog-change signal.
+    fn push(&self, request_owner: &str, kind: NotificationKind, notification: Value) {
         let mut state = self.state.lock();
-        while state.pending.len() >= self.capacity {
-            state.pending.pop_front();
-            state.dropped = state.dropped.saturating_add(1);
+        if kind == NotificationKind::ToolsListChanged
+            && state.pending.get(request_owner).is_some_and(|queue| {
+                queue
+                    .iter()
+                    .any(|pending| pending.kind == NotificationKind::ToolsListChanged)
+            })
+        {
+            return;
         }
-        state.pending.push_back(OwnedNotification {
-            request_owner: request_owner.to_owned(),
-            value: notification,
-        });
+
+        let owner_is_full = state
+            .pending
+            .get(request_owner)
+            .is_some_and(|queue| queue.len() >= self.capacity);
+        if owner_is_full && !drop_owner_progress(&mut state, request_owner) {
+            state.dropped = state.dropped.saturating_add(1);
+            return;
+        }
+
+        if state.pending_count >= self.capacity {
+            let made_room = drop_owner_progress(&mut state, request_owner)
+                || drop_largest_foreign_progress(&mut state, request_owner);
+            if !made_room {
+                state.dropped = state.dropped.saturating_add(1);
+                return;
+            }
+        }
+
+        state
+            .pending
+            .entry(request_owner.to_owned())
+            .or_default()
+            .push_back(PendingNotification {
+                kind,
+                value: notification,
+            });
+        state.pending_count += 1;
     }
 
     /// Enqueue a `notifications/progress` for `progress_token` (E6). MCP carries
@@ -118,6 +156,7 @@ impl NotificationHub {
         }
         self.push(
             request_owner,
+            NotificationKind::Progress,
             json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/progress",
@@ -132,6 +171,7 @@ impl NotificationHub {
     pub fn enqueue_tools_list_changed(&self, request_owner: &str) {
         self.push(
             request_owner,
+            NotificationKind::ToolsListChanged,
             json!({
                 "jsonrpc": "2.0",
                 "method": "notifications/tools/list_changed",
@@ -144,17 +184,12 @@ impl NotificationHub {
     #[must_use]
     pub fn drain(&self, request_owner: &str) -> Vec<Value> {
         let mut state = self.state.lock();
-        let mut drained = Vec::new();
-        let mut retained = VecDeque::with_capacity(state.pending.len());
-        while let Some(notification) = state.pending.pop_front() {
-            if notification.request_owner == request_owner {
-                drained.push(notification.value);
-            } else {
-                retained.push_back(notification);
-            }
-        }
-        state.pending = retained;
-        drained
+        let pending = state.pending.remove(request_owner).unwrap_or_default();
+        state.pending_count = state.pending_count.saturating_sub(pending.len());
+        pending
+            .into_iter()
+            .map(|notification| notification.value)
+            .collect()
     }
 
     /// Whether `request_owner` has anything queued (introspection/tests).
@@ -164,8 +199,8 @@ impl NotificationHub {
             .state
             .lock()
             .pending
-            .iter()
-            .any(|notification| notification.request_owner == request_owner)
+            .get(request_owner)
+            .is_some_and(|pending| !pending.is_empty())
     }
 
     /// Observe the exact served tool catalog for one MCP session. The first
@@ -198,6 +233,44 @@ impl NotificationHub {
     pub fn dropped_count(&self) -> u64 {
         self.state.lock().dropped
     }
+}
+
+fn drop_owner_progress(state: &mut NotificationState, request_owner: &str) -> bool {
+    let Some(queue) = state.pending.get_mut(request_owner) else {
+        return false;
+    };
+    let Some(index) = queue
+        .iter()
+        .position(|pending| pending.kind == NotificationKind::Progress)
+    else {
+        return false;
+    };
+    queue.remove(index);
+    state.pending_count = state.pending_count.saturating_sub(1);
+    state.dropped = state.dropped.saturating_add(1);
+    if queue.is_empty() {
+        state.pending.remove(request_owner);
+    }
+    true
+}
+
+fn drop_largest_foreign_progress(state: &mut NotificationState, request_owner: &str) -> bool {
+    let candidate = state
+        .pending
+        .iter()
+        .filter_map(|(owner, queue)| {
+            let progress_count = queue
+                .iter()
+                .filter(|pending| pending.kind == NotificationKind::Progress)
+                .count();
+            (owner.as_str() != request_owner && progress_count > 0)
+                .then_some((owner, progress_count))
+        })
+        .max_by(|(owner_a, count_a), (owner_b, count_b)| {
+            count_a.cmp(count_b).then_with(|| owner_b.cmp(owner_a))
+        })
+        .map(|(owner, _)| owner.clone());
+    candidate.is_some_and(|owner| drop_owner_progress(state, &owner))
 }
 
 /// Extract the MCP `progressToken` from a request's `params._meta`, if present
@@ -273,6 +346,84 @@ mod tests {
         assert_eq!(drained[0]["params"]["progress"], json!(2.0));
         assert_eq!(drained[1]["params"]["progress"], json!(3.0));
         assert_eq!(hub.dropped_count(), 1);
+    }
+
+    #[test]
+    fn one_owners_progress_flood_cannot_evict_another_owners_event() {
+        let hub = NotificationHub::with_capacity(2);
+        hub.enqueue_tools_list_changed("owner-b");
+        for progress in 0..16 {
+            hub.enqueue_progress("owner-a", &json!("a"), progress.into(), None, None);
+        }
+
+        let owner_b = hub.drain("owner-b");
+        assert_eq!(owner_b.len(), 1);
+        assert_eq!(
+            owner_b[0]["method"],
+            json!("notifications/tools/list_changed")
+        );
+        let owner_a = hub.drain("owner-a");
+        assert_eq!(owner_a.len(), 1, "the aggregate capacity is also enforced");
+        assert_eq!(owner_a[0]["params"]["progress"], json!(15.0));
+    }
+
+    #[test]
+    fn new_owner_progress_displaces_a_progress_monopolist() {
+        let hub = NotificationHub::with_capacity(3);
+        for progress in 1..=3 {
+            hub.enqueue_progress("owner-a", &json!("a"), progress.into(), None, None);
+        }
+
+        hub.enqueue_progress("owner-b", &json!("b"), 1.0, None, None);
+
+        let owner_a = hub.drain("owner-a");
+        let owner_b = hub.drain("owner-b");
+        assert_eq!(owner_a.len(), 2);
+        assert_eq!(owner_b.len(), 1, "a new owner receives one progress slot");
+        assert_eq!(owner_b[0]["params"]["progressToken"], json!("b"));
+        assert_eq!(hub.dropped_count(), 1);
+    }
+
+    #[test]
+    fn abandoned_request_owners_cannot_exceed_the_aggregate_capacity() {
+        let hub = NotificationHub::with_capacity(3);
+        for owner in 0..100 {
+            hub.enqueue_progress(&format!("owner-{owner}"), &json!(owner), 0.0, None, None);
+        }
+
+        let state = hub.state.lock();
+        assert_eq!(state.pending_count, 3);
+        assert_eq!(state.pending.len(), 3);
+        assert!(state.pending.values().all(|queue| !queue.is_empty()));
+        assert_eq!(state.dropped, 97);
+    }
+
+    #[test]
+    fn catalog_change_is_coalesced_and_protected_from_progress_pressure() {
+        let hub = NotificationHub::with_capacity(2);
+        hub.enqueue_progress("a", &json!("t"), 1.0, None, None);
+        hub.enqueue_tools_list_changed("a");
+        hub.enqueue_tools_list_changed("a");
+        hub.enqueue_progress("a", &json!("t"), 2.0, None, None);
+        hub.enqueue_progress("a", &json!("t"), 3.0, None, None);
+
+        let drained = hub.drain("a");
+        assert_eq!(drained.len(), 2);
+        assert_eq!(
+            drained
+                .iter()
+                .filter(|value| value["method"] == "notifications/tools/list_changed")
+                .count(),
+            1,
+            "catalog changes coalesce and survive progress eviction"
+        );
+        assert_eq!(
+            drained
+                .iter()
+                .filter(|value| value["method"] == "notifications/progress")
+                .count(),
+            1
+        );
     }
 
     #[test]

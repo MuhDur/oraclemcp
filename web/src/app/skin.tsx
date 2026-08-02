@@ -534,7 +534,7 @@ export function EditionTimelineRenderer({
         <div className="flex items-center gap-2">
           <FileClock className="size-4 text-[var(--om-gold)]" aria-hidden="true" />
           <span className="text-sm font-bold text-[var(--om-text-bright)]">Edition Timeline</span>
-          <Badge tone={model.tone}>{model.linear ? "linear" : "branched"}</Badge>
+          <Badge tone={model.tone}>{model.linear ? "linear" : "non-linear"}</Badge>
         </div>
         <span className="font-mono text-2xs text-[var(--om-text-muted)]">{model.headline}</span>
       </header>
@@ -569,7 +569,7 @@ export function EditionTimelineRenderer({
         ))}
       </ol>
 
-      {!model.linear ? (
+      {model.branchedFrom.length > 0 ? (
         <p className="text-2xs font-semibold text-[var(--om-copper)]">
           Branch points: {model.branchedFrom.join(", ")}
         </p>
@@ -663,7 +663,7 @@ export function ColumnLineageRenderer({
     <section
       className={cn(
         "flex flex-col gap-3 rounded-lg border bg-[var(--om-surface)] p-4 shadow-sm",
-        model.driftCount > 0
+        model.driftCount > 0 || model.unverifiedCount > 0
           ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
           : "border-[var(--om-border)]"
       )}
@@ -674,6 +674,8 @@ export function ColumnLineageRenderer({
       data-verified-count={model.verifiedCount}
       data-drift-count={model.driftCount}
       data-partial-count={model.partialCount}
+      data-unverified-count={model.unverifiedCount}
+      data-malformed-count={model.malformedCount}
     >
       <header className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
@@ -687,12 +689,12 @@ export function ColumnLineageRenderer({
 
       {model.edges.length > 0 ? (
         <ul className="flex flex-col gap-1">
-          {model.edges.map((edge) => (
+          {model.edges.map((edge, index) => (
             <li
-              key={`${edge.from}->${edge.to}`}
+              key={JSON.stringify([edge.from, edge.to, edge.reportedStatus, index])}
               className={cn(
                 "flex flex-wrap items-center gap-2 rounded-md border px-3 py-2",
-                edge.status.startsWith("drift")
+                edge.status.startsWith("drift") || edge.status === "unverified"
                   ? "border-[color-mix(in_srgb,var(--om-copper)_45%,transparent)]"
                   : "border-[var(--om-border)]"
               )}

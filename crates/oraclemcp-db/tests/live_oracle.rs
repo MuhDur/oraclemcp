@@ -1671,7 +1671,7 @@ fn live_pool_thin_roundtrip() {
             .expect("pool query");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].parse_i64("N"), Some(7));
-        assert!(pool.state_connections() >= 1);
+        assert!(pool.state_connections().expect("pool metrics") >= 1);
     });
 }
 

@@ -7969,18 +7969,32 @@ fn set_session_level_requires_confirmation_to_apply() {
             json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
         )
         .expect("preview supplies token");
+    assert_eq!(preview.get("elevation_expires_unix"), None);
     let confirm = preview["confirmation"]["confirm"]
         .as_str()
         .expect("confirm grant");
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
     let applied = dispatcher
         .dispatch(
             "oracle_set_session_level",
             json!({ "level": "READ_WRITE", "ttl_seconds": 60, "execute": true, "token": confirm }),
         )
         .expect("confirmed elevation applies");
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs();
     assert_eq!(applied["changed"], json!(true));
     assert_eq!(applied["session"]["current_level"], json!("READ_WRITE"));
     assert_eq!(applied["session"]["has_active_elevation"], json!(true));
+    let expiry = applied["elevation_expires_unix"]
+        .as_u64()
+        .expect("applied elevation carries an absolute server expiry");
+    assert!(expiry >= before.saturating_add(60));
+    assert!(expiry <= after.saturating_add(60));
 
     let write = dispatcher
         .dispatch(
@@ -7990,6 +8004,19 @@ fn set_session_level_requires_confirmation_to_apply() {
         .expect("write is now within current session level");
     assert_eq!(write["gate_decision"], json!("allow"));
     assert!(write["execute_confirmation"]["confirm"].as_str().is_some());
+}
+
+#[test]
+fn elevation_expiry_is_derived_from_the_wall_sample_taken_before_authority_install() {
+    let mut session = SessionLevelState::new(OperatingLevel::ReadWrite, false);
+
+    let expiry =
+        install_escalation_window(&mut session, OperatingLevel::ReadWrite, 60, 1_700_000_000)
+            .expect("elevation installs");
+
+    assert_eq!(expiry, 1_700_000_060);
+    assert_eq!(session.effective_level(), OperatingLevel::ReadWrite);
+    assert!(session.has_active_elevation());
 }
 
 #[test]

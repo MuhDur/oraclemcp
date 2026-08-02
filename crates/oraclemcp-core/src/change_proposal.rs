@@ -555,6 +555,8 @@ pub struct ChangeProposalApplyRequest {
     #[serde(default)]
     pub lane_id: Option<String>,
     #[serde(default)]
+    pub lane_generation: Option<u64>,
+    #[serde(default)]
     pub confirm: Option<String>,
     #[serde(default)]
     pub commit: Option<bool>,

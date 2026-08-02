@@ -210,7 +210,7 @@ impl HttpSessionStore {
             .map(|entry| entry.protocol_version.clone())
     }
 
-    pub(super) fn remove(&self, id: &str) -> bool {
+    pub(crate) fn remove(&self, id: &str) -> bool {
         let mut state = self.state.lock();
         remove_session_entry(&mut state, id).is_some()
     }
@@ -711,7 +711,7 @@ impl HttpResultStore {
         }
     }
 
-    pub(super) fn remove_session(&self, session_id: &str) {
+    pub(crate) fn remove_session(&self, session_id: &str) {
         let mut state = self.state.lock();
         let removed = state.sessions.remove(session_id);
         if let Some(session) = &removed {

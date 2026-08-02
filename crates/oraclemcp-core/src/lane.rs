@@ -36,7 +36,10 @@ use crate::admission::{
     DEFAULT_RETRY_AFTER_MS,
 };
 use crate::capability::narrow_to_lane;
-use crate::http::{HttpLaneBinding, HttpLaneSnapshot, HttpSessionLifecycle};
+use crate::http::{
+    HttpLaneBinding, HttpLaneCloseResult, HttpLaneSnapshot, HttpResultStore, HttpSessionLifecycle,
+    HttpSessionStore,
+};
 use crate::operator_protocol::operator_subject_id_hash;
 use crate::request_budget::{DEFAULT_REQUEST_POLL_QUOTA, DEFAULT_REQUEST_TIMEOUT, RequestBudget};
 use crate::server::{
@@ -1387,6 +1390,11 @@ impl StatefulLaneDispatch {
         let session_id = context.http_session_id().ok_or_else(lease_required)?;
         let principal_key = context.principal_key().unwrap_or("anonymous-http");
         let credential_generation = context.credential_generation();
+        let expected_lane = match (context.lane_id(), context.lane_generation()) {
+            (Some(lane_id), Some(generation)) => Some((lane_id, generation)),
+            (None, None) => None,
+            _ => return Err(expected_lane_identity_error()),
+        };
         // QA100 .92: refuse fail-closed, before consuming any admission capacity,
         // when this request authenticated against a credential generation that a
         // revoke/rotate has since superseded. This fast path gives a deterministic
@@ -1397,6 +1405,15 @@ impl StatefulLaneDispatch {
             return Err(lane_credential_revoked_error());
         }
         let key = LaneKey::new(session_id, principal_key);
+        if let Some((expected_lane_id, expected_generation)) = expected_lane {
+            let lane = self
+                .reusable_lane(&key)
+                .ok_or_else(expected_lane_generation_error)?;
+            if lane.name() != expected_lane_id || lane.generation() != expected_generation {
+                return Err(expected_lane_generation_error());
+            }
+            return Ok(lane);
+        }
         let lifecycle_ticket = self.begin_lane_resolution(key.clone());
         if let Some(lane) = self.reusable_lane(&key) {
             return Ok(lane);
@@ -1701,6 +1718,64 @@ impl HttpSessionLifecycle for StatefulLaneDispatch {
             })
         })
     }
+
+    fn close_lane_with_reason(
+        &self,
+        lane_id: &str,
+        expected_generation: u64,
+        reason: DispatchCloseReason,
+        session_store: Option<&HttpSessionStore>,
+        result_store: Option<&HttpResultStore>,
+    ) -> HttpLaneCloseResult {
+        let (binding, lane) = {
+            // Keep the canonical Lifecycle -> Registry order. Lane creation's
+            // final insert takes the same locks, so the exact-generation check,
+            // HTTP-store invalidation, and detach form one linearizable action.
+            let mut lifecycle = self.lifecycle.lock();
+            let mut registered = self.lock_lanes();
+            let Some((key, binding)) = registered.iter().find_map(|(key, lane)| {
+                (lane.name() == lane_id).then(|| {
+                    (
+                        key.clone(),
+                        HttpLaneBinding {
+                            lane_id: lane.name().to_owned(),
+                            mcp_session_id: key.mcp_session_id.clone(),
+                            principal_key: key.principal_key.clone(),
+                            generation: lane.generation(),
+                        },
+                    )
+                })
+            }) else {
+                return HttpLaneCloseResult::NotFound;
+            };
+            if binding.generation != expected_generation {
+                return HttpLaneCloseResult::GenerationMismatch {
+                    active_generation: binding.generation,
+                };
+            }
+
+            if let Some(store) = session_store {
+                store.remove(&binding.mcp_session_id);
+            }
+            if let Some(store) = result_store {
+                store.remove_session(&binding.mcp_session_id);
+            }
+            if let Some(token) = lifecycle
+                .key_tokens
+                .remove(&key)
+                .and_then(|token| token.upgrade())
+            {
+                token.request(reason);
+            }
+            let lane = registered
+                .remove(&key)
+                .expect("generation-bound lane remains registered while locked");
+            (binding, lane)
+        };
+        self.creation_changed.notify_all();
+        lane.close_with_reason(reason);
+        HttpLaneCloseResult::Closed(binding)
+    }
 }
 
 impl ToolDispatch for StatefulLaneDispatch {
@@ -1779,6 +1854,22 @@ fn lease_required() -> ErrorEnvelope {
         "stateful HTTP dispatch requires an MCP-session-bound lane context",
     )
     .with_next_step("initialize the Streamable HTTP session before calling tools")
+}
+
+fn expected_lane_identity_error() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::InvalidArguments,
+        "an expected stateful lane identity must include both lane id and generation",
+    )
+    .with_next_step("refresh active lanes and retry against one exact lane generation")
+}
+
+fn expected_lane_generation_error() -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        "the selected stateful lane generation is no longer active",
+    )
+    .with_next_step("refresh active lanes before retrying this operator action")
 }
 
 fn lane_resolution_cancelled_error() -> ErrorEnvelope {
@@ -5397,6 +5488,146 @@ mod tests {
         assert_eq!(lane.generation(), 2);
         assert_eq!(lane.bump_generation(), 3);
         assert_eq!(lane.generation(), 3);
+    }
+
+    #[test]
+    fn atomic_lane_close_never_terminates_a_newer_generation() {
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatch_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = counting_stateful_registry(&builder_runs, &dispatch_runs);
+        let initial = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("cancel-session")
+                        .with_principal_key("cancel-principal"),
+                    "initial",
+                    Value::Null,
+                )
+                .await
+        });
+        assert!(matches!(initial, Outcome::Ok(_)));
+        let binding = HttpSessionLifecycle::active_lanes(registry.as_ref())
+            .into_iter()
+            .next()
+            .and_then(|lane| HttpSessionLifecycle::lane_binding(registry.as_ref(), &lane.lane_id))
+            .expect("initial dispatch publishes one lane binding");
+        let lane = registry
+            .lock_lanes()
+            .values()
+            .next()
+            .cloned()
+            .expect("registered lane");
+        let replacement_generation = lane.bump_generation();
+
+        assert_eq!(
+            HttpSessionLifecycle::close_lane_with_reason(
+                registry.as_ref(),
+                &binding.lane_id,
+                binding.generation,
+                DispatchCloseReason::OperatorCancel,
+                None,
+                None,
+            ),
+            HttpLaneCloseResult::GenerationMismatch {
+                active_generation: replacement_generation,
+            }
+        );
+        assert_eq!(registry.lane_count(), 1);
+
+        let closed = HttpSessionLifecycle::close_lane_with_reason(
+            registry.as_ref(),
+            &binding.lane_id,
+            replacement_generation,
+            DispatchCloseReason::OperatorCancel,
+            None,
+            None,
+        );
+        assert!(matches!(closed, HttpLaneCloseResult::Closed(_)));
+        assert_eq!(registry.lane_count(), 0);
+    }
+
+    #[test]
+    fn exact_lane_identity_refuses_stale_or_substituted_operator_dispatch() {
+        let builder_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let dispatch_runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let registry = counting_stateful_registry(&builder_runs, &dispatch_runs);
+
+        let initial = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("operator-session")
+                        .with_principal_key("operator-principal"),
+                    "initial",
+                    Value::Null,
+                )
+                .await
+        });
+        assert!(matches!(initial, Outcome::Ok(_)));
+        let binding = HttpSessionLifecycle::lane_binding(registry.as_ref(), "lane-1")
+            .or_else(|| {
+                HttpSessionLifecycle::active_lanes(registry.as_ref())
+                    .first()
+                    .and_then(|lane| {
+                        HttpSessionLifecycle::lane_binding(registry.as_ref(), &lane.lane_id)
+                    })
+            })
+            .expect("initial dispatch publishes one lane binding");
+
+        for (lane_id, generation) in [
+            (
+                binding.lane_id.as_str(),
+                binding.generation.saturating_add(1),
+            ),
+            ("substituted-lane", binding.generation),
+        ] {
+            let outcome = block_on_lane_bridge(async {
+                let cx = Cx::current().expect("bridge installs Cx");
+                registry
+                    .dispatch(
+                        &cx,
+                        DispatchContext::default()
+                            .with_http_session_id("operator-session")
+                            .with_principal_key("operator-principal")
+                            .with_lane_identity(lane_id, generation),
+                        "must-not-run",
+                        Value::Null,
+                    )
+                    .await
+            });
+            match outcome {
+                Outcome::Err(error) => {
+                    assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired)
+                }
+                other => panic!("stale exact lane identity must fail closed: {other:?}"),
+            }
+        }
+        assert_eq!(builder_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(dispatch_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(registry.lane_count(), 1);
+
+        let exact = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            registry
+                .dispatch(
+                    &cx,
+                    DispatchContext::default()
+                        .with_http_session_id("operator-session")
+                        .with_principal_key("operator-principal")
+                        .with_lane_identity(&binding.lane_id, binding.generation),
+                    "exact",
+                    Value::Null,
+                )
+                .await
+        });
+        assert!(matches!(exact, Outcome::Ok(_)));
+        assert_eq!(builder_runs.load(Ordering::SeqCst), 1);
+        assert_eq!(dispatch_runs.load(Ordering::SeqCst), 2);
     }
 
     #[test]

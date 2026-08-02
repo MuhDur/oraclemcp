@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import { isLineageEdgeStatus, toColumnLineageViewModel } from "./presentation-model";
 import { parseColumnLineage, type WorkbenchActionData } from "./operator-client";
+import { ColumnLineageRenderer } from "./skin";
 
 // Arc K column-lineage / drift. Each source-derived edge is cross-checked
 // against the live catalog and carries a typed status: verified, drift-missing,
@@ -41,6 +43,38 @@ describe("column lineage parsing", () => {
     expect(parseColumnLineage(action({ found: false })).edges).toBeNull();
     expect(parseColumnLineage(null).edges).toBeNull();
   });
+
+  it("retains unknown and missing statuses for unverified presentation", () => {
+    const input = parseColumnLineage(
+      action({
+        edges: [
+          { from: "HR.V.C", to: "HR.T.C", status: "future-status" },
+          { from: "HR.V.D", to: "HR.T.D" }
+        ]
+      })
+    );
+
+    expect(input.edges?.map((edge) => edge.status)).toEqual(["future-status", "unreported"]);
+  });
+
+  it("keeps malformed nonempty edge evidence visible and unverified", () => {
+    const input = parseColumnLineage(
+      action({ edges: [{ from: "HR.V.C" }, null, { target: "HR.T.D" }] })
+    );
+    expect(input.edges).toEqual([]);
+    expect(input.malformedCount).toBe(3);
+
+    const model = toColumnLineageViewModel(input);
+    expect(model.status).toBe("malformed");
+    expect(model.malformedCount).toBe(3);
+    expect(model.unverifiedCount).toBe(3);
+    expect(model.headline).not.toContain("No column edges");
+    expect(model.detail).toContain("No clean or empty cross-check claim");
+    const markup = renderToStaticMarkup(ColumnLineageRenderer({ model }));
+    expect(markup).toContain('data-lineage-status="malformed"');
+    expect(markup).toContain('data-malformed-count="3"');
+    expect(markup).not.toContain("Each edge was cross-checked");
+  });
 });
 
 describe("column lineage view-model", () => {
@@ -68,7 +102,7 @@ describe("column lineage view-model", () => {
     expect(model.verifiedCount).toBe(0);
   });
 
-  it("drops an edge whose status it cannot type, never showing it as verified", () => {
+  it("retains an unknown status as a visible unverified edge", () => {
     expect(isLineageEdgeStatus("verified")).toBe(true);
     expect(isLineageEdgeStatus("mystery")).toBe(false);
     const model = toColumnLineageViewModel({
@@ -77,7 +111,20 @@ describe("column lineage view-model", () => {
         { from: "c", to: "d", status: "verified" }
       ]
     });
-    expect(model.edges.map((e) => e.from)).toEqual(["c"]);
+    expect(model.edges.map((edge) => edge.from)).toEqual(["a", "c"]);
+    expect(model.edges[0]).toMatchObject({
+      status: "unverified",
+      reportedStatus: "mystery",
+      tone: "warn"
+    });
+    expect(model.unverifiedCount).toBe(1);
+    expect(model.tone).toBe("warn");
+    expect(model.detail).toContain("No clean cross-check claim");
+    const markup = renderToStaticMarkup(ColumnLineageRenderer({ model }));
+    expect(markup).toContain("data-unverified-count=\"1\"");
+    expect(markup).toContain("unverified");
+    expect(markup).toContain("mystery");
+    expect(markup).not.toContain("No column edges");
   });
 
   it("reports not_reported vs empty distinctly", () => {

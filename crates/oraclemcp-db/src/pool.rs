@@ -14,17 +14,21 @@
 //! `PoolSettings::max_size` is a *ceiling*; the effective ceiling applied at
 //! construction is `min(max_size, cpu*2+1)` (plan §10) via
 //! [`PoolSettings::resolved`]. Checkout waits up to `acquire_timeout_secs` for a
-//! free or newly-openable connection and then returns a `Pool` (BUSY) error —
-//! the acquire loop yields cooperatively (`yield_now`) rather than sleeping on a
-//! timer, so the timeout is enforced even on the bare timer-less dispatch
-//! runtime. [`PoolMetrics`] exposes the checkout accounting
-//! (`acquired`/`released`/`discarded`/`in_use`/`open`) so the zero-leaked-session
-//! invariant (`is_balanced`) and the bound (`is_bounded`) are observable.
+//! free or newly-openable connection and then returns a `Pool` (BUSY) error.
+//! Exhausted checkouts park on Asupersync's cancel-safe FIFO semaphore. One
+//! freed slot wakes one live waiter, queued callers cannot be bypassed by new
+//! arrivals, and a dropped head waiter hands the permit to its successor. A
+//! bounded cancellation checkpoint wakes at most the waiting task; it never
+//! removes and re-enqueues the semaphore waiter. [`PoolMetrics`] exposes the
+//! checkout accounting (`acquired`/`released`/`discarded`/`in_use`/`open`) so
+//! the zero-leaked-session invariant (`is_balanced`) and the bound
+//! (`is_bounded`) are observable.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use asupersync::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use asupersync::{Cx, RegionId, TaskId, Time};
 use async_trait::async_trait;
 
@@ -81,7 +85,7 @@ pub struct PoolSettings {
 
 /// Largest supported pool-checkout wait, matching the strict config contract.
 const MAX_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 60 * 60;
-
+const POOL_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 impl Default for PoolSettings {
     fn default() -> Self {
         PoolSettings {
@@ -214,6 +218,10 @@ pub struct OraclePool {
     manager: OracleConnectionManager,
     settings: PoolSettings,
     state: Arc<Mutex<PoolState>>,
+    /// One permit is held from checkout admission until the connection state is
+    /// returned or discarded. Asupersync's semaphore supplies FIFO ordering,
+    /// anti-barging, and cancellation baton handoff.
+    capacity: Arc<Semaphore>,
     /// Request limits are keyed by the explicit Asupersync task identity, not
     /// stored as one mutable pool-wide value. Concurrent callers therefore
     /// cannot overwrite or restore each other's absolute deadlines/quotas.
@@ -285,17 +293,20 @@ impl OraclePool {
                 released: 0,
                 discarded: 0,
             })),
+            capacity: Arc::new(Semaphore::with_name(
+                "oracle-pool-checkout-capacity",
+                settings.max_size as usize,
+            )),
             request_limits: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     /// Current number of idle + in-use connections in the pool.
-    #[must_use]
-    pub fn state_connections(&self) -> u32 {
+    pub fn state_connections(&self) -> Result<u32, DbError> {
         self.state
             .lock()
             .map(|state| state.open_count)
-            .unwrap_or_default()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))
     }
 
     /// The settings actually in force after CPU-derived resolution (B4).
@@ -320,6 +331,7 @@ impl OraclePool {
             state.open_count = state.open_count.saturating_sub(idle.len() as u32);
             idle
         };
+        self.capacity.close();
 
         let mut first_error = None;
         for connection in idle {
@@ -337,8 +349,7 @@ impl OraclePool {
     }
 
     /// A snapshot of checkout accounting (B3/B4 zero-leaked-session evidence).
-    #[must_use]
-    pub fn metrics(&self) -> PoolMetrics {
+    pub fn metrics(&self) -> Result<PoolMetrics, DbError> {
         self.state
             .lock()
             .map(|state| PoolMetrics {
@@ -350,7 +361,7 @@ impl OraclePool {
                 released: state.released,
                 discarded: state.discarded,
             })
-            .unwrap_or_default()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))
     }
 
     /// Run a query on a pooled connection with cancellation-aware checkout and
@@ -426,12 +437,12 @@ impl OraclePool {
         let mut attempt = 1;
         loop {
             db_checkpoint(cx, "oracle_pool.checkout.before")?;
-            let conn = self.checkout(cx).await?;
+            let (conn, permit) = self.checkout(cx).await?;
             self.on_checked_out()?;
             // From this point, future drop is an unconditional dirty discard.
             // The guard owns both the physical session and the accounting edge,
             // so a lane hard timeout cannot leak `in_use`/`open_count`.
-            let checkout = CheckedOutConnection::new(conn, Arc::clone(&self.state));
+            let checkout = CheckedOutConnection::new(conn, Arc::clone(&self.state), permit);
             let limits = self.request_limits_for(cx)?;
             let previous_deadline = checkout.connection().request_deadline(cx)?;
             let previous_quota = checkout.connection().request_quota(cx)?;
@@ -529,32 +540,67 @@ impl OraclePool {
         }
     }
 
-    async fn checkout(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
-        let deadline = checkout_deadline(Instant::now(), self.settings.acquire_timeout_secs)?;
+    async fn checkout(
+        &self,
+        cx: &Cx,
+    ) -> Result<(RustOracleConnection, OwnedSemaphorePermit), DbError> {
+        let deadline = checkout_deadline(
+            asupersync::time::wall_now(),
+            self.settings.acquire_timeout_secs,
+        )?;
+        let permit = self.acquire_checkout_permit(cx, deadline).await?;
+        db_checkpoint(cx, "oracle_pool.checkout.admitted")?;
+        let connection = self.open_connection_for_permit(cx).await?;
+        Ok((connection, permit))
+    }
+
+    async fn acquire_checkout_permit(
+        &self,
+        cx: &Cx,
+        deadline: Time,
+    ) -> Result<OwnedSemaphorePermit, DbError> {
+        db_checkpoint(cx, "oracle_pool.checkout.wait.before")?;
+        let mut acquire = Box::pin(OwnedSemaphorePermit::acquire(
+            Arc::clone(&self.capacity),
+            cx,
+            1,
+        ));
         loop {
-            db_checkpoint(cx, "oracle_pool.checkout.loop")?;
-            if let Some(conn) = self.try_checkout(cx).await? {
-                return Ok(conn);
+            let now = asupersync::time::wall_now();
+            check_checkout_wait_deadline(cx, deadline, now)?;
+            let poll_deadline = checkout_poll_deadline(now, deadline);
+            match asupersync::time::timeout_at(poll_deadline, acquire.as_mut()).await {
+                Ok(Ok(permit)) => {
+                    db_checkpoint(cx, "oracle_pool.checkout.wait.after")?;
+                    if asupersync::time::wall_now() > deadline {
+                        return Err(pool_acquire_timeout());
+                    }
+                    return Ok(permit);
+                }
+                Ok(Err(AcquireError::Cancelled)) => {
+                    return match db_checkpoint(cx, "oracle_pool.checkout.wait.cancelled") {
+                        Err(error) => Err(error),
+                        Ok(()) => Err(DbError::Cancelled(
+                            "thin Oracle connection checkout cancelled".to_owned(),
+                        )),
+                    };
+                }
+                Ok(Err(AcquireError::Closed)) => {
+                    return Err(DbError::Pool(
+                        "thin Oracle connection pool is closing".to_owned(),
+                    ));
+                }
+                Ok(Err(AcquireError::PolledAfterCompletion)) => {
+                    return Err(DbError::Internal(
+                        "pool capacity acquire was polled after completion".to_owned(),
+                    ));
+                }
+                Err(_) => check_checkout_wait_deadline(cx, deadline, asupersync::time::wall_now())?,
             }
-            if Instant::now() >= deadline {
-                return Err(DbError::Pool(
-                    "timed out waiting for thin Oracle connection".to_owned(),
-                ));
-            }
-            // B4: yield cooperatively and re-check the wall-clock deadline. We
-            // deliberately do NOT use `asupersync::time::sleep` here: the sleep
-            // future only wakes when a timer driver is advancing, and the MCP
-            // dispatch runtime (`oraclemcp-core/server.rs`) is a bare
-            // current-thread runtime with no timer driver — a timer-driven sleep
-            // would PARK FOREVER on an exhausted pool and the acquire timeout
-            // would never fire. `yield_now` re-schedules this task without a
-            // timer, so the deadline below is always re-evaluated and the
-            // acquire timeout is enforced regardless of timer-driver config.
-            asupersync::runtime::yield_now().await;
         }
     }
 
-    async fn try_checkout(&self, cx: &Cx) -> Result<Option<RustOracleConnection>, DbError> {
+    async fn open_connection_for_permit(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
         if self.is_closing()? {
             return Err(DbError::Pool(
                 "thin Oracle connection pool is closing".to_owned(),
@@ -565,7 +611,7 @@ impl OraclePool {
                 let pending_slot = PendingOpenSlot::new(Arc::clone(&self.state));
                 if self.manager.is_valid(cx, &conn).await.is_ok() {
                     pending_slot.complete();
-                    return Ok(Some(conn));
+                    return Ok(conn);
                 }
                 pending_slot.discard()?;
                 continue;
@@ -575,7 +621,7 @@ impl OraclePool {
                 match self.manager.connect(cx).await {
                     Ok(conn) => {
                         pending_slot.complete();
-                        return Ok(Some(conn));
+                        return Ok(conn);
                     }
                     Err(err) => {
                         pending_slot.discard()?;
@@ -583,7 +629,9 @@ impl OraclePool {
                     }
                 }
             }
-            return Ok(None);
+            return Err(DbError::Internal(
+                "pool capacity permit had no idle or openable connection slot".to_owned(),
+            ));
         }
     }
 
@@ -645,21 +693,45 @@ impl OraclePool {
                 released: 0,
                 discarded: 0,
             })),
+            capacity: Arc::new(Semaphore::with_name(
+                "oracle-pool-checkout-capacity-test",
+                settings.max_size.saturating_sub(open_count) as usize,
+            )),
             request_limits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
 
-fn checkout_deadline(now: Instant, acquire_timeout_secs: u64) -> Result<Instant, DbError> {
+fn checkout_deadline(now: Time, acquire_timeout_secs: u64) -> Result<Time, DbError> {
     if acquire_timeout_secs > MAX_POOL_ACQUIRE_TIMEOUT_SECS {
         return Err(DbError::Pool(format!(
             "acquire_timeout_secs must be at most {MAX_POOL_ACQUIRE_TIMEOUT_SECS}"
         )));
     }
-    now.checked_add(Duration::from_secs(acquire_timeout_secs))
-        .ok_or_else(|| {
-            DbError::Pool("acquire_timeout_secs cannot be represented by this platform".to_owned())
-        })
+    let timeout_nanos = Duration::from_secs(acquire_timeout_secs).as_nanos();
+    let timeout_nanos = u64::try_from(timeout_nanos)
+        .map_err(|_| DbError::Pool("acquire timeout cannot be represented".to_owned()))?;
+    now.as_nanos()
+        .checked_add(timeout_nanos)
+        .map(Time::from_nanos)
+        .ok_or_else(|| DbError::Pool("acquire timeout cannot be represented".to_owned()))
+}
+
+fn checkout_poll_deadline(now: Time, deadline: Time) -> Time {
+    deadline.min(now + POOL_CANCEL_POLL_INTERVAL)
+}
+
+fn check_checkout_wait_deadline(cx: &Cx, deadline: Time, now: Time) -> Result<(), DbError> {
+    db_checkpoint(cx, "oracle_pool.checkout.wait.poll")?;
+    if now >= deadline {
+        Err(pool_acquire_timeout())
+    } else {
+        Ok(())
+    }
+}
+
+fn pool_acquire_timeout() -> DbError {
+    DbError::Pool("timed out waiting for thin Oracle connection".to_owned())
 }
 
 /// Tracks an open pool slot while an idle-session validation or a new connect
@@ -718,13 +790,24 @@ impl Drop for PendingOpenSlot {
 struct CheckedOutConnection<T> {
     connection: Option<T>,
     state: Arc<Mutex<PoolState>>,
+    permit: Option<OwnedSemaphorePermit>,
 }
 
 impl<T> CheckedOutConnection<T> {
-    fn new(connection: T, state: Arc<Mutex<PoolState>>) -> Self {
+    fn new(connection: T, state: Arc<Mutex<PoolState>>, permit: OwnedSemaphorePermit) -> Self {
         Self {
             connection: Some(connection),
             state,
+            permit: Some(permit),
+        }
+    }
+
+    #[cfg(test)]
+    fn new_without_permit(connection: T, state: Arc<Mutex<PoolState>>) -> Self {
+        Self {
+            connection: Some(connection),
+            state,
+            permit: None,
         }
     }
 
@@ -747,7 +830,12 @@ impl CheckedOutConnection<RustOracleConnection> {
             .expect("checked-out connection finishes exactly once");
         if record_checkin(&mut state, broken) {
             state.idle.push(connection);
+            drop(state);
+        } else {
+            drop(state);
+            drop(connection);
         }
+        drop(self.permit.take());
         Ok(())
     }
 }
@@ -769,6 +857,7 @@ impl<T> Drop for CheckedOutConnection<T> {
             }
         }
         drop(connection);
+        drop(self.permit.take());
     }
 }
 
@@ -825,7 +914,7 @@ impl OracleConnection for OraclePool {
     async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         let mut info = OraclePool::describe(self, cx).await?;
         info.connection_strategy = Some("stateless_metadata_pool".to_owned());
-        info.pool_open_connections = Some(self.state_connections());
+        info.pool_open_connections = Some(self.state_connections()?);
         Ok(info)
     }
 
@@ -881,11 +970,26 @@ fn should_discard_after_call<T>(
 mod tests {
     use super::*;
     use std::future::{Future, pending};
+    use std::panic::AssertUnwindSafe;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::task::{Context, Waker};
+    use std::task::{Context, Poll, Wake, Waker};
+    use std::time::Instant;
 
     use asupersync::Budget;
     use asupersync::runtime::RuntimeBuilder;
+
+    #[derive(Default)]
+    struct WakeCounter(AtomicUsize);
+
+    impl Wake for WakeCounter {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 
     #[test]
     fn pool_settings_defaults() {
@@ -898,7 +1002,7 @@ mod tests {
 
     #[test]
     fn checkout_deadline_rejects_every_out_of_contract_boundary_without_panicking() {
-        let now = Instant::now();
+        let now = Time::from_secs(17);
         for timeout in [
             0,
             1,
@@ -917,6 +1021,43 @@ mod tests {
                 );
             }
         }
+
+        assert!(
+            checkout_deadline(Time::MAX, 1).is_err(),
+            "absolute deadline arithmetic fails closed on overflow"
+        );
+    }
+
+    #[test]
+    fn checkout_poll_slice_never_moves_the_absolute_deadline_forward() {
+        let deadline = Time::from_secs(10);
+        assert_eq!(
+            checkout_poll_deadline(Time::from_millis(9_950), deadline),
+            deadline,
+            "the final cancellation slice is capped by the original deadline"
+        );
+        assert_eq!(
+            checkout_poll_deadline(Time::from_secs(11), deadline),
+            deadline,
+            "a delayed first poll cannot restart or extend the timeout"
+        );
+    }
+
+    #[test]
+    fn checkout_deadline_classification_preserves_cancellation_at_the_boundary() {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            cx.set_cancel_requested(true);
+            let deadline = Time::from_secs(10);
+            let result = check_checkout_wait_deadline(&cx, deadline, deadline);
+            assert!(
+                matches!(result, Err(DbError::Cancelled(_))),
+                "cancellation wins when it arrives at the checkout deadline: {result:?}"
+            );
+        });
     }
 
     #[test]
@@ -956,7 +1097,7 @@ mod tests {
             );
         });
 
-        let metrics = pool.metrics();
+        let metrics = pool.metrics().expect("pool metrics");
         assert_eq!(metrics.acquired, 0, "refusal must happen before checkout");
         assert_eq!(metrics.released, 0);
         assert_eq!(metrics.discarded, 0);
@@ -1042,6 +1183,147 @@ mod tests {
             ..balanced
         };
         assert!(!over.is_bounded(), "open 5 > max 4");
+    }
+
+    #[test]
+    fn released_permit_wakes_only_fifo_head_and_blocks_barging() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let held = OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).expect("initial permit");
+        let first_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
+        let second_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
+        let mut first_wait = Box::pin(OwnedSemaphorePermit::acquire(
+            Arc::clone(&capacity),
+            &first_context,
+            1,
+        ));
+        let mut second_wait = Box::pin(OwnedSemaphorePermit::acquire(
+            Arc::clone(&capacity),
+            &second_context,
+            1,
+        ));
+        let first_wakes = Arc::new(WakeCounter::default());
+        let second_wakes = Arc::new(WakeCounter::default());
+        let first_waker = Waker::from(Arc::clone(&first_wakes));
+        let second_waker = Waker::from(Arc::clone(&second_wakes));
+        let mut first_cx = Context::from_waker(&first_waker);
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(first_wait.as_mut().poll(&mut first_cx).is_pending());
+        assert!(second_wait.as_mut().poll(&mut second_cx).is_pending());
+        drop(held);
+        assert_eq!(
+            first_wakes.0.load(Ordering::Acquire),
+            1,
+            "one released slot wakes one parked checkout exactly once"
+        );
+        assert_eq!(
+            second_wakes.0.load(Ordering::Acquire),
+            0,
+            "one released slot must not wake the rest of the checkout queue"
+        );
+        assert!(
+            OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).is_err(),
+            "new arrivals cannot barge ahead of the queued FIFO head"
+        );
+        assert!(second_wait.as_mut().poll(&mut second_cx).is_pending());
+        let first_permit = match first_wait.as_mut().poll(&mut first_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("FIFO head must acquire the released permit: {other:?}"),
+        };
+        drop(first_permit);
+        let second_permit = match second_wait.as_mut().poll(&mut second_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("FIFO successor must acquire after the head: {other:?}"),
+        };
+        drop(second_permit);
+    }
+
+    #[test]
+    fn dropping_woken_fifo_head_hands_the_permit_to_its_successor() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let held = OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).expect("initial permit");
+        let first_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
+        let second_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
+        let mut first_wait = Box::pin(OwnedSemaphorePermit::acquire(
+            Arc::clone(&capacity),
+            &first_context,
+            1,
+        ));
+        let mut second_wait = Box::pin(OwnedSemaphorePermit::acquire(
+            Arc::clone(&capacity),
+            &second_context,
+            1,
+        ));
+        let first_wakes = Arc::new(WakeCounter::default());
+        let second_wakes = Arc::new(WakeCounter::default());
+        let first_waker = Waker::from(Arc::clone(&first_wakes));
+        let second_waker = Waker::from(Arc::clone(&second_wakes));
+        let mut first_cx = Context::from_waker(&first_waker);
+        let mut second_cx = Context::from_waker(&second_waker);
+
+        assert!(first_wait.as_mut().poll(&mut first_cx).is_pending());
+        assert!(second_wait.as_mut().poll(&mut second_cx).is_pending());
+        drop(held);
+        assert_eq!(
+            first_wakes.0.load(Ordering::Acquire),
+            1,
+            "the released permit first wakes the FIFO head"
+        );
+        drop(first_wait);
+        assert_eq!(
+            second_wakes.0.load(Ordering::Acquire),
+            1,
+            "dropping the selected head hands runnable capacity to its successor"
+        );
+        let second_permit = match second_wait.as_mut().poll(&mut second_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("successor must acquire the handed-off permit: {other:?}"),
+        };
+        drop(second_permit);
+    }
+
+    #[test]
+    fn cancelled_fifo_acquire_removes_its_registration() {
+        let capacity = Arc::new(Semaphore::new(1));
+        let held = OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).expect("initial permit");
+        let cancelled_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
+        let mut waiter = Box::pin(OwnedSemaphorePermit::acquire(
+            Arc::clone(&capacity),
+            &cancelled_context,
+            1,
+        ));
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(waiter.as_mut().poll(&mut task_cx).is_pending());
+        cancelled_context.set_cancel_requested(true);
+        assert!(
+            matches!(
+                waiter.as_mut().poll(&mut task_cx),
+                Poll::Ready(Err(AcquireError::Cancelled))
+            ),
+            "the queued acquire observes its Cx cancellation"
+        );
+        drop(waiter);
+        drop(held);
+        assert!(
+            OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).is_ok(),
+            "cancelled waiter registration cannot retain or consume capacity"
+        );
+    }
+
+    #[test]
+    fn poisoned_pool_accounting_is_an_error_not_healthy_zeroes() {
+        let pool = OraclePool::for_test_at_open_count(PoolSettings::default(), 1);
+        let state = Arc::clone(&pool.state);
+        let poisoned = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let _guard = state.lock().expect("pool state starts healthy");
+            panic!("poison pool state for deterministic test");
+        }));
+        assert!(poisoned.is_err());
+        assert!(matches!(pool.metrics(), Err(DbError::Internal(_))));
+        assert!(matches!(
+            pool.state_connections(),
+            Err(DbError::Internal(_))
+        ));
     }
 
     #[test]
@@ -1181,7 +1463,7 @@ mod tests {
             pool.reserve_new_connection().expect("replacement slot"),
             "dirty discard frees capacity only for a fresh connection"
         );
-        let metrics = pool.metrics();
+        let metrics = pool.metrics().expect("pool metrics");
         assert!(metrics.is_balanced());
         assert!(metrics.is_bounded());
         assert_eq!(metrics.open, metrics.max_size);
@@ -1286,7 +1568,7 @@ mod tests {
         let state = Arc::new(Mutex::new(seeded_state(1)));
         let guard_state = Arc::clone(&state);
         let mut in_flight = Box::pin(async move {
-            let _checkout = CheckedOutConnection::new((), guard_state);
+            let _checkout = CheckedOutConnection::new_without_permit((), guard_state);
             pending::<()>().await;
         });
         let mut task_cx = Context::from_waker(Waker::noop());
@@ -1355,8 +1637,57 @@ mod tests {
             !pool.reserve_new_connection().expect("reserve ok"),
             "reservation refused once open_count hits max_size"
         );
-        assert_eq!(pool.metrics().open, max, "open never exceeds the ceiling");
-        assert!(pool.metrics().is_bounded());
+        let metrics = pool.metrics().expect("pool metrics");
+        assert_eq!(metrics.open, max, "open never exceeds the ceiling");
+        assert!(metrics.is_bounded());
+    }
+
+    #[test]
+    fn parked_checkout_permit_is_woken_by_cx_cancellation() {
+        let settings = PoolSettings {
+            max_size: 1,
+            min_idle: 0,
+            acquire_timeout_secs: 5,
+            statement_cache_size: 0,
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async move {
+            let cancel_cx = Cx::current().expect("block_on installs a current Cx");
+            let pool = OraclePool::for_test_at_open_count(settings, 1);
+            let deadline =
+                checkout_deadline(asupersync::time::wall_now(), settings.acquire_timeout_secs)
+                    .expect("representable checkout deadline");
+            let canceller_cx = cancel_cx.clone();
+            let capacity = Arc::clone(&pool.capacity);
+            let canceller = std::thread::spawn(move || {
+                let registration_deadline = Instant::now() + Duration::from_secs(1);
+                let registered = loop {
+                    if capacity.telemetry_snapshot(0).waiter_count == 1 {
+                        break true;
+                    }
+                    if Instant::now() >= registration_deadline {
+                        break false;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                };
+                canceller_cx.cancel_fast(asupersync::types::CancelKind::User);
+                registered
+            });
+            let started = Instant::now();
+            let result = pool.acquire_checkout_permit(&cancel_cx, deadline).await;
+            let registered = canceller.join().expect("cancellation helper joins");
+            assert!(registered, "the checkout was parked before cancellation");
+            assert!(
+                matches!(result, Err(DbError::Cancelled(_))),
+                "the parked checkout preserves cancellation classification: {result:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "cancellation must not wait for the five-second acquire deadline"
+            );
+        });
     }
 
     #[test]
@@ -1370,25 +1701,37 @@ mod tests {
             acquire_timeout_secs: 1,
             statement_cache_size: 50,
         };
-        let runtime = RuntimeBuilder::current_thread()
-            .build()
-            .expect("current-thread runtime");
-        runtime.block_on(async {
-            let cx = Cx::current().expect("block_on installs a current Cx");
-            // Resolve to learn the effective ceiling, then seed the pool full.
-            let effective_max = settings.resolved().max_size;
-            let pool = OraclePool::for_test_at_open_count(settings, effective_max);
-            let start = Instant::now();
-            let result = pool.checkout(&cx).await;
-            let elapsed = start.elapsed();
-            assert!(
-                matches!(result, Err(DbError::Pool(_))),
-                "an exhausted pool times out with a Pool/BUSY error"
-            );
-            assert!(
-                elapsed >= Duration::from_secs(1),
-                "the checkout waited for the full acquire timeout before giving up"
-            );
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let runtime = RuntimeBuilder::current_thread()
+                .build()
+                .expect("current-thread runtime");
+            let observation = runtime.block_on(async {
+                let cx = Cx::current().expect("block_on installs a current Cx");
+                // Resolve to learn the effective ceiling, then seed the pool full.
+                let effective_max = settings.resolved().max_size;
+                let pool = OraclePool::for_test_at_open_count(settings, effective_max);
+                let start = Instant::now();
+                let result = pool.checkout(&cx).await;
+                (matches!(result, Err(DbError::Pool(_))), start.elapsed())
+            });
+            let _ = result_tx.send(observation);
         });
+
+        let (timed_out_as_busy, elapsed) = result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("watchdog: exhausted checkout must finish within three seconds");
+        assert!(
+            timed_out_as_busy,
+            "an exhausted pool times out with a Pool/BUSY error"
+        );
+        assert!(
+            elapsed >= Duration::from_secs(1),
+            "the checkout waited for the full acquire timeout before giving up"
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the checkout exceeded its one-second absolute deadline by too much: {elapsed:?}"
+        );
     }
 }

@@ -139,6 +139,19 @@ pub struct HttpLaneBinding {
     pub generation: u64,
 }
 
+/// Result of an exact-generation operator lane close.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum HttpLaneCloseResult {
+    /// The requested generation was detached and closed.
+    Closed(HttpLaneBinding),
+    /// No active lane has the requested id.
+    NotFound,
+    /// The id is active, but now names a different generation.
+    GenerationMismatch { active_generation: u64 },
+    /// The lifecycle provider does not support atomic lane cancellation.
+    Unsupported,
+}
+
 /// Lifecycle hook for stateful Streamable HTTP sessions.
 pub trait HttpSessionLifecycle: std::fmt::Debug + Send + Sync {
     /// Close the lane/resources bound to `session_id` and `principal_key`.
@@ -194,6 +207,22 @@ pub trait HttpSessionLifecycle: std::fmt::Debug + Send + Sync {
     /// values are never serialized.
     fn lane_binding(&self, _lane_id: &str) -> Option<HttpLaneBinding> {
         None
+    }
+
+    /// Atomically validate and close one exact lane generation.
+    ///
+    /// Implementations must serialize the generation check with lane detachment.
+    /// They must also remove the supplied HTTP session and replay state before
+    /// allowing the same session key to resolve a replacement lane.
+    fn close_lane_with_reason(
+        &self,
+        _lane_id: &str,
+        _expected_generation: u64,
+        _reason: DispatchCloseReason,
+        _session_store: Option<&HttpSessionStore>,
+        _result_store: Option<&HttpResultStore>,
+    ) -> HttpLaneCloseResult {
+        HttpLaneCloseResult::Unsupported
     }
 }
 
@@ -2256,9 +2285,15 @@ fn handle_mcp_post_exchange(
                 ));
             }
             Outcome::Cancelled(reason) => {
+                if let Some(request_owner) = notification_request_owner.as_deref() {
+                    let _ = server.drain_server_notifications(request_owner);
+                }
                 return HttpExchange::Buffered(dispatch_cancelled_response(&reason));
             }
             Outcome::Panicked(payload) => {
+                if let Some(request_owner) = notification_request_owner.as_deref() {
+                    let _ = server.drain_server_notifications(request_owner);
+                }
                 return HttpExchange::Buffered(dispatch_panicked_response(&payload));
             }
         }

@@ -6206,15 +6206,18 @@ fn set_session_level(
                     next_step: "call oracle_set_session_level without execute=true, then pass confirmation.confirm as confirm",
                 })?;
             }
-            session
-                .escalate_window(target, Duration::from_secs(ttl_seconds))
-                .map_err(escalation_error_to_envelope)?;
+            // Sample wall time before the monotonic authority window is installed.
+            // The displayed instant may be conservative if this task is delayed,
+            // but it can never outlive the actual server-side authority.
+            let elevation_expires_unix =
+                install_escalation_window(session, target, ttl_seconds, unix_now_seconds())?;
             Ok(json!({
                 "changed": true,
                 "preview": false,
                 "action": "apply",
                 "target_level": target,
                 "ttl_seconds": ttl_seconds,
+                "elevation_expires_unix": elevation_expires_unix,
                 "session": session_level_view(session),
                 "next_actions": [
                     {
@@ -6231,6 +6234,19 @@ fn set_session_level(
             "session level gate produced an unexpected decision",
         )),
     }
+}
+
+fn install_escalation_window(
+    session: &mut SessionLevelState,
+    target: OperatingLevel,
+    ttl_seconds: u64,
+    wall_start_unix: u64,
+) -> Result<u64, ErrorEnvelope> {
+    let elevation_expires_unix = wall_start_unix.saturating_add(ttl_seconds);
+    session
+        .escalate_window(target, Duration::from_secs(ttl_seconds))
+        .map_err(escalation_error_to_envelope)?;
+    Ok(elevation_expires_unix)
 }
 
 fn execute_confirmation_json(
@@ -6801,12 +6817,14 @@ fn execute_approved_args(
 /// monotonic seq is the chain's order key, so a coarse clock string suffices and
 /// we avoid a date-formatting dependency).
 fn audit_timestamp() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
+    format!("unix:{}", unix_now_seconds())
+}
+
+fn unix_now_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("unix:{secs}")
+        .unwrap_or(0)
 }
 
 /// Map an `oraclemcp-audit` error to an agent-facing envelope. A failed audit

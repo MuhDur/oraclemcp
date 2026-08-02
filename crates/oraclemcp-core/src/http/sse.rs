@@ -381,6 +381,16 @@ impl HttpToolStream {
     }
 }
 
+impl Drop for HttpToolStream {
+    fn drop(&mut self) {
+        if let Some(request_owner) = self.notification_request_owner.as_deref() {
+            // A peer can disconnect before `finish_notifications` drains this
+            // request. Do not strand its owner entry until aggregate eviction.
+            let _ = self.server.drain_server_notifications(request_owner);
+        }
+    }
+}
+
 fn tool_stream_frame_data(frame: ToolStreamFrame) -> (&'static str, Value) {
     match frame {
         ToolStreamFrame::Row { seq, row } => ("row", json!({ "seq": seq, "row": row })),

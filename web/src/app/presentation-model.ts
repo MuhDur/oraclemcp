@@ -1485,6 +1485,10 @@ export type EditionTimelineViewModel = {
   stages: readonly EditionStageViewModel[];
   // Base editions that have more than one child — a branch. Empty when linear.
   branchedFrom: readonly string[];
+  multipleParentEditions: readonly string[];
+  cycleEditions: readonly string[];
+  disconnectedComponents: number;
+  warnings: readonly string[];
   headline: string;
   detail: string;
   tone: DashboardTone;
@@ -1509,21 +1513,95 @@ export function toEditionTimelineViewModel(
 ): EditionTimelineViewModel {
   // One edge per proposal: base_edition -> child_edition.
   const childrenByBase = new Map<string, EditionProposalInput[]>();
-  const childEditions = new Set<string>();
+  const parentsByChild = new Map<string, Set<string>>();
+  const nodes = new Set<string>();
+  const edgeCounts = new Map<string, number>();
   for (const proposal of proposals) {
     const list = childrenByBase.get(proposal.baseEdition) ?? [];
     list.push(proposal);
     childrenByBase.set(proposal.baseEdition, list);
-    childEditions.add(proposal.childEdition);
+    const parents = parentsByChild.get(proposal.childEdition) ?? new Set<string>();
+    parents.add(proposal.baseEdition);
+    parentsByChild.set(proposal.childEdition, parents);
+    nodes.add(proposal.baseEdition);
+    nodes.add(proposal.childEdition);
+    const edgeKey = JSON.stringify([proposal.baseEdition, proposal.childEdition]);
+    edgeCounts.set(edgeKey, (edgeCounts.get(edgeKey) ?? 0) + 1);
   }
   // A branch = a base edition with more than one child.
   const branchedFrom = [...childrenByBase.entries()]
-    .filter(([, children]) => children.length > 1)
+    .filter(([, children]) => new Set(children.map((child) => child.childEdition)).size > 1)
     .map(([base]) => base)
     .sort();
+  const multipleParentEditions = [...parentsByChild.entries()]
+    .filter(([, parents]) => parents.size > 1)
+    .map(([child]) => child)
+    .sort();
+  const duplicateEdgeCount = [...edgeCounts.values()].filter((count) => count > 1).length;
 
   // Roots: base editions that are not themselves a child of any proposal.
-  const roots = [...childrenByBase.keys()].filter((base) => !childEditions.has(base)).sort();
+  const roots = [...nodes].filter((edition) => !parentsByChild.has(edition)).sort();
+
+  const cycleNodes = new Set<string>();
+  const visitState = new Map<string, "visiting" | "visited">();
+  const stack: string[] = [];
+  const visit = (edition: string): void => {
+    const state = visitState.get(edition);
+    if (state === "visiting") {
+      const cycleStart = stack.lastIndexOf(edition);
+      for (const member of stack.slice(Math.max(0, cycleStart))) {
+        cycleNodes.add(member);
+      }
+      return;
+    }
+    if (state === "visited") {
+      return;
+    }
+    visitState.set(edition, "visiting");
+    stack.push(edition);
+    const children = new Set(
+      (childrenByBase.get(edition) ?? []).map((proposal) => proposal.childEdition)
+    );
+    for (const child of children) {
+      visit(child);
+    }
+    stack.pop();
+    visitState.set(edition, "visited");
+  };
+  for (const edition of nodes) {
+    visit(edition);
+  }
+  const cycleEditions = [...cycleNodes].sort();
+
+  const neighbors = new Map<string, Set<string>>();
+  for (const edition of nodes) {
+    neighbors.set(edition, new Set());
+  }
+  for (const proposal of proposals) {
+    neighbors.get(proposal.baseEdition)?.add(proposal.childEdition);
+    neighbors.get(proposal.childEdition)?.add(proposal.baseEdition);
+  }
+  let disconnectedComponents = 0;
+  const connected = new Set<string>();
+  for (const edition of [...nodes].sort()) {
+    if (connected.has(edition)) {
+      continue;
+    }
+    disconnectedComponents += 1;
+    const pending = [edition];
+    while (pending.length > 0) {
+      const current = pending.pop() as string;
+      if (connected.has(current)) {
+        continue;
+      }
+      connected.add(current);
+      for (const neighbor of neighbors.get(current) ?? []) {
+        if (!connected.has(neighbor)) {
+          pending.push(neighbor);
+        }
+      }
+    }
+  }
 
   const stages: EditionStageViewModel[] = [];
   const stageOf = (
@@ -1540,39 +1618,73 @@ export function toEditionTimelineViewModel(
     tone: proposal?.status ? EDITION_STATUS_TONE[proposal.status] : "neutral"
   });
 
-  // Walk the single chain from the first root. Stop if a fork or cycle appears —
-  // the flags carry the truth, the walk never fabricates a straight line past a
-  // branch.
+  // List every component deterministically. The flags carry the topology truth;
+  // stages are an inventory and never imply that a branch/cycle was linearized.
   const visited = new Set<string>();
-  let cursor: string | null = roots[0] ?? proposals[0]?.baseEdition ?? null;
-  let parent: string | null = null;
-  let parentProposal: EditionProposalInput | null = null;
-  while (cursor && !visited.has(cursor)) {
-    visited.add(cursor);
-    stages.push(stageOf(cursor, parent, parentProposal));
-    const children: EditionProposalInput[] = childrenByBase.get(cursor) ?? [];
-    const next: EditionProposalInput | null = children[0] ?? null;
-    parent = cursor;
-    parentProposal = next;
-    cursor = next?.childEdition ?? null;
+  const walk = (
+    edition: string,
+    parentEdition: string | null,
+    proposal: EditionProposalInput | null
+  ): void => {
+    if (visited.has(edition)) {
+      return;
+    }
+    visited.add(edition);
+    stages.push(stageOf(edition, parentEdition, proposal));
+    const children = [...(childrenByBase.get(edition) ?? [])].sort(
+      (left, right) =>
+        left.childEdition.localeCompare(right.childEdition) ||
+        left.proposalId.localeCompare(right.proposalId)
+    );
+    for (const child of children) {
+      walk(child.childEdition, edition, child);
+    }
+  };
+  for (const root of roots) {
+    walk(root, null, null);
+  }
+  for (const edition of [...nodes].sort()) {
+    walk(edition, null, null);
   }
 
-  const linear = branchedFrom.length === 0 && stages.length === childEditions.size + roots.length;
+  const warnings: string[] = [];
+  if (cycleEditions.length > 0) {
+    warnings.push(`Cycle detected across ${cycleEditions.join(", ")}.`);
+  }
+  if (branchedFrom.length > 0) {
+    warnings.push(`Multiple children from ${branchedFrom.join(", ")}.`);
+  }
+  if (multipleParentEditions.length > 0) {
+    warnings.push(`Multiple parents for ${multipleParentEditions.join(", ")}.`);
+  }
+  if (disconnectedComponents > 1 || (proposals.length > 0 && roots.length !== 1)) {
+    warnings.push(
+      `Graph has ${disconnectedComponents} component(s) and ${roots.length} root edition(s).`
+    );
+  }
+  if (duplicateEdgeCount > 0) {
+    warnings.push(`${duplicateEdgeCount} duplicate edition edge(s) detected.`);
+  }
+  const linear = proposals.length === 0 || warnings.length === 0;
   const tone = proposals.length === 0 ? "off" : linear ? "ok" : "warn";
   return {
     grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
     linear,
     stages,
     branchedFrom,
+    multipleParentEditions,
+    cycleEditions,
+    disconnectedComponents,
+    warnings,
     headline:
       proposals.length === 0
         ? "No edition proposals"
         : linear
           ? `${stages.length}-stage linear edition chain`
-          : `Non-linear edition graph (${branchedFrom.length} branch point(s))`,
+          : `Non-linear edition graph (${warnings.length} issue(s))`,
     detail: linear
       ? "Each edition derives from exactly one parent; rendered as a straight timeline."
-      : "A base edition has more than one child — this is a branch, shown truthfully rather than flattened into a line.",
+      : warnings.join(" "),
     tone
   };
 }
@@ -1712,23 +1824,27 @@ export type LineageEdgeStatus =
   | "verified"
   | "drift-missing"
   | "drift-type-mismatch"
-  | "partial";
+  | "partial"
+  | "unverified";
 
 export type LineageEdgeViewModel = {
   from: string;
   to: string;
   status: LineageEdgeStatus;
+  reportedStatus: string;
   detail: string;
   tone: DashboardTone;
 };
 
 export type ColumnLineageViewModel = {
   grammarVersion: 1;
-  status: "edges" | "empty" | "not_reported";
+  status: "edges" | "empty" | "malformed" | "not_reported";
   edges: readonly LineageEdgeViewModel[];
   verifiedCount: number;
   driftCount: number;
   partialCount: number;
+  unverifiedCount: number;
+  malformedCount: number;
   headline: string;
   detail: string;
   tone: DashboardTone;
@@ -1744,20 +1860,23 @@ export type LineageEdgeInput = {
 export type ColumnLineageInput = {
   // Null when the lineage surface projected nothing (not the same as "no edges").
   edges: readonly LineageEdgeInput[] | null;
+  malformedCount?: number;
 };
 
 const LINEAGE_EDGE_STATUSES: readonly LineageEdgeStatus[] = [
   "verified",
   "drift-missing",
   "drift-type-mismatch",
-  "partial"
+  "partial",
+  "unverified"
 ];
 
 const LINEAGE_EDGE_TONE: Readonly<Record<LineageEdgeStatus, DashboardTone>> = {
   verified: "ok",
   "drift-missing": "warn",
   "drift-type-mismatch": "warn",
-  partial: "info"
+  partial: "info",
+  unverified: "warn"
 };
 
 export function isLineageEdgeStatus(value: string): value is LineageEdgeStatus {
@@ -1773,34 +1892,39 @@ export function toColumnLineageViewModel(input: ColumnLineageInput): ColumnLinea
       verifiedCount: 0,
       driftCount: 0,
       partialCount: 0,
+      unverifiedCount: 0,
+      malformedCount: 0,
       headline: "Lineage not reported",
       detail:
         "The lineage surface projected no column edges. That is not a clean-graph claim — the console shows only the edges the server derived and cross-checked.",
       tone: "off"
     };
   }
-  const edges = input.edges.flatMap((edge): LineageEdgeViewModel[] => {
-    // An unknown status is not silently rendered as verified: the console drops
-    // an edge it cannot type rather than implying it was cross-checked clean.
-    if (!isLineageEdgeStatus(edge.status)) {
-      return [];
-    }
-    return [
-      {
-        from: edge.from,
-        to: edge.to,
-        status: edge.status,
-        detail: edge.detail ?? DEFAULT_LINEAGE_DETAIL[edge.status],
-        tone: LINEAGE_EDGE_TONE[edge.status]
-      }
-    ];
+  const edges = input.edges.map((edge): LineageEdgeViewModel => {
+    const reportedStatus = edge.status.trim() || "unreported";
+    const status = isLineageEdgeStatus(reportedStatus) ? reportedStatus : "unverified";
+    return {
+      from: edge.from,
+      to: edge.to,
+      status,
+      reportedStatus,
+      detail:
+        edge.detail ??
+        (status === "unverified"
+          ? `Unrecognized server edge status ${JSON.stringify(reportedStatus.slice(0, 64))}; this edge is unverified.`
+          : DEFAULT_LINEAGE_DETAIL[status]),
+      tone: LINEAGE_EDGE_TONE[status]
+    };
   });
   const verifiedCount = edges.filter((edge) => edge.status === "verified").length;
   const partialCount = edges.filter((edge) => edge.status === "partial").length;
   const driftCount = edges.filter(
     (edge) => edge.status === "drift-missing" || edge.status === "drift-type-mismatch"
   ).length;
-  const status = edges.length > 0 ? "edges" : "empty";
+  const malformedCount = Math.max(0, input.malformedCount ?? 0);
+  const unverifiedCount =
+    edges.filter((edge) => edge.status === "unverified").length + malformedCount;
+  const status = edges.length > 0 ? "edges" : malformedCount > 0 ? "malformed" : "empty";
   return {
     grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
     status,
@@ -1808,15 +1932,30 @@ export function toColumnLineageViewModel(input: ColumnLineageInput): ColumnLinea
     verifiedCount,
     driftCount,
     partialCount,
+    unverifiedCount,
+    malformedCount,
     headline:
-      status === "empty"
+      status === "malformed"
+        ? `${malformedCount} malformed column edge(s)`
+        : status === "empty"
         ? "No column edges"
-        : `${edges.length} column edge(s): ${verifiedCount} verified, ${driftCount} drifted, ${partialCount} partial`,
+        : `${edges.length} column edge(s): ${verifiedCount} verified, ${driftCount} drifted, ${partialCount} partial, ${unverifiedCount} unverified`,
     detail:
-      driftCount > 0
+      malformedCount > 0
+        ? `${malformedCount} server edge record(s) had no valid source/target identity and remain explicitly unverified. No clean or empty cross-check claim is available.`
+        : unverifiedCount > 0
+          ? "At least one edge carried an unknown server status and remains explicitly unverified. No clean cross-check claim is available."
+        : driftCount > 0
         ? "A drift marker means the source-derived edge disagrees with the live catalog — shown, never smoothed over."
         : "Each edge was cross-checked against the live catalog.",
-    tone: driftCount > 0 ? "warn" : partialCount > 0 ? "info" : status === "empty" ? "off" : "ok"
+    tone:
+      driftCount > 0 || unverifiedCount > 0
+        ? "warn"
+        : partialCount > 0
+          ? "info"
+          : status === "empty"
+            ? "off"
+            : "ok"
   };
 }
 
@@ -1824,7 +1963,8 @@ const DEFAULT_LINEAGE_DETAIL: Readonly<Record<LineageEdgeStatus, string>> = {
   verified: "target object and column present in the live catalog",
   "drift-missing": "the target object or column is absent from the live catalog",
   "drift-type-mismatch": "the target column exists but its type differs from the source",
-  partial: "a wrapped or obfuscated body yields only partial lineage"
+  partial: "a wrapped or obfuscated body yields only partial lineage",
+  unverified: "the server did not report a recognized catalog cross-check status"
 };
 
 /** One edge of each typed status, including an injected drift. */

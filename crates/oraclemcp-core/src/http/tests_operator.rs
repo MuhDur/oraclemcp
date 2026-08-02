@@ -1,9 +1,13 @@
-use super::operator::config_error_value;
+use super::operator::{OperatorEventTarget, config_error_value};
 
 #[test]
 fn config_preview_errors_keep_their_distinct_operator_codes() {
     for (error, status, expected_code) in [
-        (ConfigOpsError::PreviewRequired, 400, "config_preview_required"),
+        (
+            ConfigOpsError::PreviewRequired,
+            400,
+            "config_preview_required",
+        ),
         (
             ConfigOpsError::InvalidPreviewToken,
             409,
@@ -28,7 +32,11 @@ fn config_preview_errors_keep_their_distinct_operator_codes() {
         let (actual_status, body) = config_error_value(error);
         assert_eq!(actual_status, status);
         assert_eq!(body["error"], serde_json::json!(expected_code));
-        assert!(body["message"].as_str().is_some_and(|message| !message.is_empty()));
+        assert!(
+            body["message"]
+                .as_str()
+                .is_some_and(|message| !message.is_empty())
+        );
     }
 }
 
@@ -164,7 +172,7 @@ fn operator_conflict_and_provider_failure_never_emit_success_terminals() {
         &cfg,
         operator_json_post(
             "/operator/v1/lanes/cancel",
-            &serde_json::json!({ "lane_id": "lane-a" }),
+            &serde_json::json!({ "lane_id": "lane-a", "lane_generation": 7 }),
         ),
     );
     assert_eq!(conflict.status, 409);
@@ -701,6 +709,17 @@ impl StaticLaneLifecycle {
                 .collect(),
         }
     }
+
+    fn one_lane_at_generation(lane_id: &str, generation: u64) -> Self {
+        Self {
+            lanes: vec![HttpLaneSnapshot {
+                lane_id: lane_id.to_owned(),
+                generation,
+                status: "active",
+                subject_id_hash: "subject-sha256:abc".to_owned(),
+            }],
+        }
+    }
 }
 
 impl HttpSessionLifecycle for StaticLaneLifecycle {
@@ -751,11 +770,9 @@ impl HttpSessionLifecycle for CancelRecordingLifecycle {
         principal_key: &str,
         reason: DispatchCloseReason,
     ) -> bool {
-        self.closed.lock().push((
-            session_id.to_owned(),
-            principal_key.to_owned(),
-            reason,
-        ));
+        self.closed
+            .lock()
+            .push((session_id.to_owned(), principal_key.to_owned(), reason));
         true
     }
 
@@ -775,6 +792,39 @@ impl HttpSessionLifecycle for CancelRecordingLifecycle {
             principal_key: "principal:subject-sha256:abc".to_owned(),
             generation: 7,
         })
+    }
+
+    fn close_lane_with_reason(
+        &self,
+        lane_id: &str,
+        expected_generation: u64,
+        reason: DispatchCloseReason,
+        session_store: Option<&HttpSessionStore>,
+        result_store: Option<&HttpResultStore>,
+    ) -> HttpLaneCloseResult {
+        if lane_id != "lane-a" {
+            return HttpLaneCloseResult::NotFound;
+        }
+        if expected_generation != 7 {
+            return HttpLaneCloseResult::GenerationMismatch {
+                active_generation: 7,
+            };
+        }
+        let binding = self
+            .lane_binding(lane_id)
+            .expect("known test lane has a binding");
+        if let Some(store) = session_store {
+            store.remove(&binding.mcp_session_id);
+        }
+        if let Some(store) = result_store {
+            store.remove_session(&binding.mcp_session_id);
+        }
+        self.closed.lock().push((
+            binding.mcp_session_id.clone(),
+            binding.principal_key.clone(),
+            reason,
+        ));
+        HttpLaneCloseResult::Closed(binding)
     }
 }
 
@@ -814,7 +864,7 @@ fn operator_lane_cancel_invalidates_the_mcp_session_and_replay_buffer() {
             ("content-type", "application/json"),
             ("accept", "application/json"),
         ],
-        serde_json::json!({ "lane_id": "lane-a" })
+        serde_json::json!({ "lane_id": "lane-a", "lane_generation": 7 })
             .to_string()
             .into_bytes(),
     )
@@ -866,7 +916,7 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
                 ("content-type", "application/json"),
                 ("accept", "application/json"),
             ],
-            serde_json::json!({ "lane_id": lane_id })
+            serde_json::json!({ "lane_id": lane_id, "lane_generation": 7 })
                 .to_string()
                 .into_bytes(),
         )
@@ -936,6 +986,50 @@ fn operator_lane_cancel_is_operator_gated_and_audited() {
     let records = sink.records();
     assert_eq!(records.len(), 4);
     assert_operator_audit_pair(&records[2..], AuditDecision::Blocked, AuditOutcome::Failed);
+}
+
+#[test]
+fn operator_lane_cancel_rejects_missing_or_stale_generation_without_side_effects() {
+    let (auditor, _sink) = operator_auditor();
+    let lifecycle = Arc::new(CancelRecordingLifecycle::default());
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        operator_auditor: Some(auditor),
+        session_lifecycle: Some(Arc::clone(&lifecycle) as Arc<dyn HttpSessionLifecycle>),
+        ..Default::default()
+    };
+    let cancel_request = |body: Value| {
+        operator_json_post("/operator/v1/lanes/cancel", &body).with_peer_loopback(true)
+    };
+
+    let missing = handle_http_request(
+        &test_server(),
+        &cfg,
+        cancel_request(serde_json::json!({ "lane_id": "lane-a" })),
+    );
+    assert_eq!(missing.status, 400);
+    assert_eq!(
+        response_json(&missing)["data"]["error"],
+        serde_json::json!("operator_lane_generation_required")
+    );
+
+    let stale = handle_http_request(
+        &test_server(),
+        &cfg,
+        cancel_request(serde_json::json!({
+            "lane_id": "lane-a",
+            "lane_generation": 6
+        })),
+    );
+    assert_eq!(stale.status, 409);
+    assert_eq!(
+        response_json(&stale)["data"]["error"],
+        serde_json::json!("operator_lane_generation_mismatch")
+    );
+    assert!(
+        lifecycle.closed.lock().is_empty(),
+        "missing or stale lane generations must not terminate the active lane"
+    );
 }
 
 #[test]
@@ -1011,7 +1105,7 @@ fn terminal_audit_failure_surfaces_indeterminate_after_control_side_effect() {
         &cfg,
         operator_json_post(
             "/operator/v1/lanes/cancel",
-            &serde_json::json!({ "lane_id": "lane-a" }),
+            &serde_json::json!({ "lane_id": "lane-a", "lane_generation": 7 }),
         ),
     );
 
@@ -1211,13 +1305,10 @@ fn operator_events_stream_classifier_verdicts_for_ladder() {
 #[test]
 fn classifier_verdict_never_defaults_an_unrecognized_decision_to_pass() {
     for decision in [
-        "",
-        "UNKNOWN",
-        "allowed",  // lowercase: the real field is emitted upper-case; a
+        "", "UNKNOWN", "allowed", // lowercase: the real field is emitted upper-case; a
         // case mismatch must not be treated as a match.
         "ALLOWED ", // trailing whitespace: not an exact match either.
-        "PENDING",
-        "ERROR",
+        "PENDING", "ERROR",
     ] {
         let record = serde_json::json!({
             "tool": "oracle_query",
@@ -1557,6 +1648,119 @@ fn audit_tail_filters_exports_redacted_proof_bundle() {
     );
 }
 
+fn audit_tail_budget_record() -> AuditRecord {
+    let key = oraclemcp_audit::SigningKey::new(
+        "tail-budget-test",
+        b"0123456789abcdef0123456789abcdef".to_vec(),
+    )
+    .expect("valid key");
+    AuditRecord::chained_signed(
+        &audit_tail_draft(
+            "budget@example.test",
+            "oracle_query",
+            "SELECT 1 FROM dual",
+            "SAFE",
+            AuditOutcome::Succeeded,
+            None,
+        ),
+        1,
+        GENESIS_HASH,
+        "2026-08-01T00:00:00Z".to_owned(),
+        &key,
+    )
+}
+
+fn audit_tail_budget_response(path: &Path) -> Value {
+    let (auditor, _sink) = operator_auditor();
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        operator_audit_tail_path: Some(path.to_owned()),
+        ..Default::default()
+    };
+    let response = handle_http_request(
+        &test_server(),
+        &cfg,
+        HttpRequest::new(
+            "GET",
+            "/operator/v1/audit-tail?tool=never_matches",
+            [("host", "127.0.0.1"), ("accept", "application/json")],
+            Vec::new(),
+        )
+        .with_peer_loopback(true),
+    );
+    assert_eq!(response.status, 200);
+    response_json(&response)["data"].clone()
+}
+
+#[test]
+fn audit_tail_rejects_an_overlong_nonmatching_record_as_unavailable() {
+    let path = audit_tail_fixture_path("overlong-budget");
+    let mut line = serde_json::to_vec(&audit_tail_budget_record()).expect("serialize record");
+    assert!(line.len() < oraclemcp_audit::MAX_AUDIT_LINE_LEN);
+    line.resize(oraclemcp_audit::MAX_AUDIT_LINE_LEN + 1, b' ');
+    line.push(b'\n');
+    std::fs::write(&path, line).expect("write overlong audit line");
+
+    let data = audit_tail_budget_response(&path);
+    assert_eq!(data["source"], serde_json::json!("unavailable"));
+    assert_eq!(data["records"], serde_json::json!([]));
+    assert!(
+        data["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("record line exceeds the 1048576-byte maximum")),
+        "unexpected refusal: {}",
+        data["reason"]
+    );
+}
+
+#[test]
+fn audit_tail_counts_nonmatching_records_before_the_record_budget() {
+    let path = audit_tail_fixture_path("record-budget");
+    let mut line = serde_json::to_vec(&audit_tail_budget_record()).expect("serialize record");
+    line.push(b'\n');
+    let mut file = std::fs::File::create(&path).expect("create audit fixture");
+    for _ in 0..10_001 {
+        file.write_all(&line).expect("write audit record");
+    }
+    file.flush().expect("flush audit fixture");
+
+    let data = audit_tail_budget_response(&path);
+    assert_eq!(data["source"], serde_json::json!("unavailable"));
+    assert_eq!(data["records"], serde_json::json!([]));
+    assert!(
+        data["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("exceeds the 10000-record maximum")),
+        "unexpected refusal: {}",
+        data["reason"]
+    );
+}
+
+#[test]
+fn audit_tail_counts_nonmatching_bytes_before_the_physical_scan_budget() {
+    let path = audit_tail_fixture_path("physical-scan-budget");
+    let mut line = serde_json::to_vec(&audit_tail_budget_record()).expect("serialize record");
+    assert!(line.len() < oraclemcp_audit::MAX_AUDIT_LINE_LEN);
+    line.resize(oraclemcp_audit::MAX_AUDIT_LINE_LEN, b' ');
+    line.push(b'\n');
+    let mut file = std::fs::File::create(&path).expect("create audit fixture");
+    for _ in 0..64 {
+        file.write_all(&line).expect("write padded audit record");
+    }
+    file.flush().expect("flush audit fixture");
+
+    let data = audit_tail_budget_response(&path);
+    assert_eq!(data["source"], serde_json::json!("unavailable"));
+    assert_eq!(data["records"], serde_json::json!([]));
+    assert!(
+        data["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("exceeds the 67108864-byte maximum")),
+        "unexpected refusal: {}",
+        data["reason"]
+    );
+}
+
 #[test]
 fn audit_tail_projects_hash_covered_operator_correlation() {
     let key = oraclemcp_audit::SigningKey::new(
@@ -1764,7 +1968,7 @@ fn operator_events_reject_an_inactive_lane_id() {
         handle_http_request(
             &test_server(),
             &cfg,
-            get("/operator/v1/events?lane_id=lane-a")
+            get("/operator/v1/events?lane_id=lane-a&lane_generation=7")
         )
         .status,
         200,
@@ -1778,12 +1982,97 @@ fn operator_events_reject_an_inactive_lane_id() {
     let refused = handle_http_request(
         &test_server(),
         &cfg,
-        get("/operator/v1/events?lane_id=lane-nope"),
+        get("/operator/v1/events?lane_id=lane-nope&lane_generation=7"),
     );
     assert_eq!(refused.status, 404);
     assert_eq!(
         response_json(&refused)["data"]["error"],
         serde_json::json!("operator_lane_not_active")
+    );
+
+    let missing_generation = handle_http_request(
+        &test_server(),
+        &cfg,
+        get("/operator/v1/events?lane_id=lane-a"),
+    );
+    assert_eq!(missing_generation.status, 400);
+    assert_eq!(
+        response_json(&missing_generation)["data"]["error"],
+        serde_json::json!("operator_lane_generation_required")
+    );
+}
+
+#[test]
+fn operator_events_do_not_replay_across_lane_generations() {
+    let (auditor, _sink) = operator_auditor();
+    let store = Arc::new(OperatorEventStore::new());
+    let request = |target: &'static str, last_event_id: Option<&'static str>| {
+        let mut headers = vec![
+            ("host".to_owned(), "127.0.0.1".to_owned()),
+            ("accept".to_owned(), "text/event-stream".to_owned()),
+        ];
+        if let Some(last_event_id) = last_event_id {
+            headers.push(("last-event-id".to_owned(), last_event_id.to_owned()));
+        }
+        HttpRequest::new("GET", target, headers, Vec::new()).with_peer_loopback(true)
+    };
+    let generation_seven = HttpTransportConfig {
+        operator_auditor: Some(Arc::clone(&auditor)),
+        operator_events: Arc::clone(&store),
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane_at_generation(
+            "lane-a", 7,
+        ))),
+        ..Default::default()
+    };
+    let first = handle_http_request(
+        &test_server(),
+        &generation_seven,
+        request("/operator/v1/events?lane_id=lane-a&lane_generation=7", None),
+    );
+    assert_eq!(first.status, 200);
+    assert!(String::from_utf8_lossy(&first.body).contains("id: lane-a@7/1"));
+
+    let generation_eight = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        operator_events: store,
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane_at_generation(
+            "lane-a", 8,
+        ))),
+        ..Default::default()
+    };
+    let stale_target = handle_http_request(
+        &test_server(),
+        &generation_eight,
+        request("/operator/v1/events?lane_id=lane-a&lane_generation=7", None),
+    );
+    assert_eq!(stale_target.status, 409);
+    assert_eq!(
+        response_json(&stale_target)["data"]["error"],
+        serde_json::json!("operator_lane_generation_mismatch")
+    );
+
+    let fresh = handle_http_request(
+        &test_server(),
+        &generation_eight,
+        request("/operator/v1/events?lane_id=lane-a&lane_generation=8", None),
+    );
+    assert_eq!(fresh.status, 200);
+    let fresh_body = String::from_utf8_lossy(&fresh.body);
+    assert!(fresh_body.contains("id: lane-a@8/1"));
+    assert!(!fresh_body.contains("lane-a@7/"));
+
+    let stale_cursor = handle_http_request(
+        &test_server(),
+        &generation_eight,
+        request(
+            "/operator/v1/events?lane_id=lane-a&lane_generation=8",
+            Some("lane-a@7/1"),
+        ),
+    );
+    assert_eq!(stale_cursor.status, 400);
+    assert_eq!(
+        response_json(&stale_cursor)["data"]["error"],
+        serde_json::json!("operator_event_cursor_lane_mismatch")
     );
 }
 
@@ -1793,9 +2082,13 @@ fn operator_event_store_caps_the_number_of_streams() {
     // LRU-evicted so many lane ids cannot grow memory without limit.
     let store = OperatorEventStore::new();
     for i in 0..(MAX_OPERATOR_EVENT_STREAMS + 50) {
+        let target = OperatorEventTarget {
+            lane_id: format!("lane-{i}"),
+            generation: Some(7),
+        };
         let _ = store.append_snapshot_and_resume(
             "subject",
-            &format!("lane-{i}"),
+            &target,
             None,
             None,
             false,
@@ -1833,36 +2126,39 @@ fn operator_events_resume_is_lane_scoped() {
     let first_a = handle_http_request(
         &test_server(),
         &cfg,
-        event_request("/operator/v1/events?lane_id=lane-a", None),
+        event_request("/operator/v1/events?lane_id=lane-a&lane_generation=7", None),
     );
     assert_eq!(first_a.status, 200);
     let first_a_body = String::from_utf8(first_a.body).expect("operator SSE utf-8");
-    assert!(first_a_body.contains("id: lane-a/1"));
+    assert!(first_a_body.contains("id: lane-a@7/1"));
 
     let first_b = handle_http_request(
         &test_server(),
         &cfg,
-        event_request("/operator/v1/events?lane_id=lane-b", None),
+        event_request("/operator/v1/events?lane_id=lane-b&lane_generation=7", None),
     );
     assert_eq!(first_b.status, 200);
     let first_b_body = String::from_utf8(first_b.body).expect("operator SSE utf-8");
-    assert!(first_b_body.contains("id: lane-b/1"));
+    assert!(first_b_body.contains("id: lane-b@7/1"));
 
     let replay_a = handle_http_request(
         &test_server(),
         &cfg,
-        event_request("/operator/v1/events?lane_id=lane-a", Some("lane-a/1")),
+        event_request(
+            "/operator/v1/events?lane_id=lane-a&lane_generation=7",
+            Some("lane-a@7/1"),
+        ),
     );
     assert_eq!(replay_a.status, 200);
     let replay_a_body = String::from_utf8(replay_a.body.clone()).expect("operator SSE utf-8");
-    assert!(replay_a_body.contains("id: lane-a/2"));
+    assert!(replay_a_body.contains("id: lane-a@7/2"));
     assert!(
         !replay_a_body.contains("lane-b"),
         "lane-a resume must not replay lane-b events"
     );
     let replayed = sse_json_events(&replay_a);
     assert_eq!(replayed.len(), 1);
-    assert_eq!(replayed[0]["event_id"], serde_json::json!("lane-a/2"));
+    assert_eq!(replayed[0]["event_id"], serde_json::json!("lane-a@7/2"));
     assert_eq!(replayed[0]["lane_id"], serde_json::json!("lane-a"));
     assert_eq!(
         replayed[0]["redaction_level"],
@@ -1872,7 +2168,10 @@ fn operator_events_resume_is_lane_scoped() {
     let mismatch = handle_http_request(
         &test_server(),
         &cfg,
-        event_request("/operator/v1/events?lane_id=lane-a", Some("lane-b/1")),
+        event_request(
+            "/operator/v1/events?lane_id=lane-a&lane_generation=7",
+            Some("lane-b@7/1"),
+        ),
     );
     assert_eq!(mismatch.status, 400);
     assert_eq!(
@@ -1883,10 +2182,14 @@ fn operator_events_resume_is_lane_scoped() {
     let subject_a = "operator:subject-a";
     let subject_b = "operator:subject-b";
     let subject_b_hash = operator_subject_id_hash(subject_b);
+    let shared_target = OperatorEventTarget {
+        lane_id: "shared-lane".to_owned(),
+        generation: Some(7),
+    };
     cfg.operator_events
         .append_snapshot_and_resume(
             subject_a,
-            "shared-lane",
+            &shared_target,
             None,
             None,
             false,
@@ -1896,7 +2199,7 @@ fn operator_events_resume_is_lane_scoped() {
     cfg.operator_events
         .append_snapshot_and_resume(
             subject_b,
-            "shared-lane",
+            &shared_target,
             None,
             None,
             false,
@@ -1907,15 +2210,15 @@ fn operator_events_resume_is_lane_scoped() {
         .operator_events
         .append_snapshot_and_resume(
             subject_a,
-            "shared-lane",
-            Some("shared-lane/1"),
+            &shared_target,
+            Some("shared-lane@7/1"),
             Some(1),
             false,
             serde_json::json!({ "source": "subject-a-2" }),
         )
         .expect("resume subject-a stream");
     assert_eq!(subject_a_resume.len(), 1);
-    assert_eq!(subject_a_resume[0].id, "shared-lane/2");
+    assert_eq!(subject_a_resume[0].id, "shared-lane@7/2");
     assert_eq!(
         subject_a_resume[0].data["subject_id_hash"],
         serde_json::json!(operator_subject_id_hash(subject_a))
@@ -1951,7 +2254,7 @@ fn operator_events_last_event_id_reports_gap_for_slow_consumer() {
         let response = handle_http_request(
             &test_server(),
             &cfg,
-            event_request("/operator/v1/events?lane_id=lane-a", None),
+            event_request("/operator/v1/events?lane_id=lane-a&lane_generation=7", None),
         );
         assert_eq!(response.status, 200);
     }
@@ -1959,14 +2262,17 @@ fn operator_events_last_event_id_reports_gap_for_slow_consumer() {
     let gap = handle_http_request(
         &test_server(),
         &cfg,
-        event_request("/operator/v1/events?lane_id=lane-a", Some("lane-a/1")),
+        event_request(
+            "/operator/v1/events?lane_id=lane-a&lane_generation=7",
+            Some("lane-a@7/1"),
+        ),
     );
     assert_eq!(gap.status, 200);
     let body = String::from_utf8(gap.body.clone()).expect("operator SSE utf-8");
     assert!(body.contains("event: operator.stream_gap"));
-    assert!(body.contains("id: lane-a/2"));
+    assert!(body.contains("id: lane-a@7/2"));
     assert!(body.contains("\"type\":\"stream_gap\""));
-    assert!(body.contains("\"oldest_event_id\":\"lane-a/3\""));
+    assert!(body.contains("\"oldest_event_id\":\"lane-a@7/3\""));
     assert!(
         !body.contains("lane-b"),
         "slow-consumer replay must stay within the requested lane"
@@ -1981,7 +2287,10 @@ fn operator_events_last_event_id_reports_gap_for_slow_consumer() {
     let expired_cursor = handle_http_request(
         &test_server(),
         &cfg,
-        event_request("/operator/v1/events?lane_id=lane-a&cursor=lane-a/1", None),
+        event_request(
+            "/operator/v1/events?lane_id=lane-a&lane_generation=7&cursor=lane-a@7/1",
+            None,
+        ),
     );
     assert_eq!(expired_cursor.status, 410);
     assert_eq!(
@@ -2158,6 +2467,7 @@ fn operator_session_set_level_is_lane_bound_preview_apply_drop() {
         &cfg,
         action_request(&serde_json::json!({
             "idempotency_key": "level-missing-lane",
+            "lane_generation": 7,
             "arguments": { "level": "READ_WRITE", "action": "preview" }
         })),
     );
@@ -2167,12 +2477,49 @@ fn operator_session_set_level_is_lane_bound_preview_apply_drop() {
         serde_json::json!("operator_lane_required")
     );
 
+    let missing_generation = handle_http_request(
+        &server,
+        &cfg,
+        action_request(&serde_json::json!({
+            "idempotency_key": "level-missing-generation",
+            "lane_id": "lane-a",
+            "arguments": { "level": "READ_WRITE", "action": "preview" }
+        })),
+    );
+    assert_eq!(missing_generation.status, 400);
+    assert_eq!(
+        response_json(&missing_generation)["data"]["error"],
+        serde_json::json!("operator_lane_generation_required")
+    );
+
+    let stale_generation = handle_http_request(
+        &server,
+        &cfg,
+        action_request(&serde_json::json!({
+            "idempotency_key": "level-stale-generation",
+            "lane_id": "lane-a",
+            "lane_generation": 6,
+            "arguments": { "level": "READ_WRITE", "action": "preview" }
+        })),
+    );
+    assert_eq!(stale_generation.status, 409);
+    assert_eq!(
+        response_json(&stale_generation)["data"]["error"],
+        serde_json::json!("operator_lane_generation_mismatch")
+    );
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        0,
+        "missing or stale lane generations must fail before guarded dispatch"
+    );
+
     let preview = handle_http_request(
         &server,
         &cfg,
         action_request(&serde_json::json!({
             "idempotency_key": "level-preview",
             "lane_id": "lane-a",
+            "lane_generation": 7,
             "arguments": {
                 "level": "READ_WRITE",
                 "ttl_seconds": 120,
@@ -2216,6 +2563,7 @@ fn operator_session_set_level_is_lane_bound_preview_apply_drop() {
         action_request(&serde_json::json!({
             "idempotency_key": "level-apply",
             "lane_id": "lane-a",
+            "lane_generation": 7,
             "arguments": {
                 "level": "READ_WRITE",
                 "ttl_seconds": 120,
@@ -2240,6 +2588,7 @@ fn operator_session_set_level_is_lane_bound_preview_apply_drop() {
         action_request(&serde_json::json!({
             "idempotency_key": "level-drop",
             "lane_id": "lane-a",
+            "lane_generation": 7,
             "arguments": { "action": "drop" }
         })),
     );
@@ -3231,6 +3580,91 @@ fn cp_apply_reclassifies_never_trusts_stored_verdict() {
 }
 
 #[test]
+fn change_proposal_apply_preserves_the_exact_lane_generation() {
+    let (auditor, _sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let dir = dashboard_test_dir("cp-lane-generation");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane())),
+        ..Default::default()
+    };
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/change-proposals/draft",
+            &serde_json::json!({
+                "profile": "prod",
+                "author": "human",
+                "statements": [{
+                    "sql_template": "SELECT 1 FROM dual",
+                    "unit": "read"
+                }]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    let apply = |generation: Option<u64>, key: &str| {
+        let mut body = serde_json::json!({
+            "proposal_id": proposal_id,
+            "lane_id": "lane-a",
+            "idempotency_key": key,
+        });
+        if let Some(generation) = generation {
+            body["lane_generation"] = serde_json::json!(generation);
+        }
+        handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post("/operator/v1/change-proposals/apply", &body),
+        )
+    };
+
+    let missing = response_json(&apply(None, "cp-generation-missing"));
+    assert_eq!(missing["data"]["status"], serde_json::json!("stopped_on_failure"));
+    assert_eq!(
+        missing["data"]["results"][0]["action_response"]["data"]["error"],
+        serde_json::json!("operator_lane_generation_required")
+    );
+    let stale = response_json(&apply(Some(6), "cp-generation-stale"));
+    assert_eq!(
+        stale["data"]["results"][0]["action_response"]["data"]["error"],
+        serde_json::json!("operator_lane_generation_mismatch")
+    );
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        0,
+        "missing and stale generations must not enter dispatch"
+    );
+
+    let exact = response_json(&apply(Some(7), "cp-generation-exact"));
+    assert_eq!(exact["data"]["status"], serde_json::json!("applied"));
+    assert_eq!(exact["data"]["lane_id"], serde_json::json!("lane-a"));
+    assert_eq!(exact["data"]["lane_generation"], serde_json::json!(7));
+    assert_eq!(
+        exact["data"]["results"][0]["action_response"]["data"]["idempotency"]
+            ["lane_generation"],
+        serde_json::json!(7),
+        "the forwarded action must retain the caller's exact lane generation"
+    );
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+}
+
+#[test]
 fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -3263,7 +3697,10 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     );
     assert_eq!(draft.status, 200);
     let draft_json = response_json(&draft);
-    assert_eq!(draft_json["data"]["authority"], serde_json::json!("request_only"));
+    assert_eq!(
+        draft_json["data"]["authority"],
+        serde_json::json!("request_only")
+    );
     assert_eq!(
         draft_json["data"]["proposal"]["status"],
         serde_json::json!("requested")
@@ -3325,10 +3762,26 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     );
 
     let records = sink.records();
-    assert_eq!(records.len(), 8, "every board read/write attempt is audited");
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[4..6], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_eq!(
+        records.len(),
+        8,
+        "every board read/write attempt is audited"
+    );
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[4..6],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 
@@ -3454,7 +3907,10 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
     );
     assert_eq!(rollback.status, 200);
     let rollback_json = response_json(&rollback);
-    assert_eq!(rollback_json["data"]["action"], serde_json::json!("rollback"));
+    assert_eq!(
+        rollback_json["data"]["action"],
+        serde_json::json!("rollback")
+    );
     assert_eq!(
         rollback_json["data"]["target_edition"],
         serde_json::json!("SYNTHETIC_BASE")
@@ -3475,12 +3931,128 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
 
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     let records = sink.records();
-    assert_eq!(records.len(), 10, "every default-edition attempt is hash-chain audited");
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_eq!(
+        records.len(),
+        10,
+        "every default-edition attempt is hash-chain audited"
+    );
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(&records[6..8], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[8..10], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(
+        &records[6..8],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[8..10],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+}
+
+#[test]
+fn edition_default_flip_preserves_the_exact_lane_generation() {
+    let (auditor, _sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+        calls: Arc::clone(&calls),
+    }));
+    let dir = dashboard_test_dir("edition-default-lane-generation");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        stateful: true,
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane())),
+        ..Default::default()
+    };
+    let draft = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/draft",
+            &serde_json::json!({
+                "profile": "prod",
+                "child_edition": "synthetic_child",
+                "base_edition": "synthetic_base",
+                "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    assert_eq!(
+        handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/edition-proposals/transition",
+                &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
+            ),
+        )
+        .status,
+        200
+    );
+    let flip = |generation: Option<u64>, key: &str| {
+        let mut body = serde_json::json!({
+            "proposal_id": proposal_id,
+            "lane_id": "lane-a",
+            "confirm": "synthetic-admin-preview-grant",
+            "idempotency_key": key,
+        });
+        if let Some(generation) = generation {
+            body["lane_generation"] = serde_json::json!(generation);
+        }
+        handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post("/operator/v1/edition-proposals/merge", &body),
+        )
+    };
+
+    let missing = flip(None, "edition-generation-missing");
+    assert_eq!(missing.status, 400);
+    assert_eq!(
+        response_json(&missing)["data"]["mcp_response"]["data"]["error"],
+        serde_json::json!("operator_lane_generation_required")
+    );
+    let stale = flip(Some(6), "edition-generation-stale");
+    assert_eq!(stale.status, 409);
+    assert_eq!(
+        response_json(&stale)["data"]["mcp_response"]["data"]["error"],
+        serde_json::json!("operator_lane_generation_mismatch")
+    );
+    assert_eq!(
+        calls.load(AtomicOrdering::SeqCst),
+        0,
+        "missing and stale generations must not enter dispatch"
+    );
+
+    let exact = flip(Some(7), "edition-generation-exact");
+    assert_eq!(exact.status, 200);
+    let exact = response_json(&exact);
+    assert_eq!(exact["data"]["lane_id"], serde_json::json!("lane-a"));
+    assert_eq!(exact["data"]["lane_generation"], serde_json::json!(7));
+    assert_eq!(
+        exact["data"]["mcp_response"]["result"]["structuredContent"]["tool"],
+        serde_json::json!("oracle_execute")
+    );
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
 }
 
 #[test]
@@ -3594,12 +4166,32 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
 
     let records = sink.records();
     assert_eq!(records.len(), 12);
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[4..6], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[4..6],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(&records[8..10], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(&records[10..12], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(
+        &records[8..10],
+        AuditDecision::Blocked,
+        AuditOutcome::Failed,
+    );
+    assert_operator_audit_pair(
+        &records[10..12],
+        AuditDecision::Blocked,
+        AuditOutcome::Failed,
+    );
 }
 
 #[test]
@@ -3667,8 +4259,16 @@ fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
     );
     let records = sink.records();
     assert_eq!(records.len(), 6);
-    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
-    assert_operator_audit_pair(&records[2..4], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(
+        &records[0..2],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(
+        &records[2..4],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 

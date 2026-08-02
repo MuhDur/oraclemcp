@@ -604,7 +604,10 @@ pub struct SubscriptionRegistry {
 
 #[derive(Default)]
 struct SubscriptionState {
-    by_uri: HashMap<String, HashSet<String>>,
+    /// Each owner/URI admission carries an opaque generation token. Replacing
+    /// an admission after unsubscribe creates a different token, so an
+    /// observation made for the old admission cannot notify the new one.
+    by_uri: HashMap<String, HashMap<String, Arc<()>>>,
     active_emon_receivers: HashSet<EmonReceiverKey>,
 }
 
@@ -715,22 +718,34 @@ impl SubscriptionRegistry {
     /// The rejection happens before the registry changes, so it cannot leave a
     /// subscription visible without an accounted EMON connection.
     pub fn subscribe(&self, client: &str, uri: &str) -> SubscriptionAdmission {
+        self.subscribe_with_generation(client, uri).0
+    }
+
+    fn subscribe_with_generation(
+        &self,
+        client: &str,
+        uri: &str,
+    ) -> (SubscriptionAdmission, Option<Arc<()>>, bool) {
         let mut state = self.state.lock();
-        if state
+        if let Some(generation) = state
             .by_uri
             .get(uri)
-            .is_some_and(|subscribers| subscribers.contains(client))
+            .and_then(|subscribers| subscribers.get(client))
         {
-            return SubscriptionAdmission::Accepted;
+            return (
+                SubscriptionAdmission::Accepted,
+                Some(Arc::clone(generation)),
+                false,
+            );
         }
 
         let active_for_client = state
             .by_uri
             .values()
-            .filter(|subscribers| subscribers.contains(client))
+            .filter(|subscribers| subscribers.contains_key(client))
             .count();
         if active_for_client >= self.max_subscriptions_per_principal as usize {
-            return SubscriptionAdmission::PerPrincipalCapReached;
+            return (SubscriptionAdmission::PerPrincipalCapReached, None, false);
         }
         let receiver_already_owns_pair = state
             .active_emon_receivers
@@ -739,36 +754,33 @@ impl SubscriptionRegistry {
         if !receiver_already_owns_pair
             && Self::emon_connection_count_locked(&state) >= self.emon_connection_ceiling as usize
         {
-            return SubscriptionAdmission::EmonConnectionCeilingReached;
+            return (
+                SubscriptionAdmission::EmonConnectionCeilingReached,
+                None,
+                false,
+            );
         }
 
+        let generation = Arc::new(());
         state
             .by_uri
             .entry(uri.to_owned())
             .or_default()
-            .insert(client.to_owned());
-        SubscriptionAdmission::Accepted
+            .insert(client.to_owned(), Arc::clone(&generation));
+        (SubscriptionAdmission::Accepted, Some(generation), true)
     }
 
     /// Unsubscribe `client` from `uri`. Idempotent; drops the URI entry when its
     /// last subscriber leaves.
     pub fn unsubscribe(&self, client: &str, uri: &str) {
         let mut state = self.state.lock();
-        if let Some(set) = state.by_uri.get_mut(uri) {
-            set.remove(client);
-            if set.is_empty() {
-                state.by_uri.remove(uri);
-            }
-        }
+        Self::unsubscribe_locked(&mut state, client, uri);
     }
 
     /// Drop all of `client`'s subscriptions (on disconnect).
     pub fn unsubscribe_all(&self, client: &str) {
         let mut state = self.state.lock();
-        state.by_uri.retain(|_, set| {
-            set.remove(client);
-            !set.is_empty()
-        });
+        Self::unsubscribe_all_locked(&mut state, client);
     }
 
     /// Every URI with at least one subscriber (sorted). Used by the polling
@@ -788,7 +800,7 @@ impl SubscriptionRegistry {
         let mut out: Vec<String> = state
             .by_uri
             .get(uri)
-            .map(|s| s.iter().cloned().collect())
+            .map(|s| s.keys().cloned().collect())
             .unwrap_or_default();
         out.sort();
         out
@@ -801,7 +813,7 @@ impl SubscriptionRegistry {
             .lock()
             .by_uri
             .get(uri)
-            .is_some_and(|s| s.contains(client))
+            .is_some_and(|s| s.contains_key(client))
     }
 
     /// Active client/URI subscriptions plus receiver slots which outlived an
@@ -854,17 +866,48 @@ impl SubscriptionRegistry {
     }
 
     fn is_subscribed_locked(
-        by_uri: &HashMap<String, HashSet<String>>,
+        by_uri: &HashMap<String, HashMap<String, Arc<()>>>,
         owner: &str,
         resource_uri: &str,
     ) -> bool {
         by_uri
             .get(resource_uri)
-            .is_some_and(|subscribers| subscribers.contains(owner))
+            .is_some_and(|subscribers| subscribers.contains_key(owner))
+    }
+
+    /// Remove one owner/URI pair while the caller holds the registry lock.
+    /// Returns whether the URI lost its final subscriber.
+    fn unsubscribe_locked(state: &mut SubscriptionState, owner: &str, uri: &str) -> bool {
+        let Some(subscribers) = state.by_uri.get_mut(uri) else {
+            return false;
+        };
+        subscribers.remove(owner);
+        if subscribers.is_empty() {
+            state.by_uri.remove(uri);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove all subscriptions for one owner while the caller holds the
+    /// registry lock. Returns every URI that lost its final subscriber.
+    fn unsubscribe_all_locked(state: &mut SubscriptionState, owner: &str) -> Vec<String> {
+        let mut now_unsubscribed = Vec::new();
+        state.by_uri.retain(|uri, subscribers| {
+            subscribers.remove(owner);
+            if subscribers.is_empty() {
+                now_unsubscribed.push(uri.clone());
+                false
+            } else {
+                true
+            }
+        });
+        now_unsubscribed
     }
 
     fn emon_connection_count_locked(state: &SubscriptionState) -> usize {
-        let admitted = state.by_uri.values().map(HashSet::len).sum::<usize>();
+        let admitted = state.by_uri.values().map(HashMap::len).sum::<usize>();
         let receivers_without_admission = state
             .active_emon_receivers
             .iter()
@@ -996,13 +1039,27 @@ impl SubscriptionHub {
         if !self.supports_subscriptions() {
             return false;
         }
-        if !self.registry.subscribe(owner, uri).is_accepted() {
+        let (admission, generation, inserted) = self.registry.subscribe_with_generation(owner, uri);
+        if !admission.is_accepted() {
             return false;
+        }
+        if !inserted {
+            return true;
         }
         if let SubscribeSource::Polling(source) = &self.source
             && let Some(fp) = source.poll(uri)
         {
-            self.fingerprints.lock().insert(uri.to_owned(), fp);
+            let state = self.registry.state.lock();
+            let still_current = generation.as_ref().is_some_and(|generation| {
+                state
+                    .by_uri
+                    .get(uri)
+                    .and_then(|subscribers| subscribers.get(owner))
+                    .is_some_and(|current| Arc::ptr_eq(current, generation))
+            });
+            if still_current {
+                self.fingerprints.lock().entry(uri.to_owned()).or_insert(fp);
+            }
         }
         true
     }
@@ -1010,14 +1067,33 @@ impl SubscriptionHub {
     /// Unsubscribe `owner` from `uri`. Scoped to `owner`: one principal can only
     /// drop its own subscription, never another's.
     pub fn unsubscribe(&self, owner: &str, uri: &str) {
-        self.registry.unsubscribe(owner, uri);
+        let mut state = self.registry.state.lock();
+        let final_subscriber = SubscriptionRegistry::unsubscribe_locked(&mut state, owner, uri);
+        let mut pending = self.pending.lock();
+        if let Some(queue) = pending.get_mut(owner) {
+            queue.retain(|queued_uri| queued_uri != uri);
+            if queue.is_empty() {
+                pending.remove(owner);
+            }
+        }
+        drop(pending);
+        if final_subscriber {
+            self.fingerprints.lock().remove(uri);
+        }
     }
 
     /// Drop all of `owner`'s subscriptions AND its pending updates (on
     /// disconnect). Touches only `owner`; other principals are unaffected.
     pub fn unsubscribe_all(&self, owner: &str) {
-        self.registry.unsubscribe_all(owner);
+        let mut state = self.registry.state.lock();
+        let now_unsubscribed = SubscriptionRegistry::unsubscribe_all_locked(&mut state, owner);
         self.pending.lock().remove(owner);
+        if !now_unsubscribed.is_empty() {
+            let mut fingerprints = self.fingerprints.lock();
+            for uri in now_unsubscribed {
+                fingerprints.remove(&uri);
+            }
+        }
     }
 
     /// Poll every subscribed URI through the polling source; for each whose
@@ -1028,25 +1104,69 @@ impl SubscriptionHub {
         let SubscribeSource::Polling(source) = &self.source else {
             return Vec::new();
         };
-        let uris = self.registry.subscribed_uris();
+        let snapshots = {
+            let state = self.registry.state.lock();
+            let mut snapshots: Vec<_> = state
+                .by_uri
+                .iter()
+                .map(|(uri, subscribers)| {
+                    let mut subscribers: Vec<_> = subscribers
+                        .iter()
+                        .map(|(owner, generation)| (owner.clone(), Arc::clone(generation)))
+                        .collect();
+                    subscribers.sort_by(|(left, _), (right, _)| left.cmp(right));
+                    (uri.clone(), subscribers)
+                })
+                .collect();
+            snapshots.sort_by(|(left, _), (right, _)| left.cmp(right));
+            snapshots
+        };
+        let observations: Vec<_> = snapshots
+            .into_iter()
+            .filter_map(|(uri, subscribers)| {
+                source
+                    .poll(&uri)
+                    .map(|fingerprint| (uri, subscribers, fingerprint))
+            })
+            .collect();
+
         let mut changed = Vec::new();
+        let state = self.registry.state.lock();
+        let mut pending = self.pending.lock();
         let mut fingerprints = self.fingerprints.lock();
-        for uri in uris {
-            let Some(current) = source.poll(&uri) else {
+        for (uri, subscribers, current) in observations {
+            let active_subscribers: Vec<_> = subscribers
+                .into_iter()
+                .filter_map(|(owner, observed_generation)| {
+                    state
+                        .by_uri
+                        .get(&uri)
+                        .and_then(|current| current.get(&owner))
+                        .is_some_and(|current_generation| {
+                            Arc::ptr_eq(current_generation, &observed_generation)
+                        })
+                        .then_some(owner)
+                })
+                .collect();
+            if active_subscribers.is_empty() {
                 continue;
-            };
+            }
             let prior = fingerprints.get(&uri).cloned();
             if prior.as_ref() != Some(&current) {
                 fingerprints.insert(uri.clone(), current);
                 // Only an actual change (we had a prior fingerprint that
                 // differs) fires; the very first observation just seeds.
                 if prior.is_some() {
+                    for owner in active_subscribers {
+                        let queue = pending.entry(owner).or_default();
+                        if !queue.iter().any(|queued_uri| queued_uri == &uri) {
+                            queue.push_back(uri.clone());
+                        }
+                    }
                     changed.push(uri);
                 }
             }
         }
-        drop(fingerprints);
-        self.enqueue_updates(&changed);
         changed
     }
 
@@ -1098,24 +1218,23 @@ impl SubscriptionHub {
     }
 
     /// Fan a set of changed URIs out to their subscribers, coalescing duplicate
-    /// pending `resources/updated` entries per owner and URI. Subscribers are
-    /// resolved through the registry BEFORE the `pending` lock is taken, so the
-    /// lock order is always registry→pending and never inverts. A URI with no
-    /// subscribers enqueues nothing.
+    /// pending `resources/updated` entries per owner and URI. The registry lock
+    /// remains held until the pending insert completes, so an unsubscribe either
+    /// removes an earlier enqueue or wins before subscriber resolution. Lock
+    /// order is always registry→pending and never inverts.
     fn enqueue_updates(&self, changed: &[String]) {
         if changed.is_empty() {
             return;
         }
-        let fanned: Vec<(String, Vec<String>)> = changed
-            .iter()
-            .map(|uri| (uri.clone(), self.registry.subscribers_of(uri)))
-            .collect();
+        let state = self.registry.state.lock();
         let mut pending = self.pending.lock();
-        for (uri, owners) in fanned {
-            for owner in owners {
-                let queue = pending.entry(owner).or_default();
-                if !queue.iter().any(|queued_uri| queued_uri == &uri) {
-                    queue.push_back(uri.clone());
+        for uri in changed {
+            if let Some(owners) = state.by_uri.get(uri) {
+                for owner in owners.keys() {
+                    let queue = pending.entry(owner.clone()).or_default();
+                    if !queue.iter().any(|queued_uri| queued_uri == uri) {
+                        queue.push_back(uri.clone());
+                    }
                 }
             }
         }
@@ -1136,9 +1255,15 @@ impl SubscriptionHub {
         drained
     }
 
-    /// The subscriber registry (for introspection/tests).
+    /// The subscriber registry for crate-local tests.
+    ///
+    /// Production callers must mutate subscriptions through the hub so pending
+    /// updates and polling fingerprints are cleaned up atomically with registry
+    /// state. Keeping this accessor out of non-test builds prevents callers from
+    /// bypassing that ownership boundary through the registry's standalone API.
+    #[cfg(test)]
     #[must_use]
-    pub fn registry(&self) -> &SubscriptionRegistry {
+    pub(crate) fn registry(&self) -> &SubscriptionRegistry {
         &self.registry
     }
 }
@@ -1151,6 +1276,7 @@ mod tests {
         sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
+            mpsc::{Receiver, SyncSender, sync_channel},
         },
         time::Duration,
     };
@@ -2124,6 +2250,36 @@ mod tests {
         }
     }
 
+    struct BlockingSource {
+        fingerprint: Mutex<String>,
+        block_next: AtomicBool,
+        entered: SyncSender<()>,
+        release: Mutex<Receiver<()>>,
+    }
+
+    impl PollingSource for BlockingSource {
+        fn poll(&self, _uri: &str) -> Option<String> {
+            if self.block_next.swap(false, Ordering::AcqRel) {
+                self.entered
+                    .send(())
+                    .expect("poll observer remains connected");
+                self.release
+                    .lock()
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("blocked poll is released within its test bound");
+            }
+            Some(self.fingerprint.lock().clone())
+        }
+    }
+
+    struct BlockingSourceArc(Arc<BlockingSource>);
+
+    impl PollingSource for BlockingSourceArc {
+        fn poll(&self, uri: &str) -> Option<String> {
+            self.0.poll(uri)
+        }
+    }
+
     #[test]
     fn an_unsupported_hub_does_not_advertise_or_accept_subscriptions() {
         // E1 hard requirement: with no confirmed source, the capability is off
@@ -2167,6 +2323,54 @@ mod tests {
     }
 
     #[test]
+    fn idempotent_resubscribe_does_not_hide_an_unobserved_change() {
+        let (hub, source) = polling_hub(URI);
+        assert!(hub.subscribe("agent-a", URI));
+        source.set(URI, "fp-v2");
+
+        assert!(hub.subscribe("agent-a", URI));
+        assert_eq!(hub.poll_for_changes(), vec![URI.to_owned()]);
+        assert_eq!(hub.drain_pending("agent-a"), vec![URI.to_owned()]);
+    }
+
+    #[test]
+    fn stale_poll_cannot_notify_a_recreated_subscription() {
+        let (entered_tx, entered_rx) = sync_channel(0);
+        let (release_tx, release_rx) = sync_channel(0);
+        let source = Arc::new(BlockingSource {
+            fingerprint: Mutex::new("fp-v1".to_owned()),
+            block_next: AtomicBool::new(false),
+            entered: entered_tx,
+            release: Mutex::new(release_rx),
+        });
+        let hub = Arc::new(SubscriptionHub::with_source(SubscribeSource::Polling(
+            Box::new(BlockingSourceArc(Arc::clone(&source))),
+        )));
+        assert!(hub.subscribe("agent-a", URI));
+
+        *source.fingerprint.lock() = "fp-v2".to_owned();
+        source.block_next.store(true, Ordering::Release);
+        let polling_hub = Arc::clone(&hub);
+        let poller = std::thread::spawn(move || polling_hub.poll_for_changes());
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("old-generation poll reaches its deterministic barrier");
+
+        hub.unsubscribe("agent-a", URI);
+        assert!(hub.subscribe("agent-a", URI));
+        release_tx
+            .send(())
+            .expect("blocked old-generation poll remains connected");
+
+        assert!(poller.join().expect("poll thread joins").is_empty());
+        assert!(hub.drain_pending("agent-a").is_empty());
+        assert_eq!(
+            hub.fingerprints.lock().get(URI).map(String::as_str),
+            Some("fp-v2")
+        );
+    }
+
+    #[test]
     fn mark_changed_only_enqueues_for_subscribed_uris() {
         let source = std::sync::Arc::new(ScriptedSource::new());
         source.set(URI, "fp");
@@ -2180,6 +2384,49 @@ mod tests {
         hub.subscribe("agent-a", URI);
         hub.mark_changed(URI);
         assert_eq!(hub.drain_pending("agent-a"), vec![URI.to_owned()]);
+    }
+
+    #[test]
+    fn unsubscribe_removes_pending_and_final_fingerprint_immediately() {
+        let (hub, _source) = polling_hub(URI);
+        assert!(hub.subscribe("principal-a", URI));
+        assert!(hub.subscribe("principal-b", URI));
+        hub.mark_changed(URI);
+
+        hub.unsubscribe("principal-a", URI);
+        assert!(hub.drain_pending("principal-a").is_empty());
+        assert!(
+            hub.fingerprints.lock().contains_key(URI),
+            "the remaining subscriber retains the shared polling baseline"
+        );
+        assert_eq!(hub.drain_pending("principal-b"), vec![URI.to_owned()]);
+
+        hub.mark_changed(URI);
+        hub.unsubscribe("principal-b", URI);
+        assert!(hub.drain_pending("principal-b").is_empty());
+        assert!(hub.fingerprints.lock().get(URI).is_none());
+        assert!(hub.registry().subscribed_uris().is_empty());
+    }
+
+    #[test]
+    fn subscription_churn_leaves_no_fingerprints_or_removed_owner_updates() {
+        let source = std::sync::Arc::new(ScriptedSource::new());
+        let hub = SubscriptionHub::with_source(SubscribeSource::Polling(Box::new(
+            PollingSourceArc(source.clone()),
+        )));
+
+        for index in 0..2_000 {
+            let uri = format!("oracle://object/HR/TABLE/CHURN_{index}");
+            source.set(&uri, "initial");
+            assert!(hub.subscribe("principal-a", &uri));
+            hub.mark_changed(&uri);
+            hub.unsubscribe("principal-a", &uri);
+        }
+
+        assert!(hub.registry().subscribed_uris().is_empty());
+        assert!(hub.fingerprints.lock().is_empty());
+        assert!(hub.pending.lock().is_empty());
+        assert!(hub.drain_pending("principal-a").is_empty());
     }
 
     /// Build a polling hub over a scripted source seeded so `subscribe` seeds a

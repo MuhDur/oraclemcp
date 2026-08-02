@@ -62,6 +62,13 @@ fn bundle_text(dir: &Path) -> Vec<(PathBuf, String)> {
 #[test]
 fn incident_capture_cli_is_redacted_self_describing_and_non_overwriting() {
     let temp = tempfile::tempdir().expect("temporary fixture directory");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
+            .expect("protect incident fixture directory");
+    }
     let config = temp.path().join("profiles.toml");
     fs::write(
         &config,

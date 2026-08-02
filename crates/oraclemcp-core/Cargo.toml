@@ -58,7 +58,7 @@ wait-timeout = "0.2"
 # the dependency graph transitively; this adds no new package.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 async-trait.workspace = true

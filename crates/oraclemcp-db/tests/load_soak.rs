@@ -107,7 +107,7 @@ fn live_xe_load_soak_pool_accounting_and_latency() {
                     local.push(start.elapsed().as_micros());
                     outcome.expect("live pool op succeeds against a healthy DB");
                 }
-                let metrics = pool.metrics();
+                let metrics = pool.metrics().expect("pool metrics remain readable");
                 if !(metrics.is_balanced() && metrics.is_bounded()) {
                     leaks.lock().expect("leaks lock").push(format!(
                         "client {client_id}: in_use={} acquired={} released={} discarded={} open={} max={}",
