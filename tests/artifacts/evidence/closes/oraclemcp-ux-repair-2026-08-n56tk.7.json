@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:35:37Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk.7",
+  "scope": {
+    "summary": "Distinguishes an idle global Explorer search from an active submitted request so the operator is not told that disabled queries are already searching.",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/e2e/ux-explorer-selection.spec.ts"
+    ],
+    "out_of_scope": [
+      "Live Oracle search behavior",
+      "Unrelated visual semantic token repairs"
+    ]
+  },
+  "source": {
+    "sha": "b545ebde7a2152fa7248fbcc38fb4f9711a4915e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard type, production build, and regression suite",
+        "kind": "cli",
+        "trace": "`cd web && npm run check` exited 0 at source b545ebde: TypeScript, Vite production build, bundle check, and 234 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "browser global-search lifecycle behavior",
+        "kind": "cli",
+        "trace": "`cd web && npm exec playwright test e2e/ux-explorer-selection.spec.ts --config playwright.config.ts` exited 0 with two Chromium tests. The lifecycle test proves idle copy before submission and the searching state while a submitted object request is deliberately held."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is local browser coverage with stubbed operator responses and does not claim a live Oracle search run.",
+    "No fuzzing or mutation campaign was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
