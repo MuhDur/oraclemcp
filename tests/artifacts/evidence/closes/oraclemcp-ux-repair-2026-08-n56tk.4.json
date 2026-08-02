@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:20:50Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk.4",
+  "scope": {
+    "summary": "Reflows Audit filters into usable fields and commands, and renders empty session activity without a desktop-width table while preserving a labelled scroll region for populated data.",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/e2e/ux-audit-layout.spec.ts"
+    ],
+    "out_of_scope": [
+      "Live audit-provider behavior",
+      "Unrelated Explorer selection and visual-language repairs"
+    ]
+  },
+  "source": {
+    "sha": "51ed1021e9cdd7c71d2daee7fe48ab0382d56d92",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard type, production build, and regression suite",
+        "kind": "cli",
+        "trace": "`cd web && npm run check` exited 0 at source 51ed1021: TypeScript, Vite production build, bundle check, and 232 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "browser audit layout behavior",
+        "kind": "cli",
+        "trace": "`cd web && npm exec playwright test e2e/ux-audit-layout.spec.ts --config playwright.config.ts` exited 0 with 3 Chromium tests. Audit controls and document widths fit at 1024, 1440, and 1600px; the 390px empty state fits its region; populated activity keeps an explicitly labelled horizontal scroll region."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a local browser layout proof and does not claim a live audit-provider integration run.",
+    "No fuzzing or mutation campaign was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
