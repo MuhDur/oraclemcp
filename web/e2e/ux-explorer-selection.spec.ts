@@ -1,5 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 
+type ExplorerStubOptions = {
+  pauseGlobalObjectSearch?: boolean;
+};
+
+type ExplorerStubControls = {
+  releaseGlobalObjectSearch: () => void;
+};
+
 function operatorEnvelope(path: string, data: Record<string, unknown>): string {
   return JSON.stringify({
     protocol_version: "operator.v1",
@@ -22,13 +30,20 @@ function actionResult(tool: string, structuredContent: Record<string, unknown>):
   };
 }
 
-async function stubExplorerDashboard(page: Page): Promise<void> {
+async function stubExplorerDashboard(
+  page: Page,
+  options: ExplorerStubOptions = {}
+): Promise<ExplorerStubControls> {
   const lane = {
     lane_id: "lane-explorer",
     generation: 1,
     status: "active",
     subject_id_hash: "subject-sha256-test"
   };
+  let releaseGlobalObjectSearch = (): void => {};
+  const globalObjectSearchGate = new Promise<void>((resolve) => {
+    releaseGlobalObjectSearch = resolve;
+  });
   await page.route("**/dashboard/session", async (route) => {
     await route.fulfill({
       status: 200,
@@ -60,6 +75,11 @@ async function stubExplorerDashboard(page: Page): Promise<void> {
         arguments?: { name_like?: string | null };
       };
       const tool = request.tool ?? "unknown";
+      if (tool === "oracle_search_objects" && request.arguments?.name_like === "%payroll%") {
+        if (options.pauseGlobalObjectSearch) {
+          await globalObjectSearchGate;
+        }
+      }
       const structuredContent =
         tool === "oracle_connection_info"
           ? {
@@ -154,6 +174,7 @@ async function stubExplorerDashboard(page: Page): Promise<void> {
       body: operatorEnvelope(path, data)
     });
   });
+  return { releaseGlobalObjectSearch };
 }
 
 test("Explorer global matches announce the exact selected hit and clear prior details", async ({ page }) => {
@@ -191,4 +212,23 @@ test("Explorer global matches announce the exact selected hit and clear prior de
   await expect(objectHit).toHaveAttribute("aria-pressed", "false");
   await expect(secondSourceHit).toHaveAttribute("aria-pressed", "false");
   await expect(page.getByText("create package HR.PAYROLL_API as end;", { exact: true })).toHaveCount(0);
+});
+
+test("Explorer global search distinguishes idle from an active submitted search", async ({ page }) => {
+  const controls = await stubExplorerDashboard(page, { pauseGlobalObjectSearch: true });
+  await page.goto("/explorer");
+
+  await expect(page.getByText("enter a search term", { exact: true })).toBeVisible();
+  await expect(page.getByText("Run a search to find visible objects.", { exact: true })).toBeVisible();
+  await expect(page.getByText("Run a search to find text in visible PL/SQL source.", { exact: true })).toBeVisible();
+
+  await page.getByLabel("Search term").fill("payroll");
+  await page.getByRole("button", { name: "Search" }).click();
+  await expect(page.getByText("searching", { exact: true })).toBeVisible();
+  await expect(page.getByText("Searching objects…", { exact: true })).toBeVisible();
+
+  controls.releaseGlobalObjectSearch();
+  await expect(
+    page.getByRole("button", { name: "Select HR.PAYROLL_API (PACKAGE) for details" })
+  ).toBeVisible();
 });

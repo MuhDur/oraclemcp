@@ -5466,8 +5466,8 @@ function ExplorerPage(): React.ReactElement {
           request={globalSearchRequest}
           objectRows={globalObjectRows}
           sourceRows={globalSourceRows}
-          objectPending={globalObjectsQuery.isPending}
-          sourcePending={globalSourceQuery.isPending}
+          objectPending={Boolean(globalSearchRequest?.includeObjects) && globalObjectsQuery.isPending}
+          sourcePending={Boolean(globalSearchRequest?.includeSource) && globalSourceQuery.isPending}
           objectError={
             globalObjectsQuery.error instanceof Error ? globalObjectsQuery.error.message : null
           }
