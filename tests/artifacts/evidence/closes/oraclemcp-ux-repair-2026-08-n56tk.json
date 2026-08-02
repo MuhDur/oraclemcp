@@ -31,7 +31,7 @@
     "entry_points": [
       {
         "name": "closed child evidence",
-        "kind": "tracker",
+        "kind": "cli",
         "trace": "`br show oraclemcp-ux-repair-2026-08-n56tk --json` at source 4e9c9df6 lists all seven parent-child beads (.1 through .7) as closed. Each has a committed canonical close-evidence document with a guarded close binding."
       },
       {
