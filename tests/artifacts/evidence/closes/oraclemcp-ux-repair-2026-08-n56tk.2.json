@@ -1,0 +1,58 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T10:11:21Z",
+  "bead_id": "oraclemcp-ux-repair-2026-08-n56tk.2",
+  "scope": {
+    "summary": "Restores visible, bounded retry actions for pairing, dashboard data, resource limits, Workbench configuration, and failed Explorer searches without relaxing authoritative-data checks.",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/src/app/dashboard-lifecycle.tsx",
+      "web/src/app/operator-outcome.test.tsx",
+      "web/e2e/ux-recovery.spec.ts"
+    ],
+    "out_of_scope": [
+      "Live Oracle service recovery",
+      "Unrelated responsive layout and visual-language repairs"
+    ]
+  },
+  "source": {
+    "sha": "092c71360b07b929fe888f71c0bcb6a4e4abe390",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard type, production build, and regression suite",
+        "kind": "cli",
+        "trace": "`cd web && npm run check` exited 0 at source 092c7136: TypeScript, Vite production build, bundle check, and 232 dashboard tests passed; 7 existing served-console tests remained intentionally skipped."
+      },
+      {
+        "name": "browser retry recovery",
+        "kind": "cli",
+        "trace": "`cd web && npm exec playwright test e2e/ux-recovery.spec.ts --config playwright.config.ts` exited 0 with 2 Chromium tests. It holds the session endpoint unavailable until the dashboard retry succeeds, and holds Workbench configuration unavailable until the retry exposes Run query."
+      },
+      {
+        "name": "Explorer retry eligibility",
+        "kind": "cli",
+        "trace": "`cd web && npm test -- --run src/app/operator-outcome.test.tsx` exited 0 with 66 tests, including the assertion that an Explorer error discards retained facts but does not disable a fresh search when a result type remains selected."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a local browser and dashboard proof; it does not claim a live Oracle service recovery run.",
+    "No fuzzing or mutation campaign was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
