@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T01:17:39Z",
+  "bead_id": "oraclemcp-4qw46",
+  "scope": {
+    "summary": "Included every manifest-declared benchmark source required to parse the workspace during the release-image build while keeping undeclared local benches excluded.",
+    "in_scope": [
+      ".dockerignore",
+      "tests/container_supply_chain_contract_test.sh"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation",
+      "Benchmark execution",
+      "Hosted image publication"
+    ]
+  },
+  "source": {
+    "sha": "4ac4b4413e57825cddb96d0980c891a387a66059",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release-image context and runtime smoke",
+        "kind": "config-gate",
+        "trace": "At prior source e725cc70, the runtime image build failed while parsing crates/oraclemcp-db/Cargo.toml because benches/classify_type.rs was absent from the deny-all context. At fixing source 4ac4b441, `tests/container_supply_chain_contract_test.sh --context` passed with 217 reviewed files, all three declared bench targets present, and an undeclared local bench sentinel excluded. `docker buildx build --target runtime --load` then completed, and the resulting image passed UID 10001, XDG config/state, JSON-info, and MCP initialize smokes."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The proof used a local exact-source Docker build; no hosted registry publication or pull was exercised.",
+    "This scoped evidence cannot mark a release ready."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

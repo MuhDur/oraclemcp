@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-f-server-bughunt-fixes-fusa.1.54",
+  "scope": {
+    "summary": "Resolved Reject duplicate JWT security claims and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http",
+      "crates/oraclemcp/src"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation and parity work",
+      "Live Oracle version-matrix execution and hosted release qualification"
+    ]
+  },
+  "source": {
+    "sha": "e725cc70ce8074071ddbda7c6fce8d5c02b43620",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "operator HTTP and authentication surface",
+        "kind": "route",
+        "trace": "The exact-source workspace test suite exercises request parsing, authentication, dashboard sessions, credentials, and SSE behavior; workspace clippy is warning-clean."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live Oracle and hosted release lanes were not configured; this is scoped regression evidence and does not claim release readiness."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-l2ok6",
+  "scope": {
+    "summary": "Resolved Refresh durable spool Loom lifecycle model and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      "crates/oraclemcp-audit"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation",
+      "Windows runtime execution and broad Loom exploration"
+    ]
+  },
+  "source": {
+    "sha": "e725cc70ce8074071ddbda7c6fce8d5c02b43620",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "durable audit shipping lifecycle",
+        "kind": "config-gate",
+        "trace": "At source e725cc70, the cfg(loom) shipping-spool model passed all 6 focused tests covering enqueue closure, bounded shutdown, worker lease release, and the planted pre-fix lost-wakeup witness."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The bounded command `RUSTFLAGS='--cfg loom' LOOM_MAX_PREEMPTIONS=3 cargo test -p oraclemcp-audit --test loom_shipping_spool --release -- --test-threads=1` passed 6 tests; no broad Loom campaign, mutation run, Windows runtime lane, or live external destination was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

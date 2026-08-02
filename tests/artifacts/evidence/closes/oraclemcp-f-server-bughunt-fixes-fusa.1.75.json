@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-f-server-bughunt-fixes-fusa.1.75",
+  "scope": {
+    "summary": "Resolved Wake connection-pool waiters without busy-spin and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-db/tests"
+    ],
+    "out_of_scope": [
+      "Oracle driver internals",
+      "Live Oracle load and soak execution"
+    ]
+  },
+  "source": {
+    "sha": "e725cc70ce8074071ddbda7c6fce8d5c02b43620",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "database pool checkout path",
+        "kind": "api",
+        "trace": "The exact-source workspace test suite exercises pool waiter ordering, cancellation classification, handoff, and absolute-deadline behavior; live Oracle soak tests remain explicitly outside this close."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live Oracle pool/load/soak tests were not configured and remain outside this scoped close."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

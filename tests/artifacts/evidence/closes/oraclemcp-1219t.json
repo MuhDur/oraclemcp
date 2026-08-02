@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-1219t",
+  "scope": {
+    "summary": "Restored unique BH001 through BH153 title ordinals and verified a gap-free, duplicate-free campaign index.",
+    "in_scope": [
+      ".beads/issues.jsonl"
+    ],
+    "out_of_scope": [
+      "Product behavior outside campaign tracker-title normalization"
+    ]
+  },
+  "source": {
+    "sha": "4ac4b4413e57825cddb96d0980c891a387a66059",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "campaign title inventory",
+        "kind": "config-gate",
+        "trace": "A read-only jq audit over `git show 4ac4b441:.beads/issues.jsonl` returned count=153, unique=153, min=1, max=153, and gap_free=true for BH001 through BH153."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The read-only tracker proof covers campaign title identity only; it does not establish product readiness or mutate tracker state."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

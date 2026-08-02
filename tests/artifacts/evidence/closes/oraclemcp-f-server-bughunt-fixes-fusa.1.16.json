@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-f-server-bughunt-fixes-fusa.1.16",
+  "scope": {
+    "summary": "Resolved Use authoritative absolute elevation expiry and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      "web/src/app"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation and parity work",
+      "Live Oracle-backed browser execution and hosted release qualification"
+    ]
+  },
+  "source": {
+    "sha": "e725cc70ce8074071ddbda7c6fce8d5c02b43620",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "operator dashboard",
+        "kind": "route",
+        "trace": "At source e725cc70, `cd web && npm run check` passed TypeScript, the production build, and 231 tests; 7 tests were skipped."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The exact-HEAD dashboard gate ran on Node 24.3.0 while the repository pins Node 22.17.0; 7 tests were skipped, the bundle-size warning remains, and CycloneDX validation used the schema-lite fallback.",
+    "No live Oracle-backed browser lane or hosted release lane is claimed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

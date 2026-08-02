@@ -1,0 +1,60 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-f-server-bughunt-fixes-fusa.1",
+  "scope": {
+    "summary": "Recorded the implemented source state for the 153-bead targeted non-driver hardening campaign; guarded leaf closure, tracker delivery, and the campaign's pre-existing-bead conditions remain separate completion requirements.",
+    "in_scope": [
+      "web/src/app",
+      "crates/oraclemcp-core/src/http",
+      "crates/oraclemcp-core/src/incident.rs",
+      "crates/oraclemcp-core/src/change_proposal.rs",
+      "crates/oraclemcp-core/src/lane.rs",
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-audit",
+      "crates/oraclemcp/src",
+      ".github/workflows",
+      "scripts",
+      "install.sh",
+      "install.ps1",
+      "Dockerfile",
+      ".dockerignore",
+      "release-surfaces.toml"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation and parity work",
+      "Live Oracle version-matrix execution and hosted release qualification"
+    ]
+  },
+  "source": {
+    "sha": "4ac4b4413e57825cddb96d0980c891a387a66059",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "non-driver campaign surfaces",
+        "kind": "config-gate",
+        "trace": "At source 4ac4b441, the clean dashboard, Rust workspace, audit, installer, container-context, exact-source runtime-image, MCP stdio, release-verifier, and cargo-deny gates passed; external live lanes are not claimed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live Oracle, Windows/PowerShell, hosted GitHub release, GHCR, crates.io, MCP registry, and live Cosign lanes were not executed; this campaign therefore does not claim release readiness.",
+    "No fuzzing or mutation campaign was run.",
+    "This document records implemented source only and must not be used to close the epic until at least 100 leaves are guarded-closed, tracker commits are pushed, and the epic's two pre-existing-bead conditions are resolved."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

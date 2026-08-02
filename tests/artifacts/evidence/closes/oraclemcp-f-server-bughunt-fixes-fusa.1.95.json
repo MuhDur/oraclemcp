@@ -1,0 +1,45 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-f-server-bughunt-fixes-fusa.1.95",
+  "scope": {
+    "summary": "Resolved Run release containers as an unprivileged user and proved the exact-source runtime image and MCP entry point.",
+    "in_scope": [
+      "Dockerfile"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation",
+      "A live crates.io/GitHub/GHCR/MCP-registry release and local PowerShell runtime execution"
+    ]
+  },
+  "source": {
+    "sha": "4ac4b4413e57825cddb96d0980c891a387a66059",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release and installation policy",
+        "kind": "config-gate",
+        "trace": "At source 4ac4b441, `docker buildx build --target runtime --load --tag oraclemcp:proof-4ac4b441 .` produced image sha256:f37fbad8810934365985d114a133e90bb897863cae58e7a4aa0750d7f9452592. Image inspection returned user 10001:10001; a shell smoke proved uid=10001, writable XDG config/state directories, and a non-writable home. `oraclemcp --json info` returned version 0.10.0, and the default stdio command answered an MCP initialize request at protocol 2025-11-25."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The proof used a local exact-source image; no hosted publication, registry pull, live Cosign identity verification, or PowerShell runtime was exercised.",
+    "This scoped evidence cannot mark a release ready."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

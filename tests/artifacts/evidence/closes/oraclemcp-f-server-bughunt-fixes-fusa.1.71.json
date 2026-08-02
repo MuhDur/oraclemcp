@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-f-server-bughunt-fixes-fusa.1.71",
+  "scope": {
+    "summary": "Resolved Bound durable audit-shipping shutdown and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      "crates/oraclemcp-audit"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation",
+      "Windows runtime execution and broad Loom exploration"
+    ]
+  },
+  "source": {
+    "sha": "e725cc70ce8074071ddbda7c6fce8d5c02b43620",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "durable audit shipping lifecycle",
+        "kind": "config-gate",
+        "trace": "At source e725cc70, `cargo test -p oraclemcp-audit` passed 300 tests and all-target clippy passed with warnings denied."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No Windows runtime lane, broad Loom exploration, mutation run, or live external audit destination was exercised."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

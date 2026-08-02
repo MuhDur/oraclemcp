@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-f-server-bughunt-fixes-fusa.1.96",
+  "scope": {
+    "summary": "Resolved Exclude sensitive local state from Docker build context and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      ".dockerignore",
+      "tests/container_supply_chain_contract_test.sh"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation",
+      "A live crates.io/GitHub/GHCR/MCP-registry release and local PowerShell runtime execution"
+    ]
+  },
+  "source": {
+    "sha": "4ac4b4413e57825cddb96d0980c891a387a66059",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release and installation policy",
+        "kind": "config-gate",
+        "trace": "At source 4ac4b441, `bash tests/container_supply_chain_contract_test.sh --context` passed the Dockerfile check, inventoried 217 reviewed context files, excluded every planted sensitive sentinel including an undeclared local bench file, retained every required input including the three manifest-declared bench targets, and passed the nonroot bind-state proof."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The BuildKit context and sentinel proof was local; no hosted image publication or registry-side context inspection was exercised.",
+    "This scoped evidence cannot mark a release ready."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

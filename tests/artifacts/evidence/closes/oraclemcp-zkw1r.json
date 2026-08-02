@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-zkw1r",
+  "scope": {
+    "summary": "Resolved Bind required proof to the repository Required command graph and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      "scripts/verify_required_local.py",
+      "scripts/test_verify_required_local.sh",
+      "scripts/verify_release_exact_sha.py",
+      "scripts/test_verify_release_exact_sha.sh"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation",
+      "A live crates.io/GitHub/GHCR/MCP-registry release and local PowerShell runtime execution"
+    ]
+  },
+  "source": {
+    "sha": "e725cc70ce8074071ddbda7c6fce8d5c02b43620",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release and installation policy",
+        "kind": "config-gate",
+        "trace": "Exact-source release-security, exact-SHA, Required-proof, container, installer, and release-contract regression scripts passed; no hosted publication is claimed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live publication, hosted exact-SHA release, live Cosign identity verification, or PowerShell runtime was exercised; Unix/static contract gates are the basis.",
+    "This scoped evidence cannot mark a release ready."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

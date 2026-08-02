@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-02T00:58:53Z",
+  "bead_id": "oraclemcp-69y9i",
+  "scope": {
+    "summary": "Resolved Align incident CLI fixture with protected output-directory policy and landed its focused regression or contract coverage at the exact campaign source commit.",
+    "in_scope": [
+      "crates/oraclemcp/tests/incident_cli.rs"
+    ],
+    "out_of_scope": [
+      "Oracle driver implementation and parity work",
+      "Live Oracle version-matrix execution and hosted release qualification"
+    ]
+  },
+  "source": {
+    "sha": "e725cc70ce8074071ddbda7c6fce8d5c02b43620",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "incident CLI fixture",
+        "kind": "cli",
+        "trace": "At source e725cc70, `cargo test -p oraclemcp --test incident_cli` passed its focused protected-directory regression and the clean `cargo test --workspace` gate passed with the same test included."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live Oracle and hosted release lanes were not configured; this is scoped regression evidence and does not claim release readiness."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
