@@ -3853,30 +3853,28 @@ function LaneMetricsPanel({
         tone={snapshot && rows.length > 0 ? "ok" : "off"}
       />
       <div className="overflow-x-auto" role="region" aria-label="Agent session activity" tabIndex={0}>
-        <table className="w-full min-w-[780px] border-collapse text-left">
-          <caption className="sr-only">Activity and policy refusals for active MCP sessions</caption>
-          <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
-            <tr>
-              <th className="px-4 py-3 font-bold">Session</th>
-              <th className="px-4 py-3 font-bold">Requests</th>
-              <th className="px-4 py-3 font-bold">Policy refusals</th>
-              <th className="px-4 py-3 font-bold">Latency</th>
-              <th className="px-4 py-3 font-bold">State</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-[var(--om-border)]">
-            {rows.length === 0 ? (
+        {rows.length === 0 ? (
+          <p className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" role="status">
+            {!available
+              ? "Agent session activity is unavailable."
+              : stateful
+                ? "No active agent sessions. Connect an MCP client to begin."
+                : "Per-session activity is available only when stateful HTTP is enabled."}
+          </p>
+        ) : (
+          <table className="w-full min-w-[780px] border-collapse text-left">
+            <caption className="sr-only">Activity and policy refusals for active MCP sessions</caption>
+            <thead className="bg-[var(--om-surface-muted)] text-xs uppercase text-[var(--om-text-muted)]">
               <tr>
-                <td className="px-4 py-8 text-center text-sm font-semibold text-[var(--om-text-muted)]" colSpan={5}>
-                  {!available
-                    ? "Agent session activity is unavailable."
-                    : stateful
-                    ? "No active agent sessions. Connect an MCP client to begin."
-                    : "Per-session activity is available only when stateful HTTP is enabled."}
-                </td>
+                <th className="px-4 py-3 font-bold">Session</th>
+                <th className="px-4 py-3 font-bold">Requests</th>
+                <th className="px-4 py-3 font-bold">Policy refusals</th>
+                <th className="px-4 py-3 font-bold">Latency</th>
+                <th className="px-4 py-3 font-bold">State</th>
               </tr>
-            ) : (
-              rows.map((row) => (
+            </thead>
+            <tbody className="divide-y divide-[var(--om-border)]">
+              {rows.map((row) => (
                 <tr key={`${row.laneId}:${row.subjectIdHash}`} className="bg-[var(--om-surface)]">
                   <td className="px-4 py-4 align-top">
                     <p className="font-mono text-sm font-semibold text-[var(--om-text-bright)]">{row.laneId}</p>
@@ -3913,10 +3911,10 @@ function LaneMetricsPanel({
                     <Badge tone={row.active ? "ok" : "off"}>{row.active ? "active" : "idle"}</Badge>
                   </td>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </Surface>
   );
@@ -9333,8 +9331,8 @@ function AuditPage(): React.ReactElement {
       description="Review redacted database actions, guard decisions, and hash-chain verification."
     >
       <div className="space-y-4">
-        <Surface className="p-4" aria-busy={auditTail.isPending}>
-          <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_180px_160px_120px_auto_auto_auto] lg:items-end">
+        <Surface className="p-4" aria-busy={auditTail.isPending} data-testid="audit-filter-controls">
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-[minmax(220px,1fr)_minmax(160px,0.75fr)_minmax(140px,0.65fr)_120px] xl:items-end">
             <label className="block">
               <span className="mb-2 block text-sm font-bold text-[var(--om-text)]">Client identity hash</span>
               <input
@@ -9385,6 +9383,8 @@ function AuditPage(): React.ReactElement {
                 onChange={(event) => updateDraft({ limit: clampAuditLimit(event.target.valueAsNumber) })}
               />
             </label>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
             <Button
               type="button"
               variant={draft.exportProofBundle ? "primary" : "secondary"}
