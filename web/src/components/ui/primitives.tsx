@@ -10,6 +10,8 @@ const buttonVariants = cva(
       variant: {
         primary:
           "border-[var(--om-gold)] bg-[var(--om-gold)] text-[var(--om-bg)] hover:bg-[color-mix(in_srgb,var(--om-gold)_85%,black)] focus-visible:outline-[var(--om-focus)]",
+        danger:
+          "border-[var(--om-rust)] bg-[var(--om-rust)] text-[var(--om-bg)] hover:bg-[color-mix(in_srgb,var(--om-rust)_85%,black)] focus-visible:outline-[var(--om-focus)]",
         secondary:
           "border-[var(--om-control-border)] bg-[var(--om-surface)] text-[var(--om-text-bright)] hover:bg-[var(--om-surface-elevated)] focus-visible:outline-[var(--om-focus)]",
         ghost:
@@ -21,6 +23,8 @@ const buttonVariants = cva(
     }
   }
 );
+
+export type ButtonVariant = NonNullable<VariantProps<typeof buttonVariants>["variant"]>;
 
 type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> &
   VariantProps<typeof buttonVariants>;
@@ -41,7 +45,7 @@ const badgeVariants = cva(
         ok: "border-[color-mix(in_srgb,var(--om-sage)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-sage)_14%,transparent)] text-[var(--om-sage)]",
         warn: "border-[color-mix(in_srgb,var(--om-copper)_65%,transparent)] bg-[color-mix(in_srgb,var(--om-copper)_18%,transparent)] text-[var(--om-text-bright)]",
         off: "border-[var(--om-border)] bg-transparent text-[var(--om-text-muted)]",
-        info: "border-[color-mix(in_srgb,var(--om-gold)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-gold)_14%,transparent)] text-[var(--om-gold)]"
+        info: "border-[color-mix(in_srgb,var(--om-info)_45%,transparent)] bg-[color-mix(in_srgb,var(--om-info)_14%,transparent)] text-[var(--om-info)]"
       }
     },
     defaultVariants: {

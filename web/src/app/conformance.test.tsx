@@ -78,8 +78,10 @@ describe("OMCP skin conformance", () => {
     const background = OMCP_SKIN.theme.cssVars["--om-bg"];
     const text = OMCP_SKIN.theme.cssVars["--om-text"];
     const focus = OMCP_SKIN.theme.cssVars["--om-focus"];
+    const info = OMCP_SKIN.theme.cssVars["--om-info"];
     expect(contrastRatio(text, background)).toBeGreaterThanOrEqual(7);
     expect(contrastRatio(focus, background)).toBeGreaterThanOrEqual(3);
+    expect(contrastRatio(info, background)).toBeGreaterThanOrEqual(3);
 
     for (const level of ["read-only", "read-write", "ddl", "admin"] as const) {
       expect(OMCP_SKIN.theme.cssVars[`--om-clearance-${level}`]).toMatch(/^#[0-9a-f]{6}$/i);

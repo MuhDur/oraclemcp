@@ -2,28 +2,29 @@
 
 /*
  * OMCP operator design tokens.
- * The dashboard uses a near-black palette with warm gold/copper accents and
- * classical serif + monospace type. Every color and type value lives here;
- * surfaces read the tokens, never raw hex.
+ * The dashboard uses neutral-charcoal surfaces with semantic information,
+ * success, clearance, and destructive accents. Every color and type value
+ * lives here; surfaces read the tokens, never raw hex.
  */
 @theme {
   /* Palette — dark operator theme */
-  --color-base: #0c0b09;
-  --color-surface: #1e1913;
-  --color-surface-2: #282119;
-  --color-surface-3: #2b261b;
-  --color-hairline: #4a4230;
-  --color-control-border: #786d53;
-  --color-text-bright: #f2ecdc;
-  --color-text: #e9e2d0;
-  --color-text-2: #c9c0ac;
-  --color-text-3: #b3a992;
-  --color-muted: #9c927b;
-  --color-muted-2: #918770;
-  --color-gold: #c7a34a;
-  --color-copper: #d97748;
-  --color-rust: #d8665e;
-  --color-sage: #8ea98c;
+  --color-base: #111210;
+  --color-surface: #1a1c1a;
+  --color-surface-2: #242724;
+  --color-surface-3: #2d312d;
+  --color-hairline: #454b46;
+  --color-control-border: #737d74;
+  --color-text-bright: #f5f7f3;
+  --color-text: #e8ece7;
+  --color-text-2: #c8d1c7;
+  --color-text-3: #b2bbb0;
+  --color-muted: #98a396;
+  --color-muted-2: #858f84;
+  --color-gold: #d4ad5e;
+  --color-copper: #e0ad65;
+  --color-rust: #e08380;
+  --color-sage: #8dbd9d;
+  --color-info: #78b9e6;
 
   /* Type — self-hosted faces (Appendix G.2); @font-face lives in styles.css */
   --font-serif: "EB Garamond", ui-serif, Georgia, "Times New Roman", serif;
@@ -42,8 +43,8 @@
   --text-3xl: 2.25rem;
   --text-4xl: 3rem;
 
-  /* Letter-spacing for small-caps section labels */
-  --tracking-label: 0.14em;
+  /* Labels stay compact and legible at the dashboard's small sizes. */
+  --tracking-label: 0;
 }
 
 /*
@@ -136,11 +137,12 @@
   --om-copper: var(--color-copper);
   --om-rust: var(--color-rust);
   --om-sage: var(--color-sage);
+  --om-info: var(--color-info);
   --om-clearance-read-only: var(--color-sage);
   --om-clearance-read-write: var(--color-gold);
   --om-clearance-ddl: var(--color-copper);
   --om-clearance-admin: var(--color-rust);
-  --om-activity: var(--color-copper);
+  --om-activity: var(--color-info);
   --om-grid: var(--color-surface-3);
   --om-font-serif: var(--font-serif);
   --om-font-mono: var(--font-mono);
@@ -162,7 +164,11 @@
     --om-border: CanvasText;
     --om-control-border: CanvasText;
     --om-focus: Highlight;
+    --om-gold: Highlight;
+    --om-copper: Mark;
     --om-rust: CanvasText;
+    --om-sage: LinkText;
+    --om-info: Highlight;
     --om-clearance-read-only: CanvasText;
     --om-clearance-read-write: LinkText;
     --om-clearance-ddl: Mark;

@@ -44,7 +44,7 @@ import {
   Wifi
 } from "lucide-react";
 
-import { Badge, Button, Surface } from "../components/ui/primitives";
+import { Badge, Button, Surface, type ButtonVariant } from "../components/ui/primitives";
 import { cn } from "../lib/utils";
 import { OMCP_SKIN } from "./skin";
 import {
@@ -1012,6 +1012,7 @@ function SessionsWorkspace(): React.ReactElement {
               </>
             }
             confirmLabel="End session"
+            confirmVariant="danger"
             busy={cancelMutation.isPending}
             onCancel={() => setPendingCancelLane(null)}
             onConfirm={confirmCancelLane}
@@ -1313,8 +1314,7 @@ function SessionLaneTable({
                         </Button>
                         <Button
                           type="button"
-                          variant="secondary"
-                          className="border-[color-mix(in_srgb,var(--om-rust)_55%,transparent)] text-[var(--om-rust)] hover:bg-[color-mix(in_srgb,var(--om-rust)_14%,transparent)]"
+                          variant="danger"
                           disabled={!row.active || cancelPendingLaneId === row.laneId}
                           title="End this agent session"
                           aria-label={`${cancelPendingLaneId === row.laneId ? "Ending" : "End"} session ${row.laneId}`}
@@ -3036,6 +3036,7 @@ export function ConfirmDialog({
   title,
   body,
   confirmLabel,
+  confirmVariant = "primary",
   busy = false,
   id,
   onCancel,
@@ -3044,6 +3045,7 @@ export function ConfirmDialog({
   title: string;
   body: React.ReactNode;
   confirmLabel: string;
+  confirmVariant?: Extract<ButtonVariant, "primary" | "danger">;
   busy?: boolean;
   id: string;
   onCancel: () => void;
@@ -3064,7 +3066,7 @@ export function ConfirmDialog({
           <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>
             Cancel
           </Button>
-          <Button type="button" variant="primary" disabled={busy} onClick={onConfirm}>
+          <Button type="button" variant={confirmVariant} disabled={busy} onClick={onConfirm}>
             {busy ? "Working" : confirmLabel}
           </Button>
         </div>
@@ -3094,7 +3096,7 @@ function ModalShell({
     >
       <div
         ref={dialogRef}
-        className="w-full max-w-lg rounded-md border border-[color-mix(in_srgb,var(--om-copper)_55%,transparent)] bg-[var(--om-surface)] p-4 shadow-lg"
+        className="w-full max-w-lg rounded-md border border-[var(--om-control-border)] bg-[var(--om-surface)] p-4 shadow-lg"
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -3165,7 +3167,7 @@ function ClientCredentialConfirmationDialog({
           </Button>
           <Button
             type="button"
-            variant="primary"
+            variant={action.kind === "revoke" ? "danger" : "primary"}
             disabled={busy || !clientCredentialConfirmationReady(action, typedClientId)}
             onClick={onConfirm}
           >
@@ -3307,7 +3309,7 @@ function ClientCredentialRow({
           </Button>
           <Button
             type="button"
-            variant="secondary"
+            variant="danger"
             disabled={disabled}
             aria-label={`${revoking ? "Revoking credential for" : "Revoke credential for"} ${client.client_id}`}
             onClick={() => onRevoke(client)}
@@ -3895,7 +3897,7 @@ function LaneMetricsPanel({
                       <div className="w-full max-w-[180px]">
                         <div className="h-2 rounded-full bg-[var(--om-surface-elevated)]">
                           <div
-                            className="h-2 rounded-full bg-sky-600"
+                            className="h-2 rounded-full bg-[var(--om-info)]"
                             style={{ width: `${latencyBarWidth(row.meanLatencyMs)}%` }}
                           />
                         </div>
@@ -3948,7 +3950,7 @@ function ToolMetricsPanel({
               </div>
               <div className="h-2 rounded-full bg-[var(--om-surface-elevated)]">
                 <div
-                  className={cn("h-2 rounded-full", row.status === "ok" ? "bg-[var(--om-gold)]" : "bg-[var(--om-copper)]")}
+                  className={cn("h-2 rounded-full", row.status === "ok" ? "bg-[var(--om-sage)]" : "bg-[var(--om-copper)]")}
                   style={{ width: `${requestBarWidth(row.count, rows[0]?.count ?? 1)}%` }}
                 />
               </div>
@@ -4586,9 +4588,9 @@ function capacityFillClass(tone: "neutral" | "ok" | "warn" | "off" | "info"): st
     case "warn":
       return "bg-[var(--om-copper)]";
     case "info":
-      return "bg-sky-600";
+      return "bg-[var(--om-info)]";
     case "ok":
-      return "bg-[var(--om-gold)]";
+      return "bg-[var(--om-sage)]";
     case "off":
       return "bg-[var(--om-border)]";
     case "neutral":

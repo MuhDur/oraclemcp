@@ -134,21 +134,21 @@ function CiLaneHealthCard({
       </div>
       <dl className="mt-4 grid grid-cols-2 gap-3 text-xs">
         <div>
-          <dt className="font-semibold uppercase tracking-wide text-[var(--om-text-muted)]">Tier</dt>
+          <dt className="font-semibold uppercase text-[var(--om-text-muted)]">Tier</dt>
           <dd className="mt-1 font-mono font-semibold text-[var(--om-text)]">{lane.tier}</dd>
         </div>
         <div>
-          <dt className="font-semibold uppercase tracking-wide text-[var(--om-text-muted)]">Streak</dt>
+          <dt className="font-semibold uppercase text-[var(--om-text-muted)]">Streak</dt>
           <dd className="mt-1 font-mono font-semibold text-[var(--om-text)]">{streak}</dd>
         </div>
         <div>
-          <dt className="font-semibold uppercase tracking-wide text-[var(--om-text-muted)]">Observed</dt>
+          <dt className="font-semibold uppercase text-[var(--om-text-muted)]">Observed</dt>
           <dd className="mt-1 font-mono font-semibold text-[var(--om-text)]">
             {formatCiLaneTimestamp(lane.completed_at)}
           </dd>
         </div>
         <div>
-          <dt className="font-semibold uppercase tracking-wide text-[var(--om-text-muted)]">Run</dt>
+          <dt className="font-semibold uppercase text-[var(--om-text-muted)]">Run</dt>
           <dd className="mt-1 font-mono font-semibold text-[var(--om-text)]">
             {lane.run_url && lane.run_id !== null ? (
               <a

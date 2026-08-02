@@ -7,6 +7,7 @@ import {
   optionalSearchString,
   type ExplorerObjectRow
 } from "./App";
+import { Badge, Button } from "../components/ui/primitives";
 import { OMCP_SKIN, assertDashboardSkinConformance, type DashboardSkin } from "./skin";
 
 function explorerRow(n: number): ExplorerObjectRow {
@@ -88,6 +89,41 @@ describe("the console's own confirmation dialog", () => {
     );
     expect(busy).toContain("Working");
     expect(busy).toContain("disabled");
+  });
+
+  it("keeps routine confirms primary and makes destructive confirms explicit", () => {
+    const destructive = renderToStaticMarkup(
+      <ConfirmDialog
+        id="lane-end"
+        title="End lane"
+        body="body"
+        confirmLabel="End session"
+        confirmVariant="danger"
+        onCancel={() => {}}
+        onConfirm={() => {}}
+      />
+    );
+
+    expect(markup).toContain("bg-[var(--om-gold)]");
+    expect(destructive).toContain("bg-[var(--om-rust)]");
+    expect(destructive).toContain("focus-visible:outline-[var(--om-focus)]");
+  });
+});
+
+describe("shared action and status semantics", () => {
+  it("keeps primary, destructive, and informational UI affordances distinct", () => {
+    const markup = renderToStaticMarkup(
+      <>
+        <Button type="button" variant="primary">Apply</Button>
+        <Button type="button" variant="danger">Revoke</Button>
+        <Badge tone="info">Refreshing</Badge>
+      </>
+    );
+
+    expect(markup).toContain("bg-[var(--om-gold)]");
+    expect(markup).toContain("bg-[var(--om-rust)]");
+    expect(markup).toContain("text-[var(--om-info)]");
+    expect(markup).not.toContain("text-[var(--om-gold)]");
   });
 });
 

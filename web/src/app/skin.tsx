@@ -66,18 +66,19 @@ export const CARVED_LIGHT_THEME: DashboardTheme = {
   name: "carved-light",
   modes: REQUIRED_THEME_MODES,
   cssVars: {
-    "--om-bg": "#0c0b09",
-    "--om-text": "#e9e2d0",
-    "--om-surface": "#1e1913",
-    "--om-surface-muted": "#282119",
-    "--om-border": "#4a4230",
-    "--om-focus": "#c7a34a",
-    "--om-clearance-read-only": "#8ea98c",
-    "--om-clearance-read-write": "#c7a34a",
-    "--om-clearance-ddl": "#d97748",
-    "--om-clearance-admin": "#c25048",
-    "--om-activity": "#d97748",
-    "--om-grid": "#2b261b"
+    "--om-bg": "#111210",
+    "--om-text": "#e8ece7",
+    "--om-surface": "#1a1c1a",
+    "--om-surface-muted": "#242724",
+    "--om-border": "#454b46",
+    "--om-focus": "#d4ad5e",
+    "--om-info": "#78b9e6",
+    "--om-clearance-read-only": "#8dbd9d",
+    "--om-clearance-read-write": "#d4ad5e",
+    "--om-clearance-ddl": "#e0ad65",
+    "--om-clearance-admin": "#e08380",
+    "--om-activity": "#78b9e6",
+    "--om-grid": "#2d312d"
   }
 };
 
@@ -1142,7 +1143,7 @@ function toneTextClass(tone: DashboardTone): string {
     case "warn":
       return "text-[var(--om-copper)]";
     case "info":
-      return "text-[var(--om-gold)]";
+      return "text-[var(--om-info)]";
     case "off":
       return "text-[var(--om-text-muted)]";
     case "neutral":
