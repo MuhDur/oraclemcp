@@ -15,20 +15,22 @@
 //! construction is `min(max_size, cpu*2+1)` (plan §10) via
 //! [`PoolSettings::resolved`]. Checkout waits up to `acquire_timeout_secs` for a
 //! free or newly-openable connection and then returns a `Pool` (BUSY) error.
-//! Exhausted checkouts park on Asupersync's cancel-safe FIFO semaphore. One
+//! Exhausted checkouts park on the pool-local cancel-safe FIFO admission queue. One
 //! freed slot wakes one live waiter, queued callers cannot be bypassed by new
 //! arrivals, and a dropped head waiter hands the permit to its successor. A
 //! bounded cancellation checkpoint wakes at most the waiting task; it never
-//! removes and re-enqueues the semaphore waiter. [`PoolMetrics`] exposes the
+//! removes and re-enqueues an admission waiter. [`PoolMetrics`] exposes the
 //! checkout accounting (`acquired`/`released`/`discarded`/`in_use`/`open`) so
 //! the zero-leaked-session invariant (`is_balanced`) and the bound
 //! (`is_bounded`) are observable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
+use std::future::Future as StdFuture;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::{Context as TaskContext, Poll as TaskPoll, Waker as TaskWaker};
 use std::time::Duration;
 
-use asupersync::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 use asupersync::{Cx, RegionId, TaskId, Time};
 use async_trait::async_trait;
 
@@ -212,6 +214,433 @@ struct PoolRequestLimits {
 
 type PoolRequestKey = (RegionId, TaskId);
 
+/// Private FIFO checkout admission. Unlike the upstream semaphore, this owns
+/// every state transition around a user-owned `Waker`: the state is committed
+/// before a callback and recovered if that callback panics.
+#[derive(Clone, Debug)]
+struct PoolCapacity {
+    state: Arc<Mutex<PoolCapacityState>>,
+}
+
+#[derive(Debug)]
+struct PoolCapacityState {
+    total: usize,
+    available: usize,
+    /// Includes both permits returned to callers and grants awaiting a waiter
+    /// future's next poll.
+    held: usize,
+    closed: bool,
+    next_waiter_id: u64,
+    waiters: VecDeque<PoolCapacityWaiter>,
+}
+
+#[derive(Debug)]
+struct PoolCapacityWaiter {
+    id: u64,
+    phase: PoolCapacityWaiterPhase,
+    waker: Option<TaskWaker>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PoolCapacityWaiterPhase {
+    Waiting,
+    Granted,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PoolCapacityAcquireError {
+    Closed,
+    Poisoned,
+    WaiterIdExhausted,
+    WaiterQueueAllocationFailed,
+    PolledAfterCompletion,
+}
+
+#[derive(Debug)]
+struct PoolCapacityAcquire {
+    capacity: PoolCapacity,
+    waiter: Option<u64>,
+    completed: bool,
+}
+
+#[derive(Debug)]
+struct PoolCapacityPermit {
+    capacity: PoolCapacity,
+    active: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PoolCapacityPoll {
+    Pending,
+    Acquired,
+    Retry,
+    Error(PoolCapacityAcquireError),
+}
+
+impl PoolCapacityState {
+    fn has_waiting(&self) -> bool {
+        self.waiters
+            .iter()
+            .any(|waiter| waiter.phase == PoolCapacityWaiterPhase::Waiting)
+    }
+
+    fn assert_invariant(&self) {
+        debug_assert!(self.available <= self.total);
+        debug_assert!(self.held <= self.total);
+        debug_assert_eq!(self.available.checked_add(self.held), Some(self.total));
+    }
+
+    fn claim_available(&mut self) -> bool {
+        if self.available == 0 || self.held == self.total {
+            return false;
+        }
+        self.available -= 1;
+        self.held += 1;
+        self.assert_invariant();
+        true
+    }
+
+    fn release_claim(&mut self) -> bool {
+        let Some(held) = self.held.checked_sub(1) else {
+            return false;
+        };
+        let Some(available) = self.available.checked_add(1) else {
+            return false;
+        };
+        self.held = held;
+        self.available = available;
+        self.assert_invariant();
+        true
+    }
+}
+
+impl PoolCapacity {
+    fn new(permits: usize) -> Self {
+        PoolCapacity {
+            state: Arc::new(Mutex::new(PoolCapacityState {
+                total: permits,
+                available: permits,
+                held: 0,
+                closed: false,
+                next_waiter_id: 0,
+                waiters: VecDeque::new(),
+            })),
+        }
+    }
+
+    fn acquire(&self) -> PoolCapacityAcquire {
+        PoolCapacityAcquire {
+            capacity: self.clone(),
+            waiter: None,
+            completed: false,
+        }
+    }
+
+    /// Select the next runnable FIFO waiter while the capacity state is held.
+    /// The selected waker is returned to be invoked only after the mutex guard
+    /// has dropped.
+    fn grant_next_locked(state: &mut PoolCapacityState) -> Option<(u64, TaskWaker)> {
+        if state.closed || state.available == 0 {
+            return None;
+        }
+
+        loop {
+            let index = state
+                .waiters
+                .iter()
+                .position(|waiter| waiter.phase == PoolCapacityWaiterPhase::Waiting)?;
+            let (waiter_id, waker) = {
+                let waiter = state
+                    .waiters
+                    .get_mut(index)
+                    .expect("FIFO waiter index remains valid while locked");
+                waiter.phase = PoolCapacityWaiterPhase::Granted;
+                (waiter.id, waiter.waker.take())
+            };
+
+            let Some(waker) = waker else {
+                let _ = state.waiters.remove(index);
+                continue;
+            };
+            if state.claim_available() {
+                return Some((waiter_id, waker));
+            }
+
+            let waiter = state
+                .waiters
+                .get_mut(index)
+                .expect("granted waiter remains valid while locked");
+            waiter.phase = PoolCapacityWaiterPhase::Waiting;
+            waiter.waker = Some(waker);
+            return None;
+        }
+    }
+
+    /// Wake a granted waiter. A panic from safe `Wake::wake` cannot strand
+    /// capacity: revoke that unconsumed grant, restore its slot, then continue
+    /// with the next live waiter.
+    fn dispatch(&self, mut next: Option<(u64, TaskWaker)>) {
+        while let Some((waiter_id, waker)) = next {
+            if std::panic::catch_unwind(move || waker.wake()).is_ok() {
+                return;
+            }
+
+            tracing::warn!("pool capacity waker panicked; revoking its unconsumed grant");
+            let mut removed = None;
+            next = match self.state.lock() {
+                Ok(mut state) => {
+                    if let Some(index) = state.waiters.iter().position(|waiter| {
+                        waiter.id == waiter_id && waiter.phase == PoolCapacityWaiterPhase::Granted
+                    }) {
+                        removed = state.waiters.remove(index);
+                        if state.release_claim() && !state.closed {
+                            Self::grant_next_locked(&mut state)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "pool capacity state poisoned after waker panic");
+                    None
+                }
+            };
+            // A Waker's destructor is also foreign code; do not run it while
+            // the capacity mutex is held.
+            drop(removed);
+        }
+    }
+
+    fn release(&self) {
+        let next = match self.state.lock() {
+            Ok(mut state) => {
+                if !state.release_claim() || state.closed {
+                    None
+                } else {
+                    Self::grant_next_locked(&mut state)
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "pool capacity state poisoned while releasing a permit");
+                None
+            }
+        };
+        self.dispatch(next);
+    }
+
+    fn close(&self) {
+        let waiters = match self.state.lock() {
+            Ok(mut state) => {
+                if state.closed {
+                    return;
+                }
+                state.closed = true;
+                let grants = state
+                    .waiters
+                    .iter()
+                    .filter(|waiter| waiter.phase == PoolCapacityWaiterPhase::Granted)
+                    .count();
+                debug_assert!(grants <= state.held);
+                state.held = state.held.saturating_sub(grants);
+                state.available = state.available.saturating_add(grants).min(state.total);
+                state.assert_invariant();
+                std::mem::take(&mut state.waiters)
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "pool capacity state poisoned while closing");
+                return;
+            }
+        };
+
+        for waiter in waiters {
+            if let Some(waker) = waiter.waker
+                && std::panic::catch_unwind(move || waker.wake()).is_err()
+            {
+                tracing::warn!("pool capacity close waker panicked");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn waiter_count(&self) -> Result<usize, PoolCapacityAcquireError> {
+        self.state
+            .lock()
+            .map(|state| state.waiters.len())
+            .map_err(|_| PoolCapacityAcquireError::Poisoned)
+    }
+
+    #[cfg(test)]
+    fn lock_is_available(&self) -> bool {
+        self.state.try_lock().is_ok()
+    }
+}
+
+impl StdFuture for PoolCapacityAcquire {
+    type Output = Result<PoolCapacityPermit, PoolCapacityAcquireError>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut TaskContext<'_>) -> TaskPoll<Self::Output> {
+        let this = self.get_mut();
+        if this.completed {
+            return TaskPoll::Ready(Err(PoolCapacityAcquireError::PolledAfterCompletion));
+        }
+
+        // Cloning a user-supplied Waker may itself execute foreign code, so it
+        // happens before acquiring the capacity mutex.
+        let mut supplied_waker = Some(context.waker().clone());
+        loop {
+            let mut retired_waker = None;
+            let mut removed_waiter = None;
+            let action = match this.capacity.state.lock() {
+                Ok(mut state) => {
+                    if state.closed {
+                        if let Some(waiter_id) = this.waiter.take()
+                            && let Some(index) = state
+                                .waiters
+                                .iter()
+                                .position(|waiter| waiter.id == waiter_id)
+                        {
+                            let was_granted =
+                                state.waiters[index].phase == PoolCapacityWaiterPhase::Granted;
+                            removed_waiter = state.waiters.remove(index);
+                            if was_granted {
+                                let _ = state.release_claim();
+                            }
+                        }
+                        PoolCapacityPoll::Error(PoolCapacityAcquireError::Closed)
+                    } else if let Some(waiter_id) = this.waiter {
+                        if let Some(index) = state
+                            .waiters
+                            .iter()
+                            .position(|waiter| waiter.id == waiter_id)
+                        {
+                            if state.waiters[index].phase == PoolCapacityWaiterPhase::Granted {
+                                removed_waiter = state.waiters.remove(index);
+                                this.waiter = None;
+                                PoolCapacityPoll::Acquired
+                            } else {
+                                let replacement = supplied_waker
+                                    .take()
+                                    .expect("each pending poll supplies a Waker");
+                                let waiter = state
+                                    .waiters
+                                    .get_mut(index)
+                                    .expect("FIFO waiter index remains valid while locked");
+                                retired_waker = waiter.waker.replace(replacement);
+                                PoolCapacityPoll::Pending
+                            }
+                        } else {
+                            this.waiter = None;
+                            PoolCapacityPoll::Retry
+                        }
+                    } else if !state.has_waiting() && state.claim_available() {
+                        PoolCapacityPoll::Acquired
+                    } else if state.next_waiter_id == u64::MAX {
+                        PoolCapacityPoll::Error(PoolCapacityAcquireError::WaiterIdExhausted)
+                    } else if state.waiters.try_reserve(1).is_err() {
+                        PoolCapacityPoll::Error(
+                            PoolCapacityAcquireError::WaiterQueueAllocationFailed,
+                        )
+                    } else {
+                        let waiter_id = state.next_waiter_id;
+                        state.next_waiter_id += 1;
+                        state.waiters.push_back(PoolCapacityWaiter {
+                            id: waiter_id,
+                            phase: PoolCapacityWaiterPhase::Waiting,
+                            waker: supplied_waker.take(),
+                        });
+                        this.waiter = Some(waiter_id);
+                        PoolCapacityPoll::Pending
+                    }
+                }
+                Err(_) => PoolCapacityPoll::Error(PoolCapacityAcquireError::Poisoned),
+            };
+
+            match action {
+                PoolCapacityPoll::Retry => {
+                    drop(retired_waker);
+                    drop(removed_waiter);
+                }
+                PoolCapacityPoll::Pending => {
+                    drop(retired_waker);
+                    drop(removed_waiter);
+                    drop(supplied_waker.take());
+                    return TaskPoll::Pending;
+                }
+                PoolCapacityPoll::Acquired => {
+                    this.completed = true;
+                    let permit = PoolCapacityPermit {
+                        capacity: this.capacity.clone(),
+                        active: true,
+                    };
+                    drop(retired_waker);
+                    drop(removed_waiter);
+                    drop(supplied_waker.take());
+                    return TaskPoll::Ready(Ok(permit));
+                }
+                PoolCapacityPoll::Error(error) => {
+                    this.completed = true;
+                    drop(retired_waker);
+                    drop(removed_waiter);
+                    drop(supplied_waker.take());
+                    return TaskPoll::Ready(Err(error));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for PoolCapacityAcquire {
+    fn drop(&mut self) {
+        let Some(waiter_id) = self.waiter.take() else {
+            return;
+        };
+
+        let mut removed = None;
+        let next = match self.capacity.state.lock() {
+            Ok(mut state) => {
+                if let Some(index) = state
+                    .waiters
+                    .iter()
+                    .position(|waiter| waiter.id == waiter_id)
+                {
+                    let was_granted =
+                        state.waiters[index].phase == PoolCapacityWaiterPhase::Granted;
+                    removed = state.waiters.remove(index);
+                    let should_dispatch = if was_granted {
+                        state.release_claim()
+                    } else {
+                        state.available > 0
+                    };
+                    if should_dispatch && !state.closed {
+                        PoolCapacity::grant_next_locked(&mut state)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(error) => {
+                tracing::error!(error = %error, "pool capacity state poisoned while dropping an acquire future");
+                None
+            }
+        };
+        self.capacity.dispatch(next);
+        drop(removed);
+    }
+}
+
+impl Drop for PoolCapacityPermit {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            self.capacity.release();
+        }
+    }
+}
+
 /// A small async thin-mode Oracle connection pool.
 #[derive(Clone)]
 pub struct OraclePool {
@@ -219,9 +648,9 @@ pub struct OraclePool {
     settings: PoolSettings,
     state: Arc<Mutex<PoolState>>,
     /// One permit is held from checkout admission until the connection state is
-    /// returned or discarded. Asupersync's semaphore supplies FIFO ordering,
+    /// returned or discarded. The local FIFO queue supplies ordering,
     /// anti-barging, and cancellation baton handoff.
-    capacity: Arc<Semaphore>,
+    capacity: PoolCapacity,
     /// Request limits are keyed by the explicit Asupersync task identity, not
     /// stored as one mutable pool-wide value. Concurrent callers therefore
     /// cannot overwrite or restore each other's absolute deadlines/quotas.
@@ -293,20 +722,24 @@ impl OraclePool {
                 released: 0,
                 discarded: 0,
             })),
-            capacity: Arc::new(Semaphore::with_name(
-                "oracle-pool-checkout-capacity",
-                settings.max_size as usize,
-            )),
+            capacity: PoolCapacity::new(settings.max_size as usize),
             request_limits: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
     /// Current number of idle + in-use connections in the pool.
-    pub fn state_connections(&self) -> Result<u32, DbError> {
-        self.state
-            .lock()
-            .map(|state| state.open_count)
-            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))
+    ///
+    /// A poisoned accounting lock reports the resolved ceiling, which keeps
+    /// callers conservative rather than fabricating healthy spare capacity.
+    #[must_use]
+    pub fn state_connections(&self) -> u32 {
+        match self.state.lock() {
+            Ok(state) => state.open_count,
+            Err(error) => {
+                tracing::error!(error = %error, "pool state poisoned while reading connection count");
+                self.settings.max_size
+            }
+        }
     }
 
     /// The settings actually in force after CPU-derived resolution (B4).
@@ -349,10 +782,13 @@ impl OraclePool {
     }
 
     /// A snapshot of checkout accounting (B3/B4 zero-leaked-session evidence).
-    pub fn metrics(&self) -> Result<PoolMetrics, DbError> {
-        self.state
-            .lock()
-            .map(|state| PoolMetrics {
+    ///
+    /// A poisoned accounting lock produces a deliberately unhealthy snapshot:
+    /// no idle capacity, every slot in use, and an unbalanced lifetime count.
+    #[must_use]
+    pub fn metrics(&self) -> PoolMetrics {
+        match self.state.lock() {
+            Ok(state) => PoolMetrics {
                 open: state.open_count,
                 idle: state.idle.len() as u32,
                 in_use: state.in_use,
@@ -360,8 +796,20 @@ impl OraclePool {
                 acquired: state.acquired,
                 released: state.released,
                 discarded: state.discarded,
-            })
-            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))
+            },
+            Err(error) => {
+                tracing::error!(error = %error, "pool state poisoned while reading metrics");
+                PoolMetrics {
+                    open: self.settings.max_size,
+                    idle: 0,
+                    in_use: self.settings.max_size,
+                    max_size: self.settings.max_size,
+                    acquired: u64::MAX,
+                    released: 0,
+                    discarded: 0,
+                }
+            }
+        }
     }
 
     /// Run a query on a pooled connection with cancellation-aware checkout and
@@ -543,7 +991,7 @@ impl OraclePool {
     async fn checkout(
         &self,
         cx: &Cx,
-    ) -> Result<(RustOracleConnection, OwnedSemaphorePermit), DbError> {
+    ) -> Result<(RustOracleConnection, PoolCapacityPermit), DbError> {
         let deadline = checkout_deadline(
             asupersync::time::wall_now(),
             self.settings.acquire_timeout_secs,
@@ -558,13 +1006,9 @@ impl OraclePool {
         &self,
         cx: &Cx,
         deadline: Time,
-    ) -> Result<OwnedSemaphorePermit, DbError> {
+    ) -> Result<PoolCapacityPermit, DbError> {
         db_checkpoint(cx, "oracle_pool.checkout.wait.before")?;
-        let mut acquire = Box::pin(OwnedSemaphorePermit::acquire(
-            Arc::clone(&self.capacity),
-            cx,
-            1,
-        ));
+        let mut acquire = Box::pin(self.capacity.acquire());
         loop {
             let now = asupersync::time::wall_now();
             check_checkout_wait_deadline(cx, deadline, now)?;
@@ -577,20 +1021,25 @@ impl OraclePool {
                     }
                     return Ok(permit);
                 }
-                Ok(Err(AcquireError::Cancelled)) => {
-                    return match db_checkpoint(cx, "oracle_pool.checkout.wait.cancelled") {
-                        Err(error) => Err(error),
-                        Ok(()) => Err(DbError::Cancelled(
-                            "thin Oracle connection checkout cancelled".to_owned(),
-                        )),
-                    };
-                }
-                Ok(Err(AcquireError::Closed)) => {
+                Ok(Err(PoolCapacityAcquireError::Closed)) => {
                     return Err(DbError::Pool(
                         "thin Oracle connection pool is closing".to_owned(),
                     ));
                 }
-                Ok(Err(AcquireError::PolledAfterCompletion)) => {
+                Ok(Err(PoolCapacityAcquireError::Poisoned)) => {
+                    return Err(DbError::Internal("pool capacity lock poisoned".to_owned()));
+                }
+                Ok(Err(PoolCapacityAcquireError::WaiterIdExhausted)) => {
+                    return Err(DbError::Internal(
+                        "pool capacity waiter identifier exhausted".to_owned(),
+                    ));
+                }
+                Ok(Err(PoolCapacityAcquireError::WaiterQueueAllocationFailed)) => {
+                    return Err(DbError::Internal(
+                        "pool capacity waiter queue allocation failed".to_owned(),
+                    ));
+                }
+                Ok(Err(PoolCapacityAcquireError::PolledAfterCompletion)) => {
                     return Err(DbError::Internal(
                         "pool capacity acquire was polled after completion".to_owned(),
                     ));
@@ -693,10 +1142,7 @@ impl OraclePool {
                 released: 0,
                 discarded: 0,
             })),
-            capacity: Arc::new(Semaphore::with_name(
-                "oracle-pool-checkout-capacity-test",
-                settings.max_size.saturating_sub(open_count) as usize,
-            )),
+            capacity: PoolCapacity::new(settings.max_size.saturating_sub(open_count) as usize),
             request_limits: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -790,11 +1236,11 @@ impl Drop for PendingOpenSlot {
 struct CheckedOutConnection<T> {
     connection: Option<T>,
     state: Arc<Mutex<PoolState>>,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Option<PoolCapacityPermit>,
 }
 
 impl<T> CheckedOutConnection<T> {
-    fn new(connection: T, state: Arc<Mutex<PoolState>>, permit: OwnedSemaphorePermit) -> Self {
+    fn new(connection: T, state: Arc<Mutex<PoolState>>, permit: PoolCapacityPermit) -> Self {
         Self {
             connection: Some(connection),
             state,
@@ -914,7 +1360,7 @@ impl OracleConnection for OraclePool {
     async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
         let mut info = OraclePool::describe(self, cx).await?;
         info.connection_strategy = Some("stateless_metadata_pool".to_owned());
-        info.pool_open_connections = Some(self.state_connections()?);
+        info.pool_open_connections = Some(self.state_connections());
         Ok(info)
     }
 
@@ -991,6 +1437,39 @@ mod tests {
         }
     }
 
+    struct PanicWake;
+
+    impl Wake for PanicWake {
+        fn wake(self: Arc<Self>) {
+            panic!("test wake panic");
+        }
+    }
+
+    struct ReentrantWake {
+        capacity: PoolCapacity,
+        observed_unlocked: AtomicUsize,
+    }
+
+    impl Wake for ReentrantWake {
+        fn wake(self: Arc<Self>) {
+            let observed = if self.capacity.lock_is_available() {
+                1
+            } else {
+                0
+            };
+            self.observed_unlocked.store(observed, Ordering::Release);
+        }
+    }
+
+    fn acquire_capacity(capacity: &PoolCapacity) -> PoolCapacityPermit {
+        let mut acquire = Box::pin(capacity.acquire());
+        let mut task_cx = Context::from_waker(Waker::noop());
+        match acquire.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("available capacity must acquire immediately: {other:?}"),
+        }
+    }
+
     #[test]
     fn pool_settings_defaults() {
         let s = PoolSettings::default();
@@ -998,6 +1477,13 @@ mod tests {
         assert_eq!(s.min_idle, 2);
         assert_eq!(s.acquire_timeout_secs, 5);
         assert_eq!(s.statement_cache_size, 50);
+    }
+
+    #[test]
+    fn oracle_pool_preserves_its_public_unwind_safety_contract() {
+        fn assert_unwind_safe<T: std::panic::RefUnwindSafe + std::panic::UnwindSafe>() {}
+
+        assert_unwind_safe::<OraclePool>();
     }
 
     #[test]
@@ -1097,7 +1583,7 @@ mod tests {
             );
         });
 
-        let metrics = pool.metrics().expect("pool metrics");
+        let metrics = pool.metrics();
         assert_eq!(metrics.acquired, 0, "refusal must happen before checkout");
         assert_eq!(metrics.released, 0);
         assert_eq!(metrics.discarded, 0);
@@ -1187,20 +1673,10 @@ mod tests {
 
     #[test]
     fn released_permit_wakes_only_fifo_head_and_blocks_barging() {
-        let capacity = Arc::new(Semaphore::new(1));
-        let held = OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).expect("initial permit");
-        let first_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
-        let second_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
-        let mut first_wait = Box::pin(OwnedSemaphorePermit::acquire(
-            Arc::clone(&capacity),
-            &first_context,
-            1,
-        ));
-        let mut second_wait = Box::pin(OwnedSemaphorePermit::acquire(
-            Arc::clone(&capacity),
-            &second_context,
-            1,
-        ));
+        let capacity = PoolCapacity::new(1);
+        let held = acquire_capacity(&capacity);
+        let mut first_wait = Box::pin(capacity.acquire());
+        let mut second_wait = Box::pin(capacity.acquire());
         let first_wakes = Arc::new(WakeCounter::default());
         let second_wakes = Arc::new(WakeCounter::default());
         let first_waker = Waker::from(Arc::clone(&first_wakes));
@@ -1221,8 +1697,11 @@ mod tests {
             0,
             "one released slot must not wake the rest of the checkout queue"
         );
+        let mut barger = Box::pin(capacity.acquire());
+        let barger_waker = Waker::noop();
+        let mut barger_cx = Context::from_waker(barger_waker);
         assert!(
-            OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).is_err(),
+            barger.as_mut().poll(&mut barger_cx).is_pending(),
             "new arrivals cannot barge ahead of the queued FIFO head"
         );
         assert!(second_wait.as_mut().poll(&mut second_cx).is_pending());
@@ -1236,24 +1715,19 @@ mod tests {
             other => panic!("FIFO successor must acquire after the head: {other:?}"),
         };
         drop(second_permit);
+        let barger_permit = match barger.as_mut().poll(&mut barger_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("new arrival acquires only after FIFO predecessors: {other:?}"),
+        };
+        drop(barger_permit);
     }
 
     #[test]
     fn dropping_woken_fifo_head_hands_the_permit_to_its_successor() {
-        let capacity = Arc::new(Semaphore::new(1));
-        let held = OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).expect("initial permit");
-        let first_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
-        let second_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
-        let mut first_wait = Box::pin(OwnedSemaphorePermit::acquire(
-            Arc::clone(&capacity),
-            &first_context,
-            1,
-        ));
-        let mut second_wait = Box::pin(OwnedSemaphorePermit::acquire(
-            Arc::clone(&capacity),
-            &second_context,
-            1,
-        ));
+        let capacity = PoolCapacity::new(1);
+        let held = acquire_capacity(&capacity);
+        let mut first_wait = Box::pin(capacity.acquire());
+        let mut second_wait = Box::pin(capacity.acquire());
         let first_wakes = Arc::new(WakeCounter::default());
         let second_wakes = Arc::new(WakeCounter::default());
         let first_waker = Waker::from(Arc::clone(&first_wakes));
@@ -1283,35 +1757,128 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_fifo_acquire_removes_its_registration() {
-        let capacity = Arc::new(Semaphore::new(1));
-        let held = OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).expect("initial permit");
-        let cancelled_context = Cx::<asupersync::cx::cap::None>::detached_cancel_context();
-        let mut waiter = Box::pin(OwnedSemaphorePermit::acquire(
-            Arc::clone(&capacity),
-            &cancelled_context,
-            1,
-        ));
+    fn dropped_fifo_acquire_removes_its_registration() {
+        let capacity = PoolCapacity::new(1);
+        let held = acquire_capacity(&capacity);
+        let mut waiter = Box::pin(capacity.acquire());
         let mut task_cx = Context::from_waker(Waker::noop());
         assert!(waiter.as_mut().poll(&mut task_cx).is_pending());
-        cancelled_context.set_cancel_requested(true);
-        assert!(
-            matches!(
-                waiter.as_mut().poll(&mut task_cx),
-                Poll::Ready(Err(AcquireError::Cancelled))
-            ),
-            "the queued acquire observes its Cx cancellation"
-        );
+        assert_eq!(capacity.waiter_count().expect("healthy capacity"), 1);
         drop(waiter);
+        assert_eq!(capacity.waiter_count().expect("healthy capacity"), 0);
         drop(held);
-        assert!(
-            OwnedSemaphorePermit::try_acquire_arc(&capacity, 1).is_ok(),
-            "cancelled waiter registration cannot retain or consume capacity"
-        );
+        let fresh = acquire_capacity(&capacity);
+        drop(fresh);
     }
 
     #[test]
-    fn poisoned_pool_accounting_is_an_error_not_healthy_zeroes() {
+    fn panicking_wake_recovers_capacity_and_serves_the_successor() {
+        let capacity = PoolCapacity::new(1);
+        let held = acquire_capacity(&capacity);
+        let mut panicking_waiter = Box::pin(capacity.acquire());
+        let panic_waker = Waker::from(Arc::new(PanicWake));
+        let mut panic_cx = Context::from_waker(&panic_waker);
+        assert!(panicking_waiter.as_mut().poll(&mut panic_cx).is_pending());
+
+        let mut successor = Box::pin(capacity.acquire());
+        let successor_wakes = Arc::new(WakeCounter::default());
+        let successor_waker = Waker::from(Arc::clone(&successor_wakes));
+        let mut successor_cx = Context::from_waker(&successor_waker);
+        assert!(successor.as_mut().poll(&mut successor_cx).is_pending());
+
+        let release = std::panic::catch_unwind(move || drop(held));
+        assert!(release.is_ok(), "a safe Wake panic must stay contained");
+        assert_eq!(
+            successor_wakes.0.load(Ordering::Acquire),
+            1,
+            "the recovered slot is handed to the next live waiter"
+        );
+        let successor_permit = match successor.as_mut().poll(&mut successor_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("successor receives capacity after wake recovery: {other:?}"),
+        };
+        drop(successor_permit);
+
+        let recovery_waker = Waker::noop();
+        let mut recovery_cx = Context::from_waker(recovery_waker);
+        let recovered_waiter_permit = match panicking_waiter.as_mut().poll(&mut recovery_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("stale waiter may re-register after wake recovery: {other:?}"),
+        };
+        drop(recovered_waiter_permit);
+        assert_eq!(capacity.waiter_count().expect("healthy capacity"), 0);
+    }
+
+    #[test]
+    fn pool_capacity_wakes_callbacks_without_holding_its_mutex() {
+        let capacity = PoolCapacity::new(1);
+        let held = acquire_capacity(&capacity);
+        let mut waiter = Box::pin(capacity.acquire());
+        let reentrant = Arc::new(ReentrantWake {
+            capacity: capacity.clone(),
+            observed_unlocked: AtomicUsize::new(0),
+        });
+        let reentrant_waker = Waker::from(Arc::clone(&reentrant));
+        let mut task_cx = Context::from_waker(&reentrant_waker);
+        assert!(waiter.as_mut().poll(&mut task_cx).is_pending());
+
+        drop(held);
+        assert_eq!(
+            reentrant.observed_unlocked.load(Ordering::Acquire),
+            1,
+            "reentrant callback observed the capacity mutex unlocked"
+        );
+        let permit = match waiter.as_mut().poll(&mut task_cx) {
+            Poll::Ready(Ok(permit)) => permit,
+            other => panic!("reentrant waiter receives its grant: {other:?}"),
+        };
+        drop(permit);
+    }
+
+    #[test]
+    fn close_with_panicking_waker_remains_closed_and_fail_closed() {
+        let capacity = PoolCapacity::new(1);
+        let held = acquire_capacity(&capacity);
+        let mut waiter = Box::pin(capacity.acquire());
+        let panic_waker = Waker::from(Arc::new(PanicWake));
+        let mut panic_cx = Context::from_waker(&panic_waker);
+        assert!(waiter.as_mut().poll(&mut panic_cx).is_pending());
+
+        let close = std::panic::catch_unwind(|| capacity.close());
+        assert!(close.is_ok(), "a close wake panic must stay contained");
+        assert!(matches!(
+            waiter.as_mut().poll(&mut panic_cx),
+            Poll::Ready(Err(PoolCapacityAcquireError::Closed))
+        ));
+        drop(held);
+
+        let mut after_close = Box::pin(capacity.acquire());
+        assert!(matches!(
+            after_close.as_mut().poll(&mut panic_cx),
+            Poll::Ready(Err(PoolCapacityAcquireError::Closed))
+        ));
+    }
+
+    #[test]
+    fn poisoned_pool_capacity_fails_closed() {
+        let capacity = PoolCapacity::new(1);
+        let state = Arc::clone(&capacity.state);
+        let poisoned = std::panic::catch_unwind(AssertUnwindSafe(move || {
+            let _guard = state.lock().expect("pool capacity starts healthy");
+            panic!("poison pool capacity for deterministic test");
+        }));
+        assert!(poisoned.is_err());
+
+        let mut acquire = Box::pin(capacity.acquire());
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            acquire.as_mut().poll(&mut task_cx),
+            Poll::Ready(Err(PoolCapacityAcquireError::Poisoned))
+        ));
+    }
+
+    #[test]
+    fn poisoned_pool_accounting_is_conservative_not_healthy_zeroes() {
         let pool = OraclePool::for_test_at_open_count(PoolSettings::default(), 1);
         let state = Arc::clone(&pool.state);
         let poisoned = std::panic::catch_unwind(AssertUnwindSafe(move || {
@@ -1319,11 +1886,11 @@ mod tests {
             panic!("poison pool state for deterministic test");
         }));
         assert!(poisoned.is_err());
-        assert!(matches!(pool.metrics(), Err(DbError::Internal(_))));
-        assert!(matches!(
-            pool.state_connections(),
-            Err(DbError::Internal(_))
-        ));
+        let metrics = pool.metrics();
+        assert!(!metrics.is_balanced(), "poison must not look healthy");
+        assert_eq!(metrics.idle, 0, "poison exposes no spare capacity");
+        assert_eq!(metrics.in_use, pool.settings.max_size);
+        assert_eq!(pool.state_connections(), pool.settings.max_size);
     }
 
     #[test]
@@ -1463,7 +2030,7 @@ mod tests {
             pool.reserve_new_connection().expect("replacement slot"),
             "dirty discard frees capacity only for a fresh connection"
         );
-        let metrics = pool.metrics().expect("pool metrics");
+        let metrics = pool.metrics();
         assert!(metrics.is_balanced());
         assert!(metrics.is_bounded());
         assert_eq!(metrics.open, metrics.max_size);
@@ -1637,13 +2204,13 @@ mod tests {
             !pool.reserve_new_connection().expect("reserve ok"),
             "reservation refused once open_count hits max_size"
         );
-        let metrics = pool.metrics().expect("pool metrics");
+        let metrics = pool.metrics();
         assert_eq!(metrics.open, max, "open never exceeds the ceiling");
         assert!(metrics.is_bounded());
     }
 
     #[test]
-    fn parked_checkout_permit_is_woken_by_cx_cancellation() {
+    fn parked_checkout_permit_observes_cx_cancellation_within_poll_slice() {
         let settings = PoolSettings {
             max_size: 1,
             min_idle: 0,
@@ -1660,11 +2227,11 @@ mod tests {
                 checkout_deadline(asupersync::time::wall_now(), settings.acquire_timeout_secs)
                     .expect("representable checkout deadline");
             let canceller_cx = cancel_cx.clone();
-            let capacity = Arc::clone(&pool.capacity);
+            let capacity = pool.capacity.clone();
             let canceller = std::thread::spawn(move || {
                 let registration_deadline = Instant::now() + Duration::from_secs(1);
                 let registered = loop {
-                    if capacity.telemetry_snapshot(0).waiter_count == 1 {
+                    if capacity.waiter_count().is_ok_and(|count| count == 1) {
                         break true;
                     }
                     if Instant::now() >= registration_deadline {
