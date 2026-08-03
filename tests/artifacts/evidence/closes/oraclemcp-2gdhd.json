@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-03T08:07:41Z",
+  "bead_id": "oraclemcp-2gdhd",
+  "scope": {
+    "summary": "Registers the hand-authored installer SemVer vector fixture in the committed provenance register.",
+    "in_scope": [
+      "tests/conformance/PROVENANCE.md"
+    ],
+    "out_of_scope": [
+      "Installer SemVer parsing behavior and the vector fixture contents"
+    ]
+  },
+  "source": {
+    "sha": "798eb5eb507b70249d88abd7d7d18c4f6ac65ef9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The provenance checker is local evidence; exact-SHA hosted CI is still pending."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
