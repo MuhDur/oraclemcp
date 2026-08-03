@@ -107,7 +107,7 @@ function Get-NormalizedVerifyPosture {
     return $candidate
 }
 
-function Get-SemverParts {
+function Get-SemverPart {
     param([Parameter(Mandatory = $true)][string]$InputVersion)
     $normalized = Get-NormalizedVersion -InputVersion $InputVersion
     if ($normalized -eq "latest") {
@@ -141,8 +141,8 @@ function Compare-Semver {
         [Parameter(Mandatory = $true)][string]$Left,
         [Parameter(Mandatory = $true)][string]$Right
     )
-    $leftParts = Get-SemverParts -InputVersion $Left
-    $rightParts = Get-SemverParts -InputVersion $Right
+    $leftParts = Get-SemverPart -InputVersion $Left
+    $rightParts = Get-SemverPart -InputVersion $Right
     for ($index = 0; $index -lt 3; $index++) {
         $comparison = Compare-DecimalIdentifier -Left $leftParts.Core[$index] -Right $rightParts.Core[$index]
         if ($comparison -ne 0) { return $comparison }
