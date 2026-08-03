@@ -81,6 +81,14 @@ fn read_http_source() -> String {
         .join("\n")
 }
 
+fn read_dashboard_page_source() -> String {
+    [
+        read_repo_file("web/src/app/App.tsx"),
+        read_repo_file("web/src/app/reviews-page.tsx"),
+    ]
+    .join("\n")
+}
+
 fn assert_contains_all(label: &str, haystack: &str, needles: &[&str]) {
     for needle in needles {
         assert!(
@@ -149,6 +157,7 @@ fn read_only_dashboard_acceptance_gate_has_structured_dry_run() {
 #[test]
 fn read_only_dashboard_surface_contracts_are_registered() {
     let app = read_repo_file("web/src/app/App.tsx");
+    let page_source = read_dashboard_page_source();
     let client = read_repo_file("web/src/app/operator-client.ts");
     let skin = read_repo_file("web/src/app/skin.tsx");
 
@@ -182,7 +191,7 @@ fn read_only_dashboard_surface_contracts_are_registered() {
         "function AuditPage",
     ] {
         assert!(
-            app.contains(component),
+            page_source.contains(component),
             "missing dashboard page component {component}"
         );
     }
@@ -632,7 +641,7 @@ fn w10_client_credentials_screen_is_redacted_and_isolated() {
 
 #[test]
 fn wd_history_source_snapshots_and_revert_are_review_gated() {
-    let app = read_repo_file("web/src/app/App.tsx");
+    let reviews = read_repo_file("web/src/app/reviews-page.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
     let http = read_http_source();
     let source_history = read_repo_file("crates/oraclemcp-core/src/source_history.rs");
@@ -667,7 +676,7 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
     );
     assert_contains_all(
         "dashboard source-history UI",
-        &app,
+        &reviews,
         &[
             "SourceHistoryPanel",
             "fetchSourceHistory",
@@ -733,7 +742,7 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
 
 #[test]
 fn wd_diff_schema_diff_exports_migration_through_reviews() {
-    let app = read_repo_file("web/src/app/App.tsx");
+    let reviews = read_repo_file("web/src/app/reviews-page.tsx");
     let client = read_repo_file("web/src/app/operator-client.ts");
     let http = read_http_source();
     let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
@@ -742,7 +751,7 @@ fn wd_diff_schema_diff_exports_migration_through_reviews() {
 
     assert_contains_all(
         "schema diff dashboard UI",
-        &app,
+        &reviews,
         &[
             "function SchemaDiffPanel",
             "aria-label=\"schema diff before snapshot\"",
@@ -805,7 +814,7 @@ fn wd_diff_schema_diff_exports_migration_through_reviews() {
 
 #[test]
 fn dashboard_per_view_acceptance_suite_is_accounted() {
-    let app = read_repo_file("web/src/app/App.tsx");
+    let page_source = read_dashboard_page_source();
     let client = read_repo_file("web/src/app/operator-client.ts");
     let http = read_http_source();
     let conformance = read_repo_file("tests/conformance/COVERAGE.md");
@@ -813,7 +822,7 @@ fn dashboard_per_view_acceptance_suite_is_accounted() {
 
     assert_contains_all(
         "per-view dashboard pages",
-        &app,
+        &page_source,
         &[
             "function OverviewPage",
             "function SessionsPage",
