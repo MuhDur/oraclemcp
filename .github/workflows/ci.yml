@@ -420,8 +420,8 @@ jobs:
             throw "same-version payload with different bytes was not replaced"
           }
 
-          $service = .\install.ps1 -DryRun -Version 9.9.9-installer-smoke -Prefix (Join-Path $env:RUNNER_TEMP "oraclemcp") -Service -Yes -Profile db_ro -Listen 127.0.0.1:7070
-          $serviceText = $service -join "`n"
+          $serviceDryRun = .\install.ps1 -DryRun -Version 9.9.9-installer-smoke -Prefix (Join-Path $env:RUNNER_TEMP "oraclemcp") -Service -Yes -Profile db_ro -Listen 127.0.0.1:7070
+          $serviceText = $serviceDryRun -join "`n"
           if ($serviceText -notmatch "service install --yes --name oraclemcp --listen 127.0.0.1:7070 --profile db_ro") {
             throw "Windows installer service dry-run did not show the consent-gated service command"
           }
