@@ -363,7 +363,9 @@ fn configure_no_follow(options: &mut OpenOptions) {
 fn windows_security_handle(path: &Path, directory: bool) -> Result<File, AuditError> {
     use windows_permissions::constants::AccessRights;
 
-    let access = (AccessRights::ReadControl | AccessRights::WriteDac).bits() | FILE_READ_ATTRIBUTES;
+    let access = (AccessRights::ReadControl | AccessRights::WriteDac | AccessRights::WriteOwner)
+        .bits()
+        | FILE_READ_ATTRIBUTES;
     let mut options = OpenOptions::new();
     options
         .access_mode(access)
@@ -694,24 +696,6 @@ fn harden_windows_private_acl(
             path.display()
         ))
     })?;
-    let before = windows_permissions::wrappers::GetSecurityInfo(
-        &security_handle,
-        SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Owner,
-    )
-    .map_err(|error| {
-        AuditError::Io(format!(
-            "cannot validate the Windows owner for audit path {}: {error}",
-            path.display()
-        ))
-    })?;
-    if before.owner() != Some(&*current_sid) {
-        return Err(AuditError::Io(format!(
-            "audit path {} is not owned by the current Windows process user",
-            path.display()
-        )));
-    }
-
     let desired: LocalBox<SecurityDescriptor> =
         windows_private_dacl_sddl(&current_sid.to_string(), directory)
             .parse()
@@ -724,11 +708,16 @@ fn harden_windows_private_acl(
     let desired_dacl = desired.dacl().ok_or_else(|| {
         AuditError::Io("constructed private Windows audit descriptor has no DACL".to_owned())
     })?;
+    // Windows can assign a new object the token's default owner (for example,
+    // an Administrators group SID) instead of TokenUser. The no-follow,
+    // identity-authenticated handle above is held with WRITE_OWNER + WRITE_DAC,
+    // so normalize both owner and DACL in one transition, then read back the
+    // exact TokenUser-only policy before admitting the path.
     windows_permissions::wrappers::SetSecurityInfo(
         &mut security_handle,
         SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
+        SecurityInformation::Owner | SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
+        Some(&current_sid),
         None,
         Some(desired_dacl),
         None,
@@ -768,10 +757,10 @@ fn harden_windows_private_acl(
 /// Tighten and authenticate an existing Windows audit parent directory before
 /// any control or record file is opened beneath it.
 ///
-/// The directory must already belong to the current process user. The helper
-/// installs and reads back the exact protected, inheritable owner-only DACL
-/// required for children to be created safely from their first observable
-/// instant.
+/// The helper requires `WRITE_OWNER` plus `WRITE_DAC`, normalizes the owner to
+/// the current process user, then installs and reads back the exact protected,
+/// inheritable owner-only DACL required for children to be created safely from
+/// their first observable instant.
 #[cfg(windows)]
 pub fn harden_windows_private_directory(path: &Path) -> Result<(), AuditError> {
     let directory = windows_security_handle(path, true)?;
