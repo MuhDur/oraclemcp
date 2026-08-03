@@ -1,5 +1,6 @@
 import type { QueryClient } from "@tanstack/react-query";
 import type {
+  ActiveLanesData,
   MetricsSnapshot,
   OperatorHealthData,
   OperatorResponse,
@@ -15,6 +16,13 @@ export function authoritativeQueryData<T>(
   data: T | undefined
 ): T | undefined {
   return status === "success" ? data : undefined;
+}
+
+export function authoritativeServerMode(
+  status: DashboardQueryStatus,
+  response: OperatorResponse<ActiveLanesData> | undefined
+): boolean | null {
+  return authoritativeQueryData(status, response)?.data.stateful ?? null;
 }
 
 export function collectionViewState(
