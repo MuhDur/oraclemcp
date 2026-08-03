@@ -29,12 +29,12 @@
 //! # Layers
 //!
 //! - [`OracleConnection`] — the backend-independent connection trait, with the
-//!   thin [`oracledb`]-backed [`RustOracleConnection`]. The trait is `async`
+//!   thin `oraclemcp-driver-cx`-backed [`RustOracleConnection`]. The trait is `async`
 //!   and `Cx`-first (B1): every method takes an explicit `&asupersync::Cx` so
 //!   cancellation and the deadline/budget travel with the call, and each round
 //!   trip is bracketed by explicit `Cx` checkpoints (the native-async
-//!   [`oracledb`] driver also checkpoints `cx` internally). Every real
-//!   [`oracledb`] driver call is confined to the adapter seam (`connection.rs`,
+//!   `oraclemcp-driver-cx` driver also checkpoints `cx` internally). Every real
+//!   `oraclemcp-driver-cx` driver call is confined to the adapter seam (`connection.rs`,
 //!   ADR-0002), so no driver type leaks into this public surface — callers
 //!   depend only on the `oraclemcp-db` types below.
 //! - [`OraclePool`] — a bounded pure-Rust thin session pool.
