@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-03T08:32:43Z",
+  "bead_id": "oraclemcp-rustdoc-driver-links-z11d7",
+  "scope": {
+    "summary": "Corrects the oraclemcp-db crate documentation links to the renamed driver package terminology.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/lib.rs"
+    ],
+    "out_of_scope": [
+      "Driver implementation or dependency behavior"
+    ]
+  },
+  "source": {
+    "sha": "dbb371f2e9a370de2faba9c5a62a794f0331ab55",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "RUSTDOCFLAGS=-D warnings cargo doc -p oraclemcp-db --no-deps passed locally and hosted CI 30796274855 job 91630551182 built workspace docs; this remains scoped documentation evidence, not a release-readiness claim."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

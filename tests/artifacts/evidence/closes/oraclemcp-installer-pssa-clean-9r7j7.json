@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-03T08:32:43Z",
+  "bead_id": "oraclemcp-installer-pssa-clean-9r7j7",
+  "scope": {
+    "summary": "Restores the PowerShell analyzer and dry-run installer contract without weakening PSScriptAnalyzer.",
+    "in_scope": [
+      "install.ps1",
+      "crates/oraclemcp/install.ps1",
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "The independent Windows audit startup failure in oraclemcp-xuaea"
+    ]
+  },
+  "source": {
+    "sha": "f5f288018b53608c27b942ee423147c600629d16",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Windows install.ps1 dry-run",
+        "kind": "cli",
+        "trace": "Hosted CI 30796274855 job 91630551128 passed PSScriptAnalyzer and the dry-run contract; job 91630932202 passed the built-artifact installer smoke. The two tracked installer copies compare byte-identical at source HEAD."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The source commit is not a whole-CI readiness claim; exact-SHA CI 30796274855 failed only the independent Windows audit-owner P0."
+  ],
+  "known_defects": [
+    {
+      "description": "Windows audit bootstrap and fresh-file owner provenance remain unresolved; the strict refusal is intentionally retained.",
+      "bead_id": "oraclemcp-xuaea"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

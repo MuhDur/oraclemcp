@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-03T08:32:43Z",
+  "bead_id": "oraclemcp-workspace-crate-count-docs-uflhg",
+  "scope": {
+    "summary": "Corrects the repository contract's library-crate count from eight to nine.",
+    "in_scope": [
+      "AGENTS.md"
+    ],
+    "out_of_scope": [
+      "Workspace behavior and toolchain changes"
+    ]
+  },
+  "source": {
+    "sha": "3a17a92b6ba4d4647cd713fb3a9f0b356001705e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "cargo metadata --locked --no-deps reports nine oraclemcp-prefixed library packages; this is scoped documentation/configuration evidence, not a release-readiness claim."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "schema": "oraclemcp-hosted-ci-snapshot/v1",
+  "captured_at": "2026-08-03T08:32:43Z",
+  "repository": "MuhDur/oraclemcp",
+  "workflow": "CI",
+  "run_id": 30796274855,
+  "source_sha": "5de96f98806b56d426afc180a4028d848c3c83f6",
+  "url": "https://github.com/MuhDur/oraclemcp/actions/runs/30796274855",
+  "conclusion": "failure",
+  "passed_relevant_jobs": [
+    {
+      "job_id": 91630551128,
+      "name": "Windows installer PSSA and dry-run",
+      "conclusion": "success"
+    },
+    {
+      "job_id": 91630551164,
+      "name": "public-API lock (cargo public-api + semver-checks)",
+      "conclusion": "success"
+    },
+    {
+      "job_id": 91630551124,
+      "name": "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
+      "conclusion": "success"
+    },
+    {
+      "job_id": 91630551210,
+      "name": "web bundle (npm ci + vite build)",
+      "conclusion": "success"
+    },
+    {
+      "job_id": 91630551182,
+      "name": "cargo doc (builds)",
+      "conclusion": "success"
+    },
+    {
+      "job_id": 91630932161,
+      "name": "cargo test",
+      "conclusion": "success"
+    },
+    {
+      "job_id": 91630932259,
+      "name": "PL/SQL intelligence feature matrix",
+      "conclusion": "success"
+    }
+  ],
+  "failing_jobs": [
+    {
+      "job_id": 91630932211,
+      "name": "Rust workspace (Windows)",
+      "conclusion": "failure",
+      "failing_tests": [
+        "tests::build_auditor_hardens_a_new_worm_parent_before_opening_the_mirror",
+        "tests::build_auditor_installs_when_writable_profile_has_a_key",
+        "tests::startup_performs_authenticated_mixed_key_rotation_end_to_end"
+      ],
+      "tracking_bead": "oraclemcp-xuaea"
+    }
+  ],
+  "interpretation": "The exact-SHA run is not a whole-CI or release-ready proof. The listed successful jobs are narrow evidence for their corresponding fixes; Windows audit creation remains an active P0."
+}

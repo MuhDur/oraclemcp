@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-03T08:32:43Z",
+  "bead_id": "oraclemcp-oraclepool-api-lock-uh7s2",
+  "scope": {
+    "summary": "Restores the locked OraclePool public API and replaces its internal admission with a panic-safe FIFO capacity gate.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-db/tests/live_oracle.rs",
+      "crates/oraclemcp-db/tests/load_soak.rs"
+    ],
+    "out_of_scope": [
+      "Live Oracle load proof, which remains environment-gated and ignored"
+    ]
+  },
+  "source": {
+    "sha": "c1163c15078db92c738999347195eb75259a962e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "OraclePool public API",
+        "kind": "api",
+        "trace": "cargo test -p oraclemcp-db pool passed 35 targeted tests, scripts/oraclemcp_api_lock.sh passed all three locks, cargo semver-checks check-release -p oraclemcp-db passed 196 checks, and hosted CI 30796274855 job 91630551164 passed API locks and semver checks."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The ignored live XE load test was not represented as a pass.",
+    "The source commit is not a whole-CI readiness claim; exact-SHA CI 30796274855 failed only the independent Windows audit-owner P0."
+  ],
+  "known_defects": [
+    {
+      "description": "Windows audit bootstrap and fresh-file owner provenance remain unresolved; the strict refusal is intentionally retained.",
+      "bead_id": "oraclemcp-xuaea"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

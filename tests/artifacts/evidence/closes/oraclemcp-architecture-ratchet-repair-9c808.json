@@ -1,0 +1,58 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-08-03T08:32:43Z",
+  "bead_id": "oraclemcp-architecture-ratchet-repair-9c808",
+  "scope": {
+    "summary": "Splits the operator proposal tests and dashboard reviews surface along existing domains while retaining both size ratchets.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/http/tests_operator.rs",
+      "crates/oraclemcp-core/src/http/tests_operator_proposals.rs",
+      "crates/oraclemcp/tests/dashboard_e2e.rs",
+      "web/src/app/App.tsx",
+      "web/src/app/dashboard-lane-selector.tsx",
+      "web/src/app/dashboard-lane-selector.test.tsx",
+      "web/src/app/dashboard-recovery.tsx",
+      "web/src/app/dashboard-recovery.test.tsx",
+      "web/src/app/dashboard-ui.tsx",
+      "web/src/app/dashboard-view-state.ts",
+      "web/src/app/reviews-page.tsx"
+    ],
+    "out_of_scope": [
+      "The independent Windows audit startup failure in oraclemcp-xuaea"
+    ]
+  },
+  "source": {
+    "sha": "dff62869db4bc4cb133f19966a307ab64fabdaa1",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Operator dashboard reviews route",
+        "kind": "route",
+        "trace": "cargo test -p oraclemcp --test dashboard_e2e passed both default and plsql-intelligence variants; scripts/oraclemcp_arch_fitness_lint.sh reports 4,317 <= 4,337 and 8,978 <= 9,195. Hosted CI 30796274855 jobs 91630551124, 91630551210, 91630932161, and 91630932259 passed the architecture, Chromium web, Rust test, and PL/SQL feature lanes."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The source commit is not a whole-CI readiness claim; exact-SHA CI 30796274855 failed only the independent Windows audit-owner P0."
+  ],
+  "known_defects": [
+    {
+      "description": "Windows audit bootstrap and fresh-file owner provenance remain unresolved; the strict refusal is intentionally retained.",
+      "bead_id": "oraclemcp-xuaea"
+    }
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
