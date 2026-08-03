@@ -64,6 +64,8 @@ pub use shipping_spool::{
     DurableShippingShutdownOutcome, DurableShippingStatus, DurableShippingStatusHandle,
     DurableSpoolConfig,
 };
+#[cfg(windows)]
+pub use sink::harden_windows_private_directory;
 pub use sink::{
     AuditError, AuditSink, Auditor, AuthenticatedAuditTail, FileAuditSink, MemoryAuditSink,
 };

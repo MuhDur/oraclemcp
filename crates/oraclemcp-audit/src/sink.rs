@@ -765,10 +765,15 @@ fn harden_windows_private_acl(
     Ok(())
 }
 
-/// Tighten and authenticate a Windows spool directory before any control or
-/// record file is opened beneath it.
+/// Tighten and authenticate an existing Windows audit parent directory before
+/// any control or record file is opened beneath it.
+///
+/// The directory must already belong to the current process user. The helper
+/// installs and reads back the exact protected, inheritable owner-only DACL
+/// required for children to be created safely from their first observable
+/// instant.
 #[cfg(windows)]
-pub(crate) fn harden_windows_private_directory(path: &Path) -> Result<(), AuditError> {
+pub fn harden_windows_private_directory(path: &Path) -> Result<(), AuditError> {
     let directory = windows_security_handle(path, true)?;
     harden_windows_private_acl(&directory, path, true)
 }

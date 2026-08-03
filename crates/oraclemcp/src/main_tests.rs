@@ -691,26 +691,9 @@ fn doctor_audit_posture_matches_startup_audit_policy_without_opening_a_log() {
     );
 }
 
-#[test]
-fn build_auditor_installs_when_writable_profile_has_a_key() {
-    // With a signing key configured, a writable reachable profile installs
-    // an auditor (so the writable profile, after a switch, is audited).
-    let dir = target_tmp_file("a8-audit");
-    fs::create_dir_all(&dir).expect("tmp dir");
-    let audit = AuditConfig {
-        path: Some(dir.join("audit.jsonl")),
-        key_ref: Some("literal:0123456789abcdef0123456789abcdef".to_owned()),
-        ..AuditConfig::default()
-    };
-    let active = SessionLevelState::new(OperatingLevel::ReadOnly, false);
-    match build_auditor(&audit, &active, OperatingLevel::Ddl, &SystemSecretResolver) {
-        Ok(auditor) => assert!(
-            auditor.is_some(),
-            "an auditor must be installed when a write level is reachable"
-        ),
-        Err((code, msg)) => panic!("auditor should build with a key: {code}: {msg}"),
-    }
-}
+// Basic audit-parent and Windows WORM-startup coverage is kept in a focused
+// sibling document so this binary integration suite stays below its ratchet.
+include!("main_tests_audit_startup.rs");
 
 #[test]
 fn audit_startup_rejects_lexical_worm_alias_before_creating_files() {
@@ -964,8 +947,8 @@ fn audit_keyring_historical_secrets_follow_protected_policy_and_require_active_k
 
 #[test]
 fn startup_performs_authenticated_mixed_key_rotation_end_to_end() {
-    let root = target_tmp_file("qa37-startup-rotation");
-    let path = root.join("audit.jsonl");
+    let root = tempfile::tempdir().expect("private audit tempdir");
+    let path = root.path().join("audit.jsonl");
     let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(|name: &str| match name {
         "QA37_OLD" => Some("O".repeat(32)),
         "QA37_NEW" => Some("N".repeat(32)),

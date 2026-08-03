@@ -60,6 +60,8 @@ use oraclemcp::dispatch::{
     result_masking_policy_from_profile, stateless_read_worker_tool,
 };
 use oraclemcp::registry;
+#[cfg(windows)]
+use oraclemcp_audit::harden_windows_private_directory;
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditError, AuditKeyring, AuditOutcome, AuditSink,
     AuditSubject, Auditor, AuthenticatedAuditTail, FileAuditSink, HmacSha256Key, ShippingAuditSink,
@@ -1441,40 +1443,57 @@ fn exposed_profiles_summary(config: &OracleMcpConfig) -> String {
 /// Create the audit log's parent directory with private, symlink-safe
 /// semantics (bead oraclemcp-qa100 .15): reject a symlink/non-directory at the
 /// path, create any new directories `0700` on Unix, and harden an existing
-/// directory's mode down to `0700`. Unlike a plain `create_dir_all`, this fails
-/// closed on an unsafe filesystem object and never leaves the audit directory
-/// group/world-accessible under a permissive umask or a custom layout.
+/// directory's mode down to `0700`. On Windows it installs and reads back the
+/// sink's exact protected owner-only DACL. Unlike a plain `create_dir_all`, this
+/// fails closed on an unsafe filesystem object and never leaves the audit
+/// directory group/world-accessible under a permissive umask or a custom
+/// layout.
 fn create_private_audit_dir(path: &Path) -> std::io::Result<()> {
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AlreadyExists,
-                format!(
-                    "{} is a symlink or non-directory; audit logs require a private directory",
-                    path.display()
-                ),
-            ));
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            let mode = metadata.permissions().mode() & 0o777;
-            if mode != 0o700 {
-                let mut permissions = metadata.permissions();
-                permissions.set_mode(0o700);
-                fs::set_permissions(path, permissions)?;
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} is a symlink or non-directory; audit logs require a private directory",
+                        path.display()
+                    ),
+                ));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                let mode = metadata.permissions().mode() & 0o777;
+                if mode != 0o700 {
+                    let mut permissions = metadata.permissions();
+                    permissions.set_mode(0o700);
+                    fs::set_permissions(path, permissions)?;
+                }
             }
         }
-        return Ok(());
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = fs::DirBuilder::new();
+            builder.recursive(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder.create(path)?;
+        }
+        Err(error) => return Err(error),
     }
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
+
+    #[cfg(windows)]
     {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
+        harden_windows_private_directory(path).map_err(|error| {
+            std::io::Error::other(format!(
+                "cannot install the protected owner-only DACL for audit directory {}: {error}",
+                path.display()
+            ))
+        })?;
     }
-    builder.create(path)
+    Ok(())
 }
 
 fn build_auditor(
@@ -1826,11 +1845,16 @@ fn build_shipping_sink(
         if let Some(parent) = worm_path.parent()
             && !parent.as_os_str().is_empty()
         {
-            fs::create_dir_all(parent).map_err(|e| {
+            #[cfg(windows)]
+            let prepare_parent = create_private_audit_dir(parent);
+            #[cfg(not(windows))]
+            let prepare_parent = fs::create_dir_all(parent);
+
+            prepare_parent.map_err(|e| {
                 (
                     "ORACLEMCP_AUDIT_SHIPPING_INVALID",
                     format!(
-                        "failed to create WORM mirror directory {}: {e}",
+                        "failed to prepare WORM mirror directory {}: {e}",
                         parent.display()
                     ),
                 )
