@@ -1,3 +1,5 @@
+[![MCP Toplist](https://mcptoplist.com/badge/io.github.MuhDur%2Foraclemcp.svg)](https://mcptoplist.com/server/io.github.MuhDur%2Foraclemcp)
+
 <p align="center">
   <img src=".github/assets/hero.svg" alt="oraclemcp: governed, least-privilege Oracle Database MCP server in pure Rust" width="100%">
 </p>
