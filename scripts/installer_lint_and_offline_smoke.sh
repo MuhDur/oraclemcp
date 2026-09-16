@@ -1038,6 +1038,22 @@ contains "$service_output" "$PREFIX/bin/oraclemcp service install --yes --name o
 contains "$service_output" "readyz_gate: curl --fail --silent --show-error --noproxy '*' http://127.0.0.1:7070/readyz"
 log_pass "service dry-run consent plan"
 
+service_name_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --dry-run \
+      --version "$SMOKE_VERSION" \
+      --target x86_64-unknown-linux-musl \
+      --prefix "$PREFIX" \
+      --service \
+      --yes \
+      --service-name oraclemcp.service
+)"
+
+contains "$service_name_output" "unit: $CONFIG_HOME/systemd/user/oraclemcp.service"
+contains "$service_name_output" "$PREFIX/bin/oraclemcp service install --yes --name oraclemcp.service"
+log_pass "service-name accepts the normal .service form"
+
 client_service_output="$(
   env HOME="$HOME_DIR" XDG_CONFIG_HOME="$CONFIG_HOME" TMPDIR="$TMP_DIR" \
     bash install.sh \
@@ -1178,6 +1194,29 @@ set -e
 [ "$invalid_repo_status" -ne 0 ] || fail "non-canonical repository slug unexpectedly succeeded"
 contains "$invalid_repo_output" "unsupported repository"
 log_pass "offline version and repository identity fail closed"
+
+TRAVERSAL_PREFIX="$SMOKE_ROOT/service-name-traversal-prefix-$$"
+TRAVERSAL_CONFIG="$SMOKE_ROOT/service-name-traversal-config-$$"
+TRAVERSAL_SENTINEL="$TRAVERSAL_CONFIG/systemd/escaped.service"
+mkdir -p "$TRAVERSAL_CONFIG/systemd/user"
+printf 'must survive rejected traversal\n' >"$TRAVERSAL_SENTINEL"
+set +e
+traversal_output="$(
+  env HOME="$HOME_DIR" XDG_CONFIG_HOME="$TRAVERSAL_CONFIG" TMPDIR="$TMP_DIR" \
+    bash install.sh \
+      --uninstall \
+      --service \
+      --yes \
+      --service-name ../escaped \
+      --prefix "$TRAVERSAL_PREFIX" 2>&1
+)"
+traversal_status=$?
+set -e
+[ "$traversal_status" -ne 0 ] || fail "traversing service name unexpectedly reached direct uninstall"
+contains "$traversal_output" "invalid --service-name '../escaped'"
+[ -f "$TRAVERSAL_SENTINEL" ] \
+  || fail "traversing service name escaped the Linux user-unit directory before rejection"
+log_pass "service-name traversal is rejected before direct uninstall mutation"
 
 : >"$OFFLINE_ARCHIVE"
 set +e
