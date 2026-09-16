@@ -1,4 +1,4 @@
-use super::operator::{OperatorEventTarget, config_error_value};
+use super::operator::{OPERATOR_IDEMPOTENCY_TTL, OperatorEventTarget, config_error_value};
 
 #[test]
 fn config_preview_errors_keep_their_distinct_operator_codes() {

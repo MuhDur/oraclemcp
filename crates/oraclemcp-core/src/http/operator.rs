@@ -187,7 +187,7 @@ pub(super) enum OperatorEventReplayError {
     },
 }
 
-const OPERATOR_IDEMPOTENCY_TTL: Duration = Duration::from_secs(15 * 60);
+pub(super) const OPERATOR_IDEMPOTENCY_TTL: Duration = Duration::from_secs(15 * 60);
 pub(super) const OPERATOR_IDEMPOTENCY_MAX_ENTRIES: usize = 1024;
 
 /// In-memory idempotency ledger for `/operator/v1` gated actions.
@@ -387,13 +387,20 @@ pub(super) enum OperatorIdempotencyBegin {
     Conflict(HttpResponse),
 }
 
-/// Drop TTL-expired idempotency entries. Safe to run before a key lookup: an
-/// expired entry must read as absent so the action can proceed afresh.
+/// Drop TTL-expired *completed* idempotency entries.
+///
+/// An in-progress entry remains authoritative until its lease completes or is
+/// dropped. Expiring that marker while an action is still running would turn a
+/// same-key retry into a fresh request and allow the action to execute twice.
+/// Completed entries, on the other hand, may expire so a later request can
+/// proceed afresh after the bounded replay window.
 fn prune_expired_operator_idempotency_entries(
     entries: &mut HashMap<String, OperatorIdempotencyEntry>,
 ) {
     let now = Instant::now();
-    entries.retain(|_, entry| now.duration_since(entry.created_at) <= OPERATOR_IDEMPOTENCY_TTL);
+    entries.retain(|_, entry| {
+        entry.response.is_none() || now.duration_since(entry.created_at) <= OPERATOR_IDEMPOTENCY_TTL
+    });
 }
 
 /// Enforce the capacity bound by evicting the oldest COMPLETED entries. An
