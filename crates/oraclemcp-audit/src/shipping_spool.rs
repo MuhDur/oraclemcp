@@ -15,17 +15,20 @@ use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use cap_fs_ext::DirExt as _;
 #[cfg(unix)]
 use cap_fs_ext::MetadataExt as CapMetadataExt;
+use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
-use cap_std::fs::Dir as CapDir;
 #[cfg(unix)]
 use cap_std::fs::MetadataExt as CapOsMetadataExt;
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt as _;
+use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
-use crate::sink::{create_new_private_file, open_private_lock_file, open_private_read_file};
+#[cfg(test)]
+use crate::sink::create_new_private_file;
 use crate::{AuditRecord, AuthenticatedAuditTail, ShippingError, ShippingForwarder, SigningKey};
 
 #[cfg(unix)]
@@ -249,11 +252,10 @@ impl DurableShippingForwarder {
     ) -> Result<Self, ShippingError> {
         validate_config(&config)?;
         config.directory = lexically_normalize_spool_directory(&config.directory)?;
-        let secured_spool_directory = secure_spool_directory(&config.directory)?;
-        let lock = SpoolLock::acquire(&config.directory)?;
-        drop(secured_spool_directory);
-        bind_destination(&config.directory, &config.destination_id)?;
-        let recovered = recover_for_open(&config, destination.as_ref())?;
+        let spool_directory = Arc::new(secure_spool_directory(&config.directory)?);
+        let lock = SpoolLock::acquire(&spool_directory, &config.directory)?;
+        bind_destination_at(&spool_directory, &config, &config.destination_id)?;
+        let recovered = recover_for_open_at(&spool_directory, &config, destination.as_ref())?;
         let overflowed = recovered.overflow.as_ref().map_or(0, |state| state.count);
         let pending_len = u64::try_from(recovered.queue.len()).unwrap_or(u64::MAX);
         tracing::info!(
@@ -266,6 +268,7 @@ impl DurableShippingForwarder {
         );
         let shared = Arc::new(SpoolShared {
             config,
+            directory: spool_directory,
             queue: Mutex::new(recovered.queue),
             checkpoint: Mutex::new(recovered.checkpoint),
             overflow_state: Mutex::new(recovered.overflow),
@@ -409,7 +412,11 @@ impl DurableShippingForwarder {
             ));
         }
         if let Some(queued) = queue.get(&record.seq) {
-            let existing = read_private_bytes(&queued.path)?;
+            let existing = read_private_bytes_at(
+                &self.shared.directory,
+                &self.shared.config.directory,
+                &queued.name,
+            )?;
             if existing == bytes {
                 return Ok(());
             }
@@ -452,15 +459,23 @@ impl DurableShippingForwarder {
                 ),
             ));
         }
-        let final_path = record_path(&self.shared.config.directory, record.seq);
-        let temp_path = random_temp_record_path(&self.shared.config.directory, record.seq)?;
-        write_new_file(&temp_path, &bytes)?;
-        std::fs::rename(&temp_path, &final_path).map_err(transport)?;
-        let directory_sync = sync_directory(&self.shared.config.directory);
+        let final_name = record_name(record.seq);
+        let temporary_name = random_temp_record_name(record.seq)?;
+        write_new_file_at(
+            &self.shared.directory,
+            &self.shared.config.directory,
+            &temporary_name,
+            &bytes,
+        )?;
+        self.shared
+            .directory
+            .rename(&temporary_name, &self.shared.directory, &final_name)
+            .map_err(transport)?;
+        let directory_sync = sync_directory_at(&self.shared.directory);
         queue.insert(
             record.seq,
             QueuedRecord {
-                path: final_path,
+                name: final_name,
                 byte_len: bytes.len(),
                 entry_hash: record.entry_hash.clone(),
             },
@@ -513,6 +528,10 @@ impl Drop for DurableShippingForwarder {
 
 struct SpoolShared {
     config: DurableSpoolConfig,
+    /// The verified, no-follow directory capability retained for the entire
+    /// worker lifetime. All runtime spool I/O is relative to this descriptor;
+    /// `config.directory` is diagnostic-only after `open` returns.
+    directory: Arc<CapDir>,
     queue: Mutex<BTreeMap<u64, QueuedRecord>>,
     checkpoint: Mutex<DeliveryCheckpoint>,
     overflow_state: Mutex<Option<OverflowIndicator>>,
@@ -559,14 +578,18 @@ impl Drop for WorkerCompletionGuard {
 struct SpoolLock(File);
 
 impl SpoolLock {
-    fn acquire(directory: &Path) -> Result<Self, ShippingError> {
-        let path = directory.join("spool.lock");
-        let file = open_private_lock_file(&path).map_err(transport)?;
+    fn acquire(directory: &CapDir, display_directory: &Path) -> Result<Self, ShippingError> {
+        let file = open_spool_file(
+            directory,
+            display_directory,
+            "spool.lock",
+            SpoolFileOpen::Lock,
+        )?;
         match file.try_lock() {
             Ok(()) => Ok(Self(file)),
             Err(TryLockError::WouldBlock) => Err(ShippingError::Transport(format!(
                 "audit shipping spool {} is already owned by another worker",
-                directory.display()
+                display_directory.display()
             ))),
             Err(TryLockError::Error(error)) => Err(transport(error)),
         }
@@ -630,9 +653,9 @@ struct DeliveryCheckpoint {
 
 #[derive(Default)]
 struct RecoveryCandidatePaths {
-    final_path: Option<PathBuf>,
-    temporary_path: Option<PathBuf>,
-    acknowledged_path: Option<PathBuf>,
+    final_name: Option<String>,
+    temporary_name: Option<String>,
+    acknowledged_name: Option<String>,
 }
 
 struct InspectedCandidate {
@@ -648,9 +671,9 @@ struct RecoveryInspection {
 struct PlannedPending {
     record: AuditRecord,
     bytes: Vec<u8>,
-    final_path: PathBuf,
-    source_path: PathBuf,
-    redundant_paths: Vec<PathBuf>,
+    final_name: String,
+    source_name: String,
+    redundant_names: Vec<String>,
 }
 
 struct RecoveryPlan {
@@ -658,7 +681,7 @@ struct RecoveryPlan {
     overflow: Option<OverflowIndicator>,
     persist_initial_checkpoint: bool,
     pending: Vec<PlannedPending>,
-    cleanup: Vec<(PathBuf, Vec<u8>)>,
+    cleanup: Vec<(String, Vec<u8>)>,
 }
 
 #[derive(Debug)]
@@ -672,7 +695,7 @@ struct RecoveredPending {
 
 #[derive(Clone, Debug)]
 struct QueuedRecord {
-    path: PathBuf,
+    name: String,
     byte_len: usize,
     entry_hash: String,
 }
@@ -888,11 +911,15 @@ fn run_spool_directory_hardening_hook() {
 #[cfg(not(test))]
 fn run_spool_directory_hardening_hook() {}
 
-fn bind_destination(directory: &Path, destination_id: &str) -> Result<(), ShippingError> {
-    let path = directory.join("destination.json");
-    match std::fs::symlink_metadata(&path) {
+fn bind_destination_at(
+    directory: &CapDir,
+    config: &DurableSpoolConfig,
+    destination_id: &str,
+) -> Result<(), ShippingError> {
+    const DESTINATION_BINDING: &str = "destination.json";
+    match directory.symlink_metadata(DESTINATION_BINDING) {
         Ok(_) => {
-            let bytes = read_private_bytes(&path)?;
+            let bytes = read_private_bytes_at(directory, &config.directory, DESTINATION_BINDING)?;
             let binding: DestinationBinding = serde_json::from_slice(&bytes).map_err(transport)?;
             if binding.version != 1 || binding.destination_id != destination_id {
                 return Err(ShippingError::Transport(
@@ -909,13 +936,12 @@ fn bind_destination(directory: &Path, destination_id: &str) -> Result<(), Shippi
         destination_id: destination_id.to_owned(),
     };
     let bytes = serde_json::to_vec(&binding).map_err(transport)?;
-    write_new_file(&path, &bytes)?;
-    sync_directory(directory).map_err(transport)
+    write_new_file_at(directory, &config.directory, DESTINATION_BINDING, &bytes)?;
+    sync_directory_at(directory).map_err(transport)
 }
 
-fn checkpoint_path(directory: &Path) -> PathBuf {
-    directory.join("delivery-head.json")
-}
+const DELIVERY_CHECKPOINT: &str = "delivery-head.json";
+const OVERFLOW_INDICATOR: &str = "overflow.json";
 
 fn canonical_hash(value: &str) -> bool {
     value.strip_prefix("sha256:").is_some_and(|hex| {
@@ -1034,13 +1060,13 @@ fn verify_checkpoint(
     Ok(())
 }
 
-fn load_checkpoint(
+fn load_checkpoint_at(
+    directory: &CapDir,
     config: &DurableSpoolConfig,
 ) -> Result<Option<DeliveryCheckpoint>, ShippingError> {
-    let path = checkpoint_path(&config.directory);
-    match std::fs::symlink_metadata(&path) {
+    match directory.symlink_metadata(DELIVERY_CHECKPOINT) {
         Ok(_) => {
-            let bytes = read_private_bytes(&path)?;
+            let bytes = read_private_bytes_at(directory, &config.directory, DELIVERY_CHECKPOINT)?;
             let checkpoint: DeliveryCheckpoint =
                 serde_json::from_slice(&bytes).map_err(|error| {
                     spool_integrity(
@@ -1056,32 +1082,39 @@ fn load_checkpoint(
     }
 }
 
-fn persist_checkpoint(
+fn persist_checkpoint_at(
+    directory: &CapDir,
     config: &DurableSpoolConfig,
     checkpoint: &DeliveryCheckpoint,
 ) -> Result<(), ShippingError> {
     verify_checkpoint(checkpoint, config)?;
     let bytes = serde_json::to_vec(checkpoint).map_err(transport)?;
-    let temporary = random_temporary_path(&config.directory, "delivery-head")?;
-    write_new_file(&temporary, &bytes)?;
-    std::fs::rename(&temporary, checkpoint_path(&config.directory)).map_err(transport)?;
-    sync_directory(&config.directory).map_err(transport)
+    let temporary_name = random_temporary_name("delivery-head")?;
+    write_new_file_at(directory, &config.directory, &temporary_name, &bytes)?;
+    directory
+        .rename(&temporary_name, directory, DELIVERY_CHECKPOINT)
+        .map_err(transport)?;
+    sync_directory_at(directory).map_err(transport)
 }
 
-fn inspect_recovery(config: &DurableSpoolConfig) -> Result<RecoveryInspection, ShippingError> {
-    inspect_recovery_with_byte_limit(config, MAX_SPOOL_RECOVERY_BYTES)
+fn inspect_recovery_at(
+    directory: &CapDir,
+    config: &DurableSpoolConfig,
+) -> Result<RecoveryInspection, ShippingError> {
+    inspect_recovery_with_byte_limit_at(directory, config, MAX_SPOOL_RECOVERY_BYTES)
 }
 
-fn inspect_recovery_with_byte_limit(
+fn inspect_recovery_with_byte_limit_at(
+    directory: &CapDir,
     config: &DurableSpoolConfig,
     byte_limit: usize,
 ) -> Result<RecoveryInspection, ShippingError> {
     let scan_limit = config.max_records.saturating_add(1);
     let mut recognized = Vec::new();
-    for entry in std::fs::read_dir(&config.directory).map_err(transport)? {
+    for entry in directory.read_dir(".").map_err(transport)? {
         let entry = entry.map_err(transport)?;
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
             continue;
         };
         let parsed = if let Some(seq) = parse_record_name(name, ".acked") {
@@ -1099,7 +1132,7 @@ fn inspect_recovery_with_byte_limit(
                 "audit shipping spool exceeds the bounded recognized-state limit of {scan_limit}; recovery stopped before opening or deleting sequence {seq}"
             )));
         }
-        recognized.push((seq, state, path));
+        recognized.push((seq, state, name.to_owned()));
     }
 
     let distinct_non_acknowledged = recognized
@@ -1118,9 +1151,9 @@ fn inspect_recovery_with_byte_limit(
     for (seq, state, path) in recognized {
         let candidate = paths.entry(seq).or_default();
         let slot = match state {
-            RecognizedSpoolState::Acknowledged => &mut candidate.acknowledged_path,
-            RecognizedSpoolState::Temporary => &mut candidate.temporary_path,
-            RecognizedSpoolState::Final => &mut candidate.final_path,
+            RecognizedSpoolState::Acknowledged => &mut candidate.acknowledged_name,
+            RecognizedSpoolState::Temporary => &mut candidate.temporary_name,
+            RecognizedSpoolState::Final => &mut candidate.final_name,
         };
         if slot.replace(path).is_some() {
             return Err(spool_integrity(
@@ -1135,14 +1168,14 @@ fn inspect_recovery_with_byte_limit(
     for (seq, candidate_paths) in paths {
         let mut canonical: Option<(Vec<u8>, AuditRecord)> = None;
         for path in [
-            candidate_paths.final_path.as_ref(),
-            candidate_paths.temporary_path.as_ref(),
-            candidate_paths.acknowledged_path.as_ref(),
+            candidate_paths.final_name.as_ref(),
+            candidate_paths.temporary_name.as_ref(),
+            candidate_paths.acknowledged_name.as_ref(),
         ]
         .into_iter()
         .flatten()
         {
-            let bytes = read_private_bytes(path)?;
+            let bytes = read_private_bytes_at(directory, &config.directory, path)?;
             aggregate_bytes = aggregate_bytes
                 .checked_add(bytes.len())
                 .ok_or_else(|| spool_integrity(None, "recovery byte accounting overflowed"))?;
@@ -1216,9 +1249,9 @@ fn plan_recovery(
 
     for (seq, candidate) in inspection.candidates {
         let mut paths = [
-            candidate.paths.final_path,
-            candidate.paths.temporary_path,
-            candidate.paths.acknowledged_path,
+            candidate.paths.final_name,
+            candidate.paths.temporary_name,
+            candidate.paths.acknowledged_name,
         ]
         .into_iter()
         .flatten()
@@ -1230,21 +1263,21 @@ fn plan_recovery(
                     "spool residue conflicts with the authenticated delivery checkpoint",
                 ));
             }
-            cleanup.extend(paths.drain(..).map(|path| (path, candidate.bytes.clone())));
+            cleanup.extend(paths.drain(..).map(|name| (name, candidate.bytes.clone())));
             continue;
         }
-        let final_path = record_path(&config.directory, seq);
+        let final_name = record_name(seq);
         let source_index = paths
             .iter()
-            .position(|path| path == &final_path)
+            .position(|name| name == &final_name)
             .unwrap_or(0);
-        let source_path = paths.remove(source_index);
+        let source_name = paths.remove(source_index);
         pending.push(PlannedPending {
             record: candidate.record,
             bytes: candidate.bytes,
-            final_path,
-            source_path,
-            redundant_paths: paths,
+            final_name,
+            source_name,
+            redundant_names: paths,
         });
     }
     if pending.len() > config.max_records {
@@ -1309,26 +1342,32 @@ fn plan_recovery(
     })
 }
 
-fn ensure_unchanged(path: &Path, expected: &[u8]) -> Result<(), ShippingError> {
-    if read_private_bytes(path)? != expected {
+fn ensure_unchanged_at(
+    directory: &CapDir,
+    display_directory: &Path,
+    name: &str,
+    expected: &[u8],
+) -> Result<(), ShippingError> {
+    if read_private_bytes_at(directory, display_directory, name)? != expected {
         return Err(spool_integrity(
             None,
-            format!("spool path {} changed during recovery", path.display()),
+            format!("spool entry {name} changed during recovery"),
         ));
     }
     Ok(())
 }
 
-fn commit_recovery(
+fn commit_recovery_at(
+    directory: &CapDir,
     config: &DurableSpoolConfig,
     plan: RecoveryPlan,
 ) -> Result<RecoveredPending, ShippingError> {
     if plan.persist_initial_checkpoint {
-        persist_checkpoint(config, &plan.checkpoint)?;
+        persist_checkpoint_at(directory, config, &plan.checkpoint)?;
     }
-    for (path, bytes) in &plan.cleanup {
-        ensure_unchanged(path, bytes)?;
-        std::fs::remove_file(path).map_err(transport)?;
+    for (name, bytes) in &plan.cleanup {
+        ensure_unchanged_at(directory, &config.directory, name, bytes)?;
+        directory.remove_file(name).map_err(transport)?;
     }
     let mut queue = BTreeMap::new();
     let mut pending_bytes = 0_usize;
@@ -1337,12 +1376,17 @@ fn commit_recovery(
         entry_hash: plan.checkpoint.entry_hash.clone(),
     };
     for entry in plan.pending {
-        ensure_unchanged(&entry.source_path, &entry.bytes)?;
-        for redundant in &entry.redundant_paths {
-            ensure_unchanged(redundant, &entry.bytes)?;
+        ensure_unchanged_at(
+            directory,
+            &config.directory,
+            &entry.source_name,
+            &entry.bytes,
+        )?;
+        for redundant in &entry.redundant_names {
+            ensure_unchanged_at(directory, &config.directory, redundant, &entry.bytes)?;
         }
-        if entry.source_path != entry.final_path {
-            match std::fs::symlink_metadata(&entry.final_path) {
+        if entry.source_name != entry.final_name {
+            match directory.symlink_metadata(&entry.final_name) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Ok(_) => {
                     return Err(spool_integrity(
@@ -1352,10 +1396,12 @@ fn commit_recovery(
                 }
                 Err(error) => return Err(transport(error)),
             }
-            std::fs::rename(&entry.source_path, &entry.final_path).map_err(transport)?;
+            directory
+                .rename(&entry.source_name, directory, &entry.final_name)
+                .map_err(transport)?;
         }
-        for redundant in entry.redundant_paths {
-            std::fs::remove_file(redundant).map_err(transport)?;
+        for redundant in entry.redundant_names {
+            directory.remove_file(redundant).map_err(transport)?;
         }
         pending_bytes = pending_bytes
             .checked_add(entry.bytes.len())
@@ -1364,13 +1410,13 @@ fn commit_recovery(
         queue.insert(
             entry.record.seq,
             QueuedRecord {
-                path: entry.final_path,
+                name: entry.final_name,
                 byte_len: entry.bytes.len(),
                 entry_hash: entry.record.entry_hash,
             },
         );
     }
-    sync_directory(&config.directory).map_err(transport)?;
+    sync_directory_at(directory).map_err(transport)?;
     Ok(RecoveredPending {
         queue,
         checkpoint: plan.checkpoint,
@@ -1380,13 +1426,14 @@ fn commit_recovery(
     })
 }
 
-fn recover_for_open(
+fn recover_for_open_at(
+    directory: &CapDir,
     config: &DurableSpoolConfig,
     destination: &dyn ShippingForwarder,
 ) -> Result<RecoveredPending, ShippingError> {
-    let checkpoint = load_checkpoint(config)?;
-    let overflow = load_overflow(config)?;
-    let inspection = inspect_recovery(config)?;
+    let checkpoint = load_checkpoint_at(directory, config)?;
+    let overflow = load_overflow_at(directory, config)?;
+    let inspection = inspect_recovery_at(directory, config)?;
     let plan = plan_recovery(
         config,
         inspection,
@@ -1400,7 +1447,7 @@ fn recover_for_open(
         .map(|entry| entry.record.clone())
         .collect::<Vec<_>>();
     destination.validate_recovered_spool(&records)?;
-    commit_recovery(config, plan)
+    commit_recovery_at(directory, config, plan)
 }
 
 #[cfg(test)]
@@ -1412,11 +1459,12 @@ fn recover_pending(
     let config = DurableSpoolConfig::new(directory, "test-recovery")
         .with_max_records(max_records)
         .with_verification_keys(verification_keys.iter().cloned());
-    let checkpoint = load_checkpoint(&config)?;
-    let overflow = load_overflow(&config)?;
-    let inspection = inspect_recovery(&config)?;
+    let held = secure_spool_directory(&config.directory)?;
+    let checkpoint = load_checkpoint_at(&held, &config)?;
+    let overflow = load_overflow_at(&held, &config)?;
+    let inspection = inspect_recovery_at(&held, &config)?;
     let plan = plan_recovery(&config, inspection, checkpoint, overflow, None)?;
-    commit_recovery(&config, plan)
+    commit_recovery_at(&held, &config, plan)
 }
 
 fn run_worker(shared: Arc<SpoolShared>, destination: Arc<dyn ShippingForwarder>) {
@@ -1439,7 +1487,12 @@ fn run_worker(shared: Arc<SpoolShared>, destination: Arc<dyn ShippingForwarder>)
         let Some((seq, queued)) = next else {
             continue;
         };
-        let record = match read_spooled_record(&queued.path).and_then(|record| {
+        let record = match read_spooled_record_at(
+            &shared.directory,
+            &shared.config.directory,
+            &queued.name,
+        )
+        .and_then(|record| {
             verify_record_signature(&record, &shared.config.verification_keys)?;
             validate_delivery_candidate(&shared, seq, &queued.entry_hash, &record)?;
             Ok(record)
@@ -1455,7 +1508,7 @@ fn run_worker(shared: Arc<SpoolShared>, destination: Arc<dyn ShippingForwarder>)
         let attempt = deliver_with_deadline(&shared, Arc::clone(&destination), record.clone());
         match attempt {
             DeliveryAttempt::Completed(Ok(())) => {
-                if acknowledge(&shared, &record, &queued.path).is_ok() {
+                if acknowledge(&shared, &record, &queued.name).is_ok() {
                     retry = shared.config.retry_initial;
                 } else {
                     shared.failures.fetch_add(1, Ordering::Relaxed);
@@ -1571,7 +1624,7 @@ fn wait_retry(shared: &SpoolShared, delay: Duration) {
 fn acknowledge(
     shared: &SpoolShared,
     record: &AuditRecord,
-    path: &Path,
+    name: &str,
 ) -> Result<(), ShippingError> {
     let seq = record.seq;
     let mut checkpoint = shared.checkpoint.lock();
@@ -1591,14 +1644,17 @@ fn acknowledge(
         record.key_id.clone(),
         checkpoint.overflow_commitment.clone(),
     );
-    persist_checkpoint(&shared.config, &next_checkpoint)?;
+    persist_checkpoint_at(&shared.directory, &shared.config, &next_checkpoint)?;
     *checkpoint = next_checkpoint;
     drop(checkpoint);
 
-    let acknowledged = acknowledged_path(&shared.config.directory, seq);
-    let renamed = match std::fs::symlink_metadata(&acknowledged) {
+    let acknowledged = acknowledged_name(seq);
+    let renamed = match shared.directory.symlink_metadata(&acknowledged) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            match std::fs::rename(path, &acknowledged) {
+            match shared
+                .directory
+                .rename(name, &shared.directory, &acknowledged)
+            {
                 Ok(()) => true,
                 Err(error) => {
                     tracing::debug!(seq, %error, "delivery checkpoint advanced; spool residue retained for restart cleanup");
@@ -1627,9 +1683,9 @@ fn acknowledge(
             );
         }
     }
-    if renamed && let Err(error) = std::fs::remove_file(&acknowledged) {
+    if renamed && let Err(error) = shared.directory.remove_file(&acknowledged) {
         tracing::debug!(seq, %error, "acknowledged audit spool residue retained for restart cleanup");
-    } else if let Err(error) = sync_directory(&shared.config.directory) {
+    } else if let Err(error) = sync_directory_at(&shared.directory) {
         tracing::debug!(seq, %error, "could not fsync audit spool directory after ack cleanup");
     }
     Ok(())
@@ -1812,16 +1868,19 @@ fn next_overflow(
     Ok(Some(state))
 }
 
-fn persist_overflow(
+fn persist_overflow_at(
+    directory: &CapDir,
     config: &DurableSpoolConfig,
     state: &OverflowIndicator,
 ) -> Result<(), ShippingError> {
     verify_overflow(state, config)?;
     let bytes = serde_json::to_vec(state).map_err(transport)?;
-    let temporary = random_temporary_path(&config.directory, "overflow")?;
-    write_new_file(&temporary, &bytes)?;
-    std::fs::rename(&temporary, config.directory.join("overflow.json")).map_err(transport)?;
-    sync_directory(&config.directory).map_err(transport)
+    let temporary_name = random_temporary_name("overflow")?;
+    write_new_file_at(directory, &config.directory, &temporary_name, &bytes)?;
+    directory
+        .rename(&temporary_name, directory, OVERFLOW_INDICATOR)
+        .map_err(transport)?;
+    sync_directory_at(directory).map_err(transport)
 }
 
 fn record_overflow(shared: &SpoolShared, record: &AuditRecord) -> Result<bool, ShippingError> {
@@ -1833,7 +1892,7 @@ fn record_overflow(shared: &SpoolShared, record: &AuditRecord) -> Result<bool, S
     }
     let mut checkpoint = shared.checkpoint.lock();
     let mut state = shared.overflow_state.lock();
-    let disk_state = load_overflow(&shared.config)?;
+    let disk_state = load_overflow_at(&shared.directory, &shared.config)?;
     verify_overflow_checkpoint_binding(disk_state.as_ref(), &checkpoint, &shared.config)?;
     if disk_state != *state {
         return Err(spool_integrity(
@@ -1854,8 +1913,8 @@ fn record_overflow(shared: &SpoolShared, record: &AuditRecord) -> Result<bool, S
         checkpoint.record_key_id.clone(),
         Some(commitment),
     );
-    if let Err(error) = persist_overflow(&shared.config, &next)
-        .and_then(|()| persist_checkpoint(&shared.config, &next_checkpoint))
+    if let Err(error) = persist_overflow_at(&shared.directory, &shared.config, &next)
+        .and_then(|()| persist_checkpoint_at(&shared.directory, &shared.config, &next_checkpoint))
     {
         shared.overflow_poisoned.store(true, Ordering::Release);
         return Err(error);
@@ -1865,17 +1924,23 @@ fn record_overflow(shared: &SpoolShared, record: &AuditRecord) -> Result<bool, S
     Ok(true)
 }
 
-fn load_overflow(config: &DurableSpoolConfig) -> Result<Option<OverflowIndicator>, ShippingError> {
-    let path = config.directory.join("overflow.json");
-    match std::fs::symlink_metadata(&path) {
+fn load_overflow_at(
+    directory: &CapDir,
+    config: &DurableSpoolConfig,
+) -> Result<Option<OverflowIndicator>, ShippingError> {
+    match directory.symlink_metadata(OVERFLOW_INDICATOR) {
         Ok(_) => {
-            let state: OverflowIndicator = serde_json::from_slice(&read_private_bytes(&path)?)
-                .map_err(|error| {
-                    spool_integrity(
-                        None,
-                        format!("overflow evidence JSON is malformed: {error}"),
-                    )
-                })?;
+            let state: OverflowIndicator = serde_json::from_slice(&read_private_bytes_at(
+                directory,
+                &config.directory,
+                OVERFLOW_INDICATOR,
+            )?)
+            .map_err(|error| {
+                spool_integrity(
+                    None,
+                    format!("overflow evidence JSON is malformed: {error}"),
+                )
+            })?;
             verify_overflow(&state, config)?;
             Ok(Some(state))
         }
@@ -1884,21 +1949,146 @@ fn load_overflow(config: &DurableSpoolConfig) -> Result<Option<OverflowIndicator
     }
 }
 
-fn read_spooled_record(path: &Path) -> Result<AuditRecord, ShippingError> {
-    let bytes = read_private_bytes(path)?;
+fn read_spooled_record_at(
+    directory: &CapDir,
+    display_directory: &Path,
+    name: &str,
+) -> Result<AuditRecord, ShippingError> {
+    let bytes = read_private_bytes_at(directory, display_directory, name)?;
     let record: AuditRecord = serde_json::from_slice(&bytes)
         .map_err(|error| spool_integrity(None, format!("record JSON is malformed: {error}")))?;
     Ok(record)
 }
 
-fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), ShippingError> {
-    let mut file = create_new_private_file(path).map_err(transport)?;
+enum SpoolFileOpen {
+    Read,
+    Lock,
+    CreateNew,
+}
+
+/// Open a spool child through the held directory descriptor. `name` is always
+/// one generated spool filename or one entry returned by `read_dir`; rejecting
+/// any other shape keeps a future caller from turning this capability API back
+/// into a path traversal API.
+fn open_spool_file(
+    directory: &CapDir,
+    display_directory: &Path,
+    name: &str,
+    mode: SpoolFileOpen,
+) -> Result<File, ShippingError> {
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(ShippingError::Transport(format!(
+            "audit shipping spool entry name {name:?} is not one normal path component"
+        )));
+    }
+    match directory.symlink_metadata(name) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ShippingError::Transport(format!(
+                "audit shipping spool entry {} is a symlink; refusing to follow it",
+                display_directory.join(name).display()
+            )));
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            return Err(ShippingError::Transport(format!(
+                "audit shipping spool entry {} is a non-regular filesystem object",
+                display_directory.join(name).display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(transport(error)),
+    }
+
+    let mut options = CapOpenOptions::new();
+    match mode {
+        SpoolFileOpen::Read => {
+            // Preserve recovery of a legacy owner-readable spool file: Unix
+            // can harden its mode through a read descriptor. Windows needs a
+            // write-capable handle only for the owner-only ACL hardening.
+            options.read(true);
+            #[cfg(windows)]
+            options.write(true);
+        }
+        SpoolFileOpen::Lock => {
+            options.read(true).write(true).create(true).truncate(false);
+        }
+        SpoolFileOpen::CreateNew => {
+            options.write(true).create_new(true);
+        }
+    }
+    #[cfg(unix)]
+    options.mode(0o600);
+    options.follow(FollowSymlinks::No);
+    let file = directory.open_with(name, &options).map_err(|error| {
+        ShippingError::Transport(format!(
+            "cannot open private audit shipping spool entry {}: {error}",
+            display_directory.join(name).display()
+        ))
+    })?;
+    let file = file.into_std();
+    harden_opened_spool_file(&file, &display_directory.join(name))?;
+    Ok(file)
+}
+
+/// Authenticate and harden the already-open descriptor. Deliberately do not
+/// inspect `display_path`: after `DurableShippingForwarder::open` it is merely
+/// a diagnostic label and may have been replaced by another local process.
+fn harden_opened_spool_file(file: &File, display_path: &Path) -> Result<(), ShippingError> {
+    let metadata = file.metadata().map_err(transport)?;
+    if !metadata.file_type().is_file() {
+        return Err(ShippingError::Transport(format!(
+            "audit shipping spool entry {} is not a regular file",
+            display_path.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let link_count = std::os::unix::fs::MetadataExt::nlink(&metadata);
+        if link_count != 1 {
+            return Err(ShippingError::Transport(format!(
+                "audit shipping spool entry {} has {} hard links",
+                display_path.display(),
+                link_count
+            )));
+        }
+        let expected_uid = rustix::process::geteuid().as_raw();
+        if metadata.uid() != expected_uid {
+            return Err(ShippingError::Transport(format!(
+                "audit shipping spool entry {} is owned by uid {}, expected effective uid {expected_uid}",
+                display_path.display(),
+                metadata.uid()
+            )));
+        }
+        if metadata.mode() & 0o777 != 0o600 {
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                .map_err(transport)?;
+        }
+    }
+    #[cfg(windows)]
+    crate::sink::harden_windows_private_file_handle(file, display_path).map_err(transport)?;
+    Ok(())
+}
+
+fn write_new_file_at(
+    directory: &CapDir,
+    display_directory: &Path,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), ShippingError> {
+    let mut file = open_spool_file(directory, display_directory, name, SpoolFileOpen::CreateNew)?;
     file.write_all(bytes).map_err(transport)?;
     file.sync_all().map_err(transport)
 }
 
-fn read_private_bytes(path: &Path) -> Result<Vec<u8>, ShippingError> {
-    let file = open_private_read_file(path).map_err(transport)?;
+fn read_private_bytes_at(
+    directory: &CapDir,
+    display_directory: &Path,
+    name: &str,
+) -> Result<Vec<u8>, ShippingError> {
+    let file = open_spool_file(directory, display_directory, name, SpoolFileOpen::Read)?;
     let mut bytes = Vec::new();
     let limit = u64::try_from(crate::MAX_AUDIT_LINE_LEN)
         .unwrap_or(u64::MAX)
@@ -1918,21 +2108,16 @@ fn read_private_bytes(path: &Path) -> Result<Vec<u8>, ShippingError> {
     Ok(bytes)
 }
 
-fn record_path(directory: &Path, seq: u64) -> PathBuf {
-    directory.join(format!("record-{seq:020}.json"))
+fn record_name(seq: u64) -> String {
+    format!("record-{seq:020}.json")
 }
 
-fn random_temp_record_path(directory: &Path, seq: u64) -> Result<PathBuf, ShippingError> {
-    random_temporary_path(directory, &format!("record-{seq:020}"))
+fn random_temp_record_name(seq: u64) -> Result<String, ShippingError> {
+    random_temporary_name(&format!("record-{seq:020}"))
 }
 
-#[cfg(test)]
-fn temp_record_path(directory: &Path, seq: u64) -> PathBuf {
-    directory.join(format!("record-{seq:020}.tmp"))
-}
-
-fn acknowledged_path(directory: &Path, seq: u64) -> PathBuf {
-    directory.join(format!("record-{seq:020}.acked"))
+fn acknowledged_name(seq: u64) -> String {
+    format!("record-{seq:020}.acked")
 }
 
 fn parse_record_name(name: &str, suffix: &str) -> Option<u64> {
@@ -1956,7 +2141,7 @@ fn parse_temp_record_name(name: &str) -> Option<u64> {
     seq.parse().ok()
 }
 
-fn random_temporary_path(directory: &Path, prefix: &str) -> Result<PathBuf, ShippingError> {
+fn random_temporary_name(prefix: &str) -> Result<String, ShippingError> {
     let mut nonce = [0_u8; 16];
     getrandom::getrandom(&mut nonce).map_err(transport)?;
     let mut encoded = String::with_capacity(nonce.len() * 2);
@@ -1964,7 +2149,7 @@ fn random_temporary_path(directory: &Path, prefix: &str) -> Result<PathBuf, Ship
         use std::fmt::Write as _;
         write!(encoded, "{byte:02x}").expect("writing to a String cannot fail");
     }
-    Ok(directory.join(format!("{prefix}.{encoded}.tmp")))
+    Ok(format!("{prefix}.{encoded}.tmp"))
 }
 
 fn verify_record_signature(
@@ -2009,13 +2194,92 @@ fn spool_integrity(seq: Option<u64>, reason: impl Into<String>) -> ShippingError
 }
 
 #[cfg(unix)]
-fn sync_directory(directory: &Path) -> std::io::Result<()> {
-    File::open(directory)?.sync_all()
+fn sync_directory_at(directory: &CapDir) -> std::io::Result<()> {
+    // `CapDir` may retain an O_PATH-style descriptor, which deliberately
+    // cannot be fsynced. Open `.` *through that capability* to obtain a
+    // syncable descriptor for the same held directory without returning to a
+    // configured pathname.
+    directory.open(".")?.into_std().sync_all()
 }
 
 #[cfg(not(unix))]
-fn sync_directory(_directory: &Path) -> std::io::Result<()> {
+fn sync_directory_at(_directory: &CapDir) -> std::io::Result<()> {
     Ok(())
+}
+
+// The following raw-path helpers are test-fixture conveniences only. Runtime
+// code above retains and uses the verified `CapDir` for its entire lifecycle.
+#[cfg(test)]
+fn write_new_file(path: &Path, bytes: &[u8]) -> Result<(), ShippingError> {
+    let mut file = create_new_private_file(path).map_err(transport)?;
+    file.write_all(bytes).map_err(transport)?;
+    file.sync_all().map_err(transport)
+}
+
+#[cfg(test)]
+fn checkpoint_path(directory: &Path) -> PathBuf {
+    directory.join(DELIVERY_CHECKPOINT)
+}
+
+#[cfg(test)]
+fn record_path(directory: &Path, seq: u64) -> PathBuf {
+    directory.join(record_name(seq))
+}
+
+#[cfg(test)]
+fn temp_record_path(directory: &Path, seq: u64) -> PathBuf {
+    directory.join(format!("record-{seq:020}.tmp"))
+}
+
+#[cfg(test)]
+fn acknowledged_path(directory: &Path, seq: u64) -> PathBuf {
+    directory.join(acknowledged_name(seq))
+}
+
+#[cfg(test)]
+fn sync_directory(directory: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        File::open(directory)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = directory;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+fn persist_checkpoint(
+    config: &DurableSpoolConfig,
+    checkpoint: &DeliveryCheckpoint,
+) -> Result<(), ShippingError> {
+    let held = secure_spool_directory(&config.directory)?;
+    persist_checkpoint_at(&held, config, checkpoint)
+}
+
+#[cfg(test)]
+fn persist_overflow(
+    config: &DurableSpoolConfig,
+    state: &OverflowIndicator,
+) -> Result<(), ShippingError> {
+    let held = secure_spool_directory(&config.directory)?;
+    persist_overflow_at(&held, config, state)
+}
+
+#[cfg(test)]
+fn load_overflow(config: &DurableSpoolConfig) -> Result<Option<OverflowIndicator>, ShippingError> {
+    let held = secure_spool_directory(&config.directory)?;
+    load_overflow_at(&held, config)
+}
+
+#[cfg(test)]
+fn recover_for_open(
+    config: &DurableSpoolConfig,
+    destination: &dyn ShippingForwarder,
+) -> Result<RecoveredPending, ShippingError> {
+    let held = secure_spool_directory(&config.directory)?;
+    recover_for_open_at(&held, config, destination)
 }
 
 fn transport(error: impl std::fmt::Display) -> ShippingError {
@@ -2074,7 +2338,11 @@ mod tests {
                 .expect("serialize queued record")
                 .len(),
             entry_hash: record.entry_hash.clone(),
-            path,
+            name: path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("test spool path has a UTF-8 file name")
+                .to_owned(),
         }
     }
 
@@ -2860,8 +3128,11 @@ mod tests {
         let pending = recover_pending(directory.path(), 32, &[key()]).expect("recover temp");
         let final_path = record_path(directory.path(), rec.seq);
         assert_eq!(
-            pending.queue.get(&rec.seq).map(|queued| &queued.path),
-            Some(&final_path)
+            pending
+                .queue
+                .get(&rec.seq)
+                .map(|queued| queued.name.clone()),
+            Some(record_name(rec.seq))
         );
         assert!(final_path.exists(), "matching temporary record is promoted");
         assert!(!tmp.exists(), "temporary name is consumed during recovery");
@@ -2908,6 +3179,9 @@ mod tests {
         let pending_bytes = serde_json::to_vec(&first).expect("serialize first").len()
             + serde_json::to_vec(&second).expect("serialize second").len();
         let shared = SpoolShared {
+            directory: Arc::new(
+                secure_spool_directory(directory.path()).expect("open test spool directory"),
+            ),
             config: cfg,
             queue: Mutex::new(BTreeMap::from_iter([
                 (1, queued(&first, path_one.clone())),
@@ -2939,7 +3213,7 @@ mod tests {
             2,
             "setup confirms both records are queued"
         );
-        acknowledge(&shared, &record(1), &path_one).expect("ack sequence 1");
+        acknowledge(&shared, &record(1), &record_name(1)).expect("ack sequence 1");
         assert_eq!(
             shared.status().pending_records,
             1,
@@ -2951,7 +3225,7 @@ mod tests {
             "delivered should increment by one exactly once"
         );
 
-        acknowledge(&shared, &record(2), &path_two).expect("ack sequence 2");
+        acknowledge(&shared, &record(2), &record_name(2)).expect("ack sequence 2");
         assert_eq!(
             shared.status().pending_records,
             0,
@@ -2993,6 +3267,9 @@ mod tests {
         let first = record(1);
         let pending_bytes = serde_json::to_vec(&first).expect("serialize first").len();
         let shared = SpoolShared {
+            directory: Arc::new(
+                secure_spool_directory(directory.path()).expect("open test spool directory"),
+            ),
             config: cfg,
             queue: Mutex::new(BTreeMap::from_iter([(
                 1u64,
@@ -3020,7 +3297,7 @@ mod tests {
         };
         let before = shared.status();
 
-        assert!(acknowledge(&shared, &record(99), &unknown_seq_path).is_err());
+        assert!(acknowledge(&shared, &record(99), &record_name(99)).is_err());
         let after = shared.status();
         assert_eq!(
             after.pending_records, before.pending_records,
@@ -3400,7 +3677,8 @@ mod tests {
         let path = record_path(directory.path(), 1);
         let bytes = serde_json::to_vec(&record(1)).expect("serialize record");
         write_new_file(&path, &bytes).expect("seed record");
-        let error = match inspect_recovery_with_byte_limit(&cfg, bytes.len() - 1) {
+        let held = secure_spool_directory(directory.path()).expect("open test spool directory");
+        let error = match inspect_recovery_with_byte_limit_at(&held, &cfg, bytes.len() - 1) {
             Err(error) => error,
             Ok(_) => panic!("aggregate recovery bytes must be bounded independently of count"),
         };
@@ -3654,6 +3932,99 @@ mod tests {
                 & 0o777,
             outside_mode,
             "a swapped spool path must not chmod the symlink target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn post_open_directory_swap_keeps_record_and_ack_lifecycle_on_held_spool() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let spool = root.path().join("spool");
+        let moved_spool = root.path().join("moved-spool");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&spool).expect("create spool");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        let state = Arc::new((
+            Mutex::new(DestinationCallGateState::default()),
+            Condvar::new(),
+        ));
+        let delivery = DurableShippingForwarder::open(
+            config(&spool, "held-directory-lifecycle"),
+            Box::new(DestinationCallGate {
+                state: Arc::clone(&state),
+            }),
+        )
+        .expect("open spool");
+
+        // Swap the configured pathname only after `open` has secured and
+        // retained the real directory. Any later raw join would now write the
+        // record/checkpoint/ack state into `outside` instead of `moved_spool`.
+        std::fs::rename(&spool, &moved_spool).expect("move held spool");
+        symlink(&outside, &spool).expect("replace configured spool with symlink");
+
+        delivery
+            .forward(&record(1))
+            .expect("enqueue through held directory");
+        wait_for_destination_call(&state);
+        assert!(
+            moved_spool.join(record_name(1)).is_file(),
+            "the durable record must land in the originally opened directory"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("read replacement directory")
+                .next()
+                .is_none(),
+            "a replaced configured path must receive no spool state"
+        );
+
+        release_destination_call(&state);
+        wait_until(Duration::from_secs(1), || {
+            delivery.status_handle().snapshot().delivered_records == 1
+        });
+        assert!(
+            moved_spool.join(DELIVERY_CHECKPOINT).is_file(),
+            "acknowledgement checkpoint must remain relative to the held directory"
+        );
+        assert!(
+            std::fs::read_dir(&outside)
+                .expect("re-read replacement directory")
+                .next()
+                .is_none(),
+            "record, acknowledgement, and checkpoint lifecycle must not escape the held directory"
+        );
+        assert_eq!(delivery.shutdown(), DurableShippingShutdownOutcome::Stopped);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recovery_preserves_owner_readable_legacy_spool_files() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempfile::tempdir().expect("tempdir");
+        let record = record(1);
+        let path = record_path(directory.path(), record.seq);
+        write_new_file(
+            &path,
+            &serde_json::to_vec(&record).expect("serialize record"),
+        )
+        .expect("seed legacy spool record");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400))
+            .expect("make legacy record owner-readable only");
+
+        let pending = recover_pending(directory.path(), 32, &[key()])
+            .expect("owner-readable legacy record remains recoverable");
+        assert!(pending.queue.contains_key(&record.seq));
+        assert_eq!(
+            std::fs::metadata(&path)
+                .expect("stat recovered record")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600,
+            "recovery keeps the previous mode-hardening contract"
         );
     }
 
@@ -4113,7 +4484,11 @@ mod tests {
         release_destination_call(&state);
         wait_until(Duration::from_secs(1), || !status.snapshot().worker_running);
         wait_until(Duration::from_secs(1), || {
-            SpoolLock::acquire(directory.path()).is_ok()
+            SpoolLock::acquire(
+                &secure_spool_directory(directory.path()).expect("open held spool directory"),
+                directory.path(),
+            )
+            .is_ok()
         });
 
         let successor = DurableShippingForwarder::open(

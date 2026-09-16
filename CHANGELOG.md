@@ -25,10 +25,11 @@ unchanged in contract.
   bounds are tightened so a slow or reordered record cannot stall the shipper on
   the way out. See
   [323226b1](https://github.com/MuhDur/oraclemcp/commit/323226b1).
-- **Approved config writes and durable-spool setup hold no-follow directory
-  capabilities.** A local parent-directory swap now refuses the operation
-  before it can redirect a config write or change permissions on a substituted
-  spool target.
+- **Approved config writes and the entire durable-spool lifecycle retain
+  no-follow directory capabilities.** A local parent-directory swap now
+  refuses a config write before it can redirect it, and cannot redirect spool
+  setup, recovery, record, checkpoint, or acknowledgement state to a
+  substituted target.
 - **The release and installation supply chain is hardened.** The release image
   Docker build context is made complete, and the installer service/PSSA naming
   path is corrected so a partial image or a colliding variable cannot ship. See

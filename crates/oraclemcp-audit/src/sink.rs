@@ -789,6 +789,53 @@ pub(crate) fn harden_windows_private_directory_handle(
     harden_windows_private_acl(directory, display_path, true)
 }
 
+/// Harden an already-open private regular file without resolving its pathname
+/// again. Capability-scoped callers use this after opening a child through an
+/// already-verified directory handle: re-opening `display_path` here would
+/// reintroduce a parent-directory replacement race.
+#[cfg(windows)]
+pub(crate) fn harden_windows_private_file_handle(
+    file: &File,
+    display_path: &Path,
+) -> Result<(), AuditError> {
+    use std::os::windows::fs::MetadataExt as _;
+
+    let metadata = file.metadata().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot stat opened audit file {} to confirm it is a private regular file: {error}",
+            display_path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(AuditError::Io(format!(
+            "audit path {} is not a regular file after opening; refusing to write audit records to it",
+            display_path.display()
+        )));
+    }
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(AuditError::Io(format!(
+            "audit path {} is a reparse point; refusing to follow it",
+            display_path.display()
+        )));
+    }
+    match metadata.number_of_links() {
+        Some(1) => {}
+        Some(links) => {
+            return Err(AuditError::Io(format!(
+                "audit path {} has {links} hard links; refusing a file that can alias another path",
+                display_path.display()
+            )));
+        }
+        None => {
+            return Err(AuditError::Io(format!(
+                "audit path {} did not report a link count",
+                display_path.display()
+            )));
+        }
+    }
+    harden_windows_private_acl(file, display_path, false)
+}
+
 /// After opening, confirm the OPEN handle is a regular file — catching a TOCTOU
 /// swap between [`reject_unsafe_existing`] and the open — and harden it to its
 /// platform's owner-only policy. Unix applies `0600` to the descriptor. Windows
@@ -872,30 +919,7 @@ pub(crate) fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), A
     }
     #[cfg(windows)]
     {
-        use std::os::windows::fs::MetadataExt as _;
-
-        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(AuditError::Io(format!(
-                "audit path {} is a reparse point; refusing to follow it",
-                path.display()
-            )));
-        }
-        match metadata.number_of_links() {
-            Some(1) => {}
-            Some(links) => {
-                return Err(AuditError::Io(format!(
-                    "audit path {} has {links} hard links; refusing a file that can alias another path",
-                    path.display()
-                )));
-            }
-            None => {
-                return Err(AuditError::Io(format!(
-                    "audit path {} did not report a link count",
-                    path.display()
-                )));
-            }
-        }
-        harden_windows_private_acl(file, path, false)?;
+        harden_windows_private_file_handle(file, path)?;
     }
     Ok(())
 }
@@ -969,23 +993,6 @@ pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
     let file = options.open(path).map_err(|e| {
         AuditError::Io(format!(
             "cannot create private audit temporary {}: {e}",
-            path.display()
-        ))
-    })?;
-    harden_open_regular_file(&file, path)?;
-    Ok(file)
-}
-
-/// Open an existing private regular file for bounded reads without following a
-/// symlink or accepting a hard-linked/special filesystem object.
-pub(crate) fn open_private_read_file(path: &Path) -> Result<File, AuditError> {
-    reject_unsafe_existing(path)?;
-    let mut options = OpenOptions::new();
-    options.read(true);
-    configure_no_follow(&mut options);
-    let file = options.open(path).map_err(|e| {
-        AuditError::Io(format!(
-            "cannot open private audit file {} for reading: {e}",
             path.display()
         ))
     })?;
