@@ -6839,8 +6839,49 @@ function workbenchSuccess(
   response: OperatorResponse<WorkbenchActionData>,
   binding: WorkbenchResultBinding
 ): WorkbenchResult {
-  const outcome = decodeOperatorOutcome(200, response);
+  const outcome = workbenchOutcomeFromResponse(response);
   return { state: outcome.state, label, response, outcome, binding };
+}
+
+/**
+ * A preview can be a successful MCP transport response while the SQL guard
+ * refuses admission or requires elevation. The result chrome must reflect the
+ * guard's authority, not merely the transport's successful delivery.
+ */
+export function workbenchOutcomeFromResponse(
+  response: OperatorResponse<WorkbenchActionData>
+): OperatorOutcome {
+  const transportOutcome = decodeOperatorOutcome(200, response);
+  if (transportOutcome.state !== "success") {
+    return transportOutcome;
+  }
+  const verdict = workbenchVerdictFromAction(response.data);
+  switch (verdict?.status) {
+    case "refused":
+      return {
+        state: "refused",
+        message: verdict.reason ?? "The SQL guard refused this statement.",
+        nextSteps: verdict.rewrite ? ["Review the minimal safe rewrite before retrying."] : [],
+        errorClass: null
+      };
+    case "step_up":
+      return {
+        state: "partial",
+        message: "The SQL guard requires a step-up before this statement can run.",
+        nextSteps: ["Request the required operating level, then preview this exact SQL again."],
+        errorClass: null
+      };
+    case "unknown":
+      return {
+        state: "partial",
+        message: "The SQL guard verdict was not recognized; this statement was not treated as admitted.",
+        nextSteps: ["Preview the exact SQL again after confirming the server guard response."],
+        errorClass: null
+      };
+    case "pass":
+    case undefined:
+      return transportOutcome;
+  }
 }
 
 function workbenchFailure(

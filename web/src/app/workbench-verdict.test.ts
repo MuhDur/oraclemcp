@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { workbenchVerdictFromAction } from "./App";
-import type { WorkbenchActionData } from "./operator-client";
+import { workbenchOutcomeFromResponse, workbenchVerdictFromAction } from "./App";
+import type { OperatorResponse, WorkbenchActionData } from "./operator-client";
 
 // Arc L honesty: the Workbench "Classifier Verdict" badge must reflect the
 // ACTUAL admission the guard proved on the wire. A statement the guard blocked
@@ -17,6 +17,14 @@ const action = (structured: Record<string, unknown>): WorkbenchActionData => ({
   mcp_response: { result: { structuredContent: structured } }
 });
 
+const response = (structured: Record<string, unknown>): OperatorResponse<WorkbenchActionData> => ({
+  protocol_version: "operator.v1",
+  schema_version: 1,
+  route: "/operator/v1/actions/execute",
+  redaction_level: "operator_redacted",
+  data: action(structured)
+});
+
 describe("workbench classifier verdict honesty", () => {
   it("renders a gate_decision=blocked preview as refused, never pass", () => {
     const verdict = workbenchVerdictFromAction(
@@ -30,6 +38,23 @@ describe("workbench classifier verdict honesty", () => {
     expect(verdict?.status).toBe("refused");
     expect(verdict?.refused).toBe(true);
     expect(verdict?.status).not.toBe("pass");
+  });
+
+  it("does not report a delivered-but-blocked preview as a successful operation", () => {
+    const outcome = workbenchOutcomeFromResponse(
+      response({
+        danger: "DESTRUCTIVE",
+        required_level: "DDL",
+        gate_decision: "blocked",
+        reason: "protected profile is read-only"
+      })
+    );
+
+    expect(outcome).toMatchObject({
+      state: "refused",
+      message: "protected profile is read-only"
+    });
+    expect(outcome.state).not.toBe("success");
   });
 
   it("treats a FORBIDDEN statement as refused", () => {
@@ -50,6 +75,19 @@ describe("workbench classifier verdict honesty", () => {
     expect(verdict?.status).toBe("step_up");
     expect(verdict?.refused).toBe(false);
     expect(verdict?.status).not.toBe("pass");
+  });
+
+  it("does not report a step-up preview as an admitted operation", () => {
+    const outcome = workbenchOutcomeFromResponse(
+      response({
+        danger: "GUARDED",
+        required_level: "READ_WRITE",
+        gate_decision: "require_step_up"
+      })
+    );
+
+    expect(outcome).toMatchObject({ state: "partial" });
+    expect(outcome.state).not.toBe("success");
   });
 
   it("renders an explicitly allowed statement as pass", () => {
