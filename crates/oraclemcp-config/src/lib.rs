@@ -1147,6 +1147,28 @@ impl OracleMcpConfig {
         Ok(Some(path))
     }
 
+    /// Validate a `--config` file supplied directly by the operator.
+    ///
+    /// Unlike `$ORACLEMCP_CONFIG`, a CLI path may intentionally be relative to
+    /// the launch directory. It is still an explicit operator contract, so an
+    /// unusable path must be refused rather than delegated to `Toml::file`,
+    /// whose missing-file behavior would otherwise silently retain defaults.
+    fn validate_cli_config_path(path: &Path) -> Result<(), ConfigError> {
+        if path.is_dir() {
+            return Err(ConfigError::CliConfigPathUnusable {
+                path: path.display().to_string(),
+                reason: "path is a directory, not a file; point --config at the profiles.toml / config.toml file itself",
+            });
+        }
+        if !path.is_file() {
+            return Err(ConfigError::CliConfigPathUnusable {
+                path: path.display().to_string(),
+                reason: "no such regular file; create it or omit --config to use XDG / ~/.config discovery",
+            });
+        }
+        Ok(())
+    }
+
     /// Return the discovered default config file, if one is present. This is the
     /// **discovery** path only (`$XDG_CONFIG_HOME` then `~/.config`); an explicit
     /// `$ORACLEMCP_CONFIG` pointer is resolved+validated separately by
@@ -1177,14 +1199,18 @@ impl OracleMcpConfig {
     /// extracting. Callers (the binary) may `.merge()` CLI overrides last —
     /// CLI has the highest precedence — before calling [`Self::from_figment`].
     ///
-    /// Fails closed if `$ORACLEMCP_CONFIG` is set to an unusable path (see
-    /// [`resolve_explicit_config_path`](Self::resolve_explicit_config_path)).
+    /// Fails closed if either explicit config source is unusable: `$ORACLEMCP_CONFIG`
+    /// (see [`resolve_explicit_config_path`](Self::resolve_explicit_config_path))
+    /// or the CLI `--config` path (which may remain relative).
     pub fn figment(config_path: Option<&Path>) -> Result<Figment, ConfigError> {
         let mut fig = Figment::from(Serialized::defaults(OracleMcpConfig::default()));
         // Precedence: an explicit CLI `config_path` wins; else a validated
         // `$ORACLEMCP_CONFIG`; else XDG/`~/.config` discovery.
         let resolved = match config_path {
-            Some(path) => Some(path.to_path_buf()),
+            Some(path) => {
+                Self::validate_cli_config_path(path)?;
+                Some(path.to_path_buf())
+            }
             None => match Self::resolve_explicit_config_path()? {
                 Some(explicit) => Some(explicit),
                 None => Self::config_search_dirs()
@@ -1615,6 +1641,16 @@ pub enum ConfigError {
         /// Why it cannot be used, with the actionable next step.
         reason: &'static str,
     },
+    /// The explicit `--config` path cannot be used as a regular config file.
+    /// Unlike the environment source, a relative CLI path is intentionally
+    /// allowed; it is resolved by the process launch directory.
+    #[error("--config path {path:?} is unusable: {reason}")]
+    CliConfigPathUnusable {
+        /// The exact CLI path supplied by the operator.
+        path: String,
+        /// Why it cannot be safely loaded.
+        reason: &'static str,
+    },
     /// A profile has no usable `connect_string` after inheritance.
     #[error("connection profile `{0}` is missing a connect_string")]
     MissingConnectString(String),
@@ -1790,6 +1826,10 @@ impl From<figment::Error> for ConfigError {
         ConfigError::Figment(e.to_string())
     }
 }
+
+#[cfg(test)]
+#[path = "lib/config_path_tests.rs"]
+mod config_path_tests;
 
 #[cfg(test)]
 mod tests {
