@@ -17,6 +17,20 @@
 //!   --test cross_backend_parity -- --ignored --exact
 //! ```
 //!
+//! The PEM-only TCPS connection row is separate and needs an endpoint whose
+//! transport is actually TCPS plus a wallet directory containing `ewallet.pem`
+//! but not `cwallet.sso`:
+//!
+//! ```text
+//! ORACLEMCP_DUAL_BACKEND_TCPS_PEM_LAB=1 \
+//! ORACLEMCP_TCPS_PEM_DSN=<tcps-connect-string> \
+//! ORACLEMCP_TCPS_PEM_USER=<username> \
+//! ORACLEMCP_TCPS_PEM_PASSWORD=<password> \
+//! ORACLEMCP_TCPS_PEM_WALLET_LOCATION=<pem-wallet-directory> \
+//! cargo test -p oraclemcp-db --features oracledb,live-xe \
+//!   --test cross_backend_parity live_cross_backend_tcps_pem_connection_parity -- --ignored --exact
+//! ```
+//!
 //! The deterministic, feature-on VECTOR projection test remains next to the
 //! official adapter. This target is the live proof for behavior requiring a
 //! real Oracle: independent backend connections, NUMBER/TSTZ/VECTOR decoding,
@@ -30,10 +44,12 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     DbError, OfficialOracleConnection, OracleBackend, OracleConnectOptions, OracleConnection,
-    RustOracleConnection, SerializeOptions, serialize_row,
+    RustOracleConnection, SerializeOptions, select_connection_backend, selected_endpoint_uses_tcps,
+    serialize_row,
 };
 use oraclemcp_guard::{Classifier, DangerLevel, OperatingLevel};
 use serde_json::Value;
+use std::path::PathBuf;
 
 const NUMBER_AND_TSTZ_SQL: &str = "SELECT \
     12345678901234567890123456789012345678 AS number_38, \
@@ -93,6 +109,37 @@ fn local_lab_options() -> OracleConnectOptions {
         password: Some(required_lab_env("ORACLEMCP_TEST_PASSWORD")),
         ..Default::default()
     }
+}
+
+fn tcps_pem_lab_options() -> OracleConnectOptions {
+    assert_eq!(
+        required_lab_env("ORACLEMCP_DUAL_BACKEND_TCPS_PEM_LAB"),
+        "1",
+        "set ORACLEMCP_DUAL_BACKEND_TCPS_PEM_LAB=1 to acknowledge the dedicated TCPS PEM fixture"
+    );
+    let wallet_location = PathBuf::from(required_lab_env("ORACLEMCP_TCPS_PEM_WALLET_LOCATION"));
+    assert!(
+        wallet_location.join("ewallet.pem").is_file(),
+        "TCPS PEM parity requires an ewallet.pem wallet"
+    );
+    assert!(
+        !wallet_location.join("cwallet.sso").is_file(),
+        "TCPS PEM parity must not use an auto-login wallet; that remains driver-cx-only"
+    );
+    let options = OracleConnectOptions {
+        connect_string: required_lab_env("ORACLEMCP_TCPS_PEM_DSN"),
+        username: Some(required_lab_env("ORACLEMCP_TCPS_PEM_USER")),
+        password: Some(required_lab_env("ORACLEMCP_TCPS_PEM_PASSWORD")),
+        wallet_location: Some(wallet_location),
+        wallet_password: std::env::var("ORACLEMCP_TCPS_PEM_WALLET_PASSWORD").ok(),
+        ..Default::default()
+    };
+    assert!(
+        selected_endpoint_uses_tcps(&options)
+            .expect("TCPS PEM parity must parse its explicitly supplied endpoint"),
+        "TCPS PEM parity refuses a non-TCPS endpoint"
+    );
+    options
 }
 
 fn serialized_single_row(rows: Vec<oraclemcp_db::OracleRow>, label: &str) -> Value {
@@ -430,5 +477,57 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
 
         driver_cx.close(&cx).await.expect("driver-cx close");
         official.close(&cx).await.expect("official close");
+    });
+}
+
+/// Establish only password-authenticated TCPS plus PEM-wallet sessions. This
+/// intentionally does not exercise the cwallet.sso/IAM routes, which remain
+/// driver-cx capabilities by contract.
+#[test]
+#[ignore = "requires explicit TCPS endpoint plus PEM-only wallet credentials"]
+fn live_cross_backend_tcps_pem_connection_parity() {
+    run_with_cx(|cx| async move {
+        let options = tcps_pem_lab_options();
+        assert_eq!(
+            select_connection_backend(&options),
+            OracleBackend::OfficialOracle,
+            "the capability selector must make PEM wallet acquisition official-primary"
+        );
+
+        let driver_cx = RustOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("driver-cx must connect to the explicit TCPS PEM lab");
+        let official = OfficialOracleConnection::connect(&cx, options)
+            .await
+            .expect("official adapter must connect to the explicit TCPS PEM lab");
+        driver_cx.ping(&cx).await.expect("driver-cx TCPS PEM ping");
+        official.ping(&cx).await.expect("official TCPS PEM ping");
+
+        let driver_info = driver_cx
+            .describe(&cx)
+            .await
+            .expect("driver-cx TCPS PEM identity");
+        let official_info = official
+            .describe(&cx)
+            .await
+            .expect("official TCPS PEM identity");
+        assert_eq!(
+            driver_info.server_version, official_info.server_version,
+            "TCPS PEM server version"
+        );
+        assert_eq!(
+            driver_info.session_user, official_info.session_user,
+            "TCPS PEM session user"
+        );
+        assert_eq!(
+            driver_info.current_schema, official_info.current_schema,
+            "TCPS PEM current schema"
+        );
+
+        official.close(&cx).await.expect("official TCPS PEM close");
+        driver_cx
+            .close(&cx)
+            .await
+            .expect("driver-cx TCPS PEM close");
     });
 }
