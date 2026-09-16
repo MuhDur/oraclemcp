@@ -24,8 +24,8 @@ default** and **escalation-capable** up to `ADMIN` — but only through a
 preview → confirmation-token step-up that is **TTL-bounded** and capped by each
 profile's `max_level`. Every privileged action is written to a hash-chained,
 HMAC-SHA256-signed audit log. The whole thing ships as a single self-contained
-binary with the thin `oracledb` driver compiled in — no Oracle Instant Client,
-no ODPI-C, no JVM, no Python.
+binary with the pure-Rust thin `oraclemcp-driver-cx` driver compiled in — no
+Oracle Instant Client, no ODPI-C, no JVM, no Python.
 
 In privileged-access-management terms, oraclemcp applies PAM-style discipline to
 agent DB access — least privilege by default, just-in-time elevation, bounded
@@ -33,6 +33,35 @@ windows, and an audited trail. (That is an analogy to the access-control
 *pattern*, not a claim that oraclemcp is a drop-in for an enterprise PAM product;
 it does not broker OS logins, manage credential vaults, or do session recording
 beyond its own audit log.)
+
+---
+
+## Oracle's newer neighbours (September 2026)
+
+Two Oracle-developed projects are adjacent to oraclemcp and are worth naming
+separately from the SQLcl and genai-toolbox comparison:
+
+- **Oracle's official MCP servers — [`github.com/oracle/mcp`](https://github.com/oracle/mcp).**
+  Oracle publishes a repository of reference MCP servers for Oracle products
+  (OCI, database, and others). Oracle describes it as proof-of-concept/reference
+  implementations "not intended for production use"; the Oracle Database entry,
+  `src/oracle-db-mcp-java-toolkit/`, is a Java toolkit. The repository was
+  created 2025-07-27 and last pushed 2026-09-10 (checked 2026-09-16). It is
+  first-party and polyglot; oraclemcp is independent, Oracle-database-only, and
+  pure Rust.
+- **Oracle's official Rust driver — [`oracledb`](https://crates.io/crates/oracledb),
+  [`github.com/oracle/rust-oracledb`](https://github.com/oracle/rust-oracledb).**
+  Oracle maintains a pure-Rust, synchronous driver, currently `26.0.0-beta.3`
+  (published 2026-09-08; first published 2026-06-14). It requires no Oracle
+  Client libraries and targets Oracle Database 12 through 26ai. oraclemcp does
+  not use it: this repository pins the frozen, async `oraclemcp-driver-cx` 0.9.2
+  (published 2026-07-30), the renamed continuation of the original Rust thin
+  driver that Oracle's `oracledb` replaces. The `oraclemcp-driver-cx` repository
+  is [`github.com/MuhDur/rust-oracledb`](https://github.com/MuhDur/rust-oracledb).
+
+The dates and descriptions above were checked against crates.io and GitHub on
+2026-09-16. Verify their current behavior and versions against the projects' own
+documentation before relying on them; they release independently of oraclemcp.
 
 ---
 
@@ -119,8 +148,8 @@ the agent without silent float coercion. A caller can explicitly opt into
 
 ### 6. Single-binary deploy (no Instant Client, no JVM, no Python)
 
-The thin `oracledb` driver is pure Rust and compiled in. There is no Oracle
-Instant Client, ODPI-C, `libclntsh`, JVM, or Python runtime to install or
+The pure-Rust thin `oraclemcp-driver-cx` driver is compiled in. There is no
+Oracle Instant Client, ODPI-C, `libclntsh`, JVM, or Python runtime to install or
 redistribute. The published `ghcr.io/muhdur/oraclemcp` image carries only the
 compiled binary in its runtime stage. SQLcl is a JVM application; genai-toolbox's
 Oracle path brings its own driver/client requirements.
@@ -158,5 +187,6 @@ selection. Pick the one whose trust model matches how much you are willing to le
 an agent do.
 
 > This document supersedes the earlier deferred positioning draft. Verify the
-> current behavior of SQLcl MCP and genai-toolbox against their own
-> documentation before relying on version-specific claims here.
+> current behavior of SQLcl MCP, genai-toolbox, Oracle's `oracle/mcp` servers,
+> and Oracle's `oracledb` driver against their own documentation before relying
+> on version-specific claims here.
