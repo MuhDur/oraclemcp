@@ -167,6 +167,15 @@ validate_repo() {
   fi
 }
 
+validate_service_name() {
+  local service_name="$1"
+  if [[ ! "$service_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] \
+    || [[ "$service_name" == *..* ]] \
+    || [[ "$service_name" == *. ]]; then
+    fail "invalid --service-name '$service_name' (expected one safe service-name component)"
+  fi
+}
+
 normalize_verify_posture() {
   case "$1" in
     require | prefer | checksum-only)
@@ -1445,6 +1454,7 @@ wait_readyz() {
 main() {
   parse_args "$@"
   validate_repo "$REPO"
+  validate_service_name "$SERVICE_NAME"
   [ -n "$PREFIX" ] || fail "HOME is unset; pass --prefix"
   if [ "$CLIENT_REGISTER" -eq 0 ] && [ "${#CLIENT_SCOPES[@]}" -gt 0 ]; then
     fail "--client-scope requires --register-client"
