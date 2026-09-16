@@ -1134,6 +1134,14 @@ fn handle_http_exchange(
             return HttpExchange::Buffered(handle_dashboard_logout_route(config, &request));
         }
         HttpRoute::OperatorApi => {
+            // The native wire reader enforces this cap before dispatch, but
+            // `handle_http_request` is public and can be used by an embedded
+            // ingress. Keep that boundary fail-closed too: do not parse or
+            // audit an oversized operator body supplied outside the native
+            // listener.
+            if request.body.len() > MAX_BODY_BYTES {
+                return HttpExchange::Buffered(empty_response(413));
+            }
             if let Some(response) = guard_http_request(config, &request) {
                 let response = if config.dashboard_auth.is_some()
                     && request.header("authorization").is_none()
