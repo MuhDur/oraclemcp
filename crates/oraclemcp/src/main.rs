@@ -116,7 +116,7 @@ use oraclemcp_telemetry::{HealthState, Metrics, OtlpConfig};
 use service_lifecycle::{
     ServiceBackupOptions, ServiceCommand as ServiceLifecycleCommand, ServiceInstallOptions,
     ServiceLogsOptions, ServiceMutationOptions, ServiceReadOptions, ServiceRestoreOptions,
-    acquire_service_instance_guard,
+    acquire_service_instance_guard, resolve_dashboard_listener,
 };
 
 /// Whether this binary was built with Oracle connectivity support. This is a
@@ -125,6 +125,9 @@ const BUILT_WITH_LIVE_DB: bool = true;
 const CUSTOM_TOOLS_DIR_ENV: &str = "ORACLEMCP_TOOLS_DIR";
 const CUSTOM_TOOLS_HMAC_KEY_ENV: &str = "ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY";
 const DEFAULT_SETUP_CONFIG_PATH: &str = "~/.config/oraclemcp/profiles.toml";
+/// Fallback pairing target when neither `--url` nor a recorded service instance
+/// is available.
+const DEFAULT_DASHBOARD_URL: &str = "http://127.0.0.1:7070";
 /// Fallback environment variable for the audit signing key when the config's
 /// `[audit].key_ref` is not set.
 const AUDIT_KEY_ENV: &str = "ORACLEMCP_AUDIT_KEY";
@@ -219,7 +222,7 @@ fn main() -> ExitCode {
         Command::Service { command } => run_service_cmd(robot_json, command),
         Command::Clients { command } => run_client_credentials_cmd(robot_json, command),
         Command::Dashboard { url, no_open } => {
-            run_dashboard_cmd(robot_json, binary_name, &url, no_open)
+            run_dashboard_cmd(robot_json, binary_name, url.as_deref(), no_open)
         }
         Command::RobotDocs { command } => match command {
             None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
@@ -3939,7 +3942,10 @@ fn run_serve(
                         }
                     };
             }
-            let _service_instance_guard = match acquire_service_instance_guard(&addr) {
+            let _service_instance_guard = match acquire_service_instance_guard(
+                &addr,
+                if tls_enabled { "https" } else { "http" },
+            ) {
                 Ok(guard) => guard,
                 Err(error) => {
                     emit_status_error(robot_json, error.code, &error.message);
@@ -4230,11 +4236,15 @@ fn emit_status_error(robot_json: bool, code: &str, message: &str) {
 fn run_dashboard_cmd(
     robot_json: bool,
     binary_name: &str,
-    base_url: &str,
+    explicit_url: Option<&str>,
     no_open: bool,
 ) -> ExitCode {
+    // `dashboard` and `service status` resolve the SAME service-instance lock, so
+    // a live listener recorded at a non-default port is what the dashboard pairs
+    // with when `--url` is absent (bead oraclemcp-2q4em.8).
+    let resolution = resolve_dashboard_listener(explicit_url, DEFAULT_DASHBOARD_URL);
     let ticket_dir = default_dashboard_ticket_dir();
-    let pairing_request = match prepare_dashboard_pairing(base_url) {
+    let pairing_request = match prepare_dashboard_pairing(&resolution.base_url) {
         Ok(request) => request,
         Err(error) => {
             if robot_json {
@@ -4244,6 +4254,10 @@ fn run_dashboard_cmd(
                         "kind": "error",
                         "code": "ORACLEMCP_DASHBOARD_URL_INVALID",
                         "message": error.to_string(),
+                        "listener": resolution.listener,
+                        "source": resolution.source,
+                        "candidates": resolution.candidates,
+                        "lock_path": resolution.lock_path,
                     })
                 );
             } else {
@@ -4260,22 +4274,36 @@ fn run_dashboard_cmd(
     }) {
         Ok(proof) => proof,
         Err(e) => {
-            let code = if matches!(e, DashboardAuthError::ServiceUnreachable { .. }) {
+            let unreachable = matches!(e, DashboardAuthError::ServiceUnreachable { .. });
+            let code = if unreachable {
                 "ORACLEMCP_DASHBOARD_SERVICE_UNREACHABLE"
             } else {
                 "ORACLEMCP_DASHBOARD_PROBE_FAILED"
             };
             if robot_json {
-                eprintln!(
-                    "{}",
-                    serde_json::json!({
-                        "kind": "error",
-                        "code": code,
-                        "message": e.to_string(),
-                    })
-                );
+                let mut error = serde_json::json!({
+                    "kind": "error",
+                    "code": code,
+                    "message": e.to_string(),
+                    "listener": resolution.listener,
+                    "source": resolution.source,
+                });
+                if unreachable {
+                    error["candidates"] = serde_json::json!(resolution.candidates);
+                    error["lock_path"] = serde_json::json!(resolution.lock_path);
+                }
+                eprintln!("{error}");
             } else {
                 eprintln!("{binary_name} dashboard: {e}");
+                if unreachable {
+                    eprintln!(
+                        "{binary_name} dashboard: no service instance answered at {} (source: {}); candidates: {}; lock: {}",
+                        resolution.listener,
+                        resolution.source,
+                        resolution.candidates.join(", "),
+                        resolution.lock_path,
+                    );
+                }
             }
             return ExitCode::from(2);
         }
@@ -4315,6 +4343,8 @@ fn run_dashboard_cmd(
             "expires_unix": ticket.expires_unix,
             "opened": opened,
             "ticket_file": ticket.ticket_file,
+            "listener": resolution.listener,
+            "source": resolution.source,
         });
         stdout_exit(
             write_stdout_line(&serde_json::to_string(&output).expect("dashboard JSON serializes")),
@@ -4323,6 +4353,10 @@ fn run_dashboard_cmd(
     } else {
         // stdout stays the machine-readable channel (the URL); the code and its
         // instructions go to stderr so `om dashboard | …` keeps working.
+        eprintln!(
+            "{binary_name} dashboard: paired against {} (source: {})",
+            resolution.listener, resolution.source
+        );
         eprintln!(
             "{binary_name} dashboard: open the URL below, then paste this one-time code (valid {DASHBOARD_PAIRING_TTL_SECONDS}s, single use):\n\n    {}\n",
             ticket.code

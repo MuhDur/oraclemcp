@@ -277,6 +277,15 @@ struct ServiceInstanceMetadata {
     listen: String,
     started_unix_ms: u64,
     token: String,
+    /// Recorded TLS posture of the bound listener (`http` or `https`). Older
+    /// locks predate this field and carry no TLS, so they deserialize as the
+    /// plaintext default rather than becoming unreadable.
+    #[serde(default = "default_service_instance_scheme")]
+    scheme: String,
+}
+
+fn default_service_instance_scheme() -> String {
+    "http".to_owned()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -290,6 +299,7 @@ enum ServiceInstanceDiscovery {
         pid: u32,
         listen: String,
         started_unix_ms: u64,
+        scheme: String,
     },
     Unreadable {
         lock_path: String,
@@ -398,9 +408,10 @@ pub(crate) fn doctor_service_unit_caps() -> Option<DoctorServiceUnitCaps> {
 
 pub(crate) fn acquire_service_instance_guard(
     listen: &str,
+    scheme: &str,
 ) -> Result<ServiceInstanceGuard, ServiceError> {
     let lock_path = default_service_instance_lock_path()?;
-    acquire_service_instance_guard_at(&lock_path, listen)
+    acquire_service_instance_guard_at(&lock_path, listen, scheme)
 }
 
 fn require_confirmed(action: &str, dry_run: bool, yes: bool) -> Result<(), ServiceError> {
@@ -3464,6 +3475,7 @@ fn create_service_instance_lock_file(
 fn acquire_service_instance_guard_at(
     path: &Path,
     listen: &str,
+    scheme: &str,
 ) -> Result<ServiceInstanceGuard, ServiceError> {
     let token = new_service_instance_token()?;
     let metadata = ServiceInstanceMetadata {
@@ -3472,6 +3484,7 @@ fn acquire_service_instance_guard_at(
         listen: listen.to_owned(),
         started_unix_ms: current_unix_millis(),
         token: token.clone(),
+        scheme: scheme.to_owned(),
     };
     let mut body = serde_json::to_vec_pretty(&metadata).map_err(|e| {
         ServiceError::new(
@@ -3567,6 +3580,7 @@ fn discover_service_instance_at(path: &Path) -> ServiceInstanceDiscovery {
                 pid: metadata.pid,
                 listen: metadata.listen,
                 started_unix_ms: metadata.started_unix_ms,
+                scheme: metadata.scheme,
             }
         }
         Ok(metadata) => ServiceInstanceDiscovery::Unreadable {
@@ -3590,13 +3604,94 @@ fn render_instance_discovery(discovery: &ServiceInstanceDiscovery) -> String {
             pid,
             listen,
             started_unix_ms,
+            scheme,
         } => format!(
-            "service instance lock at {lock_path}: pid={pid} listen={listen:?} started_unix_ms={started_unix_ms}"
+            "service instance lock at {lock_path}: pid={pid} listen={listen:?} scheme={scheme:?} started_unix_ms={started_unix_ms}"
         ),
         ServiceInstanceDiscovery::Unreadable { lock_path, error } => {
             format!("service instance lock at {lock_path} is unreadable: {error}")
         }
     }
+}
+
+/// The listener the `oraclemcp dashboard` CLI resolved, its provenance, and the
+/// full candidate set an operator can act on.
+///
+/// Shared discovery: `service status` and `dashboard` both read the same
+/// `<state>/oraclemcp/service-instance.json` lock through
+/// [`discover_service_instance_at`], so the dashboard no longer probes the
+/// default `:7070` while the live listener is bound elsewhere.
+#[derive(Debug, Clone)]
+pub(crate) struct DashboardListener {
+    /// Canonical base URL to pair against (`scheme://host:port`).
+    pub(crate) base_url: String,
+    /// Bare `host:port` of the resolved listener, for operator display.
+    pub(crate) listener: String,
+    /// `service-instance`, `--url`, or `default`.
+    pub(crate) source: &'static str,
+    /// Path of the service-instance lock consulted (or why it was unavailable).
+    pub(crate) lock_path: String,
+    /// Every candidate considered, in resolution order.
+    pub(crate) candidates: Vec<String>,
+}
+
+/// Resolve the dashboard base URL: an explicit `--url` wins; otherwise the
+/// listener recorded in service-instance.json (scheme from the recorded TLS
+/// posture, host:port from the recorded listen); otherwise the default.
+pub(crate) fn resolve_dashboard_listener(
+    explicit_url: Option<&str>,
+    default_url: &str,
+) -> DashboardListener {
+    let (lock_path, lock_base_url) = match default_service_instance_lock_path() {
+        Ok(path) => {
+            let lock_path = path.display().to_string();
+            let base_url = match discover_service_instance_at(&path) {
+                ServiceInstanceDiscovery::Present { listen, scheme, .. } => {
+                    Some(format!("{scheme}://{listen}"))
+                }
+                _ => None,
+            };
+            (lock_path, base_url)
+        }
+        Err(_) => ("unavailable (no XDG_STATE_HOME or HOME)".to_owned(), None),
+    };
+
+    if let Some(url) = explicit_url {
+        return DashboardListener {
+            base_url: url.to_owned(),
+            listener: listener_host_port(url).unwrap_or_else(|| url.to_owned()),
+            source: "--url",
+            lock_path,
+            candidates: vec![url.to_owned()],
+        };
+    }
+
+    match lock_base_url {
+        Some(base_url) => DashboardListener {
+            listener: listener_host_port(&base_url).unwrap_or_else(|| base_url.clone()),
+            candidates: vec![base_url.clone(), default_url.to_owned()],
+            base_url,
+            source: "service-instance",
+            lock_path,
+        },
+        None => DashboardListener {
+            base_url: default_url.to_owned(),
+            listener: listener_host_port(default_url).unwrap_or_else(|| default_url.to_owned()),
+            source: "default",
+            lock_path,
+            candidates: vec![default_url.to_owned()],
+        },
+    }
+}
+
+/// Extract the bare `host:port` authority from a base URL (empty path/query
+/// stripped); `None` when the string is not `scheme://authority...`.
+fn listener_host_port(base_url: &str) -> Option<String> {
+    let rest = base_url.split_once("://")?.1;
+    let authority = rest
+        .find(['/', '?', '#'])
+        .map_or(rest, |index| &rest[..index]);
+    (!authority.is_empty()).then(|| authority.to_owned())
 }
 
 fn ensure_private_runtime_dir(path: &Path) -> io::Result<()> {
@@ -4979,17 +5074,24 @@ mod tests {
     #[test]
     fn service_instance_guard_refuses_second_instance_and_reports_discovery() {
         let path = test_root("service-instance").join("service-instance.json");
-        let first =
-            acquire_service_instance_guard_at(&path, "127.0.0.1:7070").expect("first guard");
+        let first = acquire_service_instance_guard_at(&path, "127.0.0.1:7070", "https")
+            .expect("first guard");
 
         let discovery = discover_service_instance_at(&path);
-        let ServiceInstanceDiscovery::Present { pid, listen, .. } = discovery else {
+        let ServiceInstanceDiscovery::Present {
+            pid,
+            listen,
+            scheme,
+            ..
+        } = discovery
+        else {
             panic!("expected present discovery");
         };
         assert_eq!(pid, std::process::id());
         assert_eq!(listen, "127.0.0.1:7070");
+        assert_eq!(scheme, "https");
 
-        let err = acquire_service_instance_guard_at(&path, "127.0.0.1:7071")
+        let err = acquire_service_instance_guard_at(&path, "127.0.0.1:7071", "http")
             .expect_err("second guard is refused");
         assert_eq!(err.code, "ORACLEMCP_SERVICE_ALREADY_RUNNING");
         assert_eq!(err.exit_code, 3);
@@ -5005,6 +5107,20 @@ mod tests {
     }
 
     #[test]
+    fn listener_host_port_strips_scheme_path_and_query() {
+        assert_eq!(
+            listener_host_port("https://127.0.0.1:7443/dashboard/pair").as_deref(),
+            Some("127.0.0.1:7443")
+        );
+        assert_eq!(
+            listener_host_port("http://[::1]:7094?x=1").as_deref(),
+            Some("[::1]:7094")
+        );
+        assert_eq!(listener_host_port("127.0.0.1:7070"), None);
+        assert_eq!(listener_host_port("http://"), None);
+    }
+
+    #[test]
     fn service_instance_locks_are_scoped_to_each_state_root() {
         let root = test_root("service-instance-state-roots");
         let first_path = service_instance_lock_path_for_state_dir(&root.join("state-a"));
@@ -5013,9 +5129,9 @@ mod tests {
         assert!(first_path.ends_with(SERVICE_INSTANCE_LOCK_FILE));
         assert!(second_path.ends_with(SERVICE_INSTANCE_LOCK_FILE));
 
-        let first = acquire_service_instance_guard_at(&first_path, "127.0.0.1:7070")
+        let first = acquire_service_instance_guard_at(&first_path, "127.0.0.1:7070", "http")
             .expect("first state root guard");
-        let second = acquire_service_instance_guard_at(&second_path, "127.0.0.1:7071")
+        let second = acquire_service_instance_guard_at(&second_path, "127.0.0.1:7071", "http")
             .expect("second state root guard");
 
         assert!(matches!(
@@ -5033,11 +5149,11 @@ mod tests {
     #[test]
     fn service_instance_guard_drop_does_not_clear_replaced_lock() {
         let path = test_root("service-instance-replaced").join("service-instance.json");
-        let first =
-            acquire_service_instance_guard_at(&path, "127.0.0.1:7070").expect("first guard");
+        let first = acquire_service_instance_guard_at(&path, "127.0.0.1:7070", "http")
+            .expect("first guard");
         fs::remove_file(&path).expect("simulate operator-cleared stale lock");
-        let second =
-            acquire_service_instance_guard_at(&path, "127.0.0.1:7071").expect("second guard");
+        let second = acquire_service_instance_guard_at(&path, "127.0.0.1:7071", "http")
+            .expect("second guard");
 
         drop(first);
         let discovery = discover_service_instance_at(&path);
@@ -5057,13 +5173,15 @@ mod tests {
             !service_instance_pid_is_alive(stale_pid),
             "test requires a non-running pid for stale-lock simulation"
         );
-        let stale = ServiceInstanceMetadata {
-            schema_version: SERVICE_INSTANCE_SCHEMA_VERSION,
-            pid: stale_pid,
-            listen: "127.0.0.1:7070".to_owned(),
-            started_unix_ms: 1,
-            token: "stale-token".to_owned(),
-        };
+        // Written as raw JSON with no `scheme`: an older lock predating the TLS
+        // posture field must still deserialize (defaulting to plaintext http).
+        let stale = serde_json::json!({
+            "schema_version": SERVICE_INSTANCE_SCHEMA_VERSION,
+            "pid": stale_pid,
+            "listen": "127.0.0.1:7070",
+            "started_unix_ms": 1,
+            "token": "stale-token",
+        });
         fs::create_dir_all(path.parent().expect("lock parent")).expect("runtime dir");
         fs::write(
             &path,
@@ -5071,7 +5189,7 @@ mod tests {
         )
         .expect("write stale lock");
 
-        let guard = acquire_service_instance_guard_at(&path, "127.0.0.1:7071")
+        let guard = acquire_service_instance_guard_at(&path, "127.0.0.1:7071", "http")
             .expect("stale lock should be cleared and replaced");
         let discovery = discover_service_instance_at(&path);
         let ServiceInstanceDiscovery::Present { pid, listen, .. } = discovery else {

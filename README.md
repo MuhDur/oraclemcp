@@ -449,7 +449,15 @@ separates their service-owned credentials, audit records, and durable state.
 
 The browser dashboard is paired separately even on loopback. `oraclemcp
 dashboard` creates a 0600 one-time ticket under the user runtime directory and
-prints a secret-free `/dashboard/pair` URL alongside a one-time code. That URL
+prints a secret-free `/dashboard/pair` URL alongside a one-time code. A
+`dashboard` run without `--url` resolves the listener recorded in the
+`service-instance.json` lock (its recorded TLS posture picks the scheme, its
+recorded listen picks host:port), so `om dashboard` pairs with the live instance
+even on a non-default port instead of probing `:7070`; with no lock it falls
+back to `http://127.0.0.1:7070`. The resolved `listener` and its `source`
+(`service-instance`, `--url`, or `default`) are printed in the human reminder and
+returned in the `--json` object, so an operator with several state roots can see
+which instance the code belongs to. That URL
 serves a script-free form; submitting the code POSTs it in the request body, and
 the server exchanges it for an HttpOnly, SameSite=Strict dashboard cookie. The
 code is never read from the request target — a `/dashboard/pair?ticket=...` URL

@@ -3334,7 +3334,7 @@ fn dashboard_command_parses() {
         Some(Command::Dashboard {
             ref url,
             no_open: true,
-        }) if url == "http://127.0.0.1:7777"
+        }) if url.as_deref() == Some("http://127.0.0.1:7777")
     ));
 }
 
@@ -3371,7 +3371,7 @@ fn om_alias_argv0_aware_parses_dashboard_help() {
         Some(Command::Dashboard {
             ref url,
             no_open: true,
-        }) if url == "http://127.0.0.1:7777"
+        }) if url.as_deref() == Some("http://127.0.0.1:7777")
     ));
 
     let mut help = Vec::new();

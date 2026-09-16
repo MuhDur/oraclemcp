@@ -116,9 +116,11 @@ pub(crate) enum Command {
     },
     /// Print a listener-bound one-time dashboard pairing URL.
     Dashboard {
-        /// Base URL of the running local oraclemcp HTTP service.
-        #[arg(long, default_value = "http://127.0.0.1:7070")]
-        url: String,
+        /// Base URL of the running local oraclemcp HTTP service. When omitted,
+        /// the listener recorded in `<state>/oraclemcp/service-instance.json` is
+        /// used, falling back to `http://127.0.0.1:7070`.
+        #[arg(long)]
+        url: Option<String>,
         /// Suppress the manual-open reminder (pairing URLs are never auto-launched).
         #[arg(long)]
         no_open: bool,
