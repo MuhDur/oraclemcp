@@ -4859,16 +4859,30 @@ export function explorerSearchAuthorityReady(input: {
   return input.includeObjects || input.includeSource;
 }
 
+/** Separates Explorer facts obtained under different dashboard authorities. */
+export function explorerAuthorityQueryIdentity(
+  lane: OperatorLaneTarget | undefined,
+  sessionAuthority: string | null
+): readonly [string, number, string] {
+  return [
+    lane?.laneId ?? "stateless",
+    lane?.generation ?? 0,
+    sessionAuthority ?? "no-authority"
+  ];
+}
+
 /** Detail reads use the same live session and connection authority as search. */
 export function explorerDetailAuthorityReady(input: {
   sessionStatus: DashboardQueryStatus;
   connectionStatus: DashboardQueryStatus;
   connected: boolean;
+  sessionAuthority: string | null;
 }): boolean {
   return (
     input.sessionStatus === "success" &&
     input.connectionStatus === "success" &&
-    input.connected
+    input.connected &&
+    input.sessionAuthority !== null
   );
 }
 
@@ -4932,6 +4946,16 @@ function ExplorerPage(): React.ReactElement {
     refetchInterval: 60_000,
     retry: 1
   });
+  const sessionAuthority = dashboardAuthorityIdentity(
+    session.status === "success" ? session.data : undefined
+  );
+  const purgeExplorerAuthorityState = React.useCallback(() => {
+    clearExplorerMetadataCache();
+    setCacheVersion((version) => version + 1);
+    invalidateExplorerDetail();
+    setGlobalSearchRequest(null);
+  }, [invalidateExplorerDetail]);
+  useDashboardAuthorityPurge(sessionAuthority, purgeExplorerAuthorityState);
   const activeLanes = useQuery({
     queryKey: ["active-lanes"],
     queryFn: fetchActiveLanes,
@@ -4949,6 +4973,7 @@ function ExplorerPage(): React.ReactElement {
       : { lane: null, invalidated: false };
   const selectedLane = laneSelection.lane ?? undefined;
   const explorerLane = selectedLane ? laneIdentity(selectedLane) : undefined;
+  const explorerAuthorityKey = explorerAuthorityQueryIdentity(explorerLane, sessionAuthority);
   const connectionReady =
     activeLanes.status === "success" && (!stateful || Boolean(explorerLane));
 
@@ -4988,8 +5013,7 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "connection",
-      explorerLane?.laneId ?? "stateless",
-      explorerLane?.generation ?? 0
+      ...explorerAuthorityKey
     ],
     queryFn: async ({ signal }) => {
       if (!session.data) {
@@ -5024,8 +5048,7 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "schemas",
-      explorerLane?.laneId ?? "stateless",
-      explorerLane?.generation ?? 0,
+      ...explorerAuthorityKey,
       debouncedSchemaFilter,
       maxRows,
       cacheScopeToken(schemasScope),
@@ -5062,8 +5085,7 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "objects",
-      explorerLane?.laneId ?? "stateless",
-      explorerLane?.generation ?? 0,
+      ...explorerAuthorityKey,
       owner,
       objectType,
       debouncedNameLike,
@@ -5109,8 +5131,7 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "global-objects",
-      explorerLane?.laneId ?? "stateless",
-      explorerLane?.generation ?? 0,
+      ...explorerAuthorityKey,
       globalSearchRequest,
       cacheScopeToken(globalScope),
       cacheVersion
@@ -5156,8 +5177,7 @@ function ExplorerPage(): React.ReactElement {
     queryKey: [
       "explorer",
       "global-source",
-      explorerLane?.laneId ?? "stateless",
-      explorerLane?.generation ?? 0,
+      ...explorerAuthorityKey,
       globalSearchRequest,
       cacheScopeToken(globalScope),
       cacheVersion
@@ -5317,7 +5337,8 @@ function ExplorerPage(): React.ReactElement {
   const detailAuthorityReady = explorerDetailAuthorityReady({
     sessionStatus: session.status,
     connectionStatus: connection.status,
-    connected
+    connected,
+    sessionAuthority
   });
   const sessionTone =
     session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";

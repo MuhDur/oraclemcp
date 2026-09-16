@@ -36,6 +36,7 @@ import {
   decodeExplorerSourceRows,
   expireDashboardAuthorityAfterSessionError,
   expireDashboardAuthority,
+  explorerAuthorityQueryIdentity,
   explorerDetailCompletionIsCurrent,
   explorerDetailAuthorityReady,
   explorerDetailRequestIdentity,
@@ -1939,21 +1940,67 @@ describe("frontend transport and live-data hardening", () => {
 });
 
 describe("Explorer detail authority", () => {
+  it("partitions every Explorer query by lane generation and session authority", () => {
+    expect(explorerAuthorityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-a")).toEqual(
+      ["lane-a", 7, "session-a"]
+    );
+    expect(explorerAuthorityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-b")).not.toEqual(
+      explorerAuthorityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-a")
+    );
+    expect(explorerAuthorityQueryIdentity(undefined, null)).toEqual([
+      "stateless",
+      0,
+      "no-authority"
+    ]);
+  });
+
   it("requires a live paired session and an authoritative connected database", () => {
     expect(
       explorerDetailAuthorityReady({
         sessionStatus: "success",
         connectionStatus: "success",
-        connected: true
+        connected: true,
+        sessionAuthority: "session-a"
       })
     ).toBe(true);
 
     for (const input of [
-      { sessionStatus: "error", connectionStatus: "success", connected: true },
-      { sessionStatus: "pending", connectionStatus: "success", connected: true },
-      { sessionStatus: "success", connectionStatus: "error", connected: true },
-      { sessionStatus: "success", connectionStatus: "pending", connected: true },
-      { sessionStatus: "success", connectionStatus: "success", connected: false }
+      {
+        sessionStatus: "error",
+        connectionStatus: "success",
+        connected: true,
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "pending",
+        connectionStatus: "success",
+        connected: true,
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "success",
+        connectionStatus: "error",
+        connected: true,
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "success",
+        connectionStatus: "pending",
+        connected: true,
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "success",
+        connectionStatus: "success",
+        connected: false,
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "success",
+        connectionStatus: "success",
+        connected: true,
+        sessionAuthority: null
+      }
     ] as const) {
       expect(explorerDetailAuthorityReady(input)).toBe(false);
     }
