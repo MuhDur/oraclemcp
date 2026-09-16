@@ -1345,7 +1345,12 @@ const DRIVER_CX_BACKEND_CAPABILITIES: OracleBackendCapabilities = OracleBackendC
 #[cfg(feature = "oracledb")]
 const OFFICIAL_ORACLE_BACKEND_CAPABILITIES: OracleBackendCapabilities = OracleBackendCapabilities {
     password: true,
-    pem_wallet: true,
+    // `oracledb` accepts a wallet directory pathname, not an immutable,
+    // already-verified PEM capability. A cwallet can appear or the directory
+    // can be swapped after selection but before the synchronous driver opens
+    // it, so mutable wallet directories stay driver-cx-only until consumption
+    // can be bound to verified material.
+    pem_wallet: false,
     iam_token: false,
     auto_login_wallet: false,
     driver_cx_only: false,
@@ -1539,11 +1544,11 @@ async fn connect_with_backend_registry(
 ///
 /// With the `oracledb` feature disabled this is byte-for-byte the retained
 /// driver-cx connect path. With it enabled, driver-cx remains primary for every
-/// capability. A password/PEM driver-cx acquisition error receives one guarded
-/// official alternate and, only if that alternate fails, one fresh driver-cx
-/// retry. IAM, external/proxy, and auto-login-wallet routes never reach the
-/// official adapter. No statement, transaction, or opened session is ever
-/// routed through this function again.
+/// capability. A password-only driver-cx acquisition error receives one
+/// guarded official alternate and, only if that alternate fails, one fresh
+/// driver-cx retry. Mutable wallet directories, IAM, external/proxy, and
+/// auto-login-wallet routes never reach the official adapter. No statement,
+/// transaction, or opened session is ever routed through this function again.
 pub async fn connect_oracle(
     cx: &Cx,
     options: OracleConnectOptions,
@@ -7241,6 +7246,7 @@ mod tests {
         official_errors: Arc<Mutex<VecDeque<DbError>>>,
         attempts: Arc<Mutex<Vec<OracleBackend>>>,
         statement_calls: Arc<AtomicUsize>,
+        late_auto_login_wallet: Arc<Mutex<Option<PathBuf>>>,
     }
 
     #[cfg(feature = "oracledb")]
@@ -7255,11 +7261,19 @@ mod tests {
                 official_errors: Arc::new(Mutex::new(official_errors.into())),
                 attempts: Arc::new(Mutex::new(Vec::new())),
                 statement_calls: Arc::new(AtomicUsize::new(0)),
+                late_auto_login_wallet: Arc::new(Mutex::new(None)),
             }
         }
 
         fn attempts(&self) -> Vec<OracleBackend> {
             self.attempts.lock().expect("selector attempt lock").clone()
+        }
+
+        fn write_auto_login_wallet_after_selection(&self, wallet: PathBuf) {
+            *self
+                .late_auto_login_wallet
+                .lock()
+                .expect("late wallet mutation lock") = Some(wallet);
         }
     }
 
@@ -7276,6 +7290,16 @@ mod tests {
                 .lock()
                 .expect("selector attempt lock")
                 .push(backend);
+            if backend == OracleBackend::RustOracle
+                && let Some(wallet) = self
+                    .late_auto_login_wallet
+                    .lock()
+                    .expect("late wallet mutation lock")
+                    .take()
+            {
+                std::fs::write(wallet.join(WalletFileChoice::Sso.file_name()), b"test-sso")
+                    .expect("simulate cwallet.sso appearing after capability selection");
+            }
             let errors = match backend {
                 OracleBackend::RustOracle => &self.rust_errors,
                 OracleBackend::OfficialOracle => &self.official_errors,
@@ -7519,6 +7543,63 @@ mod tests {
         });
         assert!(matches!(auto_login_error, DbError::Connect(_)));
         assert_eq!(auto_login_factory.attempts(), [OracleBackend::RustOracle]);
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[test]
+    fn late_auto_login_wallet_appearance_never_reaches_official_alternate() {
+        struct TestWalletDir(PathBuf);
+
+        impl Drop for TestWalletDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_nanos();
+        let wallet = TestWalletDir(std::env::temp_dir().join(format!(
+            "oraclemcp-selector-wallet-boundary-{}-{nonce}",
+            std::process::id()
+        )));
+        std::fs::create_dir_all(&wallet.0)
+            .expect("create a PEM-classified wallet directory without cwallet.sso");
+        let mut options = selector_test_options();
+        options.wallet_location = Some(wallet.0.clone());
+        assert!(!wallet_uses_auto_login(&options));
+        assert_eq!(
+            connection_capability(&options),
+            OracleConnectionCapability::PemWallet,
+            "selection sees a mutable PEM directory before cwallet.sso appears"
+        );
+
+        let factory = RecordingBackendFactory::with_errors(
+            vec![DbError::Connect(
+                "simulated driver-cx wallet connect failure".to_owned(),
+            )],
+            Vec::new(),
+        );
+        factory.write_auto_login_wallet_after_selection(wallet.0.clone());
+        let factory_for_connect = factory.clone();
+        let error = run_selector_test(move |cx| async move {
+            match connect_with_backend_registry(&cx, options, &factory_for_connect).await {
+                Ok(_) => panic!("a mutable wallet directory is driver-cx-only"),
+                Err(error) => error,
+            }
+        });
+
+        assert!(matches!(error, DbError::Connect(_)));
+        assert!(
+            wallet.0.join(WalletFileChoice::Sso.file_name()).is_file(),
+            "the mutation occurs only after the registry has selected the PEM capability"
+        );
+        assert_eq!(
+            factory.attempts(),
+            [OracleBackend::RustOracle],
+            "the late cwallet must not be handed to the official alternate"
+        );
     }
 
     #[cfg(feature = "oracledb")]

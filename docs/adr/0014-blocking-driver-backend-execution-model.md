@@ -5,8 +5,8 @@
 Accepted. The feature-gated official-driver adapter and its acquisition router
 are implemented. On 2026-09-16 the operator superseded the proposed default
 flip: driver-cx remains the safe primary, while the official driver remains an
-actively tried, bounded alternate for capable password and PEM-wallet
-acquisitions. The decision does not permit a deadline/thread-leak exception, a
+actively tried, bounded alternate for password acquisitions without a mutable
+wallet-directory configuration. The decision does not permit a deadline/thread-leak exception, a
 statement retry, or removal of the permanent driver-cx routes.
 
 ## Context
@@ -40,6 +40,11 @@ completion acknowledgement before admitting another mailbox command. A healthy
 caller acknowledges only after its post-completion `Cx` checkpoint; a cancelled
 or dropped caller closes the acknowledgement, quarantining and retiring the
 actor before a queued second operation can execute.
+That acknowledgement wait is bounded by the copied absolute request deadline,
+or by a fixed 250 ms grace when the request has no deadline. A live-but-never-
+polled caller therefore cannot retain the session or owner thread indefinitely:
+expiry drops the acknowledgement receiver, quarantines the session, and retires
+the actor before any queued operation can execute.
 Explicit connection close is a terminal actor operation. An unrecovered row
 stream's destructor cannot await, so it synchronously quarantines the session
 and makes a best-effort bounded discard wakeup; whether that wakeup enqueues or
@@ -51,10 +56,12 @@ unwinding through a caller-facing runtime.
 
 Automatic cross-driver routing is restricted to connection acquisition.
 Driver-cx is the primary acquisition for every capability. For compatible basic
-or PEM authentication only, a driver-cx acquisition error may make one guarded
+password authentication without a mutable wallet directory only, a driver-cx
+acquisition error may make one guarded
 official-driver alternate attempt and, if that alternate fails, one fresh
 driver-cx fallback attempt. IAM/OCI-ADB tokens, `cwallet.sso` auto-login,
-external/proxy, and other driver-cx-only authentication never reach the
+all mutable wallet-directory configurations, external/proxy, and other
+driver-cx-only authentication never reach the
 official adapter. The router never retries a statement or transfers an opened
 session across drivers.
 
@@ -75,21 +82,26 @@ retirement, and no-reuse outcome.
 completion acknowledgement closes the former reply-to-next-admission race: the
 cancelled first caller quarantines the actor, the queued second caller does not
 execute, and it observes the quarantined outcome.
+`withheld_live_completion_ack_quarantines_and_retires_actor_within_grace`
+proves the complementary liveness case: a live caller that retains but never
+polls its acknowledgement sender causes bounded quarantine/thread retirement,
+and a queued second command never executes.
 
 `connection.rs` owns a small typed backend registry. In an `oracledb` feature
-build, driver-cx is first for every acquisition. A compatible password/PEM
-driver-cx error may use the registry's official alternate; that alternate
-enters `OfficialOracleConnection::connect` only through the bounded guard
-below. An alternate failure gets exactly one fresh driver-cx acquisition while
-the caller remains live. IAM tokens, external/proxy auth, and `cwallet.sso`
-auto-login have no official registration and therefore select driver-cx only.
-The official adapter independently re-checks for `cwallet.sso` on its owner
-thread immediately before it builds an official configuration, so a wallet that
-changes after selection is refused at the consumption boundary rather than
-being silently treated as PEM-capable.
-`late_cwallet_appearance_refuses_official_config_before_consumption` proves a
-directory observed as PEM-eligible at selection is rejected when
-`cwallet.sso` appears before official configuration consumption.
+build, driver-cx is first for every acquisition. A password acquisition without
+a mutable wallet directory may use the registry's official alternate; that
+alternate enters `OfficialOracleConnection::connect` only through the bounded
+guard below. An alternate failure gets exactly one fresh driver-cx acquisition
+while the caller remains live. IAM tokens, external/proxy auth, and
+`cwallet.sso` auto-login have no official registration and therefore select
+driver-cx only. The registry also marks `PemWallet` unsupported by the official
+alternate: the beta driver consumes a mutable wallet-directory pathname, which
+cannot be bound to immutable, verified PEM material. Thus no late
+`cwallet.sso` appearance or directory replacement can be passed to the
+official alternate.
+`late_auto_login_wallet_appearance_never_reaches_official_alternate` mutates a
+wallet after the registry's PEM classification but before the primary
+connection attempt returns; the only recorded attempt is driver-cx.
 There is no fallback after a session has been returned, and no statement is
 retried or migrated across drivers. Without the feature, the registry contains
 only driver-cx and the connect path is unchanged.
@@ -124,15 +136,17 @@ after every direct and fallback capability has an official replacement.
 
 The 2026-09-16 decision keeps `oracledb` opt-in at compile time and keeps
 driver-cx first when that feature is enabled. The official driver is not
-shelved: a compatible driver-cx acquisition error actively tries it through
-the bounded connection guard. This does not authorize a statement retry, an
-in-session migration, or driver-cx removal. The router remains
+shelved: a compatible password-only driver-cx acquisition error actively tries
+it through the bounded connection guard. Mutable wallet directories stay
+driver-cx-only until their consumption can be immutable and verified. This does
+not authorize a statement retry, an in-session migration, or driver-cx removal.
+The router remains
 acquisition-only:
 
 | Authentication/configuration | Current route | Evidence status |
 | --- | --- | --- |
 | Basic username/password | driver-cx primary; guarded official alternate after a driver-cx acquisition error | Direct dual-backend local-lab proof for connect, query, transaction, errors, and close; password profile matrix evidence |
-| TLS/TCPS with PEM wallet | driver-cx primary; guarded official alternate after a driver-cx acquisition error | The same direct dual-backend proof against a PEM wallet/SNI/DN-match lab profile remains live-required |
+| TLS/TCPS with PEM wallet | driver-cx directly | Mutable wallet directories are excluded from the official alternate pending an immutable verified-consumption design; direct adapter parity remains live-required but does not license routing |
 | OCI IAM / Autonomous DB token | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
 | `cwallet.sso` auto-login | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
 | External/proxy or other driver-cx-only auth | driver-cx directly | Keep this route; no silent degradation to password auth |
@@ -158,10 +172,12 @@ that it continues to exercise the existing driver-cx-only path unchanged.
    `#[ignore]`: selecting it without `ORACLEMCP_DUAL_BACKEND_LAB=1` and all
    local-lab credentials fails rather than converting absent infrastructure
    into a passing claim.
-4. The analogous TCPS + PEM-wallet lab run passes, including the configured
-   SNI and certificate-DN posture. The test record must identify the local
-   lab/version and command, but never put a live OCI/customer identifier or
-   secret in a tracked artifact.
+4. The analogous direct TCPS + PEM-wallet adapter-parity lab run passes,
+   including the configured SNI and certificate-DN posture. It is technical
+   parity evidence only: until immutable wallet consumption exists, the
+   registry must continue to route mutable wallet directories to driver-cx.
+   The test record must identify the local lab/version and command, but never
+   put a live OCI/customer identifier or secret in a tracked artifact.
 5. The bounded live matrix records the remaining shared-trait semantics:
    timeout/cancel with uncertain-session quarantine, owned streaming/LOB
    recovery, close, identity, and the supported optional capability set. Each
@@ -183,7 +199,9 @@ classified DDL/DML rollback/commit behavior. In particular, DATE remained
 `2026-06-01T12:00:00.123456789`, with no fabricated UTC suffix. The target
 creates and drops uniquely named local VECTOR tables; it does not credit an
 absent pre-seeded fixture. This is one basic-auth row, not a qualified matrix.
-TCPS + PEM remains live-required and uncredited.
+TCPS + PEM direct-adapter parity remains live-required and uncredited; mutable
+wallet-directory production routing remains driver-cx-only even after that
+technical parity row passes.
 
 The Free23 run closed the observed VECTOR gap
 (`oraclemcp-xoflp.1.3`) and exposed/fixed the beta driver's malformed
@@ -207,6 +225,15 @@ plain TIMESTAMP, while LTZ/TSTZ retain their offset-bearing representation.
 Deterministic adapter and public-serialization regressions prove that a
 zero-valued internal offset cannot fabricate UTC. The separate live basic-auth
 parity row has now passed against the local Free23 fixture.
+The completion-acknowledgement liveness gap (`oraclemcp-xoflp.1.12`) is
+resolved: no-deadline requests receive a fixed 250 ms acknowledgement grace,
+deadline-bearing requests use their copied remaining absolute deadline, and a
+withheld live acknowledgement deterministically quarantines/drops the resource
+before a queued second call can execute. The mutable-wallet TOCTOU gap
+(`oraclemcp-xoflp.1.11`) is resolved at the production routing boundary by
+excluding every mutable wallet-directory capability from the official
+registration; direct adapter qualification cannot re-enable that path without
+an immutable verified-consumption design and a new review.
 The following residual limits remain explicitly tracked:
 
 - `oraclemcp-xoflp.1.6`: the pinned `26.0.0-beta.3` source invokes blocking
@@ -222,7 +249,8 @@ The following residual limits remain explicitly tracked:
   target compiles and refuses an auto-login wallet, but no explicit PEM-only
   TCPS lab credentials are available on this host. It needs one opted-in
   direct driver-cx/official connect, ping, identity, and close run before the
-  password+PEM default scope is fully evidenced.
+  direct adapter mapping is fully evidenced. It does not make the mutable
+  wallet directory eligible for production official routing.
 
 The pinned official driver is also `26.0.0-beta.3`; the beta API/version risk
 remains a release-signoff consideration even if all behavioral rows pass.

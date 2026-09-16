@@ -34,6 +34,12 @@ const OFFICIAL_CONNECT_GUARD_CAPACITY: usize = 2;
 /// The longest time a caller may wait to start an official-driver connect.
 /// The caller's own remaining deadline can only make this shorter.
 const OFFICIAL_CONNECT_GUARD_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+/// A caller which has received an actor reply must promptly confirm the
+/// post-completion checkpoint before that physical session is reusable. When
+/// the request carried no absolute deadline, this finite grace is the actor's
+/// liveness fuse: a live-but-never-polled caller cannot retain a session or
+/// actor thread indefinitely.
+const ACTOR_COMPLETION_ACK_GRACE: Duration = Duration::from_millis(250);
 
 /// Process-wide, Cx-aware bulkhead for uninterruptible initial official-driver
 /// TCP/TLS connection work.
@@ -553,7 +559,7 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             request,
             deadline,
             reply,
-            mut completion_ack,
+            completion_ack,
             dispose_after_reply,
         } = command
         else {
@@ -606,14 +612,12 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             }
             break;
         }
-        match completion_ack.recv(&cx).await {
-            Ok(ActorCompletionAck::Continue) => {}
-            Ok(ActorCompletionAck::Quarantine) | Err(_) => {
-                state.quarantine(
-                    "caller did not confirm an official Oracle actor completion; session state is uncertain",
-                );
-                break;
-            }
+        let acknowledgement = completion_ack_wait(&cx, deadline, completion_ack).await;
+        if !matches!(acknowledgement, Ok(ActorCompletionAck::Continue)) {
+            state.quarantine(
+                "caller did not confirm an official Oracle actor completion before the acknowledgement boundary; session state is uncertain",
+            );
+            break;
         }
         if dispose_after_reply {
             state.close();
@@ -630,6 +634,39 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
     }
 
     state.close();
+}
+
+/// Wait for the caller's post-completion disposition without allowing a live
+/// but stalled caller task to retain the thread-owned session indefinitely.
+///
+/// The actor uses the request's copied absolute deadline when one exists. A
+/// deadline that elapsed while the reply was in flight is fail-closed before
+/// polling the acknowledgement. Requests without a deadline receive only the
+/// fixed, documented grace above. `race_timeout` drops the waiter on expiry,
+/// which drops the receiver and lets the caller's retained sender observe that
+/// the actor has retired rather than permitting another command.
+async fn completion_ack_wait(
+    cx: &Cx,
+    deadline: Option<Time>,
+    mut completion_ack: oneshot::Receiver<ActorCompletionAck>,
+) -> Result<ActorCompletionAck, ()> {
+    let now = cx.now();
+    let timeout = match deadline {
+        Some(deadline) if now >= deadline => return Err(()),
+        Some(deadline) => Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos())),
+        None => ACTOR_COMPLETION_ACK_GRACE,
+    };
+    let acknowledge_cx = cx.clone();
+    let acknowledgement = Box::pin(async move { completion_ack.recv(&acknowledge_cx).await });
+    match cx.race_timeout(timeout, vec![acknowledgement]).await {
+        Ok(Ok(ActorCompletionAck::Continue))
+            if deadline.is_none_or(|deadline| cx.now() < deadline) =>
+        {
+            Ok(ActorCompletionAck::Continue)
+        }
+        Ok(Ok(ActorCompletionAck::Quarantine)) => Ok(ActorCompletionAck::Quarantine),
+        Ok(Err(_)) | Err(_) | Ok(Ok(ActorCompletionAck::Continue)) => Err(()),
+    }
 }
 
 fn checkpoint(cx: &Cx, phase: &str) -> Result<(), DbError> {
@@ -1068,6 +1105,124 @@ mod tests {
         ));
 
         drop(second_completion);
+    }
+
+    #[test]
+    fn withheld_live_completion_ack_quarantines_and_retires_actor_within_grace() {
+        #[derive(Clone, Copy)]
+        enum Request {
+            First,
+            Second,
+        }
+
+        struct Resource(mpsc::Sender<()>);
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0
+                    .send(())
+                    .expect("actor resource reports its bounded retirement");
+            }
+        }
+
+        let (retired_tx, retired_rx) = mpsc::channel();
+        let first_executions = Arc::new(AtomicUsize::new(0));
+        let second_executions = Arc::new(AtomicUsize::new(0));
+        let first_for_actor = Arc::clone(&first_executions);
+        let second_for_actor = Arc::clone(&second_executions);
+        let actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                move || Resource(retired_tx),
+                move |_, request, _| {
+                    match request {
+                        Request::First => {
+                            first_for_actor.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Request::Second => {
+                            second_for_actor.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .expect("actor thread starts for bounded acknowledgement test"),
+        );
+
+        let (first_completion, mut second_wait) = block_on_actor({
+            let actor = Arc::clone(&actor);
+            async move {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                let (first_reply, mut first_wait) = oneshot::channel();
+                let (first_completion, first_completion_ack) = oneshot::channel();
+                let first_send = actor
+                    .mailbox
+                    .send(
+                        &cx,
+                        ActorCommand::Call {
+                            request: Request::First,
+                            deadline: None,
+                            reply: first_reply,
+                            completion_ack: first_completion_ack,
+                            dispose_after_reply: false,
+                        },
+                    )
+                    .await;
+                assert!(first_send.is_ok(), "first caller enters the actor");
+                assert!(matches!(
+                    first_wait.recv(&cx).await,
+                    Ok(ActorReply::Completed(Ok(())))
+                ));
+
+                let (second_reply, second_wait) = oneshot::channel();
+                let (_second_completion, second_completion_ack) = oneshot::channel();
+                let second_send = actor
+                    .mailbox
+                    .send(
+                        &cx,
+                        ActorCommand::Call {
+                            request: Request::Second,
+                            deadline: None,
+                            reply: second_reply,
+                            completion_ack: second_completion_ack,
+                            dispose_after_reply: false,
+                        },
+                    )
+                    .await;
+                assert!(
+                    second_send.is_ok(),
+                    "second caller queues behind the withheld live acknowledgement"
+                );
+                (first_completion, second_wait)
+            }
+        });
+
+        retired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("a live-but-withheld acknowledgement must not retain the actor indefinitely");
+        actor.join_for_test();
+        assert!(actor.is_quarantined_for_test());
+        assert_eq!(first_executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second_executions.load(Ordering::SeqCst),
+            0,
+            "a queued command cannot execute after its predecessor misses acknowledgement grace"
+        );
+        let second_result: Result<(), DbError> = block_on_actor(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            match second_wait.recv(&cx).await {
+                Err(oneshot::RecvError::Closed) => Err(actor.state.quarantined_error()),
+                _ => panic!("queued second caller must receive actor closure"),
+            }
+        });
+        assert!(matches!(
+            second_result,
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                ..
+            })
+        ));
+
+        drop(first_completion);
     }
 
     #[test]

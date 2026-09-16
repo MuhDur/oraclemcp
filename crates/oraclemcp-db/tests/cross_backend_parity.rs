@@ -490,8 +490,8 @@ fn live_cross_backend_tcps_pem_connection_parity() {
         let options = tcps_pem_lab_options();
         assert_eq!(
             select_connection_backend(&options),
-            OracleBackend::OfficialOracle,
-            "the capability selector must make PEM wallet acquisition official-primary"
+            OracleBackend::RustOracle,
+            "mutable PEM wallet acquisition remains driver-cx-primary"
         );
 
         let driver_cx = RustOracleConnection::connect(&cx, options.clone())
