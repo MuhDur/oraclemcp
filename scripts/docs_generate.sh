@@ -12,8 +12,10 @@
 #     `oraclemcp robot-docs config --markdown`
 #
 # `--write` regenerates every block in place. `--check` renders fresh blocks and
-# fails (exit 1) with a unified diff on any drift. `--selftest` proves the gate
-# refuses a tampered block and accepts a clean one.
+# fails (exit 1) with a unified diff on any drift. The README tables document
+# the default distribution, so every mode refuses a renderer built with
+# `plsql-intelligence`. `--selftest` proves the gate refuses both a tampered
+# block and a feature-enabled renderer.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,7 +30,7 @@ Usage:
   scripts/docs_generate.sh --check     # fail (exit 1) with a diff on drift
   scripts/docs_generate.sh --selftest  # prove the gate can refuse tampering
 
-The renderer binary is $ORACLEMCP_BIN, or
+The default-feature renderer binary is $ORACLEMCP_BIN, or
 ${CARGO_TARGET_DIR:-<repo>/target}/debug/oraclemcp when unset. Build it first:
   CARGO_TARGET_DIR=<repo>/target scripts/build_lease.sh -- cargo build -p oraclemcp
 USAGE
@@ -57,6 +59,40 @@ done
 if [ -z "$BIN" ]; then
   echo "docs-generate: renderer binary not found or not executable" >&2
   echo "  build it with: CARGO_TARGET_DIR=$ROOT/target scripts/build_lease.sh -- cargo build -p oraclemcp" >&2
+  exit 2
+fi
+
+# README's tool and alias tables describe the default distribution. The config
+# reference is feature-independent, but handling the two outputs together means
+# a feature build must not quietly rewrite README with its extra PL/SQL tools.
+require_default_feature_renderer() {
+  local renderer="$1" engine
+  if ! engine="$("$renderer" --json info | python3 -c '
+import json
+import sys
+
+payload = json.load(sys.stdin)
+engine = payload.get("engine")
+if not isinstance(engine, bool):
+    raise SystemExit("oraclemcp --json info did not contain boolean engine")
+print(str(engine).lower())
+')"; then
+    echo "docs-generate: could not verify renderer feature set from $renderer --json info" >&2
+    return 1
+  fi
+  if [ "$engine" = "false" ]; then
+    return 0
+  fi
+  if [ "$engine" = "true" ]; then
+    echo "docs-generate: renderer $renderer was built with plsql-intelligence; refusing to generate default-distribution docs" >&2
+    echo "  build the default renderer with: CARGO_TARGET_DIR=$ROOT scripts/build_lease.sh -- cargo build -p oraclemcp" >&2
+    return 1
+  fi
+  echo "docs-generate: renderer $renderer reported invalid engine value $engine" >&2
+  return 1
+}
+
+if ! require_default_feature_renderer "$BIN"; then
   exit 2
 fi
 
@@ -154,6 +190,24 @@ done
 # Prove the comparison actually detects drift before trusting a pass.
 selftest() {
   local clean="README.md" tampered="$TMP_DIR/README.tampered.md"
+  local feature_renderer="$TMP_DIR/plsql-renderer" feature_output
+
+  # The default README must never be generated from a feature build. A tiny
+  # renderer fixture exercises the exact `--json info` contract used above,
+  # independent of which feature set compiled the real binary.
+  printf '%s\n' \
+    '#!/usr/bin/env sh' \
+    "printf '%s\\n' '{\"engine\":true}'" > "$feature_renderer"
+  chmod +x "$feature_renderer"
+  if feature_output="$(require_default_feature_renderer "$feature_renderer" 2>&1)"; then
+    echo "docs-generate: selftest failed: a plsql-intelligence renderer was accepted" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$feature_output" | grep -Fq 'plsql-intelligence'; then
+    echo "docs-generate: selftest failed: feature renderer refusal was not diagnostic" >&2
+    return 1
+  fi
+
   if ! compare_file "$clean" "" >/dev/null; then
     echo "docs-generate: selftest failed: a clean README reported drift" >&2
     return 1
