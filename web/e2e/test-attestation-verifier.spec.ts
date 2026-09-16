@@ -14,7 +14,13 @@ async function stubDashboard(page: Page, options: DashboardStubOptions): Promise
         csrf_header: "x-oraclemcp-csrf",
         action_ticket_header: "x-oraclemcp-action-ticket",
         expires_unix: 4_102_444_800,
-        action_tickets: []
+        action_tickets: [
+          {
+            method: "POST",
+            path: "/operator/v1/config/draft",
+            ticket: "ticket-test"
+          }
+        ]
       })
     });
   });
