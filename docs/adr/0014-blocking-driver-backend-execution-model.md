@@ -212,6 +212,58 @@ resolved and tested:
 The pinned official driver is also `26.0.0-beta.3`; the beta API/version risk
 remains a release-signoff consideration even if all behavioral rows pass.
 
+### Connection-establishment mitigation decision
+
+The following alternatives address only the synchronous initial connect/TLS
+handshake gap in the pinned official driver. None authorizes statement retry,
+session migration, or a change to the existing feature-off driver-cx path.
+
+1. **Keep driver-cx default until upstream supplies a bounded official
+   connect/handshake (recommended).** Keep `oracledb` feature-gated and
+   opt-in; do not make it the default selection while `TcpStream::connect` can
+   outlive the request. An upstream version is acceptable only when its public
+   configuration demonstrably bounds initial and redirected TCP plus TLS
+   handshake work before a `Connection` exists, and a regression proves an
+   expired/cancelled attempt retires its actor without leaving a session
+   reusable. This is the safest option: the default continues to use the
+   existing driver-cx transport timeout, and the official path remains an
+   explicit preview rather than a process-wide availability risk.
+
+2. **Flip behind a bounded official-connect thread pool.** This is feasible,
+   but it is a containment mechanism rather than cancellation. A future
+   implementation must use one process-global pool with exactly **two**
+   in-flight official-connect permits, acquired through a Cx-aware bounded
+   wait of at most **250 ms**. A caller that cannot acquire a permit in that
+   time may make one fresh driver-cx acquisition attempt only if its original
+   absolute Cx deadline is still live; an already-expired caller returns
+   cancellation and never starts fallback work. Once an official connect has
+   started, its permit is held until that native thread actually returns and
+   its actor is retired/reaped—never when the caller times out or drops its
+   reply. Thus a black-holed network can strand at most two native threads
+   process-wide; all later capable acquisitions immediately take the
+   backpressure/fallback path instead of spawning more. An eventually
+   successful abandoned attempt must close/discard before releasing its slot,
+   and no reply from it may publish a session. This option would require a new
+   supervisor/reaper, an explicit typed `official_connect_capacity` fallback
+   reason, and deterministic tests for permit exhaustion, deadline-before-
+   fallback, abandoned-success discard, and slot release after thread exit.
+   It does **not** satisfy the present no-thread-leak ideal; it merely caps the
+   resource cost, so it needs a separate operator decision.
+
+3. **Flip and accept the residual stall risk.** Every capable acquisition can
+   currently spawn a new native actor before entering unbounded TCP/TLS work.
+   A route or handshake black hole can therefore accumulate threads, their
+   stacks and sockets, and later-completing unactioned sessions under normal
+   connection pressure. Caller cancellation protects neither process capacity
+   nor actor retirement. This has the largest availability blast radius and
+   contradicts this ADR's quarantine/no-leak objective; it is documented only
+   as an explicit risk acceptance, not an engineering recommendation.
+
+No option has been implemented by this ADR update. Until an operator selects a
+different option and its dedicated proof suite lands, option 1 governs: the
+default remains driver-cx, and TCPS + PEM remains live-required rather than
+credited from the compiled ignored test.
+
 ### No retirement path in the approved flip
 
 The approved default flip deliberately keeps the driver-cx registration,
