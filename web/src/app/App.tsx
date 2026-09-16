@@ -209,6 +209,7 @@ export {
   currentSchemaDiffPreview,
   invalidReviewCursorError,
   OperatorOutcomeNotice,
+  reviewCapabilityQueryIdentity,
   resolveReviewSelection,
   reviewCompletionIsCurrent,
   reviewGrantReady,

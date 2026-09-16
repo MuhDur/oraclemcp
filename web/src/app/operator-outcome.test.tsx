@@ -47,6 +47,7 @@ import {
   resolveReviewSelection,
   reviewsAuthoritativeState,
   reviewCompletionIsCurrent,
+  reviewCapabilityQueryIdentity,
   reviewGrantReady,
   reviewProposalRevisionIdentity,
   startOperatorEventStream,
@@ -1045,6 +1046,15 @@ describe("Explorer identity and completion hardening", () => {
 });
 
 describe("Review selection and one-shot grant hardening", () => {
+  it("partitions lane capabilities by dashboard authority", () => {
+    expect(reviewCapabilityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-a")).toEqual(
+      ["lane-a", 7, "session-a"]
+    );
+    expect(reviewCapabilityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-b")).not.toEqual(
+      reviewCapabilityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-a")
+    );
+  });
+
   it("requires an exact deep-link match and never falls back to the first plan", () => {
     const proposals = [changeProposalList("first"), changeProposalList("second")];
 

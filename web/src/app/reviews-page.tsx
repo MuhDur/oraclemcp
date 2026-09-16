@@ -276,6 +276,18 @@ export function authoritativeReviewCapabilities(
   return authoritativeQueryData(status, response);
 }
 
+/** Prevents a new dashboard session from reusing another session's lane facts. */
+export function reviewCapabilityQueryIdentity(
+  lane: OperatorLaneTarget | undefined,
+  sessionAuthority: string | null
+): readonly [string, number, string] {
+  return [
+    lane?.laneId ?? "stateless",
+    lane?.generation ?? 0,
+    sessionAuthority ?? "no-authority"
+  ];
+}
+
 export type ReviewsPageProps = {
   selectedId: string;
   onSelectedIdChange: (next: string) => void;
@@ -346,6 +358,7 @@ export function ReviewsPage({
   });
   const { proposals, proposalsNextCursor, snapshots, historyNextCursor } = authoritative;
   const sessionAuthority = dashboardAuthorityIdentity(authoritative.session ?? undefined);
+  const reviewCapabilityKey = reviewCapabilityQueryIdentity(reviewLane, sessionAuthority);
   const reviewProfiles = authoritativeReviewProfiles(config.status, config.data);
   const profileAvailable = reviewProfiles.some((item) => item.name === profile);
   React.useEffect(() => {
@@ -424,8 +437,7 @@ export function ReviewsPage({
     queryKey: [
       "reviews",
       "capabilities",
-      reviewLane?.laneId ?? "stateless",
-      reviewLane?.generation ?? 0
+      ...reviewCapabilityKey
     ],
     queryFn: async ({ signal }) => {
       if (!session.data || !laneReady) {
