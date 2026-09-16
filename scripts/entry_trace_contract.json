@@ -36,6 +36,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/changelog_pace_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/check_bead_close_evidence.sh",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -344,6 +349,11 @@
       "path": "scripts/swarm_target_janitor.sh",
       "kind": "helper",
       "excluded_reason": "swarm-disk-janitor"
+    },
+    {
+      "path": "scripts/test_changelog_pace_lint.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
     },
     {
       "path": "scripts/test_check_mutation_result.sh",

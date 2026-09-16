@@ -684,6 +684,14 @@ jobs:
         run: bash scripts/check_bead_close_evidence.sh
       - name: entry-trace contract (required SKIP=FAIL)
         run: bash scripts/check_entry_trace_contract.sh
+      # B2.3: Keep-a-Changelog [Unreleased] is a release-debt clock. Any
+      # feat/fix/security/perf commit since the last release tag must have a
+      # human-written bullet under [Unreleased]; the paired contract test proves
+      # the gate refuses an empty section and accepts a populated one.
+      - name: changelog pace (feat/fix recorded under [Unreleased])
+        run: |
+          bash scripts/changelog_pace_lint.sh
+          bash scripts/test_changelog_pace_lint.sh
       # D6.3a: regenerate tests/conformance/COVERAGE.md from the clause manifest
       # and fail if it is stale (git-tracked doc would change) or if MUST-clause
       # coverage falls below 0.95.

@@ -6,6 +6,86 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+A hardening pass over the dashboard, the audit shipper, and the release /
+installation path, plus a driver repin to `driver-cx` 0.9.2. The fail-closed SQL
+guard and the `READ_ONLY < READ_WRITE < DDL < ADMIN` operating-level ladder are
+unchanged in contract.
+
+### Security
+
+- **A Windows audit-DACL takeover is refused, and the private owner is
+  normalized.** A durable-append audit handle whose directory DACL is owned by a
+  principal other than the server is rejected rather than trusted, and the
+  private owner is normalized before the file-identity check. See
+  [ee2c04a7](https://github.com/MuhDur/oraclemcp/commit/ee2c04a7),
+  [f0f2b54f](https://github.com/MuhDur/oraclemcp/commit/f0f2b54f).
+- **Windows audit startup parents are hardened**, closing a DACL creation
+  window. See [57e92012](https://github.com/MuhDur/oraclemcp/commit/57e92012).
+- **The audit shipping lifecycle is hardened.** Spool ordering and shutdown
+  bounds are tightened so a slow or reordered record cannot stall the shipper on
+  the way out. See
+  [323226b1](https://github.com/MuhDur/oraclemcp/commit/323226b1).
+- **The release and installation supply chain is hardened.** The release image
+  Docker build context is made complete, and the installer service/PSSA naming
+  path is corrected so a partial image or a colliding variable cannot ship. See
+  [e725cc70](https://github.com/MuhDur/oraclemcp/commit/e725cc70),
+  [4ac4b441](https://github.com/MuhDur/oraclemcp/commit/4ac4b441).
+- **Non-driver auth and bounded state are hardened.** See
+  [e4824cb4](https://github.com/MuhDur/oraclemcp/commit/e4824cb4).
+- **Dashboard and governed runtime paths are hardened; dashboard actions fail
+  closed** instead of acting on ambiguous state. See
+  [d0fff94a](https://github.com/MuhDur/oraclemcp/commit/d0fff94a),
+  [5911094c](https://github.com/MuhDur/oraclemcp/commit/5911094c).
+
+### Fixed
+
+- **Connection-pool capacity is panic-safe.** A capacity edge no longer panics
+  the pool. See [c1163c15](https://github.com/MuhDur/oraclemcp/commit/c1163c15).
+- **The installer service-variable collision is avoided.** See
+  [f5f28801](https://github.com/MuhDur/oraclemcp/commit/f5f28801).
+- **Dashboard UX repair pass.** Shell navigation and focus, recovery actions,
+  Explorer search selection and loading state, lane-identity bindings, the audit
+  layout and empty state, and visual semantics are corrected. See
+  [668947c7](https://github.com/MuhDur/oraclemcp/commit/668947c7),
+  [092c7136](https://github.com/MuhDur/oraclemcp/commit/092c7136),
+  [773e2e8a](https://github.com/MuhDur/oraclemcp/commit/773e2e8a),
+  [b545ebde](https://github.com/MuhDur/oraclemcp/commit/b545ebde),
+  [123cd567](https://github.com/MuhDur/oraclemcp/commit/123cd567),
+  [51ed1021](https://github.com/MuhDur/oraclemcp/commit/51ed1021),
+  [6591a390](https://github.com/MuhDur/oraclemcp/commit/6591a390).
+- **The dashboard UX evidence schema is corrected.** See
+  [5950c50d](https://github.com/MuhDur/oraclemcp/commit/5950c50d).
+- **The architecture fitness lint classifies only workspace dependencies**, so a
+  non-workspace path cannot trip or excuse the gate. See
+  [9f21829d](https://github.com/MuhDur/oraclemcp/commit/9f21829d).
+- **Mutation-shard planning and the dashboard full-gate CI contracts are
+  repaired.** See [3542ab29](https://github.com/MuhDur/oraclemcp/commit/3542ab29),
+  [ed362594](https://github.com/MuhDur/oraclemcp/commit/ed362594).
+- **Driver-cx close evidence is bound to the exact SHA it proves**, so a
+  release-proof record cannot widen its own scope. See
+  [a46175c8](https://github.com/MuhDur/oraclemcp/commit/a46175c8).
+- **The documented workspace crate count is corrected.** See
+  [3a17a92b](https://github.com/MuhDur/oraclemcp/commit/3a17a92b).
+
+### Added
+
+- **The operator dashboard is focused on database workflows** and split into
+  focused UI modules. See
+  [084ab1d6](https://github.com/MuhDur/oraclemcp/commit/084ab1d6),
+  [4a128010](https://github.com/MuhDur/oraclemcp/commit/4a128010).
+
+### Changed
+
+- **The server is repinned to the `driver-cx` 0.9.2 driver**, with the
+  dual-driver backend contract documented. See
+  [4394006b](https://github.com/MuhDur/oraclemcp/commit/4394006b),
+  [5f9e2c8b](https://github.com/MuhDur/oraclemcp/commit/5f9e2c8b).
+- **The native-Windows runtime CI lane is demoted to advisory** while the
+  Windows audit-DACL strict-ownership fix is under active repair (tracked by
+  bead `oraclemcp-xuaea`); the Windows installer/service packaging lane remains
+  required. See
+  [f93d2a66](https://github.com/MuhDur/oraclemcp/commit/f93d2a66).
+
 ## [0.10.0] — 2026-07-26
 
 This line was planned as `0.9.1`. It is `0.10.0` because the work below removes
