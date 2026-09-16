@@ -798,6 +798,69 @@ fn load_ci_lane_snapshot_fails_closed_on_a_missing_or_corrupt_file() {
     assert!(load_ci_lane_snapshot(&wrong_schema).is_err());
 }
 
+#[cfg(unix)]
+#[test]
+fn load_ci_lane_snapshot_refuses_a_fifo_without_blocking_or_leaking_its_path() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    let dir = dashboard_test_dir("ci-lanes-fifo");
+    let fifo = dir.join("customer-tenant-ci-lanes.fifo");
+    let status = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo starts");
+    assert!(status.success(), "mkfifo must create the FIFO fixture");
+
+    let (sender, receiver) = mpsc::channel();
+    let read_path = fifo.clone();
+    let reader = std::thread::spawn(move || {
+        sender
+            .send(load_ci_lane_snapshot(&read_path))
+            .expect("result receiver remains alive");
+    });
+    let result = match receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // Release the legacy blocking reader before failing the test, so a
+            // regression cannot strand a test thread and the suite remains
+            // diagnostic instead of hanging.
+            let writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&fifo)
+                .expect("release blocked FIFO reader");
+            drop(writer);
+            reader.join().expect("released reader joins");
+            panic!("configured FIFO must not block a CI-lane operator read");
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => panic!("FIFO reader disconnected"),
+    };
+    reader.join().expect("nonblocking reader joins");
+    let error = result.expect_err("FIFO must be rejected");
+    assert!(error.contains("not a regular file"));
+    assert!(!error.contains("customer-tenant-ci-lanes"));
+}
+
+#[cfg(unix)]
+#[test]
+fn load_ci_lane_snapshot_refuses_a_symlink_without_leaking_its_path() {
+    use std::os::unix::fs::symlink;
+
+    let dir = dashboard_test_dir("ci-lanes-symlink");
+    let target = dir.join("valid-snapshot.json");
+    std::fs::write(
+        &target,
+        br#"{\"schema\":\"ci-lane-snapshot/v1\",\"refreshed_at_unix\":1,\"lanes\":[],\"errors\":[]}"#,
+    )
+    .expect("write valid snapshot");
+    let linked = dir.join("customer-tenant-ci-lanes-link.json");
+    symlink(&target, &linked).expect("create snapshot symlink");
+
+    let error = load_ci_lane_snapshot(&linked).expect_err("symlink must be rejected");
+    assert!(error.contains("not a regular file"));
+    assert!(!error.contains("customer-tenant-ci-lanes"));
+}
+
 #[test]
 fn operator_ci_lanes_route_is_unavailable_without_a_configured_snapshot() {
     let (auditor, _sink) = operator_auditor();

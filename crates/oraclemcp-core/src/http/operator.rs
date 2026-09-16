@@ -3377,7 +3377,7 @@ fn operator_audit_tail_data(config: &HttpTransportConfig, request: &HttpRequest)
         Ok(view) => {
             let export = query
                 .export_proof_bundle
-                .then(|| audit_tail_proof_bundle(path, &query, &view));
+                .then(|| audit_tail_proof_bundle(&query, &view));
             json!({
                 "source": "self_lane",
                 "limit": query.limit,
@@ -3400,7 +3400,7 @@ fn operator_audit_tail_data(config: &HttpTransportConfig, request: &HttpRequest)
 }
 
 fn read_redacted_audit_tail(path: &Path, query: &AuditTailQuery) -> Result<AuditTailRead, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("audit tail unavailable: {e}"))?;
+    let file = open_redacted_audit_tail(path)?;
     let mut reader = BufReader::new(file);
     let mut tail = VecDeque::with_capacity(query.limit);
     let mut proof = AuditTailProofBuilder::new();
@@ -3486,6 +3486,67 @@ fn read_redacted_audit_tail(path: &Path, query: &AuditTailQuery) -> Result<Audit
         proof: proof.finish(scanned_records, selected_records),
     })
 }
+
+/// Open a configured audit-tail input without following a symlink or blocking
+/// on a FIFO. The operator route is a read-only diagnostic, so an unsafe input
+/// must become its ordinary unavailable envelope rather than pinning a request
+/// worker or exposing the service's local filesystem layout.
+fn open_redacted_audit_tail(path: &Path) -> Result<std::fs::File, String> {
+    let initial_metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "audit tail unavailable: cannot inspect configured input".to_owned())?;
+    if initial_metadata.file_type().is_symlink() || !initial_metadata.file_type().is_file() {
+        return Err("audit tail unavailable: configured input is not a regular file".to_owned());
+    }
+
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        // This is the Windows no-follow analogue. The handle check below
+        // rejects a reparse point even if the path changes after the first
+        // metadata probe.
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "audit tail unavailable: cannot safely open configured input".to_owned())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "audit tail unavailable: cannot inspect opened input".to_owned())?;
+    if !metadata.file_type().is_file() {
+        return Err("audit tail unavailable: opened input is not a regular file".to_owned());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("audit tail unavailable: opened input is a reparse point".to_owned());
+        }
+    }
+    let current_metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "audit tail unavailable: configured input changed while opening".to_owned())?;
+    if current_metadata.file_type().is_symlink() || !current_metadata.file_type().is_file() {
+        return Err("audit tail unavailable: configured input changed while opening".to_owned());
+    }
+    Ok(file)
+}
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` is the Windows no-follow open flag.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+/// Windows metadata bit set for a reparse point, including a symlink or mount
+/// point that could redirect the configured input after validation.
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 fn query_param_trimmed(request: &HttpRequest, key: &str) -> Option<String> {
     request
@@ -3586,11 +3647,10 @@ fn audit_tail_redaction_policy() -> Value {
     })
 }
 
-fn audit_tail_proof_bundle(path: &Path, query: &AuditTailQuery, view: &AuditTailRead) -> Value {
+fn audit_tail_proof_bundle(query: &AuditTailQuery, view: &AuditTailRead) -> Value {
     json!({
         "format": "oraclemcp.audit.proof-bundle.v1",
         "source": "audit_tail",
-        "file": path.display().to_string(),
         "limit": query.limit,
         "filters": query.filters_json(),
         "scanned_records": view.scanned_records,

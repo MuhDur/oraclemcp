@@ -700,6 +700,7 @@ fn request_target_preserves_and_decodes_query_string() {
 }
 
 include!("tests_operator.rs");
+include!("tests_operator_audit_tail.rs");
 include!("tests_operator_idempotency.rs");
 include!("tests_operator_workbench.rs");
 include!("tests_ci_lanes.rs");

@@ -75,7 +75,7 @@ use asupersync::http::h1::http_client::HttpClient;
 use asupersync::http::h1::types::Method;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write as IoWrite;
+use std::io::{Read as IoRead, Write as IoWrite};
 use std::sync::OnceLock;
 
 // Embedded from a crate-local copy, not `docs/ci_taxonomy.json` directly:
@@ -1137,13 +1137,27 @@ pub(super) fn start_ci_lane_poller(config: &HttpTransportConfig) -> Option<CiLan
 /// invalid JSON, schema mismatch, malformed heartbeat) with a message safe to
 /// surface on the tile — never panics, never partially trusts a corrupt file.
 pub(super) fn load_ci_lane_snapshot(path: &Path) -> Result<CiLaneSnapshot, String> {
-    let metadata = fs::metadata(path).map_err(|error| format!("cannot read snapshot: {error}"))?;
+    let file = open_ci_lane_snapshot(path)?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "cannot inspect stored CI lane snapshot".to_owned())?;
     if metadata.len() > CI_LANE_SNAPSHOT_MAX_BYTES {
         return Err(format!(
             "stored CI lane snapshot exceeds the {CI_LANE_SNAPSHOT_MAX_BYTES}-byte bound"
         ));
     }
-    let raw = fs::read_to_string(path).map_err(|error| format!("cannot read snapshot: {error}"))?;
+    // Re-check while reading: an initially small regular file may grow after
+    // its metadata was inspected. `take` keeps that race from turning an
+    // optional operator tile into an unbounded allocation.
+    let mut raw = String::new();
+    file.take(CI_LANE_SNAPSHOT_MAX_BYTES + 1)
+        .read_to_string(&mut raw)
+        .map_err(|_| "cannot read stored CI lane snapshot".to_owned())?;
+    if raw.len() as u64 > CI_LANE_SNAPSHOT_MAX_BYTES {
+        return Err(format!(
+            "stored CI lane snapshot exceeds the {CI_LANE_SNAPSHOT_MAX_BYTES}-byte bound"
+        ));
+    }
     #[derive(Deserialize)]
     struct SchemaProbe {
         schema: String,
@@ -1163,6 +1177,64 @@ pub(super) fn load_ci_lane_snapshot(path: &Path) -> Result<CiLaneSnapshot, Strin
         )),
     }
 }
+
+/// Open a configured CI-lane snapshot without following a symlink or blocking
+/// on a FIFO. This input feeds an authenticated but synchronous operator
+/// request; unsafe inputs must render the normal unavailable state, rather
+/// than tying up the serving worker or leaking the configured path.
+fn open_ci_lane_snapshot(path: &Path) -> Result<fs::File, String> {
+    let initial_metadata = fs::symlink_metadata(path)
+        .map_err(|_| "cannot inspect stored CI lane snapshot".to_owned())?;
+    if initial_metadata.file_type().is_symlink() || !initial_metadata.file_type().is_file() {
+        return Err("stored CI lane snapshot is not a regular file".to_owned());
+    }
+
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        options.custom_flags(CI_LANE_FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+    let file = options
+        .open(path)
+        .map_err(|_| "cannot safely open stored CI lane snapshot".to_owned())?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "cannot inspect opened CI lane snapshot".to_owned())?;
+    if !metadata.file_type().is_file() {
+        return Err("opened CI lane snapshot is not a regular file".to_owned());
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        if metadata.file_attributes() & CI_LANE_FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err("opened CI lane snapshot is a reparse point".to_owned());
+        }
+    }
+    let current_metadata = fs::symlink_metadata(path)
+        .map_err(|_| "configured CI lane snapshot changed while opening".to_owned())?;
+    if current_metadata.file_type().is_symlink() || !current_metadata.file_type().is_file() {
+        return Err("configured CI lane snapshot changed while opening".to_owned());
+    }
+    Ok(file)
+}
+
+/// `FILE_FLAG_OPEN_REPARSE_POINT` is the Windows no-follow open flag.
+#[cfg(windows)]
+const CI_LANE_FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+/// Windows metadata bit set for a reparse point, including symlinks and mount
+/// points that could redirect the configured snapshot after validation.
+#[cfg(windows)]
+const CI_LANE_FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Durably write `snapshot` to `path` (write-temp, fsync, then rename, so a
 /// reader never observes a torn file). Called by the background poller and
