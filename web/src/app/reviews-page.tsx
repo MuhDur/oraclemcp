@@ -1292,6 +1292,13 @@ export function currentSchemaDiffPreview<T>(
   return binding?.inputIdentity === inputIdentity ? binding.data : null;
 }
 
+export function schemaDiffCompletionIsCurrent(
+  completionAuthority: string,
+  currentAuthority: string | null
+): boolean {
+  return currentAuthority !== null && completionAuthority === currentAuthority;
+}
+
 function SchemaDiffPanel({
   session,
   profile,
@@ -1311,6 +1318,10 @@ function SchemaDiffPanel({
   const [lastError, setLastError] = React.useState<string | null>(null);
   const inputIdentity = schemaDiffInputIdentity(title, beforeJson, afterJson);
   const sessionAuthority = dashboardAuthorityIdentity(session ?? undefined);
+  const sessionAuthorityRef = React.useRef(sessionAuthority);
+  React.useLayoutEffect(() => {
+    sessionAuthorityRef.current = sessionAuthority;
+  }, [sessionAuthority]);
   const authorityInputIdentity = JSON.stringify([sessionAuthority, inputIdentity]);
   const preview = currentSchemaDiffPreview(previewBinding, authorityInputIdentity);
 
@@ -1320,8 +1331,12 @@ function SchemaDiffPanel({
       beforeJson: string;
       afterJson: string;
       inputIdentity: string;
+      authority: string;
     }) => {
-      if (!session) {
+      if (
+        !session ||
+        !schemaDiffCompletionIsCurrent(input.authority, sessionAuthorityRef.current)
+      ) {
         throw new Error("dashboard session is not ready");
       }
       const before = parseSchemaSnapshotInput(input.beforeJson);
@@ -1329,17 +1344,23 @@ function SchemaDiffPanel({
       return previewSchemaDiff(session, before, after, input.title);
     },
     onSuccess: (response, input) => {
+      if (!schemaDiffCompletionIsCurrent(input.authority, sessionAuthorityRef.current)) {
+        return;
+      }
       setPreviewBinding({ inputIdentity: input.inputIdentity, data: response.data });
       setLastError(null);
     },
-    onError: (error) => {
+    onError: (error, input) => {
+      if (!schemaDiffCompletionIsCurrent(input.authority, sessionAuthorityRef.current)) {
+        return;
+      }
       setLastError(error instanceof Error ? error.message : "schema diff preview failed");
     }
   });
 
   const draftMutation = useMutation({
-    mutationFn: async () => {
-      if (!session) {
+    mutationFn: async ({ authority }: { authority: string }) => {
+      if (!session || !schemaDiffCompletionIsCurrent(authority, sessionAuthorityRef.current)) {
         throw new Error("dashboard session is not ready");
       }
       if (!preview) {
@@ -1355,12 +1376,18 @@ function SchemaDiffPanel({
         statements: preview.proposal_statements
       });
     },
-    onSuccess: (response) => {
+    onSuccess: (response, { authority }) => {
+      if (!schemaDiffCompletionIsCurrent(authority, sessionAuthorityRef.current)) {
+        return;
+      }
       setLastError(null);
       queryClient.invalidateQueries({ queryKey: ["change-proposals"] });
       onDrafted(response.data.proposal, response);
     },
-    onError: (error) => {
+    onError: (error, { authority }) => {
+      if (!schemaDiffCompletionIsCurrent(authority, sessionAuthorityRef.current)) {
+        return;
+      }
       setLastError(error instanceof Error ? error.message : "migration draft failed");
     }
   });
@@ -1373,9 +1400,10 @@ function SchemaDiffPanel({
   useDashboardAuthorityPurge(sessionAuthority, purgeSchemaDiffAuthorityState);
 
   const busy = previewMutation.isPending || draftMutation.isPending;
-  const canPreview = Boolean(session) && !busy;
+  const canPreview = Boolean(sessionAuthority) && !busy;
   const canDraft =
-    Boolean(session && profile.trim() && preview && preview.proposal_statements.length > 0) && !busy;
+    Boolean(sessionAuthority && profile.trim() && preview && preview.proposal_statements.length > 0) &&
+    !busy;
 
   return (
     <ConsolePanel>
@@ -1437,7 +1465,8 @@ function SchemaDiffPanel({
                 title,
                 beforeJson,
                 afterJson,
-                inputIdentity: authorityInputIdentity
+                inputIdentity: authorityInputIdentity,
+                authority: sessionAuthority ?? ""
               })
             }
           >
@@ -1457,7 +1486,12 @@ function SchemaDiffPanel({
             <Download className="size-4" aria-hidden="true" />
             Export SQL
           </Button>
-          <Button type="button" variant="primary" disabled={!canDraft} onClick={() => draftMutation.mutate()}>
+          <Button
+            type="button"
+            variant="primary"
+            disabled={!canDraft}
+            onClick={() => draftMutation.mutate({ authority: sessionAuthority ?? "" })}
+          >
             <GitPullRequest className="size-4" aria-hidden="true" />
             Save DDL plan
           </Button>

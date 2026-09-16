@@ -215,6 +215,7 @@ export {
   reviewCompletionIsCurrent,
   reviewGrantReady,
   reviewProposalRevisionIdentity,
+  schemaDiffCompletionIsCurrent,
   reviewsAuthoritativeState,
   schemaDiffInputIdentity,
   visibleReviewProposals

@@ -50,6 +50,7 @@ import {
   reviewCapabilityQueryIdentity,
   reviewGrantReady,
   reviewProposalRevisionIdentity,
+  schemaDiffCompletionIsCurrent,
   startOperatorEventStream,
   schemaDiffInputIdentity,
   sessionAuthorityQueriesReady,
@@ -343,6 +344,12 @@ const explorerScope: ExplorerMetadataCacheKey = {
 };
 
 describe("schema diff preview input binding", () => {
+  it("rejects mutation completions from a replaced dashboard authority", () => {
+    expect(schemaDiffCompletionIsCurrent("session-a", "session-a")).toBe(true);
+    expect(schemaDiffCompletionIsCurrent("session-a", "session-b")).toBe(false);
+    expect(schemaDiffCompletionIsCurrent("session-a", null)).toBe(false);
+  });
+
   it("invalidates a preview on title or either snapshot edit", () => {
     const identity = schemaDiffInputIdentity("migration", "before", "after");
     const binding = { inputIdentity: identity, data: { artifact: "reviewed" } };
