@@ -843,6 +843,8 @@ pub struct QueryRowStream {
 
 enum QueryRowStreamInner {
     Driver(Box<driver::RustOracleRowStream>),
+    #[cfg(feature = "oracledb")]
+    Official(Box<crate::oracledb_backend::OfficialOracleRowStream>),
     #[cfg(feature = "test-utils")]
     StaticRows(StaticQueryRowStream),
 }
@@ -858,6 +860,18 @@ impl QueryRowStream {
     fn new(inner: driver::RustOracleRowStream) -> Self {
         Self {
             inner: QueryRowStreamInner::Driver(Box::new(inner)),
+        }
+    }
+
+    /// Construct an actor-backed stream for the official synchronous driver.
+    ///
+    /// The type remains private to the backend: the public stream facade still
+    /// exposes only serialized rows and explicit recovery, never driver values
+    /// or a synchronous cursor.
+    #[cfg(feature = "oracledb")]
+    pub(crate) fn new_official(inner: crate::oracledb_backend::OfficialOracleRowStream) -> Self {
+        Self {
+            inner: QueryRowStreamInner::Official(Box::new(inner)),
         }
     }
 
@@ -888,6 +902,8 @@ impl QueryRowStream {
     pub fn columns(&self) -> &[String] {
         match &self.inner {
             QueryRowStreamInner::Driver(inner) => inner.columns(),
+            #[cfg(feature = "oracledb")]
+            QueryRowStreamInner::Official(inner) => inner.columns(),
             #[cfg(feature = "test-utils")]
             QueryRowStreamInner::StaticRows(inner) => &inner.columns,
         }
@@ -897,6 +913,8 @@ impl QueryRowStream {
     pub async fn next_row(&mut self, cx: &Cx) -> Result<Option<OracleRow>, DbError> {
         match &mut self.inner {
             QueryRowStreamInner::Driver(inner) => inner.next_row(cx).await,
+            #[cfg(feature = "oracledb")]
+            QueryRowStreamInner::Official(inner) => inner.next_row(cx).await,
             #[cfg(feature = "test-utils")]
             QueryRowStreamInner::StaticRows(inner) => {
                 db_checkpoint(cx, "oracle_db.query_row_stream.static.next")?;
@@ -909,6 +927,8 @@ impl QueryRowStream {
     pub async fn recover(self, cx: &Cx) -> Result<(), DbError> {
         match self.inner {
             QueryRowStreamInner::Driver(inner) => inner.recover(cx).await,
+            #[cfg(feature = "oracledb")]
+            QueryRowStreamInner::Official(inner) => inner.recover(cx).await,
             #[cfg(feature = "test-utils")]
             QueryRowStreamInner::StaticRows(inner) => {
                 if let Some(recovered) = inner.recovered {

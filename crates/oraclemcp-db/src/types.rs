@@ -19,12 +19,16 @@ use crate::auth_adapter::AuthAdapter;
 pub enum OracleBackend {
     /// The pure-Rust `oracledb` thin driver.
     RustOracle,
+    /// Oracle's official synchronous `oracledb` driver, isolated behind a
+    /// dedicated connection actor.
+    OfficialOracle,
 }
 
 impl std::fmt::Display for OracleBackend {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             OracleBackend::RustOracle => f.write_str("oracledb-thin"),
+            OracleBackend::OfficialOracle => f.write_str("oracledb-official"),
         }
     }
 }

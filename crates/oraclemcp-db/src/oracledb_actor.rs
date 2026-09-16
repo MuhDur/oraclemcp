@@ -33,6 +33,7 @@ const ACTOR_MAILBOX_CAPACITY: usize = 1;
 pub(crate) struct BlockingConnectionActor<Request, Reply> {
     mailbox: mpsc::Sender<ActorCommand<Request, Reply>>,
     state: Arc<ActorState>,
+    #[cfg(test)]
     join: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
@@ -60,9 +61,13 @@ where
             .spawn(move || run_actor_thread(receiver, actor_state, factory, execute))
             .expect("dedicated official Oracle actor thread must spawn");
 
+        #[cfg(not(test))]
+        let _ = join;
+
         Self {
             mailbox,
             state,
+            #[cfg(test)]
             join: Mutex::new(Some(join)),
         }
     }
@@ -73,7 +78,18 @@ where
     /// the actor. The bridge checks it before and after a blocking operation;
     /// the future adapter additionally maps it to the driver's call timeout.
     pub(crate) async fn call(&self, cx: &Cx, request: Request) -> Result<Reply, DbError> {
-        self.call_with_deadline(cx, cx.budget().deadline, request)
+        self.call_with_deadline(cx, cx.budget().deadline, request, true)
+            .await
+    }
+
+    /// Runs a terminal operation through the actor without a caller-side
+    /// post-completion checkpoint.
+    ///
+    /// Oracle commit is the one intentional caller: after a successful commit,
+    /// cancellation cannot undo its effect, so observing it after the fact must
+    /// not turn a committed transaction into a spurious cancellation result.
+    pub(crate) async fn call_terminal(&self, cx: &Cx, request: Request) -> Result<Reply, DbError> {
+        self.call_with_deadline(cx, cx.budget().deadline, request, false)
             .await
     }
 
@@ -82,6 +98,7 @@ where
         cx: &Cx,
         deadline: Option<Time>,
         request: Request,
+        checkpoint_after_completion: bool,
     ) -> Result<Reply, DbError> {
         self.state.require_active()?;
         checkpoint(cx, "official Oracle actor call before admission")?;
@@ -101,7 +118,10 @@ where
 
         match reply_rx.recv(cx).await {
             Ok(ActorReply::Completed(result)) => {
-                if let Err(error) = checkpoint(cx, "official Oracle actor call after completion") {
+                if checkpoint_after_completion
+                    && let Err(error) =
+                        checkpoint(cx, "official Oracle actor call after completion")
+                {
                     self.state.quarantine(
                         "caller cancelled after an official Oracle actor operation completed",
                     );
@@ -235,6 +255,7 @@ impl ActorState {
         );
     }
 
+    #[cfg(test)]
     fn is_quarantined(&self) -> bool {
         self.status.load(Ordering::Acquire) == ACTOR_QUARANTINED
     }
@@ -312,6 +333,10 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
         }
 
         let result = execute(&mut resource, request);
+        let result_left_session_uncertain = result
+            .as_ref()
+            .err()
+            .is_some_and(DbError::is_uncertain_session_state);
         if deadline.is_some_and(|deadline| cx.now() >= deadline) {
             state.quarantine(
                 "official Oracle actor completed after its absolute deadline; session state is uncertain",
@@ -322,6 +347,12 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
         if reply.send_blocking(ActorReply::Completed(result)).is_err() {
             state.quarantine(
                 "official Oracle actor reply receiver was dropped; session state is uncertain",
+            );
+            break;
+        }
+        if result_left_session_uncertain {
+            state.quarantine(
+                "official Oracle actor operation left the physical session state uncertain",
             );
             break;
         }
@@ -404,7 +435,9 @@ mod tests {
         );
         let result = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
-            actor.call_with_deadline(&cx, Some(Time::ZERO), ()).await
+            actor
+                .call_with_deadline(&cx, Some(Time::ZERO), (), true)
+                .await
         });
 
         assert!(matches!(result, Err(DbError::Cancelled(_))));
@@ -459,5 +492,26 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn uncertain_operation_error_quarantines_and_discards_the_actor() {
+        let actor = BlockingConnectionActor::spawn(
+            || (),
+            |_, ()| -> Result<(), DbError> {
+                Err(DbError::Cancelled(
+                    "driver timeout leaves the session state uncertain".to_owned(),
+                ))
+            },
+        );
+
+        let result = block_on_actor(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            actor.call(&cx, ()).await
+        });
+
+        assert!(matches!(result, Err(DbError::Cancelled(_))));
+        assert!(actor.is_quarantined());
+        actor.join();
     }
 }

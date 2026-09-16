@@ -72,10 +72,9 @@ mod masking;
 mod native_redaction;
 mod oci;
 #[cfg(feature = "oracledb")]
-// The actor is deliberately dormant until the qualified adapter wires its
-// `OracleConnection` methods; its native tests exercise the contract now.
-#[allow(dead_code)]
 mod oracledb_actor;
+#[cfg(feature = "oracledb")]
+mod oracledb_backend;
 mod plscope;
 mod privileges;
 mod query;
@@ -159,6 +158,8 @@ pub use oci::{
     classify_wallet, discover_wallet, ensure_fresh_token, supported_wallet_modes,
     validate_adb_connect_string,
 };
+#[cfg(feature = "oracledb")]
+pub use oracledb_backend::OfficialOracleConnection;
 pub use plscope::{
     PlscopeIdentifier, PlscopeStatement, compile_object_statements, execute_immediate_audit,
     find_unused_declarations, plscope_identifiers, plscope_statements,
