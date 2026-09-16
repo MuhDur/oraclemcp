@@ -1376,7 +1376,8 @@ const CONNECTION_BACKEND_REGISTRY: &[OracleBackendRegistration] = &[OracleBacken
 
 /// The ordered connection-acquisition backend registry for this build.
 ///
-/// Removing driver-cx after a future parity decision is intentionally a local
+/// Driver-cx is permanent under the current operator decision. Any future,
+/// separately approved capability change is intentionally a local
 /// registry/fallback edit. The SQL and transaction paths use only the returned
 /// [`OracleConnection`] and do not need a cross-driver branch.
 #[must_use]
@@ -1446,7 +1447,67 @@ trait BackendConnectionFactory {
         cx: &Cx,
         backend: OracleBackend,
         options: OracleConnectOptions,
-    ) -> Result<Box<dyn OracleConnection>, DbError>;
+    ) -> Result<Box<dyn OracleConnection>, BackendConnectFailure>;
+}
+
+/// Where a backend connection attempt failed for router purposes.
+///
+/// The only failure which permits a second backend is raw connection/auth
+/// acquisition, before driver-cx has an open session. Identity, canonical NLS,
+/// and configured session statements run on an already-open physical session;
+/// trying another driver after one of them would create a second session after
+/// a potentially observable setup effect.
+#[cfg(feature = "oracledb")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BackendConnectPhase {
+    RawAcquisition,
+    SessionIdentity,
+    CanonicalNls,
+    SessionStatement,
+}
+
+#[cfg(feature = "oracledb")]
+impl BackendConnectPhase {
+    const fn permits_alternate(self) -> bool {
+        matches!(self, Self::RawAcquisition)
+    }
+}
+
+#[cfg(feature = "oracledb")]
+struct BackendConnectFailure {
+    phase: BackendConnectPhase,
+    error: DbError,
+}
+
+#[cfg(feature = "oracledb")]
+impl BackendConnectFailure {
+    fn raw_acquisition(error: DbError) -> Self {
+        Self {
+            phase: BackendConnectPhase::RawAcquisition,
+            error,
+        }
+    }
+
+    fn from_driver_cx(error: driver::ConnectFailure) -> Self {
+        match error {
+            driver::ConnectFailure::RawAcquisition(error) => Self {
+                phase: BackendConnectPhase::RawAcquisition,
+                error,
+            },
+            driver::ConnectFailure::SessionIdentity(error) => Self {
+                phase: BackendConnectPhase::SessionIdentity,
+                error,
+            },
+            driver::ConnectFailure::CanonicalNls(error) => Self {
+                phase: BackendConnectPhase::CanonicalNls,
+                error,
+            },
+            driver::ConnectFailure::SessionStatement(error) => Self {
+                phase: BackendConnectPhase::SessionStatement,
+                error,
+            },
+        }
+    }
 }
 
 #[cfg(feature = "oracledb")]
@@ -1460,16 +1521,20 @@ impl BackendConnectionFactory for ProductionBackendConnectionFactory {
         cx: &Cx,
         backend: OracleBackend,
         options: OracleConnectOptions,
-    ) -> Result<Box<dyn OracleConnection>, DbError> {
+    ) -> Result<Box<dyn OracleConnection>, BackendConnectFailure> {
         match backend {
             OracleBackend::OfficialOracle => {
                 crate::oracledb_backend::OfficialOracleConnection::connect(cx, options)
                     .await
                     .map(|connection| Box::new(connection) as Box<dyn OracleConnection>)
+                    .map_err(BackendConnectFailure::raw_acquisition)
             }
-            OracleBackend::RustOracle => RustOracleConnection::connect(cx, options)
-                .await
-                .map(|connection| Box::new(connection) as Box<dyn OracleConnection>),
+            OracleBackend::RustOracle => {
+                RustOracleConnection::connect_for_backend_registry(cx, options)
+                    .await
+                    .map(|connection| Box::new(connection) as Box<dyn OracleConnection>)
+                    .map_err(BackendConnectFailure::from_driver_cx)
+            }
         }
     }
 }
@@ -1506,10 +1571,12 @@ async fn connect_with_backend_registry(
     let alternate = compatible_backends.next();
     match factory.connect(cx, primary, options.clone()).await {
         Ok(connection) => Ok(connection),
-        Err(primary_error)
+        Err(primary_failure)
             if primary == OracleBackend::RustOracle
-                && alternate == Some(OracleBackend::OfficialOracle) =>
+                && alternate == Some(OracleBackend::OfficialOracle)
+                && primary_failure.phase.permits_alternate() =>
         {
+            let primary_error = primary_failure.error;
             tracing::warn!(
                 from_backend = %primary,
                 to_backend = %OracleBackend::OfficialOracle,
@@ -1523,7 +1590,8 @@ async fn connect_with_backend_registry(
                 .await
             {
                 Ok(connection) => Ok(connection),
-                Err(official_error) => {
+                Err(official_failure) => {
+                    let official_error = official_failure.error;
                     db_checkpoint(cx, "driver-cx fallback after official alternate")?;
                     tracing::warn!(
                         from_backend = %OracleBackend::OfficialOracle,
@@ -1532,11 +1600,14 @@ async fn connect_with_backend_registry(
                         official_error_kind = acquisition_error_kind(&official_error),
                         "guarded official Oracle alternate failed; retrying driver-cx once for this new session"
                     );
-                    factory.connect(cx, primary, options).await
+                    factory
+                        .connect(cx, primary, options)
+                        .await
+                        .map_err(|failure| failure.error)
                 }
             }
         }
-        Err(error) => Err(error),
+        Err(failure) => Err(failure.error),
     }
 }
 
@@ -1544,11 +1615,13 @@ async fn connect_with_backend_registry(
 ///
 /// With the `oracledb` feature disabled this is byte-for-byte the retained
 /// driver-cx connect path. With it enabled, driver-cx remains primary for every
-/// capability. A password-only driver-cx acquisition error receives one
+/// capability. A password-only raw driver-cx acquisition error receives one
 /// guarded official alternate and, only if that alternate fails, one fresh
-/// driver-cx retry. Mutable wallet directories, IAM, external/proxy, and
-/// auto-login-wallet routes never reach the official adapter. No statement,
-/// transaction, or opened session is ever routed through this function again.
+/// driver-cx retry. Identity, canonical-NLS, and configured session-statement
+/// failures occur after a driver-cx session exists and propagate directly.
+/// Mutable wallet directories, IAM, external/proxy, and auto-login-wallet
+/// routes never reach the official adapter. No statement, transaction, or
+/// opened session is ever routed through this function again.
 pub async fn connect_oracle(
     cx: &Cx,
     options: OracleConnectOptions,
@@ -1722,6 +1795,16 @@ impl RustOracleConnection {
     /// Open a thin-mode connection per `opts`.
     pub async fn connect(cx: &Cx, opts: OracleConnectOptions) -> Result<Self, DbError> {
         driver::connect(cx, opts).await
+    }
+
+    /// Open through the backend registry while retaining the phase needed to
+    /// enforce its acquisition-only fallback contract.
+    #[cfg(feature = "oracledb")]
+    async fn connect_for_backend_registry(
+        cx: &Cx,
+        opts: OracleConnectOptions,
+    ) -> Result<Self, driver::ConnectFailure> {
+        driver::connect_classified(cx, opts).await
     }
 
     async fn lock_inner(&self, cx: &Cx) -> Result<RustOracleConnectionGuard<'_>, DbError> {
@@ -1996,20 +2079,55 @@ mod driver {
         }
     }
 
+    pub(super) enum ConnectFailure {
+        RawAcquisition(DbError),
+        SessionIdentity(DbError),
+        CanonicalNls(DbError),
+        SessionStatement(DbError),
+    }
+
+    impl ConnectFailure {
+        fn into_error(self) -> DbError {
+            match self {
+                Self::RawAcquisition(error)
+                | Self::SessionIdentity(error)
+                | Self::CanonicalNls(error)
+                | Self::SessionStatement(error) => error,
+            }
+        }
+    }
+
     pub(super) async fn connect(
         cx: &Cx,
         opts: OracleConnectOptions,
     ) -> Result<RustOracleConnection, DbError> {
-        let mut inner = oraclemcp_driver_cx::Connection::connect(cx, to_connect_options(&opts)?)
+        connect_classified(cx, opts)
             .await
-            .map_err(|err| connect_error_to_db_error(&err, &opts))?;
-        apply_session_identity(cx, &mut inner, opts.session_identity.as_ref(), &opts).await?;
+            .map_err(ConnectFailure::into_error)
+    }
+
+    pub(super) async fn connect_classified(
+        cx: &Cx,
+        opts: OracleConnectOptions,
+    ) -> Result<RustOracleConnection, ConnectFailure> {
+        let connect_options = to_connect_options(&opts).map_err(ConnectFailure::RawAcquisition)?;
+        let mut inner = oraclemcp_driver_cx::Connection::connect(cx, connect_options)
+            .await
+            .map_err(|err| {
+                ConnectFailure::RawAcquisition(connect_error_to_db_error(&err, &opts))
+            })?;
+        apply_session_identity(cx, &mut inner, opts.session_identity.as_ref(), &opts)
+            .await
+            .map_err(ConnectFailure::SessionIdentity)?;
         for stmt in crate::serialize::canonical_nls_statements() {
-            execute_raw(cx, &mut inner, stmt, &[], &opts, "connect").await?;
+            execute_raw(cx, &mut inner, stmt, &[], &opts, "connect")
+                .await
+                .map_err(ConnectFailure::CanonicalNls)?;
         }
         for (index, stmt) in opts.session_statements.iter().enumerate() {
             let result = execute_raw(cx, &mut inner, stmt, &[], &opts, "session setup").await;
-            redact_session_setup_result(result, index + 1)?;
+            redact_session_setup_result(result, index + 1)
+                .map_err(ConnectFailure::SessionStatement)?;
         }
         let call_timeout = opts.call_timeout;
         Ok(RustOracleConnection {
@@ -7242,8 +7360,8 @@ mod tests {
     #[cfg(feature = "oracledb")]
     #[derive(Clone)]
     struct RecordingBackendFactory {
-        rust_errors: Arc<Mutex<VecDeque<DbError>>>,
-        official_errors: Arc<Mutex<VecDeque<DbError>>>,
+        rust_errors: Arc<Mutex<VecDeque<BackendConnectFailure>>>,
+        official_errors: Arc<Mutex<VecDeque<BackendConnectFailure>>>,
         attempts: Arc<Mutex<Vec<OracleBackend>>>,
         statement_calls: Arc<AtomicUsize>,
         late_auto_login_wallet: Arc<Mutex<Option<PathBuf>>>,
@@ -7257,8 +7375,33 @@ mod tests {
 
         fn with_errors(rust_errors: Vec<DbError>, official_errors: Vec<DbError>) -> Self {
             Self {
-                rust_errors: Arc::new(Mutex::new(rust_errors.into())),
-                official_errors: Arc::new(Mutex::new(official_errors.into())),
+                rust_errors: Arc::new(Mutex::new(
+                    rust_errors
+                        .into_iter()
+                        .map(BackendConnectFailure::raw_acquisition)
+                        .collect(),
+                )),
+                official_errors: Arc::new(Mutex::new(
+                    official_errors
+                        .into_iter()
+                        .map(BackendConnectFailure::raw_acquisition)
+                        .collect(),
+                )),
+                attempts: Arc::new(Mutex::new(Vec::new())),
+                statement_calls: Arc::new(AtomicUsize::new(0)),
+                late_auto_login_wallet: Arc::new(Mutex::new(None)),
+            }
+        }
+
+        fn with_rust_post_session_failure(error: driver::ConnectFailure) -> Self {
+            let failure = BackendConnectFailure::from_driver_cx(error);
+            assert!(
+                !failure.phase.permits_alternate(),
+                "this helper models a driver-cx error after its physical session opened"
+            );
+            Self {
+                rust_errors: Arc::new(Mutex::new([failure].into())),
+                official_errors: Arc::new(Mutex::new(VecDeque::new())),
                 attempts: Arc::new(Mutex::new(Vec::new())),
                 statement_calls: Arc::new(AtomicUsize::new(0)),
                 late_auto_login_wallet: Arc::new(Mutex::new(None)),
@@ -7285,7 +7428,7 @@ mod tests {
             _cx: &Cx,
             backend: OracleBackend,
             _options: OracleConnectOptions,
-        ) -> Result<Box<dyn OracleConnection>, DbError> {
+        ) -> Result<Box<dyn OracleConnection>, BackendConnectFailure> {
             self.attempts
                 .lock()
                 .expect("selector attempt lock")
@@ -7438,6 +7581,58 @@ mod tests {
             [OracleBackend::RustOracle, OracleBackend::OfficialOracle],
             "driver-cx remains primary and only acquisition may use the official alternate"
         );
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[test]
+    fn driver_cx_post_session_setup_failures_never_attempt_the_official_alternate() {
+        let cases = [
+            (BackendConnectPhase::SessionIdentity, "session identity"),
+            (BackendConnectPhase::CanonicalNls, "canonical NLS"),
+            (BackendConnectPhase::SessionStatement, "session statement"),
+        ];
+
+        for (phase, label) in cases {
+            let error = DbError::Connect(format!(
+                "simulated {label} failure after driver-cx connected"
+            ));
+            let driver_failure = match phase {
+                BackendConnectPhase::RawAcquisition => {
+                    panic!("the post-session regression must not construct raw acquisition")
+                }
+                BackendConnectPhase::SessionIdentity => {
+                    driver::ConnectFailure::SessionIdentity(error)
+                }
+                BackendConnectPhase::CanonicalNls => driver::ConnectFailure::CanonicalNls(error),
+                BackendConnectPhase::SessionStatement => {
+                    driver::ConnectFailure::SessionStatement(error)
+                }
+            };
+            let factory = RecordingBackendFactory::with_rust_post_session_failure(driver_failure);
+            let factory_for_connect = factory.clone();
+            let error = run_selector_test(move |cx| async move {
+                match connect_with_backend_registry(
+                    &cx,
+                    selector_test_options(),
+                    &factory_for_connect,
+                )
+                .await
+                {
+                    Ok(_) => panic!("{label} failure must not open a second backend session"),
+                    Err(error) => error,
+                }
+            });
+
+            assert!(
+                matches!(error, DbError::Connect(message) if message.contains(label)),
+                "the original post-session failure must propagate without backend migration"
+            );
+            assert_eq!(
+                factory.attempts(),
+                [OracleBackend::RustOracle],
+                "{label} failure occurs after a driver-cx session exists and must not start official or retry driver-cx"
+            );
+        }
     }
 
     #[cfg(feature = "oracledb")]
