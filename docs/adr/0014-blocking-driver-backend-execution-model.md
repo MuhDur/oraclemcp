@@ -3,7 +3,11 @@
 ## Status
 
 Accepted. The feature-gated official-driver adapter and its acquisition router
-are implemented; cross-backend parity remains the gate for any default flip.
+are implemented. On 2026-09-16 the operator approved an official-primary
+default for capable password and PEM-wallet acquisitions, subject to the
+remaining explicit safety and live-parity blockers below. That approval does
+not permit a deadline/thread-leak exception, a statement retry, or removal of
+the permanent driver-cx routes.
 
 ## Context
 
@@ -85,24 +89,22 @@ machine before that bead can close.
   protected-profile clamp, OAuth scope reduction, audit chain, and
   NUMBER-to-string invariant stay above the future adapter and are unchanged.
 
-## Retiring driver-cx after parity approval
+## Permanent driver-cx fallback
 
-After the operator accepts the cross-backend conformance evidence and signs
-off on a default flip, retire driver-cx from selection by removing its one
-`CONNECTION_BACKEND_REGISTRY` registration and the adjacent acquisition-only
-fallback branch in `connection.rs`. No SQL/transaction call site may change:
-they already consume the selected `OracleConnection` without knowing its
-driver. Keep the existing driver-cx adapter until its remaining non-selector
-capabilities (including the cx-only pool and CQN) have separately reached
-official-driver parity; remove those registrations deliberately rather than
-inventing statement-level fallback.
+Driver-cx is intentionally permanent in this design. It remains the direct
+backend for IAM/OCI-ADB tokens and `cwallet.sso` auto-login, and the one fresh,
+logged acquisition fallback when a capable official connection has a typed
+driver gap. The router registration and its adjacent fallback branch therefore
+must remain after the default flip. There is no Tier-3 driver-cx retirement
+plan in this ADR; any future removal needs a new operator decision after every
+direct and fallback capability has an official replacement.
 
-## Default-flip proposal — not approved
+## Default flip — operator-approved, implementation gated
 
-This is a decision record for the operator, not an authorization to change
-Cargo defaults. `oracledb` stays opt-in and `driver-cx` remains the default
-build/runtime until every criterion below is met and the operator explicitly
-accepts the evidence.
+The 2026-09-16 operator direction authorizes changing the default after the
+remaining safety and live-parity blockers are actually closed. `oracledb`
+remains opt-in in the current tree until that implementation commit lands;
+the criteria below are landing gates, not a second request for authorization.
 
 ### What a flip would mean
 
@@ -159,12 +161,14 @@ feature-off tests still exercise the existing driver-cx-only path unchanged.
 
 On 2026-09-16, the explicitly selected local Free23 basic-auth run passed
 against independent driver-cx and official connections. It proved session
-identity, exact NUMBER/TSTZ serialization, dense and sparse VECTOR
-serialization, missing-object error-envelope parity, and classified
-DDL/DML rollback/commit behavior. The target creates and drops uniquely named
-local VECTOR tables; it does not credit an absent pre-seeded fixture. This is
-one basic-auth row, not a qualified matrix. TCPS + PEM remains live-required
-and uncredited.
+identity; exact NUMBER, TSTZ, DATE, and plain-TIMESTAMP serialization; dense
+and sparse VECTOR serialization; missing-object error-envelope parity; and
+classified DDL/DML rollback/commit behavior. In particular, DATE remained
+`2026-06-01T12:00:00` and plain TIMESTAMP remained
+`2026-06-01T12:00:00.123456789`, with no fabricated UTC suffix. The target
+creates and drops uniquely named local VECTOR tables; it does not credit an
+absent pre-seeded fixture. This is one basic-auth row, not a qualified matrix.
+TCPS + PEM remains live-required and uncredited.
 
 The Free23 run closed the observed VECTOR gap
 (`oraclemcp-xoflp.1.3`) and exposed/fixed the beta driver's malformed
@@ -187,8 +191,7 @@ the official column type selects zone-less component formatting for DATE and
 plain TIMESTAMP, while LTZ/TSTZ retain their offset-bearing representation.
 Deterministic adapter and public-serialization regressions prove that a
 zero-valued internal offset cannot fabricate UTC. The separate live basic-auth
-parity row is present but remains required evidence until its ignored Free23
-lab target is explicitly run.
+parity row has now passed against the local Free23 fixture.
 The following review findings remain default-flip blockers until independently
 resolved and tested:
 
@@ -200,16 +203,19 @@ resolved and tested:
   violate the no-thread-leak contract. An upstream driver fix or an approved
   replacement version is required before this blocker can close.
 
+- `oraclemcp-xoflp.4.8`: the feature-gated ignored TCPS + `ewallet.pem` parity
+  target compiles and refuses an auto-login wallet, but no explicit PEM-only
+  TCPS lab credentials are available on this host. It needs one opted-in
+  direct driver-cx/official connect, ping, identity, and close run before the
+  password+PEM default scope is fully evidenced.
+
 The pinned official driver is also `26.0.0-beta.3`; the beta API/version risk
 remains a release-signoff consideration even if all behavioral rows pass.
 
-### Retire path after a future approval
+### No retirement path in the approved flip
 
-Once the operator approves an official-first default and every direct
-driver-cx capability has an official replacement, removal remains localized:
-delete the driver-cx registration in `CONNECTION_BACKEND_REGISTRY`, delete the
-adjacent acquisition-only fallback branch, remove the driver-cx dependency and
-feature wiring, then run the same contract matrix. No query, execute,
-transaction, guard, audit, or dispatch call site should change. Until IAM,
-auto-login wallets, CQN/pool behavior, and other driver-cx-only capabilities
-are separately qualified, a default flip is not a driver-cx retirement.
+The approved default flip deliberately keeps the driver-cx registration,
+IAM/cwallet routes, and acquisition-only fallback branch. No query, execute,
+transaction, guard, audit, or dispatch call site should change. A future
+driver-cx retirement would be a separate proposal, not an implication of this
+default flip.
