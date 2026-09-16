@@ -66,12 +66,13 @@ gates a tag push, not a merge).
 | `scripts/gen_coverage_report.sh --check` (conformance **clause** coverage, MUST/SHOULD vs `tests/conformance/clauses.tsv` — *not* code coverage) | `ci.yml:boundary` | every push+PR | 1 | required |
 | feature-powerset (`cargo hack`) | `ci.yml:feature-powerset` | every push+PR | 1 | required |
 | `cargo deny check` (supply-chain) | local / `ci.yml:supply-chain` | pre-push + every push+PR | 0 → 1 | required |
-| public-API lock (`cargo public-api` + `cargo semver-checks`) | `ci.yml:api-lock` | every push+PR | 1 | required |
+| public-API lock (`cargo public-api` + `cargo semver-checks`) | `ci.yml:api-lock` | every push+PR | 1 | advisory (pre-release window — `semver-checks` reports expected unreleased drift vs published 0.10.0; re-required at release when the version is bumped) |
 | installer lint + built-artifact smoke, Windows installer/service | `ci.yml:installer`, `windows-installer` | every push+PR | 1 | required |
 | native-Windows runtime workspace tests | `ci.yml:windows-rust` | every push+PR | 1 | advisory (pending `oraclemcp-xuaea`, see README Limitations) |
 | PL/SQL intelligence feature matrix, thin-driver build | `ci.yml:plsql-intelligence`, `thin-db` | every push+PR | 1 | required |
 | `sensitive-data` / `secret_scan.sh` structural + denylist scan | `ci.yml:sensitive-data` | every push+PR | 1 | required |
 | BMC formal proofs (Kani/CBMC) over guard + audit | `kani-safety.yml:kani-safety` | every push+PR (no schedule despite the filename) | 1 | required |
+| release metadata sync (`release_preflight.sh`) | `ci.yml:release-metadata` | every push+PR | 1 | advisory (every check passes except `mutation_safety_gate check-report` hard-failing on `E_STALE_SEAL`; beads `oraclemcp-2q4em.5.3`, `oraclemcp-eng-program-bp8ia.5.6`) |
 | release-acceptance suite (B.12) | `ci.yml:release-acceptance` **and** `release.yml:release-acceptance` | every push+PR, **and again** at tag push | 1 and 3 | required (PR copy) / release (tag copy) |
 | `mutation-safety.yml` — `cargo-mutants` over guard + audit | `mutation-safety.yml` | cron `17 2 * * *` (nightly) | 2 | scheduled |
 | `multi-nightly` floating-toolchain early warning | `ci.yml:multi-nightly` | every push+PR (not a schedule — see §4.3) | 1-shaped but advisory | advisory |
@@ -80,7 +81,7 @@ gates a tag push, not a merge).
 | gvenzl 23ai matrix + VECTOR smoke (real live DB) | `ci.yml:oracle-free23` (`scripts/e2e/oracle_version_matrix.sh --log --lane free23`) | every push+PR | 1 (should be 2; see §4.1) | required |
 | gvenzl full ladder (XE 18 / XE 21 / FREE 23ai) | `scripts/e2e/oracle_version_matrix.sh --log` | operator/agent-run, no schedule | 2-shaped, executed as 3 | manual |
 | `scripts/coverage_baseline.sh` (code-coverage baseline, bead D1; `tests/coverage/BASELINE.{json,md}`) | local / not wired into CI | on demand (deliberate dispatch) | 2 | n/a (local generator, not a CI job yet; see §4.5, §6) |
-| `scripts/coverage_ratchet.sh` (D2: changed-line coverage + mutation floor; deliberately not a global percentage gate) | `ci.yml:coverage-ratchet` | every push+PR | 1 | required |
+| `scripts/coverage_ratchet.sh` (D2: changed-line coverage + mutation floor; deliberately not a global percentage gate) | `ci.yml:coverage-ratchet` | every push+PR | 1 | advisory (mutation-floor leg blocked by the deferred five-surface re-seal; beads `oraclemcp-2q4em.5.3`, `oraclemcp-eng-program-bp8ia.5.6`) |
 | bounded loom model-checks (shipping-spool lost wakeup, admission permits/switch-at-cap, lane lock order) | `loom.yml:loom` | weekly + manual dispatch | 2 | scheduled |
 | `scripts/e2e/oci_adb_terraform.sh`, `real_adb_tcps_signoff.sh`, `oci_adb_iam_bootstrap/` (real OCI Always-Free ADB) | `oci-adb.yml:acceptance` | `workflow_dispatch` only | 3 | manual |
 | `scripts/local_release_gate.sh` (D3.2: synthetic TCPS proof, optional real-ADB delegation) | local, pre-tag | on demand before a release tag | 3 | n/a (local, not a CI job) |
@@ -279,9 +280,11 @@ line coverage (90% for `oraclemcp-guard`, `oraclemcp-audit`, and
 Non-instrumentable lines, such as comments, do not inflate the denominator.
 
 For a safety-critical diff the report also requires review to name the invariant
-or negative test that pins the change. The changed-line leg is the enforced
-push/PR gate, and since `efe8975c` it actually measures the diff rather than
-taking the "no changed crates" branch. The mutation-floor leg still calls
+or negative test that pins the change. The changed-line leg still runs and
+actually measures the diff rather than taking the "no changed crates" branch
+(since `efe8975c`), but under operator steering 2026-09-16 the whole
+`coverage-ratchet` job is advisory for this train. The mutation-floor leg still
+calls
 `scripts/mutation_safety_gate.sh check-floor-report`, but it is advisory for
 this train under `ALLOW_STALE_MUTATION_SEAL` (operator ruling 2026-07-21, plan
 v8 §Z2): it reports `mutation-floor=deferred` and is attested as `SKIP`, never
@@ -291,6 +294,8 @@ an enforcing, current floor. Per-leg truth lives in
 attestation-outcomes` derives the CI attestation from that file instead of from
 workflow prose. The intended anti-gaming guard is still the same -- coverage
 proves the changed code ran, while mutation floors prove tests assert behavior
--- but only the changed-line coverage leg is a required D2 gate during this
-train. The workspace-wide D1 numbers remain trend evidence, not a
+-- but for this train the whole `coverage-ratchet` job is advisory (tracking
+beads `oraclemcp-2q4em.5.3`, `oraclemcp-eng-program-bp8ia.5.6`), so neither leg
+gates main until the deferred five-surface re-seal lands. The workspace-wide D1
+numbers remain trend evidence, not a
 never-decrease merge gate.

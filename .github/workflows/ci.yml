@@ -173,6 +173,15 @@ jobs:
   coverage-ratchet:
     name: changed-line coverage + mutation floor
     runs-on: ubuntu-latest
+    # Advisory for this train. Operator steering 2026-09-16: the mutation-floor
+    # leg is blocked by the stale mutation seal, and the fresh five-surface
+    # mutation re-seal is deferred by operator decision (tracking beads
+    # oraclemcp-2q4em.5.3 and oraclemcp-eng-program-bp8ia.5.6). The changed-line
+    # coverage leg still RUNS and is reported; `continue-on-error: true` is what
+    # makes scripts/ci_taxonomy.py classify this job `advisory`, so the stale-seal
+    # red never blocks main and never masks a real regression as a green gate.
+    # The tracking beads stay open; re-required when the re-seal lands.
+    continue-on-error: true
     timeout-minutes: 45
     env:
       CARGO_BUILD_JOBS: "2"
@@ -732,6 +741,14 @@ jobs:
   api-lock:
     name: public-API lock (cargo public-api + semver-checks)
     runs-on: ubuntu-latest
+    # PRE-RELEASE-WINDOW demotion. Operator steering 2026-09-16: cargo
+    # semver-checks correctly reports unreleased public-API drift versus the
+    # published 0.10.0, which is expected while main accumulates the next
+    # release. `continue-on-error: true` is what makes scripts/ci_taxonomy.py
+    # classify this job `advisory`. This re-activates as a required gate at
+    # release, when the version is bumped and the baseline is refreshed; the
+    # exact-surface `cargo public-api` lock still runs and is reported here.
+    continue-on-error: true
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -758,6 +775,13 @@ jobs:
     name: release metadata sync
     needs: web-build
     runs-on: ubuntu-latest
+    # Advisory for this train. Operator steering 2026-09-16: release_preflight.sh's
+    # mutation_safety_gate check-report hard-fails on E_STALE_SEAL from the same
+    # deferred five-surface mutation re-seal (tracking beads oraclemcp-2q4em.5.3
+    # and oraclemcp-eng-program-bp8ia.5.6). Every other preflight check passes;
+    # `continue-on-error: true` is what makes scripts/ci_taxonomy.py classify this
+    # job `advisory`. The tracking beads stay open; re-required when the re-seal lands.
+    continue-on-error: true
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7

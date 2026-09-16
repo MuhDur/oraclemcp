@@ -137,7 +137,7 @@
     },
     {
       "check_name": "changed-line coverage + mutation floor",
-      "tier": "required",
+      "tier": "advisory",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "coverage-ratchet",
@@ -221,7 +221,7 @@
     },
     {
       "check_name": "public-API lock (cargo public-api + semver-checks)",
-      "tier": "required",
+      "tier": "advisory",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "api-lock",
@@ -245,7 +245,7 @@
     },
     {
       "check_name": "release metadata sync",
-      "tier": "required",
+      "tier": "advisory",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "release-metadata",
@@ -972,8 +972,11 @@
   "groups": {
     "advisory": [
       "Rust workspace (Windows)",
+      "changed-line coverage + mutation floor",
       "fuzz targets compile (nightly)",
-      "multi-nightly early-warning (advisory) (nightly)"
+      "multi-nightly early-warning (advisory) (nightly)",
+      "public-API lock (cargo public-api + semver-checks)",
+      "release metadata sync"
     ],
     "manual": [
       "OCI ADB acceptance",
@@ -1013,15 +1016,12 @@
       "cargo deny (advisories, licenses, bans, sources)",
       "cargo doc (builds)",
       "cargo test",
-      "changed-line coverage + mutation floor",
       "clippy (-D warnings)",
       "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
       "feature powerset (cargo hack)",
       "guard + audit BMC proofs",
       "installer lint and built-artifact smoke",
-      "public-API lock (cargo public-api + semver-checks)",
       "release acceptance suite (B.12)",
-      "release metadata sync",
       "rustfmt",
       "sensitive-data lint",
       "web bundle (npm ci + vite build)"
