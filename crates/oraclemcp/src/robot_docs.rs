@@ -891,21 +891,16 @@ mod tests {
     /// Golden drift gate: the committed generated blocks must equal a fresh
     /// render from the registry/config types. Mirrors `docs_generate.sh --check`
     /// so `cargo test` catches drift even without the shell gate.
+    ///
+    /// The README tool/alias tables describe the DEFAULT distribution:
+    /// `scripts/docs_generate.sh` renders them from a `cargo build -p oraclemcp`
+    /// with no features. Enabling `plsql-intelligence` legitimately adds the
+    /// `oracle_plsql_*` rows to the registry, so that comparison only holds
+    /// when the feature is off. The config block is feature-independent and is
+    /// always checked.
     #[test]
     fn committed_generated_blocks_match_a_fresh_render() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md readable");
-        let fresh_tools = tools_markdown();
-        assert_eq!(
-            extract_block(&readme, "tools"),
-            extract_block(&fresh_tools, "tools"),
-            "README tools table drifted; run scripts/docs_generate.sh --write"
-        );
-        assert_eq!(
-            extract_block(&readme, "tools-aliases"),
-            extract_block(&fresh_tools, "tools-aliases"),
-            "README alias table drifted; run scripts/docs_generate.sh --write"
-        );
 
         let configuration = std::fs::read_to_string(root.join("docs/configuration.md"))
             .expect("docs/configuration.md readable");
@@ -914,6 +909,23 @@ mod tests {
             extract_block(&config_markdown(), "config"),
             "config reference drifted; run scripts/docs_generate.sh --write"
         );
+
+        #[cfg(not(feature = "plsql-intelligence"))]
+        {
+            let readme =
+                std::fs::read_to_string(root.join("README.md")).expect("README.md readable");
+            let fresh_tools = tools_markdown();
+            assert_eq!(
+                extract_block(&readme, "tools"),
+                extract_block(&fresh_tools, "tools"),
+                "README tools table drifted; run scripts/docs_generate.sh --write"
+            );
+            assert_eq!(
+                extract_block(&readme, "tools-aliases"),
+                extract_block(&fresh_tools, "tools-aliases"),
+                "README alias table drifted; run scripts/docs_generate.sh --write"
+            );
+        }
     }
 
     /// The agent guide must name every registered tool (it previously listed
