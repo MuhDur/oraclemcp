@@ -182,15 +182,23 @@ The actor-startup gap (`oraclemcp-xoflp.1.10`) is resolved: native thread
 creation is fallible and reports a stable redacted `DbError::Connect` rather
 than panicking. The injected launcher-failure regression proves that no actor
 handle escapes and the thread-confined resource factory is never run.
+The DATE/plain-TIMESTAMP adapter gap (`oraclemcp-xoflp.1.8`) is resolved:
+the official column type selects zone-less component formatting for DATE and
+plain TIMESTAMP, while LTZ/TSTZ retain their offset-bearing representation.
+Deterministic adapter and public-serialization regressions prove that a
+zero-valued internal offset cannot fabricate UTC. The separate live basic-auth
+parity row is present but remains required evidence until its ignored Free23
+lab target is explicitly run.
 The following review findings remain default-flip blockers until independently
 resolved and tested:
 
-- `oraclemcp-xoflp.1.6`: the blocking connect/handshake begins before a
-  driver call timeout is set. It needs a remaining-deadline bound plus a
-  deterministic stalled-connect retirement proof.
-- `oraclemcp-xoflp.1.8`: DATE and plain TIMESTAMP must be formatted
-  metadata-aware, without fabricating a UTC `Z` suffix; their serialized
-  regression rows remain unproven.
+- `oraclemcp-xoflp.1.6`: the pinned `26.0.0-beta.3` source invokes blocking
+  `TcpStream::connect` for initial and redirected connections before a
+  `Connection` exists. Its `tcp_connect_timeout` field is unused and its public
+  `set_call_timeout` arrives only after connection establishment. Safe Rust
+  cannot cancel or join a stalled foreign connect thread, so a watchdog would
+  violate the no-thread-leak contract. An upstream driver fix or an approved
+  replacement version is required before this blocker can close.
 
 The pinned official driver is also `26.0.0-beta.3`; the beta API/version risk
 remains a release-signoff consideration even if all behavioral rows pass.

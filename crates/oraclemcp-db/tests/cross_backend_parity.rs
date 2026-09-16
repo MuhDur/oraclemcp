@@ -42,6 +42,13 @@ const NUMBER_AND_TSTZ_SQL: &str = "SELECT \
         'YYYY-MM-DD HH24:MI:SS.FF9 TZH:TZM'\
     ) AS tstz \
     FROM dual";
+const DATE_AND_PLAIN_TIMESTAMP_SQL: &str = "SELECT \
+    TO_DATE('2026-06-01 12:00:00', 'YYYY-MM-DD HH24:MI:SS') AS plain_date, \
+    TO_TIMESTAMP(\
+        '2026-06-01 12:00:00.123456789', \
+        'YYYY-MM-DD HH24:MI:SS.FF9'\
+    ) AS plain_timestamp \
+    FROM dual";
 const SPARSE_VECTOR_SQL: &str = "SELECT VECTOR(\
     '[1000, [0, 500, 999], [1.5, 2.5, 3.5]]', \
     1000, FLOAT32, SPARSE\
@@ -338,6 +345,33 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
         assert_eq!(
             official_scalar["NUMBER_38"], "12345678901234567890123456789012345678",
             "NUMBER must remain the exact decimal string"
+        );
+
+        let driver_timezone_less = serialized_single_row(
+            driver_cx
+                .query_rows(&cx, DATE_AND_PLAIN_TIMESTAMP_SQL, &[])
+                .await
+                .expect("driver-cx DATE/plain-TIMESTAMP query"),
+            "driver-cx DATE/plain-TIMESTAMP",
+        );
+        let official_timezone_less = serialized_single_row(
+            official
+                .query_rows(&cx, DATE_AND_PLAIN_TIMESTAMP_SQL, &[])
+                .await
+                .expect("official DATE/plain-TIMESTAMP query"),
+            "official DATE/plain-TIMESTAMP",
+        );
+        assert_eq!(
+            driver_timezone_less, official_timezone_less,
+            "DATE/plain-TIMESTAMP serialization"
+        );
+        assert_eq!(
+            official_timezone_less["PLAIN_DATE"], "2026-06-01T12:00:00",
+            "DATE must not gain a UTC suffix"
+        );
+        assert_eq!(
+            official_timezone_less["PLAIN_TIMESTAMP"], "2026-06-01T12:00:00.123456789",
+            "plain TIMESTAMP must not gain a UTC suffix"
         );
 
         let suffix = std::process::id();
