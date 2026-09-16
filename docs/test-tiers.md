@@ -69,7 +69,7 @@ gates a tag push, not a merge).
 | public-API lock (`cargo public-api` + `cargo semver-checks`) | `ci.yml:api-lock` | every push+PR | 1 | advisory (pre-release window — `semver-checks` reports expected unreleased drift vs published 0.10.0; re-required at release when the version is bumped) |
 | installer lint + built-artifact smoke, Windows installer/service | `ci.yml:installer`, `windows-installer` | every push+PR | 1 | required |
 | native-Windows runtime workspace tests | `ci.yml:windows-rust` | every push+PR | 1 | advisory (pending `oraclemcp-xuaea`, see README Limitations) |
-| PL/SQL intelligence feature matrix, thin-driver build | `ci.yml:plsql-intelligence`, `thin-db` | every push+PR | 1 | required |
+| PL/SQL intelligence feature matrix, thin-driver build | `ci.yml:plsql-intelligence`, `thin-db` | every push+PR | 1 | advisory (operator steering 2026-09-16: feature build/tests are green locally, but the hosted 2-core runner OOMs/times out; runner sizing/parallelism follow-up `oraclemcp-xoflp.3.2` restores the required gate) |
 | `sensitive-data` / `secret_scan.sh` structural + denylist scan | `ci.yml:sensitive-data` | every push+PR | 1 | required |
 | BMC formal proofs (Kani/CBMC) over guard + audit | `kani-safety.yml:kani-safety` | every push+PR (no schedule despite the filename) | 1 | required |
 | release metadata sync (`release_preflight.sh`) | `ci.yml:release-metadata` | every push+PR | 1 | advisory (every check passes except `mutation_safety_gate check-report` hard-failing on `E_STALE_SEAL`; beads `oraclemcp-2q4em.5.3`, `oraclemcp-eng-program-bp8ia.5.6`) |
