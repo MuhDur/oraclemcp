@@ -31,6 +31,14 @@ uncertain post-call state permanently quarantines that physical session as
 `next_row` request crosses the actor's bounded mailbox and returns at most one
 owned row through its oneshot reply, so the caller controls backpressure without
 the synchronous cursor or an unbounded row queue leaving the actor.
+Explicit connection close is a terminal actor operation. An unrecovered row
+stream's destructor cannot await, so it synchronously quarantines the session
+and makes a best-effort bounded discard wakeup; whether that wakeup enqueues or
+finds a command already queued, the actor drops its thread-owned resource and
+exits without reusing the session.
+The actor boundary catches a panic from its synchronous factory/runtime/command
+path, quarantines the session, and lets the owner thread retire instead of
+unwinding through a caller-facing runtime.
 
 Automatic driver-cx fallback is restricted to connection acquisition. It may
 select driver-cx directly for unsupported authentication, or retry one failed
@@ -46,7 +54,11 @@ tests prove dedicated-thread ownership, absolute-deadline refusal before a
 blocking call, fresh deadline-budget sampling after mailbox queueing,
 cancellation/reply-drop quarantine, and uncertain-error discard with no future
 reuse. `oracledb_backend.rs` confines real synchronous driver calls, values,
-and cursors to that actor.
+and cursors to that actor. It additionally proves explicit terminal disposal
+drops the resource and joins the actor, and that dropping an official row stream
+quarantines, stops, and refuses reuse of its owner actor without a blocking
+destructor. A blocking-call panic regression proves the same quarantine, thread
+retirement, and no-reuse outcome.
 
 `connection.rs` owns a small typed backend registry. In an `oracledb` feature
 build, password/PEM acquisition tries the official backend first; IAM tokens,
@@ -161,13 +173,14 @@ gap (`oraclemcp-xoflp.1.4`) is resolved: the actor samples the copied absolute
 deadline immediately before dispatch, and the adapter can only tighten the
 existing driver timeout. The deterministic queued-command regression asserts
 that time spent in the bounded mailbox is deducted before the driver sees its
-timeout. The following review findings remain default-flip blockers until
-independently resolved and tested:
+timeout.
+The actor-lifecycle gap (`oraclemcp-xoflp.1.5`) is resolved: explicit close is
+terminal, while an unrecovered official stream uses a nonblocking drop
+disposition that quarantines and retires the actor. Unit regressions prove the
+resource is dropped, the thread joins, and subsequent actor calls are refused.
+The following review findings remain default-flip blockers until independently
+resolved and tested:
 
-- `oraclemcp-xoflp.1.5`: terminal close and an abandoned official row stream do
-  not yet prove actor/session termination and quarantine. They require their
-  own ownership/lifecycle regression tests before a live parity run can be
-  treated as complete.
 - `oraclemcp-xoflp.1.6`: the blocking connect/handshake begins before a
   driver call timeout is set. It needs a remaining-deadline bound plus a
   deterministic stalled-connect retirement proof.

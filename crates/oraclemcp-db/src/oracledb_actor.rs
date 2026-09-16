@@ -11,6 +11,7 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
+use std::{panic::AssertUnwindSafe, panic::catch_unwind};
 
 use asupersync::Cx;
 use asupersync::channel::{mpsc, oneshot};
@@ -115,7 +116,7 @@ where
         deadline: Option<Time>,
         request: Request,
     ) -> Result<Reply, DbError> {
-        self.call_inner(cx, deadline, request, true).await
+        self.call_inner(cx, deadline, request, true, false).await
     }
 
     /// Terminal counterpart to the explicit-deadline call.
@@ -125,7 +126,22 @@ where
         deadline: Option<Time>,
         request: Request,
     ) -> Result<Reply, DbError> {
-        self.call_inner(cx, deadline, request, false).await
+        self.call_inner(cx, deadline, request, false, false).await
+    }
+
+    /// Runs an explicit terminal cleanup operation, then retires the actor.
+    ///
+    /// The reply is sent before the owner thread exits, but the physical
+    /// resource is never available to a later mailbox command. This is for a
+    /// consuming connection close; commit is terminal to a transaction but
+    /// deliberately keeps its session actor alive.
+    pub(crate) async fn call_disposing_with_deadline(
+        &self,
+        cx: &Cx,
+        deadline: Option<Time>,
+        request: Request,
+    ) -> Result<Reply, DbError> {
+        self.call_inner(cx, deadline, request, true, true).await
     }
 
     async fn call_inner(
@@ -134,6 +150,7 @@ where
         deadline: Option<Time>,
         request: Request,
         checkpoint_after_completion: bool,
+        dispose_after_reply: bool,
     ) -> Result<Reply, DbError> {
         self.state.require_active()?;
         checkpoint(cx, "official Oracle actor call before admission")?;
@@ -146,6 +163,7 @@ where
                     request,
                     deadline,
                     reply: reply_tx,
+                    dispose_after_reply,
                 },
             )
             .await
@@ -195,20 +213,34 @@ where
         }
     }
 
+    /// Permanently discards the resource without waiting for mailbox capacity.
+    ///
+    /// `Drop` cannot await a `Cx`-aware send. Marking the state first makes
+    /// every concurrent/future caller fail closed; the best-effort typed wakeup
+    /// then releases an idle actor. If another command already occupies the
+    /// one-slot mailbox, that command observes the quarantined state and exits
+    /// the owner loop instead.
+    pub(crate) fn discard_nonblocking(&self, reason: &str) {
+        self.state.quarantine(reason);
+        let _ = self.mailbox.try_send(ActorCommand::Discard);
+        self.mailbox.wake_receiver();
+    }
+
     /// Returns whether the physical session has been permanently removed from
     /// reuse because its outcome was uncertain.
     #[cfg(test)]
-    fn is_quarantined(&self) -> bool {
+    pub(crate) fn is_quarantined_for_test(&self) -> bool {
         self.state.is_quarantined()
     }
 
-    /// Joins an already-stopped actor thread.
-    ///
-    /// Normal adapter teardown will send a typed close command in the next
-    /// increment. This skeleton only needs to prove that a quarantined actor
-    /// cannot remain reusable after its owner thread finishes.
     #[cfg(test)]
-    fn join(&self) {
+    pub(crate) fn is_closed_for_test(&self) -> bool {
+        self.state.is_closed()
+    }
+
+    /// Joins an already-stopped actor thread.
+    #[cfg(test)]
+    pub(crate) fn join_for_test(&self) {
         if let Some(join) = self
             .join
             .lock()
@@ -240,7 +272,9 @@ enum ActorCommand<Request, Reply> {
         request: Request,
         deadline: Option<Time>,
         reply: oneshot::Sender<ActorReply<Reply>>,
+        dispose_after_reply: bool,
     },
+    Discard,
 }
 
 enum ActorReply<Reply> {
@@ -295,6 +329,11 @@ impl ActorState {
         self.status.load(Ordering::Acquire) == ACTOR_QUARANTINED
     }
 
+    #[cfg(test)]
+    fn is_closed(&self) -> bool {
+        self.status.load(Ordering::Acquire) == ACTOR_CLOSED
+    }
+
     fn quarantined_error(&self) -> DbError {
         let reason = self
             .quarantine_reason
@@ -322,16 +361,27 @@ fn run_actor_thread<Resource, Request, Reply, Factory, Execute>(
     Execute:
         FnMut(&mut Resource, Request, ActorAdmission) -> Result<Reply, DbError> + Send + 'static,
 {
-    let reactor = asupersync::runtime::reactor::create_reactor()
-        .expect("native reactor must build for the official Oracle actor");
-    let runtime = RuntimeBuilder::current_thread()
-        .with_reactor(reactor)
-        .build()
-        .expect("current-thread runtime must build for the official Oracle actor");
-    // block-on-boundary: this is the one dedicated native actor thread, not a
-    // caller-side DB round-trip. The actor owns the synchronous resource and
-    // drives its Cx-aware channels for its whole lifetime.
-    runtime.block_on(run_actor_loop(receiver, state, factory, execute));
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        let reactor = asupersync::runtime::reactor::create_reactor()
+            .expect("native reactor must build for the official Oracle actor");
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .expect("current-thread runtime must build for the official Oracle actor");
+        // block-on-boundary: this is the one dedicated native actor thread, not a
+        // caller-side DB round-trip. The actor owns the synchronous resource and
+        // drives its Cx-aware channels for its whole lifetime.
+        runtime.block_on(run_actor_loop(
+            receiver,
+            Arc::clone(&state),
+            factory,
+            execute,
+        ));
+    }));
+    if result.is_err() {
+        state.quarantine("official Oracle actor panicked; session discarded");
+    }
+    state.close();
 }
 
 async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
@@ -355,7 +405,12 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             request,
             deadline,
             reply,
-        } = command;
+            dispose_after_reply,
+        } = command
+        else {
+            state.quarantine("official Oracle actor discarded an abandoned stream");
+            break;
+        };
 
         if state.status.load(Ordering::Acquire) != ACTOR_ACTIVE {
             let _ = reply.send_blocking(ActorReply::DeadlineExceeded);
@@ -394,16 +449,24 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             let _ = reply.send_blocking(ActorReply::DeadlineExceeded);
             break;
         }
+        if dispose_after_reply {
+            state.close();
+        }
         if reply.send_blocking(ActorReply::Completed(result)).is_err() {
-            state.quarantine(
-                "official Oracle actor reply receiver was dropped; session state is uncertain",
-            );
+            if !dispose_after_reply {
+                state.quarantine(
+                    "official Oracle actor reply receiver was dropped; session state is uncertain",
+                );
+            }
             break;
         }
         if result_left_session_uncertain {
             state.quarantine(
                 "official Oracle actor operation left the physical session state uncertain",
             );
+            break;
+        }
+        if dispose_after_reply {
             break;
         }
     }
@@ -491,8 +554,92 @@ mod tests {
 
         assert!(matches!(result, Err(DbError::Cancelled(_))));
         assert_eq!(executions.load(Ordering::SeqCst), 0);
-        assert!(actor.is_quarantined());
-        actor.join();
+        assert!(actor.is_quarantined_for_test());
+        actor.join_for_test();
+    }
+
+    #[test]
+    fn disposing_call_drops_resource_stops_actor_and_refuses_reuse() {
+        struct Resource(Arc<AtomicUsize>);
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let resource_dropped = Arc::clone(&dropped);
+        let actor = BlockingConnectionActor::spawn(
+            move || Resource(resource_dropped),
+            |_, (), _| -> Result<(), DbError> { Ok(()) },
+        );
+
+        let result = block_on_actor(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            actor.call_disposing_with_deadline(&cx, None, ()).await
+        });
+
+        assert!(matches!(result, Ok(())));
+        actor.join_for_test();
+        assert!(actor.is_closed_for_test());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            block_on_actor(async {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                actor.call(&cx, ()).await
+            }),
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn blocking_call_panic_quarantines_stops_actor_and_refuses_reuse() {
+        struct Resource(Arc<AtomicUsize>);
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let resource_dropped = Arc::clone(&dropped);
+        let actor = BlockingConnectionActor::spawn(
+            move || Resource(resource_dropped),
+            |_, (), _| -> Result<(), DbError> {
+                panic!("test-only blocking driver panic");
+            },
+        );
+
+        let result = block_on_actor(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            actor.call(&cx, ()).await
+        });
+
+        assert!(matches!(
+            result,
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                ..
+            })
+        ));
+        actor.join_for_test();
+        assert!(actor.is_quarantined_for_test());
+        assert_eq!(dropped.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            block_on_actor(async {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                actor.call(&cx, ()).await
+            }),
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -535,6 +682,7 @@ mod tests {
                         request: Request::Block,
                         deadline: None,
                         reply: first_reply,
+                        dispose_after_reply: false,
                     },
                 )
                 .await;
@@ -553,6 +701,7 @@ mod tests {
                         request: Request::Timed,
                         deadline: Some(cx.now() + initial_budget),
                         reply: timed_reply,
+                        dispose_after_reply: false,
                     },
                 )
                 .await;
@@ -617,8 +766,8 @@ mod tests {
         });
 
         assert!(matches!(call, Err(DbError::Cancelled(_))));
-        assert!(actor.is_quarantined());
-        actor.join();
+        assert!(actor.is_quarantined_for_test());
+        actor.join_for_test();
         assert!(matches!(
             block_on_actor(async {
                 let cx = Cx::current().expect("test runtime installs a current Cx");
@@ -648,7 +797,7 @@ mod tests {
         });
 
         assert!(matches!(result, Err(DbError::Cancelled(_))));
-        assert!(actor.is_quarantined());
-        actor.join();
+        assert!(actor.is_quarantined_for_test());
+        actor.join_for_test();
     }
 }

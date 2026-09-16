@@ -4,6 +4,7 @@
 //! actor thread. This module passes only owned, backend-neutral requests and
 //! serialized rows through [`super::oracledb_actor::BlockingConnectionActor`].
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -53,6 +54,7 @@ pub struct OfficialOracleConnection {
     options: OracleConnectOptions,
     actor: Arc<BlockingConnectionActor<OfficialCommand, OfficialReply>>,
     wire_limits: Arc<Mutex<OfficialWireLimits>>,
+    closed: AtomicBool,
 }
 
 impl OfficialOracleConnection {
@@ -78,6 +80,7 @@ impl OfficialOracleConnection {
             })),
             options,
             actor,
+            closed: AtomicBool::new(false),
         };
         let budget = adapter.effective_budget(cx, "official Oracle connect")?;
         let reply = adapter
@@ -102,6 +105,7 @@ impl OfficialOracleConnection {
         command: OfficialCommand,
         phase: &'static str,
     ) -> Result<OfficialReply, DbError> {
+        self.require_open()?;
         checkpoint(cx, phase)?;
         let budget = self.effective_budget(cx, phase)?;
         self.actor
@@ -115,6 +119,7 @@ impl OfficialOracleConnection {
         command: OfficialCommand,
         phase: &'static str,
     ) -> Result<OfficialReply, DbError> {
+        self.require_open()?;
         checkpoint(cx, phase)?;
         let budget = self.effective_budget(cx, phase)?;
         self.actor
@@ -133,6 +138,28 @@ impl OfficialOracleConnection {
             .map_err(|_| DbError::Internal("official Oracle wire-limits lock poisoned".to_owned()))?
             .clone();
         limits.effective_budget(cx, phase)
+    }
+
+    fn require_open(&self) -> Result<(), DbError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                message: "official Oracle connection has already been closed and discarded"
+                    .to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn cleanup_timeout(&self) -> Option<Duration> {
+        // Teardown must still retire the actor if a prior caller poisoned the
+        // configuration lock. Falling back to the driver's default timeout is
+        // safer than preserving a live session because cleanup configuration
+        // could not be read.
+        self.wire_limits
+            .lock()
+            .map(|limits| limits.call_timeout)
+            .unwrap_or(None)
     }
 }
 
@@ -1011,6 +1038,7 @@ pub(crate) struct OfficialOracleRowStream {
     actor: Arc<BlockingConnectionActor<OfficialCommand, OfficialReply>>,
     columns: Vec<String>,
     wire_limits: Arc<Mutex<OfficialWireLimits>>,
+    recovered: bool,
 }
 
 impl OfficialOracleRowStream {
@@ -1039,7 +1067,7 @@ impl OfficialOracleRowStream {
         }
     }
 
-    pub(crate) async fn recover(self, cx: &Cx) -> Result<(), DbError> {
+    pub(crate) async fn recover(mut self, cx: &Cx) -> Result<(), DbError> {
         let budget =
             stream_effective_budget(&self.wire_limits, cx, "official Oracle row stream recovery")?;
         match self
@@ -1053,10 +1081,23 @@ impl OfficialOracleRowStream {
             )
             .await?
         {
-            OfficialReply::Unit => Ok(()),
+            OfficialReply::Unit => {
+                self.recovered = true;
+                Ok(())
+            }
             _ => Err(DbError::Internal(
                 "official Oracle actor returned an unexpected row-stream recovery reply".to_owned(),
             )),
+        }
+    }
+}
+
+impl Drop for OfficialOracleRowStream {
+    fn drop(&mut self) {
+        if !self.recovered {
+            self.actor.discard_nonblocking(
+                "official Oracle row stream was dropped before recovery; session discarded",
+            );
         }
     }
 }
@@ -1147,6 +1188,7 @@ impl OracleConnection for OfficialOracleConnection {
                     actor: Arc::clone(&self.actor),
                     columns,
                     wire_limits: Arc::clone(&self.wire_limits),
+                    recovered: false,
                 }),
             )),
             _ => Err(DbError::Internal(
@@ -1206,14 +1248,15 @@ impl OracleConnection for OfficialOracleConnection {
     }
 
     async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        let timeout = self.cleanup_timeout();
         try_commit_section(cx, CLEANUP_MASKED_POLLS, async {
             expect_unit(
-                self.call(
-                    cx,
-                    OfficialCommand::Close { timeout: None },
-                    "official Oracle close cleanup",
-                )
-                .await?,
+                self.actor
+                    .call_disposing_with_deadline(cx, None, OfficialCommand::Close { timeout })
+                    .await?,
                 "close",
             )
         })
@@ -1268,6 +1311,86 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::str::FromStr;
+
+    fn block_on_backend<T>(future: impl std::future::Future<Output = T>) -> T {
+        let reactor = asupersync::runtime::reactor::create_reactor()
+            .expect("native reactor must build for official backend test");
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .expect("current-thread runtime must build for official backend test");
+        runtime.block_on(future)
+    }
+
+    #[test]
+    fn dropped_official_row_stream_quarantines_and_stops_its_actor() {
+        let actor = Arc::new(BlockingConnectionActor::spawn(
+            || (),
+            |_, _, _| -> Result<OfficialReply, DbError> {
+                Err(DbError::Internal(
+                    "discarded stream must not execute an actor command".to_owned(),
+                ))
+            },
+        ));
+        let stream = OfficialOracleRowStream {
+            actor: Arc::clone(&actor),
+            columns: Vec::new(),
+            wire_limits: Arc::new(Mutex::new(OfficialWireLimits::default())),
+            recovered: false,
+        };
+
+        drop(stream);
+        actor.join_for_test();
+
+        assert!(actor.is_quarantined_for_test());
+        assert!(matches!(
+            block_on_backend(async {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                actor
+                    .call_with_deadline(&cx, None, OfficialCommand::Ping { timeout: None })
+                    .await
+            }),
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn official_close_is_terminal_and_idempotent() {
+        let close_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let actor_close_calls = Arc::clone(&close_calls);
+        let actor = Arc::new(BlockingConnectionActor::spawn(
+            OfficialActorResource::default,
+            move |_, command, _| -> Result<OfficialReply, DbError> {
+                assert!(matches!(command, OfficialCommand::Close { .. }));
+                actor_close_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(OfficialReply::Unit)
+            },
+        ));
+        let connection = OfficialOracleConnection {
+            options: OracleConnectOptions::default(),
+            actor: Arc::clone(&actor),
+            wire_limits: Arc::new(Mutex::new(OfficialWireLimits::default())),
+            closed: AtomicBool::new(false),
+        };
+
+        let first = block_on_backend(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            connection.close(&cx).await
+        });
+        assert!(matches!(first, Ok(())));
+        actor.join_for_test();
+        assert!(actor.is_closed_for_test());
+
+        let second = block_on_backend(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            connection.close(&cx).await
+        });
+        assert!(matches!(second, Ok(())));
+        assert_eq!(close_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
 
     #[test]
     fn actor_admission_tightens_never_expands_driver_timeout() {
