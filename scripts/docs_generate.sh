@@ -43,20 +43,25 @@ case "$mode" in
   *) echo "docs-generate: unknown argument: $mode" >&2; usage >&2; exit 2 ;;
 esac
 
-# Resolve the renderer. Prefer an explicit override, then the checkout's own
-# debug binary (what the operator builds with CARGO_TARGET_DIR=$ROOT/target),
-# then a CARGO_TARGET_DIR override — never a shared cache by default.
-BIN=""
-for candidate in \
-  "${ORACLEMCP_BIN:-}" \
-  "$ROOT/target/debug/oraclemcp" \
-  "${CARGO_TARGET_DIR:+$CARGO_TARGET_DIR/debug/oraclemcp}"; do
-  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
-    BIN="$candidate"
-    break
-  fi
-done
-if [ -z "$BIN" ]; then
+# Resolve the renderer. An explicit binary wins, followed by the target the
+# caller explicitly selected for Cargo; only then fall back to the checkout's
+# conventional target. Otherwise a stale `$ROOT/target` binary can shadow the
+# binary an operator just built in `CARGO_TARGET_DIR`.
+resolve_renderer() {
+  local explicit_bin="$1" cargo_target_dir="$2" repo_default="$3" candidate
+  for candidate in \
+    "$explicit_bin" \
+    "${cargo_target_dir:+$cargo_target_dir/debug/oraclemcp}" \
+    "$repo_default"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+if ! BIN="$(resolve_renderer "${ORACLEMCP_BIN:-}" "${CARGO_TARGET_DIR:-}" "$ROOT/target/debug/oraclemcp")"; then
   echo "docs-generate: renderer binary not found or not executable" >&2
   echo "  build it with: CARGO_TARGET_DIR=$ROOT/target scripts/build_lease.sh -- cargo build -p oraclemcp" >&2
   exit 2
@@ -191,6 +196,8 @@ done
 selftest() {
   local clean="README.md" tampered="$TMP_DIR/README.tampered.md"
   local feature_renderer="$TMP_DIR/plsql-renderer" feature_output
+  local explicit_target="$TMP_DIR/explicit-target" explicit_renderer
+  local fallback_target="$TMP_DIR/fallback-target/debug/oraclemcp" selected
 
   # The default README must never be generated from a feature build. A tiny
   # renderer fixture exercises the exact `--json info` contract used above,
@@ -205,6 +212,23 @@ selftest() {
   fi
   if ! printf '%s\n' "$feature_output" | grep -Fq 'plsql-intelligence'; then
     echo "docs-generate: selftest failed: feature renderer refusal was not diagnostic" >&2
+    return 1
+  fi
+
+  # An explicit CARGO_TARGET_DIR must not be shadowed by an older checkout
+  # target. Give both candidates executable fixtures and assert the target
+  # requested by the caller wins.
+  explicit_renderer="$explicit_target/debug/oraclemcp"
+  mkdir -p "$(dirname "$explicit_renderer")" "$(dirname "$fallback_target")"
+  printf '%s\n' '#!/usr/bin/env sh' 'exit 0' > "$explicit_renderer"
+  printf '%s\n' '#!/usr/bin/env sh' 'exit 0' > "$fallback_target"
+  chmod +x "$explicit_renderer" "$fallback_target"
+  if ! selected="$(resolve_renderer "" "$explicit_target" "$fallback_target")"; then
+    echo "docs-generate: selftest failed: explicit CARGO_TARGET_DIR renderer was not found" >&2
+    return 1
+  fi
+  if [ "$selected" != "$explicit_renderer" ]; then
+    echo "docs-generate: selftest failed: explicit CARGO_TARGET_DIR was shadowed by fallback renderer" >&2
     return 1
   fi
 
