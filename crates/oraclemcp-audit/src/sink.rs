@@ -229,14 +229,14 @@ struct AuditLogLock {
 impl AuditLogLock {
     /// Take the exclusive advisory lock guarding writes to `audit_path`, or
     /// fail closed if another instance already holds it.
-    fn acquire(audit_path: &Path) -> Result<Self, AuditError> {
+    fn acquire(audit_path: &Path) -> Result<(Self, bool), AuditError> {
         let lock_path = lock_path_for(audit_path);
         // Symlink-safe, private (0600), never-truncate-on-open sidecar: a
         // contender must not wipe the holder's recorded pid, and a pre-planted
         // symlink at the lock path must not redirect the truncate/pid write onto
         // another operator-writable file (bead oraclemcp-qa100 .15). The holder
         // truncates via `set_len(0)` only AFTER it owns the lock (below).
-        let mut file = open_private_lock_file(&lock_path)?;
+        let OpenedPrivateAuditFile { mut file, created } = open_private_lock_file(&lock_path)?;
         match file.try_lock() {
             Ok(()) => {}
             Err(TryLockError::WouldBlock) => {
@@ -258,7 +258,7 @@ impl AuditLogLock {
         let _ = file.set_len(0);
         let _ = file.seek(SeekFrom::Start(0));
         let _ = writeln!(file, "{}", std::process::id());
-        Ok(AuditLogLock { file })
+        Ok((AuditLogLock { file }, created))
     }
 }
 
@@ -291,6 +291,37 @@ fn read_holder_pid(lock_path: &Path) -> Option<u32> {
 #[cfg(test)]
 thread_local! {
     pub(crate) static PARENT_DIR_FSYNCS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+// The hook lands exactly between the historical stale path-existence probes
+// and the secure opens. It proves that parent-directory durability follows
+// the actual create outcome, rather than a pre-open pathname observation.
+#[cfg(test)]
+thread_local! {
+    static FILE_AUDIT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_file_audit_open_hook(hook: impl FnOnce() + 'static) {
+    FILE_AUDIT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_file_audit_open_hook() {
+    FILE_AUDIT_OPEN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_file_audit_open_hook() {}
+
+struct OpenedPrivateAuditFile {
+    file: File,
+    created: bool,
 }
 
 /// Reject a pre-planted symlink or non-regular filesystem object at `path`
@@ -493,11 +524,14 @@ fn open_or_create_private_windows_file(
     path: &Path,
     mode: WindowsPrivateOpenMode,
     description: &str,
-) -> Result<File, AuditError> {
+) -> Result<OpenedPrivateAuditFile, AuditError> {
     match windows_private_open_options(mode).open(path) {
         Ok(file) => {
             harden_open_regular_file(&file, path)?;
-            return Ok(file);
+            return Ok(OpenedPrivateAuditFile {
+                file,
+                created: false,
+            });
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
@@ -511,17 +545,18 @@ fn open_or_create_private_windows_file(
     let _creation_parent = windows_private_creation_parent(path)?;
     let mut create = windows_private_open_options(mode);
     create.create_new(true);
-    let file = match create.open(path) {
-        Ok(file) => file,
+    let (file, created) = match create.open(path) {
+        Ok(file) => (file, true),
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            windows_private_open_options(mode)
+            let file = windows_private_open_options(mode)
                 .open(path)
                 .map_err(|error| {
                     AuditError::Io(format!(
                         "cannot authenticate concurrently created {description} {}: {error}",
                         path.display()
                     ))
-                })?
+                })?;
+            (file, false)
         }
         Err(error) => {
             return Err(AuditError::Io(format!(
@@ -531,7 +566,7 @@ fn open_or_create_private_windows_file(
         }
     };
     harden_open_regular_file(&file, path)?;
-    Ok(file)
+    Ok(OpenedPrivateAuditFile { file, created })
 }
 
 #[cfg(windows)]
@@ -924,10 +959,13 @@ pub(crate) fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), A
     Ok(())
 }
 
-/// Open (creating when absent) a private, symlink-safe append handle for the
-/// audit log at `path`: reject a pre-planted non-regular target, create with
-/// mode `0600` on Unix, then confirm/harden the opened inode.
-pub(crate) fn open_private_append_file(path: &Path) -> Result<File, AuditError> {
+/// Open (creating when absent) a private, symlink-safe append handle and
+/// report whether this exact open created its directory entry. That outcome,
+/// rather than an earlier path observation, determines the required parent
+/// directory fsync.
+fn open_private_append_file_with_creation(
+    path: &Path,
+) -> Result<OpenedPrivateAuditFile, AuditError> {
     reject_unsafe_existing(path)?;
     #[cfg(windows)]
     {
@@ -935,24 +973,63 @@ pub(crate) fn open_private_append_file(path: &Path) -> Result<File, AuditError> 
     }
     #[cfg(not(windows))]
     {
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).append(true);
-        #[cfg(unix)]
-        options.mode(0o600);
-        configure_no_follow(&mut options);
-        let file = options.open(path).map_err(|e| {
-            AuditError::Io(format!("failed to open audit log {}: {e}", path.display()))
-        })?;
+        let open_existing = || {
+            let mut options = OpenOptions::new();
+            options.read(true).append(true);
+            #[cfg(unix)]
+            options.mode(0o600);
+            configure_no_follow(&mut options);
+            options.open(path)
+        };
+        let (file, created) = match open_existing() {
+            Ok(file) => (file, false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut create = OpenOptions::new();
+                create.create_new(true).read(true).append(true);
+                #[cfg(unix)]
+                create.mode(0o600);
+                configure_no_follow(&mut create);
+                match create.open(path) {
+                    Ok(file) => (file, true),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let file = open_existing().map_err(|error| {
+                            AuditError::Io(format!(
+                                "failed to authenticate concurrently created audit log {}: {error}",
+                                path.display()
+                            ))
+                        })?;
+                        (file, false)
+                    }
+                    Err(error) => {
+                        return Err(AuditError::Io(format!(
+                            "failed to create audit log {}: {error}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(AuditError::Io(format!(
+                    "failed to open audit log {}: {error}",
+                    path.display()
+                )));
+            }
+        };
         harden_open_regular_file(&file, path)?;
-        Ok(file)
+        Ok(OpenedPrivateAuditFile { file, created })
     }
 }
 
-/// Open (creating when absent) a private, symlink-safe read/write handle for the
-/// audit `<log>.lock` sidecar. Never truncates on open (a contender must not
-/// wipe the holder's recorded pid); creates `0600` on Unix and confirms/hardens
-/// the opened inode.
-pub(crate) fn open_private_lock_file(path: &Path) -> Result<File, AuditError> {
+/// Open (creating when absent) a private, symlink-safe append handle for the
+/// audit log at `path`: reject a pre-planted non-regular target, create with
+/// mode `0600` on Unix, then confirm/harden the opened inode.
+pub(crate) fn open_private_append_file(path: &Path) -> Result<File, AuditError> {
+    Ok(open_private_append_file_with_creation(path)?.file)
+}
+
+/// Open (creating when absent) a private, symlink-safe read/write handle and
+/// report whether this exact open created the lock sidecar.
+fn open_private_lock_file(path: &Path) -> Result<OpenedPrivateAuditFile, AuditError> {
     reject_unsafe_existing(path)?;
     #[cfg(windows)]
     {
@@ -964,19 +1041,54 @@ pub(crate) fn open_private_lock_file(path: &Path) -> Result<File, AuditError> {
     }
     #[cfg(not(windows))]
     {
-        let mut options = OpenOptions::new();
-        options.read(true).write(true).create(true).truncate(false);
-        #[cfg(unix)]
-        options.mode(0o600);
-        configure_no_follow(&mut options);
-        let file = options.open(path).map_err(|e| {
-            AuditError::Io(format!(
-                "cannot open audit lock sidecar {}: {e}",
-                path.display()
-            ))
-        })?;
+        let open_existing = || {
+            let mut options = OpenOptions::new();
+            options.read(true).write(true).truncate(false);
+            #[cfg(unix)]
+            options.mode(0o600);
+            configure_no_follow(&mut options);
+            options.open(path)
+        };
+        let (file, created) = match open_existing() {
+            Ok(file) => (file, false),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut create = OpenOptions::new();
+                create
+                    .read(true)
+                    .write(true)
+                    .create_new(true)
+                    .truncate(false);
+                #[cfg(unix)]
+                create.mode(0o600);
+                configure_no_follow(&mut create);
+                match create.open(path) {
+                    Ok(file) => (file, true),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        let file = open_existing().map_err(|error| {
+                            AuditError::Io(format!(
+                                "cannot authenticate concurrently created audit lock sidecar {}: {error}",
+                                path.display()
+                            ))
+                        })?;
+                        (file, false)
+                    }
+                    Err(error) => {
+                        return Err(AuditError::Io(format!(
+                            "cannot create audit lock sidecar {}: {error}",
+                            path.display()
+                        )));
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(AuditError::Io(format!(
+                    "cannot open audit lock sidecar {}: {error}",
+                    path.display()
+                )));
+            }
+        };
         harden_open_regular_file(&file, path)?;
-        Ok(file)
+        Ok(OpenedPrivateAuditFile { file, created })
     }
 }
 
@@ -1114,22 +1226,24 @@ impl FileAuditSink {
     /// on the same log fails closed instead of forking the hash chain.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AuditError> {
         let path = path.as_ref();
-        // Whether the durable entries already exist decides whether opening will
-        // *create* anything — and thus whether the parent directory entry needs
-        // an fsync to be crash-durable (bead oraclemcp-g4xi).
-        let audit_pre_existing = path.exists();
-        let lock_pre_existing = lock_path_for(path).exists();
+        // A pathname can be deleted or replaced between an existence probe and
+        // a no-follow open. The test hook occupies that historical gap; only
+        // each secure open's actual create result controls directory durability.
+        run_file_audit_open_hook();
         // Lock BEFORE opening the append fd: fail fast on contention, and never
         // leave a half-armed writer if the lock is already held.
-        let lock = AuditLogLock::acquire(path)?;
+        let (lock, lock_created) = AuditLogLock::acquire(path)?;
         // Symlink-safe, private (0600) append handle: reject a pre-planted
         // symlink/non-regular target and harden the opened inode to owner-only
         // (bead oraclemcp-qa100 .15).
-        let file = open_private_append_file(path)?;
+        let OpenedPrivateAuditFile {
+            file,
+            created: audit_created,
+        } = open_private_append_file_with_creation(path)?;
         // Directory durability: if we just created the audit log or its lock
         // sidecar, fsync the parent directory so the new file survives a crash
         // instead of vanishing with the tamper-evidence it was about to hold.
-        if !audit_pre_existing || !lock_pre_existing {
+        if audit_created || lock_created {
             fsync_parent_dir(path)?;
         }
         Ok(FileAuditSink {
@@ -2023,6 +2137,9 @@ impl Auditor {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod open_tests;
 
 #[cfg(test)]
 mod tests {
