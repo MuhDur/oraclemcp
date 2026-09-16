@@ -1661,9 +1661,9 @@ fn wallet_error_label(kind: DoctorWalletErrorKind) -> &'static str {
 /// posture (B2.1) — a diagnostic of "what would happen", WITHOUT opening a live
 /// DB connection.
 ///
-/// Uses only the driver's public, sans-I/O parsers
+/// Uses the driver's public bounded file reader, sans-I/O parsers
 /// (`oraclemcp_driver_cx_protocol::tls::wallet::{parse_ewallet_pem, parse_ewallet_p12}` and
-/// `oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso`) plus the public path helpers
+/// `oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso`), and public path helpers
 /// (`pem_wallet_path`/`p12_wallet_path`/`sso_wallet_path`). It mirrors the
 /// driver's documented `load_wallet` precedence and fallthrough contract; it does
 /// NOT call the driver's (private) resolver, so it can only *infer* the verdict,
@@ -1681,17 +1681,25 @@ pub fn probe_wallet_posture(
 ) -> DoctorWalletPostureReport {
     use oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso;
     use oraclemcp_driver_cx_protocol::tls::wallet::{
-        p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, sso_wallet_path,
+        p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, read_wallet_file,
+        sso_wallet_path,
     };
 
     // The auto-login cwallet.sso is "usable" iff it exists AND parses end to end
     // — exactly the condition the driver's `load_wallet::read_sso` requires
-    // before it will fall through. The path is never rendered.
+    // before it will fall through. Keep this lazy: the driver must not touch a
+    // present SSO file when a primary wallet is usable or fails without a
+    // fallthrough-eligible error. The path is never rendered.
     let sso_path = sso_wallet_path(dir);
-    let sso_usable = sso_path.exists()
-        && std::fs::read(&sso_path)
-            .ok()
-            .is_some_and(|bytes| parse_cwallet_sso(&bytes).is_ok());
+    let probe_sso = || -> Result<Option<()>, DoctorWalletErrorKind> {
+        if !sso_path.exists() {
+            return Ok(None);
+        }
+        read_wallet_file(&sso_path)
+            .and_then(|bytes| parse_cwallet_sso(&bytes))
+            .map(|_| Some(()))
+            .map_err(|error| wallet_error_kind(&error))
+    };
 
     // The primary wallet, in the driver's exact precedence order: ewallet.pem
     // first, else a *password-bearing* ewallet.p12 (a password-less p12 is NOT
@@ -1699,17 +1707,17 @@ pub fn probe_wallet_posture(
     // password.is_some()`).
     let pem_path = pem_wallet_path(dir);
     let p12_path = p12_wallet_path(dir);
-    let probe_pem = |password: Option<&str>| match std::fs::read(&pem_path) {
-        Ok(bytes) => parse_ewallet_pem(&bytes, password)
+    let probe_pem = |password: Option<&str>| {
+        read_wallet_file(&pem_path)
+            .and_then(|bytes| parse_ewallet_pem(&bytes, password))
             .map(|_| ())
-            .map_err(|e| wallet_error_kind(&e)),
-        Err(_) => Err(DoctorWalletErrorKind::Io),
+            .map_err(|error| wallet_error_kind(&error))
     };
-    let probe_p12 = |password: Option<&str>| match std::fs::read(&p12_path) {
-        Ok(bytes) => parse_ewallet_p12(&bytes, password)
+    let probe_p12 = |password: Option<&str>| {
+        read_wallet_file(&p12_path)
+            .and_then(|bytes| parse_ewallet_p12(&bytes, password))
             .map(|_| ())
-            .map_err(|e| wallet_error_kind(&e)),
-        Err(_) => Err(DoctorWalletErrorKind::Io),
+            .map_err(|error| wallet_error_kind(&error))
     };
     let primary: Option<(&'static str, Result<(), DoctorWalletErrorKind>)> = if pem_path.exists() {
         Some(("ewallet.pem", probe_pem(wallet_password)))
@@ -1729,7 +1737,7 @@ pub fn probe_wallet_posture(
             summary: format!("{name} usable"),
         },
         Some((name, Err(kind))) => {
-            if wallet_error_falls_through(kind) && sso_usable {
+            if wallet_error_falls_through(kind) && matches!(probe_sso(), Ok(Some(()))) {
                 DoctorWalletPostureReport {
                     posture: DoctorWalletPosture::EwalletUndecryptableSsoFallthrough,
                     usable_file: Some(SSO_WALLET_FILE),
@@ -1755,46 +1763,59 @@ pub fn probe_wallet_posture(
                 }
             }
         }
-        None => {
-            // No pem and no password-bearing p12. The driver prefers an
-            // auto-login wallet; otherwise a present-but-password-less p12
-            // surfaces PasswordRequired (a wallet load that would fail).
-            if sso_usable {
-                DoctorWalletPostureReport {
-                    posture: DoctorWalletPosture::AutoLoginUsable,
-                    usable_file: Some(SSO_WALLET_FILE),
-                    failed_file: None,
-                    fallthrough: false,
-                    error_kind: None,
-                    summary: "auto-login (cwallet.sso) usable".to_owned(),
-                }
-            } else if p12_path.exists() {
-                let kind = probe_p12(wallet_password)
-                    .err()
-                    .unwrap_or(DoctorWalletErrorKind::Io);
-                DoctorWalletPostureReport {
-                    posture: DoctorWalletPosture::WalletLoadWouldFail,
-                    usable_file: None,
-                    failed_file: Some("ewallet.p12"),
-                    fallthrough: false,
-                    error_kind: Some(kind),
-                    summary: format!(
-                        "wallet load would fail: {}, no auto-login fallback",
-                        wallet_error_label(kind)
-                    ),
-                }
-            } else {
-                DoctorWalletPostureReport {
-                    posture: DoctorWalletPosture::NoWalletFiles,
-                    usable_file: None,
-                    failed_file: None,
-                    fallthrough: false,
-                    error_kind: None,
-                    summary: "no ewallet.pem/.p12 or usable cwallet.sso in the wallet directory"
-                        .to_owned(),
+        None => match probe_sso() {
+            Ok(Some(())) => DoctorWalletPostureReport {
+                posture: DoctorWalletPosture::AutoLoginUsable,
+                usable_file: Some(SSO_WALLET_FILE),
+                failed_file: None,
+                fallthrough: false,
+                error_kind: None,
+                summary: "auto-login (cwallet.sso) usable".to_owned(),
+            },
+            Err(kind) => DoctorWalletPostureReport {
+                posture: DoctorWalletPosture::WalletLoadWouldFail,
+                usable_file: None,
+                failed_file: Some(SSO_WALLET_FILE),
+                fallthrough: false,
+                error_kind: Some(kind),
+                summary: format!(
+                    "wallet load would fail: {}, no auto-login fallback",
+                    wallet_error_label(kind)
+                ),
+            },
+            Ok(None) => {
+                // No pem and no password-bearing p12. The driver prefers an
+                // auto-login wallet; otherwise a present-but-password-less p12
+                // surfaces PasswordRequired (a wallet load that would fail).
+                if p12_path.exists() {
+                    let kind = probe_p12(wallet_password)
+                        .err()
+                        .unwrap_or(DoctorWalletErrorKind::Io);
+                    DoctorWalletPostureReport {
+                        posture: DoctorWalletPosture::WalletLoadWouldFail,
+                        usable_file: None,
+                        failed_file: Some("ewallet.p12"),
+                        fallthrough: false,
+                        error_kind: Some(kind),
+                        summary: format!(
+                            "wallet load would fail: {}, no auto-login fallback",
+                            wallet_error_label(kind)
+                        ),
+                    }
+                } else {
+                    DoctorWalletPostureReport {
+                        posture: DoctorWalletPosture::NoWalletFiles,
+                        usable_file: None,
+                        failed_file: None,
+                        fallthrough: false,
+                        error_kind: None,
+                        summary:
+                            "no ewallet.pem/.p12 or usable cwallet.sso in the wallet directory"
+                                .to_owned(),
+                    }
                 }
             }
-        }
+        },
     }
 }
 

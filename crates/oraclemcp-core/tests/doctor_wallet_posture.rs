@@ -11,7 +11,14 @@
 //! * `undecryptable_without_sso/` — the same encrypted `ewallet.pem`, no
 //!   `cwallet.sso`.
 
+use std::fs::{self, File};
 use std::path::PathBuf;
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::sync::mpsc;
+#[cfg(unix)]
+use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
@@ -19,6 +26,8 @@ use oraclemcp_core::doctor::{
     CheckStatus, DoctorContext, DoctorWalletErrorKind, DoctorWalletPosture, probe_wallet_posture,
     run_doctor,
 };
+use oraclemcp_driver_cx_protocol::tls::wallet::MAX_WALLET_FILE_BYTES;
+use tempfile::tempdir;
 
 /// The password the committed encrypted `ewallet.pem` fixtures were sealed with
 /// (see PROVENANCE). The probe below deliberately uses the WRONG password to
@@ -134,6 +143,134 @@ fn wallet_posture_good_sso_parses_end_to_end() {
     );
     assert_eq!(report.posture, DoctorWalletPosture::AutoLoginUsable);
     assert!(report.usable_file == Some("cwallet.sso"));
+}
+
+/// A present but malformed auto-login wallet is a real driver failure, not an
+/// absent-wallet success. The diagnostic must retain its typed, secret-free
+/// reason instead of telling the operator that the directory has no wallet.
+#[test]
+fn wallet_posture_reports_a_malformed_sole_sso() {
+    let dir = tempdir().expect("temporary wallet directory");
+    fs::write(dir.path().join("cwallet.sso"), [0_u8; 8]).expect("write malformed sso");
+
+    let report = probe_wallet_posture(dir.path(), None);
+
+    assert_eq!(report.posture, DoctorWalletPosture::WalletLoadWouldFail);
+    assert_eq!(report.failed_file, Some("cwallet.sso"));
+    assert_eq!(report.error_kind, Some(DoctorWalletErrorKind::Sso));
+    assert!(!report.fallthrough);
+    assert_eq!(
+        report.summary,
+        "wallet load would fail: Sso, no auto-login fallback"
+    );
+}
+
+/// The CLI-facing doctor check must fail, rather than retain its otherwise-pass
+/// base result, when the configured directory contains only an unusable SSO
+/// wallet. Its rendered diagnostics must remain secret-free.
+#[test]
+fn doctor_reports_a_malformed_sole_sso_as_a_secret_free_failure() {
+    let dir = tempdir().expect("temporary wallet directory");
+    fs::write(dir.path().join("cwallet.sso"), [0_u8; 8]).expect("write malformed sso");
+    let dir_display = dir.path().display().to_string();
+    let context = DoctorContext {
+        wallet_location: Some(dir_display.clone()),
+        ..DoctorContext::default()
+    };
+
+    let report = run_doctor_blocking(&context);
+    let tns = report
+        .checks
+        .iter()
+        .find(|check| check.id == 2)
+        .expect("TNS/wallet check present");
+
+    assert_eq!(tns.status, CheckStatus::Fail);
+    assert_eq!(
+        tns.detail,
+        "wallet load would fail: Sso, no auto-login fallback"
+    );
+    let posture = tns
+        .wallet_posture
+        .as_ref()
+        .expect("wallet posture attached");
+    assert_eq!(posture.failed_file, Some("cwallet.sso"));
+    assert_eq!(posture.error_kind, Some(DoctorWalletErrorKind::Sso));
+
+    for rendered in [
+        report.to_text(),
+        serde_json::to_string(&report.to_json()).expect("json"),
+    ] {
+        assert!(
+            !rendered.contains(&dir_display),
+            "doctor output leaked the wallet directory"
+        );
+    }
+}
+
+/// The actual resolver does not touch cwallet.sso when ewallet.pem already
+/// succeeds. Keep the offline probe aligned: a FIFO SSO with no writer must
+/// not make doctor hang behind an otherwise usable primary wallet.
+#[cfg(unix)]
+#[test]
+fn wallet_posture_does_not_open_sso_when_primary_is_usable() {
+    let dir = tempdir().expect("temporary wallet directory");
+    let primary = wallet_fixture_dir("expired_cert").join("ewallet.pem");
+    fs::copy(primary, dir.path().join("ewallet.pem")).expect("copy usable primary wallet");
+    let sso = dir.path().join("cwallet.sso");
+    let status = Command::new("mkfifo")
+        .arg(&sso)
+        .status()
+        .expect("run mkfifo for blocking sso fixture");
+    assert!(status.success(), "mkfifo must create the SSO fixture");
+
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let wallet_dir = dir.path().to_owned();
+    std::thread::spawn(move || {
+        sender
+            .send(probe_wallet_posture(&wallet_dir, None))
+            .expect("test receiver remains available");
+    });
+
+    let report = match receiver.recv_timeout(Duration::from_secs(2)) {
+        Ok(report) => report,
+        Err(timeout) => {
+            // Unblock the legacy eager reader before failing so this regression
+            // test never leaks a permanently blocked worker into the harness.
+            drop(
+                File::options()
+                    .write(true)
+                    .open(&sso)
+                    .expect("open FIFO writer to release legacy reader"),
+            );
+            let _ = receiver.recv_timeout(Duration::from_secs(2));
+            panic!("a usable primary wallet blocked on cwallet.sso: {timeout}");
+        }
+    };
+    assert_eq!(report.posture, DoctorWalletPosture::PrimaryUsable);
+    assert_eq!(report.usable_file, Some("ewallet.pem"));
+}
+
+/// The doctor probe must take the exact bounded-reader path that the driver
+/// takes. A sparse file one byte over the public driver limit must be rejected
+/// as `TooLarge` before any wallet parser can mistake it for malformed data.
+#[test]
+fn wallet_posture_rejects_an_oversized_sole_sso() {
+    let dir = tempdir().expect("temporary wallet directory");
+    let sso = dir.path().join("cwallet.sso");
+    File::create(&sso)
+        .and_then(|file| file.set_len((MAX_WALLET_FILE_BYTES + 1) as u64))
+        .expect("create sparse oversized sso");
+
+    let report = probe_wallet_posture(dir.path(), None);
+
+    assert_eq!(report.posture, DoctorWalletPosture::WalletLoadWouldFail);
+    assert_eq!(report.failed_file, Some("cwallet.sso"));
+    assert_eq!(report.error_kind, Some(DoctorWalletErrorKind::TooLarge));
+    assert_eq!(
+        report.summary,
+        "wallet load would fail: TooLarge, no auto-login fallback"
+    );
 }
 
 fn run_doctor_blocking(ctx: &DoctorContext<'_>) -> oraclemcp_core::doctor::DoctorReport {
