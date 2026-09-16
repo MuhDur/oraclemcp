@@ -53,11 +53,15 @@ separately from the SQLcl and genai-toolbox comparison:
   [`github.com/oracle/rust-oracledb`](https://github.com/oracle/rust-oracledb).**
   Oracle maintains a pure-Rust, synchronous driver, currently `26.0.0-beta.3`
   (published 2026-09-08; first published 2026-06-14). It requires no Oracle
-  Client libraries and targets Oracle Database 12 through 26ai. oraclemcp does
-  not use it: this repository pins the frozen, async `oraclemcp-driver-cx` 0.9.2
-  (published 2026-07-30), the renamed continuation of the original Rust thin
-  driver that Oracle's `oracledb` replaces. The `oraclemcp-driver-cx` repository
-  is [`github.com/MuhDur/rust-oracledb`](https://github.com/MuhDur/rust-oracledb).
+  Client libraries and targets Oracle Database 12 through 26ai. The shipped
+  default remains the frozen, async `oraclemcp-driver-cx` 0.9.2 (published
+  2026-07-30), the renamed continuation of the original Rust thin driver that
+  Oracle's `oracledb` replaces. The opt-in `oracledb` feature is a bounded
+  acquisition-only alternate for compatible password connections after a raw
+  `oraclemcp-driver-cx` acquisition failure; it does not replace the primary
+  driver, execute statements after routing, or handle IAM/cwallet routes. The
+  `oraclemcp-driver-cx` repository is
+  [`github.com/MuhDur/rust-oracledb`](https://github.com/MuhDur/rust-oracledb).
 
 The dates and descriptions above were checked against crates.io and GitHub on
 2026-09-16. Verify their current behavior and versions against the projects' own

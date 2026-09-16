@@ -238,6 +238,10 @@ require_contains \
   "\`oraclemcp-driver-cx-protocol = $driver_version\` crates from crates.io" \
   "behavior-inventory protocol pin"
 require_contains \
+  "docs/comparison.md" \
+  'The opt-in `oracledb` feature is a bounded' \
+  "comparison official-driver routing"
+require_contains \
   "Cargo.toml" \
   "The oraclemcp-driver-cx $driver_version driver's own source is stable-clean" \
   "workspace driver provenance"
