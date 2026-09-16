@@ -71,7 +71,7 @@ impl OfficialOracleConnection {
         let actor = Arc::new(BlockingConnectionActor::spawn(
             OfficialActorResource::default,
             execute_actor_command,
-        ));
+        )?);
         let adapter = Self {
             wire_limits: Arc::new(Mutex::new(OfficialWireLimits {
                 call_timeout: options.call_timeout,
@@ -1324,14 +1324,17 @@ mod tests {
 
     #[test]
     fn dropped_official_row_stream_quarantines_and_stops_its_actor() {
-        let actor = Arc::new(BlockingConnectionActor::spawn(
-            || (),
-            |_, _, _| -> Result<OfficialReply, DbError> {
-                Err(DbError::Internal(
-                    "discarded stream must not execute an actor command".to_owned(),
-                ))
-            },
-        ));
+        let actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                || (),
+                |_, _, _| -> Result<OfficialReply, DbError> {
+                    Err(DbError::Internal(
+                        "discarded stream must not execute an actor command".to_owned(),
+                    ))
+                },
+            )
+            .expect("actor thread starts for stream-drop test"),
+        );
         let stream = OfficialOracleRowStream {
             actor: Arc::clone(&actor),
             columns: Vec::new(),
@@ -1361,14 +1364,17 @@ mod tests {
     fn official_close_is_terminal_and_idempotent() {
         let close_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let actor_close_calls = Arc::clone(&close_calls);
-        let actor = Arc::new(BlockingConnectionActor::spawn(
-            OfficialActorResource::default,
-            move |_, command, _| -> Result<OfficialReply, DbError> {
-                assert!(matches!(command, OfficialCommand::Close { .. }));
-                actor_close_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(OfficialReply::Unit)
-            },
-        ));
+        let actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                OfficialActorResource::default,
+                move |_, command, _| -> Result<OfficialReply, DbError> {
+                    assert!(matches!(command, OfficialCommand::Close { .. }));
+                    actor_close_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(OfficialReply::Unit)
+                },
+            )
+            .expect("actor thread starts for explicit-close test"),
+        );
         let connection = OfficialOracleConnection {
             options: OracleConnectOptions::default(),
             actor: Arc::clone(&actor),

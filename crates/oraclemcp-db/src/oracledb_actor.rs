@@ -69,7 +69,10 @@ where
     /// `Resource` need not be `Send`: it is created and used entirely inside
     /// the actor thread. Requests and replies are owned values because they
     /// cross the Cx-aware mailbox boundary.
-    pub(crate) fn spawn<Resource, Factory, Execute>(factory: Factory, execute: Execute) -> Self
+    pub(crate) fn spawn<Resource, Factory, Execute>(
+        factory: Factory,
+        execute: Execute,
+    ) -> Result<Self, DbError>
     where
         Resource: 'static,
         Factory: FnOnce() -> Resource + Send + 'static,
@@ -77,23 +80,50 @@ where
             + Send
             + 'static,
     {
+        Self::spawn_with_thread(factory, execute, |actor_thread| {
+            thread::Builder::new()
+                .name("oraclemcp-oracledb-actor".to_owned())
+                .spawn(actor_thread)
+        })
+    }
+
+    /// Starts an actor with an injectable native-thread launcher.
+    ///
+    /// The injection point confines an OS thread/PID exhaustion regression to
+    /// this boundary. On launcher failure, every locally constructed channel,
+    /// state cell, closure, and the unstarted actor task are dropped before an
+    /// actor handle can escape to a caller.
+    fn spawn_with_thread<Resource, Factory, Execute, Spawn>(
+        factory: Factory,
+        execute: Execute,
+        spawn_thread: Spawn,
+    ) -> Result<Self, DbError>
+    where
+        Resource: 'static,
+        Factory: FnOnce() -> Resource + Send + 'static,
+        Execute: FnMut(&mut Resource, Request, ActorAdmission) -> Result<Reply, DbError>
+            + Send
+            + 'static,
+        Spawn:
+            FnOnce(Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<thread::JoinHandle<()>>,
+    {
         let (mailbox, receiver) = mpsc::channel(ACTOR_MAILBOX_CAPACITY);
         let state = Arc::new(ActorState::default());
         let actor_state = Arc::clone(&state);
-        let join = thread::Builder::new()
-            .name("oraclemcp-oracledb-actor".to_owned())
-            .spawn(move || run_actor_thread(receiver, actor_state, factory, execute))
-            .expect("dedicated official Oracle actor thread must spawn");
+        let join = spawn_thread(Box::new(move || {
+            run_actor_thread(receiver, actor_state, factory, execute);
+        }))
+        .map_err(|_| DbError::Connect("official Oracle actor thread could not start".to_owned()))?;
 
         #[cfg(not(test))]
         let _ = join;
 
-        Self {
+        Ok(Self {
             mailbox,
             state,
             #[cfg(test)]
             join: Mutex::new(Some(join)),
-        }
+        })
     }
 
     /// Runs one synchronous operation through the actor.
@@ -522,7 +552,8 @@ mod tests {
                 assert_eq!(thread::current().id(), connection.owner_thread);
                 connection.value += amount;
                 Ok((connection.owner_thread, connection.value))
-            });
+            })
+            .expect("actor thread starts for ownership test");
         let caller_thread = thread::current().id();
 
         let (owner_thread, value) = block_on_actor(async {
@@ -546,7 +577,8 @@ mod tests {
                 executions_for_actor.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-        );
+        )
+        .expect("actor thread starts for deadline test");
         let result = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
             actor.call_with_deadline(&cx, Some(Time::ZERO), ()).await
@@ -573,7 +605,8 @@ mod tests {
         let actor = BlockingConnectionActor::spawn(
             move || Resource(resource_dropped),
             |_, (), _| -> Result<(), DbError> { Ok(()) },
-        );
+        )
+        .expect("actor thread starts for terminal-disposal test");
 
         let result = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
@@ -613,7 +646,8 @@ mod tests {
             |_, (), _| -> Result<(), DbError> {
                 panic!("test-only blocking driver panic");
             },
-        );
+        )
+        .expect("actor thread starts for panic quarantine test");
 
         let result = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
@@ -669,7 +703,8 @@ mod tests {
                 }
                 Ok(())
             },
-        );
+        )
+        .expect("actor thread starts for deadline-admission test");
 
         let (first_result, timed_result) = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
@@ -745,7 +780,8 @@ mod tests {
                     .expect("test releases the blocking operation");
                 Ok(())
             },
-        );
+        )
+        .expect("actor thread starts for cancellation test");
         let call = block_on_actor(async {
             let caller_cx = Cx::current().expect("test runtime installs a current Cx");
             let thread_cx = caller_cx.clone();
@@ -789,7 +825,8 @@ mod tests {
                     "driver timeout leaves the session state uncertain".to_owned(),
                 ))
             },
-        );
+        )
+        .expect("actor thread starts for uncertainty test");
 
         let result = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
@@ -799,5 +836,53 @@ mod tests {
         assert!(matches!(result, Err(DbError::Cancelled(_))));
         assert!(actor.is_quarantined_for_test());
         actor.join_for_test();
+    }
+
+    #[test]
+    fn actor_spawn_failure_is_redacted_and_never_starts_a_resource() {
+        struct UnstartedTaskDrop(Arc<AtomicUsize>);
+
+        impl Drop for UnstartedTaskDrop {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let factory_runs = Arc::new(AtomicUsize::new(0));
+        let factory_runs_for_actor = Arc::clone(&factory_runs);
+        let unstarted_task_drops = Arc::new(AtomicUsize::new(0));
+        let task_drop_guard = UnstartedTaskDrop(Arc::clone(&unstarted_task_drops));
+        let result = BlockingConnectionActor::spawn_with_thread(
+            move || {
+                let _task_drop_guard = task_drop_guard;
+                factory_runs_for_actor.fetch_add(1, Ordering::SeqCst);
+            },
+            |_, (), _| -> Result<(), DbError> { Ok(()) },
+            |_actor_thread| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "host thread limit exhausted: /operator-only/path",
+                ))
+            },
+        );
+
+        let error = match result {
+            Ok(_) => panic!("failed launcher must not publish an actor handle"),
+            Err(error) => error,
+        };
+        assert!(matches!(
+            error,
+            DbError::Connect(ref message) if message == "official Oracle actor thread could not start"
+        ));
+        assert_eq!(
+            factory_runs.load(Ordering::SeqCst),
+            0,
+            "an unstarted actor task must not create the physical resource"
+        );
+        assert_eq!(
+            unstarted_task_drops.load(Ordering::SeqCst),
+            1,
+            "the failed launcher must drop the unstarted actor task rather than leak its mailbox"
+        );
     }
 }

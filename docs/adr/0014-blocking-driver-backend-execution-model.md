@@ -178,6 +178,10 @@ The actor-lifecycle gap (`oraclemcp-xoflp.1.5`) is resolved: explicit close is
 terminal, while an unrecovered official stream uses a nonblocking drop
 disposition that quarantines and retires the actor. Unit regressions prove the
 resource is dropped, the thread joins, and subsequent actor calls are refused.
+The actor-startup gap (`oraclemcp-xoflp.1.10`) is resolved: native thread
+creation is fallible and reports a stable redacted `DbError::Connect` rather
+than panicking. The injected launcher-failure regression proves that no actor
+handle escapes and the thread-confined resource factory is never run.
 The following review findings remain default-flip blockers until independently
 resolved and tested:
 
@@ -187,9 +191,6 @@ resolved and tested:
 - `oraclemcp-xoflp.1.8`: DATE and plain TIMESTAMP must be formatted
   metadata-aware, without fabricating a UTC `Z` suffix; their serialized
   regression rows remain unproven.
-- `oraclemcp-xoflp.1.10`: actor thread startup must return a typed,
-  redacted acquisition failure instead of panicking under thread/PID
-  exhaustion, with an injected spawn-failure proof.
 
 The pinned official driver is also `26.0.0-beta.3`; the beta API/version risk
 remains a release-signoff consideration even if all behavioral rows pass.
