@@ -153,6 +153,7 @@ import {
   configurationAuthority,
   dashboardAuthorityIdentity,
   elevationCompletionIsCurrent,
+  laneAuthorityQueryIdentity,
   laneCancelFailure,
   laneCancelSuccess,
   laneIdentity,
@@ -715,6 +716,10 @@ function SessionsWorkspace(): React.ReactElement {
   const sessionAuthority = dashboardAuthorityIdentity(
     session.status === "success" ? session.data : undefined
   );
+  const selectedLaneAuthorityKey = laneAuthorityQueryIdentity(
+    selectedLaneTarget,
+    sessionAuthority
+  );
   const purgeSessionAuthorityState = React.useCallback(() => {
     invalidateElevationDraft();
     setCancelNotice(null);
@@ -737,8 +742,7 @@ function SessionsWorkspace(): React.ReactElement {
     queryKey: [
       "sessions",
       "capabilities",
-      selectedLaneTarget?.laneId ?? "none",
-      selectedLaneTarget?.generation ?? 0
+      ...selectedLaneAuthorityKey
     ],
     queryFn: async ({ signal }) => {
       if (!session.data || !selectedLaneTarget) {
@@ -754,8 +758,7 @@ function SessionsWorkspace(): React.ReactElement {
     queryKey: [
       "sessions",
       "connection",
-      selectedLaneTarget?.laneId ?? "none",
-      selectedLaneTarget?.generation ?? 0
+      ...selectedLaneAuthorityKey
     ],
     queryFn: async ({ signal }) => {
       if (!session.data || !selectedLaneTarget) {
@@ -1580,6 +1583,10 @@ function HealthPage(): React.ReactElement {
       : { lane: null, invalidated: false };
   const selectedLane = laneSelection.lane ?? undefined;
   const connectionLane = selectedLane ? laneIdentity(selectedLane) : undefined;
+  const sessionAuthority = dashboardAuthorityIdentity(
+    session.status === "success" ? session.data : undefined
+  );
+  const connectionAuthorityKey = laneAuthorityQueryIdentity(connectionLane, sessionAuthority);
   const connectionReady =
     activeLanes.status === "success" && (!stateful || Boolean(connectionLane));
   React.useEffect(() => {
@@ -1598,8 +1605,7 @@ function HealthPage(): React.ReactElement {
     queryKey: [
       "health",
       "connection",
-      connectionLane?.laneId ?? "stateless",
-      connectionLane?.generation ?? 0
+      ...connectionAuthorityKey
     ],
     queryFn: async ({ signal }) => {
       if (!session.data) {

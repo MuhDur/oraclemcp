@@ -11,6 +11,7 @@ import {
   configurationAuthority,
   dashboardAuthorityIdentity,
   elevationCompletionIsCurrent,
+  laneAuthorityQueryIdentity,
   laneCancelFailure,
   laneCancelSuccess,
   purgeClientRotationMutation,
@@ -61,6 +62,20 @@ describe("authoritative collection presentation", () => {
 });
 
 describe("lane action truth and identity", () => {
+  it("partitions lane facts by the current dashboard authority", () => {
+    expect(laneAuthorityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-a")).toEqual(
+      ["lane-a", 7, "session-a"]
+    );
+    expect(laneAuthorityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-b")).not.toEqual(
+      laneAuthorityQueryIdentity({ laneId: "lane-a", generation: 7 }, "session-a")
+    );
+    expect(laneAuthorityQueryIdentity(undefined, null)).toEqual([
+      "stateless",
+      0,
+      "no-authority"
+    ]);
+  });
+
   it("keeps cancellation failure distinct from success", () => {
     expect(laneCancelSuccess("lane-a")).toEqual({
       kind: "success",

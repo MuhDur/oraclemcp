@@ -79,6 +79,18 @@ export function sameLaneIdentity(
   return left.laneId === right.laneId && left.generation === right.generation;
 }
 
+/** Separates lane-scoped facts from different dashboard authentication epochs. */
+export function laneAuthorityQueryIdentity(
+  lane: LaneIdentity | null | undefined,
+  sessionAuthority: string | null
+): readonly [string, number, string] {
+  return [
+    lane?.laneId ?? "stateless",
+    lane?.generation ?? 0,
+    sessionAuthority ?? "no-authority"
+  ];
+}
+
 export type ExactLaneSelection<T extends LaneLike> = {
   lane: T | null;
   invalidated: boolean;
