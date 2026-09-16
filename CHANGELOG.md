@@ -56,8 +56,9 @@ unchanged in contract.
 - **The dashboard UX evidence schema is corrected.** See
   [5950c50d](https://github.com/MuhDur/oraclemcp/commit/5950c50d).
 - **Dashboard pairing discovers the live service listener.** `oraclemcp
-  dashboard` now uses the recorded service-instance listener instead of silently
-  probing the default `:7070`. See
+  dashboard` now uses the actual kernel-bound address in the recorded
+  service-instance listener (including an ephemeral `--listen ...:0` port)
+  instead of silently probing the default `:7070`. See
   [8fa50275](https://github.com/MuhDur/oraclemcp/commit/8fa50275).
 - **Explorer detail actions wait for current dashboard authority.** Viewing
   creation DDL or source stays disabled unless both the active dashboard session

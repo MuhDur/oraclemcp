@@ -3946,8 +3946,12 @@ fn run_serve(
                         }
                     };
             }
+            // `--listen 127.0.0.1:0` asks the kernel to choose a port. The
+            // service-instance record is consumed by `oraclemcp dashboard`, so
+            // it must name the bound address rather than the pre-bind request.
+            let recorded_listener = listener_addr.to_string();
             let _service_instance_guard = match acquire_service_instance_guard(
-                &addr,
+                &recorded_listener,
                 if tls_enabled { "https" } else { "http" },
             ) {
                 Ok(guard) => guard,
@@ -4046,7 +4050,7 @@ fn run_serve(
             emit_serve_status(
                 robot_json,
                 if tls_enabled { "https" } else { "http" },
-                Some(&addr),
+                Some(&recorded_listener),
                 &advertised_tools,
             );
             let result = service_app.wait_for_transport();

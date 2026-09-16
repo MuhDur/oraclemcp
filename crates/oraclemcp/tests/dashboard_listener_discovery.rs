@@ -130,6 +130,31 @@ fn spawn_serve(home: &TestHome, addr: SocketAddr) -> ServeChild {
     }
 }
 
+fn spawn_serve_ephemeral(home: &TestHome) -> ServeChild {
+    let mut child = home
+        .command()
+        .args([
+            "--json",
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--allow-no-auth",
+            "--http-json-response",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn ephemeral serve");
+    let stdout = drain(child.stdout.take().expect("serve stdout"));
+    let stderr = drain(child.stderr.take().expect("serve stderr"));
+    ServeChild {
+        child,
+        stdout: Some(stdout),
+        stderr: Some(stderr),
+    }
+}
+
 fn drain<R: Read + Send + 'static>(mut pipe: R) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut buf = Vec::new();
@@ -155,6 +180,30 @@ fn wait_for_recorded_listener(home: &TestHome, addr: SocketAddr, serve: &mut Ser
             Instant::now() < deadline,
             "service-instance.json never recorded {}",
             addr
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+fn wait_for_recorded_ephemeral_listener(home: &TestHome, serve: &mut ServeChild) -> SocketAddr {
+    let lock = home.lock_path();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        if let Ok(body) = fs::read_to_string(&lock)
+            && let Ok(value) = serde_json::from_str::<Value>(&body)
+            && let Some(listen) = value["listen"].as_str()
+            && let Ok(addr) = listen.parse::<SocketAddr>()
+        {
+            assert_eq!(addr.ip().to_string(), "127.0.0.1");
+            assert_ne!(addr.port(), 0, "service lock must record the bound port");
+            return addr;
+        }
+        if let Some(status) = serve.child.try_wait().expect("poll serve") {
+            panic!("serve exited before recording an ephemeral listener (status {status})");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "service-instance.json never recorded a bound ephemeral listener"
         );
         thread::sleep(Duration::from_millis(20));
     }
@@ -256,6 +305,39 @@ fn dashboard_without_url_pairs_with_the_recorded_nondefault_listener() {
 
     let status = http_get_status(addr, "/dashboard/pair");
     assert_eq!(status, 200, "the pairing form must be served at {url}");
+}
+
+#[test]
+fn dashboard_without_url_pairs_with_the_bound_ephemeral_listener() {
+    let home = TestHome::new("ephemeral-listener");
+    let mut serve = spawn_serve_ephemeral(&home);
+    let addr = wait_for_recorded_ephemeral_listener(&home, &mut serve);
+
+    let output = run_with_timeout(
+        {
+            let mut cmd = home.command();
+            cmd.args(["--json", "dashboard", "--no-open"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            cmd
+        },
+        Duration::from_secs(30),
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(0),
+        "dashboard must pair with the bound ephemeral listener; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let value: Value = serde_json::from_slice(&output.stdout).expect("dashboard JSON");
+    assert_eq!(value["source"], "service-instance");
+    assert_eq!(value["listener"], addr.to_string());
+    assert_eq!(
+        value["url"],
+        json!(format!("http://{addr}/dashboard/pair")),
+        "dashboard pairing URL must use the real kernel-assigned port"
+    );
+    assert_eq!(http_get_status(addr, "/dashboard/pair"), 200);
 }
 
 #[test]
