@@ -2701,22 +2701,55 @@ function ClientsPage(): React.ReactElement {
     queryKey: ["client-credentials"],
     queryFn: fetchClientCredentials
   });
+  const sessionAuthority = dashboardAuthorityIdentity(
+    session.status === "success" ? session.data : undefined
+  );
+  const sessionAuthorityRef = React.useRef(sessionAuthority);
+  React.useLayoutEffect(() => {
+    sessionAuthorityRef.current = sessionAuthority;
+  }, [sessionAuthority]);
   const rotateMutation = useMutation({
     mutationKey: CLIENT_ROTATION_MUTATION_KEY,
-    mutationFn: async (client: ClientCredentialView) => {
-      if (session.status !== "success" || !session.data) {
+    mutationFn: async (action: ClientCredentialPendingAction) => {
+      if (
+        session.status !== "success" ||
+        !session.data ||
+        !clientCredentialConfirmationReady(
+          action,
+          action.client.client_id,
+          sessionAuthorityRef.current
+        )
+      ) {
         throw new Error("dashboard session is not ready");
       }
-      return rotateClientCredential(session.data, client.client_id);
+      return rotateClientCredential(session.data, action.client.client_id);
     },
-    onSuccess: (response) => {
+    onSuccess: (response, action) => {
+      queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
+      if (
+        !clientCredentialConfirmationReady(
+          action,
+          action.client.client_id,
+          sessionAuthorityRef.current
+        )
+      ) {
+        return;
+      }
       setRotated(response.data);
       setLastError(null);
       setLastNotice(null);
       setLastWarning(null);
-      queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
     },
-    onError: (error) => {
+    onError: (error, action) => {
+      if (
+        !clientCredentialConfirmationReady(
+          action,
+          action.client.client_id,
+          sessionAuthorityRef.current
+        )
+      ) {
+        return;
+      }
       setLastError(error instanceof Error ? error.message : "rotate failed");
     }
   });
@@ -2725,9 +2758,6 @@ function ClientsPage(): React.ReactElement {
     setRotated(null);
     purgeClientRotationMutation(queryClient, resetRotation);
   }, [resetRotation]);
-  const sessionAuthority = dashboardAuthorityIdentity(
-    session.status === "success" ? session.data : undefined
-  );
   const priorSessionAuthority = React.useRef<string | null>(null);
   React.useEffect(() => {
     const changed = Boolean(
@@ -2747,20 +2777,46 @@ function ClientsPage(): React.ReactElement {
     [resetRotation]
   );
   const revokeMutation = useMutation({
-    mutationFn: async (client: ClientCredentialView) => {
-      if (session.status !== "success" || !session.data) {
+    mutationFn: async (action: ClientCredentialPendingAction) => {
+      if (
+        session.status !== "success" ||
+        !session.data ||
+        !clientCredentialConfirmationReady(
+          action,
+          action.client.client_id,
+          sessionAuthorityRef.current
+        )
+      ) {
         throw new Error("dashboard session is not ready");
       }
-      return revokeClientCredential(session.data, client.client_id);
+      return revokeClientCredential(session.data, action.client.client_id);
     },
-    onSuccess: (_response, client) => {
+    onSuccess: (_response, action) => {
+      queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
+      if (
+        !clientCredentialConfirmationReady(
+          action,
+          action.client.client_id,
+          sessionAuthorityRef.current
+        )
+      ) {
+        return;
+      }
       setLastError(null);
-      setLastNotice(`Client ${client.client_id} revoked.`);
+      setLastNotice(`Client ${action.client.client_id} revoked.`);
       setLastWarning(_response.data.durability_warning ?? null);
       clearRotatedCredential();
-      queryClient.invalidateQueries({ queryKey: ["client-credentials"] });
     },
-    onError: (error) => {
+    onError: (error, action) => {
+      if (
+        !clientCredentialConfirmationReady(
+          action,
+          action.client.client_id,
+          sessionAuthorityRef.current
+        )
+      ) {
+        return;
+      }
       setLastError(error instanceof Error ? error.message : "revoke failed");
     }
   });
@@ -2772,27 +2828,39 @@ function ClientsPage(): React.ReactElement {
     kind: ClientCredentialPendingAction["kind"],
     client: ClientCredentialView
   ): void => {
-    if (busy) {
+    if (busy || !sessionAuthority) {
       return;
     }
     setLastError(null);
     setLastNotice(null);
     setLastWarning(null);
     setTypedClientId("");
-    setPendingAction({ kind, client });
+    setPendingAction({ kind, client, authority: sessionAuthority });
   };
   const confirmAction = (): void => {
     const action = pendingAction;
-    if (!action || busy || !clientCredentialConfirmationReady(action, typedClientId)) {
+    if (
+      !action ||
+      busy ||
+      !clientCredentialConfirmationReady(action, typedClientId, sessionAuthority)
+    ) {
+      if (
+        action &&
+        !clientCredentialConfirmationReady(action, action.client.client_id, sessionAuthority)
+      ) {
+        setPendingAction(null);
+        setTypedClientId("");
+        setLastError("Dashboard session changed. Re-open the credential action and confirm it again.");
+      }
       return;
     }
     setPendingAction(null);
     setTypedClientId("");
     if (action.kind === "rotate") {
       clearRotatedCredential();
-      rotateMutation.mutate(action.client);
+      rotateMutation.mutate(action);
     } else {
-      revokeMutation.mutate(action.client);
+      revokeMutation.mutate(action);
     }
   };
 
@@ -2825,6 +2893,11 @@ function ClientsPage(): React.ReactElement {
           <ClientCredentialConfirmationDialog
             action={pendingAction}
             busy={busy}
+            authorityCurrent={clientCredentialConfirmationReady(
+              pendingAction,
+              pendingAction.client.client_id,
+              sessionAuthority
+            )}
             typedClientId={typedClientId}
             onTypedClientId={setTypedClientId}
             onCancel={() => {
@@ -2839,8 +2912,8 @@ function ClientsPage(): React.ReactElement {
           sessionReady={session.status === "success"}
           state={clientState}
           busy={busy}
-          rotatingClientId={rotateMutation.variables?.client_id ?? null}
-          revokingClientId={revokeMutation.variables?.client_id ?? null}
+          rotatingClientId={rotateMutation.variables?.client.client_id ?? null}
+          revokingClientId={revokeMutation.variables?.client.client_id ?? null}
           onRotate={(client) => requestAction("rotate", client)}
           onRevoke={(client) => requestAction("revoke", client)}
         />
@@ -2963,13 +3036,19 @@ function ClientCredentialBearerPanel({
 type ClientCredentialPendingAction = {
   kind: "rotate" | "revoke";
   client: ClientCredentialView;
+  authority: string;
 };
 
 export function clientCredentialConfirmationReady(
   action: ClientCredentialPendingAction,
-  typedClientId: string
+  typedClientId: string,
+  currentAuthority: string | null
 ): boolean {
-  return typedClientId === action.client.client_id;
+  return (
+    Boolean(currentAuthority) &&
+    action.authority === currentAuthority &&
+    typedClientId === action.client.client_id
+  );
 }
 
 const FOCUSABLE_SELECTOR =
@@ -3135,6 +3214,7 @@ function ModalShell({
 function ClientCredentialConfirmationDialog({
   action,
   busy,
+  authorityCurrent,
   typedClientId,
   onTypedClientId,
   onCancel,
@@ -3142,6 +3222,7 @@ function ClientCredentialConfirmationDialog({
 }: {
   action: ClientCredentialPendingAction;
   busy: boolean;
+  authorityCurrent: boolean;
   typedClientId: string;
   onTypedClientId: (value: string) => void;
   onCancel: () => void;
@@ -3183,6 +3264,11 @@ function ClientCredentialConfirmationDialog({
             onChange={(event) => onTypedClientId(event.target.value)}
           />
         </label>
+        {!authorityCurrent ? (
+          <p className="mt-3 text-sm font-semibold text-[var(--om-rust)]" role="alert">
+            Dashboard session changed. Close this dialog and reopen the action before confirming.
+          </p>
+        ) : null}
         <div className="mt-4 flex flex-wrap gap-2">
           <Button type="button" variant="secondary" disabled={busy} onClick={onCancel}>
             Cancel
@@ -3190,7 +3276,14 @@ function ClientCredentialConfirmationDialog({
           <Button
             type="button"
             variant={action.kind === "revoke" ? "danger" : "primary"}
-            disabled={busy || !clientCredentialConfirmationReady(action, typedClientId)}
+            disabled={
+              busy ||
+              !clientCredentialConfirmationReady(
+                action,
+                typedClientId,
+                authorityCurrent ? action.authority : null
+              )
+            }
             onClick={onConfirm}
           >
             {busy ? "Working" : destructiveLabel}

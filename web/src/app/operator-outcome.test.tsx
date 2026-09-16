@@ -321,11 +321,13 @@ describe("client credential destructive confirmation", () => {
 
   it("requires the exact selected client ID for both rotation and revocation", () => {
     for (const kind of ["rotate", "revoke"] as const) {
-      const action = { kind, client };
-      expect(clientCredentialConfirmationReady(action, "")).toBe(false);
-      expect(clientCredentialConfirmationReady(action, "client-prod")).toBe(false);
-      expect(clientCredentialConfirmationReady(action, "CLIENT-PROD-7")).toBe(false);
-      expect(clientCredentialConfirmationReady(action, client.client_id)).toBe(true);
+      const action = { kind, client, authority: "dashboard-session-a" };
+      expect(clientCredentialConfirmationReady(action, "", action.authority)).toBe(false);
+      expect(clientCredentialConfirmationReady(action, "client-prod", action.authority)).toBe(false);
+      expect(clientCredentialConfirmationReady(action, "CLIENT-PROD-7", action.authority)).toBe(false);
+      expect(clientCredentialConfirmationReady(action, client.client_id, action.authority)).toBe(true);
+      expect(clientCredentialConfirmationReady(action, client.client_id, "dashboard-session-b")).toBe(false);
+      expect(clientCredentialConfirmationReady(action, client.client_id, null)).toBe(false);
     }
   });
 });
