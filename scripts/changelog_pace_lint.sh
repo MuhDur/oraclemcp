@@ -4,13 +4,16 @@
 # Keep-a-Changelog's [Unreleased] section is a contract, not a scratchpad: every
 # commit that lands a user-visible change (feat/fix/security/perf) since the last
 # release tag must be recorded under [Unreleased] before that release is cut.
-# This gate fails when such commits exist and [Unreleased] carries no bullet,
-# listing each unrecorded subject with its short SHA so the fix is mechanical.
+# This gate fails when such commits have no matching commit link under
+# [Unreleased], listing each unrecorded subject with its short SHA so the fix is
+# mechanical. A generic bullet is not enough: it could describe an unrelated
+# change and must not vouch for every later user-visible commit.
 #
 # Contract:
 #   * range   = <most-recent-tag>..HEAD (tag discovered with `git describe`)
 #   * subject = a commit subject matching ^(feat|fix|security|perf)(\(|:)
-#   * failure = matching commits exist AND [Unreleased] has no `- ` bullet
+#   * coverage = every matching short SHA occurs in an [Unreleased] commit link
+#   * failure = any matching commit has no such link
 #   * typed skip (exit 0) when no tag is reachable: there is no pace to measure
 #
 # Env overrides (used by scripts/test_changelog_pace_lint.sh):
@@ -35,11 +38,11 @@ if ! last_tag="$(git -C "$REPO_DIR" describe --tags --abbrev=0 2>/dev/null)"; th
 fi
 
 # Every commit since the tag whose subject declares a user-visible change.
-# `%h %s` is CR-stripped so a stray CRLF cannot hide a matching subject, and a
+# `%h<TAB>%s` is CR-stripped so a stray CRLF cannot hide a matching subject, and a
 # subject containing `[` or `]` is data, never a regex fragment, so it cannot
 # break the scan.
 offending="$(
-  git -C "$REPO_DIR" log "${last_tag}..HEAD" --pretty=format:'%h %s' \
+  git -C "$REPO_DIR" log "${last_tag}..HEAD" --pretty=format:'%h%x09%s' \
     | tr -d '\r' \
     | grep -E '^[0-9a-f]+[[:space:]]+(feat|fix|security|perf)(\(|:)' \
     || true
@@ -50,12 +53,11 @@ if [ -z "$offending" ]; then
   exit 0
 fi
 
-# Does [Unreleased] carry at least one bullet? Parsed with python3 so CRLF line
-# endings and bracket characters cannot fool the section scan.
-#   exit 0 = at least one bullet, 1 = section present but empty,
-#   exit 2 = no [Unreleased] section at all.
+# Extract [Unreleased] with Python so CRLF line endings and bracket characters
+# cannot fool the section scan. The body is then checked below for a commit link
+# for each visible commit. Exit 2 means no [Unreleased] section exists.
 set +e
-python3 - "$CHANGELOG" <<'PY'
+unreleased="$(python3 - "$CHANGELOG" <<'PY'
 import re
 import sys
 
@@ -74,26 +76,32 @@ for line in lines[start:]:
     stripped = line.rstrip("\r")
     if stripped.startswith("## "):
         break
-    if re.match(r"^\s*-\s+\S", stripped):
-        sys.exit(0)
-sys.exit(1)
+    print(stripped)
 PY
-bullet_status=$?
+)"
+unreleased_status=$?
 set -e
 
-case "$bullet_status" in
-  0)
-    echo "changelog-pace: OK (feat/fix/security/perf commits since $last_tag are recorded under [Unreleased])"
-    exit 0
-    ;;
-  1)
-    count="$(printf '%s\n' "$offending" | grep -c .)"
-    echo "changelog-pace: FAIL: $count feat/fix/security/perf commit(s) since $last_tag are not recorded under [Unreleased]:" >&2
-    printf '%s\n' "$offending" | sed 's/^/  /' >&2
-    exit 1
-    ;;
-  *)
-    echo "changelog-pace: FAIL: CHANGELOG.md has no [Unreleased] section" >&2
-    exit 1
-    ;;
-esac
+if [ "$unreleased_status" -ne 0 ]; then
+  echo "changelog-pace: FAIL: CHANGELOG.md has no [Unreleased] section" >&2
+  exit 1
+fi
+
+unrecorded=""
+while IFS=$'\t' read -r short_sha subject; do
+  [ -n "$short_sha" ] || continue
+  # A `.../commit/<short-sha>` link explicitly binds the entry to this landed
+  # change. Full SHAs also match because they begin with the short SHA.
+  if ! printf '%s\n' "$unreleased" | grep -Fq "/commit/$short_sha"; then
+    unrecorded+="$short_sha $subject"$'\n'
+  fi
+done <<< "$offending"
+
+if [ -n "$unrecorded" ]; then
+  count="$(printf '%s' "$unrecorded" | grep -c .)"
+  echo "changelog-pace: FAIL: $count feat/fix/security/perf commit(s) since $last_tag lack an [Unreleased] commit link:" >&2
+  printf '%s' "$unrecorded" | sed 's/^/  /' >&2
+  exit 1
+fi
+
+echo "changelog-pace: OK (each feat/fix/security/perf commit since $last_tag has an [Unreleased] commit link)"

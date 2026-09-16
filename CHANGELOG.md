@@ -55,6 +55,17 @@ unchanged in contract.
   [6591a390](https://github.com/MuhDur/oraclemcp/commit/6591a390).
 - **The dashboard UX evidence schema is corrected.** See
   [5950c50d](https://github.com/MuhDur/oraclemcp/commit/5950c50d).
+- **Dashboard pairing discovers the live service listener.** `oraclemcp
+  dashboard` now uses the recorded service-instance listener instead of silently
+  probing the default `:7070`. See
+  [8fa50275](https://github.com/MuhDur/oraclemcp/commit/8fa50275).
+- **Generated tool and configuration documentation is kept in sync with the
+  default shipped surface.** See
+  [2e186680](https://github.com/MuhDur/oraclemcp/commit/2e186680) and
+  [7008d6c1](https://github.com/MuhDur/oraclemcp/commit/7008d6c1).
+- **Web and TLS dependency security updates are applied.** See
+  [8a6c2fc4](https://github.com/MuhDur/oraclemcp/commit/8a6c2fc4) and
+  [7ffa4132](https://github.com/MuhDur/oraclemcp/commit/7ffa4132).
 - **The architecture fitness lint classifies only workspace dependencies**, so a
   non-workspace path cannot trip or excuse the gate. See
   [9f21829d](https://github.com/MuhDur/oraclemcp/commit/9f21829d).
