@@ -72,7 +72,7 @@ pub use sink::{
 pub use unified::{UnifiedAuditError, UnifiedAuditPolicy, is_simple_identifier};
 pub use verify::{
     BrokenReason, JsonlError, MAX_AUDIT_LINE_LEN, ParseError, VerifyOutcome, parse_jsonl,
-    verify_reader, verify_records,
+    verify_reader, verify_reader_with, verify_records,
 };
 
 /// Re-export the shared agent-facing error envelope.

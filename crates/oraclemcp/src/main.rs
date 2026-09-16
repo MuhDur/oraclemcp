@@ -29,13 +29,15 @@ mod readiness;
 mod robot_docs;
 mod service_lifecycle;
 
+#[cfg(test)]
+use audit_evidence::audit_db_evidence_summary;
 use audit_evidence::{
-    audit_db_evidence_payload, audit_db_evidence_summary, audit_db_evidence_text,
+    AuditDbEvidenceSummaryAccumulator, audit_db_evidence_payload, audit_db_evidence_text,
 };
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
@@ -1867,21 +1869,25 @@ fn build_shipping_sink(
                 )
             })?;
         }
-        let worm = WormFileForwarder::open_distinct_for_durable_recovery(worm_path, &local)
-            .map_err(|error| match error {
-                oraclemcp_audit::ShippingError::AliasedPrimaryAuditLog => (
-                    "ORACLEMCP_AUDIT_SHIPPING_INVALID",
-                    "WORM mirror must be a filesystem object distinct from the primary audit log"
-                        .to_owned(),
+        let worm = WormFileForwarder::open_distinct_for_durable_recovery(
+            worm_path,
+            &local,
+            verification_keys,
+        )
+        .map_err(|error| match error {
+            oraclemcp_audit::ShippingError::AliasedPrimaryAuditLog => (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                "WORM mirror must be a filesystem object distinct from the primary audit log"
+                    .to_owned(),
+            ),
+            other => (
+                "ORACLEMCP_AUDIT_SHIPPING_INVALID",
+                format!(
+                    "failed to open WORM mirror {}: {other}",
+                    worm_path.display()
                 ),
-                other => (
-                    "ORACLEMCP_AUDIT_SHIPPING_INVALID",
-                    format!(
-                        "failed to open WORM mirror {}: {other}",
-                        worm_path.display()
-                    ),
-                ),
-            })?;
+            ),
+        })?;
         let normalized_worm = normalized_destination_path(worm_path).map_err(|error| {
             (
                 "ORACLEMCP_AUDIT_SHIPPING_INVALID",
@@ -5640,6 +5646,76 @@ fn run_incident_replay(robot_json: bool, args: IncidentReplayCliArgs) -> ExitCod
     stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
 }
 
+/// Open a user-supplied audit ledger through its held parent directory, without
+/// following a final-component link. The nonblocking Unix flag matters even
+/// though the descriptor is immediately type-checked: otherwise opening a FIFO
+/// would wait for a writer before we can reject it as a non-regular input.
+fn open_audit_verification_file(path: &Path) -> io::Result<cap_std::fs::File> {
+    use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
+    use cap_std::ambient_authority;
+    use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
+
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let file_name = absolute.file_name().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit verification path has no file name",
+        )
+    })?;
+    let parent_path = absolute.parent().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit verification path has no parent directory",
+        )
+    })?;
+
+    // Retain the immediate parent directory before opening its child. Holding
+    // this capability prevents a post-open parent rename from redirecting any
+    // later pass; the verifier reuses the returned file rather than its path.
+    let parent = match (parent_path.parent(), parent_path.file_name()) {
+        (Some(ancestor_path), Some(parent_name)) => {
+            let ancestor = Dir::open_ambient_dir(ancestor_path, ambient_authority())?;
+            ancestor.open_dir_nofollow(parent_name)?
+        }
+        _ => Dir::open_ambient_dir(parent_path, ambient_authority())?,
+    };
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+
+        let flags = i32::try_from(rustix::fs::OFlags::NONBLOCK.bits())
+            .expect("O_NONBLOCK fits cap-std custom flags");
+        options.custom_flags(flags);
+    }
+    let file = parent.open_with(file_name, &options)?;
+    if !file.metadata()?.file_type().is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit verification input is not a regular file",
+        ));
+    }
+    Ok(file)
+}
+
+fn rewind_audit_verification_file(
+    file: &mut cap_std::fs::File,
+    path: &Path,
+    phase: &str,
+) -> Result<(), String> {
+    file.seek(SeekFrom::Start(0)).map(drop).map_err(|error| {
+        format!(
+            "failed to rewind audit log {} for {phase}: {error}",
+            path.display()
+        )
+    })
+}
+
 fn run_audit_verify(
     robot_json: bool,
     file: &Path,
@@ -5648,7 +5724,7 @@ fn run_audit_verify(
 ) -> ExitCode {
     use oraclemcp_audit::{
         AnchorReaderError, AnchorStatus, AnchorViolation, JsonlError, VerifyOutcome,
-        anchor_path_for, check_anchor_reader, load_anchor, parse_jsonl, verify_reader,
+        anchor_path_for, check_anchor_reader, load_anchor, verify_reader, verify_reader_with,
     };
     use std::io::BufReader;
 
@@ -5663,11 +5739,11 @@ fn run_audit_verify(
     // Stream verification with BOUNDED MEMORY (bead oraclemcp-qa100 .29): a
     // permanent, never-pruned audit log can be multi-gigabyte, so `audit verify`
     // must not `read_to_string` + parse every record into a `Vec`. The optional
-    // `--with-db-evidence` correlation scan below is an explicit operator opt-in
-    // and still buffers the full history.
-    let open_stream = || std::fs::File::open(file).map(BufReader::new);
-    let reader = match open_stream() {
-        Ok(reader) => reader,
+    // `--with-db-evidence` report folds into that first signed stream. Every
+    // later pass reuses one no-follow, nonblocking regular-file descriptor, so
+    // a path replacement cannot mix a verified ledger with later checks.
+    let mut audit_file = match open_audit_verification_file(file) {
+        Ok(file) => file,
         Err(e) => {
             emit_status_error(
                 robot_json,
@@ -5677,7 +5753,16 @@ fn run_audit_verify(
             return ExitCode::from(2);
         }
     };
-    let outcome = match verify_reader(reader, keyring.verification_keys()) {
+    let mut db_evidence_accumulator = with_db_evidence.then(AuditDbEvidenceSummaryAccumulator::new);
+    let verification = match db_evidence_accumulator.as_mut() {
+        Some(accumulator) => verify_reader_with(
+            BufReader::new(&mut audit_file),
+            keyring.verification_keys(),
+            |record| accumulator.observe(record),
+        ),
+        None => verify_reader(BufReader::new(&mut audit_file), keyring.verification_keys()),
+    };
+    let outcome = match verification {
         Ok(outcome) => outcome,
         Err(JsonlError::Malformed(e)) => {
             emit_status_error(robot_json, "ORACLEMCP_AUDIT_MALFORMED", &e.to_string());
@@ -5718,20 +5803,22 @@ fn run_audit_verify(
                 }),
                 Some(anchor) => {
                     // Bounded streaming anchor cross-check (bead
-                    // oraclemcp-qa100 .29): re-open the log and stream it rather
-                    // than retaining every record from verification.
-                    let anchor_reader = match open_stream() {
-                        Ok(reader) => reader,
-                        Err(e) => {
-                            emit_status_error(
-                                robot_json,
-                                "ORACLEMCP_AUDIT_READ_FAILED",
-                                &format!("failed to re-read audit log {}: {e}", file.display()),
-                            );
-                            return ExitCode::from(2);
-                        }
-                    };
-                    match check_anchor_reader(anchor_reader, anchor, keyring.verification_keys()) {
+                    // oraclemcp-qa100 .29): rewind the exact verified log
+                    // descriptor and stream it rather than retaining every
+                    // record from verification.
+                    if let Err(message) = rewind_audit_verification_file(
+                        &mut audit_file,
+                        file,
+                        "head-anchor verification",
+                    ) {
+                        emit_status_error(robot_json, "ORACLEMCP_AUDIT_READ_FAILED", &message);
+                        return ExitCode::from(2);
+                    }
+                    match check_anchor_reader(
+                        BufReader::new(&mut audit_file),
+                        anchor,
+                        keyring.verification_keys(),
+                    ) {
                         Ok(AnchorStatus::Match) => serde_json::json!({
                             "status": "match",
                             "seq": anchor.seq,
@@ -5794,26 +5881,13 @@ fn run_audit_verify(
                 "records": record_count,
                 "anchor": anchor_payload,
             });
-            // `--with-db-evidence` is an explicit operator opt-in for a full
-            // correlation scan, so it (only) buffers the whole history here; the
-            // default verification path above stays bounded (bead qa100 .29).
-            let db_evidence_summary = if with_db_evidence {
-                match fs::read_to_string(file)
-                    .map_err(|e| e.to_string())
-                    .and_then(|body| {
-                        parse_jsonl(&body)
-                            .map(|records| audit_db_evidence_summary(&records))
-                            .map_err(|e| e.to_string())
-                    }) {
-                    Ok(summary) => Some(summary),
-                    Err(message) => {
-                        emit_status_error(robot_json, "ORACLEMCP_AUDIT_READ_FAILED", &message);
-                        return ExitCode::from(2);
-                    }
-                }
-            } else {
-                None
-            };
+            // `--with-db-evidence` derives its bounded report while the first
+            // pass verifies each record. It retains only aggregate counters, at
+            // most 32 sample correlations, and at most 32 distinct unavailable
+            // reasons; it never reopens or re-reads potentially changed input.
+            let db_evidence_summary = db_evidence_accumulator
+                .take()
+                .map(AuditDbEvidenceSummaryAccumulator::finish);
             if let Some(summary) = db_evidence_summary.as_ref()
                 && let serde_json::Value::Object(obj) = &mut payload
             {

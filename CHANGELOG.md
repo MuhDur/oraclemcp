@@ -31,6 +31,9 @@ unchanged in contract.
 - **Audit lock contention reads its PID hint from the authenticated descriptor.**
   An oversized or replaced lock sidecar can no longer trigger an unbounded
   pathname read before the competing writer receives its fail-closed refusal.
+- **Audit DB-evidence verification remains memory-bounded.** `audit verify
+  --with-db-evidence` now streams correlation data and caps report samples and
+  unavailable-reason summaries instead of retaining a full ledger.
 - **Approved config writes and the entire durable-spool lifecycle retain
   no-follow directory capabilities.** A local parent-directory swap now
   refuses a config write before it can redirect it, and cannot redirect spool

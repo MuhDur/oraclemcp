@@ -3007,9 +3007,12 @@ mod tests {
         )
         .expect("seed pending suffix");
 
-        let worm =
-            crate::WormFileForwarder::open_distinct_for_durable_recovery(&mirror_path, &primary)
-                .expect("lagging mirror opens provisionally");
+        let worm = crate::WormFileForwarder::open_distinct_for_durable_recovery(
+            &mirror_path,
+            &primary,
+            &[key()],
+        )
+        .expect("lagging mirror opens provisionally");
         let delivery = DurableShippingForwarder::open(
             config(&spool_path, "worm-crash-recovery"),
             Box::new(worm),
@@ -3056,9 +3059,12 @@ mod tests {
         )
         .expect("seed gapped suffix");
 
-        let worm =
-            crate::WormFileForwarder::open_distinct_for_durable_recovery(&mirror_path, &primary)
-                .expect("lagging mirror opens provisionally");
+        let worm = crate::WormFileForwarder::open_distinct_for_durable_recovery(
+            &mirror_path,
+            &primary,
+            &[key()],
+        )
+        .expect("lagging mirror opens provisionally");
         let error = match DurableShippingForwarder::open(
             config(&spool_path, "worm-gap-recovery"),
             Box::new(worm),

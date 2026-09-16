@@ -1,15 +1,17 @@
 //! Audit `db_evidence` correlation summary for `oracle audit verify`.
 //!
-//! Pure data-shaping helpers (no I/O), relocated verbatim from `main.rs` so the
+//! Pure data-shaping helpers (no file-path I/O), relocated from `main.rs` so the
 //! CLI flow there stays small. Summarizes DB-evidence capture/correlation across
-//! already-signed `AuditRecord`s; it reports, it does not enforce. The three
-//! `pub(crate)` entry points (`audit_db_evidence_summary` / `_payload` / `_text`)
-//! are re-exported at the crate root and consumed by `run_audit_verify`.
+//! already-signed `AuditRecord`s; it reports, it does not enforce. The
+//! accumulator consumes the audit crate's verified stream one record at a time,
+//! so the optional correlation report preserves `audit verify`'s bounded-memory
+//! and signed-input contracts.
 
 use oraclemcp_audit::{AuditRecord, DbEvidence};
 
 const DB_EVIDENCE_UNAVAILABLE_PREFIX: &str = "db_evidence_unavailable:";
 const AUDIT_DB_EVIDENCE_SAMPLE_LIMIT: usize = 32;
+const AUDIT_DB_EVIDENCE_UNAVAILABLE_REASON_LIMIT: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct AuditDbEvidenceCorrelation {
@@ -33,6 +35,7 @@ pub(crate) struct AuditDbEvidenceSummary {
     pub(crate) correlated: usize,
     pub(crate) with_session_tags: usize,
     pub(crate) unavailable_reasons: Vec<String>,
+    pub(crate) unavailable_reasons_truncated: bool,
     sample_correlations: Vec<AuditDbEvidenceCorrelation>,
     sample_limit: usize,
     sample_truncated: bool,
@@ -89,50 +92,68 @@ fn db_evidence_has_session_tag(evidence: &DbEvidence) -> bool {
         || non_empty(&evidence.action)
 }
 
-fn push_unique(values: &mut Vec<String>, value: &str) {
+fn push_unique_bounded(values: &mut Vec<String>, value: &str, cap: usize) -> bool {
     if !values.iter().any(|existing| existing == value) {
+        if values.len() == cap {
+            return true;
+        }
         values.push(value.to_owned());
     }
+    false
 }
 
-pub(crate) fn audit_db_evidence_summary(records: &[AuditRecord]) -> AuditDbEvidenceSummary {
-    let mut summary = AuditDbEvidenceSummary {
-        status: "degraded",
-        degraded_reason: None,
-        records: records.len(),
-        with_db_evidence: 0,
-        captured: 0,
-        unavailable: 0,
-        missing: 0,
-        correlated: 0,
-        with_session_tags: 0,
-        unavailable_reasons: Vec::new(),
-        sample_correlations: Vec::new(),
-        sample_limit: AUDIT_DB_EVIDENCE_SAMPLE_LIMIT,
-        sample_truncated: false,
-    };
+pub(crate) struct AuditDbEvidenceSummaryAccumulator {
+    summary: AuditDbEvidenceSummary,
+}
 
-    for record in records {
+impl AuditDbEvidenceSummaryAccumulator {
+    pub(crate) fn new() -> Self {
+        Self {
+            summary: AuditDbEvidenceSummary {
+                status: "degraded",
+                degraded_reason: None,
+                records: 0,
+                with_db_evidence: 0,
+                captured: 0,
+                unavailable: 0,
+                missing: 0,
+                correlated: 0,
+                with_session_tags: 0,
+                unavailable_reasons: Vec::new(),
+                unavailable_reasons_truncated: false,
+                sample_correlations: Vec::new(),
+                sample_limit: AUDIT_DB_EVIDENCE_SAMPLE_LIMIT,
+                sample_truncated: false,
+            },
+        }
+    }
+
+    pub(crate) fn observe(&mut self, record: &AuditRecord) {
+        self.summary.records += 1;
         let Some(evidence) = record.db_evidence.as_ref() else {
-            summary.missing += 1;
-            continue;
+            self.summary.missing += 1;
+            return;
         };
-        summary.with_db_evidence += 1;
+        self.summary.with_db_evidence += 1;
         if let Some(reason) = db_evidence_unavailable_reason(evidence) {
-            summary.unavailable += 1;
-            push_unique(&mut summary.unavailable_reasons, reason);
-            continue;
+            self.summary.unavailable += 1;
+            self.summary.unavailable_reasons_truncated |= push_unique_bounded(
+                &mut self.summary.unavailable_reasons,
+                reason,
+                AUDIT_DB_EVIDENCE_UNAVAILABLE_REASON_LIMIT,
+            );
+            return;
         }
         if db_evidence_is_captured(evidence) {
-            summary.captured += 1;
+            self.summary.captured += 1;
         }
         if db_evidence_has_session_tag(evidence) {
-            summary.with_session_tags += 1;
+            self.summary.with_session_tags += 1;
         }
         if db_evidence_has_session_correlation(evidence) {
-            summary.correlated += 1;
-            if summary.sample_correlations.len() < AUDIT_DB_EVIDENCE_SAMPLE_LIMIT {
-                summary
+            self.summary.correlated += 1;
+            if self.summary.sample_correlations.len() < AUDIT_DB_EVIDENCE_SAMPLE_LIMIT {
+                self.summary
                     .sample_correlations
                     .push(AuditDbEvidenceCorrelation {
                         seq: record.seq,
@@ -143,25 +164,36 @@ pub(crate) fn audit_db_evidence_summary(records: &[AuditRecord]) -> AuditDbEvide
                         action: evidence.action.clone(),
                     });
             } else {
-                summary.sample_truncated = true;
+                self.summary.sample_truncated = true;
             }
         }
     }
 
-    if summary.correlated > 0 {
-        summary.status = "correlated";
-    } else {
-        summary.degraded_reason = Some(if summary.records == 0 {
-            "no_records"
-        } else if summary.with_db_evidence == 0 {
-            "no_db_evidence"
-        } else if summary.captured == 0 && summary.unavailable > 0 {
-            "db_evidence_unavailable"
+    pub(crate) fn finish(mut self) -> AuditDbEvidenceSummary {
+        if self.summary.correlated > 0 {
+            self.summary.status = "correlated";
         } else {
-            "db_evidence_missing_session_tags"
-        });
+            self.summary.degraded_reason = Some(if self.summary.records == 0 {
+                "no_records"
+            } else if self.summary.with_db_evidence == 0 {
+                "no_db_evidence"
+            } else if self.summary.captured == 0 && self.summary.unavailable > 0 {
+                "db_evidence_unavailable"
+            } else {
+                "db_evidence_missing_session_tags"
+            });
+        }
+        self.summary
     }
-    summary
+}
+
+#[cfg(test)]
+pub(crate) fn audit_db_evidence_summary(records: &[AuditRecord]) -> AuditDbEvidenceSummary {
+    let mut accumulator = AuditDbEvidenceSummaryAccumulator::new();
+    for record in records {
+        accumulator.observe(record);
+    }
+    accumulator.finish()
 }
 
 pub(crate) fn audit_db_evidence_payload(summary: &AuditDbEvidenceSummary) -> serde_json::Value {
@@ -192,6 +224,7 @@ pub(crate) fn audit_db_evidence_payload(summary: &AuditDbEvidenceSummary) -> ser
         "correlated": summary.correlated,
         "with_session_tags": summary.with_session_tags,
         "unavailable_reasons": summary.unavailable_reasons,
+        "unavailable_reasons_truncated": summary.unavailable_reasons_truncated,
         "sample_limit": summary.sample_limit,
         "sample_truncated": summary.sample_truncated,
         "sample_correlations": sample_correlations,
@@ -203,8 +236,13 @@ pub(crate) fn audit_db_evidence_text(summary: &AuditDbEvidenceSummary) -> String
         .degraded_reason
         .map(|reason| format!(" reason={reason}"))
         .unwrap_or_default();
+    let unavailable_reasons_note = if summary.unavailable_reasons_truncated {
+        " unavailable_reasons_truncated=true"
+    } else {
+        ""
+    };
     format!(
-        "DB evidence {}:{} correlated={}/{} captured={} unavailable={} missing={} session_tags={}",
+        "DB evidence {}:{} correlated={}/{} captured={} unavailable={} missing={} session_tags={}{}",
         summary.status.to_ascii_uppercase(),
         reason,
         summary.correlated,
@@ -212,6 +250,11 @@ pub(crate) fn audit_db_evidence_text(summary: &AuditDbEvidenceSummary) -> String
         summary.captured,
         summary.unavailable,
         summary.missing,
-        summary.with_session_tags
+        summary.with_session_tags,
+        unavailable_reasons_note,
     )
 }
+
+#[cfg(test)]
+#[path = "audit_evidence_tests.rs"]
+mod tests;

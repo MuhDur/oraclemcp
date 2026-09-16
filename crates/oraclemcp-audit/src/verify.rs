@@ -227,6 +227,22 @@ pub fn verify_reader<R: BufRead>(
     reader: R,
     keys: &[SigningKey],
 ) -> Result<VerifyOutcome, JsonlError> {
+    verify_reader_with(reader, keys, |_| {})
+}
+
+/// Stream and verify an audit log while observing each verified record.
+///
+/// The callback runs only after the record has passed its hash-link, sequence,
+/// keyed-MAC, and key-rotation checks. This lets a caller derive a bounded
+/// report from the exact verified stream without reopening the underlying path
+/// for a second, potentially different pass. As with [`verify_reader`], a
+/// chain violation is returned as [`VerifyOutcome::Broken`], while malformed
+/// input and I/O failures are returned as [`JsonlError`].
+pub fn verify_reader_with<R: BufRead, F: FnMut(&AuditRecord)>(
+    reader: R,
+    keys: &[SigningKey],
+    mut observe: F,
+) -> Result<VerifyOutcome, JsonlError> {
     let mut records = JsonlReader::new(reader);
     let mut verifier = ChainVerifier::new(keys);
     let mut index = 0usize;
@@ -234,6 +250,7 @@ pub fn verify_reader<R: BufRead>(
         if let Some(broken) = verifier.observe(index, &record) {
             return Ok(broken);
         }
+        observe(&record);
         index += 1;
     }
     Ok(VerifyOutcome::Ok {
@@ -289,14 +306,15 @@ impl std::error::Error for JsonlError {}
 /// single line can never grow beyond [`MAX_AUDIT_LINE_LEN`] in memory — an
 /// unterminated or oversized line fails closed instead of allocating without
 /// bound.
-pub(crate) struct JsonlReader<R: BufRead> {
+pub struct JsonlReader<R: BufRead> {
     reader: R,
     line_no: usize,
     line: Vec<u8>,
 }
 
 impl<R: BufRead> JsonlReader<R> {
-    pub(crate) fn new(reader: R) -> Self {
+    #[must_use]
+    pub fn new(reader: R) -> Self {
         Self {
             reader,
             line_no: 0,
@@ -306,7 +324,7 @@ impl<R: BufRead> JsonlReader<R> {
 
     /// The next non-blank record, `Ok(None)` at end of input, or an error for a
     /// malformed/oversized line or an I/O failure.
-    pub(crate) fn next_record(&mut self) -> Result<Option<AuditRecord>, JsonlError> {
+    pub fn next_record(&mut self) -> Result<Option<AuditRecord>, JsonlError> {
         loop {
             self.line.clear();
             if !self.read_physical_line()? {
@@ -876,6 +894,28 @@ mod tests {
             verify_reader(io::Cursor::new(padded), &[key()]).expect("tolerant"),
             VerifyOutcome::Ok { records: 5 }
         );
+    }
+
+    #[test]
+    fn verify_reader_with_observes_only_verified_records() {
+        let mut records = signed_chain(3);
+        records[1].sql_preview = "SELECT tampered".to_owned();
+        let mut observed = Vec::new();
+
+        let outcome = verify_reader_with(io::Cursor::new(body_of(&records)), &[key()], |record| {
+            observed.push(record.seq);
+        })
+        .expect("tampering is a verification verdict, not a parse failure");
+
+        assert!(matches!(
+            outcome,
+            VerifyOutcome::Broken {
+                seq: 2,
+                reason: BrokenReason::HashMismatch,
+                ..
+            }
+        ));
+        assert_eq!(observed, [1], "the callback must never see a bad record");
     }
 
     #[test]

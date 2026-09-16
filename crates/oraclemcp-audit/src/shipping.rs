@@ -56,12 +56,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use parking_lot::Mutex;
 
-use crate::record::{AuditRecord, BoundAuditVerdictCertificate};
+use crate::record::{AuditRecord, BoundAuditVerdictCertificate, SigningKey};
 use crate::sink::{
     AuditError, AuditSink, FileAuditSink, open_file_identity, open_private_append_file,
     path_identity,
 };
-use crate::verify::JsonlReader;
+use crate::verify::{ChainVerifier, JsonlReader, VerifyOutcome};
 
 /// A shipping (forwarding) failure. Distinct from [`AuditError`] because a
 /// shipping failure is **non-fatal** to the local durable chain: the decorator
@@ -173,7 +173,8 @@ struct WormFileState {
 
 impl WormFileForwarder {
     /// Open (creating + appending) the WORM mirror file at `path`, after proving
-    /// its open filesystem identity differs from `primary`. Uses
+    /// its open filesystem identity differs from `primary` and streaming every
+    /// existing record through `verification_keys`. Uses
     /// `O_APPEND` so every write lands at the current end of file — the
     /// write-once posture is enforced by the destination filesystem / bucket
     /// object-lock; this side never seeks or truncates.
@@ -181,12 +182,15 @@ impl WormFileForwarder {
     /// # Errors
     /// Returns [`ShippingError::Transport`] if either identity cannot be
     /// established or the mirror cannot be opened, and
-    /// [`ShippingError::AliasedPrimaryAuditLog`] for any same-object alias.
+    /// [`ShippingError::AliasedPrimaryAuditLog`] for any same-object alias. A
+    /// missing, unknown, or invalid record MAC is a transport error: a mirror
+    /// cannot be considered caught up unless `audit verify` would accept it.
     pub fn open_distinct(
         path: impl AsRef<Path>,
         primary: &FileAuditSink,
+        verification_keys: &[SigningKey],
     ) -> Result<Self, ShippingError> {
-        Self::open_distinct_inner(path.as_ref(), primary, false)
+        Self::open_distinct_inner(path.as_ref(), primary, verification_keys, false)
     }
 
     /// Open a WORM mirror that may be behind the primary only long enough for a
@@ -200,13 +204,15 @@ impl WormFileForwarder {
     pub fn open_distinct_for_durable_recovery(
         path: impl AsRef<Path>,
         primary: &FileAuditSink,
+        verification_keys: &[SigningKey],
     ) -> Result<Self, ShippingError> {
-        Self::open_distinct_inner(path.as_ref(), primary, true)
+        Self::open_distinct_inner(path.as_ref(), primary, verification_keys, true)
     }
 
     fn open_distinct_inner(
         path: &Path,
         primary: &FileAuditSink,
+        verification_keys: &[SigningKey],
         allow_pending_suffix: bool,
     ) -> Result<Self, ShippingError> {
         let primary_identity = primary
@@ -237,7 +243,7 @@ impl WormFileForwarder {
         if mirror_identity == primary_identity {
             return Err(ShippingError::AliasedPrimaryAuditLog);
         }
-        let mirror_tail = stream_worm_tail(&file)?;
+        let mirror_tail = stream_worm_tail(&file, verification_keys)?;
         let primary_tail = primary.structural_tail().map_err(|error| {
             ShippingError::Transport(format!(
                 "cannot verify primary audit tail before arming WORM mirror: {error}"
@@ -268,30 +274,28 @@ impl WormFileForwarder {
     }
 }
 
-fn stream_worm_tail(file: &File) -> Result<Option<(u64, String)>, ShippingError> {
+fn stream_worm_tail(
+    file: &File,
+    verification_keys: &[SigningKey],
+) -> Result<Option<(u64, String)>, ShippingError> {
     let mut handle = file;
     handle
         .seek(SeekFrom::Start(0))
         .map_err(|error| ShippingError::Transport(error.to_string()))?;
     let mut reader = JsonlReader::new(BufReader::new(handle));
-    let mut expected_seq = 1_u64;
-    let mut previous_hash = crate::GENESIS_HASH.to_owned();
+    let mut verifier = ChainVerifier::new(verification_keys);
+    let mut index = 0_usize;
     let mut tail = None;
     while let Some(record) = reader.next_record().map_err(|error| {
         ShippingError::Transport(format!("existing WORM mirror is malformed: {error}"))
     })? {
-        if record.seq != expected_seq
-            || record.prev_hash != previous_hash
-            || !record.hash_is_valid()
-        {
+        if let Some(VerifyOutcome::Broken { seq, reason, .. }) = verifier.observe(index, &record) {
             return Err(ShippingError::Transport(format!(
-                "existing WORM mirror has a broken chain at sequence {}",
-                record.seq
+                "existing WORM mirror fails signed audit verification at sequence {seq}: {reason}"
             )));
         }
-        expected_seq = expected_seq.saturating_add(1);
-        previous_hash.clone_from(&record.entry_hash);
         tail = Some((record.seq, record.entry_hash));
+        index = index.saturating_add(1);
     }
     Ok(tail)
 }
@@ -1152,8 +1156,8 @@ mod tests {
         let worm = dir.path().join("worm-mirror.jsonl");
         {
             let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
-            let forwarder =
-                WormFileForwarder::open_distinct(&worm, &local).expect("open distinct worm");
+            let forwarder = WormFileForwarder::open_distinct(&worm, &local, &[key()])
+                .expect("open distinct worm");
             let sink = ShippingAuditSink::new(Box::new(local), Box::new(forwarder));
             let auditor = Auditor::new(Box::new(sink), key());
             for i in 0..4 {
@@ -1194,8 +1198,8 @@ mod tests {
         let worm = dir.path().join("worm-mirror.jsonl");
         {
             let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
-            let forwarder =
-                WormFileForwarder::open_distinct(&worm, &local).expect("open distinct worm");
+            let forwarder = WormFileForwarder::open_distinct(&worm, &local, &[key()])
+                .expect("open distinct worm");
             let sink = ShippingAuditSink::new(Box::new(local), Box::new(forwarder));
             let auditor = Auditor::new(Box::new(sink), key());
             // A client-controlled field carrying both separators.
@@ -1243,14 +1247,16 @@ mod tests {
             &key(),
         );
         {
-            let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+            let worm = WormFileForwarder::open_distinct(&worm_path, &primary, &[key()])
+                .expect("open worm");
             primary.append(&first).expect("append primary first");
             primary.flush().expect("flush primary first");
             worm.forward(&first).expect("first delivery");
             worm.flush().expect("durable first delivery");
         }
         {
-            let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("reopen worm");
+            let worm = WormFileForwarder::open_distinct(&worm_path, &primary, &[key()])
+                .expect("reopen worm");
             worm.forward(&first).expect("idempotent replay");
             worm.flush().expect("flush replay");
         }
@@ -1281,7 +1287,8 @@ mod tests {
         );
         let mut different_sequence_same_hash = first.clone();
         different_sequence_same_hash.seq = 2;
-        let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+        let worm =
+            WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]).expect("open worm");
         worm.forward(&first).expect("first delivery");
         let error = worm
             .forward(&conflicting_tail)
@@ -1326,7 +1333,8 @@ mod tests {
             "t2".to_owned(),
             &key(),
         );
-        let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+        let worm =
+            WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]).expect("open worm");
         worm.forward(&first).expect("first delivery");
         for bad in [&gap, &wrong_prev] {
             let error = worm
@@ -1360,7 +1368,8 @@ mod tests {
             "t1".to_owned(),
             &key(),
         );
-        let worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("open worm");
+        let worm =
+            WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]).expect("open worm");
         for bad in [&seq_two, &wrong_genesis] {
             let error = worm
                 .forward(bad)
@@ -1415,15 +1424,53 @@ mod tests {
                 .map(|record| serde_json::to_string(record).expect("serialize") + "\n")
                 .collect::<String>();
             std::fs::write(&worm_path, body).expect("seed malformed WORM");
-            let error = match WormFileForwarder::open_distinct(&worm_path, &primary) {
+            let error = match WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]) {
                 Err(error) => error,
                 Ok(_) => panic!("malformed existing WORM mirror must fail closed"),
             };
             assert!(
-                error.to_string().contains("broken chain"),
+                error
+                    .to_string()
+                    .contains("fails signed audit verification"),
                 "unexpected {case} error: {error}"
             );
         }
+    }
+
+    #[test]
+    fn worm_open_rejects_a_matching_tail_with_a_tampered_signature() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let primary_path = dir.path().join("audit.jsonl");
+        let worm_path = dir.path().join("worm.jsonl");
+        let primary = crate::sink::FileAuditSink::open(&primary_path).expect("open primary");
+        let first = AuditRecord::chained_signed(
+            &draft("DELETE FROM t WHERE id=1", "DESTRUCTIVE"),
+            1,
+            crate::GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+        );
+        primary.append(&first).expect("append primary");
+        primary.flush().expect("flush primary");
+
+        let mut tampered = first.clone();
+        tampered.signature = Some("hmac-sha256:00".to_owned());
+        std::fs::write(
+            &worm_path,
+            serde_json::to_string(&tampered).expect("serialize tampered mirror") + "\n",
+        )
+        .expect("seed tampered mirror");
+
+        let error = match WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]) {
+            Err(error) => error,
+            Ok(_) => panic!("matching structural tail with tampered MAC must refuse startup"),
+        };
+        assert!(
+            error.to_string().contains(
+                "fails signed audit verification at sequence 1: keyed MAC does not verify"
+            ),
+            "unexpected WORM signature failure: {error}"
+        );
     }
 
     #[test]
@@ -1437,7 +1484,12 @@ mod tests {
 
         {
             let local = crate::FileAuditSink::open(&primary_path).expect("old primary");
-            let worm = WormFileForwarder::open_distinct(&worm_path, &local).expect("old worm");
+            let worm = WormFileForwarder::open_distinct(
+                &worm_path,
+                &local,
+                std::slice::from_ref(&old_key),
+            )
+            .expect("old worm");
             let tee = TestTee {
                 first: Box::new(worm),
                 second: Box::new(SharedForwarder(Arc::clone(&capture))),
@@ -1461,7 +1513,12 @@ mod tests {
             crate::AuditKeyring::new(new_key.clone(), [old_key.clone()]).expect("rotation keyring");
         {
             let local = crate::FileAuditSink::open(&primary_path).expect("new primary");
-            let worm = WormFileForwarder::open_distinct(&worm_path, &local).expect("new worm");
+            let worm = WormFileForwarder::open_distinct(
+                &worm_path,
+                &local,
+                &[new_key.clone(), old_key.clone()],
+            )
+            .expect("new worm");
             let tee = TestTee {
                 first: Box::new(worm),
                 second: Box::new(SharedForwarder(Arc::clone(&capture))),
@@ -1518,7 +1575,7 @@ mod tests {
         let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
         let before = std::fs::metadata(&primary).expect("primary metadata").len();
 
-        let error = match WormFileForwarder::open_distinct(&primary, &local) {
+        let error = match WormFileForwarder::open_distinct(&primary, &local, &[key()]) {
             Err(error) => error,
             Ok(_) => panic!("same open file must be rejected"),
         };
@@ -1538,7 +1595,7 @@ mod tests {
         let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
         std::fs::hard_link(&primary, &alias).expect("create hard-link alias");
 
-        let error = match WormFileForwarder::open_distinct(&alias, &local) {
+        let error = match WormFileForwarder::open_distinct(&alias, &local, &[key()]) {
             Err(error) => error,
             Ok(_) => panic!("hard-link alias must be rejected"),
         };
@@ -1560,7 +1617,7 @@ mod tests {
         let local = crate::sink::FileAuditSink::open(&primary).expect("open primary");
         symlink(&primary, &alias).expect("create symlink alias");
 
-        let error = match WormFileForwarder::open_distinct(&alias, &local) {
+        let error = match WormFileForwarder::open_distinct(&alias, &local, &[key()]) {
             Err(error) => error,
             Ok(_) => panic!("symlink alias must be rejected"),
         };
@@ -1586,7 +1643,7 @@ mod tests {
                 std::fs::hard_link(&victim, &mirror).expect("plant hardlink");
             }
 
-            let error = match WormFileForwarder::open_distinct(&mirror, &primary) {
+            let error = match WormFileForwarder::open_distinct(&mirror, &primary, &[key()]) {
                 Err(error) => error,
                 Ok(_) => panic!("{kind} victim must be rejected"),
             };
@@ -1615,7 +1672,7 @@ mod tests {
             .expect("run mkfifo");
         assert!(status.success(), "mkfifo must create the fixture");
 
-        let error = match WormFileForwarder::open_distinct(&fifo, &primary) {
+        let error = match WormFileForwarder::open_distinct(&fifo, &primary, &[key()]) {
             Err(error) => error,
             Ok(_) => panic!("FIFO destination must fail closed"),
         };
@@ -1638,7 +1695,8 @@ mod tests {
             .expect("broaden fixture mode");
         let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
 
-        let _worm = WormFileForwarder::open_distinct(&worm_path, &primary).expect("secure open");
+        let _worm =
+            WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]).expect("secure open");
         assert_eq!(
             std::fs::metadata(&worm_path)
                 .expect("mirror metadata")
@@ -1676,7 +1734,7 @@ mod tests {
         }
         output.flush().expect("flush fixture");
 
-        let error = match WormFileForwarder::open_distinct(&worm_path, &primary) {
+        let error = match WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]) {
             Err(error) => error,
             Ok(_) => panic!("corrupt streamed tail must fail closed"),
         };
@@ -1696,7 +1754,7 @@ mod tests {
         oversized.push(b'\n');
         std::fs::write(&worm_path, oversized).expect("seed oversized line");
 
-        let error = match WormFileForwarder::open_distinct(&worm_path, &primary) {
+        let error = match WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]) {
             Err(error) => error,
             Ok(_) => panic!("oversized WORM line must fail closed"),
         };
@@ -1730,7 +1788,7 @@ mod tests {
         primary.flush().expect("flush primary");
 
         let empty_path = dir.path().join("empty-worm.jsonl");
-        let empty_error = match WormFileForwarder::open_distinct(&empty_path, &primary) {
+        let empty_error = match WormFileForwarder::open_distinct(&empty_path, &primary, &[key()]) {
             Err(error) => error,
             Ok(_) => panic!("empty mirror after primary history must fail startup"),
         };
@@ -1746,10 +1804,11 @@ mod tests {
             ),
         )
         .expect("seed lagging mirror");
-        let lagging_error = match WormFileForwarder::open_distinct(&lagging_path, &primary) {
-            Err(error) => error,
-            Ok(_) => panic!("lagging mirror must fail startup"),
-        };
+        let lagging_error =
+            match WormFileForwarder::open_distinct(&lagging_path, &primary, &[key()]) {
+                Err(error) => error,
+                Ok(_) => panic!("lagging mirror must fail startup"),
+            };
         assert!(lagging_error.to_string().contains("not caught up"));
         assert!(lagging_error.to_string().contains("sequence 1"));
     }
@@ -1785,8 +1844,8 @@ mod tests {
         )
         .expect("seed caught-up mirror");
 
-        let worm =
-            WormFileForwarder::open_distinct(&worm_path, &primary).expect("caught-up mirror opens");
+        let worm = WormFileForwarder::open_distinct(&worm_path, &primary, &[key()])
+            .expect("caught-up mirror opens");
         primary.append(&second).expect("append second primary");
         primary.flush().expect("flush second primary");
         worm.forward(&second).expect("deliver next record");
