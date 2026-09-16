@@ -8812,9 +8812,10 @@ mod driver_seam {
             vec!["0.9.2".to_owned()],
             "Cargo.lock must resolve the matching driver-cx protocol package at 0.9.2"
         );
-        assert!(
-            lock_package_versions(&lock, "oracledb").is_empty(),
-            "Cargo.lock must not retain the legacy oracledb package"
+        assert_eq!(
+            lock_package_versions(&lock, "oracledb"),
+            vec!["26.0.0-beta.3".to_owned()],
+            "Cargo.lock must resolve exactly Oracle's official optional driver pin"
         );
         assert!(
             lock_package_versions(&lock, "oracledb-protocol").is_empty(),

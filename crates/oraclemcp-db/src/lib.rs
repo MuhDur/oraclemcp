@@ -71,6 +71,11 @@ mod intelligence;
 mod masking;
 mod native_redaction;
 mod oci;
+#[cfg(feature = "oracledb")]
+// The actor is deliberately dormant until the qualified adapter wires its
+// `OracleConnection` methods; its native tests exercise the contract now.
+#[allow(dead_code)]
+mod oracledb_actor;
 mod plscope;
 mod privileges;
 mod query;

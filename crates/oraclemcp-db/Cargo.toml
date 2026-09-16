@@ -12,6 +12,10 @@ categories.workspace = true
 
 [features]
 default = []
+# Enables the quarantined connection-actor bridge for Oracle's synchronous
+# official driver. The bridge has no production SQL mapping yet; it is enabled
+# only while the adapter contract is qualified.
+oracledb = ["dep:oracledb"]
 # Live Oracle integration tests (gated; require a reachable DB).
 live-xe = []
 # Test-only seam for higher-level crates that need deterministic row streams
@@ -34,6 +38,7 @@ getrandom = "0.2"
 # feature so DB-call spans flow into the OTLP trace layer. It only adds the
 # `tracing` dep (no async runtime), so the engine-free boundary holds.
 oraclemcp-driver-cx = { workspace = true, features = ["tracing"] }
+oracledb = { workspace = true, optional = true }
 # TNS-onboarding parse adapter (src/tns.rs): reuse the upstream pure-Rust
 # `TnsnamesReader` from the protocol core directly, via the
 # `oraclemcp_driver_cx_protocol::` path.
