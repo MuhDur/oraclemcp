@@ -4694,7 +4694,7 @@ use workspace::CheckpointWorkspace;
 mod metadata_cache_key;
 use metadata_cache_key::metadata_cache_key_json;
 
-mod tool_routing;
+pub(crate) mod tool_routing;
 use tool_routing::{canonical_tool_name, response_reports_terminal_effect};
 
 /// Map a JSON value to an [`OracleBind`]. Agent argument values are always

@@ -226,6 +226,12 @@ fn main() -> ExitCode {
         }
         Command::RobotDocs { command } => match command {
             None | Some(RobotDocsCommand::Guide) => run_robot_docs_guide(robot_json),
+            Some(RobotDocsCommand::Tools { markdown }) => {
+                run_robot_docs_tools(robot_json, markdown)
+            }
+            Some(RobotDocsCommand::Config { markdown }) => {
+                run_robot_docs_config(robot_json, markdown)
+            }
         },
         Command::Setup {
             write,
@@ -6297,10 +6303,48 @@ fn run_robot_docs_guide(robot_json: bool) -> ExitCode {
         stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
     } else {
         stdout_exit(
-            write_stdout_text(robot_docs::robot_docs_guide_text()),
+            write_stdout_text(&robot_docs::robot_docs_guide_text()),
             ExitCode::SUCCESS,
         )
     }
+}
+
+/// `robot-docs tools`: render the tool registry from the code that serves it.
+/// `--markdown` emits the marked blocks `scripts/docs_generate.sh` writes into
+/// README.md; plain output is a readable listing; `--robot-json` is the rows.
+fn run_robot_docs_tools(robot_json: bool, markdown: bool) -> ExitCode {
+    if robot_json {
+        let rows = robot_docs::registry_tool_rows();
+        let payload = serde_json::json!({
+            "ok": true,
+            "tool_count": rows.len(),
+            "tools": rows,
+        });
+        let output = serde_json::to_string(&payload).unwrap();
+        return stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS);
+    }
+    let text = if markdown {
+        robot_docs::tools_markdown()
+    } else {
+        robot_docs::tools_text()
+    };
+    stdout_exit(write_stdout_text(&text), ExitCode::SUCCESS)
+}
+
+/// `robot-docs config`: render the config field reference from the config
+/// types. `--markdown` emits the marked block `scripts/docs_generate.sh` writes
+/// into docs/configuration.md.
+fn run_robot_docs_config(robot_json: bool, markdown: bool) -> ExitCode {
+    if robot_json {
+        let output = serde_json::to_string(&robot_docs::config_json()).unwrap();
+        return stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS);
+    }
+    let text = if markdown {
+        robot_docs::config_markdown()
+    } else {
+        robot_docs::config_text()
+    };
+    stdout_exit(write_stdout_text(&text), ExitCode::SUCCESS)
 }
 
 fn profiles_json(cfg: &OracleMcpConfig) -> serde_json::Value {

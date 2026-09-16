@@ -9,6 +9,7 @@
 //! (`deny_unknown_fields`), validation runs at load (fail fast), and `base`
 //! inheritance across connection profiles is resolved with cycle detection.
 
+pub mod config_docs;
 pub mod discovery;
 mod profile;
 
@@ -22,6 +23,7 @@ use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use config_docs::{ConfigFieldDoc, config_field_docs};
 pub use oraclemcp_error as error;
 pub use oraclemcp_guard::{
     OperatingLevel, SQL_POLICY_VERSION, SqlPolicyConfig, SqlPolicyEffectConfig,

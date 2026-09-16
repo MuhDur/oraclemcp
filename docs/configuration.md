@@ -17,6 +17,143 @@ Audit-log operation, verification, and WORM/SIEM shipping are documented in
 
 ---
 
+## Generated field reference
+
+The table below is the complete field list, generated from the typed config
+structs (the `deny_unknown_fields` source of truth) by
+`scripts/docs_generate.sh` from `oraclemcp robot-docs config --markdown`. It
+covers every key, including the governance/arc knobs (`profiles.max_query_cost`,
+`profiles.cumulative_query_cost_budget`, `profiles.sql_policy`,
+`profiles.masking`, `profiles.allow_change_notification`,
+`profiles.max_subscriptions`) that the narrative sections below expand on. Do
+not hand-edit it; edit the config types and run
+`bash scripts/docs_generate.sh --write`. The same block is mirrored, commented,
+in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
+
+<!-- generated:config -->
+| Field | Type | Default | Inherits `base` | Redacted | Since schema | Effect |
+| --- | --- | --- | --- | --- | --- | --- |
+| `schema_version` | integer | 2 | no | no | 1 | Config schema version this build understands; a higher value is rejected. |
+| `default_profile` | string | none | no | no | 1 | Profile used when serve is not given --profile. |
+| `monitor_profile` | string | none | no | no | 1 | Least-privilege profile for fleet-wide v$session/DB observability. |
+| `http.allowed_hosts` | array of string | [] | no | no | 1 | Host authorities allowed beyond loopback. |
+| `http.allowed_origins` | array of string | [] | no | no | 1 | Browser Origin values allowed beyond loopback origins. |
+| `http.json_response` | bool | false | no | no | 1 | Prefer direct JSON responses for stateless requests. |
+| `http.stateful` | bool | false | no | no | 1 | Enable Streamable HTTP stateful session framing. |
+| `http.stateful_idle_ttl_seconds` | integer | 900 | no | no | 1 | Seconds before an idle stateful session is reaped; 0 disables reaping. |
+| `http.dashboard_workbench` | bool | false | no | no | 1 | Release gate for the browser Safe SQL Workbench. |
+| `http.trusted_https_termination` | bool | false | no | no | 1 | Assert external clients reach this plaintext listener only through a trusted HTTPS terminator. |
+| `http.allow_remote` | bool | false | no | no | 1 | Permit a non-loopback bind without auth/TLS when combined with --allow-no-auth (fail-closed default). |
+| `http.oauth.resource` | string | none | no | no | 1 | Canonical resource/audience identifier expected in JWT aud. |
+| `http.oauth.allowed_issuers` | array of string | [] | no | no | 1 | Allowed JWT issuers (iss); empty is invalid config. |
+| `http.oauth.authorization_servers` | array of string | [] | no | no | 1 | Authorization servers advertised in RFC 9728 metadata. |
+| `http.oauth.required_scopes` | array of string | [] | no | no | 1 | Scopes every token must carry before dispatch. |
+| `http.oauth.hs256_secret_ref` | secret ref | none | no | yes | 1 | Secret reference for the built-in HS256 verifier; resolved key must be at least 32 bytes. |
+| `http.oauth.metadata_url` | string | none | no | no | 1 | Metadata URL advertised in WWW-Authenticate; defaults from resource. |
+| `http.mtls.client_fingerprints` | array of string | [] | no | no | 1 | Registered client leaf-certificate SHA-256 fingerprints; become mtls:sha256:<hex> principals. |
+| `http.tls.cert_chain_path` | path | none | no | no | 1 | Server certificate chain PEM path. |
+| `http.tls.private_key_path` | path | none | no | no | 1 | Server private key PEM path. |
+| `http.tls.client_ca_path` | path | none | no | no | 1 | Client CA PEM path; when present mTLS is required. |
+| `http.control.listen` | string | 127.0.0.1:7071 | no | no | 1 | Socket address for the mandatory-mTLS control listener. |
+| `http.control.preauth_workers` | integer | 4 | no | no | 1 | Maximum concurrent TLS handshakes before certificate identity exists (1..=64). |
+| `http.control.operator_workers` | integer | 1 | no | no | 1 | Authenticated operator-request worker reserve (1..=64). |
+| `http.control.doctor_workers` | integer | 1 | no | no | 1 | Authenticated health/readiness worker reserve (1..=64). |
+| `http.operator.allow_loopback_owner` | bool | true | no | no | 1 | Allow unauthenticated loopback requests from the local process owner to act as operator. |
+| `http.operator.allowed_subjects` | array of string | [] | no | no | 1 | Server-derived principal keys (oauth:..., mtls:...) allowed to act as operator. |
+| `audit.path` | path | XDG state default | no | no | 1 | Append-only audit log file path. |
+| `audit.key_ref` | secret ref | none | no | yes | 1 | Secret reference for the HMAC signing key; resolved key must be at least 32 bytes. |
+| `audit.key_id` | string | default | no | no | 1 | Identifier of the active signing key, recorded so keys can rotate. |
+| `audit.verification_keys.key_id` | string | required | no | no | 1 | Unique identifier carried by historical records/anchors. |
+| `audit.verification_keys.key_ref` | secret ref | required | no | yes | 1 | Secret reference resolving a historical verification-only HMAC key. |
+| `audit.shipping.worm_path` | path | none | no | no | 2 | Append-only WORM mirror file path. |
+| `audit.shipping.siem_endpoint` | string | none | no | no | 2 | SIEM endpoint receiving one signed record per POST; remote must be HTTPS. |
+| `audit.shipping.siem_format` | enum(json\|cef\|syslog) | json | no | no | 2 | SIEM wire format. |
+| `audit.shipping.siem_auth_header_ref` | secret ref | none | no | yes | 2 | Secret reference for an outbound SIEM auth header value. |
+| `audit.shipping.siem_auth_header_name` | string | Authorization | no | no | 2 | Header name for the SIEM auth value. |
+| `audit.unsigned_refusal_log` | bool | true | no | no | 2 | Persist redacted guard refusals to the unsigned local security-event trail. |
+| `profiles.name` | string | required | no | no | 1 | Stable identifier the agent connects by; unique across profiles. |
+| `profiles.description` | string | none | yes | no | 1 | Friendly description shown in list_profiles. |
+| `profiles.connect_string` | string | none | yes | yes | 1 | Oracle Net connect identifier: EZConnect, EZConnect-Plus, or a tnsnames.ora alias. |
+| `profiles.username` | string | none | yes | yes | 1 | Oracle username; omit for wallet / OS-auth / OCI IAM. |
+| `profiles.credential_ref` | secret ref | none | yes | yes | 1 | Secret reference for the credential; literal: is rejected when protected = true. |
+| `profiles.login_script` | path | none | yes | yes | 1 | Path to a login script of allowlisted ALTER SESSION statements. |
+| `profiles.login_statements` | array of string | none | yes | no | 1 | Inline allowlist-validated ALTER SESSION login statements. |
+| `profiles.trusted_session_statements` | array of string | none | yes | no | 2 | Operator-authored session setup statements, never agent supplied. |
+| `profiles.session_release_statements` | array of string | none | yes | no | 2 | Operator-authored cleanup before a pooled session returns to idle reuse. |
+| `profiles.logoff_statements` | array of string | none | yes | no | 2 | Operator-authored cleanup before logical Oracle logoff. |
+| `profiles.call_timeout_seconds` | integer | 30 | yes | no | 1 | Oracle call timeout and total request-budget ceiling, in seconds. |
+| `profiles.max_query_cost` | integer | none | yes | no | 2 | Arc G: per-query optimizer-cost ceiling for oracle_query; can only lower the effective ceiling. |
+| `profiles.cumulative_query_cost_budget.max_cost` | integer | required | yes | no | 2 | Arc G: total estimated optimizer cost a principal may consume per window. |
+| `profiles.cumulative_query_cost_budget.window_seconds` | integer | required | yes | no | 2 | Arc G: duration of one cumulative-cost accounting window, in seconds. |
+| `profiles.connect_timeout_seconds` | integer | 20 | yes | no | 1 | Oracle Net transport connect timeout, in seconds, bounding connect/auth reads. |
+| `profiles.inactivity_timeout_seconds` | integer | none | yes | no | 1 | Per-read inactivity deadline on an established session; 0 is unset. |
+| `profiles.keepalive_minutes` | integer | none | yes | no | 1 | Oracle EXPIRE_TIME dead-connection-detection probe interval, in minutes. |
+| `profiles.sdu` | integer | none | yes | no | 1 | Thin Session Data Unit request size (512..=65535). |
+| `profiles.max_level` | enum(READ_ONLY\|READ_WRITE\|DDL\|ADMIN) | READ_ONLY | yes | no | 1 | Per-target operating-level ceiling; session elevation cannot exceed it. |
+| `profiles.default_level` | enum(READ_ONLY\|READ_WRITE\|DDL\|ADMIN) | READ_ONLY | yes | no | 1 | Level a fresh session starts at; must not exceed max_level. |
+| `profiles.protected` | bool | false | yes | no | 1 | Pin the ceiling immutable at READ_ONLY and reject literal: secret refs. |
+| `profiles.require_signed_tools` | bool | false | yes | no | 1 | Require an HMAC signature for every operator-defined custom tool on this profile. |
+| `profiles.read_only_standby` | bool | false | yes | no | 1 | Force READ_ONLY regardless of max_level for an Active Data Guard standby. |
+| `profiles.allow_change_notification` | bool | false | yes | no | 2 | Permit CQN registration (still classifier/step-up/audit gated; never widens SQL admission). |
+| `profiles.max_subscriptions` | integer | 4 | yes | no | 2 | Per-principal live-subscription cap; 0 disables new subscriptions fail-closed. |
+| `profiles.mcp_exposed` | bool | true | yes | no | 1 | E5 per-profile MCP exposure opt-out (visibility, never access control). |
+| `profiles.dashboard_ddl_workbench` | bool | false | yes | no | 2 | Reserved profile metadata; browser DDL/Admin apply is refused in this release. |
+| `profiles.base` | string | none | no | no | 1 | Name of a profile to inherit unset fields from (shallow merge, child wins). |
+| `profiles.session_identity.edition` | string | none | no | yes | 1 | Optional Oracle edition for Edition-Based Redefinition. |
+| `profiles.session_identity.program` | string | none | no | yes | 1 | Connect-time client program recorded by Oracle (V$SESSION.PROGRAM). |
+| `profiles.session_identity.machine` | string | none | no | yes | 1 | Connect-time client machine recorded by Oracle (V$SESSION.MACHINE). |
+| `profiles.session_identity.os_user` | string | none | no | yes | 1 | Connect-time OS user recorded by Oracle (V$SESSION.OSUSER). |
+| `profiles.session_identity.terminal` | string | none | no | yes | 1 | Connect-time terminal recorded by Oracle (V$SESSION.TERMINAL). |
+| `profiles.session_identity.module` | string | none | no | yes | 1 | DBMS_APPLICATION_INFO module / SYS_CONTEXT MODULE, applied post-connect. |
+| `profiles.session_identity.action` | string | none | no | yes | 1 | DBMS_APPLICATION_INFO action / SYS_CONTEXT ACTION, applied post-connect. |
+| `profiles.session_identity.client_identifier` | string | none | no | yes | 1 | DBMS_SESSION client identifier. |
+| `profiles.session_identity.client_info` | string | none | no | yes | 1 | DBMS_APPLICATION_INFO client info. |
+| `profiles.session_identity.driver_name` | string | none | no | yes | 1 | Driver name shown by Oracle connection-info views where supported. |
+| `profiles.pool.max_size` | integer | 16 | no | no | 1 | Maximum pooled connections (runtime clamps to cpu*2+1). |
+| `profiles.pool.min_idle` | integer | 2 | no | no | 1 | Minimum idle connections kept warm; must be <= max_size. |
+| `profiles.pool.acquire_timeout_secs` | integer | 5 | no | no | 1 | Seconds to wait for a checkout before returning BUSY (1..=3600). |
+| `profiles.pool.statement_cache_size` | integer | 50 | no | no | 1 | Per-connection statement-cache size passed to the thin driver. |
+| `profiles.oci.wallet_location` | path | none | no | yes | 1 | TCPS wallet directory loaded by the thin driver. |
+| `profiles.oci.wallet_password_ref` | secret ref | none | no | yes | 1 | Secret reference for an encrypted-wallet password. |
+| `profiles.oci.ssl_server_dn_match` | bool | driver default | no | no | 1 | Override Oracle server-certificate DN matching. |
+| `profiles.oci.ssl_server_cert_dn` | string | none | no | yes | 1 | Exact expected server-certificate DN. |
+| `profiles.oci.use_sni` | bool | driver default | no | no | 1 | Override TCPS SNI behavior. |
+| `profiles.oci.use_iam_token` | bool | false | no | no | 1 | Authenticate with a pre-fetched OCI IAM database token instead of a password. |
+| `profiles.oci.iam_config_profile` | string | none | no | yes | 1 | ~/.oci/config profile name for an IAM token (parses; reserved). |
+| `profiles.oci.token_env` | string | ORACLEMCP_IAM_TOKEN | no | yes | 1 | Name of an env var holding the pre-fetched IAM token (a reference, not the value). |
+| `profiles.oci.token_file` | path | none | no | yes | 1 | Path to a file holding the pre-fetched IAM token, re-read on every connect. |
+| `profiles.oci.token_exec` | array of string | none | no | yes | 1 | Argv command run with no shell to fetch a fresh IAM token from stdout. |
+| `profiles.oci.token_key_file` | path | none | no | yes | 1 | PKCS#8 PEM private key the IAM database token is bound to (proof-of-possession). |
+| `profiles.oci.token_key_env` | string | none | no | yes | 1 | Name of an env var holding the PKCS#8 PEM private key for the IAM database token. |
+| `profiles.drcp.pooled` | bool | false | no | no | 1 | Request a DRCP pooled server (SERVER=POOLED). |
+| `profiles.drcp.connection_class` | string | none | no | yes | 1 | DRCP connection class; requires pooled = true. |
+| `profiles.drcp.purity` | enum(reuse\|new) | reuse | no | no | 1 | DRCP session purity. |
+| `profiles.proxy_auth.proxy_user` | string | none | no | yes | 1 | Authenticating account that owns credential_ref. |
+| `profiles.proxy_auth.target_schema` | string | none | no | yes | 1 | Target schema granted CONNECT THROUGH proxy_user. |
+| `profiles.app_context.namespace` | string | required | no | yes | 1 | Application-context namespace (<= 128 chars). |
+| `profiles.app_context.key` | string | required | no | yes | 1 | Application-context key/name (<= 128 chars). |
+| `profiles.app_context.value` | string | empty | no | yes | 1 | Application-context value; sensitive and redacted (<= 4000 chars). |
+| `profiles.masking.mask_unknown_default` | bool | true | no | no | 2 | Arc M: mask any result column not matched by a rule. |
+| `profiles.masking.salt_ref` | string | none | no | no | 2 | Non-secret salt id/reference required when any rule uses action = tokenize. |
+| `profiles.masking.rules.column_match.schema` | string | none | no | no | 2 | Arc M: optional owner/schema constraint on a masking rule. |
+| `profiles.masking.rules.column_match.table` | string | none | no | no | 2 | Arc M: optional table/object constraint on a masking rule. |
+| `profiles.masking.rules.column_match.column` | string | none | no | no | 2 | Arc M: result/catalog column name; mutually exclusive with tag. |
+| `profiles.masking.rules.column_match.tag` | string | none | no | no | 2 | Arc M: operator-defined sensitivity tag; mutually exclusive with column. |
+| `profiles.masking.rules.action` | enum(mask\|tokenize\|null) | required | no | no | 2 | Arc M: action applied to matching non-null cells. |
+| `profiles.masking.rules.tag` | string | none | no | no | 2 | Arc M: optional non-secret policy/audit tag on a rule. |
+| `profiles.sql_policy.version` | integer | 1 | no | no | 2 | Arc N: declarative policy grammar version. |
+| `profiles.sql_policy.rules.id` | string | required | no | no | 2 | Arc N: non-secret stable rule identifier retained by audit. |
+| `profiles.sql_policy.rules.match.schema` | string | none | no | no | 2 | Arc N: exact resolved owner/schema selector. |
+| `profiles.sql_policy.rules.match.object` | string | none | no | no | 2 | Arc N: exact object selector; requires match.schema. |
+| `profiles.sql_policy.rules.match.verb` | enum(select\|insert\|update\|delete\|merge\|ddl\|admin\|plsql\|alter_session) | none | no | no | 2 | Arc N: top-level verb supplied by the classifier. |
+| `profiles.sql_policy.rules.match.principal` | string | none | no | no | 2 | Arc N: exact server-derived principal key selector. |
+| `profiles.sql_policy.rules.effect.kind` | enum(deny\|require_level\|require_predicate) | required | no | no | 2 | Arc N: tightening-only effect kind; no allow/override is representable. |
+| `profiles.sql_policy.rules.effect.level` | enum(READ_ONLY\|READ_WRITE\|DDL\|ADMIN) | none | no | no | 2 | Arc N: operating-level floor for a require_level effect. |
+| `profiles.sql_policy.rules.effect.sql_fragment` | string | none | no | no | 2 | Arc N: restricted conjunctive row filter for a require_predicate effect. |
+<!-- /generated:config -->
+
+---
+
 ## Discovery and precedence
 
 ### File discovery order

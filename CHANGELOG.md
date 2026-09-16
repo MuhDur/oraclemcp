@@ -69,6 +69,13 @@ unchanged in contract.
 
 ### Added
 
+- **Tool and config docs are generated from the code, not hand-written.** The
+  README tool/alias tables and the `docs/configuration.md` field reference
+  (including the governance/arc knobs) are rendered from the tool registry and
+  the typed config structs by `oraclemcp robot-docs tools|config --markdown` and
+  filled by `scripts/docs_generate.sh`; `--check` fails on drift and is wired
+  into the CI `boundary` job. `robot-docs guide` now lists every registered
+  tool. Tracked by beads `oraclemcp-2q4em.3.1`/`2q4em.3.2`.
 - **The operator dashboard is focused on database workflows** and split into
   focused UI modules. See
   [084ab1d6](https://github.com/MuhDur/oraclemcp/commit/084ab1d6),

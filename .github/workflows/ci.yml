@@ -617,7 +617,7 @@ jobs:
   boundary:
     name: engine-free boundary + surface + driver-seam + honesty + conformance accounting
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
         with:
@@ -629,6 +629,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # Never save from the boundary job: keep cache ownership on the
+          # test/clippy jobs so a docs-only build cannot evict a warm population.
+          save-if: false
+      # Generated-docs drift: the README tool/alias tables and the config field
+      # reference are rendered from the registry/config types, never hand-written
+      # (beads oraclemcp-2q4em.3.1/.3.2). This builds only the one binary the
+      # renderer needs, so the boundary job stays cheap; `docs_generate.sh
+      # --check` fails with a unified diff on any drift.
+      - name: generated docs match the registry and config types
+        run: |
+          cargo build -p oraclemcp
+          bash scripts/docs_generate.sh --check
       - run: bash scripts/oraclemcp_boundary_lint.sh
       - run: bash scripts/oraclemcp_arch_fitness_lint.sh
       - run: bash scripts/oraclemcp_agent_surface_lint.sh

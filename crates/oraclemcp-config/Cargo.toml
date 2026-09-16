@@ -21,6 +21,7 @@ thiserror.workspace = true
 figment = { version = "0.10", features = ["toml", "env", "test"] }
 proptest = "1"
 tempfile = "3"
+toml = "0.8"
 
 [lints]
 workspace = true

@@ -136,6 +136,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/docs_generate.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/eng_program_graph_lint.py",
       "kind": "helper",
       "excluded_reason": "tracker-graph-lint"

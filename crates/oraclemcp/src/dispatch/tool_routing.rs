@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-pub(super) fn canonical_tool_name(name: &str) -> &str {
+pub(crate) fn canonical_tool_name(name: &str) -> &str {
     match name {
         "current_database" => "oracle_connection_info",
         "switch_database" => "oracle_switch_profile",

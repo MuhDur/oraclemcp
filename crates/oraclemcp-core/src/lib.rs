@@ -81,7 +81,7 @@ pub use server::{
     CAPABILITIES_TOOL, DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture,
     DispatchOutcome, DispatchReplyReceiver, DispatchStreamStartFuture, McpSurfaceDetail,
     McpSurfaceFuture, McpSurfaceOutcome, McpSurfaceState, McpToolCatalogSnapshot, OracleMcpServer,
-    ToolDispatch, ToolStreamFrame, ToolStreamSender,
+    ToolDispatch, ToolStreamFrame, ToolStreamSender, min_visible_level_for_tool,
 };
 pub use shutdown::{CancelOutcome, ShutdownCoordinator, install_panic_hook};
 pub use source_history::{

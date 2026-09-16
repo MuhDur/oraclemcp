@@ -80,6 +80,50 @@ pub const TOOL_NAMES: [&str; 59] = [
     "get_clob",
 ];
 
+/// The governed canonical surface is the `oracle_*` tools; every other
+/// registered name in [`TOOL_NAMES`] is a compatibility alias. Naming the
+/// prefix once lets the generated tool docs and the dispatch routing agree by
+/// construction instead of by a second hand-kept list.
+pub const CANONICAL_TOOL_PREFIX: &str = "oracle_";
+
+/// The canonical tool a compatibility alias routes to, for the generated alias
+/// table (`oraclemcp robot-docs tools --markdown`). Returns `None` for a
+/// canonical `oracle_*` tool.
+///
+/// Plain renames mirror [`crate::dispatch::tool_routing::canonical_tool_name`]
+/// (kept honest by `alias_targets_match_dispatch_routing`). Three names —
+/// `execute_approved`, `deploy_ddl`, and `read_patch_preview` — are
+/// compatibility wrappers that extend a guarded path rather than rename it, so
+/// their targets are declared here explicitly.
+#[must_use]
+pub fn alias_target(name: &str) -> Option<&'static str> {
+    let target = match name {
+        "current_database" => "oracle_connection_info",
+        "switch_database" => "oracle_switch_profile",
+        "enable_writes" | "disable_writes" => "oracle_set_session_level",
+        "query" => "oracle_query",
+        "preview_sql" => "oracle_preview_sql",
+        "execute_approved" => "oracle_execute",
+        "compile_object" | "compile_with_warnings" => "oracle_compile_object",
+        "create_or_replace" => "oracle_create_or_replace",
+        "patch_package" | "patch_view" => "oracle_patch_source",
+        "read_patch_preview" => "oracle_patch_source",
+        "deploy_ddl" => "oracle_create_or_replace",
+        "list_objects" | "get_schema" => "oracle_schema_inspect",
+        "list_schemas" => "oracle_list_schemas",
+        "describe_table" => "oracle_describe",
+        "describe_index" => "oracle_describe_index",
+        "describe_trigger" => "oracle_describe_trigger",
+        "describe_view" => "oracle_describe_view",
+        "get_ddl" => "oracle_get_ddl",
+        "get_object_source" => "oracle_get_source",
+        "get_errors" => "oracle_compile_errors",
+        "get_clob" => "oracle_read_clob",
+        _ => return None,
+    };
+    Some(target)
+}
+
 #[must_use]
 pub fn tool_names() -> Vec<&'static str> {
     #[cfg(feature = "plsql-intelligence")]
@@ -1808,6 +1852,38 @@ mod tests {
                 "{} never opts into open-world behavior",
                 tool.name
             );
+        }
+    }
+
+    #[test]
+    fn alias_targets_cover_every_alias_and_match_dispatch_routing() {
+        let registry = tool_registry();
+        for tool in &registry.tools {
+            if tool.name.starts_with(CANONICAL_TOOL_PREFIX) {
+                assert!(
+                    alias_target(&tool.name).is_none(),
+                    "{} is canonical and must not carry an alias target",
+                    tool.name
+                );
+                continue;
+            }
+            let target = alias_target(&tool.name)
+                .unwrap_or_else(|| panic!("compatibility alias {} has no target", tool.name));
+            assert!(
+                registry.tools.iter().any(|candidate| {
+                    candidate.name == target && candidate.name.starts_with(CANONICAL_TOOL_PREFIX)
+                }),
+                "alias {} target {} must be a registered canonical tool",
+                tool.name,
+                target
+            );
+            // Plain renames must agree with dispatch routing. The three
+            // wrappers route to themselves in dispatch (they have their own
+            // arms) and declare the guarded path they extend here.
+            let routed = crate::dispatch::tool_routing::canonical_tool_name(&tool.name);
+            if routed != tool.name {
+                assert_eq!(routed, target, "alias {} routing drift", tool.name);
+            }
         }
     }
 

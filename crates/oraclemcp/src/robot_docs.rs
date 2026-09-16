@@ -1,8 +1,17 @@
 //! Static onboarding payloads for the `oraclemcp` binary: the agent-facing
 //! `robot-docs guide` (JSON + text) and the generic `setup` templates.
 //!
+//! The tool and config tables are GENERATED from the registry/config types —
+//! never hand-written — so the guide and README cannot drift from the code
+//! (beads `oraclemcp-2q4em.3.1`/`.3.2`). `scripts/docs_generate.sh` writes the
+//! marked blocks into `README.md` / `docs/configuration.md` and `--check`
+//! fails on drift.
+//!
 //! Pure data, no I/O. Split out of `main.rs` so the CLI flow there stays small;
 //! the `json!` macros are compile-time checked exactly as before.
+
+use oraclemcp::registry;
+use oraclemcp_core::min_visible_level_for_tool;
 
 pub(crate) fn setup_profiles_template(profile: &str, credential_env: &str) -> String {
     format!(
@@ -57,6 +66,228 @@ type = "integer"
 required = true
 description = "Customer id"
 "#
+}
+
+/// First sentence of a descriptor summary, or the whole summary when it has no
+/// sentence break. Keeps the generated purpose column honest and short.
+fn first_sentence(summary: &str) -> &str {
+    let trimmed = summary.trim();
+    match trimmed.find(". ") {
+        Some(index) => &trimmed[..=index],
+        None => trimmed,
+    }
+}
+
+/// Escape a value for a Markdown table cell: collapse newlines and escape `|`
+/// so a summary can never break the generated table.
+fn markdown_cell(value: &str) -> String {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace('|', "\\|")
+}
+
+fn is_canonical(name: &str) -> bool {
+    name.starts_with(registry::CANONICAL_TOOL_PREFIX)
+}
+
+/// One generated row per registered tool, carrying the fields the tool table
+/// and the agent guide both render. `visible_from` is the minimum session
+/// operating level at which the tool appears in `tools/list`
+/// ([`oraclemcp_core::min_visible_level_for_tool`]).
+pub(crate) fn registry_tool_rows() -> Vec<serde_json::Value> {
+    registry::tool_registry()
+        .tools
+        .iter()
+        .map(|tool| {
+            let level = min_visible_level_for_tool(tool);
+            serde_json::json!({
+                "name": tool.name,
+                "title": tool.title,
+                "purpose": first_sentence(&tool.summary),
+                "visible_from": level.as_str(),
+                "destructive": tool.destructive,
+                "alias_of": registry::alias_target(&tool.name),
+            })
+        })
+        .collect()
+}
+
+fn canonical_tools_table(rows: &[serde_json::Value]) -> String {
+    let mut out = String::from(
+        "| Tool | Title | Purpose | Visible from | Destructive |\n\
+         | --- | --- | --- | --- | --- |\n",
+    );
+    for row in rows
+        .iter()
+        .filter(|row| is_canonical(row["name"].as_str().unwrap_or_default()))
+    {
+        let destructive = if row["destructive"] == serde_json::json!(true) {
+            "yes"
+        } else {
+            "no"
+        };
+        out.push_str(&format!(
+            "| `{}` | {} | {} | `{}` | {} |\n",
+            row["name"].as_str().unwrap_or_default(),
+            markdown_cell(row["title"].as_str().unwrap_or_default()),
+            markdown_cell(row["purpose"].as_str().unwrap_or_default()),
+            row["visible_from"].as_str().unwrap_or_default(),
+            destructive,
+        ));
+    }
+    out
+}
+
+fn alias_tools_table(rows: &[serde_json::Value]) -> String {
+    let mut out = String::from("| Alias | Routes to |\n| --- | --- |\n");
+    for row in rows
+        .iter()
+        .filter(|row| !is_canonical(row["name"].as_str().unwrap_or_default()))
+    {
+        out.push_str(&format!(
+            "| `{}` | `{}` |\n",
+            row["name"].as_str().unwrap_or_default(),
+            row["alias_of"].as_str().unwrap_or_default(),
+        ));
+    }
+    out
+}
+
+/// The registry rendered as marked blocks for `robot-docs tools --markdown`.
+/// `scripts/docs_generate.sh --write` writes each body between the matching
+/// `<!-- generated:<id> -->` markers; `--check` fails on any drift.
+pub(crate) fn tools_markdown() -> String {
+    let rows = registry_tool_rows();
+    format!(
+        "<!-- generated:tools -->\n{}<!-- /generated:tools -->\n\
+         <!-- generated:tools-aliases -->\n{}<!-- /generated:tools-aliases -->\n",
+        canonical_tools_table(&rows),
+        alias_tools_table(&rows),
+    )
+}
+
+/// The registry rows as JSON for `--robot-json` and the guide payload.
+pub(crate) fn tools_json() -> serde_json::Value {
+    serde_json::Value::Array(registry_tool_rows())
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn config_table() -> String {
+    let mut out = String::from(
+        "| Field | Type | Default | Inherits `base` | Redacted | Since schema | Effect |\n\
+         | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    for field in oraclemcp_config::config_field_docs() {
+        out.push_str(&format!(
+            "| `{}` | {} | {} | {} | {} | {} | {} |\n",
+            field.key,
+            markdown_cell(field.ty),
+            markdown_cell(field.default),
+            yes_no(field.inherits_from_base),
+            yes_no(field.redacted_in_diagnostics),
+            field.since,
+            markdown_cell(field.description),
+        ));
+    }
+    out
+}
+
+/// The config reference rendered as a marked block for
+/// `robot-docs config --markdown`; `scripts/docs_generate.sh` writes the body
+/// between the `<!-- generated:config -->` markers in `docs/configuration.md`.
+pub(crate) fn config_markdown() -> String {
+    format!(
+        "<!-- generated:config -->\n{}<!-- /generated:config -->\n",
+        config_table()
+    )
+}
+
+/// The config rows as JSON for `--robot-json`.
+pub(crate) fn config_json() -> serde_json::Value {
+    let fields: Vec<serde_json::Value> = oraclemcp_config::config_field_docs()
+        .iter()
+        .map(|field| {
+            serde_json::json!({
+                "key": field.key,
+                "type": field.ty,
+                "default": field.default,
+                "inherits_from_base": field.inherits_from_base,
+                "redacted_in_diagnostics": field.redacted_in_diagnostics,
+                "since": field.since,
+                "description": field.description,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "ok": true,
+        "field_count": fields.len(),
+        "fields": fields,
+    })
+}
+
+/// Plain-text config listing for a human reader.
+pub(crate) fn config_text() -> String {
+    let mut out = String::from("Configuration reference (generated from the config types)\n");
+    for field in oraclemcp_config::config_field_docs() {
+        out.push_str(&format!(
+            "- {} ({}) — default {} — {}\n",
+            field.key, field.ty, field.default, field.description
+        ));
+    }
+    out
+}
+
+/// The agent-facing tool listing embedded in `robot-docs guide`, so the guide
+/// always names every registered tool (previously it listed none).
+pub(crate) fn tools_text() -> String {
+    let rows = registry_tool_rows();
+    let canonical = rows
+        .iter()
+        .filter(|row| is_canonical(row["name"].as_str().unwrap_or_default()))
+        .count();
+    let mut out = String::new();
+    out.push_str("Tool registry\n");
+    out.push_str(&format!(
+        "- {} registered tools: {} canonical `oracle_*` tools + {} compatibility aliases.\n",
+        rows.len(),
+        canonical,
+        rows.len() - canonical
+    ));
+    out.push_str(
+        "- `tools/list` is level-gated: a tool below the active session level is absent from the\n\
+         \x20 surface, not merely refused at call time. Raise the session level (within the profile\n\
+         \x20 ceiling) to expose write/DDL tools.\n",
+    );
+    for row in rows
+        .iter()
+        .filter(|row| is_canonical(row["name"].as_str().unwrap_or_default()))
+    {
+        out.push_str(&format!(
+            "- {} (visible from {}) — {}\n",
+            row["name"].as_str().unwrap_or_default(),
+            row["visible_from"].as_str().unwrap_or_default(),
+            row["title"].as_str().unwrap_or_default(),
+        ));
+    }
+    out.push_str("Compatibility aliases\n");
+    for row in rows
+        .iter()
+        .filter(|row| !is_canonical(row["name"].as_str().unwrap_or_default()))
+    {
+        out.push_str(&format!(
+            "- {} -> {}\n",
+            row["name"].as_str().unwrap_or_default(),
+            row["alias_of"].as_str().unwrap_or_default(),
+        ));
+    }
+    out
 }
 
 pub(crate) fn cli_exit_codes_json() -> serde_json::Value {
@@ -223,6 +454,7 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
         "ok": true,
         "guide_version": 1,
         "binary": "oraclemcp",
+        "tools": tools_json(),
         "structured_output": {
             "flag": "--robot-json",
             "alias": "--json",
@@ -479,8 +711,9 @@ pub(crate) fn robot_docs_guide_json() -> serde_json::Value {
     })
 }
 
-pub(crate) fn robot_docs_guide_text() -> &'static str {
-    r#"oraclemcp robot-docs guide
+pub(crate) fn robot_docs_guide_text() -> String {
+    let mut text = String::from(
+        r#"oraclemcp robot-docs guide
 
 Output contract
 - Use --robot-json or --json for compact machine-readable stdout.
@@ -613,7 +846,11 @@ Agent rules
 - Treat profile max_level as the hard ceiling for the running server.
 - Preview service lifecycle changes with oraclemcp --json service install --dry-run before using --yes.
 - Keep environment-specific tools, names, identities, and connection details in config.
-"#
+"#,
+    );
+    text.push('\n');
+    text.push_str(&tools_text());
+    text
 }
 
 #[cfg(test)]
@@ -628,11 +865,88 @@ mod tests {
             .as_str()
             .expect("local pool guidance is text");
 
-        for guidance in [guide, local_pool] {
+        for guidance in [guide.as_str(), local_pool] {
             assert!(guidance.contains("every newly opened connection"));
             assert!(guidance.contains("including pool connections"));
             assert!(guidance.contains("setup failure fails that connection"));
             assert!(!guidance.contains("login setup, and session identity stay on the pinned"));
         }
+    }
+
+    /// Body between the `<!-- generated:<id> -->` markers.
+    fn extract_block(document: &str, id: &str) -> String {
+        let start = format!("<!-- generated:{id} -->");
+        let end = format!("<!-- /generated:{id} -->");
+        let after_start = document
+            .split_once(start.as_str())
+            .unwrap_or_else(|| panic!("missing start marker for {id}"))
+            .1;
+        after_start
+            .split_once(end.as_str())
+            .unwrap_or_else(|| panic!("missing end marker for {id}"))
+            .0
+            .to_owned()
+    }
+
+    /// Golden drift gate: the committed generated blocks must equal a fresh
+    /// render from the registry/config types. Mirrors `docs_generate.sh --check`
+    /// so `cargo test` catches drift even without the shell gate.
+    #[test]
+    fn committed_generated_blocks_match_a_fresh_render() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let readme = std::fs::read_to_string(root.join("README.md")).expect("README.md readable");
+        let fresh_tools = tools_markdown();
+        assert_eq!(
+            extract_block(&readme, "tools"),
+            extract_block(&fresh_tools, "tools"),
+            "README tools table drifted; run scripts/docs_generate.sh --write"
+        );
+        assert_eq!(
+            extract_block(&readme, "tools-aliases"),
+            extract_block(&fresh_tools, "tools-aliases"),
+            "README alias table drifted; run scripts/docs_generate.sh --write"
+        );
+
+        let configuration = std::fs::read_to_string(root.join("docs/configuration.md"))
+            .expect("docs/configuration.md readable");
+        assert_eq!(
+            extract_block(&configuration, "config"),
+            extract_block(&config_markdown(), "config"),
+            "config reference drifted; run scripts/docs_generate.sh --write"
+        );
+    }
+
+    /// The agent guide must name every registered tool (it previously listed
+    /// none of the governance/DDL tools).
+    #[test]
+    fn guide_lists_every_registered_tool() {
+        let registry = registry::tool_registry();
+        assert!(
+            registry.tools.len() >= 59,
+            "canonical + alias surface stays complete"
+        );
+        let text = robot_docs_guide_text();
+        let json = robot_docs_guide_json();
+        let rows = json["tools"].as_array().expect("guide embeds tool rows");
+        assert_eq!(rows.len(), registry.tools.len());
+        for tool in &registry.tools {
+            assert!(
+                text.contains(&tool.name),
+                "guide text must name {}",
+                tool.name
+            );
+            assert!(
+                rows.iter().any(|row| row["name"] == tool.name),
+                "guide JSON must include {}",
+                tool.name
+            );
+        }
+        // A representative governance tool must be visible with its level gate.
+        let execute = rows
+            .iter()
+            .find(|row| row["name"] == "oracle_execute")
+            .expect("oracle_execute row");
+        assert_eq!(execute["visible_from"], serde_json::json!("READ_WRITE"));
+        assert_eq!(execute["destructive"], serde_json::json!(true));
     }
 }

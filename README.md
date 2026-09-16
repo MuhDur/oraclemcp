@@ -1165,33 +1165,49 @@ Connection modes are configured per profile in `profiles.toml`; see
 
 ## Tools
 
-| Tool | Purpose |
-| --- | --- |
-| `oracle_list_profiles` | List configured connection profiles without exposing connect strings, usernames, or credential references |
-| `oracle_connection_info` | Describe the active profile and redacted connection posture; if live metadata is unavailable, returns `connected=false` with a structured `connection_error` and `next_actions` |
-| `oracle_switch_profile` | Reconnect the server to another configured profile |
-| `oracle_set_session_level` | Preview/apply a temporary session operating-level elevation within the profile ceiling, or drop back to `READ_ONLY` |
-| `oracle_query` | Run a read-only `SELECT`/`WITH` (paginated, parameter-bound) |
-| `oracle_preview_sql` | Classify SQL and report whether it is read-only, needs profile-permitted step-up, or exceeds the active profile ceiling, without executing it |
-| `oracle_execute` | Execute one non-read statement through the active profile/session gate; DML rolls back by default, while commits, DDL/Admin, and non-transactional effects such as sequence `NEXTVAL` require the execution grant from `oracle_preview_sql`; query-shaped `NEXTVAL` is refused because this path does not fetch rows; optionally captures bounded `DBMS_OUTPUT` |
-| `oracle_compile_object` | Preview or compile one PL/SQL/view object through the `DDL` profile gate; execution requires the single-use confirmation grant returned by preview |
-| `oracle_create_or_replace` | Preview or apply one `CREATE OR REPLACE` statement through the classifier and `DDL` profile gate |
-| `oracle_patch_source` | Preview or apply an exact `old_text`→`new_text` patch to one stored PL/SQL source object (package/body/type/view) through the classifier and `DDL` profile gate; TOCTOU-safe, re-fetching the current source and re-confirming at execute time |
-| `oracle_list_schemas` | List schemas that own objects visible to this session |
-| `oracle_schema_inspect` | List objects in the current schema, one owner, or all accessible schemas |
-| `oracle_describe` | Column and constraint metadata for a table or view |
-| `oracle_describe_index` | Index metadata, indexed columns, and function-based expressions |
-| `oracle_describe_trigger` | Trigger timing, target table, status, and body |
-| `oracle_describe_view` | View definition metadata and columns |
-| `oracle_get_ddl` | `DBMS_METADATA` DDL for an object |
-| `oracle_get_source` | Full source text or an inclusive `from_line`/`to_line` range for a package, procedure, function, trigger, or type; pair the range with a line returned by `oracle_search_source`; omit `object_type` to return every visible source variant for the object name |
-| `oracle_sample_rows` | Safely sample the first rows of a table or view |
-| `oracle_read_clob` | Read one capped CLOB/NCLOB/text value by key |
-| `oracle_compile_errors` | Compile errors for the current schema, an owner, or one PL/SQL object |
-| `oracle_search_source` | Search `ALL_SOURCE` for a needle; optionally use `owner="*"`, `object_type`, and `name_like` to widen or narrow scope; matching lines are capped by `max_line_chars`, and their `LINE` values can be passed to `oracle_get_source`'s `from_line`/`to_line` range |
-| `oracle_plscope_inspect` | Read PL/Scope identifiers/statements for one object and report unused declarations plus dynamic-SQL lines when metadata is populated |
-| `oracle_explain_plan` | Diagnostic `EXPLAIN PLAN` for a vetted read-only statement; writes `PLAN_TABLE` and requires `READ_WRITE` plus `allow_plan_table_write=true` |
-| `oracle_capabilities` | Zero-arg discovery: tools, operating level, feature tiers |
+The tables below are generated from the server's tool registry — the same
+descriptors `tools/list` serves — by `scripts/docs_generate.sh`, which renders
+them from `oraclemcp robot-docs tools --markdown`. Do not hand-edit them; edit
+the registry and run `bash scripts/docs_generate.sh --write`.
+
+<!-- generated:tools -->
+| Tool | Title | Purpose | Visible from | Destructive |
+| --- | --- | --- | --- | --- |
+| `oracle_list_profiles` | Oracle List Profiles | List configured connection profiles without exposing connect strings, usernames, or credential references. | `READ_ONLY` | no |
+| `oracle_connection_info` | Oracle Connection Info | Describe the active profile and Oracle connection. | `READ_ONLY` | no |
+| `oracle_switch_profile` | Oracle Switch Profile | Reconnect this MCP server to another configured profile by name. | `READ_ONLY` | no |
+| `oracle_set_session_level` | Oracle Set Session Level | Preview or apply a temporary session operating-level elevation within the active profile ceiling, or drop back to READ_ONLY. | `READ_ONLY` | yes |
+| `oracle_query` | Oracle Query | Run a read-only SELECT with positional binds; paginated and row/byte capped. | `READ_ONLY` | no |
+| `oracle_semantic_search` | Oracle Semantic Search | Run a bounded, fail-closed 23ai vector search through the same policy, semantic-resolution, masking, and audit path as oracle_query. | `READ_ONLY` | no |
+| `oracle_diff` | Oracle Diff | Diff one proven read-only SELECT across two Oracle SCNs, or across two databases. | `READ_ONLY` | no |
+| `oracle_preview_sql` | Oracle Preview SQL | Classify a SQL statement and report whether it would pass the active profile/session gate without executing it. | `READ_ONLY` | no |
+| `oracle_execute` | Oracle Execute | Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. | `READ_WRITE` | yes |
+| `oracle_checkpoint` | Oracle Checkpoint | Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true then leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. | `READ_WRITE` | yes |
+| `oracle_undo_to` | Oracle Undo To | Undo the reversible workspace: ROLLBACK TO SAVEPOINT <name> discards every held statement executed after that checkpoint and releases the checkpoints stacked above it, leaving the transaction open. | `READ_WRITE` | yes |
+| `oracle_preview_dml` | Oracle Preview DML | Dry-run one DML statement: the server brackets it in its own savepoint, executes it, reads the rows it touched, then rolls back to that savepoint and presents the result — nothing is committed and nothing is left behind. | `READ_WRITE` | yes |
+| `oracle_compile_object` | Oracle Compile Object | Preview or compile one PL/SQL/view object through the active DDL profile gate; preview is the default and execution requires the returned confirmation token. | `DDL` | yes |
+| `oracle_create_or_replace` | Oracle Create Or Replace | Preview or apply one CREATE OR REPLACE statement through the classifier and active DDL profile gate. | `DDL` | yes |
+| `oracle_patch_source` | Oracle Patch Source | Preview or apply an exact old_text to new_text replacement against one stored source object; preview refetches the current source and execute uses the existing DDL confirmation gate. | `DDL` | yes |
+| `oracle_list_schemas` | Oracle List Schemas | List schemas that own objects visible to this session, optionally filtered by name. | `READ_ONLY` | no |
+| `oracle_schema_inspect` | Oracle Schema Inspect | List objects in the current schema, one owner, or all accessible schemas, with optional type/name filters. | `READ_ONLY` | no |
+| `oracle_search_objects` | Oracle Search Objects | Unified read-only object search/inspection with a detail_level. | `READ_ONLY` | no |
+| `oracle_orient` | Oracle Orient | Return bounded orientation evidence: by default one cacheable snapshot for the active profile; fleet=true maps every MCP-visible profile independently with schema, version, freshness, drift, and typed UNREACHABLE/FAIL_CLOSED lane status. | `READ_ONLY` | no |
+| `oracle_describe` | Oracle Describe | Describe a table/view's columns and constraint metadata. | `READ_ONLY` | no |
+| `oracle_describe_index` | Oracle Describe Index | Describe one index's metadata, indexed columns, and function-based expressions. | `READ_ONLY` | no |
+| `oracle_describe_trigger` | Oracle Describe Trigger | Describe one trigger's timing, event, target table, status, and body. | `READ_ONLY` | no |
+| `oracle_describe_view` | Oracle Describe View | Describe one view's definition metadata and columns. | `READ_ONLY` | no |
+| `oracle_get_ddl` | Oracle Get DDL | Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types). | `READ_ONLY` | no |
+| `oracle_get_source` | Oracle Get Source | Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. | `READ_ONLY` | no |
+| `oracle_sample_rows` | Oracle Sample Rows | Read the first rows of a table or view with a hard row cap. | `READ_ONLY` | no |
+| `oracle_read_clob` | Oracle Read CLOB | Read one CLOB/NCLOB/text value by key with a character cap. | `READ_ONLY` | no |
+| `oracle_compile_errors` | Oracle Compile Errors | Retrieve compile errors for the current schema, an owner, or one object (ALL_ERRORS). | `READ_ONLY` | no |
+| `oracle_search_source` | Oracle Search Source | Full-text search across ALL_SOURCE for a needle (row- and line-capped). | `READ_ONLY` | no |
+| `oracle_plscope_inspect` | Oracle PL/Scope Inspect | Inspect PL/Scope identifier and SQL statement metadata for one PL/SQL object when ALL_IDENTIFIERS/ALL_STATEMENTS are populated. | `READ_ONLY` | no |
+| `oracle_explain_plan` | Oracle Explain Plan | Explicit diagnostic-write EXPLAIN PLAN for a vetted SELECT; writes PLAN_TABLE, requires READ_WRITE plus allow_plan_table_write, and is disabled on read-only standby. | `READ_WRITE` | yes |
+| `oracle_top_queries` | Oracle Top Queries | Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). | `READ_ONLY` | no |
+| `oracle_plan_timeline` | Oracle Plan Timeline | Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. | `READ_ONLY` | no |
+| `oracle_db_health` | Oracle Db Health | Read-only DBA health-check suite. | `READ_ONLY` | no |
+<!-- /generated:tools -->
 
 Every advertised tool descriptor includes a human title plus explicit MCP
 annotations. Read-only tools set `readOnlyHint=true`,
@@ -1227,22 +1243,31 @@ advertised in this release.
 For migrations from shorter Oracle MCP tool surfaces, the server also advertises
 compatibility aliases that route to the guarded `oracle_*` tools:
 
+The table below is generated from the registry/routing metadata; do not
+hand-edit it. `execute_approved`, `deploy_ddl`, and `read_patch_preview` are
+compatibility wrappers rather than plain renames: the first replays a
+`preview_sql` grant through `oracle_execute` (token-only calls work for five
+minutes in one server process), the second previews then applies one DDL
+statement through the DDL gate, and the third lists or reads the last
+in-process source-patch preview.
+
+<!-- generated:tools-aliases -->
 | Alias | Routes to |
 | --- | --- |
 | `current_database` | `oracle_connection_info` |
-| `switch_database` | `oracle_switch_profile` (`db` is accepted as an alias for `profile`) |
-| `enable_writes` | `oracle_set_session_level` with `level=READ_WRITE`; preview is still the default |
-| `disable_writes` | `oracle_set_session_level` with `action=drop`; immediately returns the session to `READ_ONLY` |
+| `switch_database` | `oracle_switch_profile` |
+| `enable_writes` | `oracle_set_session_level` |
+| `disable_writes` | `oracle_set_session_level` |
 | `query` | `oracle_query` |
 | `preview_sql` | `oracle_preview_sql` |
-| `execute_approved` | Compatibility wrapper around `oracle_execute`; token-only calls work for five minutes after `preview_sql`/`oracle_preview_sql` in the same server process, DML rolls back when `commit` is omitted, and durable commit requires explicit `commit=true`; non-transactional effects still consume confirmation even when rollback is requested |
+| `execute_approved` | `oracle_execute` |
 | `compile_object` | `oracle_compile_object` |
-| `compile_with_warnings` | `oracle_compile_object` with `warnings=true` |
+| `compile_with_warnings` | `oracle_compile_object` |
 | `create_or_replace` | `oracle_create_or_replace` |
-| `deploy_ddl` | Compatibility wrapper for one DDL statement; preview by default, execution reuses the same DDL profile gate and confirmation |
-| `patch_package` | `oracle_patch_source` for a package spec or body |
-| `patch_view` | `oracle_patch_source` for a view |
-| `read_patch_preview` | Compatibility helper that lists or reads the last in-process source-patch preview created by `oracle_patch_source`, `patch_package`, or `patch_view` |
+| `patch_package` | `oracle_patch_source` |
+| `patch_view` | `oracle_patch_source` |
+| `read_patch_preview` | `oracle_patch_source` |
+| `deploy_ddl` | `oracle_create_or_replace` |
 | `list_objects` | `oracle_schema_inspect` |
 | `list_schemas` | `oracle_list_schemas` |
 | `get_schema` | `oracle_schema_inspect` |
@@ -1254,6 +1279,7 @@ compatibility aliases that route to the guarded `oracle_*` tools:
 | `get_object_source` | `oracle_get_source` |
 | `get_errors` | `oracle_compile_errors` |
 | `get_clob` | `oracle_read_clob` |
+<!-- /generated:tools-aliases -->
 
 Aliases share the same SQL classifier, argument validation, profile handling,
 and operating-level behavior as their `oracle_*` targets.

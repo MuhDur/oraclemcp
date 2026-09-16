@@ -2685,18 +2685,40 @@ fn tools_json_for_descriptors(descriptors: &[ToolDescriptor]) -> Vec<Value> {
 
 fn descriptor_visible_for_surface(descriptor: &ToolDescriptor, surface: &McpSurfaceState) -> bool {
     match descriptor.name.as_str() {
-        "oracle_set_session_level" => true,
+        // `enable_writes` is gated by the profile ceiling alone; `disable_writes`
+        // only exists once a session has been raised above READ_ONLY. Both are
+        // handled explicitly because their visibility keys off a surface fact
+        // other than the descriptor's own minimum level.
         "enable_writes" => surface.effective_ceiling >= OperatingLevel::ReadWrite,
         "disable_writes" => surface.current_level > OperatingLevel::ReadOnly,
+        _ => {
+            let required = min_visible_level_for_tool(descriptor);
+            surface.current_level >= required && surface.effective_ceiling >= required
+        }
+    }
+}
+
+/// The minimum session operating level at which `descriptor` appears in
+/// `tools/list`, derived from the SAME rule [`descriptor_visible_for_surface`]
+/// enforces. Below that level the tool is absent from the agent surface (not
+/// merely refused at call time), so operators can explain why `tools/list`
+/// advertises fewer tools at `READ_ONLY`.
+///
+/// `enable_writes`/`disable_writes` are additionally profile-ceiling
+/// dependent; this returns the session-level half of that gate. It is a
+/// documentation/discovery projection, never an authorization decision — the
+/// classifier and level gate remain the enforcement path.
+#[must_use]
+pub fn min_visible_level_for_tool(descriptor: &ToolDescriptor) -> OperatingLevel {
+    match descriptor.name.as_str() {
+        // Always advertised so an agent can discover the level workflow; the
+        // elevation itself stays classifier/profile gated.
+        "oracle_set_session_level" => OperatingLevel::ReadOnly,
+        "enable_writes" | "disable_writes" => OperatingLevel::ReadWrite,
         name => match required_current_level_for_tool(name) {
-            Some(required) => {
-                surface.current_level >= required && surface.effective_ceiling >= required
-            }
-            None if descriptor.destructive => {
-                surface.current_level >= OperatingLevel::ReadWrite
-                    && surface.effective_ceiling >= OperatingLevel::ReadWrite
-            }
-            None => true,
+            Some(required) => required,
+            None if descriptor.destructive => OperatingLevel::ReadWrite,
+            None => OperatingLevel::ReadOnly,
         },
     }
 }
