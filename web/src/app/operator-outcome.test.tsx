@@ -62,6 +62,7 @@ import {
   workbenchCompletionIsCurrent,
   workbenchIdeInputIdentity,
   workbenchRequestIdentity,
+  workbenchSessionReady,
   workbenchSourceIdentity,
   workbenchSourceIsDirty
 } from "./App";
@@ -1153,6 +1154,17 @@ describe("Review selection and one-shot grant hardening", () => {
 });
 
 describe("Workbench submission identity hardening", () => {
+  it("fails closed when a cached paired session reaches its absolute expiry", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(100_000));
+    const expiringSession = { ...session, expires_unix: 101 };
+
+    expect(workbenchSessionReady("success", expiringSession)).toBe(true);
+    vi.setSystemTime(new Date(101_000));
+    expect(workbenchSessionReady("success", expiringSession)).toBe(false);
+    expect(workbenchSessionReady("pending", { ...session, expires_unix: 999_999 })).toBe(false);
+  });
+
   it("keeps reversed responses bound to the newest exact SQL, action, and lane generation", async () => {
     const oldContext = workbenchActionContextIdentity({
       authority: "session-a",

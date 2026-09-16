@@ -135,6 +135,7 @@ import {
   DashboardSessionBanner,
   LIVE_TELEMETRY_REFETCH_MS,
   createDashboardQueryClient,
+  dashboardSessionIsValidAt,
   queryActivity,
   startOperatorEventStream,
   useDashboardAuthorityPurge,
@@ -6809,6 +6810,18 @@ export function workbenchCompletionIsCurrent(
   );
 }
 
+/**
+ * A cached React Query success is not an authority grant: the paired browser
+ * session can expire before its next refetch. Keep every Workbench control and
+ * its submit boundary tied to the same absolute expiry check.
+ */
+export function workbenchSessionReady(
+  status: DashboardQueryStatus,
+  session: DashboardSession | undefined
+): boolean {
+  return status === "success" && dashboardSessionIsValidAt(session);
+}
+
 export function workbenchRequestIdentity(
   contextIdentity: string,
   action: WorkbenchAction | WorkbenchIdeAction,
@@ -6975,6 +6988,7 @@ function WorkbenchPage(): React.ReactElement {
   const sessionAuthority = dashboardAuthorityIdentity(
     session.status === "success" ? session.data : undefined
   );
+  const sessionReady = workbenchSessionReady(session.status, session.data);
   const [changesetJson, setChangesetJson] = React.useState(
     '{\n  "objects": [],\n  "unclassified_files": []\n}'
   );
@@ -7049,6 +7063,7 @@ function WorkbenchPage(): React.ReactElement {
     mutationFn: async (submission: WorkbenchSubmission) => {
       if (
         !session.data ||
+        !workbenchSessionReady(session.status, session.data) ||
         submission.authority !== sessionAuthority ||
         !workbenchCompletionIsCurrent(
           { requestIdentity: submission.identity, contextIdentity: submission.contextIdentity },
@@ -7162,6 +7177,7 @@ function WorkbenchPage(): React.ReactElement {
     mutationFn: async (submission: WorkbenchIdeSubmission) => {
       if (
         !session.data ||
+        !workbenchSessionReady(session.status, session.data) ||
         !workbenchCompletionIsCurrent(
           { requestIdentity: submission.identity, contextIdentity: submission.contextIdentity },
           activeIdeIdentityRef.current,
@@ -7250,13 +7266,13 @@ function WorkbenchPage(): React.ReactElement {
   const canSubmit =
     sql.trim().length > 0 &&
     laneReady &&
-    session.status === "success" &&
+    sessionReady &&
     !action.isPending &&
     !ideAction.isPending;
   const canRunIde =
     sql.trim().length > 0 &&
     laneReady &&
-    session.status === "success" &&
+    sessionReady &&
     !ideAction.isPending &&
     !action.isPending;
   const confirmReady =
