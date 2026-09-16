@@ -6,13 +6,17 @@
 //! write-temp-and-rename while holding the service lock.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io::Write;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use cap_fs_ext::{DirExt as _, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as CapOpenOptions};
 use oraclemcp_config::{
     ConfigError, ConfigReloadPlan, ConnectionProfile, OracleMcpConfig, ProfileMetadata,
 };
@@ -24,7 +28,7 @@ use thiserror::Error;
 use crate::file_store::{FileStore, FileStoreError, ServiceOwner};
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use cap_std::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 
 /// Config-ops backend error.
 #[derive(Debug, Error)]
@@ -1190,12 +1194,50 @@ fn normalize_target_path(path: &Path) -> Result<PathBuf, ConfigOpsError> {
             path.display().to_string(),
         ));
     }
-    if let Some(parent) = path.parent()
-        && parent.as_os_str().is_empty()
-    {
-        return Ok(PathBuf::from(path));
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let Some(name) = path.file_name() else {
+        return Err(ConfigOpsError::InvalidTargetPath(
+            path.display().to_string(),
+        ));
+    };
+    Ok(lexically_normalize_directory(parent)?.join(name))
+}
+
+/// Normalize `.` and `..` lexically without resolving any filesystem link.
+/// The no-follow capability walk later verifies every retained component, so a
+/// legacy relative config path remains supported without granting a symlink a
+/// chance to change the target being written.
+fn lexically_normalize_directory(path: &Path) -> Result<PathBuf, ConfigOpsError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| ConfigOpsError::Io(error.to_string()))?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(ConfigOpsError::InvalidTargetPath(format!(
+                        "{} escapes its filesystem root",
+                        path.display()
+                    )));
+                }
+            }
+        }
     }
-    Ok(path.to_path_buf())
+    if normalized.as_os_str().is_empty() {
+        return Err(ConfigOpsError::InvalidTargetPath(
+            path.display().to_string(),
+        ));
+    }
+    Ok(normalized)
 }
 
 fn read_or_empty(path: &Path) -> Result<Vec<u8>, ConfigOpsError> {
@@ -1249,95 +1291,274 @@ fn timestamp_suffix() -> String {
 }
 
 fn write_backup(path: &Path, bytes: &[u8]) -> Result<(), ConfigOpsError> {
-    ensure_parent_dir(path)?;
-    let mut file = create_new_private_file(path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
-        .map_err(|e| ConfigOpsError::Io(e.to_string()))?;
-    fsync_dir(path.parent().unwrap_or_else(|| Path::new(".")))
+    let (parent_path, name) = parent_path_and_name(path)?;
+    let parent = open_or_create_dir_nofollow(&parent_path)?;
+    write_new_private_file_at(&parent, &name, path, bytes)?;
+    verify_held_parent(&parent, &parent_path, path)?;
+    sync_cap_dir(&parent, path)
 }
 
 fn write_atomic_path(path: &Path, bytes: &[u8]) -> Result<(), ConfigOpsError> {
-    ensure_parent_dir(path)?;
-    if let Ok(metadata) = fs::symlink_metadata(path)
-        && metadata.file_type().is_symlink()
-    {
-        return Err(ConfigOpsError::InvalidTargetPath(format!(
-            "{} is a symlink",
-            path.display()
-        )));
+    let (parent_path, name) = parent_path_and_name(path)?;
+    let parent = open_or_create_dir_nofollow(&parent_path)?;
+    match parent.symlink_metadata(&name) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(ConfigOpsError::InvalidTargetPath(format!(
+                "{} is a symlink",
+                path.display()
+            )));
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            return Err(ConfigOpsError::InvalidTargetPath(format!(
+                "{} is not a regular file",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(ConfigOpsError::Io(error.to_string())),
     }
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| ConfigOpsError::InvalidTargetPath(path.display().to_string()))?;
-    let tmp_path = parent.join(format!(
-        ".{file_name}.tmp.{}.{}",
+    let temp_name = OsString::from(format!(
+        ".{}.tmp.{}.{}",
+        name.to_string_lossy(),
         std::process::id(),
         timestamp_suffix()
     ));
-    let mut tmp =
-        create_new_private_file(&tmp_path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
-    tmp.write_all(bytes)
-        .and_then(|()| tmp.sync_all())
-        .map_err(|e| ConfigOpsError::Io(e.to_string()))?;
-    drop(tmp);
-    fs::rename(&tmp_path, path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
-    fsync_dir(parent)
+    write_new_private_file_at(&parent, &temp_name, path, bytes)?;
+    run_config_atomic_write_hook();
+    verify_held_parent(&parent, &parent_path, path)?;
+    parent
+        .rename(&temp_name, &parent, &name)
+        .map_err(|error| ConfigOpsError::Io(error.to_string()))?;
+    verify_held_parent(&parent, &parent_path, path)?;
+    sync_cap_dir(&parent, path)
 }
 
-fn ensure_parent_dir(path: &Path) -> Result<(), ConfigOpsError> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    if let Ok(metadata) = fs::symlink_metadata(parent) {
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(ConfigOpsError::InvalidTargetPath(format!(
-                "{} is not a safe directory",
-                parent.display()
-            )));
+fn parent_path_and_name(path: &Path) -> Result<(PathBuf, OsString), ConfigOpsError> {
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| ConfigOpsError::InvalidTargetPath(path.display().to_string()))?
+        .to_os_string();
+    Ok((parent, name))
+}
+
+/// Open every parent component without following a symlink, then retain the
+/// resulting directory capability for all writes. A later pathname swap cannot
+/// redirect writes made through that held capability.
+fn open_existing_dir_nofollow(path: &Path) -> Result<CapDir, ConfigOpsError> {
+    let mut current = capability_root(path)?;
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                current = current.open_dir_nofollow(name).map_err(|error| {
+                    ConfigOpsError::InvalidTargetPath(format!(
+                        "{} is not a safe directory: {error}",
+                        path.display()
+                    ))
+                })?;
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                return Err(ConfigOpsError::InvalidTargetPath(format!(
+                    "{} contains parent traversal",
+                    path.display()
+                )));
+            }
         }
-        return Ok(());
     }
-    let mut builder = fs::DirBuilder::new();
-    builder.recursive(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
-    builder
-        .create(parent)
-        .map_err(|e| ConfigOpsError::Io(e.to_string()))
+    Ok(current)
 }
 
-fn create_new_private_file(path: &Path) -> std::io::Result<File> {
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
+/// Create any missing parent component through the directory capability that
+/// owns its predecessor. A concurrent replacement is re-opened without link
+/// following and therefore refuses rather than creating below the replacement.
+fn open_or_create_dir_nofollow(path: &Path) -> Result<CapDir, ConfigOpsError> {
+    let mut current = capability_root(path)?;
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            if matches!(component, Component::ParentDir) {
+                return Err(ConfigOpsError::InvalidTargetPath(format!(
+                    "{} contains parent traversal",
+                    path.display()
+                )));
+            }
+            continue;
+        };
+        current = match current.open_dir_nofollow(name) {
+            Ok(next) => next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                run_config_parent_create_hook();
+                let mut builder = CapDirBuilder::new();
+                #[cfg(unix)]
+                builder.mode(0o700);
+                match current.create_dir_with(name, &builder) {
+                    Ok(()) => {}
+                    Err(race) if race.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => return Err(ConfigOpsError::Io(error.to_string())),
+                }
+                current.open_dir_nofollow(name).map_err(|error| {
+                    ConfigOpsError::InvalidTargetPath(format!(
+                        "{} is not a safe directory after creation: {error}",
+                        path.display()
+                    ))
+                })?
+            }
+            Err(error) => {
+                return Err(ConfigOpsError::InvalidTargetPath(format!(
+                    "{} is not a safe directory: {error}",
+                    path.display()
+                )));
+            }
+        };
+    }
+    Ok(current)
+}
+
+fn capability_root(path: &Path) -> Result<CapDir, ConfigOpsError> {
+    let root = if path.is_absolute() {
+        #[cfg(windows)]
+        {
+            let mut root = PathBuf::new();
+            for component in path.components() {
+                root.push(component.as_os_str());
+                if matches!(component, Component::RootDir) {
+                    break;
+                }
+            }
+            root
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
+    } else {
+        PathBuf::from(".")
+    };
+    CapDir::open_ambient_dir(&root, ambient_authority())
+        .map_err(|error| ConfigOpsError::Io(format!("failed to open {}: {error}", root.display())))
+}
+
+fn write_new_private_file_at(
+    parent: &CapDir,
+    name: &OsStr,
+    display_path: &Path,
+    bytes: &[u8],
+) -> Result<(), ConfigOpsError> {
+    let mut options = CapOpenOptions::new();
+    options
+        .write(true)
+        .create_new(true)
+        .follow(FollowSymlinks::No);
     #[cfg(unix)]
     options.mode(0o600);
-    options.open(path)
+    let mut file = parent.open_with(name, &options).map_err(|error| {
+        ConfigOpsError::Io(format!(
+            "failed to create {}: {error}",
+            display_path.display()
+        ))
+    })?;
+    file.write_all(bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| {
+            ConfigOpsError::Io(format!(
+                "failed to write {}: {error}",
+                display_path.display()
+            ))
+        })
 }
 
-/// Flush a directory's entries so a freshly created/renamed child is durable
-/// across a crash. Unix opens the directory and `fsync`s it (the POSIX idiom).
-#[cfg(unix)]
-fn fsync_dir(path: &Path) -> Result<(), ConfigOpsError> {
-    File::open(path)
-        .and_then(|file| file.sync_all())
-        .map_err(|e| ConfigOpsError::Io(e.to_string()))
-}
-
-/// Non-Unix (Windows) has no directory-`fsync`: `File::open` cannot open a
-/// directory handle without `FILE_FLAG_BACKUP_SEMANTICS`, and `FlushFileBuffers`
-/// (`sync_all`) returns `ERROR_ACCESS_DENIED` on a directory handle regardless.
-/// Running the Unix path here would fail every durable config write on Windows.
-/// NTFS metadata journaling plus the atomic temp-write-then-rename this module
-/// uses (with the file's own `sync_all` still run) provide the directory-entry
-/// durability, so this is a deliberate no-op, matching `file_store`'s `fsync_dir`.
-#[cfg(not(unix))]
-fn fsync_dir(_path: &Path) -> Result<(), ConfigOpsError> {
+fn verify_held_parent(
+    held_parent: &CapDir,
+    parent_path: &Path,
+    display_path: &Path,
+) -> Result<(), ConfigOpsError> {
+    let current_parent = open_existing_dir_nofollow(parent_path)?;
+    let held = held_parent.dir_metadata().map_err(|error| {
+        ConfigOpsError::Io(format!(
+            "failed to inspect {}: {error}",
+            display_path.display()
+        ))
+    })?;
+    let current = current_parent.dir_metadata().map_err(|error| {
+        ConfigOpsError::Io(format!(
+            "failed to inspect {}: {error}",
+            display_path.display()
+        ))
+    })?;
+    if held.dev() != current.dev() || held.ino() != current.ino() {
+        return Err(ConfigOpsError::InvalidTargetPath(format!(
+            "config target parent for {} was replaced during write",
+            display_path.display()
+        )));
+    }
     Ok(())
 }
+
+/// Flush a held directory's entries after durable file publication. Windows
+/// relies on NTFS metadata journaling because directory flushes are refused.
+fn sync_cap_dir(dir: &CapDir, display_path: &Path) -> Result<(), ConfigOpsError> {
+    #[cfg(not(windows))]
+    {
+        dir.open(".")
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                ConfigOpsError::Io(format!(
+                    "failed to fsync {}: {error}",
+                    display_path.display()
+                ))
+            })?;
+    }
+    #[cfg(windows)]
+    let _ = (dir, display_path);
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+static CONFIG_ATOMIC_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static CONFIG_PARENT_CREATE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_config_atomic_write_hook(hook: impl FnOnce() + 'static) {
+    CONFIG_ATOMIC_WRITE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_config_atomic_write_hook() {
+    CONFIG_ATOMIC_WRITE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(test)]
+fn set_config_parent_create_hook(hook: impl FnOnce() + 'static) {
+    CONFIG_PARENT_CREATE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_config_parent_create_hook() {
+    CONFIG_PARENT_CREATE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_config_atomic_write_hook() {}
+
+#[cfg(not(test))]
+fn run_config_parent_create_hook() {}
 
 #[cfg(test)]
 mod tests {
@@ -1450,7 +1671,10 @@ mod tests {
             .expect("system clock after epoch")
             .as_nanos();
         Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/config-ops-tests")
+            .parent()
+            .and_then(Path::parent)
+            .expect("core crate is nested below workspace root")
+            .join("target/config-ops-tests")
             .join(format!("{name}-{}-{stamp}", std::process::id()))
     }
 
@@ -2370,6 +2594,82 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&target).expect("preserved external"),
             external
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_refuses_a_parent_swap_without_touching_the_redirected_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("parent-swap-toctou");
+        fs::create_dir_all(&root).expect("create test root");
+        let safe_parent = root.join("safe-config");
+        let moved_parent = root.join("moved-safe-config");
+        let outside_parent = root.join("outside");
+        fs::create_dir(&safe_parent).expect("create safe parent");
+        fs::create_dir(&outside_parent).expect("create outside parent");
+
+        let target = safe_parent.join("profiles.toml");
+        let outside_target = outside_parent.join("profiles.toml");
+        let current = profile_config("current:1521/svc");
+        let draft = profile_config("draft:1521/svc");
+        let outside_before = profile_config("outside:1521/svc");
+        write_atomic_path(&target, current.as_bytes()).expect("seed safe config");
+        fs::write(&outside_target, &outside_before).expect("seed outside config");
+
+        let backend = ConfigOpsBackend::open(root.join("state")).expect("config ops");
+        let plan = backend
+            .stage_config_draft(&target, &draft)
+            .expect("stage reviewed config before swap");
+        let verified_parent = safe_parent.clone();
+        let moved_parent_for_hook = moved_parent.clone();
+        let replacement_parent = outside_parent.clone();
+        set_config_atomic_write_hook(move || {
+            fs::rename(&verified_parent, &moved_parent_for_hook).expect("move held parent");
+            symlink(&replacement_parent, &verified_parent).expect("replace parent with symlink");
+        });
+
+        assert!(backend.apply_config_draft(&plan).is_err());
+        assert_eq!(
+            fs::read_to_string(&outside_target).expect("read outside target"),
+            outside_before,
+            "the approved draft must never be redirected through a parent swap"
+        );
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("profiles.toml"))
+                .expect("read original target through held parent"),
+            current,
+            "a refused apply must preserve the previously active configuration"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_refuses_a_swapped_missing_parent_without_creating_under_the_link() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("parent-create-swap-toctou");
+        fs::create_dir_all(&root).expect("create test root");
+        let safe_parent = root.join("safe-config");
+        let outside_parent = root.join("outside");
+        fs::create_dir(&safe_parent).expect("create safe parent");
+        fs::create_dir(&outside_parent).expect("create outside parent");
+        let missing_parent = safe_parent.join("missing");
+        let target = missing_parent.join("profiles.toml");
+        let outside_target = outside_parent.join("profiles.toml");
+
+        let replacement = outside_parent.clone();
+        let missing_parent_for_hook = missing_parent.clone();
+        set_config_parent_create_hook(move || {
+            symlink(&replacement, &missing_parent_for_hook)
+                .expect("replace missing parent with a symlink");
+        });
+
+        assert!(write_atomic_path(&target, profile_config("draft:1521/svc").as_bytes()).is_err());
+        assert!(
+            !outside_target.exists(),
+            "a missing parent swapped to a symlink must not receive a config file"
         );
     }
 

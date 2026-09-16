@@ -778,6 +778,17 @@ pub fn harden_windows_private_directory(path: &Path) -> Result<(), AuditError> {
     harden_windows_private_acl(&directory, path, true)
 }
 
+/// Harden a directory that was already opened through a no-follow capability.
+/// The pathname is re-opened only to prove it still identifies that held
+/// directory before the DACL is changed.
+#[cfg(windows)]
+pub(crate) fn harden_windows_private_directory_handle(
+    directory: &File,
+    display_path: &Path,
+) -> Result<(), AuditError> {
+    harden_windows_private_acl(directory, display_path, true)
+}
+
 /// After opening, confirm the OPEN handle is a regular file — catching a TOCTOU
 /// swap between [`reject_unsafe_existing`] and the open — and harden it to its
 /// platform's owner-only policy. Unix applies `0600` to the descriptor. Windows

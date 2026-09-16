@@ -9,12 +9,19 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, TryLockError};
 use std::io::{Read, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use cap_fs_ext::DirExt as _;
+#[cfg(unix)]
+use cap_fs_ext::MetadataExt as CapMetadataExt;
+use cap_std::ambient_authority;
+use cap_std::fs::Dir as CapDir;
+#[cfg(unix)]
+use cap_std::fs::MetadataExt as CapOsMetadataExt;
 use parking_lot::{Condvar, Mutex};
 use serde::{Deserialize, Serialize};
 
@@ -22,7 +29,9 @@ use crate::sink::{create_new_private_file, open_private_lock_file, open_private_
 use crate::{AuditRecord, AuthenticatedAuditTail, ShippingError, ShippingForwarder, SigningKey};
 
 #[cfg(unix)]
-use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+use cap_std::fs::PermissionsExt as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 
 /// Default maximum number of undelivered records retained per destination.
 pub const DEFAULT_SPOOL_MAX_RECORDS: usize = 4_096;
@@ -235,13 +244,14 @@ impl DurableShippingForwarder {
     /// corrupt spool, or a destination-identity mismatch. Existing queued data
     /// is never silently discarded.
     pub fn open(
-        config: DurableSpoolConfig,
+        mut config: DurableSpoolConfig,
         destination: Box<dyn ShippingForwarder>,
     ) -> Result<Self, ShippingError> {
         validate_config(&config)?;
-        std::fs::create_dir_all(&config.directory).map_err(transport)?;
-        secure_spool_directory(&config.directory)?;
+        config.directory = lexically_normalize_spool_directory(&config.directory)?;
+        let secured_spool_directory = secure_spool_directory(&config.directory)?;
         let lock = SpoolLock::acquire(&config.directory)?;
+        drop(secured_spool_directory);
         bind_destination(&config.directory, &config.destination_id)?;
         let recovered = recover_for_open(&config, destination.as_ref())?;
         let overflowed = recovered.overflow.as_ref().map_or(0, |state| state.count);
@@ -706,34 +716,177 @@ fn validate_config(config: &DurableSpoolConfig) -> Result<(), ShippingError> {
     Ok(())
 }
 
-fn secure_spool_directory(directory: &Path) -> Result<(), ShippingError> {
-    let metadata = std::fs::symlink_metadata(directory).map_err(transport)?;
-    if metadata.file_type().is_symlink() || !metadata.file_type().is_dir() {
-        return Err(ShippingError::Transport(format!(
-            "audit shipping spool {} must be a private directory, not a link or special object",
-            directory.display()
-        )));
-    }
+fn secure_spool_directory(directory: &Path) -> Result<CapDir, ShippingError> {
+    let held = open_or_create_dir_nofollow(directory)?;
+    let metadata = held.dir_metadata().map_err(transport)?;
+    run_spool_directory_hardening_hook();
     #[cfg(unix)]
     {
         let expected_uid = rustix::process::geteuid().as_raw();
-        if metadata.uid() != expected_uid {
+        if CapOsMetadataExt::uid(&metadata) != expected_uid {
             return Err(ShippingError::Transport(format!(
                 "audit shipping spool {} is owned by uid {}, expected effective uid {expected_uid}",
                 directory.display(),
-                metadata.uid()
+                CapOsMetadataExt::uid(&metadata)
             )));
         }
         if metadata.permissions().mode() & 0o777 != 0o700 {
-            let mut permissions = metadata.permissions();
-            permissions.set_mode(0o700);
-            std::fs::set_permissions(directory, permissions).map_err(transport)?;
+            held.set_permissions(
+                Component::CurDir.as_os_str(),
+                cap_std::fs::Permissions::from_std(std::fs::Permissions::from_mode(0o700)),
+            )
+            .map_err(transport)?;
         }
     }
+    #[cfg(not(unix))]
+    let _ = &metadata;
     #[cfg(windows)]
-    crate::sink::harden_windows_private_directory(directory).map_err(transport)?;
+    {
+        let security_handle = held.try_clone().map_err(transport)?.into_std_file();
+        crate::sink::harden_windows_private_directory_handle(&security_handle, directory)
+            .map_err(transport)?;
+    }
+    verify_held_spool_directory(&held, directory)?;
+    Ok(held)
+}
+
+/// Preserve relative-path behavior without resolving a filesystem link before
+/// the no-follow walk takes ownership of each directory component.
+fn lexically_normalize_spool_directory(path: &Path) -> Result<PathBuf, ShippingError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_err(transport)?.join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(ShippingError::Transport(format!(
+                        "audit shipping spool {} escapes its filesystem root",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(ShippingError::Transport(
+            "audit shipping spool directory is empty".to_owned(),
+        ));
+    }
+    Ok(normalized)
+}
+
+/// Open every spool path component without following a symlink and retain the
+/// resulting directory capability while its owner/mode is hardened.
+fn open_existing_dir_nofollow(path: &Path) -> Result<CapDir, ShippingError> {
+    open_dir_nofollow(path, false)
+}
+
+fn open_or_create_dir_nofollow(path: &Path) -> Result<CapDir, ShippingError> {
+    open_dir_nofollow(path, true)
+}
+
+fn open_dir_nofollow(path: &Path, create_missing: bool) -> Result<CapDir, ShippingError> {
+    let root = if path.is_absolute() {
+        #[cfg(windows)]
+        {
+            let mut root = PathBuf::new();
+            for component in path.components() {
+                root.push(component.as_os_str());
+                if matches!(component, Component::RootDir) {
+                    break;
+                }
+            }
+            root
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
+    } else {
+        PathBuf::from(".")
+    };
+    let mut current = CapDir::open_ambient_dir(&root, ambient_authority()).map_err(transport)?;
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                current = match current.open_dir_nofollow(name) {
+                    Ok(next) => next,
+                    Err(error)
+                        if create_missing && error.kind() == std::io::ErrorKind::NotFound =>
+                    {
+                        match current.create_dir(name) {
+                            Ok(()) => {}
+                            Err(create_error)
+                                if create_error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                            Err(create_error) => return Err(transport(create_error)),
+                        }
+                        current.open_dir_nofollow(name).map_err(transport)?
+                    }
+                    Err(error) => return Err(transport(error)),
+                };
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                return Err(ShippingError::Transport(format!(
+                    "audit shipping spool {} contains parent traversal",
+                    path.display()
+                )));
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn verify_held_spool_directory(held: &CapDir, path: &Path) -> Result<(), ShippingError> {
+    let current = open_existing_dir_nofollow(path)?;
+    #[cfg(unix)]
+    {
+        let held_metadata = held.dir_metadata().map_err(transport)?;
+        let current_metadata = current.dir_metadata().map_err(transport)?;
+        if CapMetadataExt::dev(&held_metadata) != CapMetadataExt::dev(&current_metadata)
+            || CapMetadataExt::ino(&held_metadata) != CapMetadataExt::ino(&current_metadata)
+        {
+            return Err(ShippingError::Transport(format!(
+                "audit shipping spool {} was replaced while its permissions were hardened",
+                path.display()
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (held, current, path);
     Ok(())
 }
+
+#[cfg(test)]
+thread_local! {
+    static SPOOL_DIRECTORY_HARDENING_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_spool_directory_hardening_hook(hook: impl FnOnce() + 'static) {
+    SPOOL_DIRECTORY_HARDENING_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_spool_directory_hardening_hook() {
+    SPOOL_DIRECTORY_HARDENING_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_spool_directory_hardening_hook() {}
 
 fn bind_destination(directory: &Path, destination_id: &str) -> Result<(), ShippingError> {
     let path = directory.join("destination.json");
@@ -2381,6 +2534,18 @@ mod tests {
     }
 
     #[test]
+    fn spool_directory_keeps_legacy_relative_parent_segments_without_links() {
+        let normalized = lexically_normalize_spool_directory(Path::new("spool/../shipping"))
+            .expect("relative spool path normalizes");
+        assert_eq!(
+            normalized,
+            std::env::current_dir()
+                .expect("current directory")
+                .join("shipping")
+        );
+    }
+
+    #[test]
     fn forwarder_enqueue_rejects_records_when_capacity_is_exact() {
         let directory = tempfile::tempdir().expect("tempdir");
         let delivery = DurableShippingForwarder::open(
@@ -3450,6 +3615,46 @@ mod tests {
             Ok(_) => panic!("FIFO spool record must fail closed"),
         };
         assert!(fifo_error.to_string().contains("non-regular"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn spool_directory_hardening_refuses_a_swap_without_chmodding_the_target() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let spool = root.path().join("spool");
+        let moved_spool = root.path().join("moved-spool");
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&spool).expect("create spool");
+        std::fs::create_dir(&outside).expect("create outside directory");
+        std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o755))
+            .expect("make spool require hardening");
+        std::fs::set_permissions(&outside, std::fs::Permissions::from_mode(0o751))
+            .expect("set outside mode");
+        let outside_mode = std::fs::metadata(&outside)
+            .expect("stat outside")
+            .permissions()
+            .mode()
+            & 0o777;
+
+        let verified_spool = spool.clone();
+        let replacement = outside.clone();
+        set_spool_directory_hardening_hook(move || {
+            std::fs::rename(&verified_spool, &moved_spool).expect("move held spool");
+            symlink(&replacement, &verified_spool).expect("replace spool with symlink");
+        });
+
+        assert!(secure_spool_directory(&spool).is_err());
+        assert_eq!(
+            std::fs::metadata(&outside)
+                .expect("restat outside")
+                .permissions()
+                .mode()
+                & 0o777,
+            outside_mode,
+            "a swapped spool path must not chmod the symlink target"
+        );
     }
 
     #[cfg(unix)]

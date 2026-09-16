@@ -2380,6 +2380,8 @@ dependencies = [
 name = "oraclemcp-audit"
 version = "0.10.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "getrandom 0.2.17",
  "loom",
  "oraclemcp-error",
