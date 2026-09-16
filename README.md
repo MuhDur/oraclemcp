@@ -250,6 +250,105 @@ channels once they resolve.
   fail-closed auth defaults, optional OAuth bearer enforcement, and native
   rustls TLS/mTLS.
 
+## Governed dimensions
+
+oraclemcp treats a database session as a governed surface with several
+independent controls, not only a guarded read path. Each control below names the
+tool or knob it uses and the proof script that exercises it. The depth is in
+operators' hands; this section links to docs rather than repeating them.
+
+What an agent sees depends on the active operating level. At `READ_ONLY`,
+`initialize` advertises `tools`, `prompts`, `resources`, and `completions`
+(protocol `2025-11-25`); `tools/list` then returns **27 `oracle_*` tools plus 16
+compatibility aliases**. Tools that require `READ_WRITE` or `DDL` are absent
+from that list; once the session is elevated within the profile ceiling,
+`tools/list` returns **35 `oracle_*` tools plus 25 aliases**. A call to a
+not-yet-visible tool before elevation is refused with the same typed
+`ErrorEnvelope` as any other below-level statement (`oracle_execute` answers
+`OPERATING_LEVEL_TOO_LOW` on a `READ_ONLY` profile); tools that appear only
+after elevation still refuse with a typed envelope if the classifier or profile
+ceiling does not admit them — see [Safety model](#safety-model). Both counts
+were measured by driving the served binary in this release; the generated tool
+table below is the canonical name reference.
+
+- **Cost.** `oracle_query` takes an optional per-call `max_query_cost` that can
+  only lower the profile's ceiling, and a profile can set a durable
+  per-principal `profiles.cumulative_query_cost_budget` (`max_cost`,
+  `window_seconds`). An over-ceiling or unavailable optimizer estimate is
+  refused before the target query executes. Proof:
+  [`scripts/e2e/cost_gate.sh`](scripts/e2e/cost_gate.sh).
+- **Time.** `oracle_query` accepts `as_of` to read a past committed SCN or
+  timestamp through a bound `DBMS_FLASHBACK` window; `oracle_diff` compares one
+  proven read-only query across two SCNs or two databases; and
+  `oracle_plan_timeline` reads historical optimizer-plan history (AWR-gated per
+  [ADR 0005](docs/adr/0005-awr-diagnostics-license-gating.md)). Proof:
+  [`scripts/e2e/time_diff.sh`](scripts/e2e/time_diff.sh).
+- **Egress.** A profile-scoped result-masking policy is evaluated after the read
+  guard and before rows leave the server, and served results carry mask
+  certificates. See
+  [ADR 0008](docs/adr/0008-result-masking-policy.md). Proof:
+  [`scripts/e2e/served_egress.sh`](scripts/e2e/served_egress.sh).
+- **Proof.** A statement classified through the governed path can emit a verdict
+  certificate bound to the classified bytes and the MAC-authenticated audit
+  record, checked by the standalone verifier; durable audit heads can be
+  anchored to Rekor asynchronously without gating an audit append
+  (`crates/oraclemcp-audit/src/rekor.rs`). The routine-purity law the
+  certificate relies on is formally specified in
+  [`proofs/purity-core/PurityCore.lean`](proofs/purity-core/PurityCore.lean)
+  and pinned to the Rust classifier by a conformance test. See
+  [ADR 0010](docs/adr/0010-verdict-certificate-schema.md). Proof:
+  [`scripts/e2e/verdict_certificate.sh`](scripts/e2e/verdict_certificate.sh).
+- **Policy.** A profile can carry a SQL policy written in a deny/narrow-only
+  grammar: a policy may refuse statements and tighten the level or predicates,
+  never widen the base classifier. See
+  [ADR 0009](docs/adr/0009-policy-as-code-grammar.md). Proof:
+  [`scripts/e2e/sql_policy.sh`](scripts/e2e/sql_policy.sh).
+- **Living database.** A profile can subscribe to CQN query-change
+  notifications that reduce to a single coalesced URI update rather than
+  emitting row data; `oracle_orient` returns a freshness/drift snapshot; and
+  `oracle_query format=arrow` returns base64 Arrow IPC after the identical
+  masking and audit path. Proof:
+  [`scripts/e2e/living_db.sh`](scripts/e2e/living_db.sh).
+- **Governed vector search.** `oracle_semantic_search` runs a bounded,
+  fail-closed 23ai vector search through the same policy, semantic-resolution,
+  masking, and audit path as `oracle_query`; on a pre-23ai database the served
+  request fails with a typed `requires_23ai` refusal. Proof:
+  [`scripts/e2e/governed_rag.sh`](scripts/e2e/governed_rag.sh).
+- **Lineage.** In the `plsql-intelligence` build, `oracle_lineage` derives
+  column lineage from stored source and reports type and missing-object drift
+  markers rather than inventing an edge. Proof:
+  [`scripts/e2e/live_lineage.sh`](scripts/e2e/live_lineage.sh).
+- **Fleet.** `oracle_orient fleet=true`, cross-profile `oracle_diff`, and
+  `oracle_search_objects fleet=true` map or compare several MCP-visible profiles
+  at once; unreachable targets become typed `UNREACHABLE`/`FAIL_CLOSED` lane
+  results, and each source profile's egress policy is applied before
+  aggregation. Proof: [`scripts/e2e/fleet.sh`](scripts/e2e/fleet.sh).
+- **Reversible workspace.** `oracle_checkpoint` opens a native Oracle SAVEPOINT;
+  `oracle_execute hold=true` leaves DML pending instead of committing, and
+  `oracle_undo_to` walks it back; `oracle_preview_dml` shows before/after rows
+  and refuses a sequence-touching statement it cannot undo. Proof:
+  [`scripts/e2e/reversible.sh`](scripts/e2e/reversible.sh).
+- **Editions.** Edition-based redefinition is governed through an
+  `ALTER SESSION SET EDITION` allowlist, persisted edition proposals, and an
+  `ADMIN`-only merge, with a typed `NOT_EDITIONABLE` refusal where an object
+  cannot be editioned. Proof:
+  [`scripts/e2e/editions.sh`](scripts/e2e/editions.sh).
+- **Incident capture.** `om incident capture` writes a redacted, deterministic
+  bundle and `om incident replay` re-classifies it offline under the recorded
+  seed. See
+  [ADR 0011](docs/adr/0011-incident-artifact-manifest.md). Proof:
+  [`scripts/e2e/incident.sh`](scripts/e2e/incident.sh).
+- **Refusal corpus.** `om refusal-corpus export` emits the accumulated,
+  deduplicated, re-validated refusals as JSONL. Proof:
+  [`scripts/e2e/refusal_corpus.sh`](scripts/e2e/refusal_corpus.sh).
+- **Diagnostics.** `oracle_top_queries` ranks top SQL from the free live cursor
+  cache (`V$SQLSTATS`) rather than the separately licensed AWR/ASH data, and
+  `oracle_db_health` runs a read-only DBA health suite that degrades cleanly on
+  an unlicensed or least-privilege account. See
+  [ADR 0005](docs/adr/0005-awr-diagnostics-license-gating.md). There is no
+  single dedicated e2e script for this dimension; the tools are exercised by the
+  live version-matrix lanes.
+
 ## Source builds and runtime requirements
 
 This branch is pinned to **`nightly-2026-05-11`** and has no stable MSRV. The
@@ -1235,8 +1334,9 @@ and `oracle://tools`. `resources/templates/list` exposes read templates for
 those routes through the same safe tool dispatch path as
 `oracle_schema_inspect`, `oracle_get_source`, and `oracle_get_ddl`, including
 the active transport authorization context. `prompts/list` and `prompts/get`
-serve the built-in expert playbook catalog. Completion and subscriptions are not
-advertised in this release.
+serve the built-in expert playbook catalog. `initialize` advertises `completions`
+alongside `prompts`, `resources`, and `tools` (protocol `2025-11-25`);
+subscriptions remain unadvertised in this release.
 
 ### Compatibility aliases
 
