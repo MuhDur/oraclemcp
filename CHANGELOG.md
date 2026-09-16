@@ -59,13 +59,22 @@ unchanged in contract.
   dashboard` now uses the recorded service-instance listener instead of silently
   probing the default `:7070`. See
   [8fa50275](https://github.com/MuhDur/oraclemcp/commit/8fa50275).
+- **Explorer detail actions wait for current dashboard authority.** Viewing
+  creation DDL or source stays disabled unless both the active dashboard session
+  and its connection are successful, so retained stale state cannot present a
+  doomed action as available. See
+  [5685f55b](https://github.com/MuhDur/oraclemcp/commit/5685f55b).
 - **Generated tool and configuration documentation is kept in sync with the
   default shipped surface.** See
-  [2e186680](https://github.com/MuhDur/oraclemcp/commit/2e186680) and
-  [7008d6c1](https://github.com/MuhDur/oraclemcp/commit/7008d6c1).
+  [2e186680](https://github.com/MuhDur/oraclemcp/commit/2e186680),
+  [7008d6c1](https://github.com/MuhDur/oraclemcp/commit/7008d6c1), and
+  [f9c04393](https://github.com/MuhDur/oraclemcp/commit/f9c04393).
 - **Web and TLS dependency security updates are applied.** See
   [8a6c2fc4](https://github.com/MuhDur/oraclemcp/commit/8a6c2fc4) and
   [7ffa4132](https://github.com/MuhDur/oraclemcp/commit/7ffa4132).
+- **The changelog pace gate binds every user-visible commit to its Unreleased
+  entry**, rather than letting an unrelated bullet cover a later change. See
+  [e65a0455](https://github.com/MuhDur/oraclemcp/commit/e65a0455).
 - **The architecture fitness lint classifies only workspace dependencies**, so a
   non-workspace path cannot trip or excuse the gate. See
   [9f21829d](https://github.com/MuhDur/oraclemcp/commit/9f21829d).
