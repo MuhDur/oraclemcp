@@ -72,9 +72,9 @@ unchanged in contract.
 - **Web and TLS dependency security updates are applied.** See
   [8a6c2fc4](https://github.com/MuhDur/oraclemcp/commit/8a6c2fc4) and
   [7ffa4132](https://github.com/MuhDur/oraclemcp/commit/7ffa4132).
-- **The changelog pace gate binds every user-visible commit to its Unreleased
-  entry**, rather than letting an unrelated bullet cover a later change. See
-  [e65a0455](https://github.com/MuhDur/oraclemcp/commit/e65a0455).
+- **The changelog pace gate requires a populated Unreleased section when
+  user-facing changes are pending**, while allowing one release note to cover a
+  coherent set of related changes.
 - **The architecture fitness lint classifies only workspace dependencies**, so a
   non-workspace path cannot trip or excuse the gate. See
   [9f21829d](https://github.com/MuhDur/oraclemcp/commit/9f21829d).
