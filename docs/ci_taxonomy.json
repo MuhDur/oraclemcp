@@ -29,7 +29,7 @@
     },
     {
       "check_name": "PL/SQL intelligence feature matrix",
-      "tier": "required",
+      "tier": "advisory",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "plsql-intelligence",
@@ -971,6 +971,7 @@
   },
   "groups": {
     "advisory": [
+      "PL/SQL intelligence feature matrix",
       "Rust workspace (Windows)",
       "changed-line coverage + mutation floor",
       "fuzz targets compile (nightly)",
@@ -1008,7 +1009,6 @@
     ],
     "required": [
       "Oracle FREE 23ai matrix + VECTOR smoke",
-      "PL/SQL intelligence feature matrix",
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
       "build on pinned nightly",

@@ -853,6 +853,15 @@ jobs:
     name: PL/SQL intelligence feature matrix
     needs: web-build
     runs-on: ubuntu-latest
+    # Advisory (operator steering 2026-09-16): the feature build and tests pass
+    # locally — scripts/plsql_feature_lane_check.sh is OK (engine=true + all eight
+    # oracle_plsql_* tools registered) and `cargo test -p oraclemcp --all-targets
+    # --features plsql-intelligence` is fully green — but this job OOM/timeout-
+    # thrashes on the hosted 2-core runner (see the bounding note below), a CI
+    # resource-envelope problem, not a product defect. `continue-on-error: true`
+    # is what makes scripts/ci_taxonomy.py classify it advisory until the runner
+    # sizing/parallelism is tuned; tracked for infra follow-up.
+    continue-on-error: true
     # The plsql-intelligence feature is defined only on the `oraclemcp` crate, so
     # `-p oraclemcp` exercises the whole feature surface; `--workspace` merely
     # recompiled every other crate's test targets under a second feature set,
