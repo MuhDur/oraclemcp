@@ -4766,6 +4766,19 @@ export function explorerSearchAuthorityReady(input: {
   return input.includeObjects || input.includeSource;
 }
 
+/** Detail reads use the same live session and connection authority as search. */
+export function explorerDetailAuthorityReady(input: {
+  sessionStatus: DashboardQueryStatus;
+  connectionStatus: DashboardQueryStatus;
+  connected: boolean;
+}): boolean {
+  return (
+    input.sessionStatus === "success" &&
+    input.connectionStatus === "success" &&
+    input.connected
+  );
+}
+
 function ExplorerPage(): React.ReactElement {
   // The lane is the Explorer's identity — which database you are reading — so
   // it belongs in the URL. Text filters stay local and publish after a short
@@ -5208,6 +5221,11 @@ function ExplorerPage(): React.ReactElement {
         ))
   );
   const connected = connectedFromResponse(authoritativeConnection);
+  const detailAuthorityReady = explorerDetailAuthorityReady({
+    sessionStatus: session.status,
+    connectionStatus: connection.status,
+    connected
+  });
   const sessionTone =
     session.status === "success" ? "ok" : session.status === "error" ? "warn" : "info";
 
@@ -5260,7 +5278,7 @@ function ExplorerPage(): React.ReactElement {
     }
   };
   const requestObjectDetail = (kind: "ddl" | "source", ref: ExplorerObjectRef): void => {
-    if (!baseCacheKey || !selectedReferenceIsAuthoritative) {
+    if (!detailAuthorityReady || !baseCacheKey || !selectedReferenceIsAuthoritative) {
       return;
     }
     const requestGeneration = detailRequestGeneration.current + 1;
@@ -5486,6 +5504,7 @@ function ExplorerPage(): React.ReactElement {
           selectedRef={selectedRef}
           result={detailResult}
           pending={detailMutation.isPending}
+          detailAuthorityReady={detailAuthorityReady && selectedReferenceIsAuthoritative}
           maxChars={maxChars}
           onMaxCharsChange={(value) => {
             clearExplorerDetailResult();
@@ -6137,6 +6156,7 @@ function ExplorerObjectDetailPanel({
   selectedRef,
   result,
   pending,
+  detailAuthorityReady,
   maxChars,
   onMaxCharsChange,
   onReadDdl,
@@ -6146,6 +6166,7 @@ function ExplorerObjectDetailPanel({
   selectedRef: ExplorerObjectRef | null;
   result: ExplorerDetailResult | null;
   pending: boolean;
+  detailAuthorityReady: boolean;
   maxChars: number;
   onMaxCharsChange: (value: number) => void;
   onReadDdl: (ref: ExplorerObjectRef) => void;
@@ -6170,7 +6191,7 @@ function ExplorerObjectDetailPanel({
           <Button
             type="button"
             variant="secondary"
-            disabled={!selectedRef || pending}
+            disabled={!selectedRef || !detailAuthorityReady || pending}
             onClick={() => selectedRef && onReadDdl(selectedRef)}
           >
             <Database className="size-4" aria-hidden="true" />
@@ -6179,7 +6200,7 @@ function ExplorerObjectDetailPanel({
           <Button
             type="button"
             variant="secondary"
-            disabled={!selectedRef || !sourceAllowed || pending}
+            disabled={!selectedRef || !detailAuthorityReady || !sourceAllowed || pending}
             onClick={() => selectedRef && onReadSource(selectedRef)}
           >
             <Code2 className="size-4" aria-hidden="true" />

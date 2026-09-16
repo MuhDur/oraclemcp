@@ -37,6 +37,7 @@ import {
   expireDashboardAuthorityAfterSessionError,
   expireDashboardAuthority,
   explorerDetailCompletionIsCurrent,
+  explorerDetailAuthorityReady,
   explorerDetailRequestIdentity,
   explorerSearchAuthorityReady,
   identifierOccurrences,
@@ -1932,5 +1933,27 @@ describe("frontend transport and live-data hardening", () => {
     const error = new OperatorHttpClientError("timeout", "operator request timed out");
     expect(error).toBeInstanceOf(Error);
     expect(error.kind).toBe("timeout");
+  });
+});
+
+describe("Explorer detail authority", () => {
+  it("requires a live paired session and an authoritative connected database", () => {
+    expect(
+      explorerDetailAuthorityReady({
+        sessionStatus: "success",
+        connectionStatus: "success",
+        connected: true
+      })
+    ).toBe(true);
+
+    for (const input of [
+      { sessionStatus: "error", connectionStatus: "success", connected: true },
+      { sessionStatus: "pending", connectionStatus: "success", connected: true },
+      { sessionStatus: "success", connectionStatus: "error", connected: true },
+      { sessionStatus: "success", connectionStatus: "pending", connected: true },
+      { sessionStatus: "success", connectionStatus: "success", connected: false }
+    ] as const) {
+      expect(explorerDetailAuthorityReady(input)).toBe(false);
+    }
   });
 });
