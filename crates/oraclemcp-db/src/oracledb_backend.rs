@@ -83,7 +83,7 @@ impl OfficialOracleConnection {
             closed: AtomicBool::new(false),
         };
         let budget = adapter.effective_budget(cx, "official Oracle connect")?;
-        let reply = adapter
+        let reply = match adapter
             .actor
             .call_with_deadline(
                 cx,
@@ -93,10 +93,30 @@ impl OfficialOracleConnection {
                     timeout: budget.timeout,
                 },
             )
-            .await?;
-        expect_unit(reply, "connect")?;
-        checkpoint(cx, "official Oracle connect after actor startup")?;
+            .await
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                Self::discard_failed_connect(&adapter.actor);
+                return Err(error);
+            }
+        };
+        if let Err(error) = expect_unit(reply, "connect") {
+            Self::discard_failed_connect(&adapter.actor);
+            return Err(error);
+        }
+        if let Err(error) = checkpoint(cx, "official Oracle connect after actor startup") {
+            Self::discard_failed_connect(&adapter.actor);
+            return Err(error);
+        }
         Ok(adapter)
+    }
+
+    /// A failed acquisition never leaves its just-created owner actor available
+    /// for another command. This covers synchronous driver connection errors,
+    /// deadline/cancellation reports, and an unexpected connect reply.
+    fn discard_failed_connect(actor: &BlockingConnectionActor<OfficialCommand, OfficialReply>) {
+        actor.discard_nonblocking("official Oracle connection establishment failed");
     }
 
     async fn call(
@@ -1422,6 +1442,67 @@ mod tests {
         });
         assert!(matches!(second, Ok(())));
         assert_eq!(close_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn failed_official_connect_discards_actor_and_refuses_reuse() {
+        struct Resource(Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for Resource {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let resource_dropped = Arc::clone(&dropped);
+        let actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                move || Resource(resource_dropped),
+                |_, command, _| -> Result<OfficialReply, DbError> {
+                    assert!(matches!(command, OfficialCommand::Connect { .. }));
+                    Err(DbError::Connect(
+                        "official Oracle driver operation failed".to_owned(),
+                    ))
+                },
+            )
+            .expect("actor thread starts for failed-connect test"),
+        );
+
+        let result = block_on_backend(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            let result = actor
+                .call_with_deadline(
+                    &cx,
+                    None,
+                    OfficialCommand::Connect {
+                        options: Box::new(OracleConnectOptions::default()),
+                        timeout: None,
+                    },
+                )
+                .await;
+            if result.is_err() {
+                OfficialOracleConnection::discard_failed_connect(&actor);
+            }
+            result
+        });
+
+        assert!(matches!(result, Err(DbError::Connect(_))));
+        actor.join_for_test();
+        assert!(actor.is_quarantined_for_test());
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            block_on_backend(async {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                actor
+                    .call_with_deadline(&cx, None, OfficialCommand::Ping { timeout: None })
+                    .await
+            }),
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                ..
+            })
+        ));
     }
 
     #[test]
