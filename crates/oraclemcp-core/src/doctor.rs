@@ -40,6 +40,8 @@ use crate::service_app::ServiceAppDoctorSnapshot;
 mod auth;
 #[cfg(test)]
 mod iam_token_tests;
+#[cfg(test)]
+mod migration_tests;
 pub use auth::{
     DoctorAuthCapabilities, DoctorAuthModeCapability, DoctorAuthModeKind, DoctorAuthModeSupport,
     DoctorIamTokenSourceKind, DoctorIamTokenSourceObservation,
@@ -717,6 +719,12 @@ enum LegacyStateLayoutObservation {
     Unsafe(String),
 }
 
+/// The migration copies permanent audit history through a fixed buffer rather
+/// than materializing it in memory. The audit trail is intentionally
+/// unbounded over the service lifetime, so this is a memory bound rather than
+/// a throughput tuning knob.
+const LEGACY_AUDIT_MIGRATION_BUFFER_BYTES: usize = 64 * 1024;
+
 fn inspect_legacy_state_layout(layout: &DoctorStateLayout) -> LegacyStateLayoutObservation {
     if layout.audit_path_configured {
         return LegacyStateLayoutObservation::ExplicitAuditPath;
@@ -745,9 +753,24 @@ fn inspect_legacy_state_layout(layout: &DoctorStateLayout) -> LegacyStateLayoutO
 }
 
 fn audit_files_match(left: &Path, right: &Path) -> Result<bool, String> {
-    let left = fs::read(left).map_err(|e| format!("failed to read {}: {e}", left.display()))?;
-    let right = fs::read(right).map_err(|e| format!("failed to read {}: {e}", right.display()))?;
-    Ok(left == right)
+    let mut left_file = open_regular_file_nofollow(left)?;
+    let mut right_file = open_regular_file_nofollow(right)?;
+    let mut left_buffer = [0_u8; LEGACY_AUDIT_MIGRATION_BUFFER_BYTES];
+    let mut right_buffer = [0_u8; LEGACY_AUDIT_MIGRATION_BUFFER_BYTES];
+    loop {
+        let left_read = left_file
+            .read(&mut left_buffer)
+            .map_err(|error| format!("failed to read {}: {error}", left.display()))?;
+        let right_read = right_file
+            .read(&mut right_buffer)
+            .map_err(|error| format!("failed to read {}: {error}", right.display()))?;
+        if left_read != right_read || left_buffer[..left_read] != right_buffer[..right_read] {
+            return Ok(false);
+        }
+        if left_read == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 fn regular_file_status(path: &Path) -> Result<bool, String> {
@@ -789,24 +812,37 @@ pub fn apply_legacy_state_migration(
         LegacyStateLayoutObservation::Unsafe(reason) => return Err(reason),
     }
 
-    let bytes = read_regular_file_nofollow(&layout.legacy_audit_path)?;
     let backup_dir = open_or_create_private_dir_nofollow(&layout.migration_backup_dir)?;
     let backup_name = OsString::from(format!(
         "legacy-audit-jsonl.{}.backup",
         doctor_migration_timestamp_suffix()
     ));
     let backup_path = layout.migration_backup_dir.join(&backup_name);
-    write_new_private_file_at(&backup_dir, &backup_name, &backup_path, &bytes)?;
-
     let current_parent_path = parent_path(&layout.current_audit_path)?;
     let current_name = file_name(&layout.current_audit_path)?;
     let current_parent = open_or_create_private_dir_nofollow(current_parent_path)?;
-    write_new_atomic_file_at(
+    let temp_name = OsString::from(format!(
+        ".{}.tmp.{}.{}",
+        current_name.to_string_lossy(),
+        std::process::id(),
+        doctor_migration_timestamp_suffix()
+    ));
+    let temp_identity = copy_regular_file_nofollow_to_new_files(
+        &layout.legacy_audit_path,
+        &backup_dir,
+        &backup_name,
+        &backup_path,
+        &current_parent,
+        &temp_name,
+        &layout.current_audit_path,
+    )?;
+    install_new_atomic_file_at(
         &current_parent,
         current_parent_path,
         current_name,
+        &temp_name,
         &layout.current_audit_path,
-        &bytes,
+        temp_identity,
     )?;
     Ok(Some(DoctorFixMutation {
         id: "legacy_state_audit_jsonl_migration",
@@ -966,36 +1002,61 @@ fn set_private_dir_permissions(dir: &CapDir, display_path: &Path) -> Result<(), 
     Ok(())
 }
 
-fn read_regular_file_nofollow(path: &Path) -> Result<Vec<u8>, String> {
+/// Open one migration input through its held parent capability and bind the
+/// returned file handle to the regular file observed before the open. A
+/// pathname re-check would follow a replacement; the held directory and
+/// identity comparison keep the read itself in the verified namespace.
+fn open_regular_file_nofollow(path: &Path) -> Result<cap_std::fs::File, String> {
     let parent_path = parent_path(path)?;
     let name = file_name(path)?;
     let parent = open_existing_dir_nofollow(parent_path)?;
-    let metadata = parent.symlink_metadata(name).map_err(|e| {
+    let initial_metadata = parent.symlink_metadata(name).map_err(|e| {
         format!(
             "failed to inspect legacy audit JSONL {}: {e}",
             path.display()
         )
     })?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
+    if initial_metadata.file_type().is_symlink() || !initial_metadata.is_file() {
         return Err(format!("{} is not a regular file", path.display()));
     }
+    let initial_identity = FileIdentity::from_metadata(&initial_metadata);
+    run_doctor_legacy_audit_open_hook();
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
-    let mut file = parent
+    let file = parent
         .open_with(name, &options)
         .map_err(|e| format!("failed to open legacy audit JSONL {}: {e}", path.display()))?;
-    let mut bytes = Vec::new();
-    file.read_to_end(&mut bytes)
-        .map_err(|e| format!("failed to read legacy audit JSONL {}: {e}", path.display()))?;
-    Ok(bytes)
+    let opened_metadata = file.metadata().map_err(|e| {
+        format!(
+            "failed to inspect legacy audit JSONL {}: {e}",
+            path.display()
+        )
+    })?;
+    if !opened_metadata.is_file()
+        || FileIdentity::from_metadata(&opened_metadata) != initial_identity
+    {
+        return Err(format!("{} changed while opening", path.display()));
+    }
+    let current_metadata = parent.symlink_metadata(name).map_err(|e| {
+        format!(
+            "failed to re-inspect legacy audit JSONL {}: {e}",
+            path.display()
+        )
+    })?;
+    if current_metadata.file_type().is_symlink()
+        || !current_metadata.is_file()
+        || FileIdentity::from_metadata(&current_metadata) != initial_identity
+    {
+        return Err(format!("{} changed while opening", path.display()));
+    }
+    Ok(file)
 }
 
-fn write_new_private_file_at(
+fn create_new_private_file_at(
     parent: &CapDir,
     name: &OsStr,
     display_path: &Path,
-    bytes: &[u8],
-) -> Result<FileIdentity, String> {
+) -> Result<cap_std::fs::File, String> {
     let mut options = CapOpenOptions::new();
     options
         .write(true)
@@ -1003,11 +1064,18 @@ fn write_new_private_file_at(
         .follow(FollowSymlinks::No);
     #[cfg(unix)]
     options.mode(0o600);
-    let mut file = parent
+    let file = parent
         .open_with(name, &options)
         .map_err(|e| format!("failed to create {}: {e}", display_path.display()))?;
-    file.write_all(bytes)
-        .and_then(|()| file.sync_all())
+    Ok(file)
+}
+
+fn finish_new_private_file_at(
+    parent: &CapDir,
+    file: &cap_std::fs::File,
+    display_path: &Path,
+) -> Result<FileIdentity, String> {
+    file.sync_all()
         .map_err(|e| format!("failed to write {}: {e}", display_path.display()))?;
     let metadata = file
         .metadata()
@@ -1016,35 +1084,69 @@ fn write_new_private_file_at(
     Ok(FileIdentity::from_metadata(&metadata))
 }
 
-/// Install a fully-fsynced temp through an atomic create-new hard link. Unlike
-/// `rename`, the link fails if an attacker creates the destination after the
-/// first observation, while still making the completed file appear atomically.
-fn write_new_atomic_file_at(
+/// Copy one opened audit input into the backup and current-target staging files
+/// in lockstep. Both resulting files therefore represent the exact same byte
+/// stream without retaining the permanent source in memory.
+fn copy_regular_file_nofollow_to_new_files(
+    source_path: &Path,
+    backup_parent: &CapDir,
+    backup_name: &OsStr,
+    backup_path: &Path,
+    current_parent: &CapDir,
+    current_temp_name: &OsStr,
+    current_path: &Path,
+) -> Result<FileIdentity, String> {
+    let mut source = open_regular_file_nofollow(source_path)?;
+    let mut backup = create_new_private_file_at(backup_parent, backup_name, backup_path)?;
+    let mut current_temp =
+        create_new_private_file_at(current_parent, current_temp_name, current_path)?;
+    let mut buffer = [0_u8; LEGACY_AUDIT_MIGRATION_BUFFER_BYTES];
+    loop {
+        let read = source.read(&mut buffer).map_err(|e| {
+            format!(
+                "failed to read legacy audit JSONL {}: {e}",
+                source_path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        backup
+            .write_all(&buffer[..read])
+            .map_err(|e| format!("failed to write {}: {e}", backup_path.display()))?;
+        current_temp
+            .write_all(&buffer[..read])
+            .map_err(|e| format!("failed to write {}: {e}", current_path.display()))?;
+        run_doctor_legacy_audit_copy_hook()?;
+    }
+    finish_new_private_file_at(backup_parent, &backup, backup_path)?;
+    finish_new_private_file_at(current_parent, &current_temp, current_path)
+}
+
+/// Install a fully-fsynced staged file through an atomic create-new hard link.
+/// Unlike `rename`, the link fails if an attacker creates the destination
+/// after the first observation, while still making the completed file appear
+/// atomically.
+fn install_new_atomic_file_at(
     parent: &CapDir,
     parent_path: &Path,
     name: &OsStr,
+    temp_name: &OsStr,
     display_path: &Path,
-    bytes: &[u8],
+    temp_identity: FileIdentity,
 ) -> Result<(), String> {
     if regular_file_status_at(parent, name, display_path)? {
         return Err(format!("{} already exists", display_path.display()));
     }
-    let temp_name = OsString::from(format!(
-        ".{}.tmp.{}.{}",
-        name.to_string_lossy(),
-        std::process::id(),
-        doctor_migration_timestamp_suffix()
-    ));
-    let temp_identity = write_new_private_file_at(parent, &temp_name, display_path, bytes)?;
     run_doctor_atomic_install_hook();
     verify_parent_identity(parent, parent_path, display_path)?;
-    verify_file_identity(parent, &temp_name, temp_identity, display_path)?;
+    verify_file_identity(parent, temp_name, temp_identity, display_path)?;
     parent
-        .hard_link(&temp_name, parent, name)
+        .hard_link(temp_name, parent, name)
         .map_err(|e| format!("failed to install {}: {e}", display_path.display()))?;
     verify_file_identity(parent, name, temp_identity, display_path)?;
     parent
-        .remove_file(&temp_name)
+        .remove_file(temp_name)
         .map_err(|e| format!("failed to finalize {}: {e}", display_path.display()))?;
     verify_parent_identity(parent, parent_path, display_path)?;
     sync_cap_dir(parent, display_path)
@@ -1161,6 +1263,57 @@ fn run_doctor_atomic_install_hook() {
 
 #[cfg(not(test))]
 fn run_doctor_atomic_install_hook() {}
+
+#[cfg(test)]
+thread_local! {
+    static DOCTOR_LEGACY_AUDIT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_doctor_legacy_audit_open_hook(hook: impl FnOnce() + 'static) {
+    DOCTOR_LEGACY_AUDIT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_doctor_legacy_audit_open_hook() {
+    DOCTOR_LEGACY_AUDIT_OPEN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_doctor_legacy_audit_open_hook() {}
+
+#[cfg(test)]
+type DoctorLegacyAuditCopyHook = Box<dyn FnOnce() -> Result<(), String>>;
+
+#[cfg(test)]
+thread_local! {
+    static DOCTOR_LEGACY_AUDIT_COPY_HOOK:
+        std::cell::RefCell<Option<DoctorLegacyAuditCopyHook>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_doctor_legacy_audit_copy_hook(hook: impl FnOnce() -> Result<(), String> + 'static) {
+    DOCTOR_LEGACY_AUDIT_COPY_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_doctor_legacy_audit_copy_hook() -> Result<(), String> {
+    DOCTOR_LEGACY_AUDIT_COPY_HOOK.with(|slot| match slot.borrow_mut().take() {
+        Some(hook) => hook(),
+        None => Ok(()),
+    })
+}
+
+#[cfg(not(test))]
+fn run_doctor_legacy_audit_copy_hook() -> Result<(), String> {
+    Ok(())
+}
 
 fn fix_refusal_for_check(check: &CheckResult) -> DoctorFixRefusal {
     let (target, scope, reason) = match check.id {
@@ -5078,169 +5231,6 @@ mod tests {
             provenance
                 .detail
                 .contains("does not probe live connection options or runtime timeout behavior")
-        );
-    }
-
-    #[test]
-    fn legacy_state_layout_detects_and_migrates_audit_jsonl_once() {
-        let root = doctor_tmp_dir("legacy-state-migration");
-        let legacy = root.join("config").join("audit.jsonl");
-        let current = root.join("state").join("audit").join("audit.jsonl");
-        let backups = root.join("state").join("doctor-migrations").join("backups");
-        std::fs::create_dir_all(legacy.parent().expect("legacy parent"))
-            .expect("legacy parent exists");
-        let audit_jsonl = br#"{"schema_version":1,"seq":1}
-"#;
-        std::fs::write(&legacy, audit_jsonl).expect("seed legacy audit");
-        let layout = DoctorStateLayout {
-            legacy_audit_path: legacy.clone(),
-            current_audit_path: current.clone(),
-            migration_backup_dir: backups,
-            audit_path_configured: false,
-        };
-
-        let report = doctor(&DoctorContext {
-            state_layout: Some(layout.clone()),
-            audit_posture: Some(DoctorAuditPosture::SigningKeyConfigured {
-                path: layout.current_audit_path.clone(),
-            }),
-            ..DoctorContext::default()
-        });
-        let check = check_by_id(&report, 13);
-        assert_eq!(check.status, CheckStatus::Warn);
-        assert!(
-            check
-                .fix
-                .as_deref()
-                .is_some_and(|fix| fix.contains("doctor --fix"))
-        );
-
-        let mutation = apply_legacy_state_migration(Some(&layout))
-            .expect("migration succeeds")
-            .expect("migration applied");
-        assert_eq!(mutation.id, "legacy_state_audit_jsonl_migration");
-        assert_eq!(std::fs::read(&legacy).expect("read legacy"), audit_jsonl);
-        assert_eq!(std::fs::read(&current).expect("read current"), audit_jsonl);
-        assert_eq!(
-            std::fs::read(&mutation.backup).expect("read backup"),
-            audit_jsonl
-        );
-
-        let rerun = doctor(&DoctorContext {
-            state_layout: Some(layout.clone()),
-            audit_posture: Some(DoctorAuditPosture::SigningKeyConfigured {
-                path: layout.current_audit_path.clone(),
-            }),
-            ..DoctorContext::default()
-        })
-        .with_fix_report_mutations(vec![mutation]);
-        assert_eq!(check_by_id(&rerun, 13).status, CheckStatus::Pass);
-        let fix = rerun.fix.as_ref().expect("fix report");
-        assert_eq!(fix.outcome, DoctorFixOutcome::Applied);
-        assert_eq!(fix.exit_code, 0);
-        assert_eq!(fix.mutations.len(), 1);
-        assert!(
-            apply_legacy_state_migration(Some(&layout))
-                .expect("second migration is noop")
-                .is_none(),
-            "migration must be idempotent after the byte-identical copy exists"
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn legacy_migration_refuses_symlink_swaps_at_atomic_install() {
-        let audit_jsonl = br#"{"schema_version":1,"seq":1}
-"#;
-
-        let parent_swap_root = doctor_tmp_dir("legacy-state-parent-symlink-race");
-        let parent_swap_legacy = parent_swap_root.join("config").join("audit.jsonl");
-        let parent_swap_current = parent_swap_root
-            .join("state")
-            .join("audit")
-            .join("audit.jsonl");
-        let parent_swap_backups = parent_swap_root
-            .join("state")
-            .join("doctor-migrations")
-            .join("backups");
-        std::fs::create_dir_all(parent_swap_legacy.parent().expect("legacy parent"))
-            .expect("legacy parent exists");
-        std::fs::write(&parent_swap_legacy, audit_jsonl).expect("seed legacy audit");
-        let verified_parent = parent_swap_current
-            .parent()
-            .expect("current parent")
-            .to_owned();
-        let moved_parent = parent_swap_root.join("state").join("audit-verified");
-        let attacker_parent = parent_swap_root.join("attacker-parent");
-        std::fs::create_dir_all(&attacker_parent).expect("attacker parent exists");
-        let attacker_parent_for_hook = attacker_parent.clone();
-        set_doctor_atomic_install_hook(move || {
-            std::fs::rename(&verified_parent, &moved_parent).expect("move verified parent");
-            std::os::unix::fs::symlink(&attacker_parent_for_hook, &verified_parent)
-                .expect("replace visible parent with symlink");
-        });
-        let parent_swap = DoctorStateLayout {
-            legacy_audit_path: parent_swap_legacy.clone(),
-            current_audit_path: parent_swap_current.clone(),
-            migration_backup_dir: parent_swap_backups,
-            audit_path_configured: false,
-        };
-        let parent_error = apply_legacy_state_migration(Some(&parent_swap))
-            .expect_err("replaced destination parent must refuse");
-        assert!(
-            parent_error.contains("not a safe directory"),
-            "{parent_error}"
-        );
-        assert!(
-            !attacker_parent.join("audit.jsonl").exists(),
-            "the held parent must prevent writes through the replacement symlink"
-        );
-        assert_eq!(
-            std::fs::read(&parent_swap_legacy).expect("legacy source remains readable"),
-            audit_jsonl
-        );
-
-        let destination_swap_root = doctor_tmp_dir("legacy-state-destination-symlink-race");
-        let destination_swap_legacy = destination_swap_root.join("config").join("audit.jsonl");
-        let destination_swap_current = destination_swap_root
-            .join("state")
-            .join("audit")
-            .join("audit.jsonl");
-        let destination_swap_backups = destination_swap_root
-            .join("state")
-            .join("doctor-migrations")
-            .join("backups");
-        std::fs::create_dir_all(destination_swap_legacy.parent().expect("legacy parent"))
-            .expect("legacy parent exists");
-        std::fs::write(&destination_swap_legacy, audit_jsonl).expect("seed legacy audit");
-        let attacker_target = destination_swap_root.join("attacker-target");
-        set_doctor_atomic_install_hook({
-            let destination_swap_current = destination_swap_current.clone();
-            let attacker_target = attacker_target.clone();
-            move || {
-                std::os::unix::fs::symlink(&attacker_target, &destination_swap_current)
-                    .expect("replace destination with symlink");
-            }
-        });
-        let destination_swap = DoctorStateLayout {
-            legacy_audit_path: destination_swap_legacy.clone(),
-            current_audit_path: destination_swap_current,
-            migration_backup_dir: destination_swap_backups,
-            audit_path_configured: false,
-        };
-        let destination_error = apply_legacy_state_migration(Some(&destination_swap))
-            .expect_err("replacement destination must preserve create-new semantics");
-        assert!(
-            destination_error.contains("failed to install"),
-            "{destination_error}"
-        );
-        assert!(
-            !attacker_target.exists(),
-            "the destination symlink must never receive the migration write"
-        );
-        assert_eq!(
-            std::fs::read(&destination_swap_legacy).expect("legacy source remains readable"),
-            audit_jsonl
         );
     }
 
