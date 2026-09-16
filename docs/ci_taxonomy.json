@@ -41,7 +41,7 @@
     },
     {
       "check_name": "Rust workspace (Windows)",
-      "tier": "required",
+      "tier": "advisory",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "windows-rust",
@@ -971,6 +971,7 @@
   },
   "groups": {
     "advisory": [
+      "Rust workspace (Windows)",
       "fuzz targets compile (nightly)",
       "multi-nightly early-warning (advisory) (nightly)"
     ],
@@ -1005,7 +1006,6 @@
     "required": [
       "Oracle FREE 23ai matrix + VECTOR smoke",
       "PL/SQL intelligence feature matrix",
-      "Rust workspace (Windows)",
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
       "build on pinned nightly",

@@ -430,6 +430,15 @@ jobs:
     name: Rust workspace (Windows)
     needs: web-build
     runs-on: windows-latest
+    # Advisory until the native-Windows audit-DACL hardening lands. Operator
+    # steering 2026-09-16 (bead oraclemcp-2q4em.2.1; tracked by
+    # oraclemcp-xuaea): the strict-ownership fix needs an atomic
+    # CreateDirectoryW + SECURITY_ATTRIBUTES create-time descriptor, which has
+    # no vetted safe wrapper and conflicts with #[forbid(unsafe_code)], so the
+    # lane is demoted rather than fixed. `continue-on-error: true` is what makes
+    # scripts/ci_taxonomy.py classify this job `advisory`; the Windows
+    # installer/service lane stays required.
+    continue-on-error: true
     env:
       # E1's mandatory direct-Cargo interceptor is the POSIX flock host guard.
       # This runner is single-tenant (the documented CI lease waiver), and a

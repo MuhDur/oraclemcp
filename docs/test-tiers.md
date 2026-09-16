@@ -67,7 +67,8 @@ gates a tag push, not a merge).
 | feature-powerset (`cargo hack`) | `ci.yml:feature-powerset` | every push+PR | 1 | required |
 | `cargo deny check` (supply-chain) | local / `ci.yml:supply-chain` | pre-push + every push+PR | 0 → 1 | required |
 | public-API lock (`cargo public-api` + `cargo semver-checks`) | `ci.yml:api-lock` | every push+PR | 1 | required |
-| installer lint + built-artifact smoke, Windows installer/Rust | `ci.yml:installer`, `windows-installer`, `windows-rust` | every push+PR | 1 | required |
+| installer lint + built-artifact smoke, Windows installer/service | `ci.yml:installer`, `windows-installer` | every push+PR | 1 | required |
+| native-Windows runtime workspace tests | `ci.yml:windows-rust` | every push+PR | 1 | advisory (pending `oraclemcp-xuaea`, see README Limitations) |
 | PL/SQL intelligence feature matrix, thin-driver build | `ci.yml:plsql-intelligence`, `thin-db` | every push+PR | 1 | required |
 | `sensitive-data` / `secret_scan.sh` structural + denylist scan | `ci.yml:sensitive-data` | every push+PR | 1 | required |
 | BMC formal proofs (Kani/CBMC) over guard + audit | `kani-safety.yml:kani-safety` | every push+PR (no schedule despite the filename) | 1 | required |

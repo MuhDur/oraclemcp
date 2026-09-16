@@ -1432,6 +1432,13 @@ Honest constraints, each documented in more detail in the sections above:
 - **`oracle_explain_plan` is not a pure read.** `EXPLAIN PLAN` writes
   `PLAN_TABLE`, so the tool refuses by default, refuses on a read-only standby,
   and runs only at `READ_WRITE` with `allow_plan_table_write=true`.
+- **Native-Windows runtime audit-DACL hardening is under active repair.** Strict
+  TokenUser ownership for pre-existing audit objects needs an atomic
+  create-with-security-descriptor primitive that has no vetted safe wrapper under
+  `#![forbid(unsafe_code)]` (tracked by bead `oraclemcp-xuaea`). The native-Windows
+  runtime workspace lane is therefore advisory until that lands; Windows
+  installer/service packaging remains gated and tested, and Linux and WSL are
+  unaffected.
 - **No npm/npx channel.** Install with the one-line installer, `cargo binstall`,
   the GHCR image, or the Homebrew/winget channels once they resolve.
 
