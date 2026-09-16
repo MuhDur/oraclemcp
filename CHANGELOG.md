@@ -25,6 +25,9 @@ unchanged in contract.
   bounds are tightened so a slow or reordered record cannot stall the shipper on
   the way out. See
   [323226b1](https://github.com/MuhDur/oraclemcp/commit/323226b1).
+- **Audit head-anchor sidecars are read fail-closed.** Link, FIFO, and
+  oversized sidecars are rejected through a bounded no-follow descriptor before
+  audit verification or service startup can trust them.
 - **Approved config writes and the entire durable-spool lifecycle retain
   no-follow directory capabilities.** A local parent-directory swap now
   refuses a config write before it can redirect it, and cannot redirect spool

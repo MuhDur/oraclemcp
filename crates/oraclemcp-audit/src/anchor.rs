@@ -43,11 +43,16 @@
 //! operators should treat an unexpectedly missing anchor as suspicious.
 
 use std::fs;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt as _;
+use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::hmac::ct_eq;
@@ -57,6 +62,11 @@ use crate::verify::JsonlReader;
 
 /// Current anchor document version.
 pub const ANCHOR_VERSION: u16 = 1;
+
+/// A head anchor contains only a fixed-size version, sequence, hashes, key id,
+/// and MAC. Keeping its reader below this cap prevents a replaced sidecar from
+/// turning audit startup or verification into an unbounded allocation.
+const MAX_ANCHOR_BYTES: usize = 16 * 1024;
 
 /// Domain-separation prefix for the anchor MAC. Distinct from the record
 /// signature domain (which MACs a bare `sha256:<hex>` entry hash), so a record
@@ -211,15 +221,69 @@ impl std::error::Error for AnchorLoadError {}
 /// Load the anchor sidecar at `path`. Absent file → `Ok(None)` (legacy log);
 /// any other read/parse failure → `Err` (fail closed at verify time).
 pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> {
-    let body = match fs::read_to_string(path) {
-        Ok(body) => body,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| AnchorLoadError {
+            message: format!("{}: anchor path has no file name", path.display()),
+        })?;
+    let directory = match CapDir::open_ambient_dir(parent, ambient_authority()) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
             return Err(AnchorLoadError {
-                message: format!("{}: {e}", path.display()),
+                message: format!("{}: {error}", path.display()),
             });
         }
     };
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    // Opening a FIFO for reading blocks until a writer appears. Take a
+    // non-blocking descriptor first, then reject every non-regular object
+    // below; the no-follow descriptor is also the object we actually read.
+    #[cfg(unix)]
+    options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+    let file = match directory.open_with(name, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(AnchorLoadError {
+                message: format!("{}: {error}", path.display()),
+            });
+        }
+    };
+    let metadata = file.metadata().map_err(|error| AnchorLoadError {
+        message: format!("{}: {error}", path.display()),
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(AnchorLoadError {
+            message: format!("{}: anchor sidecar is not a regular file", path.display()),
+        });
+    }
+    let limit = u64::try_from(MAX_ANCHOR_BYTES)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut bytes = Vec::with_capacity(MAX_ANCHOR_BYTES.saturating_add(1));
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .map_err(|error| AnchorLoadError {
+            message: format!("{}: {error}", path.display()),
+        })?;
+    if bytes.len() > MAX_ANCHOR_BYTES {
+        return Err(AnchorLoadError {
+            message: format!(
+                "{}: anchor sidecar exceeds the {MAX_ANCHOR_BYTES}-byte maximum",
+                path.display()
+            ),
+        });
+    }
+    let body = String::from_utf8(bytes).map_err(|error| AnchorLoadError {
+        message: format!("{}: {error}", path.display()),
+    })?;
     let anchor: ChainAnchor = serde_json::from_str(body.trim()).map_err(|e| AnchorLoadError {
         message: format!("{}: {e}", path.display()),
     })?;
@@ -674,6 +738,66 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("audit head anchor unreadable"), "{msg}");
         assert!(msg.contains(dir.path().to_string_lossy().as_ref()), "{msg}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_anchor_refuses_a_symlink_without_reading_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("operator-controlled-anchor-target");
+        let target_bytes = b"operator-controlled bytes";
+        std::fs::write(&target, target_bytes).expect("seed anchor target");
+        let anchor = dir.path().join("audit.jsonl.anchor");
+        symlink(&target, &anchor).expect("plant anchor symlink");
+
+        let error = load_anchor(&anchor).expect_err("symlinked anchor must fail closed");
+        assert!(error.to_string().contains("audit head anchor unreadable"));
+        assert_eq!(
+            std::fs::read(&target).expect("read target"),
+            target_bytes,
+            "loading an anchor must not follow or alter its symlink target"
+        );
+    }
+
+    #[test]
+    fn load_anchor_refuses_an_oversized_sidecar_before_parsing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor = dir.path().join("audit.jsonl.anchor");
+        std::fs::write(&anchor, vec![b'x'; MAX_ANCHOR_BYTES + 1]).expect("seed oversized anchor");
+
+        let error = load_anchor(&anchor).expect_err("oversized anchor must fail closed");
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("{MAX_ANCHOR_BYTES}-byte maximum")),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_anchor_rejects_a_fifo_without_waiting_for_a_writer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor = dir.path().join("audit.jsonl.anchor");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&anchor)
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        if !made {
+            return;
+        }
+
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = result_tx.send(load_anchor(&anchor));
+        });
+        let result = result_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("FIFO anchor must be rejected without blocking for a writer");
+        assert!(result.is_err(), "FIFO anchor must fail closed");
     }
 
     #[test]
