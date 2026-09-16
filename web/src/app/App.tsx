@@ -651,6 +651,19 @@ export function sessionAuthorityQueriesReady(
   return combinedQueryStatus(metricsStatus, capabilitiesStatus, connectionStatus) === "success";
 }
 
+/** Session termination is an authority-sensitive operator action, never a UI-only convenience. */
+export function sessionLaneCancellationReady(input: {
+  sessionStatus: DashboardQueryStatus;
+  activeLanesStatus: DashboardQueryStatus;
+  sessionAuthority: string | null;
+}): boolean {
+  return (
+    input.sessionStatus === "success" &&
+    input.activeLanesStatus === "success" &&
+    input.sessionAuthority !== null
+  );
+}
+
 function SessionsWorkspace(): React.ReactElement {
   // The selected lane lives in the URL so an operator can hand a colleague a
   // link to the exact lane they are looking at, and so reload/back keep it.
@@ -896,9 +909,21 @@ function SessionsWorkspace(): React.ReactElement {
     }
   });
 
+  const canCancel =
+    sessionLaneCancellationReady({
+      sessionStatus: session.status,
+      activeLanesStatus: activeLanes.status,
+      sessionAuthority
+    }) && !cancelMutation.isPending;
+  const laneIsActive = (lane: LaneIdentity): boolean =>
+    lanes.some((item) => item.status === "active" && sameLaneIdentity(laneIdentity(item), lane));
+
   // Ask through the console's own dialog rather than window.confirm, so the
   // prompt is styled, focus-managed, and assertable like every other gate.
   const requestCancelLane = (lane: LaneIdentity): void => {
+    if (!canCancel || !laneIsActive(lane)) {
+      return;
+    }
     setPendingCancelLane(lane);
   };
 
@@ -908,8 +933,10 @@ function SessionsWorkspace(): React.ReactElement {
     if (!lane) {
       return;
     }
-    if (!lanes.some((item) => sameLaneIdentity(laneIdentity(item), lane))) {
-      setCancelNotice(laneCancelFailure(new Error("session identity changed; review the list and retry")));
+    if (!canCancel || !laneIsActive(lane)) {
+      setCancelNotice(
+        laneCancelFailure(new Error("session state changed; refresh the dashboard session and retry"))
+      );
       return;
     }
     setCancelNotice(null);
@@ -1050,6 +1077,7 @@ function SessionsWorkspace(): React.ReactElement {
               setSelectedLane(identity);
             }}
             onCancel={requestCancelLane}
+            canCancel={canCancel}
             cancelPendingLaneId={cancelMutation.isPending ? cancelMutation.variables?.lane.laneId ?? null : null}
             cancelNotice={cancelNotice}
           />
@@ -1200,6 +1228,7 @@ function SessionLaneTable({
   pending,
   onSelect,
   onCancel,
+  canCancel,
   cancelPendingLaneId,
   cancelNotice
 }: {
@@ -1209,6 +1238,7 @@ function SessionLaneTable({
   pending: boolean;
   onSelect: (identity: LaneIdentity) => void;
   onCancel: (identity: LaneIdentity) => void;
+  canCancel: boolean;
   cancelPendingLaneId: string | null;
   cancelNotice: LaneCancelNotice | null;
 }): React.ReactElement {
@@ -1328,7 +1358,7 @@ function SessionLaneTable({
                         <Button
                           type="button"
                           variant="danger"
-                          disabled={!row.active || cancelPendingLaneId === row.laneId}
+                          disabled={!canCancel || !row.active || cancelPendingLaneId === row.laneId}
                           title="End this agent session"
                           aria-label={`${cancelPendingLaneId === row.laneId ? "Ending" : "End"} session ${row.laneId}`}
                           onClick={() => onCancel({ laneId: row.laneId, generation: row.generation })}

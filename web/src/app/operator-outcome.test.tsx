@@ -53,6 +53,7 @@ import {
   schemaDiffCompletionIsCurrent,
   startOperatorEventStream,
   schemaDiffInputIdentity,
+  sessionLaneCancellationReady,
   sessionAuthorityQueriesReady,
   invalidReviewCursorError,
   updateAuditFilterDraft,
@@ -1953,6 +1954,48 @@ describe("frontend transport and live-data hardening", () => {
     const error = new OperatorHttpClientError("timeout", "operator request timed out");
     expect(error).toBeInstanceOf(Error);
     expect(error.kind).toBe("timeout");
+  });
+});
+
+describe("Session termination authority", () => {
+  it("requires a fresh paired authority and an authoritative lane snapshot", () => {
+    expect(
+      sessionLaneCancellationReady({
+        sessionStatus: "success",
+        activeLanesStatus: "success",
+        sessionAuthority: "session-a"
+      })
+    ).toBe(true);
+
+    for (const input of [
+      {
+        sessionStatus: "error",
+        activeLanesStatus: "success",
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "pending",
+        activeLanesStatus: "success",
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "success",
+        activeLanesStatus: "error",
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "success",
+        activeLanesStatus: "pending",
+        sessionAuthority: "session-a"
+      },
+      {
+        sessionStatus: "success",
+        activeLanesStatus: "success",
+        sessionAuthority: null
+      }
+    ] as const) {
+      expect(sessionLaneCancellationReady(input)).toBe(false);
+    }
   });
 });
 
