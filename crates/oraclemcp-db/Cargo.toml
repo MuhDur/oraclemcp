@@ -12,9 +12,9 @@ categories.workspace = true
 
 [features]
 default = []
-# Enables the quarantined connection-actor bridge for Oracle's synchronous
-# official driver. The bridge has no production SQL mapping yet; it is enabled
-# only while the adapter contract is qualified.
+# Enables Oracle's official synchronous driver behind the quarantining
+# connection actor and capability-aware acquisition selector. It remains an
+# opt-in feature while cross-backend parity qualification is completed.
 oracledb = ["dep:oracledb"]
 # Live Oracle integration tests (gated; require a reachable DB).
 live-xe = []

@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted for the actor-bridge spike; the actual official-driver adapter remains
-under qualification.
+Accepted. The feature-gated official-driver adapter and its acquisition router
+are implemented; cross-backend parity remains the gate for any default flip.
 
 ## Context
 
@@ -35,13 +35,23 @@ official-driver connection establishment with driver-cx for compatible basic or
 PEM authentication. It never retries a statement or transfers an opened
 session across drivers.
 
-## Evidence in this increment
+## Evidence
 
 `crates/oraclemcp-db/src/oracledb_actor.rs`, behind the optional `oracledb`
 feature, proves the actor boundary with a non-`Send` fake connection. Its unit
 tests prove dedicated-thread ownership, absolute-deadline refusal before a
-blocking call, and cancellation/reply-drop quarantine with no future reuse.
-The bridge uses Asupersync's bounded `mpsc` and `oneshot` directly.
+blocking call, cancellation/reply-drop quarantine, and uncertain-error discard
+with no future reuse. `oracledb_backend.rs` confines real synchronous driver
+calls, values, and cursors to that actor.
+
+`connection.rs` owns a small typed backend registry. In an `oracledb` feature
+build, password/PEM acquisition tries the official backend first; IAM tokens,
+external/proxy auth, and `cwallet.sso` auto-login select driver-cx directly.
+Only a typed official acquisition gap (`unsupported_auth` or
+`unsupported_feature`) can make one logged, fresh driver-cx connect attempt.
+There is no fallback after a session has been returned, and no statement is
+retried or migrated across drivers. Without the feature, the registry contains
+only driver-cx and the connect path is unchanged.
 
 This is native-thread evidence, not a Loom proof. Loom cannot model the
 opaque Asupersync channel implementation together with its runtime-owned OS
@@ -52,8 +62,21 @@ machine before that bead can close.
 
 - The default build does not enable or compile the official driver.
 - The optional feature pins `oracledb` exactly at `26.0.0-beta.3`.
-- No SQL, type conversion, connection configuration, fallback routing, or
-  `OracleConnection` implementation is introduced by this spike.
+- The feature-gated backend selection is acquisition-only; the fail-closed SQL
+  guard, operating-level ladder, transaction cleanup, and audit chain are
+  unchanged and remain above the connection seam.
 - The fail-closed SQL guard, operating-level ladder, rollback default,
   protected-profile clamp, OAuth scope reduction, audit chain, and
   NUMBER-to-string invariant stay above the future adapter and are unchanged.
+
+## Retiring driver-cx after parity approval
+
+After the operator accepts the cross-backend conformance evidence and signs
+off on a default flip, retire driver-cx from selection by removing its one
+`CONNECTION_BACKEND_REGISTRY` registration and the adjacent acquisition-only
+fallback branch in `connection.rs`. No SQL/transaction call site may change:
+they already consume the selected `OracleConnection` without knowing its
+driver. Keep the existing driver-cx adapter until its remaining non-selector
+capabilities (including the cx-only pool and CQN) have separately reached
+official-driver parity; remove those registrations deliberately rather than
+inventing statement-level fallback.

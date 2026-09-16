@@ -105,7 +105,7 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::{
     DbError, OracleConnectOptions, OracleConnection, OraclePool, PoolSettings, ResultMaskingPolicy,
-    RustOracleConnection,
+    connect_oracle,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::incident::{BuildIdentity, CapturedLane, CapturedVerdict, IncidentTrigger};
@@ -580,9 +580,7 @@ async fn try_open_connection(
     cx: &Cx,
     opts: OracleConnectOptions,
 ) -> Result<Box<dyn OracleConnection>, DbError> {
-    RustOracleConnection::connect(cx, opts)
-        .await
-        .map(|conn| Box::new(conn) as Box<dyn OracleConnection>)
+    connect_oracle(cx, opts).await
 }
 
 async fn try_open_stateless_connection(

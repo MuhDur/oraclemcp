@@ -26,8 +26,8 @@ const CLEANUP_MASKED_POLLS: u32 = 100;
 /// An [`OracleConnection`] backed by Oracle's official synchronous driver.
 ///
 /// Every physical driver connection is confined to a dedicated actor thread.
-/// This adapter is compiled only with the `oracledb` feature and is not yet
-/// selected by the backend router.
+/// This adapter is compiled only with the `oracledb` feature and is selected
+/// only for capability-compatible connection acquisition.
 pub struct OfficialOracleConnection {
     options: OracleConnectOptions,
     actor: Arc<BlockingConnectionActor<OfficialCommand, OfficialReply>>,

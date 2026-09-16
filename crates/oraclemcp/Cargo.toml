@@ -24,6 +24,9 @@ pkg-fmt = "zip"
 
 [features]
 default = []
+# Opt in to Oracle's official synchronous driver and the feature-gated
+# capability-aware acquisition selector. Default builds retain driver-cx only.
+oracledb = ["oraclemcp-db/oracledb"]
 # Opt in to the published PL/SQL intelligence engine crates. Default builds stay
 # engine-free; the feature build resolves the offline engine from crates.io.
 plsql-intelligence = [

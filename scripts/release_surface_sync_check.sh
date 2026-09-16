@@ -129,6 +129,20 @@ driver_version="$(
   python3 "$ROOT/scripts/release_surface_manifest.py" --value driver_version
 )" || fail "Cargo.toml must structurally pin oraclemcp-driver-cx at an exact =X.Y.Z version"
 
+official_driver_version="$(
+  python3 - "$ROOT/Cargo.toml" <<'PY'
+import sys
+import tomllib
+
+with open(sys.argv[1], "rb") as manifest:
+    document = tomllib.load(manifest)
+pin = document["workspace"]["dependencies"]["oracledb"]["version"]
+if not isinstance(pin, str) or not pin.startswith("=") or len(pin) == 1:
+    raise SystemExit(1)
+print(pin[1:])
+PY
+)" || fail "Cargo.toml must structurally pin the optional official oracledb driver at an exact =X.Y.Z version"
+
 asupersync_version="$(
   python3 "$ROOT/scripts/release_surface_manifest.py" --value runtime_version
 )" || fail "Cargo.toml must structurally pin asupersync at X.Y.Z"
@@ -137,6 +151,8 @@ grep -Fq "oraclemcp-driver-cx = { version = \"=$driver_version\", default-featur
   fail "Cargo.toml must pin oraclemcp-driver-cx exactly at =$driver_version"
 grep -Fq "oraclemcp-driver-cx-protocol = { version = \"=$driver_version\", default-features = false }" "$ROOT/Cargo.toml" ||
   fail "Cargo.toml must pin oraclemcp-driver-cx-protocol exactly at =$driver_version"
+grep -Fq "oracledb = { version = \"=$official_driver_version\", default-features = false }" "$ROOT/Cargo.toml" ||
+  fail "Cargo.toml must pin the optional official oracledb driver exactly at =$official_driver_version"
 
 lock="$ROOT/Cargo.lock"
 for pkg in oraclemcp-driver-cx oraclemcp-driver-cx-protocol; do
@@ -153,7 +169,24 @@ for pkg in oraclemcp-driver-cx oraclemcp-driver-cx-protocol; do
   [ "$lock_versions" = "$driver_version" ] ||
     fail "Cargo.lock $pkg version '$lock_versions' != pinned driver '$driver_version'"
 done
-for legacy_pkg in oracledb oracledb-protocol; do
+for pkg in oracledb; do
+  lock_versions="$(
+    awk -v pkg="$pkg" '
+      $0 ~ /^name = / { cur = $0; sub(/^name = "/, "", cur); sub(/"$/, "", cur) }
+      cur == pkg && $0 ~ /^version = / {
+        v = $0; sub(/^version = "/, "", v); sub(/"$/, "", v); print v
+      }
+    ' "$lock" | sort -u
+  )"
+  [ "$(printf '%s\n' "$lock_versions" | sed '/^$/d' | wc -l | tr -d ' ')" = "1" ] ||
+    fail "Cargo.lock must resolve exactly one optional official $pkg version (got: $lock_versions)"
+  [ "$lock_versions" = "$official_driver_version" ] ||
+    fail "Cargo.lock optional official $pkg version '$lock_versions' != pinned driver '$official_driver_version'"
+done
+# The feature-gated official driver is an intentional, exact-pinned release
+# dependency. Its similarly named protocol package remains forbidden: only the
+# driver-cx protocol core is part of the supported transport seam.
+for legacy_pkg in oracledb-protocol; do
   if grep -Fq "name = \"$legacy_pkg\"" "$lock"; then
     fail "Cargo.lock must not retain legacy package $legacy_pkg"
   fi

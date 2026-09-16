@@ -106,9 +106,11 @@ pub use catalog_resolver::{
 };
 pub use connection::{
     CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,
-    DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleConnection, OracleRoutineArg,
+    DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleBackendCapabilities,
+    OracleBackendRegistration, OracleConnection, OracleConnectionCapability, OracleRoutineArg,
     QueryRowStream, QueryRowStreamStart, RustOracleConnection, WalletCertValidity,
-    WalletFileChoice, WalletResolutionReport, WalletResolveError, resolve_wallet_choice,
+    WalletFileChoice, WalletResolutionReport, WalletResolveError, connect_oracle,
+    connection_backend_registry, resolve_wallet_choice, select_connection_backend,
     selected_endpoint_uses_tcps, wallet_certificate_validity,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};

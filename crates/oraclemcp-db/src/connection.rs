@@ -1,5 +1,6 @@
-//! The backend-independent [`OracleConnection`] trait and the thin
-//! `oraclemcp-driver-cx`-backed [`RustOracleConnection`].
+//! The backend-independent [`OracleConnection`] trait, the feature-gated
+//! backend selector, and the thin `oraclemcp-driver-cx`-backed
+//! [`RustOracleConnection`].
 //!
 //! The trait is `async` and `Cx`-first (B1): every method takes an explicit
 //! `&asupersync::Cx`, so cancellation and the deadline/budget travel with the
@@ -1261,6 +1262,281 @@ pub trait OracleConnection: Send + Sync {
         binds: &[OracleBind],
     ) -> Result<Option<OracleRow>, DbError> {
         Ok(self.query_rows(cx, sql, binds).await?.into_iter().next())
+    }
+}
+
+/// Authentication/configuration capability required to open one Oracle
+/// connection.
+///
+/// This is deliberately about acquisition only. Once the selector returns an
+/// [`OracleConnection`], every statement stays on that selected backend for
+/// the lifetime of the physical session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OracleConnectionCapability {
+    /// Username/password authentication, with or without TLS transport.
+    Password,
+    /// A password-authenticated PEM wallet connection.
+    PemWallet,
+    /// OCI IAM/OAuth database-token authentication.
+    IamToken,
+    /// A `cwallet.sso` auto-login wallet.
+    AutoLoginWallet,
+    /// External, proxy, or another driver-cx-only authentication mode.
+    DriverCxOnly,
+}
+
+/// Typed connection-acquisition capabilities advertised by one registered
+/// backend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OracleBackendCapabilities {
+    password: bool,
+    pem_wallet: bool,
+    iam_token: bool,
+    auto_login_wallet: bool,
+    driver_cx_only: bool,
+}
+
+impl OracleBackendCapabilities {
+    const fn supports(self, capability: OracleConnectionCapability) -> bool {
+        match capability {
+            OracleConnectionCapability::Password => self.password,
+            OracleConnectionCapability::PemWallet => self.pem_wallet,
+            OracleConnectionCapability::IamToken => self.iam_token,
+            OracleConnectionCapability::AutoLoginWallet => self.auto_login_wallet,
+            OracleConnectionCapability::DriverCxOnly => self.driver_cx_only,
+        }
+    }
+}
+
+/// One backend registration in the connection-acquisition registry.
+///
+/// Registrations are ordered by preference. The optional official driver is
+/// first only in an `oracledb` feature build; the default feature set contains
+/// only the established driver-cx registration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OracleBackendRegistration {
+    backend: OracleBackend,
+    capabilities: OracleBackendCapabilities,
+}
+
+impl OracleBackendRegistration {
+    /// The backend that owns the resulting physical session.
+    #[must_use]
+    pub const fn backend(self) -> OracleBackend {
+        self.backend
+    }
+
+    /// Whether this backend can establish the requested auth/configuration
+    /// capability.
+    #[must_use]
+    pub const fn supports(self, capability: OracleConnectionCapability) -> bool {
+        self.capabilities.supports(capability)
+    }
+}
+
+const DRIVER_CX_BACKEND_CAPABILITIES: OracleBackendCapabilities = OracleBackendCapabilities {
+    password: true,
+    pem_wallet: true,
+    iam_token: true,
+    auto_login_wallet: true,
+    driver_cx_only: true,
+};
+
+#[cfg(feature = "oracledb")]
+const OFFICIAL_ORACLE_BACKEND_CAPABILITIES: OracleBackendCapabilities = OracleBackendCapabilities {
+    password: true,
+    pem_wallet: true,
+    iam_token: false,
+    auto_login_wallet: false,
+    driver_cx_only: false,
+};
+
+#[cfg(feature = "oracledb")]
+const CONNECTION_BACKEND_REGISTRY: &[OracleBackendRegistration] = &[
+    OracleBackendRegistration {
+        backend: OracleBackend::OfficialOracle,
+        capabilities: OFFICIAL_ORACLE_BACKEND_CAPABILITIES,
+    },
+    OracleBackendRegistration {
+        backend: OracleBackend::RustOracle,
+        capabilities: DRIVER_CX_BACKEND_CAPABILITIES,
+    },
+];
+
+#[cfg(not(feature = "oracledb"))]
+const CONNECTION_BACKEND_REGISTRY: &[OracleBackendRegistration] = &[OracleBackendRegistration {
+    backend: OracleBackend::RustOracle,
+    capabilities: DRIVER_CX_BACKEND_CAPABILITIES,
+}];
+
+/// The ordered connection-acquisition backend registry for this build.
+///
+/// Removing driver-cx after a future parity decision is intentionally a local
+/// registry/fallback edit. The SQL and transaction paths use only the returned
+/// [`OracleConnection`] and do not need a cross-driver branch.
+#[must_use]
+pub const fn connection_backend_registry() -> &'static [OracleBackendRegistration] {
+    CONNECTION_BACKEND_REGISTRY
+}
+
+fn wallet_uses_auto_login(options: &OracleConnectOptions) -> bool {
+    options
+        .wallet_location
+        .as_ref()
+        .is_some_and(|wallet| wallet.join(WalletFileChoice::Sso.file_name()).is_file())
+}
+
+fn connection_capability_with_wallet_mode(
+    options: &OracleConnectOptions,
+    wallet_is_auto_login: bool,
+) -> OracleConnectionCapability {
+    if options.use_iam_token || options.iam_token.is_some() || options.iam_token_source.is_some() {
+        OracleConnectionCapability::IamToken
+    } else if options.external_auth
+        || !matches!(
+            options.auth_adapter,
+            crate::auth_adapter::AuthAdapter::Password
+        )
+    {
+        OracleConnectionCapability::DriverCxOnly
+    } else if wallet_is_auto_login {
+        OracleConnectionCapability::AutoLoginWallet
+    } else if options.wallet_location.is_some() {
+        OracleConnectionCapability::PemWallet
+    } else {
+        OracleConnectionCapability::Password
+    }
+}
+
+fn connection_capability(options: &OracleConnectOptions) -> OracleConnectionCapability {
+    connection_capability_with_wallet_mode(options, wallet_uses_auto_login(options))
+}
+
+fn select_backend_for_capability(capability: OracleConnectionCapability) -> OracleBackend {
+    connection_backend_registry()
+        .iter()
+        .find(|registration| registration.supports(capability))
+        .map(|registration| registration.backend())
+        // driver-cx is the retained fail-closed baseline, so a registry without
+        // it would be a source/configuration defect rather than an implicit
+        // fallback to an arbitrary backend.
+        .expect("connection backend registry must retain a compatible driver-cx registration")
+}
+
+/// Select the preferred backend for one connection's authentication and wallet
+/// capability.
+///
+/// This selection is pure apart from discovering whether a configured wallet
+/// contains `cwallet.sso`; it never opens a socket or executes SQL.
+#[must_use]
+pub fn select_connection_backend(options: &OracleConnectOptions) -> OracleBackend {
+    select_backend_for_capability(connection_capability(options))
+}
+
+#[cfg(feature = "oracledb")]
+#[async_trait(?Send)]
+trait BackendConnectionFactory {
+    async fn connect(
+        &self,
+        cx: &Cx,
+        backend: OracleBackend,
+        options: OracleConnectOptions,
+    ) -> Result<Box<dyn OracleConnection>, DbError>;
+}
+
+#[cfg(feature = "oracledb")]
+struct ProductionBackendConnectionFactory;
+
+#[cfg(feature = "oracledb")]
+#[async_trait(?Send)]
+impl BackendConnectionFactory for ProductionBackendConnectionFactory {
+    async fn connect(
+        &self,
+        cx: &Cx,
+        backend: OracleBackend,
+        options: OracleConnectOptions,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        match backend {
+            OracleBackend::OfficialOracle => {
+                crate::oracledb_backend::OfficialOracleConnection::connect(cx, options)
+                    .await
+                    .map(|connection| Box::new(connection) as Box<dyn OracleConnection>)
+            }
+            OracleBackend::RustOracle => RustOracleConnection::connect(cx, options)
+                .await
+                .map(|connection| Box::new(connection) as Box<dyn OracleConnection>),
+        }
+    }
+}
+
+#[cfg(feature = "oracledb")]
+fn official_acquisition_gap(error: &DbError) -> Option<&'static str> {
+    match error {
+        DbError::UnsupportedAuth(_) => Some("unsupported_auth"),
+        DbError::UnsupportedFeature(_) => Some("unsupported_feature"),
+        DbError::BackendNotCompiled {
+            backend: OracleBackend::OfficialOracle,
+        } => Some("official_backend_not_compiled"),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "oracledb")]
+async fn connect_with_backend_registry(
+    cx: &Cx,
+    options: OracleConnectOptions,
+    factory: &dyn BackendConnectionFactory,
+) -> Result<Box<dyn OracleConnection>, DbError> {
+    let capability = connection_capability(&options);
+    let selected = select_backend_for_capability(capability);
+    match factory.connect(cx, selected, options.clone()).await {
+        Ok(connection) => Ok(connection),
+        Err(error) if selected == OracleBackend::OfficialOracle => {
+            let Some(reason) = official_acquisition_gap(&error) else {
+                return Err(error);
+            };
+            let fallback = connection_backend_registry()
+                .iter()
+                .find(|registration| {
+                    registration.backend() != selected && registration.supports(capability)
+                })
+                .map(|registration| registration.backend())
+                .expect("official acquisition fallback requires a registered compatible driver-cx backend");
+            tracing::warn!(
+                from_backend = %selected,
+                to_backend = %fallback,
+                capability = ?capability,
+                fallback_reason = reason,
+                "official Oracle connection acquisition is unavailable; using driver-cx for this new session"
+            );
+            factory.connect(cx, fallback, options).await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Open one Oracle connection through the feature-aware backend registry.
+///
+/// With the `oracledb` feature disabled this is byte-for-byte the retained
+/// driver-cx connect path. With it enabled, compatible password/PEM sessions
+/// try Oracle's official backend first; typed official acquisition gaps receive
+/// one logged fresh driver-cx attempt. No statement, transaction, or opened
+/// session is ever routed through this function again.
+pub async fn connect_oracle(
+    cx: &Cx,
+    options: OracleConnectOptions,
+) -> Result<Box<dyn OracleConnection>, DbError> {
+    #[cfg(feature = "oracledb")]
+    {
+        return connect_with_backend_registry(cx, options, &ProductionBackendConnectionFactory)
+            .await;
+    }
+
+    #[cfg(not(feature = "oracledb"))]
+    {
+        RustOracleConnection::connect(cx, options)
+            .await
+            .map(|connection| Box::new(connection) as Box<dyn OracleConnection>)
     }
 }
 
@@ -6841,6 +7117,315 @@ mod tests {
     use asupersync::runtime::RuntimeBuilder;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn selector_test_options() -> OracleConnectOptions {
+        OracleConnectOptions {
+            connect_string: "db.example.test:1521/app".to_owned(),
+            username: Some("app".to_owned()),
+            password: Some("not-a-real-secret".to_owned()),
+            ..OracleConnectOptions::default()
+        }
+    }
+
+    #[cfg(not(feature = "oracledb"))]
+    #[test]
+    fn selector_without_official_feature_retains_driver_cx_for_every_capability() {
+        assert_eq!(
+            connection_backend_registry(),
+            [OracleBackendRegistration {
+                backend: OracleBackend::RustOracle,
+                capabilities: DRIVER_CX_BACKEND_CAPABILITIES,
+            }]
+        );
+        for capability in [
+            OracleConnectionCapability::Password,
+            OracleConnectionCapability::PemWallet,
+            OracleConnectionCapability::IamToken,
+            OracleConnectionCapability::AutoLoginWallet,
+            OracleConnectionCapability::DriverCxOnly,
+        ] {
+            assert_eq!(
+                select_backend_for_capability(capability),
+                OracleBackend::RustOracle
+            );
+        }
+        assert_eq!(
+            select_connection_backend(&selector_test_options()),
+            OracleBackend::RustOracle
+        );
+    }
+
+    #[cfg(feature = "oracledb")]
+    struct SelectorTestConnection {
+        backend: OracleBackend,
+        statement_calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[async_trait(?Send)]
+    impl OracleConnection for SelectorTestConnection {
+        fn backend(&self) -> OracleBackend {
+            self.backend
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            Ok(Vec::new())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            self.statement_calls.fetch_add(1, Ordering::SeqCst);
+            Err(DbError::Query(
+                "simulated statement error must not reconnect through another backend".to_owned(),
+            ))
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[derive(Clone)]
+    struct RecordingBackendFactory {
+        official_error: Option<DbError>,
+        attempts: Arc<Mutex<Vec<OracleBackend>>>,
+        statement_calls: Arc<AtomicUsize>,
+    }
+
+    #[cfg(feature = "oracledb")]
+    impl RecordingBackendFactory {
+        fn new(official_error: Option<DbError>) -> Self {
+            Self {
+                official_error,
+                attempts: Arc::new(Mutex::new(Vec::new())),
+                statement_calls: Arc::new(AtomicUsize::new(0)),
+            }
+        }
+
+        fn attempts(&self) -> Vec<OracleBackend> {
+            self.attempts.lock().expect("selector attempt lock").clone()
+        }
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[async_trait(?Send)]
+    impl BackendConnectionFactory for RecordingBackendFactory {
+        async fn connect(
+            &self,
+            _cx: &Cx,
+            backend: OracleBackend,
+            _options: OracleConnectOptions,
+        ) -> Result<Box<dyn OracleConnection>, DbError> {
+            self.attempts
+                .lock()
+                .expect("selector attempt lock")
+                .push(backend);
+            if backend == OracleBackend::OfficialOracle
+                && let Some(error) = &self.official_error
+            {
+                return Err(error.clone());
+            }
+            Ok(Box::new(SelectorTestConnection {
+                backend,
+                statement_calls: Arc::clone(&self.statement_calls),
+            }))
+        }
+    }
+
+    #[cfg(feature = "oracledb")]
+    fn run_selector_test<F, T>(body: impl FnOnce(Cx) -> F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime for selector test");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("selector test runtime installs Cx");
+            body(cx).await
+        })
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[test]
+    fn selector_capability_table_prefers_official_only_for_password_and_pem() {
+        let expected = [
+            (
+                OracleConnectionCapability::Password,
+                OracleBackend::OfficialOracle,
+            ),
+            (
+                OracleConnectionCapability::PemWallet,
+                OracleBackend::OfficialOracle,
+            ),
+            (
+                OracleConnectionCapability::IamToken,
+                OracleBackend::RustOracle,
+            ),
+            (
+                OracleConnectionCapability::AutoLoginWallet,
+                OracleBackend::RustOracle,
+            ),
+            (
+                OracleConnectionCapability::DriverCxOnly,
+                OracleBackend::RustOracle,
+            ),
+        ];
+        for (capability, backend) in expected {
+            assert_eq!(select_backend_for_capability(capability), backend);
+        }
+
+        let options = selector_test_options();
+        assert_eq!(
+            select_connection_backend(&options),
+            OracleBackend::OfficialOracle
+        );
+
+        let mut pem_wallet = options.clone();
+        pem_wallet.wallet_location = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../oraclemcp-core/tests/fixtures/wallet/undecryptable_without_sso"),
+        );
+        assert_eq!(
+            connection_capability(&pem_wallet),
+            OracleConnectionCapability::PemWallet
+        );
+        assert_eq!(
+            select_connection_backend(&pem_wallet),
+            OracleBackend::OfficialOracle
+        );
+
+        let mut iam = options.clone();
+        iam.iam_token = Some("test-token".to_owned());
+        assert_eq!(
+            connection_capability(&iam),
+            OracleConnectionCapability::IamToken
+        );
+        assert_eq!(select_connection_backend(&iam), OracleBackend::RustOracle);
+
+        let mut external_auth = options.clone();
+        external_auth.external_auth = true;
+        assert_eq!(
+            connection_capability(&external_auth),
+            OracleConnectionCapability::DriverCxOnly
+        );
+        assert_eq!(
+            select_connection_backend(&external_auth),
+            OracleBackend::RustOracle
+        );
+
+        let mut auto_login_wallet = options.clone();
+        auto_login_wallet.wallet_location = Some(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../oraclemcp-core/tests/fixtures/wallet/good_sso"),
+        );
+        assert!(wallet_uses_auto_login(&auto_login_wallet));
+        assert_eq!(
+            connection_capability(&auto_login_wallet),
+            OracleConnectionCapability::AutoLoginWallet
+        );
+        assert_eq!(
+            select_connection_backend(&auto_login_wallet),
+            OracleBackend::RustOracle
+        );
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[test]
+    fn typed_official_acquisition_gap_falls_back_once_to_driver_cx() {
+        let factory = RecordingBackendFactory::new(Some(DbError::UnsupportedFeature(
+            "simulated official connect capability gap".to_owned(),
+        )));
+        let factory_for_connect = factory.clone();
+        let connection = run_selector_test(move |cx| async move {
+            connect_with_backend_registry(&cx, selector_test_options(), &factory_for_connect)
+                .await
+                .expect("typed official acquisition gap falls back to driver-cx")
+        });
+
+        assert_eq!(connection.backend(), OracleBackend::RustOracle);
+        assert_eq!(
+            factory.attempts(),
+            [OracleBackend::OfficialOracle, OracleBackend::RustOracle],
+            "fallback is one fresh connection acquisition, never a retry loop"
+        );
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[test]
+    fn ordinary_official_connect_failure_does_not_cross_backends() {
+        let factory = RecordingBackendFactory::new(Some(DbError::Connect(
+            "simulated listener refusal".to_owned(),
+        )));
+        let factory_for_connect = factory.clone();
+        let error = run_selector_test(move |cx| async move {
+            match connect_with_backend_registry(&cx, selector_test_options(), &factory_for_connect)
+                .await
+            {
+                Ok(_) => panic!("ordinary service/connect failures are not driver-gap fallback"),
+                Err(error) => error,
+            }
+        });
+
+        assert!(matches!(error, DbError::Connect(_)));
+        assert_eq!(factory.attempts(), [OracleBackend::OfficialOracle]);
+    }
+
+    #[cfg(feature = "oracledb")]
+    #[test]
+    fn statement_failure_never_reenters_the_selector_or_migrates_the_session() {
+        let factory = RecordingBackendFactory::new(None);
+        let factory_for_connect = factory.clone();
+        let (error, attempts, statement_calls) = run_selector_test(move |cx| async move {
+            let connection =
+                connect_with_backend_registry(&cx, selector_test_options(), &factory_for_connect)
+                    .await
+                    .expect("official connection opens");
+            let error = connection
+                .execute(&cx, "SELECT 1 FROM dual", &[])
+                .await
+                .expect_err("simulated statement failure");
+            (
+                error,
+                factory_for_connect.attempts(),
+                factory_for_connect.statement_calls.load(Ordering::SeqCst),
+            )
+        });
+
+        assert!(matches!(error, DbError::Query(_)));
+        assert_eq!(statement_calls, 1);
+        assert_eq!(
+            attempts,
+            [OracleBackend::OfficialOracle],
+            "a statement error cannot start a driver-cx connection or migrate this session"
+        );
+    }
 
     #[test]
     fn bounded_page_cell_options_cap_every_expandable_cell_to_one_page() {
