@@ -14,10 +14,17 @@ pub mod discovery;
 mod profile;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
+use std::io::Read as _;
 use std::net::IpAddr;
 use std::ops::Deref;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use cap_fs_ext::{DirExt as _, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
+use cap_std::ambient_authority;
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt as _;
+use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use serde::{Deserialize, Serialize};
@@ -48,6 +55,12 @@ pub const ENV_PREFIX: &str = "ORACLEMCP_";
 ///
 /// This is a launcher/control variable, not part of the config schema.
 pub const CONFIG_PATH_ENV: &str = "ORACLEMCP_CONFIG";
+
+/// Bound startup config reads before passing their bytes to Figment. This is
+/// deliberately the same ceiling as the reviewed runtime config operation
+/// path: generous for profile inventories while refusing a swapped stream or
+/// an unexpectedly large local file.
+const MAX_CONFIG_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
 const IGNORED_ENV_KEYS: &[&str] = &[
     "audit_key",
@@ -83,6 +96,240 @@ const IGNORED_ENV_KEYS: &[&str] = &[
     "test_wallet_password",
     "tools_dir",
 ];
+
+/// Read a startup config source through a held, no-follow directory capability.
+///
+/// `Toml::file` opens a pathname later, after the caller has checked it. That
+/// lets a concurrent replacement change the bytes being parsed (and, on Unix,
+/// turn the source into a blocking FIFO). Bind validation and reading to the
+/// same descriptor instead: retain the parent capability, refuse links, check
+/// the descriptor identity against the observation, and bound the bytes before
+/// passing an owned string to Figment.
+fn read_startup_config_source(path: &Path) -> Result<String, ConfigError> {
+    let normalized = normalize_startup_config_path(path)?;
+    let (parent_path, name) = startup_config_parent_and_name(&normalized)?;
+    let parent = open_startup_config_parent(&parent_path)?;
+    let before = parent.symlink_metadata(&name).map_err(|error| {
+        startup_config_read_error(
+            &normalized,
+            if error.kind() == std::io::ErrorKind::NotFound {
+                "file disappeared before it could be opened"
+            } else {
+                "file metadata could not be read safely"
+            },
+        )
+    })?;
+    if before.file_type().is_symlink() {
+        return Err(startup_config_read_error(
+            &normalized,
+            "file is a symbolic link",
+        ));
+    }
+    if !before.is_file() {
+        return Err(startup_config_read_error(
+            &normalized,
+            "file is not a regular file",
+        ));
+    }
+
+    run_startup_config_open_hook();
+
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let file = parent.open_with(&name, &options).map_err(|_| {
+        startup_config_read_error(
+            &normalized,
+            "file could not be opened without following links",
+        )
+    })?;
+    let after = file.metadata().map_err(|_| {
+        startup_config_read_error(&normalized, "opened file metadata could not be inspected")
+    })?;
+    verify_startup_config_parent(&parent, &parent_path, &normalized)?;
+    if !after.is_file() || before.dev() != after.dev() || before.ino() != after.ino() {
+        return Err(startup_config_read_error(
+            &normalized,
+            "file changed while it was opened",
+        ));
+    }
+    if after.len() > MAX_CONFIG_SOURCE_BYTES as u64 {
+        return Err(startup_config_read_error(
+            &normalized,
+            "file exceeds the 16 MiB startup-config limit",
+        ));
+    }
+
+    let mut bytes = Vec::with_capacity(after.len() as usize);
+    file.take((MAX_CONFIG_SOURCE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|_| startup_config_read_error(&normalized, "file could not be read safely"))?;
+    if bytes.len() > MAX_CONFIG_SOURCE_BYTES {
+        return Err(startup_config_read_error(
+            &normalized,
+            "file exceeds the 16 MiB startup-config limit",
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| startup_config_read_error(&normalized, "file is not valid UTF-8 TOML"))
+}
+
+fn normalize_startup_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
+    if path.as_os_str().is_empty() || path.file_name().is_none() {
+        return Err(startup_config_read_error(path, "path does not name a file"));
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| startup_config_read_error(path, "path does not name a file"))?;
+    let absolute = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|_| startup_config_read_error(path, "launch directory is unavailable"))?
+            .join(parent)
+    };
+
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(part) => normalized.push(part),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(startup_config_read_error(
+                        path,
+                        "path escapes its filesystem root",
+                    ));
+                }
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(startup_config_read_error(
+            path,
+            "path has no filesystem root",
+        ));
+    }
+    Ok(normalized.join(name))
+}
+
+fn startup_config_parent_and_name(path: &Path) -> Result<(PathBuf, OsString), ConfigError> {
+    let parent = path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf();
+    let name = path
+        .file_name()
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| startup_config_read_error(path, "path does not name a file"))?
+        .to_os_string();
+    Ok((parent, name))
+}
+
+/// Open every parent component without following links, then retain that
+/// directory capability for the source metadata check and read.
+fn open_startup_config_parent(path: &Path) -> Result<CapDir, ConfigError> {
+    let mut current = startup_config_capability_root(path)?;
+    for component in path.components() {
+        match component {
+            Component::Normal(name) => {
+                current = current.open_dir_nofollow(name).map_err(|_| {
+                    startup_config_read_error(path, "parent is not a safe existing directory")
+                })?;
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+            Component::ParentDir => {
+                return Err(startup_config_read_error(
+                    path,
+                    "parent path contains traversal",
+                ));
+            }
+        }
+    }
+    Ok(current)
+}
+
+fn startup_config_capability_root(path: &Path) -> Result<CapDir, ConfigError> {
+    let root = if path.is_absolute() {
+        #[cfg(windows)]
+        {
+            let mut root = PathBuf::new();
+            for component in path.components() {
+                root.push(component.as_os_str());
+                if matches!(component, Component::RootDir) {
+                    break;
+                }
+            }
+            root
+        }
+        #[cfg(not(windows))]
+        {
+            PathBuf::from("/")
+        }
+    } else {
+        PathBuf::from(".")
+    };
+    CapDir::open_ambient_dir(&root, ambient_authority())
+        .map_err(|_| startup_config_read_error(path, "filesystem root could not be opened"))
+}
+
+fn verify_startup_config_parent(
+    held_parent: &CapDir,
+    parent_path: &Path,
+    display_path: &Path,
+) -> Result<(), ConfigError> {
+    let current_parent = open_startup_config_parent(parent_path)?;
+    let held = held_parent.dir_metadata().map_err(|_| {
+        startup_config_read_error(display_path, "held parent directory could not be inspected")
+    })?;
+    let current = current_parent.dir_metadata().map_err(|_| {
+        startup_config_read_error(
+            display_path,
+            "current parent directory could not be inspected",
+        )
+    })?;
+    if held.dev() != current.dev() || held.ino() != current.ino() {
+        return Err(startup_config_read_error(
+            display_path,
+            "parent directory changed while the file was opened",
+        ));
+    }
+    Ok(())
+}
+
+fn startup_config_read_error(path: &Path, reason: &'static str) -> ConfigError {
+    ConfigError::StartupConfigSourceUnusable {
+        path: path.display().to_string(),
+        reason,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static STARTUP_CONFIG_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_startup_config_open_hook(hook: impl FnOnce() + 'static) {
+    STARTUP_CONFIG_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_startup_config_open_hook() {
+    let hook = STARTUP_CONFIG_OPEN_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn run_startup_config_open_hook() {}
 
 fn default_schema_version() -> u32 {
     SUPPORTED_SCHEMA_VERSION
@@ -1220,7 +1467,8 @@ impl OracleMcpConfig {
             },
         };
         if let Some(path) = resolved {
-            fig = fig.merge(Toml::file(path));
+            let source = read_startup_config_source(&path)?;
+            fig = fig.merge(Toml::string(&source));
         }
         Ok(fig.merge(
             Env::prefixed(ENV_PREFIX)
@@ -1651,6 +1899,16 @@ pub enum ConfigError {
         /// Why it cannot be safely loaded.
         reason: &'static str,
     },
+    /// The config file changed or became unsafe between the explicit-path
+    /// validation and the descriptor-bound startup read. Never continue with
+    /// defaults in that case: the source may carry profile authority ceilings.
+    #[error("config source {path:?} is unusable: {reason}")]
+    StartupConfigSourceUnusable {
+        /// The operator-selected or discovered config path.
+        path: String,
+        /// A non-secret, stable reason for the refusal.
+        reason: &'static str,
+    },
     /// A profile has no usable `connect_string` after inheritance.
     #[error("connection profile `{0}` is missing a connect_string")]
     MissingConnectString(String),
@@ -1830,6 +2088,10 @@ impl From<figment::Error> for ConfigError {
 #[cfg(test)]
 #[path = "lib/config_path_tests.rs"]
 mod config_path_tests;
+
+#[cfg(test)]
+#[path = "lib/config_source_tests.rs"]
+mod config_source_tests;
 
 #[cfg(test)]
 mod tests {

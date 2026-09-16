@@ -10,12 +10,20 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+cap-fs-ext = "4.0.2"
+cap-std = "4.0.2"
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.10.0" }
 oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.10.0" }
 figment = { version = "0.10", features = ["toml", "env"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+
+# A startup config path is an authority-bearing input. On Unix, open a path
+# swapped to a FIFO non-blockingly so its descriptor can be rejected as
+# non-regular rather than stalling server startup.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 figment = { version = "0.10", features = ["toml", "env", "test"] }

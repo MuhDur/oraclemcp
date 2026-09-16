@@ -2418,7 +2418,10 @@ dependencies = [
 name = "oraclemcp-config"
 version = "0.10.0"
 dependencies = [
+ "cap-fs-ext",
+ "cap-std",
  "figment",
+ "libc",
  "oraclemcp-error",
  "oraclemcp-guard",
  "proptest",
