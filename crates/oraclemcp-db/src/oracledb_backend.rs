@@ -10,6 +10,7 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::combinator::try_commit_section;
 use asupersync::types::Time;
+use serde_json::{Number, Value, json};
 
 use crate::auth_adapter::AuthAdapter;
 use crate::connection::{DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart};
@@ -22,6 +23,26 @@ use crate::types::{
 use crate::{DbError, SerializeOptions};
 
 const CLEANUP_MASKED_POLLS: u32 = 100;
+
+// Keep the identity surface aligned with the driver-cx implementation without
+// depending on `V$SESSION` visibility. `USERENV` is available to every
+// authenticated Oracle session and this query remains actor-owned.
+const OFFICIAL_SESSION_CONTEXT_SQL: &str = concat!(
+    "SELECT ",
+    "SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, ",
+    "SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS current_edition, ",
+    "SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, ",
+    "SYS_CONTEXT('USERENV','CURRENT_USER') AS current_user, ",
+    "SYS_CONTEXT('USERENV','PROXY_USER') AS proxy_user, ",
+    "SYS_CONTEXT('USERENV','MODULE') AS module, ",
+    "SYS_CONTEXT('USERENV','ACTION') AS session_action, ",
+    "SYS_CONTEXT('USERENV','CLIENT_IDENTIFIER') AS client_identifier, ",
+    "SYS_CONTEXT('USERENV','CLIENT_INFO') AS client_info, ",
+    "SYS_CONTEXT('USERENV','OS_USER') AS os_user, ",
+    "SYS_CONTEXT('USERENV','HOST') AS host, ",
+    "SYS_CONTEXT('USERENV','TERMINAL') AS terminal ",
+    "FROM dual",
+);
 
 /// An [`OracleConnection`] backed by Oracle's official synchronous driver.
 ///
@@ -369,6 +390,7 @@ fn execute_actor_command(
         OfficialCommand::Describe { timeout } => {
             let connection = ready_connection(resource)?;
             set_driver_timeout(connection, timeout, OfficialOperation::Query)?;
+            let session_context = official_session_context(connection)?;
             let info = OracleConnectionInfo {
                 backend: Some(OracleBackend::OfficialOracle),
                 server_version: Some(
@@ -401,6 +423,18 @@ fn execute_actor_command(
                         .map_err(|error| official_error(error, OfficialOperation::Query))?
                         .to_string(),
                 ),
+                current_schema: session_context.current_schema,
+                current_edition: session_context.current_edition,
+                session_user: session_context.session_user,
+                current_user: session_context.current_user,
+                proxy_user: session_context.proxy_user,
+                module: session_context.module,
+                action: session_context.action,
+                client_identifier: session_context.client_identifier,
+                client_info: session_context.client_info,
+                os_user: session_context.os_user,
+                host: session_context.host,
+                terminal: session_context.terminal,
                 ..OracleConnectionInfo::default()
             };
             Ok(OfficialReply::ConnectionInfo(Box::new(info)))
@@ -509,6 +543,48 @@ fn ready_connection(resource: &OfficialActorResource) -> Result<&oracledb::Conne
         return Err(stream_not_recovered());
     }
     resource.connection.as_ref().ok_or_else(closed_connection)
+}
+
+#[derive(Default)]
+struct OfficialSessionContext {
+    current_schema: Option<String>,
+    current_edition: Option<String>,
+    session_user: Option<String>,
+    current_user: Option<String>,
+    proxy_user: Option<String>,
+    module: Option<String>,
+    action: Option<String>,
+    client_identifier: Option<String>,
+    client_info: Option<String>,
+    os_user: Option<String>,
+    host: Option<String>,
+    terminal: Option<String>,
+}
+
+fn official_session_context(
+    connection: &oracledb::Connection,
+) -> Result<OfficialSessionContext, DbError> {
+    let row = connection
+        .query_row(OFFICIAL_SESSION_CONTEXT_SQL, &[])
+        .map_err(|error| official_error(error, OfficialOperation::Query))?;
+    let get = |index| {
+        row.get::<Option<String>>(index)
+            .map_err(|error| official_error(error, OfficialOperation::Query))
+    };
+    Ok(OfficialSessionContext {
+        current_schema: get(0)?,
+        current_edition: get(1)?,
+        session_user: get(2)?,
+        current_user: get(3)?,
+        proxy_user: get(4)?,
+        module: get(5)?,
+        action: get(6)?,
+        client_identifier: get(7)?,
+        client_info: get(8)?,
+        os_user: get(9)?,
+        host: get(10)?,
+        terminal: get(11)?,
+    })
 }
 
 fn closed_connection() -> DbError {
@@ -680,9 +756,15 @@ fn cell_from_official(
                 oracle_type,
                 row.get::<Option<oracledb::OracleTimestamp>>(index)
                     .map_err(|error| official_error(error, OfficialOperation::Query))?
-                    .map(|value| value.to_string()),
+                    .as_ref()
+                    .map(format_official_timestamp),
             )
         }
+        "DB_TYPE_VECTOR" => vector_cell(
+            row.get::<Option<oracledb::Vector>>(index)
+                .map_err(|error| official_error(error, OfficialOperation::Query))?,
+            oracle_type,
+        ),
         unsupported => {
             return Err(DbError::UnsupportedFeature(format!(
                 "official Oracle backend does not yet serialize {unsupported} columns"
@@ -696,6 +778,104 @@ fn number_cell(value: Option<oracledb::OracleNumber>, oracle_type: &'static str)
     // Deliberately format OracleNumber directly. Never decode a NUMBER through
     // f64: its 53-bit mantissa cannot represent a 38-digit Oracle NUMBER.
     OracleCell::new(oracle_type, value.map(|number| number.to_string()))
+}
+
+/// Render timestamp offsets ourselves because the beta driver's Display
+/// implementation formats a negative minute component as "-05:-30".
+/// Our row contract requires one offset sign followed by absolute hours/minutes.
+fn format_official_timestamp(value: &oracledb::OracleTimestamp) -> String {
+    let offset_minutes =
+        i32::from(value.tz_hour_offset()) * 60 + i32::from(value.tz_minute_offset());
+    let timestamp = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}",
+        value.year(),
+        value.month(),
+        value.day(),
+        value.hour(),
+        value.minute(),
+        value.second(),
+        value.nanoseconds(),
+    );
+    if offset_minutes == 0 {
+        return format!("{timestamp}Z");
+    }
+    let sign = if offset_minutes < 0 { '-' } else { '+' };
+    let offset_abs = i64::from(offset_minutes).abs();
+    format!(
+        "{timestamp}{sign}{:02}:{:02}",
+        offset_abs / 60,
+        offset_abs % 60
+    )
+}
+
+fn vector_cell(value: Option<oracledb::Vector>, oracle_type: &'static str) -> OracleCell {
+    match value {
+        Some(vector) => OracleCell::structured(oracle_type, structured_official_vector(&vector)),
+        None => OracleCell::new(oracle_type, None),
+    }
+}
+
+/// Project the official driver's VECTOR value onto the existing structured
+/// `OracleCell` contract. This deliberately matches the driver-cx shape so
+/// callers observe no backend-dependent representation change.
+fn structured_official_vector(vector: &oracledb::Vector) -> Value {
+    match vector {
+        oracledb::Vector::Dense(values) => {
+            let (format, values) = structured_official_vector_values(values);
+            json!({
+                "kind": "vector",
+                "storage": "dense",
+                "format": format,
+                "values": values,
+            })
+        }
+        oracledb::Vector::Sparse(sparse) => {
+            let (format, values) = structured_official_vector_values(sparse.values());
+            json!({
+                "kind": "vector",
+                "storage": "sparse",
+                "format": format,
+                "num_dimensions": sparse.num_dimensions(),
+                "indices": sparse.indices(),
+                "values": values,
+            })
+        }
+    }
+}
+
+fn structured_official_vector_values(values: &oracledb::VectorData) -> (&'static str, Value) {
+    match values {
+        oracledb::VectorData::Float32(values) => (
+            "float32",
+            Value::Array(
+                values
+                    .iter()
+                    .map(|value| json_number_or_string(f64::from(*value)))
+                    .collect(),
+            ),
+        ),
+        oracledb::VectorData::Float64(values) => (
+            "float64",
+            Value::Array(
+                values
+                    .iter()
+                    .map(|value| json_number_or_string(*value))
+                    .collect(),
+            ),
+        ),
+        oracledb::VectorData::Int8(values) => (
+            "int8",
+            Value::Array(values.iter().map(|value| json!(*value)).collect()),
+        ),
+        oracledb::VectorData::Binary(values) => (
+            "binary",
+            Value::Array(values.iter().map(|value| json!(*value)).collect()),
+        ),
+    }
+}
+
+fn json_number_or_string(value: f64) -> Value {
+    Number::from_f64(value).map_or_else(|| Value::String(value.to_string()), Value::Number)
 }
 
 fn oracle_type_name(metadata: &oracledb::Metadata) -> &'static str {
@@ -718,6 +898,7 @@ fn oracle_type_name(metadata: &oracledb::Metadata) -> &'static str {
         "DB_TYPE_TIMESTAMP" => "TIMESTAMP",
         "DB_TYPE_TIMESTAMP_LTZ" => "TIMESTAMP WITH LOCAL TIME ZONE",
         "DB_TYPE_TIMESTAMP_TZ" => "TIMESTAMP WITH TIME ZONE",
+        "DB_TYPE_VECTOR" => "VECTOR",
         _ => "UNSUPPORTED",
     }
 }
@@ -1023,6 +1204,7 @@ impl OracleConnection for OfficialOracleConnection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::str::FromStr;
 
     #[test]
@@ -1058,6 +1240,70 @@ mod tests {
         };
         assert_eq!(timestamp.tz_hour_offset(), -5);
         assert_eq!(timestamp.tz_minute_offset(), -30);
+    }
+
+    #[test]
+    fn timestamp_tz_projection_uses_one_sign_for_a_negative_offset() {
+        for (hour_offset, minute_offset, expected) in [
+            (0, -30, "2026-09-16T12:34:56.123456789-00:30"),
+            (0, 30, "2026-09-16T12:34:56.123456789+00:30"),
+            (-5, -30, "2026-09-16T12:34:56.123456789-05:30"),
+            (14, 0, "2026-09-16T12:34:56.123456789+14:00"),
+        ] {
+            let timestamp = oracledb::OracleTimestamp::new_timestamp_tz(
+                2026,
+                9,
+                16,
+                12,
+                34,
+                56,
+                123_456_789,
+                hour_offset,
+                minute_offset,
+            );
+            assert_eq!(format_official_timestamp(&timestamp), expected);
+        }
+    }
+
+    #[test]
+    fn vector_projection_matches_dense_and_sparse_structured_contract() {
+        let dense = vector_cell(
+            Some(oracledb::Vector::Dense(oracledb::VectorData::Float32(
+                vec![1.25, -2.5],
+            ))),
+            "VECTOR",
+        );
+        assert_eq!(dense.oracle_type, "VECTOR");
+        assert_eq!(
+            dense.structured,
+            Some(json!({
+                "kind": "vector",
+                "storage": "dense",
+                "format": "float32",
+                "values": [1.25, -2.5],
+            }))
+        );
+
+        let sparse = vector_cell(
+            Some(oracledb::Vector::Sparse(oracledb::SparseVector::new(
+                1_000,
+                vec![0, 500, 999],
+                oracledb::VectorData::Float64(vec![1.5, 2.5, 3.5]),
+            ))),
+            "VECTOR",
+        );
+        assert_eq!(sparse.oracle_type, "VECTOR");
+        assert_eq!(
+            sparse.structured,
+            Some(json!({
+                "kind": "vector",
+                "storage": "sparse",
+                "format": "float64",
+                "num_dimensions": 1_000,
+                "indices": [0, 500, 999],
+                "values": [1.5, 2.5, 3.5],
+            }))
+        );
     }
 
     #[test]

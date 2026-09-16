@@ -26,8 +26,10 @@ adapter will also tighten the driver's call timeout to the minimum of the
 profile cap and remaining request deadline. A caller cancellation, expired
 deadline, dropped reply receiver, actor stop, or any uncertain post-call state
 permanently quarantines that physical session as `unknown_discarded`; it cannot
-re-enter a pool. A bounded actor-to-caller stream channel will provide cursor
-backpressure in the later streaming implementation.
+re-enter a pool. Streaming already uses a bounded pull cursor: each
+`next_row` request crosses the actor's bounded mailbox and returns at most one
+owned row through its oneshot reply, so the caller controls backpressure without
+the synchronous cursor or an unbounded row queue leaving the actor.
 
 Automatic driver-cx fallback is restricted to connection acquisition. It may
 select driver-cx directly for unsupported authentication, or retry one failed
@@ -80,3 +82,108 @@ driver. Keep the existing driver-cx adapter until its remaining non-selector
 capabilities (including the cx-only pool and CQN) have separately reached
 official-driver parity; remove those registrations deliberately rather than
 inventing statement-level fallback.
+
+## Default-flip proposal — not approved
+
+This is a decision record for the operator, not an authorization to change
+Cargo defaults. `oracledb` stays opt-in and `driver-cx` remains the default
+build/runtime until every criterion below is met and the operator explicitly
+accepts the evidence.
+
+### What a flip would mean
+
+The proposed flip is **only** that a build including the official-driver
+feature prefers the official adapter for its supported connection acquisitions.
+It does not authorize a statement retry, an in-session migration, or an
+unconditional driver-cx removal. The router remains acquisition-only:
+
+| Authentication/configuration | Current route | Evidence needed before a flip |
+| --- | --- | --- |
+| Basic username/password | Official first when `oracledb` is enabled | Direct dual-backend local-lab proof for connect, query, transaction, errors, and close; password profile matrix evidence |
+| TLS/TCPS with PEM wallet | Official first when `oracledb` is enabled | The same direct dual-backend proof against a PEM wallet/SNI/DN-match lab profile |
+| OCI IAM / Autonomous DB token | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
+| `cwallet.sso` auto-login | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
+| External/proxy or other driver-cx-only auth | driver-cx directly | Keep this route; no silent degradation to password auth |
+
+The feature-off registry contains only driver-cx. Therefore a flip must not
+claim feature-off behavior changed; its regression criterion is that the
+feature-off tests still exercise the existing driver-cx-only path unchanged.
+
+### Required evidence
+
+1. Both feature states pass the scoped `oraclemcp-db` suite, including the
+   router/fallback tests and the deterministic official-driver type tests. The
+   feature-off result is a compatibility requirement, not a lower bar.
+2. The feature-on deterministic suite proves `NUMBER` is formatted directly
+   from `OracleNumber` as the exact decimal string; it must never decode NUMBER
+   through `f64`. It also proves the official VECTOR mapper emits the existing
+   dense/sparse structured-cell contract and TSTZ bind/format handling preserves
+   its offset.
+3. A captured, explicitly opted-in local Free23 lab run of
+   `cross_backend_parity` passes with both adapters connected directly using
+   basic authentication. It compares the observable serialized result of a
+   38-digit NUMBER, TSTZ, dense VECTOR, sparse VECTOR, missing-object error
+   envelope, and DDL/DML rollback/commit sequence. The test is intentionally
+   `#[ignore]`: selecting it without `ORACLEMCP_DUAL_BACKEND_LAB=1` and all
+   local-lab credentials fails rather than converting absent infrastructure
+   into a passing claim.
+4. The analogous TCPS + PEM-wallet lab run passes, including the configured
+   SNI and certificate-DN posture. The test record must identify the local
+   lab/version and command, but never put a live OCI/customer identifier or
+   secret in a tracked artifact.
+5. The bounded live matrix records the remaining shared-trait semantics:
+   timeout/cancel with uncertain-session quarantine, owned streaming/LOB
+   recovery, close, identity, and the supported optional capability set. Each
+   row must be `SUPPORTED`, `UNSUPPORTED(reason)`, or `BLOCKED(reason)`; an
+   unrun case is `BLOCKED`, never implied supported.
+6. Required gates remain green: formatting, scoped lint/test lanes, release
+   surface synchronization, and the required feature-off lane. Advisory
+   Windows, mutation, changed-line coverage, public-API, and PL/SQL lanes stay
+   advisory by operator decision.
+
+### Current evidence and residual risks
+
+On 2026-09-16, the explicitly selected local Free23 basic-auth run passed
+against independent driver-cx and official connections. It proved session
+identity, exact NUMBER/TSTZ serialization, dense and sparse VECTOR
+serialization, missing-object error-envelope parity, and classified
+DDL/DML rollback/commit behavior. The target creates and drops uniquely named
+local VECTOR tables; it does not credit an absent pre-seeded fixture. This is
+one basic-auth row, not a qualified matrix. TCPS + PEM remains live-required
+and uncredited.
+
+The Free23 run closed the observed VECTOR gap
+(`oraclemcp-xoflp.1.3`) and exposed/fixed the beta driver's malformed
+negative-minute timestamp display in the adapter. The following review
+findings remain default-flip blockers until independently resolved and tested:
+
+- `oraclemcp-xoflp.1.4`: actor mailbox admission can retain a stale, overly
+  generous driver call timeout after queueing. The timeout must be tightened at
+  actor admission and shown by a queued-deadline regression test.
+- `oraclemcp-xoflp.1.5`: terminal close and an abandoned official row stream do
+  not yet prove actor/session termination and quarantine. They require their
+  own ownership/lifecycle regression tests before a live parity run can be
+  treated as complete.
+- `oraclemcp-xoflp.1.6`: the blocking connect/handshake begins before a
+  driver call timeout is set. It needs a remaining-deadline bound plus a
+  deterministic stalled-connect retirement proof.
+- `oraclemcp-xoflp.1.8`: DATE and plain TIMESTAMP must be formatted
+  metadata-aware, without fabricating a UTC `Z` suffix; their serialized
+  regression rows remain unproven.
+- `oraclemcp-xoflp.1.10`: actor thread startup must return a typed,
+  redacted acquisition failure instead of panicking under thread/PID
+  exhaustion, with an injected spawn-failure proof.
+
+The pinned official driver is also `26.0.0-beta.3`; the beta API/version risk
+remains a release-signoff consideration even if all behavioral rows pass.
+
+### Retire path after a future approval
+
+Once the operator approves an official-first default and every direct
+driver-cx capability has an official replacement, removal remains localized:
+delete the driver-cx registration in `CONNECTION_BACKEND_REGISTRY`, delete the
+adjacent acquisition-only fallback branch, remove the driver-cx dependency and
+feature wiring, then run the same contract matrix. No query, execute,
+transaction, guard, audit, or dispatch call site should change. Until IAM,
+auto-login wallets, CQN/pool behavior, and other driver-cx-only capabilities
+are separately qualified, a default flip is not a driver-cx retirement.
