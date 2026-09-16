@@ -59,11 +59,14 @@ Automatic cross-driver routing is restricted to connection acquisition.
 Driver-cx is the primary acquisition for every capability. For compatible basic
 password authentication without a mutable wallet directory only, a **raw
 socket/auth acquisition failure before a driver-cx session exists** may make one
-guarded official-driver alternate attempt and, if that alternate fails, one
-fresh driver-cx fallback attempt. Identity setup, canonical NLS setup, and
-configured session-statement failures are post-session failures: they propagate
-from the single driver-cx attempt and never start the official driver or a
-fresh driver-cx retry. IAM/OCI-ADB tokens, `cwallet.sso` auto-login, all mutable
+guarded official-driver alternate attempt. Only a **raw acquisition failure
+inside that official alternate, before it has performed post-connect setup**,
+may make one fresh driver-cx fallback attempt. Identity setup, canonical NLS
+setup, and configured session-statement failures are post-session failures:
+they propagate from the single driver-cx attempt and never start the official
+driver or a fresh driver-cx retry. Official timeout/NLS/session-setup failures
+likewise propagate after the official attempt and never open a new driver-cx
+session. IAM/OCI-ADB tokens, `cwallet.sso` auto-login, all mutable
 wallet-directory configurations, external/proxy, and other driver-cx-only
 authentication never reach the official adapter. The router never retries a
 statement or transfers an opened session across drivers.
@@ -108,7 +111,9 @@ connection attempt returns; the only recorded attempt is driver-cx.
 `driver_cx_post_session_setup_failures_never_attempt_the_official_alternate`
 injects each post-session phase (identity, canonical NLS, and configured session
 statement) and proves its original error propagates after exactly one driver-cx
-attempt. `driver_cx_connect_error_tries_guarded_official_alternate_for_capable_auth`
+attempt. `official_post_connect_setup_failures_never_retry_driver_cx` injects
+canonical-NLS and configured-session-statement errors after official connect and
+proves the sequence stops at driver-cx then official. `driver_cx_connect_error_tries_guarded_official_alternate_for_capable_auth`
 retains the complementary raw-acquisition alternate proof.
 There is no fallback after a session has been returned, and no statement is
 retried or migrated across drivers. Without the feature, the registry contains
@@ -133,8 +138,8 @@ machine before that bead can close.
 Driver-cx is intentionally permanent in this design. It is the default primary
 for every connection and the direct-only backend for IAM/OCI-ADB tokens and
 `cwallet.sso` auto-login. It is also the single fresh, logged safety fallback
-when the guarded official alternate cannot be used. The router registration and
-its adjacent fallback branch must remain. There is no Tier-3 driver-cx
+after a **raw pre-session** failure in the guarded official alternate. The
+router registration and its adjacent fallback branch must remain. There is no Tier-3 driver-cx
 retirement plan in this ADR; any future removal needs a new operator decision
 after every direct and fallback capability has an official replacement.
 
@@ -261,12 +266,13 @@ before a queued second call can execute. The mutable-wallet TOCTOU gap
 excluding every mutable wallet-directory capability from the official
 registration; direct adapter qualification cannot re-enable that path without
 an immutable verified-consumption design and a new review.
-The acquisition-boundary gap (`oraclemcp-xoflp.1.13`) is resolved: the typed
-factory labels failures as raw acquisition, identity setup, canonical NLS, or a
-configured session statement. Only the first can reach the official alternate.
-The regression injects every post-session driver-cx phase and proves its
-original error returns after exactly one driver-cx attempt; no second session is
-opened under another backend.
+The acquisition-boundary gaps (`oraclemcp-xoflp.1.13`,
+`oraclemcp-xoflp.1.14`) are resolved: the typed factory labels failures as raw
+acquisition, driver-cx identity/canonical-NLS/configured-statement setup, or
+official post-connect setup. Only raw acquisition can cross a backend boundary.
+The regressions inject every post-session driver-cx phase plus official canonical
+NLS/configured-statement failures and prove the original error returns without a
+second session under another backend.
 The following residual limits remain explicitly tracked:
 
 - `oraclemcp-xoflp.1.6`: the pinned `26.0.0-beta.3` source invokes blocking

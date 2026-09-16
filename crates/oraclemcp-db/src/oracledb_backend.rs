@@ -61,6 +61,27 @@ pub struct OfficialOracleConnection {
     closed: AtomicBool,
 }
 
+/// Classifies an official-driver establishment failure by whether a physical
+/// session could already have been used for setup work.
+///
+/// The registry may try driver-cx after [`Self::RawAcquisition`] only. Once
+/// `oracledb::connect` has returned, even a failed timeout/NLS/session setup
+/// can have an observable effect on that session, so a fresh backend would be
+/// a forbidden second session rather than an acquisition retry.
+#[derive(Debug)]
+pub(crate) enum ConnectFailure {
+    RawAcquisition(DbError),
+    PostConnectSetup(DbError),
+}
+
+impl ConnectFailure {
+    pub(crate) fn into_error(self) -> DbError {
+        match self {
+            Self::RawAcquisition(error) | Self::PostConnectSetup(error) => error,
+        }
+    }
+}
+
 impl OfficialOracleConnection {
     /// Opens a feature-gated official-driver connection through the actor.
     ///
@@ -69,14 +90,37 @@ impl OfficialOracleConnection {
     /// and unsupported TLS overrides are refused here so a later selector can
     /// route them directly to driver-cx; none is silently dropped.
     pub async fn connect(cx: &Cx, options: OracleConnectOptions) -> Result<Self, DbError> {
-        checkpoint(cx, "official Oracle connect before actor startup")?;
-        validate_supported_connect_options(&options)?;
+        Self::connect_for_backend_registry(cx, options)
+            .await
+            .map_err(ConnectFailure::into_error)
+    }
 
-        let connect_slot = OfficialConnectGuard::shared().acquire(cx).await?;
-        let actor = Arc::new(BlockingConnectionActor::spawn(
-            move || OfficialActorResource::with_connect_slot(connect_slot),
-            execute_actor_command,
-        )?);
+    /// Opens an official connection while retaining the phase needed by the
+    /// backend registry's acquisition-only fallback policy.
+    ///
+    /// Actor-boundary failures are intentionally conservative: the caller
+    /// cannot determine whether the synchronous actor had advanced beyond the
+    /// raw native connect, so they are treated as post-connect and never cause
+    /// a new driver-cx session.
+    pub(crate) async fn connect_for_backend_registry(
+        cx: &Cx,
+        options: OracleConnectOptions,
+    ) -> Result<Self, ConnectFailure> {
+        checkpoint(cx, "official Oracle connect before actor startup")
+            .map_err(ConnectFailure::RawAcquisition)?;
+        validate_supported_connect_options(&options).map_err(ConnectFailure::RawAcquisition)?;
+
+        let connect_slot = OfficialConnectGuard::shared()
+            .acquire(cx)
+            .await
+            .map_err(ConnectFailure::RawAcquisition)?;
+        let actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                move || OfficialActorResource::with_connect_slot(connect_slot),
+                execute_actor_command,
+            )
+            .map_err(ConnectFailure::RawAcquisition)?,
+        );
         let adapter = Self {
             wire_limits: Arc::new(Mutex::new(OfficialWireLimits {
                 call_timeout: options.call_timeout,
@@ -87,7 +131,13 @@ impl OfficialOracleConnection {
             actor,
             closed: AtomicBool::new(false),
         };
-        let budget = adapter.effective_budget(cx, "official Oracle connect")?;
+        let budget = match adapter.effective_budget(cx, "official Oracle connect") {
+            Ok(budget) => budget,
+            Err(error) => {
+                Self::discard_failed_connect(&adapter.actor);
+                return Err(ConnectFailure::RawAcquisition(error));
+            }
+        };
         let reply = match adapter
             .actor
             .call_with_deadline(
@@ -103,23 +153,24 @@ impl OfficialOracleConnection {
             Ok(reply) => reply,
             Err(error) => {
                 Self::discard_failed_connect(&adapter.actor);
-                return Err(error);
+                return Err(ConnectFailure::PostConnectSetup(error));
             }
         };
-        if let Err(error) = expect_unit(reply, "connect") {
+        if let Err(error) = expect_connect_reply(reply) {
             Self::discard_failed_connect(&adapter.actor);
             return Err(error);
         }
         if let Err(error) = checkpoint(cx, "official Oracle connect after actor startup") {
             Self::discard_failed_connect(&adapter.actor);
-            return Err(error);
+            return Err(ConnectFailure::PostConnectSetup(error));
         }
         Ok(adapter)
     }
 
-    /// A failed acquisition never leaves its just-created owner actor available
-    /// for another command. This covers synchronous driver connection errors,
-    /// deadline/cancellation reports, and an unexpected connect reply.
+    /// A failed establishment never leaves its just-created owner actor
+    /// available for another command. This covers synchronous driver
+    /// connection/setup errors, deadline/cancellation reports, and an
+    /// unexpected connect reply.
     fn discard_failed_connect(actor: &BlockingConnectionActor<OfficialCommand, OfficialReply>) {
         actor.discard_nonblocking("official Oracle connection establishment failed");
     }
@@ -369,6 +420,7 @@ impl OfficialCommand {
 
 enum OfficialReply {
     Unit,
+    ConnectFailed(ConnectFailure),
     ConnectionInfo(Box<OracleConnectionInfo>),
     Rows(Vec<OracleRow>),
     StreamStarted { columns: Vec<String> },
@@ -481,21 +533,52 @@ fn execute_actor_command(
                     "official Oracle actor received a duplicate connect command".to_owned(),
                 ));
             }
-            let config = config_from_options(&options)?;
-            let connection = oracledb::connect(config)
-                .map_err(|error| official_error(error, OfficialOperation::Connect))?;
-            connection
+            let config = match config_from_options(&options) {
+                Ok(config) => config,
+                Err(error) => {
+                    return Ok(OfficialReply::ConnectFailed(
+                        ConnectFailure::RawAcquisition(error),
+                    ));
+                }
+            };
+            let connection = match oracledb::connect(config) {
+                Ok(connection) => connection,
+                Err(error) => {
+                    return Ok(OfficialReply::ConnectFailed(
+                        ConnectFailure::RawAcquisition(official_error(
+                            error,
+                            OfficialOperation::Connect,
+                        )),
+                    ));
+                }
+            };
+            if let Err(error) = connection
                 .set_call_timeout(timeout)
-                .map_err(|error| official_error(error, OfficialOperation::Connect))?;
+                .map_err(|error| official_error(error, OfficialOperation::Connect))
+            {
+                return Ok(OfficialReply::ConnectFailed(
+                    ConnectFailure::PostConnectSetup(error),
+                ));
+            }
             for statement in canonical_nls_statements() {
-                connection
+                if let Err(error) = connection
                     .execute(statement, &[])
-                    .map_err(|error| official_error(error, OfficialOperation::Connect))?;
+                    .map_err(|error| official_error(error, OfficialOperation::Connect))
+                {
+                    return Ok(OfficialReply::ConnectFailed(
+                        ConnectFailure::PostConnectSetup(error),
+                    ));
+                }
             }
             for statement in &options.session_statements {
-                connection
+                if let Err(error) = connection
                     .execute(statement, &[])
-                    .map_err(|error| official_error(error, OfficialOperation::Connect))?;
+                    .map_err(|error| official_error(error, OfficialOperation::Connect))
+                {
+                    return Ok(OfficialReply::ConnectFailed(
+                        ConnectFailure::PostConnectSetup(error),
+                    ));
+                }
             }
             resource.connection = Some(connection);
             resource.release_connect_slot();
@@ -1104,8 +1187,21 @@ fn official_error(error: oracledb::Error, operation: OfficialOperation) -> DbErr
 fn expect_unit(reply: OfficialReply, operation: &str) -> Result<(), DbError> {
     match reply {
         OfficialReply::Unit => Ok(()),
+        OfficialReply::ConnectFailed(_) => Err(DbError::Internal(format!(
+            "official Oracle actor returned an unexpected connect failure reply for {operation}"
+        ))),
         _ => Err(DbError::Internal(format!(
             "official Oracle actor returned an unexpected {operation} reply"
+        ))),
+    }
+}
+
+fn expect_connect_reply(reply: OfficialReply) -> Result<(), ConnectFailure> {
+    match reply {
+        OfficialReply::Unit => Ok(()),
+        OfficialReply::ConnectFailed(failure) => Err(failure),
+        _ => Err(ConnectFailure::PostConnectSetup(DbError::Internal(
+            "official Oracle actor returned an unexpected connect reply".to_owned(),
         ))),
     }
 }
