@@ -848,7 +848,7 @@ function SessionsWorkspace(): React.ReactElement {
       )) {
         return;
       }
-      const outcome = decodeOperatorOutcome(200, response);
+      const outcome = sessionLevelOutcomeFromResponse(response);
       setLastResult({ state: outcome.state, action: request.action, response, outcome });
       const nextConfirm = confirmationFromResponse(response);
       if (request.action === "preview") {
@@ -1142,6 +1142,51 @@ type SessionLevelResult = {
   response: OperatorResponse<WorkbenchActionData> | null;
   outcome: OperatorOutcome;
 };
+
+/**
+ * Elevation previews are deliberately inspectable even when the profile denies
+ * the requested level. The successful MCP envelope only proves the preview was
+ * delivered; the nested gate decides whether the requested elevation is usable.
+ */
+export function sessionLevelOutcomeFromResponse(
+  response: OperatorResponse<WorkbenchActionData>
+): OperatorOutcome {
+  const transportOutcome = decodeOperatorOutcome(200, response);
+  if (transportOutcome.state !== "success") {
+    return transportOutcome;
+  }
+  const payload = mcpResult(response.data.mcp_response);
+  const gate = isRecord(payload) && isRecord(payload["gate"]) ? payload["gate"] : null;
+  if (!gate) {
+    return transportOutcome;
+  }
+  switch (stringValue(gate["decision"], "").toLowerCase()) {
+    case "blocked":
+      return {
+        state: "refused",
+        message: "The profile blocks the requested operating-level elevation.",
+        nextSteps: ["Choose a profile whose maximum level permits this elevation."],
+        errorClass: null
+      };
+    case "require_step_up":
+      return {
+        state: "partial",
+        message: "A confirmation is required before the operating-level elevation can apply.",
+        nextSteps: ["Confirm this exact elevation before treating the session level as changed."],
+        errorClass: null
+      };
+    case "allow":
+    case "allow_lowering":
+      return transportOutcome;
+    default:
+      return {
+        state: "partial",
+        message: "The elevation gate decision was not recognized; no elevation was treated as applied.",
+        nextSteps: ["Refresh the session state and preview the elevation again."],
+        errorClass: null
+      };
+  }
+}
 
 const operatingLevels: OperatingLevel[] = ["READ_WRITE", "DDL", "ADMIN"];
 

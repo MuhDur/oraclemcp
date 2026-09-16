@@ -55,6 +55,7 @@ import {
   schemaDiffInputIdentity,
   sessionLaneCancellationReady,
   sessionAuthorityQueriesReady,
+  sessionLevelOutcomeFromResponse,
   invalidReviewCursorError,
   updateAuditFilterDraft,
   visibleReviewProposals,
@@ -1261,6 +1262,29 @@ describe("Workbench submission identity hardening", () => {
     expect(reviewGrantReady(true, duringAttempt.confirm, duringAttempt.acknowledged)).toBe(false);
     const afterFailure = duringAttempt;
     expect(reviewGrantReady(true, afterFailure.confirm, afterFailure.acknowledged)).toBe(false);
+  });
+});
+
+describe("session elevation guard outcome hardening", () => {
+  const elevationPreview = (decision: string): OperatorResponse<WorkbenchActionData> =>
+    response("/operator/v1/session/set-level", {
+      status: "forwarded",
+      mcp_tool: "oracle_set_session_level",
+      mcp_response: { result: { structuredContent: { gate: { decision } } } }
+    }) as OperatorResponse<WorkbenchActionData>;
+
+  it("does not label a blocked elevation preview as success", () => {
+    const outcome = sessionLevelOutcomeFromResponse(elevationPreview("blocked"));
+
+    expect(outcome).toMatchObject({ state: "refused" });
+    expect(outcome.state).not.toBe("success");
+  });
+
+  it("does not label a confirmation-required elevation preview as applied", () => {
+    const outcome = sessionLevelOutcomeFromResponse(elevationPreview("require_step_up"));
+
+    expect(outcome).toMatchObject({ state: "partial" });
+    expect(outcome.state).not.toBe("success");
   });
 });
 
