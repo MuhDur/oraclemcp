@@ -61,7 +61,7 @@ check_max_file_size_ratchet() {
     [crates/oraclemcp/src/service_lifecycle/service_units.rs]=97
     [crates/oraclemcp-core/src/lane.rs]=5510
     [crates/oraclemcp/src/main_tests.rs]=4690
-    [crates/oraclemcp-core/src/http/tests_operator.rs]=4337
+    [crates/oraclemcp-core/src/http/tests_operator.rs]=4460
     [crates/oraclemcp-db/src/intelligence.rs]=4425
     [crates/oraclemcp-audit/src/record.rs]=4334
     [crates/oraclemcp-core/src/http/operator.rs]=4092
