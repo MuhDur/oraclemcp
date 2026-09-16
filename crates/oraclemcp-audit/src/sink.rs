@@ -10,7 +10,7 @@
 //! log, at-most-once execute); pure reads may use a batched group-commit flush.
 
 use std::fs::{File, OpenOptions, TryLockError};
-use std::io::{BufReader, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
@@ -242,7 +242,13 @@ impl AuditLogLock {
             Err(TryLockError::WouldBlock) => {
                 return Err(AuditError::Locked {
                     path: audit_path.display().to_string(),
-                    holder_pid: read_holder_pid(&lock_path),
+                    // The lock contender already holds an authenticated,
+                    // no-follow descriptor for this exact sidecar. Reusing it
+                    // avoids a second pathname lookup between validation and
+                    // the best-effort PID hint, and bounds a maliciously large
+                    // sidecar before returning the fail-closed contention
+                    // error.
+                    holder_pid: read_holder_pid(&mut file),
                 });
             }
             Err(TryLockError::Error(e)) => {
@@ -271,17 +277,22 @@ impl Drop for AuditLogLock {
     }
 }
 
-/// Read a pid previously written to the lock sidecar. Best-effort: any I/O or
-/// parse failure yields `None` (the contention message just omits the pid). On
-/// Windows the holder's exclusive `LockFileEx` lock is mandatory and blocks this
-/// read, so a contender's pid hint is legitimately absent there; the fail-closed
-/// refusal itself does not depend on it.
-fn read_holder_pid(lock_path: &Path) -> Option<u32> {
-    std::fs::read_to_string(lock_path)
-        .ok()?
-        .trim()
-        .parse::<u32>()
-        .ok()
+/// Read a PID previously written to an already-open lock sidecar descriptor.
+/// Best-effort: any I/O or parse failure yields `None` (the contention message
+/// just omits the PID). On Windows the holder's exclusive `LockFileEx` lock is
+/// mandatory and blocks the contender descriptor read, so a PID hint is
+/// legitimately absent there; the fail-closed refusal itself does not depend on
+/// it.
+const MAX_LOCK_HOLDER_PID_BYTES: u64 = 64;
+
+fn read_holder_pid(file: &mut File) -> Option<u32> {
+    file.seek(SeekFrom::Start(0)).ok()?;
+    let mut contents = String::new();
+    (&mut *file)
+        .take(MAX_LOCK_HOLDER_PID_BYTES)
+        .read_to_string(&mut contents)
+        .ok()?;
+    contents.trim().parse::<u32>().ok()
 }
 
 // Test-only observability for the parent-directory fsync (bead
@@ -2374,6 +2385,65 @@ mod tests {
             assert_eq!(rec.seq, (i + 1) as u64);
             prev = rec.entry_hash;
         }
+    }
+
+    #[test]
+    fn holder_pid_hint_reads_only_a_bounded_open_descriptor_prefix() {
+        // Contention must reject promptly even if a sidecar has unexpectedly
+        // large content. The PID is only an optional operator hint, so reading
+        // past this small prefix would add no value while reopening the path
+        // would reintroduce a validation/read TOCTOU.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl.lock");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .expect("create lock sidecar");
+        file.write_all(&vec![b'9'; MAX_LOCK_HOLDER_PID_BYTES as usize + 1])
+            .expect("write oversized holder hint");
+        file.seek(SeekFrom::Start(0)).expect("rewind sidecar");
+
+        assert_eq!(
+            read_holder_pid(&mut file),
+            None,
+            "an oversized malformed hint is omitted, never trusted"
+        );
+        assert_eq!(
+            file.stream_position().expect("position after bounded read"),
+            MAX_LOCK_HOLDER_PID_BYTES,
+            "the hint reader must not consume an unbounded sidecar"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn oversized_locked_sidecar_still_returns_the_fail_closed_contention_error() {
+        // Advisory Unix locks do not prevent another descriptor from writing
+        // the sidecar. Even so, a contender must return `Locked` promptly
+        // rather than allocating the full PID-hint file or opening its path a
+        // second time.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let first = FileAuditSink::open(&path).expect("first writer opens");
+        std::fs::write(
+            lock_path_for(&path),
+            vec![b'9'; MAX_LOCK_HOLDER_PID_BYTES as usize * 1024],
+        )
+        .expect("replace advisory PID hint with oversized content");
+
+        assert!(
+            matches!(
+                FileAuditSink::open(&path),
+                Err(AuditError::Locked {
+                    holder_pid: None,
+                    ..
+                })
+            ),
+            "oversized PID hint must not prevent the second writer from failing closed"
+        );
+        drop(first);
     }
 
     #[test]

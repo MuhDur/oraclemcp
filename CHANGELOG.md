@@ -28,6 +28,9 @@ unchanged in contract.
 - **Audit head-anchor sidecars are read fail-closed.** Link, FIFO, and
   oversized sidecars are rejected through a bounded no-follow descriptor before
   audit verification or service startup can trust them.
+- **Audit lock contention reads its PID hint from the authenticated descriptor.**
+  An oversized or replaced lock sidecar can no longer trigger an unbounded
+  pathname read before the competing writer receives its fail-closed refusal.
 - **Approved config writes and the entire durable-spool lifecycle retain
   no-follow directory capabilities.** A local parent-directory swap now
   refuses a config write before it can redirect it, and cannot redirect spool
