@@ -3116,6 +3116,14 @@ pub(super) fn config_error_value(error: ConfigOpsError) -> (u16, Value) {
                 "message": "config file is not valid UTF-8",
             }),
         ),
+        ConfigOpsError::FileTooLarge { max_bytes, .. } => (
+            413,
+            json!({
+                "error": "config_file_too_large",
+                "message": "config file exceeds the bounded read limit",
+                "max_bytes": max_bytes,
+            }),
+        ),
         ConfigOpsError::Config(_) => (
             400,
             json!({

@@ -360,6 +360,10 @@ FAKE
 cat >"$provenance_bin/jq" <<'FAKE'
 #!/bin/bash
 set -euo pipefail
+# The workflow runs `cargo metadata | jq`. Consume the producer before
+# returning the deterministic fixture value; otherwise cargo can receive
+# SIGPIPE under `pipefail` when this tiny fake exits first.
+cat >/dev/null
 printf '%s\n' "${VERSION:?}"
 FAKE
 cat >"$provenance_bin/bash" <<'FAKE'

@@ -28,6 +28,14 @@ fn config_preview_errors_keep_their_distinct_operator_codes() {
             409,
             "config_preview_confirmation_required",
         ),
+        (
+            ConfigOpsError::FileTooLarge {
+                path: std::path::PathBuf::from("profiles.toml"),
+                max_bytes: 16 * 1024 * 1024,
+            },
+            413,
+            "config_file_too_large",
+        ),
     ] {
         let (actual_status, body) = config_error_value(error);
         assert_eq!(actual_status, status);

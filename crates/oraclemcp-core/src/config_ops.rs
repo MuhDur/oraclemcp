@@ -8,8 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -26,6 +25,9 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::file_store::{FileStore, FileStoreError, ServiceOwner};
+
+#[cfg(test)]
+use std::fs;
 
 #[cfg(unix)]
 use cap_std::fs::{DirBuilderExt as _, OpenOptionsExt as _};
@@ -48,6 +50,14 @@ pub enum ConfigOpsError {
     InvalidUtf8 {
         /// Path being read.
         path: PathBuf,
+    },
+    /// A config file exceeds the bounded read limit.
+    #[error("config file {path} exceeds the {max_bytes}-byte read limit")]
+    FileTooLarge {
+        /// Path being read.
+        path: PathBuf,
+        /// Maximum admitted file size.
+        max_bytes: usize,
     },
     /// Target path shape is unsafe for atomic replacement.
     #[error("invalid config target path: {0}")]
@@ -357,7 +367,7 @@ impl ConfigOpsBackend {
         draft_toml: &str,
     ) -> Result<ConfigDraftPlan, ConfigOpsError> {
         let target_path = normalize_target_path(target_path.as_ref())?;
-        let current_bytes = read_or_empty(&target_path)?;
+        let (current_bytes, original_existed) = read_or_empty(&target_path)?;
         let current_toml = bytes_to_toml(&target_path, &current_bytes)?;
         let current = OracleMcpConfig::from_toml_str(current_toml)?;
         let draft = OracleMcpConfig::from_toml_str(draft_toml)?;
@@ -367,7 +377,7 @@ impl ConfigOpsBackend {
         let draft_bytes = draft_toml.as_bytes().to_vec();
         let preview = ConfigDraftPreview {
             backup_path: backup_path_for(&target_path)?,
-            original_existed: target_path.exists(),
+            original_existed,
             current_sha256: oraclemcp_audit::sha256_hex(&current_bytes),
             draft_sha256: oraclemcp_audit::sha256_hex(&draft_bytes),
             redacted_diff: redacted_diff(&before, &after),
@@ -390,7 +400,7 @@ impl ConfigOpsBackend {
         plan: &ConfigDraftPlan,
     ) -> Result<ConfigApplyReport, ConfigOpsError> {
         let _mutation = self.owner.mutation_guard();
-        let current_bytes = read_or_empty(&plan.preview.target_path)?;
+        let (current_bytes, _) = read_or_empty(&plan.preview.target_path)?;
         let actual_sha256 = oraclemcp_audit::sha256_hex(&current_bytes);
         if actual_sha256 != plan.preview.current_sha256 {
             return Err(ConfigOpsError::CurrentChanged {
@@ -431,7 +441,7 @@ impl ConfigOpsBackend {
         report: &ConfigApplyReport,
     ) -> Result<AppliedConfigRollback, ConfigOpsError> {
         let _mutation = self.owner.mutation_guard();
-        let applied_bytes = read_or_empty(&report.target_path)?;
+        let (applied_bytes, _) = read_or_empty(&report.target_path)?;
         let actual_sha256 = oraclemcp_audit::sha256_hex(&applied_bytes);
         if actual_sha256 != report.applied_sha256 {
             return Err(ConfigOpsError::CurrentChanged {
@@ -439,8 +449,7 @@ impl ConfigOpsBackend {
                 actual_sha256,
             });
         }
-        let backup =
-            fs::read(&report.backup_path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
+        let backup = read_required(&report.backup_path)?;
         let applied_toml = bytes_to_toml(&report.target_path, &applied_bytes)?;
         let backup_toml = bytes_to_toml(&report.backup_path, &backup)?;
         let applied_config = OracleMcpConfig::from_toml_str(applied_toml)?;
@@ -485,6 +494,10 @@ pub struct ConfigOpsService {
 
 const CONFIG_PREVIEW_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_REVIEWED_CONFIG_PREVIEWS: usize = 128;
+/// Bound all local config and backup descriptor reads. This comfortably admits
+/// large profile inventories while refusing an unbounded read from a replaced
+/// or malformed local file.
+const MAX_CONFIG_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 struct ReviewedConfigDraft {
     binding_sha256: String,
@@ -517,14 +530,14 @@ impl ConfigOpsService {
 
     /// Current target status, redacted for UI/protocol use.
     pub fn status(&self) -> Result<ConfigOpsStatus, ConfigOpsError> {
-        let current_bytes = read_or_empty(&self.target_path)?;
+        let (current_bytes, target_exists) = read_or_empty(&self.target_path)?;
         let current_toml = bytes_to_toml(&self.target_path, &current_bytes)?;
         let current = OracleMcpConfig::from_toml_str(current_toml)?;
         let mut profiles = current.list_profiles();
         profiles.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(ConfigOpsStatus {
             target_path: self.target_path.clone(),
-            target_exists: self.target_path.exists(),
+            target_exists,
             current_sha256: oraclemcp_audit::sha256_hex(&current_bytes),
             default_profile: current.default_profile,
             dashboard_workbench: current.http.dashboard_workbench,
@@ -1240,8 +1253,24 @@ fn lexically_normalize_directory(path: &Path) -> Result<PathBuf, ConfigOpsError>
     Ok(normalized)
 }
 
-fn read_or_empty(path: &Path) -> Result<Vec<u8>, ConfigOpsError> {
-    match fs::symlink_metadata(path) {
+/// Read one config file through a held no-follow parent capability.
+///
+/// The `(bytes, exists)` result preserves the legacy absent-config behavior
+/// without relying on a separate path lookup. A parent or file replacement
+/// after the first observation cannot redirect the read: the held parent is
+/// retained, the file is opened without following links, and its identity is
+/// checked again from the opened descriptor.
+fn read_or_empty(path: &Path) -> Result<(Vec<u8>, bool), ConfigOpsError> {
+    // ConfigOpsService historically accepts legacy relative paths (including
+    // lexical `..` components). Normalize them before the capability walk so
+    // that support remains intact without allowing traversal at open time.
+    let normalized_path = normalize_target_path(path)?;
+    let path = normalized_path.as_path();
+    let (parent_path, name) = parent_path_and_name(path)?;
+    let Some(parent) = open_existing_dir_nofollow_if_present(&parent_path)? else {
+        return Ok((Vec::new(), false));
+    };
+    let before = match parent.symlink_metadata(&name) {
         Ok(metadata) if metadata.file_type().is_symlink() => {
             return Err(ConfigOpsError::InvalidTargetPath(format!(
                 "{} is a symlink",
@@ -1254,11 +1283,60 @@ fn read_or_empty(path: &Path) -> Result<Vec<u8>, ConfigOpsError> {
                 path.display()
             )));
         }
-        Ok(_) => {}
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(ConfigOpsError::Io(e.to_string())),
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), false));
+        }
+        Err(error) => return Err(ConfigOpsError::Io(error.to_string())),
+    };
+    run_config_read_hook();
+
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = parent.open_with(&name, &options).map_err(|error| {
+        ConfigOpsError::Io(format!("failed to open {}: {error}", path.display()))
+    })?;
+    let after = file.metadata().map_err(|error| {
+        ConfigOpsError::Io(format!("failed to inspect {}: {error}", path.display()))
+    })?;
+    verify_held_parent(&parent, &parent_path, path)?;
+    if !after.is_file() || before.dev() != after.dev() || before.ino() != after.ino() {
+        return Err(ConfigOpsError::InvalidTargetPath(format!(
+            "{} changed while it was opened",
+            path.display()
+        )));
     }
-    fs::read(path).map_err(|e| ConfigOpsError::Io(e.to_string()))
+    if after.len() > MAX_CONFIG_FILE_BYTES as u64 {
+        return Err(ConfigOpsError::FileTooLarge {
+            path: path.to_path_buf(),
+            max_bytes: MAX_CONFIG_FILE_BYTES,
+        });
+    }
+    let mut bytes = Vec::with_capacity(after.len() as usize);
+    file.take((MAX_CONFIG_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| {
+            ConfigOpsError::Io(format!("failed to read {}: {error}", path.display()))
+        })?;
+    if bytes.len() > MAX_CONFIG_FILE_BYTES {
+        return Err(ConfigOpsError::FileTooLarge {
+            path: path.to_path_buf(),
+            max_bytes: MAX_CONFIG_FILE_BYTES,
+        });
+    }
+    Ok((bytes, true))
+}
+
+fn read_required(path: &Path) -> Result<Vec<u8>, ConfigOpsError> {
+    let (bytes, exists) = read_or_empty(path)?;
+    if exists {
+        Ok(bytes)
+    } else {
+        Err(ConfigOpsError::Io(format!(
+            "required config file {} does not exist",
+            path.display()
+        )))
+    }
 }
 
 fn bytes_to_toml<'a>(path: &Path, bytes: &'a [u8]) -> Result<&'a str, ConfigOpsError> {
@@ -1268,7 +1346,7 @@ fn bytes_to_toml<'a>(path: &Path, bytes: &'a [u8]) -> Result<&'a str, ConfigOpsE
 }
 
 fn validate_target(path: &Path) -> Result<(), ConfigOpsError> {
-    let bytes = fs::read(path).map_err(|e| ConfigOpsError::Io(e.to_string()))?;
+    let bytes = read_required(path)?;
     let toml = bytes_to_toml(path, &bytes)?;
     OracleMcpConfig::from_toml_str(toml)?;
     Ok(())
@@ -1351,16 +1429,29 @@ fn parent_path_and_name(path: &Path) -> Result<(PathBuf, OsString), ConfigOpsErr
 /// resulting directory capability for all writes. A later pathname swap cannot
 /// redirect writes made through that held capability.
 fn open_existing_dir_nofollow(path: &Path) -> Result<CapDir, ConfigOpsError> {
+    open_existing_dir_nofollow_if_present(path)?.ok_or_else(|| {
+        ConfigOpsError::InvalidTargetPath(format!("{} does not exist", path.display()))
+    })
+}
+
+/// Open every existing parent component without following a symlink. `None`
+/// means the directory was absent, which callers may treat as an absent config
+/// rather than conflating it with a symlink or other unsafe directory.
+fn open_existing_dir_nofollow_if_present(path: &Path) -> Result<Option<CapDir>, ConfigOpsError> {
     let mut current = capability_root(path)?;
     for component in path.components() {
         match component {
             Component::Normal(name) => {
-                current = current.open_dir_nofollow(name).map_err(|error| {
-                    ConfigOpsError::InvalidTargetPath(format!(
-                        "{} is not a safe directory: {error}",
-                        path.display()
-                    ))
-                })?;
+                current = match current.open_dir_nofollow(name) {
+                    Ok(next) => next,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                    Err(error) => {
+                        return Err(ConfigOpsError::InvalidTargetPath(format!(
+                            "{} is not a safe directory: {error}",
+                            path.display()
+                        )));
+                    }
+                };
             }
             Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
             Component::ParentDir => {
@@ -1371,7 +1462,7 @@ fn open_existing_dir_nofollow(path: &Path) -> Result<CapDir, ConfigOpsError> {
             }
         }
     }
-    Ok(current)
+    Ok(Some(current))
 }
 
 /// Create any missing parent component through the directory capability that
@@ -1520,9 +1611,11 @@ fn sync_cap_dir(dir: &CapDir, display_path: &Path) -> Result<(), ConfigOpsError>
 
 #[cfg(test)]
 thread_local! {
-static CONFIG_ATOMIC_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+    static CONFIG_ATOMIC_WRITE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
     static CONFIG_PARENT_CREATE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+    static CONFIG_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
@@ -1554,11 +1647,27 @@ fn run_config_parent_create_hook() {
     });
 }
 
+#[cfg(test)]
+fn set_config_read_hook(hook: impl FnOnce() + 'static) {
+    CONFIG_READ_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_config_read_hook() {
+    let hook = CONFIG_READ_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[cfg(not(test))]
 fn run_config_atomic_write_hook() {}
 
 #[cfg(not(test))]
 fn run_config_parent_create_hook() {}
+
+#[cfg(not(test))]
+fn run_config_read_hook() {}
 
 #[cfg(test)]
 mod tests {
@@ -1735,6 +1844,25 @@ mod tests {
         for secret in ["database.internal", "PRIVATE_USER", "PRIVATE_PASSWORD"] {
             assert!(!rendered.contains(secret), "status leaked {secret}");
         }
+    }
+
+    #[test]
+    fn status_accepts_a_regular_config_created_by_an_external_editor() {
+        let root = test_root("status-external-editor");
+        fs::create_dir_all(&root).expect("create test root");
+        let target = root.join("profiles.toml");
+        let current = profile_config("editor-written:1521/svc");
+        fs::write(&target, &current).expect("external editor writes config");
+        let backend = ConfigOpsBackend::open(root.join("state")).expect("config ops");
+        let service = ConfigOpsService::new(backend, target, None);
+
+        let status = service
+            .status()
+            .expect("status reads external editor config");
+        assert_eq!(
+            status.current_sha256,
+            oraclemcp_audit::sha256_hex(current.as_bytes())
+        );
     }
 
     #[test]
@@ -2594,6 +2722,165 @@ mod tests {
         assert_eq!(
             fs::read_to_string(&target).expect("preserved external"),
             external
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_read_refuses_a_parent_swap_without_returning_stale_bytes() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("config-read-parent-swap");
+        fs::create_dir_all(&root).expect("create test root");
+        let safe_parent = root.join("safe-config");
+        let moved_parent = root.join("moved-safe-config");
+        let outside_parent = root.join("outside");
+        fs::create_dir(&safe_parent).expect("create safe parent");
+        fs::create_dir(&outside_parent).expect("create outside parent");
+        let target = safe_parent.join("profiles.toml");
+        let outside_target = outside_parent.join("profiles.toml");
+        let current = profile_config("current:1521/svc");
+        let outside = profile_config("outside:1521/svc");
+        fs::write(&target, &current).expect("seed current config");
+        fs::write(&outside_target, &outside).expect("seed outside config");
+
+        let verified_parent = safe_parent.clone();
+        let moved_parent_for_hook = moved_parent.clone();
+        let replacement_parent = outside_parent.clone();
+        set_config_read_hook(move || {
+            fs::rename(&verified_parent, &moved_parent_for_hook).expect("move held parent");
+            symlink(&replacement_parent, &verified_parent).expect("replace parent with symlink");
+        });
+
+        assert!(
+            matches!(
+                read_or_empty(&target),
+                Err(ConfigOpsError::InvalidTargetPath(_))
+            ),
+            "a parent replacement must not produce a stale config snapshot"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_target).expect("read outside target"),
+            outside,
+            "a parent swap must not redirect config reads"
+        );
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("profiles.toml"))
+                .expect("read original target through held parent"),
+            current,
+            "the original config must remain untouched when the read is refused"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_read_refuses_a_file_swap_to_a_symlink_after_metadata_check() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("config-read-file-swap");
+        fs::create_dir_all(&root).expect("create test root");
+        let parent = root.join("config");
+        fs::create_dir(&parent).expect("create config parent");
+        let target = parent.join("profiles.toml");
+        let outside_target = root.join("outside.toml");
+        let current = profile_config("current:1521/svc");
+        let outside = profile_config("outside:1521/svc");
+        fs::write(&target, &current).expect("seed current config");
+        fs::write(&outside_target, &outside).expect("seed outside config");
+
+        let target_for_hook = target.clone();
+        let outside_for_hook = outside_target.clone();
+        set_config_read_hook(move || {
+            fs::remove_file(&target_for_hook).expect("remove observed config");
+            symlink(&outside_for_hook, &target_for_hook).expect("replace config with symlink");
+        });
+
+        assert!(
+            read_or_empty(&target).is_err(),
+            "a file swapped to a symlink after metadata inspection must fail closed"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_target).expect("read outside target"),
+            outside,
+            "the symlink target must never be read or modified"
+        );
+    }
+
+    #[test]
+    fn config_read_refuses_files_over_the_bounded_limit() {
+        let root = test_root("config-read-limit");
+        fs::create_dir_all(&root).expect("create test root");
+        let target = root.join("profiles.toml");
+        fs::File::create(&target)
+            .and_then(|file| file.set_len((MAX_CONFIG_FILE_BYTES + 1) as u64))
+            .expect("create over-limit sparse config");
+
+        assert!(matches!(
+            read_or_empty(&target),
+            Err(ConfigOpsError::FileTooLarge { max_bytes, .. }) if max_bytes == MAX_CONFIG_FILE_BYTES
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rollback_refuses_a_parent_swap_before_a_backup_can_be_redirected() {
+        use std::os::unix::fs::symlink;
+
+        let root = test_root("config-rollback-backup-parent-swap");
+        fs::create_dir_all(&root).expect("create test root");
+        let safe_parent = root.join("safe-config");
+        let moved_parent = root.join("moved-safe-config");
+        let outside_parent = root.join("outside");
+        fs::create_dir(&safe_parent).expect("create safe parent");
+        fs::create_dir(&outside_parent).expect("create outside parent");
+        let target = safe_parent.join("profiles.toml");
+        let current = profile_config("current:1521/svc");
+        let draft = profile_config("draft:1521/svc");
+        write_atomic_path(&target, current.as_bytes()).expect("seed current config");
+
+        let backend = ConfigOpsBackend::open(root.join("state")).expect("config ops");
+        let plan = backend
+            .stage_config_draft(&target, &draft)
+            .expect("stage reviewed config");
+        let report = backend.apply_config_draft(&plan).expect("apply draft");
+        let outside_backup = outside_parent.join(
+            report
+                .backup_path
+                .file_name()
+                .expect("backup has a file name"),
+        );
+        let outside = profile_config("outside:1521/svc");
+        fs::write(&outside_backup, &outside).expect("seed redirect backup");
+
+        let verified_parent = safe_parent.clone();
+        let moved_parent_for_hook = moved_parent.clone();
+        let replacement_parent = outside_parent.clone();
+        set_config_read_hook(move || {
+            // The first read authenticates the applied target. Swap only on
+            // the second read, immediately after the backup was observed.
+            // Before this hardening, the raw `fs::read(backup_path)` would
+            // have followed the replacement pathname and applied `outside`.
+            set_config_read_hook(move || {
+                fs::rename(&verified_parent, &moved_parent_for_hook).expect("move held parent");
+                symlink(&replacement_parent, &verified_parent)
+                    .expect("replace parent with symlink");
+            });
+        });
+
+        assert!(
+            backend.rollback_applied_config(&report).is_err(),
+            "rollback must not read a backup through a swapped parent"
+        );
+        assert_eq!(
+            fs::read_to_string(moved_parent.join("profiles.toml"))
+                .expect("read original target through held parent"),
+            draft,
+            "a refused rollback must preserve the applied generation"
+        );
+        assert_eq!(
+            fs::read_to_string(&outside_backup).expect("read redirect backup"),
+            outside,
+            "the redirect backup must never be applied"
         );
     }
 

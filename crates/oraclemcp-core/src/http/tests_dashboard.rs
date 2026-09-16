@@ -328,7 +328,7 @@ fn operator_config_draft_apply_and_rollback_are_redacted_and_audited() {
         &cfg,
         operator_json_get("/operator/v1/config"),
     );
-    assert_eq!(status.status, 200);
+    assert_eq!(status.status, 200, "{}", response_json(&status));
     let status_json = response_json(&status);
     let current_sha = status_json["data"]["status"]["current_sha256"]
         .as_str()
