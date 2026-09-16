@@ -15,7 +15,7 @@ use serde_json::{Number, Value, json};
 use crate::auth_adapter::AuthAdapter;
 use crate::connection::{DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart};
 use crate::error::QuarantineOutcome;
-use crate::oracledb_actor::BlockingConnectionActor;
+use crate::oracledb_actor::{ActorAdmission, BlockingConnectionActor};
 use crate::serialize::canonical_nls_statements;
 use crate::types::{
     OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
@@ -79,14 +79,15 @@ impl OfficialOracleConnection {
             options,
             actor,
         };
-        let timeout = adapter.effective_timeout(cx, "official Oracle connect")?;
+        let budget = adapter.effective_budget(cx, "official Oracle connect")?;
         let reply = adapter
             .actor
-            .call(
+            .call_with_deadline(
                 cx,
+                budget.deadline,
                 OfficialCommand::Connect {
                     options: Box::new(adapter.options.clone()),
-                    timeout,
+                    timeout: budget.timeout,
                 },
             )
             .await?;
@@ -102,8 +103,10 @@ impl OfficialOracleConnection {
         phase: &'static str,
     ) -> Result<OfficialReply, DbError> {
         checkpoint(cx, phase)?;
-        let timeout = self.effective_timeout(cx, phase)?;
-        self.actor.call(cx, command.with_timeout(timeout)).await
+        let budget = self.effective_budget(cx, phase)?;
+        self.actor
+            .call_with_deadline(cx, budget.deadline, command.with_timeout(budget.timeout))
+            .await
     }
 
     async fn call_terminal(
@@ -113,20 +116,30 @@ impl OfficialOracleConnection {
         phase: &'static str,
     ) -> Result<OfficialReply, DbError> {
         checkpoint(cx, phase)?;
-        let timeout = self.effective_timeout(cx, phase)?;
+        let budget = self.effective_budget(cx, phase)?;
         self.actor
-            .call_terminal(cx, command.with_timeout(timeout))
+            .call_terminal_with_deadline(cx, budget.deadline, command.with_timeout(budget.timeout))
             .await
     }
 
-    fn effective_timeout(&self, cx: &Cx, phase: &'static str) -> Result<Option<Duration>, DbError> {
+    fn effective_budget(
+        &self,
+        cx: &Cx,
+        phase: &'static str,
+    ) -> Result<OfficialCallBudget, DbError> {
         let limits = self
             .wire_limits
             .lock()
             .map_err(|_| DbError::Internal("official Oracle wire-limits lock poisoned".to_owned()))?
             .clone();
-        limits.effective_timeout(cx, phase)
+        limits.effective_budget(cx, phase)
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct OfficialCallBudget {
+    timeout: Option<Duration>,
+    deadline: Option<Time>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -137,12 +150,17 @@ struct OfficialWireLimits {
 }
 
 impl OfficialWireLimits {
-    fn effective_timeout(&self, cx: &Cx, phase: &'static str) -> Result<Option<Duration>, DbError> {
+    fn effective_budget(
+        &self,
+        cx: &Cx,
+        phase: &'static str,
+    ) -> Result<OfficialCallBudget, DbError> {
         if let Some(quota) = &self.request_quota {
             quota.consume_checkpoint(phase)?;
         }
 
-        let mut remaining = self.call_timeout;
+        let mut timeout = self.call_timeout;
+        let mut effective_deadline = None;
         for (kind, deadline) in [
             ("request", self.request_deadline),
             ("context", cx.budget().deadline),
@@ -157,9 +175,14 @@ impl OfficialWireLimits {
             }
             let until_deadline =
                 Duration::from_nanos(deadline.as_nanos().saturating_sub(cx.now().as_nanos()));
-            remaining = Some(remaining.map_or(until_deadline, |limit| limit.min(until_deadline)));
+            timeout = Some(timeout.map_or(until_deadline, |limit| limit.min(until_deadline)));
+            effective_deadline =
+                Some(effective_deadline.map_or(deadline, |current: Time| current.min(deadline)));
         }
-        Ok(remaining)
+        Ok(OfficialCallBudget {
+            timeout,
+            deadline: effective_deadline,
+        })
     }
 }
 
@@ -218,6 +241,22 @@ enum OfficialCommand {
 }
 
 impl OfficialCommand {
+    fn timeout(&self) -> Option<Duration> {
+        match self {
+            Self::Connect { timeout, .. }
+            | Self::Ping { timeout }
+            | Self::Describe { timeout }
+            | Self::Query { timeout, .. }
+            | Self::StartStream { timeout, .. }
+            | Self::NextStream { timeout }
+            | Self::RecoverStream { timeout }
+            | Self::Execute { timeout, .. }
+            | Self::Commit { timeout }
+            | Self::Rollback { timeout }
+            | Self::Close { timeout } => *timeout,
+        }
+    }
+
     fn with_timeout(self, timeout: Option<Duration>) -> Self {
         match self {
             Self::Connect { options, .. } => Self::Connect { options, timeout },
@@ -244,6 +283,16 @@ impl OfficialCommand {
             Self::Rollback { .. } => Self::Rollback { timeout },
             Self::Close { .. } => Self::Close { timeout },
         }
+    }
+
+    fn tighten_for_actor_admission(self, remaining_timeout: Option<Duration>) -> Self {
+        let timeout = match (self.timeout(), remaining_timeout) {
+            (Some(configured), Some(remaining)) => Some(configured.min(remaining)),
+            (Some(configured), None) => Some(configured),
+            (None, Some(remaining)) => Some(remaining),
+            (None, None) => None,
+        };
+        self.with_timeout(timeout)
     }
 }
 
@@ -352,8 +401,9 @@ impl OfficialBind {
 fn execute_actor_command(
     resource: &mut OfficialActorResource,
     command: OfficialCommand,
+    admission: ActorAdmission,
 ) -> Result<OfficialReply, DbError> {
-    match command {
+    match command.tighten_for_actor_admission(admission.remaining_timeout()) {
         OfficialCommand::Connect { options, timeout } => {
             if resource.connection.is_some() {
                 return Err(DbError::Internal(
@@ -945,15 +995,15 @@ fn checkpoint(cx: &Cx, phase: &str) -> Result<(), DbError> {
         .map_err(|error| DbError::Cancelled(format!("{phase}: {error}")))
 }
 
-fn stream_effective_timeout(
+fn stream_effective_budget(
     wire_limits: &Mutex<OfficialWireLimits>,
     cx: &Cx,
     phase: &'static str,
-) -> Result<Option<Duration>, DbError> {
+) -> Result<OfficialCallBudget, DbError> {
     wire_limits
         .lock()
         .map_err(|_| DbError::Internal("official Oracle wire-limits lock poisoned".to_owned()))?
-        .effective_timeout(cx, phase)
+        .effective_budget(cx, phase)
 }
 
 /// Actor-owned facade for an official-driver cursor.
@@ -969,11 +1019,17 @@ impl OfficialOracleRowStream {
     }
 
     pub(crate) async fn next_row(&mut self, cx: &Cx) -> Result<Option<OracleRow>, DbError> {
-        let timeout =
-            stream_effective_timeout(&self.wire_limits, cx, "official Oracle row stream next")?;
+        let budget =
+            stream_effective_budget(&self.wire_limits, cx, "official Oracle row stream next")?;
         match self
             .actor
-            .call(cx, OfficialCommand::NextStream { timeout })
+            .call_with_deadline(
+                cx,
+                budget.deadline,
+                OfficialCommand::NextStream {
+                    timeout: budget.timeout,
+                },
+            )
             .await?
         {
             OfficialReply::NextRow(row) => Ok(row),
@@ -984,11 +1040,17 @@ impl OfficialOracleRowStream {
     }
 
     pub(crate) async fn recover(self, cx: &Cx) -> Result<(), DbError> {
-        let timeout =
-            stream_effective_timeout(&self.wire_limits, cx, "official Oracle row stream recovery")?;
+        let budget =
+            stream_effective_budget(&self.wire_limits, cx, "official Oracle row stream recovery")?;
         match self
             .actor
-            .call(cx, OfficialCommand::RecoverStream { timeout })
+            .call_with_deadline(
+                cx,
+                budget.deadline,
+                OfficialCommand::RecoverStream {
+                    timeout: budget.timeout,
+                },
+            )
             .await?
         {
             OfficialReply::Unit => Ok(()),
@@ -1206,6 +1268,27 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::str::FromStr;
+
+    #[test]
+    fn actor_admission_tightens_never_expands_driver_timeout() {
+        let command = OfficialCommand::Ping {
+            timeout: Some(Duration::from_secs(5)),
+        };
+        assert_eq!(
+            command
+                .tighten_for_actor_admission(Some(Duration::from_millis(25)))
+                .timeout(),
+            Some(Duration::from_millis(25))
+        );
+
+        let command = OfficialCommand::Ping { timeout: None };
+        assert_eq!(
+            command
+                .tighten_for_actor_admission(Some(Duration::from_millis(25)))
+                .timeout(),
+            Some(Duration::from_millis(25))
+        );
+    }
 
     #[test]
     fn number_38_digits_stays_an_exact_decimal_string() {

@@ -10,6 +10,7 @@
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use asupersync::Cx;
 use asupersync::channel::{mpsc, oneshot};
@@ -23,6 +24,26 @@ const ACTOR_ACTIVE: u8 = 0;
 const ACTOR_QUARANTINED: u8 = 1;
 const ACTOR_CLOSED: u8 = 2;
 const ACTOR_MAILBOX_CAPACITY: usize = 1;
+
+/// Fresh operation budget sampled by the actor immediately before the
+/// synchronous call begins.
+///
+/// A caller-side duration is only an upper cap: it may have become stale while
+/// its command waited in the bounded mailbox. The executor must tighten that
+/// cap with the remaining timeout before handing work to a blocking driver.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ActorAdmission {
+    remaining_timeout: Option<Duration>,
+}
+
+impl ActorAdmission {
+    /// The remaining duration until the copied absolute deadline, sampled on
+    /// the actor thread immediately before execution.
+    #[must_use]
+    pub(crate) const fn remaining_timeout(self) -> Option<Duration> {
+        self.remaining_timeout
+    }
+}
 
 /// A bounded actor which owns one synchronous physical Oracle connection.
 ///
@@ -51,7 +72,9 @@ where
     where
         Resource: 'static,
         Factory: FnOnce() -> Resource + Send + 'static,
-        Execute: FnMut(&mut Resource, Request) -> Result<Reply, DbError> + Send + 'static,
+        Execute: FnMut(&mut Resource, Request, ActorAdmission) -> Result<Reply, DbError>
+            + Send
+            + 'static,
     {
         let (mailbox, receiver) = mpsc::channel(ACTOR_MAILBOX_CAPACITY);
         let state = Arc::new(ActorState::default());
@@ -77,23 +100,35 @@ where
     /// The absolute deadline is copied from `Cx` rather than moving `Cx` to
     /// the actor. The bridge checks it before and after a blocking operation;
     /// the future adapter additionally maps it to the driver's call timeout.
+    #[cfg(test)]
     pub(crate) async fn call(&self, cx: &Cx, request: Request) -> Result<Reply, DbError> {
-        self.call_with_deadline(cx, cx.budget().deadline, request, true)
+        self.call_with_deadline(cx, cx.budget().deadline, request)
             .await
     }
 
-    /// Runs a terminal operation through the actor without a caller-side
-    /// post-completion checkpoint.
-    ///
-    /// Oracle commit is the one intentional caller: after a successful commit,
-    /// cancellation cannot undo its effect, so observing it after the fact must
-    /// not turn a committed transaction into a spurious cancellation result.
-    pub(crate) async fn call_terminal(&self, cx: &Cx, request: Request) -> Result<Reply, DbError> {
-        self.call_with_deadline(cx, cx.budget().deadline, request, false)
-            .await
+    /// Runs one operation with an explicit absolute deadline supplied by the
+    /// connection layer. This is the earlier of a per-request limit and the
+    /// caller's Cx deadline when both exist.
+    pub(crate) async fn call_with_deadline(
+        &self,
+        cx: &Cx,
+        deadline: Option<Time>,
+        request: Request,
+    ) -> Result<Reply, DbError> {
+        self.call_inner(cx, deadline, request, true).await
     }
 
-    async fn call_with_deadline(
+    /// Terminal counterpart to the explicit-deadline call.
+    pub(crate) async fn call_terminal_with_deadline(
+        &self,
+        cx: &Cx,
+        deadline: Option<Time>,
+        request: Request,
+    ) -> Result<Reply, DbError> {
+        self.call_inner(cx, deadline, request, false).await
+    }
+
+    async fn call_inner(
         &self,
         cx: &Cx,
         deadline: Option<Time>,
@@ -284,7 +319,8 @@ fn run_actor_thread<Resource, Request, Reply, Factory, Execute>(
     Request: Send + 'static,
     Reply: Send + 'static,
     Factory: FnOnce() -> Resource + Send + 'static,
-    Execute: FnMut(&mut Resource, Request) -> Result<Reply, DbError> + Send + 'static,
+    Execute:
+        FnMut(&mut Resource, Request, ActorAdmission) -> Result<Reply, DbError> + Send + 'static,
 {
     let reactor = asupersync::runtime::reactor::create_reactor()
         .expect("native reactor must build for the official Oracle actor");
@@ -308,7 +344,8 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
     Request: Send + 'static,
     Reply: Send + 'static,
     Factory: FnOnce() -> Resource + Send + 'static,
-    Execute: FnMut(&mut Resource, Request) -> Result<Reply, DbError> + Send + 'static,
+    Execute:
+        FnMut(&mut Resource, Request, ActorAdmission) -> Result<Reply, DbError> + Send + 'static,
 {
     let cx = Cx::current().expect("actor runtime installs a current Cx");
     let mut resource = factory();
@@ -324,15 +361,28 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             let _ = reply.send_blocking(ActorReply::DeadlineExceeded);
             break;
         }
-        if deadline.is_some_and(|deadline| cx.now() >= deadline) {
-            state.quarantine(
-                "official Oracle actor received an operation after its absolute deadline",
-            );
-            let _ = reply.send_blocking(ActorReply::DeadlineExceeded);
-            break;
-        }
+        let admission = match deadline {
+            Some(deadline) => {
+                let now = cx.now();
+                if now >= deadline {
+                    state.quarantine(
+                        "official Oracle actor received an operation after its absolute deadline",
+                    );
+                    let _ = reply.send_blocking(ActorReply::DeadlineExceeded);
+                    break;
+                }
+                ActorAdmission {
+                    remaining_timeout: Some(Duration::from_nanos(
+                        deadline.as_nanos().saturating_sub(now.as_nanos()),
+                    )),
+                }
+            }
+            None => ActorAdmission {
+                remaining_timeout: None,
+            },
+        };
 
-        let result = execute(&mut resource, request);
+        let result = execute(&mut resource, request, admission);
         let result_left_session_uncertain = result
             .as_ref()
             .err()
@@ -404,11 +454,12 @@ mod tests {
 
     #[test]
     fn actor_keeps_non_send_connection_on_its_dedicated_thread() {
-        let actor = BlockingConnectionActor::spawn(NonSendConnection::new, |connection, amount| {
-            assert_eq!(thread::current().id(), connection.owner_thread);
-            connection.value += amount;
-            Ok((connection.owner_thread, connection.value))
-        });
+        let actor =
+            BlockingConnectionActor::spawn(NonSendConnection::new, |connection, amount, _| {
+                assert_eq!(thread::current().id(), connection.owner_thread);
+                connection.value += amount;
+                Ok((connection.owner_thread, connection.value))
+            });
         let caller_thread = thread::current().id();
 
         let (owner_thread, value) = block_on_actor(async {
@@ -428,16 +479,14 @@ mod tests {
         let executions_for_actor = Arc::clone(&executions);
         let actor = BlockingConnectionActor::spawn(
             || (),
-            move |_, ()| {
+            move |_, (), _| {
                 executions_for_actor.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
         );
         let result = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
-            actor
-                .call_with_deadline(&cx, Some(Time::ZERO), (), true)
-                .await
+            actor.call_with_deadline(&cx, Some(Time::ZERO), ()).await
         });
 
         assert!(matches!(result, Err(DbError::Cancelled(_))));
@@ -447,12 +496,100 @@ mod tests {
     }
 
     #[test]
+    fn queued_command_receives_only_its_remaining_deadline_budget() {
+        #[derive(Clone, Copy)]
+        enum Request {
+            Block,
+            Timed,
+        }
+
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let (budget_tx, budget_rx) = mpsc::channel();
+        let actor = BlockingConnectionActor::spawn(
+            || (),
+            move |_, request, admission| {
+                match request {
+                    Request::Block => {
+                        entered_tx.send(()).expect("actor reports operation start");
+                        release_rx
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("test releases the blocking operation");
+                    }
+                    Request::Timed => budget_tx
+                        .send(admission.remaining_timeout())
+                        .expect("actor reports the freshly sampled budget"),
+                }
+                Ok(())
+            },
+        );
+
+        let (first_result, timed_result) = block_on_actor(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            let (first_reply, mut first_wait) = oneshot::channel();
+            let first_send = actor
+                .mailbox
+                .send(
+                    &cx,
+                    ActorCommand::Call {
+                        request: Request::Block,
+                        deadline: None,
+                        reply: first_reply,
+                    },
+                )
+                .await;
+            assert!(first_send.is_ok(), "first command enters the actor mailbox");
+            entered_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("first command begins blocking in the actor");
+
+            let initial_budget = Duration::from_millis(500);
+            let (timed_reply, mut timed_wait) = oneshot::channel();
+            let timed_send = actor
+                .mailbox
+                .send(
+                    &cx,
+                    ActorCommand::Call {
+                        request: Request::Timed,
+                        deadline: Some(cx.now() + initial_budget),
+                        reply: timed_reply,
+                    },
+                )
+                .await;
+            assert!(
+                timed_send.is_ok(),
+                "timed command queues behind the blocking command"
+            );
+
+            thread::sleep(Duration::from_millis(50));
+            release_tx
+                .send(())
+                .expect("test releases the first command");
+            let first_result = first_wait.recv(&cx).await;
+            let timed_result = timed_wait.recv(&cx).await;
+            (first_result, timed_result)
+        });
+
+        assert!(matches!(first_result, Ok(ActorReply::Completed(Ok(())))));
+        assert!(matches!(timed_result, Ok(ActorReply::Completed(Ok(())))));
+        let observed = budget_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("actor reports the timed command budget")
+            .expect("timed command has an absolute deadline");
+        assert!(
+            observed < Duration::from_millis(450),
+            "actor must subtract mailbox time from a caller-side budget; observed {observed:?}"
+        );
+        drop(actor);
+    }
+
+    #[test]
     fn caller_cancellation_drops_reply_and_quarantines_actor() {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let actor = BlockingConnectionActor::spawn(
             || (),
-            move |_, ()| {
+            move |_, (), _| {
                 entered_tx.send(()).expect("actor reports operation start");
                 release_rx
                     .recv_timeout(Duration::from_secs(5))
@@ -498,7 +635,7 @@ mod tests {
     fn uncertain_operation_error_quarantines_and_discards_the_actor() {
         let actor = BlockingConnectionActor::spawn(
             || (),
-            |_, ()| -> Result<(), DbError> {
+            |_, (), _| -> Result<(), DbError> {
                 Err(DbError::Cancelled(
                     "driver timeout leaves the session state uncertain".to_owned(),
                 ))

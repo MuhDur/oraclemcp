@@ -20,13 +20,14 @@ Asupersync `mpsc` mailbox and awaits an Asupersync `oneshot` reply. The
 connection itself, raw driver values, and all synchronous calls remain on that
 actor thread; `Cx` never crosses the thread boundary.
 
-The adapter copies the caller's absolute `Cx` deadline into each request. The
-actor checks it before and after the synchronous operation. The concrete
-adapter will also tighten the driver's call timeout to the minimum of the
-profile cap and remaining request deadline. A caller cancellation, expired
-deadline, dropped reply receiver, actor stop, or any uncertain post-call state
-permanently quarantines that physical session as `unknown_discarded`; it cannot
-re-enter a pool. Streaming already uses a bounded pull cursor: each
+The adapter carries the earlier of the caller's `Cx` and per-request absolute
+deadlines into each request. Immediately before the synchronous operation, the
+actor samples the remaining duration and tightens the driver's call timeout to
+the minimum of that fresh value and the configured profile cap. It checks the
+absolute deadline before and after the synchronous operation. A caller
+cancellation, expired deadline, dropped reply receiver, actor stop, or any
+uncertain post-call state permanently quarantines that physical session as
+`unknown_discarded`; it cannot re-enter a pool. Streaming already uses a bounded pull cursor: each
 `next_row` request crosses the actor's bounded mailbox and returns at most one
 owned row through its oneshot reply, so the caller controls backpressure without
 the synchronous cursor or an unbounded row queue leaving the actor.
@@ -42,9 +43,10 @@ session across drivers.
 `crates/oraclemcp-db/src/oracledb_actor.rs`, behind the optional `oracledb`
 feature, proves the actor boundary with a non-`Send` fake connection. Its unit
 tests prove dedicated-thread ownership, absolute-deadline refusal before a
-blocking call, cancellation/reply-drop quarantine, and uncertain-error discard
-with no future reuse. `oracledb_backend.rs` confines real synchronous driver
-calls, values, and cursors to that actor.
+blocking call, fresh deadline-budget sampling after mailbox queueing,
+cancellation/reply-drop quarantine, and uncertain-error discard with no future
+reuse. `oracledb_backend.rs` confines real synchronous driver calls, values,
+and cursors to that actor.
 
 `connection.rs` owns a small typed backend registry. In an `oracledb` feature
 build, password/PEM acquisition tries the official backend first; IAM tokens,
@@ -154,12 +156,14 @@ and uncredited.
 
 The Free23 run closed the observed VECTOR gap
 (`oraclemcp-xoflp.1.3`) and exposed/fixed the beta driver's malformed
-negative-minute timestamp display in the adapter. The following review
-findings remain default-flip blockers until independently resolved and tested:
+negative-minute timestamp display in the adapter. The actor-admission timeout
+gap (`oraclemcp-xoflp.1.4`) is resolved: the actor samples the copied absolute
+deadline immediately before dispatch, and the adapter can only tighten the
+existing driver timeout. The deterministic queued-command regression asserts
+that time spent in the bounded mailbox is deducted before the driver sees its
+timeout. The following review findings remain default-flip blockers until
+independently resolved and tested:
 
-- `oraclemcp-xoflp.1.4`: actor mailbox admission can retain a stale, overly
-  generous driver call timeout after queueing. The timeout must be tightened at
-  actor admission and shown by a queued-deadline regression test.
 - `oraclemcp-xoflp.1.5`: terminal close and an abandoned official row stream do
   not yet prove actor/session termination and quarantine. They require their
   own ownership/lifecycle regression tests before a live parity run can be
