@@ -8,7 +8,7 @@
 //! permanently unavailable for reuse.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::Duration;
 use std::{panic::AssertUnwindSafe, panic::catch_unwind};
@@ -16,6 +16,7 @@ use std::{panic::AssertUnwindSafe, panic::catch_unwind};
 use asupersync::Cx;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::runtime::RuntimeBuilder;
+use asupersync::sync::{OwnedSemaphorePermit, Semaphore};
 use asupersync::types::Time;
 
 use crate::DbError;
@@ -25,6 +26,104 @@ const ACTOR_ACTIVE: u8 = 0;
 const ACTOR_QUARANTINED: u8 = 1;
 const ACTOR_CLOSED: u8 = 2;
 const ACTOR_MAILBOX_CAPACITY: usize = 1;
+/// The process-wide maximum number of native official-driver handshakes that
+/// may be unable to observe cancellation. A permit is held only until a
+/// successful connect is published, or a failed/cancelled actor actually
+/// retires; healthy established sessions do not consume this capacity.
+const OFFICIAL_CONNECT_GUARD_CAPACITY: usize = 2;
+/// The longest time a caller may wait to start an official-driver connect.
+/// The caller's own remaining deadline can only make this shorter.
+const OFFICIAL_CONNECT_GUARD_ACQUIRE_TIMEOUT: Duration = Duration::from_millis(250);
+
+/// Process-wide, Cx-aware bulkhead for uninterruptible initial official-driver
+/// TCP/TLS connection work.
+///
+/// The pinned official driver can block before a connection object exists, so
+/// an actor cancellation cannot interrupt that native call. The returned slot
+/// is deliberately owned by the actor resource rather than the awaiting
+/// caller: cancellation may abandon the reply, but it must not make another
+/// stalled native connect possible until this actor has retired.
+pub(crate) struct OfficialConnectGuard {
+    semaphore: Arc<Semaphore>,
+    acquire_timeout: Duration,
+}
+
+/// One owned official-connect bulkhead slot.
+///
+/// Dropping this value releases exactly one capacity unit. It is moved into
+/// the actor resource and therefore cannot be released by a caller timeout.
+pub(crate) struct OfficialConnectSlot {
+    _permit: OwnedSemaphorePermit,
+}
+
+impl OfficialConnectGuard {
+    /// Returns the singleton process-wide connect guard.
+    #[must_use]
+    pub(crate) fn shared() -> &'static Self {
+        static GUARD: OnceLock<OfficialConnectGuard> = OnceLock::new();
+        GUARD.get_or_init(|| Self {
+            semaphore: Arc::new(Semaphore::new(OFFICIAL_CONNECT_GUARD_CAPACITY)),
+            acquire_timeout: OFFICIAL_CONNECT_GUARD_ACQUIRE_TIMEOUT,
+        })
+    }
+
+    /// Acquires a slot without extending the caller's deadline.
+    ///
+    /// Asupersync's owned semaphore acquisition is cancellation-safe. The
+    /// explicit race supplies the hard bulkhead boundary even when the caller
+    /// has no deadline; when it does, the shorter remaining duration wins.
+    pub(crate) async fn acquire(&self, cx: &Cx) -> Result<OfficialConnectSlot, DbError> {
+        checkpoint(cx, "official Oracle connect guard before admission")?;
+        let timeout = self.acquire_timeout(cx)?;
+        let semaphore = Arc::clone(&self.semaphore);
+        let acquire_cx = cx.clone();
+        let acquire =
+            Box::pin(async move { OwnedSemaphorePermit::acquire(semaphore, &acquire_cx, 1).await });
+
+        match cx.race_timeout(timeout, vec![acquire]).await {
+            Ok(Ok(permit)) => Ok(OfficialConnectSlot { _permit: permit }),
+            Ok(Err(_)) => {
+                checkpoint(cx, "official Oracle connect guard acquisition")?;
+                Err(DbError::Connect(
+                    "official Oracle connect guard is unavailable".to_owned(),
+                ))
+            }
+            Err(_) => {
+                checkpoint(cx, "official Oracle connect guard acquisition")?;
+                Err(DbError::Connect(
+                    "official Oracle connect guard capacity exhausted".to_owned(),
+                ))
+            }
+        }
+    }
+
+    fn acquire_timeout(&self, cx: &Cx) -> Result<Duration, DbError> {
+        let Some(deadline) = cx.budget().deadline else {
+            return Ok(self.acquire_timeout);
+        };
+        let now = cx.now();
+        if now >= deadline {
+            return Err(DbError::Cancelled(
+                "official Oracle connect guard caller deadline exceeded".to_owned(),
+            ));
+        }
+        let remaining = Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos()));
+        Ok(self.acquire_timeout.min(remaining))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(capacity: usize, acquire_timeout: Duration) -> Self {
+        Self {
+            semaphore: Arc::new(Semaphore::new(capacity)),
+            acquire_timeout,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn available_for_test(&self) -> usize {
+        self.semaphore.available_permits()
+    }
+}
 
 /// Fresh operation budget sampled by the actor immediately before the
 /// synchronous call begins.
@@ -186,6 +285,11 @@ where
         checkpoint(cx, "official Oracle actor call before admission")?;
 
         let (reply_tx, mut reply_rx) = oneshot::channel();
+        // The actor must not dequeue a later operation merely because it has
+        // handed this reply to the runtime. The caller still has to perform
+        // its post-completion Cx checkpoint; this acknowledgement closes that
+        // completion/admission race without moving Cx onto the actor thread.
+        let (completion_tx, completion_ack) = oneshot::channel();
         self.mailbox
             .send(
                 cx,
@@ -193,6 +297,7 @@ where
                     request,
                     deadline,
                     reply: reply_tx,
+                    completion_ack,
                     dispose_after_reply,
                 },
             )
@@ -208,8 +313,10 @@ where
                     self.state.quarantine(
                         "caller cancelled after an official Oracle actor operation completed",
                     );
+                    let _ = completion_tx.send_blocking(ActorCompletionAck::Quarantine);
                     return Err(error);
                 }
+                let _ = completion_tx.send_blocking(ActorCompletionAck::Continue);
                 result
             }
             Ok(ActorReply::DeadlineExceeded) => {
@@ -302,9 +409,20 @@ enum ActorCommand<Request, Reply> {
         request: Request,
         deadline: Option<Time>,
         reply: oneshot::Sender<ActorReply<Reply>>,
+        completion_ack: oneshot::Receiver<ActorCompletionAck>,
         dispose_after_reply: bool,
     },
     Discard,
+}
+
+/// Caller disposition after it has observed an operation's reply.
+///
+/// The actor waits for this one-shot acknowledgement before admitting another
+/// command, so a cancellation at the caller-side post-completion checkpoint
+/// makes the physical session unavailable before it can execute again.
+enum ActorCompletionAck {
+    Continue,
+    Quarantine,
 }
 
 enum ActorReply<Reply> {
@@ -435,6 +553,7 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             request,
             deadline,
             reply,
+            mut completion_ack,
             dispose_after_reply,
         } = command
         else {
@@ -479,9 +598,6 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             let _ = reply.send_blocking(ActorReply::DeadlineExceeded);
             break;
         }
-        if dispose_after_reply {
-            state.close();
-        }
         if reply.send_blocking(ActorReply::Completed(result)).is_err() {
             if !dispose_after_reply {
                 state.quarantine(
@@ -489,6 +605,18 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
                 );
             }
             break;
+        }
+        match completion_ack.recv(&cx).await {
+            Ok(ActorCompletionAck::Continue) => {}
+            Ok(ActorCompletionAck::Quarantine) | Err(_) => {
+                state.quarantine(
+                    "caller did not confirm an official Oracle actor completion; session state is uncertain",
+                );
+                break;
+            }
+        }
+        if dispose_after_reply {
+            state.close();
         }
         if result_left_session_uncertain {
             state.quarantine(
@@ -709,6 +837,7 @@ mod tests {
         let (first_result, timed_result) = block_on_actor(async {
             let cx = Cx::current().expect("test runtime installs a current Cx");
             let (first_reply, mut first_wait) = oneshot::channel();
+            let (first_completion, first_completion_ack) = oneshot::channel();
             let first_send = actor
                 .mailbox
                 .send(
@@ -717,6 +846,7 @@ mod tests {
                         request: Request::Block,
                         deadline: None,
                         reply: first_reply,
+                        completion_ack: first_completion_ack,
                         dispose_after_reply: false,
                     },
                 )
@@ -728,6 +858,7 @@ mod tests {
 
             let initial_budget = Duration::from_millis(500);
             let (timed_reply, mut timed_wait) = oneshot::channel();
+            let (timed_completion, timed_completion_ack) = oneshot::channel();
             let timed_send = actor
                 .mailbox
                 .send(
@@ -736,6 +867,7 @@ mod tests {
                         request: Request::Timed,
                         deadline: Some(cx.now() + initial_budget),
                         reply: timed_reply,
+                        completion_ack: timed_completion_ack,
                         dispose_after_reply: false,
                     },
                 )
@@ -750,7 +882,15 @@ mod tests {
                 .send(())
                 .expect("test releases the first command");
             let first_result = first_wait.recv(&cx).await;
+            assert!(matches!(
+                first_completion.send_blocking(ActorCompletionAck::Continue),
+                Ok(())
+            ));
             let timed_result = timed_wait.recv(&cx).await;
+            assert!(matches!(
+                timed_completion.send_blocking(ActorCompletionAck::Continue),
+                Ok(())
+            ));
             (first_result, timed_result)
         });
 
@@ -814,6 +954,248 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn cancelled_completed_reply_never_admits_a_queued_second_caller() {
+        #[derive(Clone, Copy)]
+        enum Request {
+            First,
+            Second,
+        }
+
+        let first_executions = Arc::new(AtomicUsize::new(0));
+        let second_executions = Arc::new(AtomicUsize::new(0));
+        let first_for_actor = Arc::clone(&first_executions);
+        let second_for_actor = Arc::clone(&second_executions);
+        let actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                || (),
+                move |_, request, _| {
+                    match request {
+                        Request::First => {
+                            first_for_actor.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Request::Second => {
+                            second_for_actor.fetch_add(1, Ordering::SeqCst);
+                        }
+                    }
+                    Ok(())
+                },
+            )
+            .expect("actor thread starts for completion/admission race test"),
+        );
+        let (first_completion, second_completion, mut second_wait) = block_on_actor({
+            let actor = Arc::clone(&actor);
+            async move {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                let (first_reply, mut first_wait) = oneshot::channel();
+                let (first_completion, first_completion_ack) = oneshot::channel();
+                let first_send = actor
+                    .mailbox
+                    .send(
+                        &cx,
+                        ActorCommand::Call {
+                            request: Request::First,
+                            deadline: None,
+                            reply: first_reply,
+                            completion_ack: first_completion_ack,
+                            dispose_after_reply: false,
+                        },
+                    )
+                    .await;
+                assert!(first_send.is_ok(), "first caller enters the actor");
+                assert!(matches!(
+                    first_wait.recv(&cx).await,
+                    Ok(ActorReply::Completed(Ok(())))
+                ));
+
+                let (second_reply, second_wait) = oneshot::channel();
+                let (second_completion, second_completion_ack) = oneshot::channel();
+                let second_send = actor
+                    .mailbox
+                    .send(
+                        &cx,
+                        ActorCommand::Call {
+                            request: Request::Second,
+                            deadline: None,
+                            reply: second_reply,
+                            completion_ack: second_completion_ack,
+                            dispose_after_reply: false,
+                        },
+                    )
+                    .await;
+                assert!(
+                    second_send.is_ok(),
+                    "second caller queues while the first completion waits for acknowledgement"
+                );
+
+                cx.set_cancel_requested(true);
+                assert!(checkpoint(&cx, "test first caller after-completion checkpoint").is_err());
+                actor.state.quarantine(
+                    "test caller cancellation after an official actor operation completed",
+                );
+                (first_completion, second_completion, second_wait)
+            }
+        });
+
+        assert!(matches!(
+            first_completion.send_blocking(ActorCompletionAck::Quarantine),
+            Ok(())
+        ));
+        actor.join_for_test();
+        assert_eq!(first_executions.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            second_executions.load(Ordering::SeqCst),
+            0,
+            "the queued second caller cannot execute before the cancelled first caller closes completion admission"
+        );
+        assert!(actor.is_quarantined_for_test());
+
+        let second_result: Result<(), DbError> = block_on_actor(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            match second_wait.recv(&cx).await {
+                Err(oneshot::RecvError::Closed) => Err(actor.state.quarantined_error()),
+                _ => panic!("queued second caller must receive actor closure"),
+            }
+        });
+        assert!(matches!(
+            second_result,
+            Err(DbError::Quarantined {
+                outcome: QuarantineOutcome::UnknownDiscarded,
+                ..
+            })
+        ));
+
+        drop(second_completion);
+    }
+
+    #[test]
+    fn bounded_connect_guard_caps_stalled_actors_and_recovers_every_slot() {
+        struct StalledConnect {
+            _slot: OfficialConnectSlot,
+        }
+
+        let guard = Arc::new(OfficialConnectGuard::for_test(2, Duration::from_millis(25)));
+        let first_slot = block_on_actor({
+            let guard = Arc::clone(&guard);
+            async move {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                guard
+                    .acquire(&cx)
+                    .await
+                    .expect("first stalled connect receives a guard slot")
+            }
+        });
+        let second_slot = block_on_actor({
+            let guard = Arc::clone(&guard);
+            async move {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                guard
+                    .acquire(&cx)
+                    .await
+                    .expect("second stalled connect receives a guard slot")
+            }
+        });
+
+        let (started_tx, started_rx) = mpsc::channel();
+        let first_started_tx = started_tx.clone();
+        let (first_release_tx, first_release_rx) = mpsc::channel();
+        let (second_release_tx, second_release_rx) = mpsc::channel();
+        let first_actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                move || StalledConnect { _slot: first_slot },
+                move |_, (), _| {
+                    first_started_tx
+                        .send(())
+                        .expect("first simulated native connect starts");
+                    first_release_rx
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("first simulated native connect is released");
+                    Ok(())
+                },
+            )
+            .expect("first guarded actor thread starts"),
+        );
+        let second_actor = Arc::new(
+            BlockingConnectionActor::spawn(
+                move || StalledConnect { _slot: second_slot },
+                move |_, (), _| {
+                    started_tx
+                        .send(())
+                        .expect("second simulated native connect starts");
+                    second_release_rx
+                        .recv_timeout(Duration::from_secs(1))
+                        .expect("second simulated native connect is released");
+                    Ok(())
+                },
+            )
+            .expect("second guarded actor thread starts"),
+        );
+
+        let (first_call, second_call) = thread::scope(|scope| {
+            let first_actor_for_call = Arc::clone(&first_actor);
+            let first_call = scope.spawn(move || {
+                block_on_actor(async move {
+                    let cx = Cx::current().expect("test runtime installs a current Cx");
+                    first_actor_for_call.call(&cx, ()).await
+                })
+            });
+            let second_actor_for_call = Arc::clone(&second_actor);
+            let second_call = scope.spawn(move || {
+                block_on_actor(async move {
+                    let cx = Cx::current().expect("test runtime installs a current Cx");
+                    second_actor_for_call.call(&cx, ()).await
+                })
+            });
+
+            started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first simulated native connect blocks");
+            started_rx
+                .recv_timeout(Duration::from_secs(1))
+                .expect("second simulated native connect blocks");
+            assert_eq!(guard.available_for_test(), 0);
+
+            let saturated = block_on_actor({
+                let guard = Arc::clone(&guard);
+                async move {
+                    let cx = Cx::current().expect("test runtime installs a current Cx");
+                    guard.acquire(&cx).await
+                }
+            });
+            assert!(
+                matches!(saturated, Err(DbError::Connect(message)) if message == "official Oracle connect guard capacity exhausted")
+            );
+            assert_eq!(
+                guard.available_for_test(),
+                0,
+                "a saturated guard cannot admit an unbounded third native connect"
+            );
+
+            first_release_tx
+                .send(())
+                .expect("release first simulated native connect");
+            second_release_tx
+                .send(())
+                .expect("release second simulated native connect");
+            (
+                first_call.join().expect("first guarded caller joins"),
+                second_call.join().expect("second guarded caller joins"),
+            )
+        });
+
+        assert!(first_call.is_ok());
+        assert!(second_call.is_ok());
+        first_actor.discard_nonblocking("test retires first guarded actor");
+        second_actor.discard_nonblocking("test retires second guarded actor");
+        first_actor.join_for_test();
+        second_actor.join_for_test();
+        assert_eq!(
+            guard.available_for_test(),
+            2,
+            "retiring stalled actors returns the guard to its exact baseline"
+        );
     }
 
     #[test]
@@ -883,6 +1265,44 @@ mod tests {
             unstarted_task_drops.load(Ordering::SeqCst),
             1,
             "the failed launcher must drop the unstarted actor task rather than leak its mailbox"
+        );
+    }
+
+    #[test]
+    fn actor_spawn_failure_returns_the_reserved_connect_guard_slot() {
+        struct GuardedUnstartedResource {
+            _slot: OfficialConnectSlot,
+        }
+
+        let guard = Arc::new(OfficialConnectGuard::for_test(1, Duration::from_millis(25)));
+        let slot = block_on_actor({
+            let guard = Arc::clone(&guard);
+            async move {
+                let cx = Cx::current().expect("test runtime installs a current Cx");
+                guard
+                    .acquire(&cx)
+                    .await
+                    .expect("unstarted actor reserves the only guard slot")
+            }
+        });
+        assert_eq!(guard.available_for_test(), 0);
+
+        let result = BlockingConnectionActor::spawn_with_thread(
+            move || GuardedUnstartedResource { _slot: slot },
+            |_, (), _| -> Result<(), DbError> { Ok(()) },
+            |_actor_thread| {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "test-only native thread exhaustion",
+                ))
+            },
+        );
+
+        assert!(matches!(result, Err(DbError::Connect(_))));
+        assert_eq!(
+            guard.available_for_test(),
+            1,
+            "a failed actor spawn drops its unstarted guarded factory rather than stranding capacity"
         );
     }
 }

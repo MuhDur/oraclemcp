@@ -14,9 +14,13 @@ use asupersync::types::Time;
 use serde_json::{Number, Value, json};
 
 use crate::auth_adapter::AuthAdapter;
-use crate::connection::{DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart};
+use crate::connection::{
+    DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart, WalletFileChoice,
+};
 use crate::error::QuarantineOutcome;
-use crate::oracledb_actor::{ActorAdmission, BlockingConnectionActor};
+use crate::oracledb_actor::{
+    ActorAdmission, BlockingConnectionActor, OfficialConnectGuard, OfficialConnectSlot,
+};
 use crate::serialize::canonical_nls_statements;
 use crate::types::{
     OracleBackend, OracleBind, OracleCell, OracleConnectOptions, OracleConnectionInfo, OracleRow,
@@ -68,8 +72,9 @@ impl OfficialOracleConnection {
         checkpoint(cx, "official Oracle connect before actor startup")?;
         validate_supported_connect_options(&options)?;
 
+        let connect_slot = OfficialConnectGuard::shared().acquire(cx).await?;
         let actor = Arc::new(BlockingConnectionActor::spawn(
-            OfficialActorResource::default,
+            move || OfficialActorResource::with_connect_slot(connect_slot),
             execute_actor_command,
         )?);
         let adapter = Self {
@@ -237,6 +242,25 @@ impl OfficialWireLimits {
 struct OfficialActorResource {
     connection: Option<oracledb::Connection>,
     stream: Option<OfficialCursor>,
+    /// Held only while the synchronous initial connection may still be
+    /// uninterruptibly blocked. A successful setup releases it before this
+    /// healthy session is returned; every failed/cancelled setup retains it
+    /// until the actor and its native thread actually retire.
+    connect_slot: Option<OfficialConnectSlot>,
+}
+
+impl OfficialActorResource {
+    fn with_connect_slot(connect_slot: OfficialConnectSlot) -> Self {
+        Self {
+            connection: None,
+            stream: None,
+            connect_slot: Some(connect_slot),
+        }
+    }
+
+    fn release_connect_slot(&mut self) {
+        let _ = self.connect_slot.take();
+    }
 }
 
 struct OfficialCursor {
@@ -474,6 +498,7 @@ fn execute_actor_command(
                     .map_err(|error| official_error(error, OfficialOperation::Connect))?;
             }
             resource.connection = Some(connection);
+            resource.release_connect_slot();
             Ok(OfficialReply::Unit)
         }
         OfficialCommand::Ping { timeout } => {
@@ -718,6 +743,7 @@ fn set_driver_timeout(
 
 fn config_from_options(options: &OracleConnectOptions) -> Result<oracledb::Config, DbError> {
     validate_supported_connect_options(options)?;
+    reject_auto_login_wallet_at_consumption(options)?;
     let username = options.username.as_deref().ok_or_else(|| {
         DbError::UnsupportedAuth(
             "official Oracle backend requires a username for password authentication".to_owned(),
@@ -750,6 +776,28 @@ fn config_from_options(options: &OracleConnectOptions) -> Result<oracledb::Confi
         config = config.set_stmtcachesize(cache_size as usize);
     }
     Ok(config)
+}
+
+/// Refuse an auto-login wallet at the last boundary before the official driver
+/// receives its directory path.
+///
+/// The capability selector is intentionally side-effect free apart from its
+/// initial file observation. A `cwallet.sso` can appear after that observation
+/// while driver-cx acquisition is in progress, so a selector result is not
+/// sufficient authority to hand a wallet path to the PEM-only official driver.
+/// This re-check runs on the owner actor immediately before building the
+/// official configuration and fails closed instead of silently treating the
+/// changed directory as a PEM wallet.
+fn reject_auto_login_wallet_at_consumption(options: &OracleConnectOptions) -> Result<(), DbError> {
+    let Some(wallet) = &options.wallet_location else {
+        return Ok(());
+    };
+    if wallet.join(WalletFileChoice::Sso.file_name()).is_file() {
+        return Err(DbError::UnsupportedAuth(
+            "official Oracle backend does not support cwallet.sso auto-login wallets".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_supported_connect_options(options: &OracleConnectOptions) -> Result<(), DbError> {
@@ -1366,6 +1414,75 @@ mod tests {
             .build()
             .expect("current-thread runtime must build for official backend test");
         runtime.block_on(future)
+    }
+
+    #[test]
+    fn successful_official_setup_releases_its_connect_guard_slot() {
+        let guard = OfficialConnectGuard::for_test(1, Duration::from_millis(25));
+        let slot = block_on_backend(async {
+            let cx = Cx::current().expect("test runtime installs a current Cx");
+            guard
+                .acquire(&cx)
+                .await
+                .expect("official setup reserves its only connect slot")
+        });
+        let mut resource = OfficialActorResource::with_connect_slot(slot);
+        assert_eq!(
+            guard.available_for_test(),
+            0,
+            "an actor owns its slot until successful setup is complete"
+        );
+
+        resource.release_connect_slot();
+
+        assert_eq!(
+            guard.available_for_test(),
+            1,
+            "a healthy established session does not consume stalled-connect capacity"
+        );
+    }
+
+    #[test]
+    fn late_cwallet_appearance_refuses_official_config_before_consumption() {
+        struct TestWalletDir(std::path::PathBuf);
+
+        impl Drop for TestWalletDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time is after the Unix epoch")
+            .as_nanos();
+        let wallet = TestWalletDir(std::env::temp_dir().join(format!(
+            "oraclemcp-official-wallet-consumption-{}-{nonce}",
+            std::process::id()
+        )));
+        std::fs::create_dir_all(&wallet.0).expect("create empty PEM-eligible wallet directory");
+        let options = OracleConnectOptions {
+            username: Some("test-user".to_owned()),
+            password: Some("test-password".to_owned()),
+            wallet_location: Some(wallet.0.clone()),
+            ..OracleConnectOptions::default()
+        };
+        assert!(
+            reject_auto_login_wallet_at_consumption(&options).is_ok(),
+            "the selector could have observed this directory before cwallet.sso appeared"
+        );
+
+        std::fs::write(
+            wallet.0.join(WalletFileChoice::Sso.file_name()),
+            b"test-sso",
+        )
+        .expect("simulate cwallet.sso appearing after backend selection");
+
+        assert!(matches!(
+            config_from_options(&options),
+            Err(DbError::UnsupportedAuth(message))
+                if message == "official Oracle backend does not support cwallet.sso auto-login wallets"
+        ));
     }
 
     #[test]

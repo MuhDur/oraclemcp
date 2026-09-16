@@ -3,11 +3,11 @@
 ## Status
 
 Accepted. The feature-gated official-driver adapter and its acquisition router
-are implemented. On 2026-09-16 the operator approved an official-primary
-default for capable password and PEM-wallet acquisitions, subject to the
-remaining explicit safety and live-parity blockers below. That approval does
-not permit a deadline/thread-leak exception, a statement retry, or removal of
-the permanent driver-cx routes.
+are implemented. On 2026-09-16 the operator superseded the proposed default
+flip: driver-cx remains the safe primary, while the official driver remains an
+actively tried, bounded alternate for capable password and PEM-wallet
+acquisitions. The decision does not permit a deadline/thread-leak exception, a
+statement retry, or removal of the permanent driver-cx routes.
 
 ## Context
 
@@ -35,6 +35,11 @@ uncertain post-call state permanently quarantines that physical session as
 `next_row` request crosses the actor's bounded mailbox and returns at most one
 owned row through its oneshot reply, so the caller controls backpressure without
 the synchronous cursor or an unbounded row queue leaving the actor.
+After an actor sends an operation reply, it waits for the caller's one-shot
+completion acknowledgement before admitting another mailbox command. A healthy
+caller acknowledges only after its post-completion `Cx` checkpoint; a cancelled
+or dropped caller closes the acknowledgement, quarantining and retiring the
+actor before a queued second operation can execute.
 Explicit connection close is a terminal actor operation. An unrecovered row
 stream's destructor cannot await, so it synchronously quarantines the session
 and makes a best-effort bounded discard wakeup; whether that wakeup enqueues or
@@ -44,10 +49,13 @@ The actor boundary catches a panic from its synchronous factory/runtime/command
 path, quarantines the session, and lets the owner thread retire instead of
 unwinding through a caller-facing runtime.
 
-Automatic driver-cx fallback is restricted to connection acquisition. It may
-select driver-cx directly for unsupported authentication, or retry one failed
-official-driver connection establishment with driver-cx for compatible basic or
-PEM authentication. It never retries a statement or transfers an opened
+Automatic cross-driver routing is restricted to connection acquisition.
+Driver-cx is the primary acquisition for every capability. For compatible basic
+or PEM authentication only, a driver-cx acquisition error may make one guarded
+official-driver alternate attempt and, if that alternate fails, one fresh
+driver-cx fallback attempt. IAM/OCI-ADB tokens, `cwallet.sso` auto-login,
+external/proxy, and other driver-cx-only authentication never reach the
+official adapter. The router never retries a statement or transfers an opened
 session across drivers.
 
 ## Evidence
@@ -63,12 +71,25 @@ drops the resource and joins the actor, and that dropping an official row stream
 quarantines, stops, and refuses reuse of its owner actor without a blocking
 destructor. A blocking-call panic regression proves the same quarantine, thread
 retirement, and no-reuse outcome.
+`cancelled_completed_reply_never_admits_a_queued_second_caller` proves the
+completion acknowledgement closes the former reply-to-next-admission race: the
+cancelled first caller quarantines the actor, the queued second caller does not
+execute, and it observes the quarantined outcome.
 
 `connection.rs` owns a small typed backend registry. In an `oracledb` feature
-build, password/PEM acquisition tries the official backend first; IAM tokens,
-external/proxy auth, and `cwallet.sso` auto-login select driver-cx directly.
-Only a typed official acquisition gap (`unsupported_auth` or
-`unsupported_feature`) can make one logged, fresh driver-cx connect attempt.
+build, driver-cx is first for every acquisition. A compatible password/PEM
+driver-cx error may use the registry's official alternate; that alternate
+enters `OfficialOracleConnection::connect` only through the bounded guard
+below. An alternate failure gets exactly one fresh driver-cx acquisition while
+the caller remains live. IAM tokens, external/proxy auth, and `cwallet.sso`
+auto-login have no official registration and therefore select driver-cx only.
+The official adapter independently re-checks for `cwallet.sso` on its owner
+thread immediately before it builds an official configuration, so a wallet that
+changes after selection is refused at the consumption boundary rather than
+being silently treated as PEM-capable.
+`late_cwallet_appearance_refuses_official_config_before_consumption` proves a
+directory observed as PEM-eligible at selection is rejected when
+`cwallet.sso` appears before official configuration consumption.
 There is no fallback after a session has been returned, and no statement is
 retried or migrated across drivers. Without the feature, the registry contains
 only driver-cx and the connect path is unchanged.
@@ -91,39 +112,33 @@ machine before that bead can close.
 
 ## Permanent driver-cx fallback
 
-Driver-cx is intentionally permanent in this design. It remains the direct
-backend for IAM/OCI-ADB tokens and `cwallet.sso` auto-login, and the one fresh,
-logged acquisition fallback when a capable official connection has a typed
-driver gap. The router registration and its adjacent fallback branch therefore
-must remain after the default flip. There is no Tier-3 driver-cx retirement
-plan in this ADR; any future removal needs a new operator decision after every
-direct and fallback capability has an official replacement.
+Driver-cx is intentionally permanent in this design. It is the default primary
+for every connection and the direct-only backend for IAM/OCI-ADB tokens and
+`cwallet.sso` auto-login. It is also the single fresh, logged safety fallback
+when the guarded official alternate cannot be used. The router registration and
+its adjacent fallback branch must remain. There is no Tier-3 driver-cx
+retirement plan in this ADR; any future removal needs a new operator decision
+after every direct and fallback capability has an official replacement.
 
-## Default flip — operator-approved, implementation gated
+## Active dual-driver disposition
 
-The 2026-09-16 operator direction authorizes changing the default after the
-remaining safety and live-parity blockers are actually closed. `oracledb`
-remains opt-in in the current tree until that implementation commit lands;
-the criteria below are landing gates, not a second request for authorization.
+The 2026-09-16 decision keeps `oracledb` opt-in at compile time and keeps
+driver-cx first when that feature is enabled. The official driver is not
+shelved: a compatible driver-cx acquisition error actively tries it through
+the bounded connection guard. This does not authorize a statement retry, an
+in-session migration, or driver-cx removal. The router remains
+acquisition-only:
 
-### What a flip would mean
-
-The proposed flip is **only** that a build including the official-driver
-feature prefers the official adapter for its supported connection acquisitions.
-It does not authorize a statement retry, an in-session migration, or an
-unconditional driver-cx removal. The router remains acquisition-only:
-
-| Authentication/configuration | Current route | Evidence needed before a flip |
+| Authentication/configuration | Current route | Evidence status |
 | --- | --- | --- |
-| Basic username/password | Official first when `oracledb` is enabled | Direct dual-backend local-lab proof for connect, query, transaction, errors, and close; password profile matrix evidence |
-| TLS/TCPS with PEM wallet | Official first when `oracledb` is enabled | The same direct dual-backend proof against a PEM wallet/SNI/DN-match lab profile |
+| Basic username/password | driver-cx primary; guarded official alternate after a driver-cx acquisition error | Direct dual-backend local-lab proof for connect, query, transaction, errors, and close; password profile matrix evidence |
+| TLS/TCPS with PEM wallet | driver-cx primary; guarded official alternate after a driver-cx acquisition error | The same direct dual-backend proof against a PEM wallet/SNI/DN-match lab profile remains live-required |
 | OCI IAM / Autonomous DB token | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
 | `cwallet.sso` auto-login | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
 | External/proxy or other driver-cx-only auth | driver-cx directly | Keep this route; no silent degradation to password auth |
 
-The feature-off registry contains only driver-cx. Therefore a flip must not
-claim feature-off behavior changed; its regression criterion is that the
-feature-off tests still exercise the existing driver-cx-only path unchanged.
+The feature-off registry contains only driver-cx. Its regression criterion is
+that it continues to exercise the existing driver-cx-only path unchanged.
 
 ### Required evidence
 
@@ -192,16 +207,16 @@ plain TIMESTAMP, while LTZ/TSTZ retain their offset-bearing representation.
 Deterministic adapter and public-serialization regressions prove that a
 zero-valued internal offset cannot fabricate UTC. The separate live basic-auth
 parity row has now passed against the local Free23 fixture.
-The following review findings remain default-flip blockers until independently
-resolved and tested:
+The following residual limits remain explicitly tracked:
 
 - `oraclemcp-xoflp.1.6`: the pinned `26.0.0-beta.3` source invokes blocking
   `TcpStream::connect` for initial and redirected connections before a
   `Connection` exists. Its `tcp_connect_timeout` field is unused and its public
   `set_call_timeout` arrives only after connection establishment. Safe Rust
-  cannot cancel or join a stalled foreign connect thread, so a watchdog would
-  violate the no-thread-leak contract. An upstream driver fix or an approved
-  replacement version is required before this blocker can close.
+  cannot cancel or join a stalled foreign connect thread. The bounded guard
+  below contains that beta limitation at the router boundary; it does not make
+  the upstream call cancellable. An upstream driver fix or replacement version
+  remains the only way to close the underlying driver finding.
 
 - `oraclemcp-xoflp.4.8`: the feature-gated ignored TCPS + `ewallet.pem` parity
   target compiles and refuses an auto-login wallet, but no explicit PEM-only
@@ -212,62 +227,28 @@ resolved and tested:
 The pinned official driver is also `26.0.0-beta.3`; the beta API/version risk
 remains a release-signoff consideration even if all behavioral rows pass.
 
-### Connection-establishment mitigation decision
+### Bounded official-connect guard — implemented operator decision
 
-The following alternatives address only the synchronous initial connect/TLS
-handshake gap in the pinned official driver. None authorizes statement retry,
-session migration, or a change to the existing feature-off driver-cx path.
+The guard is one process-global, Cx-aware semaphore with exactly **two** slots.
+An official alternate waits for a slot for at most **250 ms**, further limited
+by the caller's remaining absolute `Cx` deadline. An exhausted guard is a
+bounded acquisition failure: the router records the reason and makes the one
+fresh driver-cx safety fallback only while the caller remains live. It never
+starts a third official actor.
 
-1. **Keep driver-cx default until upstream supplies a bounded official
-   connect/handshake (recommended).** Keep `oracledb` feature-gated and
-   opt-in; do not make it the default selection while `TcpStream::connect` can
-   outlive the request. An upstream version is acceptable only when its public
-   configuration demonstrably bounds initial and redirected TCP plus TLS
-   handshake work before a `Connection` exists, and a regression proves an
-   expired/cancelled attempt retires its actor without leaving a session
-   reusable. This is the safest option: the default continues to use the
-   existing driver-cx transport timeout, and the official path remains an
-   explicit preview rather than a process-wide availability risk.
+The slot moves into the actor resource before `oracledb::connect` begins. It is
+released immediately after a successful connection plus required session setup
+has been installed, so healthy open official sessions do not consume guard
+capacity. A failed, cancelled, or reply-dropped initial connection retains its
+slot until the actor has discarded its resource and the native thread has
+actually retired. The worst case is therefore at most **two** stranded native
+official-connect threads process-wide (and their associated stack/socket
+resources), never one per request. Later capable requests wait no more than
+the 250 ms boundary before taking the driver-cx safety path. This is bounded
+containment, not a claim that beta.3's initial connect is cancellable.
 
-2. **Flip behind a bounded official-connect thread pool.** This is feasible,
-   but it is a containment mechanism rather than cancellation. A future
-   implementation must use one process-global pool with exactly **two**
-   in-flight official-connect permits, acquired through a Cx-aware bounded
-   wait of at most **250 ms**. A caller that cannot acquire a permit in that
-   time may make one fresh driver-cx acquisition attempt only if its original
-   absolute Cx deadline is still live; an already-expired caller returns
-   cancellation and never starts fallback work. Once an official connect has
-   started, its permit is held until that native thread actually returns and
-   its actor is retired/reaped—never when the caller times out or drops its
-   reply. Thus a black-holed network can strand at most two native threads
-   process-wide; all later capable acquisitions immediately take the
-   backpressure/fallback path instead of spawning more. An eventually
-   successful abandoned attempt must close/discard before releasing its slot,
-   and no reply from it may publish a session. This option would require a new
-   supervisor/reaper, an explicit typed `official_connect_capacity` fallback
-   reason, and deterministic tests for permit exhaustion, deadline-before-
-   fallback, abandoned-success discard, and slot release after thread exit.
-   It does **not** satisfy the present no-thread-leak ideal; it merely caps the
-   resource cost, so it needs a separate operator decision.
-
-3. **Flip and accept the residual stall risk.** Every capable acquisition can
-   currently spawn a new native actor before entering unbounded TCP/TLS work.
-   A route or handshake black hole can therefore accumulate threads, their
-   stacks and sockets, and later-completing unactioned sessions under normal
-   connection pressure. Caller cancellation protects neither process capacity
-   nor actor retirement. This has the largest availability blast radius and
-   contradicts this ADR's quarantine/no-leak objective; it is documented only
-   as an explicit risk acceptance, not an engineering recommendation.
-
-No option has been implemented by this ADR update. Until an operator selects a
-different option and its dedicated proof suite lands, option 1 governs: the
-default remains driver-cx, and TCPS + PEM remains live-required rather than
-credited from the compiled ignored test.
-
-### No retirement path in the approved flip
-
-The approved default flip deliberately keeps the driver-cx registration,
-IAM/cwallet routes, and acquisition-only fallback branch. No query, execute,
-transaction, guard, audit, or dispatch call site should change. A future
-driver-cx retirement would be a separate proposal, not an implication of this
-default flip.
+Deterministic native-thread regressions fill both sides of that contract: the
+two-slot saturation test proves no third stalled actor starts and that retiring
+the simulated stalls restores the exact baseline; router tests prove the
+driver-cx-primary, official-alternate, and one-fresh-driver-cx sequence. No
+query, execute, transaction, guard, audit, or dispatch call site changes.
