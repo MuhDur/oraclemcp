@@ -29,7 +29,7 @@
     "tailwindcss": "4.3.2",
     "typescript": "6.0.3",
     "vite": "8.1.2",
-    "vitest": "^3.2.7"
+    "vitest": "^5.0.1"
   },
   "dependencies": {
     "@tanstack/react-query": "5.101.2",
