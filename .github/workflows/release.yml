@@ -282,8 +282,13 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             build_tool: cargo
-            binary_warn_bytes: 36000000
-            binary_limit_bytes: 40000000
+            # Aligned with the other six targets (was 36/40 MB). The 0.11.0 B1
+            # un-gate builds the official `oracledb` fallback into every target
+            # (--features dashboard-bundle,oracledb), which pushed the Windows
+            # binary to ~40.35 MB — past the old 40 MB Windows-only cap while
+            # well under the 48 MB hard budget every other target already uses.
+            binary_warn_bytes: 43000000
+            binary_limit_bytes: 48000000
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
