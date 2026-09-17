@@ -19,8 +19,8 @@ support branch.
 | 0.9.x   | ⚠️ critical fixes only |
 | < 0.9   | ❌                 |
 
-The `0.9.0 → 0.10.0` line is the current release train; deploy the latest
-`0.10.x`. Earlier minor lines receive no fixes.
+The `0.10.0 → 0.11.0` line is the current release train; deploy the latest
+`0.11.x`. Earlier minor lines receive no fixes.
 
 ## Reporting a vulnerability
 

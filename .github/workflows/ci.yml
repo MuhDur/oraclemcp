@@ -741,13 +741,11 @@ jobs:
   api-lock:
     name: public-API lock (cargo public-api + semver-checks)
     runs-on: ubuntu-latest
-    # PRE-RELEASE-WINDOW demotion. Operator steering 2026-09-16: cargo
-    # semver-checks correctly reports unreleased public-API drift versus the
-    # published 0.10.0, which is expected while main accumulates the next
-    # release. `continue-on-error: true` is what makes scripts/ci_taxonomy.py
-    # classify this job `advisory`. This re-activates as a required gate at
-    # release, when the version is bumped and the baseline is refreshed; the
-    # exact-surface `cargo public-api` lock still runs and is reported here.
+    # The 0.11.0 candidate intentionally exposes its public additions relative
+    # to the published 0.10.0 line; cargo semver-checks must accept that minor
+    # bump and cargo public-api must match the refreshed exact baseline.
+    # `continue-on-error: true` remains the operator's advisory classification;
+    # do not re-promote this job without a separate operator decision.
     continue-on-error: true
     timeout-minutes: 30
     steps:

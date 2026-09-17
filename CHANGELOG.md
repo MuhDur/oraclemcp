@@ -6,6 +6,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-09-17
+
 A hardening pass over the dashboard, the audit shipper, and the release /
 installation path, plus a driver repin to `driver-cx` 0.9.2. The fail-closed SQL
 guard and the `READ_ONLY < READ_WRITE < DDL < ADMIN` operating-level ladder are
@@ -149,6 +151,12 @@ unchanged in contract.
 
 ### Changed
 
+- **The official `oracledb` beta adapter now ships in every artifact as a
+  bounded, acquisition-only alternate.** `driver-cx` remains the primary and
+  permanent IAM/cwallet route; an opened session is never retried or migrated.
+- **The blocking Free23 matrix now proves a PL/SQL round trip** for a function,
+  procedure, and package, while scheduled guard fuzzing retains its isolated
+  coverage corpus across successful campaigns.
 - **The server is repinned to the `driver-cx` 0.9.2 driver**, with the
   dual-driver backend contract documented. See
   [4394006b](https://github.com/MuhDur/oraclemcp/commit/4394006b),

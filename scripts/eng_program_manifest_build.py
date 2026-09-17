@@ -85,7 +85,7 @@ DEFAULT_SECTION = "§33"
 # Priority -> execution tier. The lint accepts P0-P4, T0-T3, tier-1..3, and the
 # named tiers; we use the tier-N form so the mapping is total and deterministic.
 PRIORITY_TIER = {0: "tier-1", 1: "tier-2", 2: "tier-3", 3: "tier-3", 4: "tier-3"}
-DEFAULT_RELEASE_TARGET = "0.10.0"
+DEFAULT_RELEASE_TARGET = "0.11.0"
 
 
 def slugify(issue_id: str) -> str:

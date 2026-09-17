@@ -66,7 +66,7 @@ gates a tag push, not a merge).
 | `scripts/gen_coverage_report.sh --check` (conformance **clause** coverage, MUST/SHOULD vs `tests/conformance/clauses.tsv` — *not* code coverage) | `ci.yml:boundary` | every push+PR | 1 | required |
 | feature-powerset (`cargo hack`) | `ci.yml:feature-powerset` | every push+PR | 1 | required |
 | `cargo deny check` (supply-chain) | local / `ci.yml:supply-chain` | pre-push + every push+PR | 0 → 1 | required |
-| public-API lock (`cargo public-api` + `cargo semver-checks`) | `ci.yml:api-lock` | every push+PR | 1 | advisory (pre-release window — `semver-checks` reports expected unreleased drift vs published 0.10.0; re-required at release when the version is bumped) |
+| public-API lock (`cargo public-api` + `cargo semver-checks`) | `ci.yml:api-lock` | every push+PR | 1 | advisory (the 0.11.0 candidate's refreshed exact baseline and its minor bump from published 0.10.0 must both pass; operator keeps this lane advisory) |
 | installer lint + built-artifact smoke, Windows installer/service | `ci.yml:installer`, `windows-installer` | every push+PR | 1 | required |
 | native-Windows runtime workspace tests | `ci.yml:windows-rust` | every push+PR | 1 | advisory (pending `oraclemcp-xuaea`, see README Limitations) |
 | PL/SQL intelligence feature matrix | `ci.yml:plsql-intelligence` | every push+PR | 1 | advisory (operator steering 2026-09-16: feature build/tests are green locally, but the hosted 2-core runner OOMs/times out; runner sizing/parallelism follow-up `oraclemcp-xoflp.3.2` restores the required gate) |

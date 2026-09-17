@@ -51,9 +51,9 @@ async-trait = "0.1"
 # accidental float into a new minor. Keep the `=` pin; bump it deliberately
 # (adapter + contract suite green, full gate battery re-run) for each upgrade.
 oraclemcp-driver-cx = { version = "=0.9.2", default-features = false }
-# Oracle's official synchronous Rust driver. It remains optional at the
-# workspace edge: the `oracledb` feature on `oraclemcp-db` is the only path
-# that resolves it into a server build while its adapter is qualified.
+# Oracle's official synchronous Rust driver. `oraclemcp-db` enables its
+# adapter by default so every shipped server artifact contains the bounded
+# connect-time alternate; routing nevertheless keeps driver-cx primary.
 oracledb = { version = "=26.0.0-beta.3", default-features = false }
 # The pure-Rust, sans-I/O TNS/TTC protocol core that driver-cx itself builds on.
 # The TNS-onboarding parse adapter (crates/oraclemcp-db/src/tns.rs) reuses its

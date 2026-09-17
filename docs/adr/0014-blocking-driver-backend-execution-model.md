@@ -2,11 +2,12 @@
 
 ## Status
 
-Accepted. The feature-gated official-driver adapter and its acquisition router
-are implemented. On 2026-09-16 the operator superseded the proposed default
-flip: driver-cx remains the safe primary, while the official driver remains an
-actively tried, bounded alternate for password acquisitions without a mutable
-wallet-directory configuration. The decision does not permit a
+Accepted. The official-driver adapter and its acquisition router are compiled
+into shipped builds. On 2026-09-16 the operator superseded the proposed default
+flip, and on 2026-09-17 explicitly accepted the beta-in-every-build tradeoff:
+driver-cx remains the safe primary, while the experimental, reduced-capability
+official driver remains an actively tried, bounded alternate for password
+acquisitions without a mutable wallet-directory configuration. The decision does not permit a
 deadline/thread-leak exception, a statement retry, or removal of the permanent
 driver-cx routes.
 
@@ -124,11 +125,31 @@ opaque Asupersync channel implementation together with its runtime-owned OS
 thread; the later B1.3 proof must add a finite model around the actor state
 machine before that bead can close.
 
+### Build-cost measurement (2026-09-17)
+
+The accepted beta-in-every-build cost was measured on this Linux build host
+with fresh, dedicated target directories. The baseline used the same `HEAD`
+source archive and `dashboard-bundle` release command without `oracledb`; the
+candidate added the default-compiled adapter. The Docker measurements used
+isolated BuildKit contexts assembled from that same baseline, with only the B1
+manifest/Dockerfile overlays, so concurrent workspace edits were excluded.
+They are local release-engineering measurements, not a portability or release
+SLA claim.
+
+| Measurement | Baseline | Default-compiled official adapter | Delta |
+| --- | ---: | ---: | ---: |
+| Native release build wall time | 268.64 s | 436.21 s | +167.57 s (+62.4%) |
+| Native `oraclemcp` binary | 45,590,008 bytes | 47,526,472 bytes | +1,936,464 bytes (+4.25%) |
+| Fresh native target directory | 1,413,970,742 bytes | 1,499,917,941 bytes | +85,947,199 bytes (+6.08%) |
+| Docker `runtime` image | 285,780,680 bytes | 287,721,936 bytes | +1,941,256 bytes (+0.68%) |
+| Docker image build wall time | 189.05 s | 191.47 s | +2.42 s (+1.28%) |
+
 ## Consequences
 
-- The default build does not enable or compile the official driver.
-- The optional feature pins `oracledb` exactly at `26.0.0-beta.3`.
-- The feature-gated backend selection is acquisition-only; the fail-closed SQL
+- The default build compiles the official adapter, pinned exactly at
+  `oracledb` `26.0.0-beta.3`; this is a supply-chain and binary-size tradeoff,
+  not a primary-routing flip.
+- The acquisition-only backend selection is unchanged; the fail-closed SQL
   guard, operating-level ladder, rollback default, protected-profile clamp,
   OAuth scope reduction, transaction cleanup, audit chain, and NUMBER-to-string
   invariant are unchanged and remain above the connection seam.
@@ -152,17 +173,25 @@ claim that the permanent driver-cx implementation may now be deleted.
 
 ## Active dual-driver disposition
 
-The 2026-09-16 decision keeps `oracledb` opt-in at compile time and keeps
-driver-cx first when that feature is enabled. The official driver is not
-shelved: a compatible password-only **raw acquisition** failure actively tries
-it through the bounded connection guard. Mutable wallet directories stay
-driver-cx-only until their consumption can be immutable and verified. This does
-not authorize a statement retry, an in-session migration, or driver-cx removal.
+The 2026-09-17 decision compiles `oracledb` into the default build while keeping
+driver-cx first for every route. The official adapter is experimental and
+reduced-capability, not a primary backend: it is tried only after a compatible
+password-only **raw acquisition** failure and only through the bounded
+connection guard. Mutable wallet directories stay driver-cx-only until their
+consumption can be immutable and verified. This does not authorize a statement
+retry, an in-session migration, or driver-cx removal.
+
+The official session is deliberately reduced-capability. It fails closed rather
+than emulating or reconnecting through another driver for `call_routine`, named
+bind APIs, DBMS_OUTPUT, or LOB/JSON/INTERVAL column materialization. Those
+operations remain driver-cx-only until the official adapter has explicit,
+independently tested support.
+
 The router remains acquisition-only:
 
 | Authentication/configuration | Current route | Evidence status |
 | --- | --- | --- |
-| Basic username/password | driver-cx primary; guarded official alternate only after a raw pre-session driver-cx acquisition error | Direct dual-backend local-lab proof for connect, query, transaction, errors, and close; typed router tests keep post-session setup single-backend |
+| Basic username/password | driver-cx primary; guarded official alternate only after a raw pre-session driver-cx acquisition error | Deterministic router/adapter tests; a separately reported manual, non-CI Free23 lab observation is not a reproducible release-parity artifact |
 | TLS/TCPS with PEM wallet | driver-cx directly | Mutable wallet directories are excluded from the official alternate pending an immutable verified-consumption design; direct adapter parity remains live-required but does not license routing |
 | OCI IAM / Autonomous DB token | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
 | `cwallet.sso` auto-login | driver-cx directly | Keep this route; it is outside official-driver capability until independently qualified |
@@ -181,14 +210,15 @@ that it continues to exercise the existing driver-cx-only path unchanged.
    through `f64`. It also proves the official VECTOR mapper emits the existing
    dense/sparse structured-cell contract and TSTZ bind/format handling preserves
    its offset.
-3. A captured, explicitly opted-in local Free23 lab run of
-   `cross_backend_parity` passes with both adapters connected directly using
-   basic authentication. It compares the observable serialized result of a
-   38-digit NUMBER, TSTZ, dense VECTOR, sparse VECTOR, missing-object error
-   envelope, and DDL/DML rollback/commit sequence. The test is intentionally
-   `#[ignore]`: selecting it without `ORACLEMCP_DUAL_BACKEND_LAB=1` and all
-   local-lab credentials fails rather than converting absent infrastructure
-   into a passing claim.
+3. `cross_backend_parity` is an explicitly opted-in local Free23 lab target for
+   direct basic-auth adapter comparison. It is compiled only with
+   `oracledb,live-xe`, is intentionally `#[ignore]`, requires
+   `ORACLEMCP_DUAL_BACKEND_LAB=1` plus local credentials, and is not invoked by
+   CI or a repository script. When independently run, it compares a 38-digit
+   NUMBER, TSTZ, dense/sparse VECTOR, a missing-object error envelope, and a
+   DDL/DML rollback/commit sequence. It contains no PL/SQL scenario. Missing
+   infrastructure refuses the explicitly selected test; it never converts an
+   absent lab into a passing claim.
 4. **The sole remaining live-required item** is the direct TCPS + PEM-wallet
    adapter-parity run. The target requires an explicit TCPS endpoint and proves
    direct adapter connect, ping, identity, and close parity. It is technical
@@ -222,18 +252,21 @@ that it continues to exercise the existing driver-cx-only path unchanged.
 
 ### Current evidence and residual risks
 
-On 2026-09-16, the explicitly selected local Free23 basic-auth run passed
-against independent driver-cx and official connections. It proved session
-identity; exact NUMBER, TSTZ, DATE, and plain-TIMESTAMP serialization; dense
-and sparse VECTOR serialization; missing-object error-envelope parity; and
-classified DDL/DML rollback/commit behavior. In particular, DATE remained
-`2026-06-01T12:00:00` and plain TIMESTAMP remained
-`2026-06-01T12:00:00.123456789`, with no fabricated UTC suffix. The target
+Operator prose on 2026-09-16 reported a manually selected local Free23
+basic-auth observation using independent driver-cx and official connections.
+The repository has no committed machine-readable result, CI log, or replayable
+credentialed artifact for that observation, so it is **not** reproducible
+release-parity evidence. The ignored `cross_backend_parity` target above is the
+available manual lab harness; it does not exercise PL/SQL. Its described
+scenarios include session identity; exact NUMBER, TSTZ, DATE, and
+plain-TIMESTAMP serialization; dense/sparse VECTOR serialization;
+missing-object error envelopes; and classified DDL/DML rollback/commit behavior.
+In particular, its expected DATE is `2026-06-01T12:00:00` and plain TIMESTAMP
+is `2026-06-01T12:00:00.123456789`, with no fabricated UTC suffix. The target
 creates and drops uniquely named local VECTOR tables; it does not credit an
-absent pre-seeded fixture. This is one basic-auth row, not a qualified matrix.
-TCPS + PEM direct-adapter parity remains live-required and uncredited; mutable
-wallet-directory production routing remains driver-cx-only even after that
-technical parity row passes.
+absent pre-seeded fixture. TCPS + PEM direct-adapter parity remains
+live-required and uncredited; mutable-wallet production routing remains
+driver-cx-only even after a technical parity row passes.
 
 The Free23 run closed the observed VECTOR gap
 (`oraclemcp-xoflp.1.3`) and exposed/fixed the beta driver's malformed
@@ -255,8 +288,9 @@ The DATE/plain-TIMESTAMP adapter gap (`oraclemcp-xoflp.1.8`) is resolved:
 the official column type selects zone-less component formatting for DATE and
 plain TIMESTAMP, while LTZ/TSTZ retain their offset-bearing representation.
 Deterministic adapter and public-serialization regressions prove that a
-zero-valued internal offset cannot fabricate UTC. The separate live basic-auth
-parity row has now passed against the local Free23 fixture.
+zero-valued internal offset cannot fabricate UTC. The separate basic-auth
+parity report is manual, non-CI operator context rather than a reproducible
+release-evidence row.
 The completion-acknowledgement liveness gap (`oraclemcp-xoflp.1.12`) is
 resolved: no-deadline requests receive a fixed 250 ms acknowledgement grace,
 deadline-bearing requests use their copied remaining absolute deadline, and a
@@ -284,8 +318,8 @@ The following residual limits remain explicitly tracked:
   the upstream call cancellable. An upstream driver fix or replacement version
   remains the only way to close the underlying driver finding.
 
-- `oraclemcp-xoflp.4.8`: the feature-gated ignored TCPS + `ewallet.pem` parity
-  target compiles and refuses an auto-login wallet, but no explicit PEM-only
+- `oraclemcp-xoflp.4.8`: the ignored TCPS + `ewallet.pem` parity target compiles
+  and refuses an auto-login wallet, but no explicit PEM-only
   TCPS lab credentials are available on this host. It needs one opted-in
   direct driver-cx/official connect, ping, identity, and close run before the
   direct adapter mapping is fully evidenced. This is the **sole remaining

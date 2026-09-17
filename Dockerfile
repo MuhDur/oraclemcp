@@ -38,7 +38,7 @@ WORKDIR /src/oraclemcp
 FROM builder-base AS builder
 COPY . .
 RUN test -f web/dist/index.html
-RUN cargo build --locked --release -p oraclemcp --features dashboard-bundle
+RUN cargo build --locked --release -p oraclemcp --features dashboard-bundle,oracledb
 
 # ---- optional builder: oraclemcp + PL/SQL intelligence engine ----
 # The feature build resolves published plsql-intelligence crates from crates.io.
@@ -46,7 +46,7 @@ RUN cargo build --locked --release -p oraclemcp --features dashboard-bundle
 FROM builder-base AS builder-plsql-intelligence
 COPY . .
 RUN test -f web/dist/index.html
-RUN cargo build --locked --release -p oraclemcp --features dashboard-bundle,plsql-intelligence
+RUN cargo build --locked --release -p oraclemcp --features dashboard-bundle,oracledb,plsql-intelligence
 
 # ---- runtime base: fixed non-root identity and bounded writable state ----
 FROM oraclelinux:9@sha256:fe2c9e975c93c1b8c00712e5ad40e0127c0f1982c2d76031f1e09e5307e32aeb AS runtime-base

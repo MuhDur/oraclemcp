@@ -56,10 +56,11 @@ separately from the SQLcl and genai-toolbox comparison:
   Client libraries and targets Oracle Database 12 through 26ai. The shipped
   default remains the frozen, async `oraclemcp-driver-cx` 0.9.2 (published
   2026-07-30), the renamed continuation of the original Rust thin driver that
-  Oracle's `oracledb` replaces. The opt-in `oracledb` feature is a bounded
+  Oracle's `oracledb` replaces. The official `oracledb` adapter is compiled
+  into shipped artifacts as an experimental, reduced-capability, bounded
   acquisition-only alternate for compatible password connections after a raw
   `oraclemcp-driver-cx` acquisition failure; it does not replace the primary
-  driver, execute statements after routing, or handle IAM/cwallet routes. The
+  driver, execute statements after routing, or handle IAM/cwallet/PEM routes. The
   `oraclemcp-driver-cx` repository is
   [`github.com/MuhDur/rust-oracledb`](https://github.com/MuhDur/rust-oracledb).
 

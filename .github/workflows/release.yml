@@ -335,9 +335,9 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.build_tool }}" = "cargo-zigbuild" ]; then
-            cargo zigbuild --release -p oraclemcp --features dashboard-bundle --target "${{ matrix.target }}"
+            cargo zigbuild --release -p oraclemcp --features dashboard-bundle,oracledb --target "${{ matrix.target }}"
           else
-            cargo build --release -p oraclemcp --features dashboard-bundle --target "${{ matrix.target }}"
+            cargo build --release -p oraclemcp --features dashboard-bundle,oracledb --target "${{ matrix.target }}"
           fi
 
       - name: Check binary size and musl static linkage

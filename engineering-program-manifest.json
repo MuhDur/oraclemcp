@@ -6,7 +6,7 @@
     {
       "assertion": "patch",
       "repository": "server",
-      "version": "0.10.0"
+      "version": "0.11.0"
     }
   ],
   "repositories": [
@@ -57,7 +57,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -107,7 +107,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -156,7 +156,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -204,7 +204,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -254,7 +254,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -307,7 +307,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -357,7 +357,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -410,7 +410,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -460,7 +460,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -512,7 +512,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -562,7 +562,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -611,7 +611,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -660,7 +660,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -715,7 +715,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -771,7 +771,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -821,7 +821,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -873,7 +873,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -926,7 +926,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -977,7 +977,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1029,7 +1029,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1082,7 +1082,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1135,7 +1135,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1188,7 +1188,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1238,7 +1238,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1288,7 +1288,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1345,7 +1345,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1398,7 +1398,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1447,7 +1447,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1497,7 +1497,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1551,7 +1551,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1599,7 +1599,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1646,7 +1646,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1698,7 +1698,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1750,7 +1750,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1798,7 +1798,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1846,7 +1846,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1898,7 +1898,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -1949,7 +1949,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2002,7 +2002,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2059,7 +2059,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2111,7 +2111,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2170,7 +2170,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2216,7 +2216,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2269,7 +2269,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2317,7 +2317,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2368,7 +2368,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2421,7 +2421,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2469,7 +2469,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2524,7 +2524,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2573,7 +2573,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2621,7 +2621,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2672,7 +2672,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2720,7 +2720,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2769,7 +2769,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2817,7 +2817,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2865,7 +2865,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2916,7 +2916,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -2964,7 +2964,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3015,7 +3015,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3068,7 +3068,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3122,7 +3122,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3173,7 +3173,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3225,7 +3225,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3274,7 +3274,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3325,7 +3325,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3379,7 +3379,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3429,7 +3429,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3481,7 +3481,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3532,7 +3532,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3582,7 +3582,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3631,7 +3631,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3665,13 +3665,11 @@
         "oraclemcp-091-d5-idle-kill-lane-83utt"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-091-e5-failure-recovery-e2e-bf1qa",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733",
-        "description-source:plan v8 sec.4-E5"
+        "tests/artifacts/evidence/closes/oraclemcp-091-e5-failure-recovery-e2e-bf1qa.json"
       ],
       "handoffs": [],
       "labels": [
@@ -3689,16 +3687,15 @@
         "section": "\u00a733"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-091-e5-failure-recovery-e2e-bf1qa"
       },
       "scope": [
-        ".beads/issues.jsonl#oraclemcp-091-e5-failure-recovery-e2e-bf1qa",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733"
+        "scripts/rig/failure_recovery_e2e.py"
       ],
       "slug": "oraclemcp-091-e5-failure-recovery-e2e-bf1qa",
       "tier": "tier-2",
@@ -3740,7 +3737,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3792,7 +3789,7 @@
       },
       "priority": 1,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3841,7 +3838,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3889,7 +3886,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3902,7 +3899,7 @@
         "crates/oraclemcp-db/src/tns.rs",
         "README.md",
         "AGENTS.md",
-        "docs/toolchain.md",
+        "docs/TOOLCHAIN.md",
         "docs/operations.md",
         ".github/workflows/ci.yml"
       ],
@@ -3948,7 +3945,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -3997,7 +3994,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4044,7 +4041,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4094,7 +4091,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4144,7 +4141,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4193,7 +4190,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4245,7 +4242,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4299,7 +4296,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4350,7 +4347,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4398,7 +4395,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4448,7 +4445,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4496,7 +4493,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4544,7 +4541,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4592,7 +4589,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4642,7 +4639,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4698,7 +4695,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4749,7 +4746,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4798,7 +4795,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4847,7 +4844,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4901,7 +4898,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -4954,7 +4951,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5010,7 +5007,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5064,7 +5061,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5119,7 +5116,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5153,13 +5150,11 @@
         "oraclemcp-091-ws-b-p1-fixes-71da0"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-091-r5-lite-codex-session-7us13",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733",
-        "description-source:plan v8 sec.4-R5 (OPERATOR RULING: option 2 -- R5-lite in-train)"
+        "tests/artifacts/evidence/closes/oraclemcp-091-r5-lite-codex-session-7us13.json"
       ],
       "handoffs": [],
       "labels": [
@@ -5177,16 +5172,15 @@
         "section": "\u00a733"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-091-r5-lite-codex-session-7us13"
       },
       "scope": [
-        ".beads/issues.jsonl#oraclemcp-091-r5-lite-codex-session-7us13",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733"
+        "AGENTS.md"
       ],
       "slug": "oraclemcp-091-r5-lite-codex-session-7us13",
       "tier": "tier-2",
@@ -5225,7 +5219,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5281,7 +5275,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5331,7 +5325,7 @@
       },
       "priority": 0,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5398,7 +5392,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5475,7 +5469,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5531,7 +5525,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5589,7 +5583,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5619,12 +5613,11 @@
         "oraclemcp-091-e6-e2e-attestations-ocqon"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-091-ws-e-e2e-dcrif",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733"
+        "tests/artifacts/evidence/closes/oraclemcp-091-ws-e-e2e-dcrif.json"
       ],
       "handoffs": [],
       "labels": [
@@ -5642,15 +5635,21 @@
         "section": "\u00a733"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-091-ws-e-e2e-dcrif"
       },
       "scope": [
-        "scripts/e2e/run_all.sh"
+        ".beads/issues.jsonl",
+        "tests/artifacts/evidence/closes/oraclemcp-091-e1-ladder-e2e-jel20.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-e2-sec1-reclassify-64fpf.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-e3-audit-chain-e2e-69bbf.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-e4-dashboard-e2e-sobjr.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-e5-failure-recovery-e2e-bf1qa.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-e6-e2e-attestations-ocqon.json"
       ],
       "slug": "oraclemcp-091-ws-e-e2e-dcrif",
       "tier": "tier-2",
@@ -5723,7 +5722,7 @@
       },
       "priority": 1,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5789,7 +5788,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5837,12 +5836,11 @@
         "oraclemcp-091-rfail-injection-lanes-ok400"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-091-ws-r-integrator-rig-p2sp1",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733"
+        "tests/artifacts/evidence/closes/oraclemcp-091-ws-r-integrator-rig-p2sp1.json"
       ],
       "handoffs": [],
       "labels": [
@@ -5860,16 +5858,21 @@
         "section": "\u00a733"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-091-ws-r-integrator-rig-p2sp1"
       },
       "scope": [
-        "scripts/e2e",
-        "scripts/rig/rig.sh"
+        ".beads/issues.jsonl",
+        "tests/artifacts/evidence/closes/oraclemcp-091-r0-rig-scaffold-zclvw.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-r1-external-client-tmc5j.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-r2-tool-sweep-nvxo4.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-r3-browser-lane-43kev.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-r4-report-refusal-gate-1u1oc.json",
+        "tests/artifacts/evidence/closes/oraclemcp-091-r5-lite-codex-session-7us13.json"
       ],
       "slug": "oraclemcp-091-ws-r-integrator-rig-p2sp1",
       "tier": "tier-2",
@@ -5877,6 +5880,114 @@
       "tracker": "server",
       "tracking_label": "oraclemcp-091-ws-r-integrator-rig-p2sp1",
       "type": "epic"
+    },
+    {
+      "acceptance": [
+        "All sub-epics closed with landed evidence",
+        "heartbeat green \u22653 consecutive",
+        "0.10.1 published",
+        "backend-qualification/v1 committed with a decision record",
+        "registry\u2194docs drift gate green",
+        "documented channels verified 4/4",
+        "nightly 3-lane matrix green 7 days",
+        "deferred beads without a ruling = 0"
+      ],
+      "cluster": null,
+      "dependencies": [],
+      "disposition": {
+        "reason": "existing open bead is reused without mutation",
+        "tracker_status": "open"
+      },
+      "evidence": [
+        ".beads/issues.jsonl#oraclemcp-2q4em",
+        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733"
+      ],
+      "handoffs": [],
+      "labels": [
+        "oraclemcp-2q4em",
+        "plan:ep260718:oraclemcp-2q4em-7db75dfa"
+      ],
+      "lineage": {
+        "issue_id": "oraclemcp-2q4em",
+        "kind": "existing"
+      },
+      "operator_gate": "none",
+      "parent": null,
+      "plan": {
+        "label": "plan:ep260718:oraclemcp-2q4em-7db75dfa",
+        "section": "\u00a733"
+      },
+      "priority": 0,
+      "promotion": "held",
+      "release_target": "0.11.0",
+      "repository": "server",
+      "reuse": {
+        "action": "reuse-existing",
+        "issue_id": "oraclemcp-2q4em"
+      },
+      "scope": [
+        "docs/plan/PLAN_REALITY_CHECK_2026-09.md",
+        "scripts/bead_tracker_guard.sh",
+        "scripts/build_lease.sh"
+      ],
+      "slug": "oraclemcp-2q4em",
+      "tier": "tier-1",
+      "title": "Reality check 2026-09: close every vision gap (driver strategy, green+release, truth docs, channels, proof, ledger)",
+      "tracker": "server",
+      "tracking_label": "oraclemcp-2q4em",
+      "type": "epic"
+    },
+    {
+      "acceptance": [
+        "One scheduled lane emits a signed test-attestation/v1 that verifies",
+        "K3 unblocked",
+        "runbook step recorded in docs/operations.md \u00a76.7"
+      ],
+      "cluster": null,
+      "dependencies": [],
+      "disposition": {
+        "reason": "existing open bead is reused without mutation",
+        "tracker_status": "open"
+      },
+      "evidence": [
+        ".beads/issues.jsonl#oraclemcp-2q4em.9",
+        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a733"
+      ],
+      "handoffs": [],
+      "labels": [
+        "oraclemcp-2q4em-9",
+        "plan:ep260718:oraclemcp-2q4em-9-ae885380"
+      ],
+      "lineage": {
+        "issue_id": "oraclemcp-2q4em.9",
+        "kind": "existing"
+      },
+      "operator_gate": "none",
+      "parent": null,
+      "plan": {
+        "label": "plan:ep260718:oraclemcp-2q4em-9-ae885380",
+        "section": "\u00a733"
+      },
+      "priority": 2,
+      "promotion": "held",
+      "release_target": "0.11.0",
+      "repository": "server",
+      "reuse": {
+        "action": "reuse-existing",
+        "issue_id": "oraclemcp-2q4em.9"
+      },
+      "scope": [
+        "docs/operations.md",
+        "docs/plan/PLAN_REALITY_CHECK_2026-09.md",
+        "scripts/bead_tracker_guard.sh",
+        "scripts/build_lease.sh"
+      ],
+      "slug": "oraclemcp-2q4em-9",
+      "tier": "tier-3",
+      "title": "B9 Provision the signed test-attestation lane (operator action): ENABLE_TEST_ATTESTATION + ORACLEMCP_TEST_ATTESTATION_KEY + verifier trust policy",
+      "tracker": "server",
+      "tracking_label": "oraclemcp-2q4em-9",
+      "type": "task"
     },
     {
       "acceptance": [
@@ -5908,7 +6019,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -5957,7 +6068,7 @@
       },
       "priority": 1,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6006,7 +6117,7 @@
       },
       "priority": 0,
       "promotion": "deferred",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "defer-existing",
@@ -6054,7 +6165,7 @@
       },
       "priority": 0,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6109,7 +6220,7 @@
       },
       "priority": 2,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6160,7 +6271,7 @@
       },
       "priority": 2,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6211,7 +6322,7 @@
       },
       "priority": 2,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6260,7 +6371,7 @@
       },
       "priority": 1,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6311,7 +6422,7 @@
       },
       "priority": 2,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6363,7 +6474,7 @@
       },
       "priority": 3,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6411,7 +6522,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6442,6 +6553,7 @@
       ],
       "cluster": "K",
       "dependencies": [
+        "oraclemcp-2q4em-9",
         "oraclemcp-eng-program-bp8ia-12-1"
       ],
       "disposition": {
@@ -6470,7 +6582,7 @@
       },
       "priority": 3,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6489,7 +6601,7 @@
     },
     {
       "acceptance": [
-        "Complete tracker issue oraclemcp-eng-program-bp8ia.13: Publish oraclemcp 0.10.0 (terminal sink; operator tags)."
+        "Complete tracker issue oraclemcp-eng-program-bp8ia.13: Publish oraclemcp 0.11.0 (terminal sink; operator tags)."
       ],
       "cluster": null,
       "dependencies": [
@@ -6538,7 +6650,7 @@
       },
       "priority": 1,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6550,7 +6662,7 @@
       ],
       "slug": "oraclemcp-eng-program-bp8ia-13",
       "tier": "tier-2",
-      "title": "Publish oraclemcp 0.10.0 (terminal sink; operator tags)",
+      "title": "Publish oraclemcp 0.11.0 (terminal sink; operator tags)",
       "tracker": "server",
       "tracking_label": "oraclemcp-eng-program-bp8ia-13",
       "type": "task"
@@ -6588,7 +6700,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6638,7 +6750,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6665,12 +6777,11 @@
         "oraclemcp-eng-program-bp8ia-2"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.4",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a726"
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.json"
       ],
       "handoffs": [],
       "labels": [
@@ -6689,15 +6800,21 @@
         "section": "\u00a726"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-eng-program-bp8ia.4"
       },
       "scope": [
-        "docs/plan"
+        ".beads/issues.jsonl",
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.2.json",
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.3.json",
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.5.json",
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.json",
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.3.json",
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.1.json"
       ],
       "slug": "oraclemcp-eng-program-bp8ia-4",
       "tier": "tier-2",
@@ -6740,7 +6857,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6766,12 +6883,11 @@
         "oraclemcp-091-ws-b-p1-fixes-71da0"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.4.5",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a726"
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.5.json"
       ],
       "handoffs": [],
       "labels": [
@@ -6790,17 +6906,17 @@
         "section": "\u00a726"
       },
       "priority": 2,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-eng-program-bp8ia.4.5"
       },
       "scope": [
-        "docs/plan",
-        "tests/artifacts",
-        "docs/release-surfaces.md"
+        "README.md",
+        "AGENTS.md",
+        "docs/plan"
       ],
       "slug": "oraclemcp-eng-program-bp8ia-4-5",
       "tier": "tier-3",
@@ -6819,12 +6935,11 @@
         "oraclemcp-091-ws-b-p1-fixes-71da0"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.4.6",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a726"
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.4.6.json"
       ],
       "handoffs": [],
       "labels": [
@@ -6843,16 +6958,20 @@
         "section": "\u00a726"
       },
       "priority": 2,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-eng-program-bp8ia.4.6"
       },
       "scope": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.4.6",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a726"
+        "crates/oraclemcp-core/src/server.rs",
+        "crates/oraclemcp-core/src/server/dispatch_context_tests.rs",
+        "crates/oraclemcp-core/src/server/resource_template_reads.rs",
+        "crates/oraclemcp-core/src/doctor.rs",
+        "crates/oraclemcp-core/src/doctor/iam_token_tests.rs",
+        "scripts/oraclemcp_arch_fitness_lint.sh"
       ],
       "slug": "oraclemcp-eng-program-bp8ia-4-6",
       "tier": "tier-3",
@@ -6895,7 +7014,7 @@
       },
       "priority": 0,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6945,7 +7064,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -6994,7 +7113,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7044,7 +7163,7 @@
       },
       "priority": 2,
       "promotion": "held",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7094,7 +7213,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7148,7 +7267,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7173,13 +7292,11 @@
       "cluster": "F",
       "dependencies": [],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.7.11.1",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a728",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4571-4579#finding=DC5"
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.7.11.1.json"
       ],
       "handoffs": [],
       "labels": [
@@ -7198,16 +7315,15 @@
         "section": "\u00a728"
       },
       "priority": 3,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-eng-program-bp8ia.7.11.1"
       },
       "scope": [
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4571-4579",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4571-4579#finding=DC5"
+        "README.md"
       ],
       "slug": "oraclemcp-eng-program-bp8ia-7-11-1",
       "tier": "tier-3",
@@ -7247,7 +7363,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7294,7 +7410,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7341,7 +7457,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7388,7 +7504,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7435,7 +7551,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7483,7 +7599,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7530,7 +7646,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7577,7 +7693,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7624,7 +7740,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7671,7 +7787,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7718,7 +7834,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7765,7 +7881,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7812,7 +7928,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7859,7 +7975,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7906,7 +8022,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -7953,7 +8069,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8002,7 +8118,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8050,7 +8166,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8098,7 +8214,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8124,12 +8240,11 @@
         "oraclemcp-eng-program-bp8ia-7"
       ],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.8",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a727.7"
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.8.json"
       ],
       "handoffs": [],
       "labels": [
@@ -8148,16 +8263,15 @@
         "section": "\u00a727.7"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-eng-program-bp8ia.8"
       },
       "scope": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.8",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a727.7"
+        "docs/plan/PLAN_ENGINEERING_PROGRAM.md"
       ],
       "slug": "oraclemcp-eng-program-bp8ia-8",
       "tier": "tier-2",
@@ -8197,7 +8311,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8223,12 +8337,11 @@
       "cluster": "G",
       "dependencies": [],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.8.2",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a727.7"
+        "tests/artifacts/evidence/closes/oraclemcp-eng-program-bp8ia.8.2.json"
       ],
       "handoffs": [],
       "labels": [
@@ -8247,16 +8360,15 @@
         "section": "\u00a727.7"
       },
       "priority": 2,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-eng-program-bp8ia.8.2"
       },
       "scope": [
-        ".beads/issues.jsonl#oraclemcp-eng-program-bp8ia.8.2",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a727.7"
+        "crates/oraclemcp-core/ci_taxonomy.json"
       ],
       "slug": "oraclemcp-eng-program-bp8ia-8-2",
       "tier": "tier-3",
@@ -8298,7 +8410,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8327,8 +8439,8 @@
         "oraclemcp-e-server-swarm-ready-0r8ac"
       ],
       "disposition": {
-        "reason": "existing deferred bead stays deferred",
-        "tracker_status": "deferred"
+        "reason": "existing open bead is reused without mutation",
+        "tracker_status": "open"
       },
       "evidence": [
         ".beads/issues.jsonl#oraclemcp-f-server-bughunt-fixes-fusa",
@@ -8352,11 +8464,11 @@
         "section": "\u00a728"
       },
       "priority": 1,
-      "promotion": "deferred",
-      "release_target": "0.10.0",
+      "promotion": "held",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
-        "action": "defer-existing",
+        "action": "reuse-existing",
         "issue_id": "oraclemcp-f-server-bughunt-fixes-fusa"
       },
       "scope": [
@@ -8376,17 +8488,13 @@
         "The change remains behavior-only for server 0.10.0 or driver 0.8.5, introduces no new public API, and passes cargo-semver-checks"
       ],
       "cluster": "F",
-      "dependencies": [
-        "oraclemcp-e-server-swarm-ready-0r8ac"
-      ],
+      "dependencies": [],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-f-server-di1-terminal-held-effects-h0d4",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a728",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4566-4566#task=f-server-di1-terminal-held-effects&sha256=4b9c4aa8b30ed78e2953947bb6104523bca1dac4c51939e2a3f818b0cbf47d0d"
+        "tests/artifacts/evidence/closes/oraclemcp-f-server-di1-terminal-held-effects-h0d4.json"
       ],
       "handoffs": [],
       "labels": [
@@ -8405,16 +8513,15 @@
         "section": "\u00a728"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-f-server-di1-terminal-held-effects-h0d4"
       },
       "scope": [
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4566-4566",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4566-4566#task=f-server-di1-terminal-held-effects&sha256=4b9c4aa8b30ed78e2953947bb6104523bca1dac4c51939e2a3f818b0cbf47d0d"
+        "crates/oraclemcp/src/dispatch/tests.rs"
       ],
       "slug": "oraclemcp-f-server-di1-terminal-held-effects-h0d4",
       "tier": "tier-2",
@@ -8429,17 +8536,13 @@
         "The change remains behavior-only for server 0.10.0 or driver 0.8.5, introduces no new public API, and passes cargo-semver-checks"
       ],
       "cluster": "F",
-      "dependencies": [
-        "oraclemcp-e-server-swarm-ready-0r8ac"
-      ],
+      "dependencies": [],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-f-server-met-bounded-tool-labels-na6y",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a728",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4567-4567#task=f-server-met-bounded-tool-labels&sha256=4b9c4aa8b30ed78e2953947bb6104523bca1dac4c51939e2a3f818b0cbf47d0d"
+        "tests/artifacts/evidence/closes/oraclemcp-f-server-met-bounded-tool-labels-na6y.json"
       ],
       "handoffs": [],
       "labels": [
@@ -8458,16 +8561,17 @@
         "section": "\u00a728"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-f-server-met-bounded-tool-labels-na6y"
       },
       "scope": [
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4567-4567",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md:4567-4567#task=f-server-met-bounded-tool-labels&sha256=4b9c4aa8b30ed78e2953947bb6104523bca1dac4c51939e2a3f818b0cbf47d0d"
+        "crates/oraclemcp-telemetry/src/metrics.rs",
+        "crates/oraclemcp/src/main.rs",
+        "crates/oraclemcp-core/src/custom_tools.rs"
       ],
       "slug": "oraclemcp-f-server-met-bounded-tool-labels-na6y",
       "tier": "tier-2",
@@ -8506,7 +8610,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8554,7 +8658,7 @@
       },
       "priority": 3,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8602,7 +8706,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8653,7 +8757,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8703,7 +8807,7 @@
       },
       "priority": 1,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8749,7 +8853,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8795,7 +8899,7 @@
       },
       "priority": 2,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8843,7 +8947,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8866,16 +8970,13 @@
         "close with landed evidence"
       ],
       "cluster": "F",
-      "dependencies": [
-        "oraclemcp-e-server-swarm-ready-0r8ac"
-      ],
+      "dependencies": [],
       "disposition": {
-        "reason": "existing open bead is reused without mutation",
-        "tracker_status": "open"
+        "reason": "existing closed bead is not re-imported",
+        "tracker_status": "closed"
       },
       "evidence": [
-        ".beads/issues.jsonl#oraclemcp-vzui",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a728"
+        "tests/artifacts/evidence/closes/oraclemcp-vzui.json"
       ],
       "handoffs": [],
       "labels": [
@@ -8894,16 +8995,15 @@
         "section": "\u00a728"
       },
       "priority": 1,
-      "promotion": "held",
-      "release_target": "0.10.0",
+      "promotion": "excluded",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
         "issue_id": "oraclemcp-vzui"
       },
       "scope": [
-        ".beads/issues.jsonl#oraclemcp-vzui",
-        "docs/plan/PLAN_ENGINEERING_PROGRAM.md#\u00a728"
+        "crates/oraclemcp-core/src/file_store.rs"
       ],
       "slug": "oraclemcp-vzui",
       "tier": "tier-2",
@@ -8945,7 +9045,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",
@@ -8991,7 +9091,7 @@
       },
       "priority": 0,
       "promotion": "excluded",
-      "release_target": "0.10.0",
+      "release_target": "0.11.0",
       "repository": "server",
       "reuse": {
         "action": "reuse-existing",

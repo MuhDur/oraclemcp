@@ -1520,6 +1520,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OciError where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OciError::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::OracleBackend
+pub oraclemcp_db::OracleBackend::OfficialOracle
 pub oraclemcp_db::OracleBackend::RustOracle
 impl core::clone::Clone for oraclemcp_db::OracleBackend
 pub fn oraclemcp_db::OracleBackend::clone(&self) -> oraclemcp_db::OracleBackend
@@ -1667,6 +1668,65 @@ pub type oraclemcp_db::OracleBind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleBind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleBind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleBind::vzip(self) -> V
+pub enum oraclemcp_db::OracleConnectionCapability
+pub oraclemcp_db::OracleConnectionCapability::AutoLoginWallet
+pub oraclemcp_db::OracleConnectionCapability::DriverCxOnly
+pub oraclemcp_db::OracleConnectionCapability::IamToken
+pub oraclemcp_db::OracleConnectionCapability::Password
+pub oraclemcp_db::OracleConnectionCapability::PemWallet
+impl core::clone::Clone for oraclemcp_db::OracleConnectionCapability
+pub fn oraclemcp_db::OracleConnectionCapability::clone(&self) -> oraclemcp_db::OracleConnectionCapability
+impl core::cmp::Eq for oraclemcp_db::OracleConnectionCapability
+impl core::cmp::PartialEq for oraclemcp_db::OracleConnectionCapability
+pub fn oraclemcp_db::OracleConnectionCapability::eq(&self, &oraclemcp_db::OracleConnectionCapability) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleConnectionCapability
+pub fn oraclemcp_db::OracleConnectionCapability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::OracleConnectionCapability
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleConnectionCapability
+impl core::marker::Freeze for oraclemcp_db::OracleConnectionCapability
+impl core::marker::Send for oraclemcp_db::OracleConnectionCapability
+impl core::marker::Sync for oraclemcp_db::OracleConnectionCapability
+impl core::marker::Unpin for oraclemcp_db::OracleConnectionCapability
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleConnectionCapability
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleConnectionCapability
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleConnectionCapability
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleConnectionCapability where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleConnectionCapability where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleConnectionCapability where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleConnectionCapability::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleConnectionCapability where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleConnectionCapability where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleConnectionCapability where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleConnectionCapability::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleConnectionCapability where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleConnectionCapability::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleConnectionCapability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleConnectionCapability where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleConnectionCapability::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleConnectionCapability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleConnectionCapability where T: core::clone::Clone
+pub type oraclemcp_db::OracleConnectionCapability::Owned = T
+pub fn oraclemcp_db::OracleConnectionCapability::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleConnectionCapability::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleConnectionCapability
+impl<T> core::any::Any for oraclemcp_db::OracleConnectionCapability where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleConnectionCapability::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleConnectionCapability where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleConnectionCapability::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleConnectionCapability where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleConnectionCapability::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleConnectionCapability where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleConnectionCapability::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleConnectionCapability
+pub fn oraclemcp_db::OracleConnectionCapability::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleConnectionCapability
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleConnectionCapability
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleConnectionCapability
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleConnectionCapability
+pub type oraclemcp_db::OracleConnectionCapability::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleConnectionCapability where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleConnectionCapability where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleConnectionCapability::vzip(self) -> V
 pub enum oraclemcp_db::OraclePolicyCatalogVisibility
 pub oraclemcp_db::OraclePolicyCatalogVisibility::NoPolicyRowsVisible
 pub oraclemcp_db::OraclePolicyCatalogVisibility::PolicyRowsVisible
@@ -4382,6 +4442,185 @@ pub type oraclemcp_db::NativeRedactionPolicy::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::NativeRedactionPolicy where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::NativeRedactionPolicy where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::NativeRedactionPolicy::vzip(self) -> V
+pub struct oraclemcp_db::OfficialOracleConnection
+impl oraclemcp_db::OfficialOracleConnection
+pub async fn oraclemcp_db::OfficialOracleConnection::connect(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions) -> core::result::Result<Self, oraclemcp_db::DbError>
+impl oraclemcp_db::OracleConnection for oraclemcp_db::OfficialOracleConnection
+pub fn oraclemcp_db::OfficialOracleConnection::backend(&self) -> oraclemcp_db::OracleBackend
+pub fn oraclemcp_db::OfficialOracleConnection::call_routine<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleRoutineArg]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::ExecuteOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::call_timeout(&self) -> core::result::Result<core::option::Option<core::time::Duration>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::close<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::commit<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::describe<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::OracleConnectionInfo, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::enable_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, core::option::Option<u32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<u64, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::flashback_disable<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::open_cqn_notification_receiver<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::CqnNotificationReceiver>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::ping<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_bounded_page<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_bounded_page_named<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_optional_row<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_row_stream<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::QueryRowStreamStart, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows_named<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows_named_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::register_cqn_query<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnQueryRegistration, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::request_deadline(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<asupersync::types::id::Time>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::request_quota(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::DbRequestQuota>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+impl !core::marker::Freeze for oraclemcp_db::OfficialOracleConnection
+impl core::marker::Send for oraclemcp_db::OfficialOracleConnection
+impl core::marker::Sync for oraclemcp_db::OfficialOracleConnection
+impl core::marker::Unpin for oraclemcp_db::OfficialOracleConnection
+impl core::marker::UnsafeUnpin for oraclemcp_db::OfficialOracleConnection
+impl !core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OfficialOracleConnection
+impl !core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OfficialOracleConnection
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OfficialOracleConnection where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OfficialOracleConnection where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OfficialOracleConnection where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OfficialOracleConnection where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OfficialOracleConnection where U: core::convert::From<T>
+pub fn oraclemcp_db::OfficialOracleConnection::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OfficialOracleConnection where U: core::convert::Into<T>
+pub type oraclemcp_db::OfficialOracleConnection::Error = core::convert::Infallible
+pub fn oraclemcp_db::OfficialOracleConnection::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OfficialOracleConnection where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OfficialOracleConnection::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OfficialOracleConnection::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OfficialOracleConnection
+impl<T> core::any::Any for oraclemcp_db::OfficialOracleConnection where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OfficialOracleConnection::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OfficialOracleConnection where T: ?core::marker::Sized
+pub fn oraclemcp_db::OfficialOracleConnection::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OfficialOracleConnection where T: ?core::marker::Sized
+pub fn oraclemcp_db::OfficialOracleConnection::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_db::OfficialOracleConnection
+pub fn oraclemcp_db::OfficialOracleConnection::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OfficialOracleConnection
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OfficialOracleConnection
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OfficialOracleConnection
+impl<T> typenum::type_operators::Same for oraclemcp_db::OfficialOracleConnection
+pub type oraclemcp_db::OfficialOracleConnection::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OfficialOracleConnection where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OfficialOracleConnection where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OfficialOracleConnection::vzip(self) -> V
+pub struct oraclemcp_db::OracleBackendCapabilities
+impl core::clone::Clone for oraclemcp_db::OracleBackendCapabilities
+pub fn oraclemcp_db::OracleBackendCapabilities::clone(&self) -> oraclemcp_db::OracleBackendCapabilities
+impl core::cmp::Eq for oraclemcp_db::OracleBackendCapabilities
+impl core::cmp::PartialEq for oraclemcp_db::OracleBackendCapabilities
+pub fn oraclemcp_db::OracleBackendCapabilities::eq(&self, &oraclemcp_db::OracleBackendCapabilities) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleBackendCapabilities
+pub fn oraclemcp_db::OracleBackendCapabilities::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::OracleBackendCapabilities
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleBackendCapabilities
+impl core::marker::Freeze for oraclemcp_db::OracleBackendCapabilities
+impl core::marker::Send for oraclemcp_db::OracleBackendCapabilities
+impl core::marker::Sync for oraclemcp_db::OracleBackendCapabilities
+impl core::marker::Unpin for oraclemcp_db::OracleBackendCapabilities
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleBackendCapabilities
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleBackendCapabilities
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleBackendCapabilities
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleBackendCapabilities where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleBackendCapabilities where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleBackendCapabilities where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendCapabilities::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleBackendCapabilities where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleBackendCapabilities where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleBackendCapabilities where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleBackendCapabilities::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleBackendCapabilities where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleBackendCapabilities::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleBackendCapabilities::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleBackendCapabilities where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleBackendCapabilities::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleBackendCapabilities::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleBackendCapabilities where T: core::clone::Clone
+pub type oraclemcp_db::OracleBackendCapabilities::Owned = T
+pub fn oraclemcp_db::OracleBackendCapabilities::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleBackendCapabilities::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleBackendCapabilities
+impl<T> core::any::Any for oraclemcp_db::OracleBackendCapabilities where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendCapabilities::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleBackendCapabilities where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendCapabilities::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleBackendCapabilities where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendCapabilities::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleBackendCapabilities where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleBackendCapabilities::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleBackendCapabilities
+pub fn oraclemcp_db::OracleBackendCapabilities::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleBackendCapabilities
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleBackendCapabilities
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleBackendCapabilities
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleBackendCapabilities
+pub type oraclemcp_db::OracleBackendCapabilities::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleBackendCapabilities where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleBackendCapabilities where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleBackendCapabilities::vzip(self) -> V
+pub struct oraclemcp_db::OracleBackendRegistration
+impl oraclemcp_db::OracleBackendRegistration
+pub const fn oraclemcp_db::OracleBackendRegistration::backend(self) -> oraclemcp_db::OracleBackend
+pub const fn oraclemcp_db::OracleBackendRegistration::supports(self, oraclemcp_db::OracleConnectionCapability) -> bool
+impl core::clone::Clone for oraclemcp_db::OracleBackendRegistration
+pub fn oraclemcp_db::OracleBackendRegistration::clone(&self) -> oraclemcp_db::OracleBackendRegistration
+impl core::cmp::Eq for oraclemcp_db::OracleBackendRegistration
+impl core::cmp::PartialEq for oraclemcp_db::OracleBackendRegistration
+pub fn oraclemcp_db::OracleBackendRegistration::eq(&self, &oraclemcp_db::OracleBackendRegistration) -> bool
+impl core::fmt::Debug for oraclemcp_db::OracleBackendRegistration
+pub fn oraclemcp_db::OracleBackendRegistration::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::OracleBackendRegistration
+impl core::marker::StructuralPartialEq for oraclemcp_db::OracleBackendRegistration
+impl core::marker::Freeze for oraclemcp_db::OracleBackendRegistration
+impl core::marker::Send for oraclemcp_db::OracleBackendRegistration
+impl core::marker::Sync for oraclemcp_db::OracleBackendRegistration
+impl core::marker::Unpin for oraclemcp_db::OracleBackendRegistration
+impl core::marker::UnsafeUnpin for oraclemcp_db::OracleBackendRegistration
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::OracleBackendRegistration
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::OracleBackendRegistration
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::OracleBackendRegistration where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::OracleBackendRegistration where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::OracleBackendRegistration where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendRegistration::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::OracleBackendRegistration where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::OracleBackendRegistration where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::OracleBackendRegistration where U: core::convert::From<T>
+pub fn oraclemcp_db::OracleBackendRegistration::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::OracleBackendRegistration where U: core::convert::Into<T>
+pub type oraclemcp_db::OracleBackendRegistration::Error = core::convert::Infallible
+pub fn oraclemcp_db::OracleBackendRegistration::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::OracleBackendRegistration where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::OracleBackendRegistration::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::OracleBackendRegistration::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::OracleBackendRegistration where T: core::clone::Clone
+pub type oraclemcp_db::OracleBackendRegistration::Owned = T
+pub fn oraclemcp_db::OracleBackendRegistration::clone_into(&self, &mut T)
+pub fn oraclemcp_db::OracleBackendRegistration::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::OracleBackendRegistration
+impl<T> core::any::Any for oraclemcp_db::OracleBackendRegistration where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendRegistration::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::OracleBackendRegistration where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendRegistration::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::OracleBackendRegistration where T: ?core::marker::Sized
+pub fn oraclemcp_db::OracleBackendRegistration::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::OracleBackendRegistration where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::OracleBackendRegistration::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::OracleBackendRegistration
+pub fn oraclemcp_db::OracleBackendRegistration::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::OracleBackendRegistration
+impl<T> tracing::instrument::Instrument for oraclemcp_db::OracleBackendRegistration
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::OracleBackendRegistration
+impl<T> typenum::type_operators::Same for oraclemcp_db::OracleBackendRegistration
+pub type oraclemcp_db::OracleBackendRegistration::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::OracleBackendRegistration where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleBackendRegistration where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::OracleBackendRegistration::vzip(self) -> V
 pub struct oraclemcp_db::OracleCatalogResolver
 impl oraclemcp_db::OracleCatalogResolver
 pub fn oraclemcp_db::OracleCatalogResolver::is_empty(&self) -> bool
@@ -9209,6 +9448,35 @@ pub fn oraclemcp_db::OracleConnection::set_call_timeout(&self, core::option::Opt
 pub fn oraclemcp_db::OracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
 pub fn oraclemcp_db::OracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+impl oraclemcp_db::OracleConnection for oraclemcp_db::OfficialOracleConnection
+pub fn oraclemcp_db::OfficialOracleConnection::backend(&self) -> oraclemcp_db::OracleBackend
+pub fn oraclemcp_db::OfficialOracleConnection::call_routine<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleRoutineArg]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::ExecuteOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::call_timeout(&self) -> core::result::Result<core::option::Option<core::time::Duration>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::close<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::commit<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::describe<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::OracleConnectionInfo, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::enable_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, core::option::Option<u32>) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::execute<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<u64, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::flashback_disable<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::open_cqn_notification_receiver<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::CqnNotificationReceiver>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::ping<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_bounded_page<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_bounded_page_named<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::QueryResponse>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_optional_row<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<core::option::Option<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_row_stream<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], usize, &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::QueryRowStreamStart, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows_named<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows_named_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [(alloc::string::String, oraclemcp_db::OracleBind)], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::query_rows_with_serialize_options<'life0, 'life1, 'life2, 'life3, 'life4, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind], &'life4 oraclemcp_db::SerializeOptions) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait, 'life4: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::read_dbms_output<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, usize, usize) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::DbmsOutput, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::register_cqn_query<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleBind]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::CqnQueryRegistration, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::request_deadline(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<asupersync::types::id::Time>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::request_quota(&self, &asupersync::cx::cx::Cx) -> core::result::Result<core::option::Option<oraclemcp_db::DbRequestQuota>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::rollback<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
+pub fn oraclemcp_db::OfficialOracleConnection::set_call_timeout(&self, core::option::Option<core::time::Duration>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::set_request_deadline(&self, &asupersync::cx::cx::Cx, core::option::Option<asupersync::types::id::Time>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::set_request_quota(&self, &asupersync::cx::cx::Cx, core::option::Option<oraclemcp_db::DbRequestQuota>) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OfficialOracleConnection::unregister_cqn_query<'life0, 'life1, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, oraclemcp_db::CqnQueryRegistration) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<(), oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait
 impl oraclemcp_db::OracleConnection for oraclemcp_db::OraclePool
 pub fn oraclemcp_db::OraclePool::backend(&self) -> oraclemcp_db::OracleBackend
 pub fn oraclemcp_db::OraclePool::call_routine<'life0, 'life1, 'life2, 'life3, 'async_trait>(&'life0 self, &'life1 asupersync::cx::cx::Cx, &'life2 str, &'life3 [oraclemcp_db::OracleRoutineArg]) -> core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<oraclemcp_db::ExecuteOutcome, oraclemcp_db::DbError>> + 'async_trait)>> where Self: 'async_trait, 'life0: 'async_trait, 'life1: 'async_trait, 'life2: 'async_trait, 'life3: 'async_trait
@@ -9281,6 +9549,8 @@ pub fn oraclemcp_db::classify_wallet(&std::path::Path, &[alloc::string::String],
 pub fn oraclemcp_db::compare_schemas(&oraclemcp_db::SchemaSnapshot, &oraclemcp_db::SchemaSnapshot) -> core::result::Result<oraclemcp_db::SchemaDiff, oraclemcp_db::SchemaDiffError>
 pub async fn oraclemcp_db::compile_errors(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::compile_object_statements(&str, &str, &str, bool, bool) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::connect_oracle(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions) -> core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::OracleConnection>, oraclemcp_db::DbError>
+pub const fn oraclemcp_db::connection_backend_registry() -> &'static [oraclemcp_db::OracleBackendRegistration]
 pub fn oraclemcp_db::cursor_to_offset(core::option::Option<&str>) -> usize
 pub fn oraclemcp_db::dependent_from_row(&oraclemcp_db::OracleRow) -> core::option::Option<oraclemcp_db::DependentObject>
 pub fn oraclemcp_db::derive_version_capabilities(u8) -> oraclemcp_db::DerivedVersionCapabilities
@@ -9360,6 +9630,7 @@ pub async fn oraclemcp_db::run_health(&asupersync::cx::cx::Cx, &dyn oraclemcp_db
 pub async fn oraclemcp_db::sample_rows(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::search_objects(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, core::option::Option<&str>, core::option::Option<&str>, oraclemcp_db::SearchDetailLevel, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::SearchObject>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::search_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>, &str, core::option::Option<&str>, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub fn oraclemcp_db::select_connection_backend(&oraclemcp_db::OracleConnectOptions) -> oraclemcp_db::OracleBackend
 pub fn oraclemcp_db::select_diagnostics_source(bool, bool) -> oraclemcp_db::DiagnosticsSource
 pub fn oraclemcp_db::selected_endpoint_uses_tcps(&oraclemcp_db::OracleConnectOptions) -> core::result::Result<bool, oraclemcp_db::DbError>
 pub fn oraclemcp_db::semantic_search_query(&str, &str, &str, oraclemcp_db::SemanticSearchMetric) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>
