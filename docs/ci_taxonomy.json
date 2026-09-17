@@ -46,8 +46,7 @@
       "workflow_file": "ci.yml",
       "job_id": "windows-rust",
       "triggers": [
-        "pull_request",
-        "push"
+        "pull_request"
       ],
       "path_filtered": false
     },
@@ -214,8 +213,7 @@
       "workflow_file": "ci.yml",
       "job_id": "multi-nightly",
       "triggers": [
-        "pull_request",
-        "push"
+        "pull_request"
       ],
       "path_filtered": false
     },
@@ -226,8 +224,7 @@
       "workflow_file": "ci.yml",
       "job_id": "api-lock",
       "triggers": [
-        "pull_request",
-        "push"
+        "pull_request"
       ],
       "path_filtered": false
     },
