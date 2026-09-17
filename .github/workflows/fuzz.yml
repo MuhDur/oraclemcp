@@ -82,6 +82,19 @@ jobs:
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-fuzz
+      # The two guard targets are coverage-guided safety proofs, not a fixed
+      # proxy corpus. Keep each shard's discovered inputs independently so
+      # concurrent ALTER SESSION shards never race to replace a shared cache.
+      # `run_id` makes each saved cache immutable; restore-keys selects the
+      # newest prior corpus for the same target/shard on the next campaign.
+      - name: Restore persistent guard fuzz corpus
+        if: ${{ matrix.crate == 'oraclemcp-guard' }}
+        uses: actions/cache/restore@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
+        with:
+          path: crates/${{ matrix.crate }}/fuzz/corpus/${{ matrix.target }}/shard-${{ matrix.shard }}
+          key: fuzz-corpus-v1-${{ matrix.crate }}-${{ matrix.target }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            fuzz-corpus-v1-${{ matrix.crate }}-${{ matrix.target }}-shard-${{ matrix.shard }}-
       - name: Run bounded corpus campaign
         working-directory: crates/${{ matrix.crate }}/fuzz
         # The prebuilt cargo-fuzz binary is musl-linked, and cargo-fuzz
@@ -91,13 +104,21 @@ jobs:
         # linked libc"). Pin the gnu host triple explicitly.
         run: |
           mkdir -p "artifacts/${{ matrix.target }}/shard-${{ matrix.shard }}"
+          mkdir -p "corpus/${{ matrix.target }}/shard-${{ matrix.shard }}"
           cargo +${{ env.RUST_TOOLCHAIN }} fuzz run \
-          --target x86_64-unknown-linux-gnu ${{ matrix.target }} -- \
+          --target x86_64-unknown-linux-gnu ${{ matrix.target }} \
+          "corpus/${{ matrix.target }}/shard-${{ matrix.shard }}" -- \
           -max_total_time=${{ env.FUZZ_SECONDS }} \
           -rss_limit_mb=2048 \
           -timeout=10 \
           -seed=${{ matrix.seed }} \
           -artifact_prefix="artifacts/${{ matrix.target }}/shard-${{ matrix.shard }}/"
+      - name: Persist expanded guard fuzz corpus
+        if: ${{ success() && matrix.crate == 'oraclemcp-guard' && github.event_name == 'schedule' }}
+        uses: actions/cache/save@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
+        with:
+          path: crates/${{ matrix.crate }}/fuzz/corpus/${{ matrix.target }}/shard-${{ matrix.shard }}
+          key: fuzz-corpus-v1-${{ matrix.crate }}-${{ matrix.target }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload crash and timeout artifacts
         if: ${{ always() }}
         uses: actions/upload-artifact@v7

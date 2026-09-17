@@ -78,7 +78,7 @@ gates a tag push, not a merge).
 | `mutation-safety.yml` — `cargo-mutants` over guard + audit | `mutation-safety.yml` | cron `17 2 * * *` (nightly) | 2 | scheduled |
 | `multi-nightly` floating-toolchain early warning | `ci.yml:multi-nightly` | every push+PR (not a schedule — see §4.3) | 1-shaped but advisory | advisory |
 | fuzz targets **compile** check (4 targets across `oraclemcp-guard`, `oraclemcp-audit`, and `oraclemcp-auth`; `cargo fuzz build`) | `ci.yml:fuzz-build` | every push+PR | 1-shaped but advisory | advisory |
-| bounded fuzz campaigns (5 matrix shards: guard ×2, config, audit, auth) | `fuzz.yml:fuzz` | daily + manual dispatch | 2 | scheduled |
+| bounded coverage-guided fuzz campaigns (8 matrix shards: classifier; four differential `ALTER SESSION`; config, audit, auth) | `fuzz.yml:fuzz` | daily + manual dispatch | 2 | scheduled |
 | gvenzl 23ai matrix + VECTOR smoke (real live DB) | `ci.yml:oracle-free23` (`scripts/e2e/oracle_version_matrix.sh --log --lane free23`) | every push+PR | 1 (should be 2; see §4.1) | required |
 | gvenzl full ladder (XE 18 / XE 21 / FREE 23ai) | `scripts/e2e/oracle_version_matrix.sh --log` | operator/agent-run, no schedule | 2-shaped, executed as 3 | manual |
 | `scripts/coverage_baseline.sh` (code-coverage baseline, bead D1; `tests/coverage/BASELINE.{json,md}`) | local / not wired into CI | on demand (deliberate dispatch) | 2 | n/a (local generator, not a CI job yet; see §4.5, §6) |
@@ -118,10 +118,12 @@ prevent. As of this writing:
 3. **Partially closed by D4: bounded campaigns now exist; the target-count goal
    remains aspirational.** `fuzz-build` still provides a per-PR compile-only
    check for the 4 guard/audit/auth targets. Separately,
-   `.github/workflows/fuzz.yml` runs all 5 current targets (guard ×2, config,
-   audit, auth) as independent daily/manual Tier-2 shards. Each campaign is
-   capped at 300 seconds, 2 GiB RSS, 10 seconds per input, two Cargo build jobs,
-   and a 20-minute job timeout. Plan §30.6's "22 protocol targets + the new
+   `.github/workflows/fuzz.yml` runs all 5 current targets (the fail-closed
+   classifier, differential `ALTER SESSION`, config, audit, and auth) as eight
+   independent daily/manual Tier-2 shards. The two guard targets retain a
+   shard-isolated persistent coverage corpus; each campaign is capped at 300
+   seconds, 2 GiB RSS, 10 seconds per input, two Cargo build jobs, and a
+   20-minute job timeout. Plan §30.6's "22 protocol targets + the new
    guard/config/sql targets" remains a breadth goal; D4 makes the 5 real
    targets runnable on a bounded schedule without claiming the larger count.
 4. **Closed by beads D1 (§6) + D2 (§7): a code-coverage baseline and a
