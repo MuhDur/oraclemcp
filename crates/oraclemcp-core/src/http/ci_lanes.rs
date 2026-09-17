@@ -126,18 +126,34 @@ const CI_HEARTBEAT_SCHEDULED_PREFIX: &str = "scheduled:";
 static CI_LANE_CATALOG: OnceLock<Result<Vec<CiLaneCatalogEntry>, String>> = OnceLock::new();
 static CI_LANE_SNAPSHOT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-// Test-only interleaving point between the authenticated no-follow descriptor
-// open and the final pathname identity check. It makes a regular-to-regular
-// replacement deterministic rather than relying on scheduler luck.
+// Test-only interleaving points on both sides of the authenticated no-follow
+// descriptor open. They make regular-to-regular replacements deterministic
+// rather than relying on scheduler luck.
 #[cfg(test)]
 thread_local! {
+    static CI_LANE_SNAPSHOT_INSPECT_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
     static CI_LANE_SNAPSHOT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
+pub(super) fn set_ci_lane_snapshot_inspect_hook(hook: impl FnOnce() + 'static) {
+    CI_LANE_SNAPSHOT_INSPECT_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
 pub(super) fn set_ci_lane_snapshot_open_hook(hook: impl FnOnce() + 'static) {
     CI_LANE_SNAPSHOT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_ci_lane_snapshot_inspect_hook() {
+    CI_LANE_SNAPSHOT_INSPECT_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
 }
 
 #[cfg(test)]
@@ -148,6 +164,9 @@ fn run_ci_lane_snapshot_open_hook() {
         }
     });
 }
+
+#[cfg(not(test))]
+fn run_ci_lane_snapshot_inspect_hook() {}
 
 #[cfg(not(test))]
 fn run_ci_lane_snapshot_open_hook() {}
@@ -1219,8 +1238,16 @@ fn ci_lane_snapshot_identity_matches(opened: &fs::Metadata, current: &fs::Metada
     {
         use std::os::windows::fs::MetadataExt as _;
 
-        return opened.volume_serial_number() == current.volume_serial_number()
-            && opened.file_index() == current.file_index();
+        return matches!(
+            (
+                opened.volume_serial_number(),
+                opened.file_index(),
+                current.volume_serial_number(),
+                current.file_index(),
+            ),
+            (Some(opened_volume), Some(opened_index), Some(current_volume), Some(current_index))
+                if opened_volume == current_volume && opened_index == current_index
+        );
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -1238,6 +1265,7 @@ fn open_ci_lane_snapshot(path: &Path) -> Result<fs::File, String> {
     if initial_metadata.file_type().is_symlink() || !initial_metadata.file_type().is_file() {
         return Err("stored CI lane snapshot is not a regular file".to_owned());
     }
+    run_ci_lane_snapshot_inspect_hook();
 
     let mut options = fs::OpenOptions::new();
     options.read(true);
@@ -1269,6 +1297,13 @@ fn open_ci_lane_snapshot(path: &Path) -> Result<fs::File, String> {
         if metadata.file_attributes() & CI_LANE_FILE_ATTRIBUTE_REPARSE_POINT != 0 {
             return Err("opened CI lane snapshot is a reparse point".to_owned());
         }
+    }
+    // Bind the handle we actually opened to the object inspected before the
+    // open. The later pathname comparison alone cannot catch A -> B between
+    // inspection and open: both the opened handle and final pathname would
+    // then describe B.
+    if !ci_lane_snapshot_identity_matches(&initial_metadata, &metadata) {
+        return Err("configured CI lane snapshot changed while opening".to_owned());
     }
     run_ci_lane_snapshot_open_hook();
     let current_metadata = fs::symlink_metadata(path)

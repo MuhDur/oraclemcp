@@ -916,6 +916,33 @@ fn load_ci_lane_snapshot_refuses_a_regular_file_replacement_after_open() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn load_ci_lane_snapshot_refuses_a_regular_file_replacement_before_open() {
+    let dir = dashboard_test_dir("ci-lanes-pre-open-regular-swap");
+    let configured = dir.join("customer-tenant-ci-lanes.json");
+    let replacement = dir.join("replacement.json");
+    let snapshot =
+        br#"{"schema":"ci-lane-snapshot/v1","refreshed_at_unix":1,"lanes":[],"errors":[]}"#;
+    std::fs::write(&configured, snapshot).expect("write inspected snapshot A");
+    std::fs::write(&replacement, snapshot).expect("write replacement snapshot B");
+
+    let moved_configured = configured.clone();
+    let moved_replacement = replacement.clone();
+    super::ci_lanes::set_ci_lane_snapshot_inspect_hook(move || {
+        std::fs::rename(&moved_replacement, &moved_configured)
+            .expect("atomically replace A with B before the descriptor open");
+    });
+
+    let error = load_ci_lane_snapshot(&configured)
+        .expect_err("a regular-file replacement before open must fail closed");
+    assert_eq!(error, "configured CI lane snapshot changed while opening");
+    assert!(
+        !error.contains("customer-tenant-ci-lanes"),
+        "the unavailable diagnostic must not reveal the configured path"
+    );
+}
+
 #[test]
 fn operator_ci_lanes_route_is_unavailable_without_a_configured_snapshot() {
     let (auditor, _sink) = operator_auditor();
