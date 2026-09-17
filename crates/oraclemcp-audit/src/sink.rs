@@ -2838,16 +2838,11 @@ impl Auditor {
             // A genuinely absent ledger is a first-run genesis state.
             return Ok(self);
         };
-        let Some(tail) = analyze_open_resume_log(
+        let tail = analyze_open_resume_log(
             &mut ledger.file,
             audit_path,
             self.keyring.verification_keys(),
-        )?
-        else {
-            // Absent or empty log: nothing to resume; fresh genesis state is
-            // correct.
-            return Ok(self);
-        };
+        )?;
 
         run_audit_resume_anchor_hook();
 
@@ -2869,12 +2864,13 @@ impl Auditor {
             // forged/rewritten sidecar defeats the truncation/divergence checks
             // below (multi-pass 2026-07).
             self.verify_anchor_authenticity(&anchor)?;
-            if anchor.seq > tail.seq {
+            let chain_seq = tail.as_ref().map_or(0, |tail| tail.seq);
+            if anchor.seq > chain_seq {
                 return Err(AuditError::ResumeRefused(format!(
                     "head anchor attests durable seq {} but the audit log {disp} ends at seq {} — \
                      trailing records were removed (tail truncation); restore the missing tail, or \
                      only if the loss is understood reset the anchor, before restarting",
-                    anchor.seq, tail.seq
+                    anchor.seq, chain_seq
                 )));
             }
             // Divergence at the anchored seq: a second bounded streaming pass
@@ -2886,10 +2882,9 @@ impl Auditor {
                     "cannot rewind audit log {disp} to confirm the anchored record: {error}"
                 ))
             })?;
-            if let Some(anchored_hash) =
-                find_entry_hash_at_seq_in_open_log(&mut ledger.file, audit_path, anchor.seq)?
-                && anchored_hash != anchor.entry_hash
-            {
+            let anchored_hash =
+                find_entry_hash_at_seq_in_open_log(&mut ledger.file, audit_path, anchor.seq)?;
+            if anchored_hash.as_deref() != Some(anchor.entry_hash.as_str()) {
                 return Err(AuditError::ResumeRefused(format!(
                     "record at the anchored seq {} in {disp} does not match the head anchor's \
                      attested entry_hash — the chain diverged from the attested history; inspect \
@@ -2898,6 +2893,14 @@ impl Auditor {
                 )));
             }
         }
+
+        let Some(tail) = tail else {
+            // An absent or empty ledger with no anchor is a first-run genesis
+            // state. A present anchor was authenticated above first, so an
+            // attacker cannot turn a real durable head into this legacy case by
+            // truncating the ledger to zero records.
+            return Ok(self);
+        };
 
         {
             let mut state = self.state.lock();
@@ -3738,6 +3741,51 @@ mod tests {
             .expect("append");
         assert_eq!(r1.seq, 1);
         assert_eq!(r1.prev_hash, GENESIS_HASH);
+    }
+
+    #[test]
+    fn resume_refuses_an_anchored_ledger_truncated_to_zero_records() {
+        // An empty file is fresh genesis only before an anchor exists. Once a
+        // durable head is attested, truncating every record must fail closed;
+        // otherwise a public `Auditor::resume_from` caller can restart a
+        // privileged audit chain at seq=1 and hide the entire prior prefix.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open seeded ledger")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                    "t1".to_owned(),
+                    true,
+                )
+                .expect("write anchored record");
+        }
+        assert!(
+            anchor_path.is_file(),
+            "setup must create a durable head anchor"
+        );
+        std::fs::write(&path, "").expect("truncate every ledger record");
+
+        let resumed = Auditor::new(
+            Box::new(FileAuditSink::open(&path).expect("open truncated ledger")),
+            test_key(),
+        )
+        .with_head_anchor(&anchor_path)
+        .resume_from(&path);
+        match resumed {
+            Err(AuditError::ResumeRefused(message)) => assert!(
+                message.contains("tail truncation") && message.contains("ends at seq 0"),
+                "the anchored zero-record truncation must be named: {message}"
+            ),
+            Err(error) => panic!("expected anchored truncation refusal, got {error}"),
+            Ok(_) => panic!("an anchor must prevent zero-record genesis resume"),
+        }
     }
 
     #[test]
