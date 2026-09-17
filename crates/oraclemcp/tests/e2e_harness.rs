@@ -193,6 +193,53 @@ fn e2e_scripts_emit_required_json_line_fields() {
 }
 
 #[test]
+fn blocking_free23_matrix_keeps_the_plsql_round_trip_contract() {
+    let root = repo_root();
+    let ladder = std::fs::read_to_string(root.join("scripts/e2e/oracle_ladder_session.py"))
+        .expect("read Oracle ladder session");
+    for required in [
+        "CREATE OR REPLACE PROCEDURE {proc}",
+        "CREATE OR REPLACE FUNCTION {function}",
+        "CREATE OR REPLACE PACKAGE {package}",
+        "source_compile_object",
+        "source_compile_function",
+        "source_compile_package",
+        "source_invoke_procedure_via_oracle_execute",
+        "source_invoke_function_via_oracle_execute",
+        "source_invoke_package_via_oracle_execute",
+        "source_verify_plsql_round_trip",
+        "DROP PACKAGE {package}",
+        "DROP FUNCTION {function}",
+        "DROP PROCEDURE {proc}",
+    ] {
+        assert!(
+            ladder.contains(required),
+            "Free23 PL/SQL round-trip contract omitted {required:?}"
+        );
+    }
+
+    let workflow =
+        std::fs::read_to_string(root.join(".github/workflows/ci.yml")).expect("read CI workflow");
+    let free23_start = workflow
+        .find("  oracle-free23:\n")
+        .expect("CI must define the Oracle Free23 job");
+    let after_start = &workflow[free23_start + "  oracle-free23:\n".len()..];
+    let free23_end = after_start
+        .find("\n  sensitive-data:\n")
+        .expect("the Oracle Free23 job must end before sensitive-data");
+    let free23_job = &after_start[..free23_end];
+    assert!(
+        free23_job.contains("PL/SQL round-trip smoke")
+            && free23_job.contains("scripts/e2e/oracle_version_matrix.sh --log --lane free23"),
+        "the blocking Free23 job must run the named PL/SQL matrix scenario"
+    );
+    assert!(
+        !free23_job.contains("continue-on-error"),
+        "the Free23 PL/SQL matrix must fail the required job rather than be advisory"
+    );
+}
+
+#[test]
 fn rig_l1_dry_run_is_a_single_command_with_complete_lane_plan() {
     let root = repo_root();
     let driver_root = root

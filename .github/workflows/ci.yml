@@ -954,7 +954,7 @@ jobs:
           c.commit()
           print('granted EXECUTE ON DBMS_FLASHBACK to E2E_ORACLE')
           PY
-      - name: 23ai matrix lane and VECTOR_DISTANCE smoke
+      - name: 23ai matrix lane, VECTOR_DISTANCE, and PL/SQL round-trip smoke
         id: free23-matrix
         env:
           ORACLEMCP_LIVE_XE: "1"

@@ -357,18 +357,27 @@ class Ladder:
         self.vector_table_created = False
         self.vector_table_dropped = False
         # Throwaway source objects for the create_or_replace / compile_object /
-        # patch_source governed-DDL sub-ladder. Both a VIEW and a PL/SQL
-        # PROCEDURE exercise oracle_create_or_replace's own DDL grant flow
-        # (oracle-p0d6: PL/SQL CREATE OR REPLACE floors at DDL, no longer
-        # delegating to the general execute path); the PROCEDURE additionally
-        # exercises compile_object + patch_source (both DDL-gated).
+        # patch_source governed-DDL sub-ladder. A PROCEDURE, FUNCTION, and
+        # PACKAGE exercise their own CREATE OR REPLACE + compile paths and are
+        # invoked through oracle_execute. Their marker table is separate from
+        # the DML ladder table so the PL/SQL proof cannot mask rollback/commit
+        # behavior below.
         self.view = f"{args.table}_V"
         self.proc = f"{args.table}_P"
+        self.function = f"{args.table}_F"
+        self.package = f"{args.table}_PKG"
+        self.plsql_table = f"{args.table}_PL"
         self.proc_owner = None
         self.view_created = False
         self.view_dropped = False
         self.proc_created = False
         self.proc_dropped = False
+        self.function_created = False
+        self.function_dropped = False
+        self.package_created = False
+        self.package_dropped = False
+        self.plsql_table_created = False
+        self.plsql_table_dropped = False
         self.failures = 0
 
     def new_session(self, profile):
@@ -1152,8 +1161,25 @@ class Ladder:
         # The audit assertions for these tools live in verify_audit_records.
         view = self.view
         proc = self.proc
+        function = self.function
+        package = self.package
+        plsql_table = self.plsql_table
         view_src = f"CREATE OR REPLACE VIEW {view} AS SELECT 1 AS id FROM dual"
-        proc_src = f"CREATE OR REPLACE PROCEDURE {proc} AS BEGIN NULL; END;"
+        proc_src = (
+            f"CREATE OR REPLACE PROCEDURE {proc} AS BEGIN "
+            f"NULL; INSERT INTO {plsql_table} (id, marker) VALUES (2002, 'procedure'); END;"
+        )
+        function_src = (
+            f"CREATE OR REPLACE FUNCTION {function} RETURN NUMBER AS BEGIN RETURN 2001; END;"
+        )
+        package_spec_src = (
+            f"CREATE OR REPLACE PACKAGE {package} AS PROCEDURE mark; END;"
+        )
+        package_body_src = (
+            f"CREATE OR REPLACE PACKAGE BODY {package} AS "
+            f"PROCEDURE mark IS BEGIN INSERT INTO {plsql_table} (id, marker) "
+            f"VALUES (2003, 'package'); END mark; END {package};"
+        )
 
         def source_create_or_replace_view():
             preview = structured(
@@ -1232,6 +1258,20 @@ class Ladder:
             )
             return {"error_class": content.get("error_class")}
 
+        def source_create_plsql_fixture():
+            result = self.governed_execute(
+                f"CREATE TABLE {plsql_table} (id NUMBER PRIMARY KEY, marker VARCHAR2(32))",
+                commit=True,
+                expect={"committed": True},
+            )
+            self.plsql_table_created = True
+            require(
+                self.count_rows(f"SELECT COUNT(*) AS n FROM {plsql_table}") == 0,
+                "the separate PL/SQL marker table starts empty",
+                plsql_table,
+            )
+            return result
+
         def source_create_procedure_via_create_or_replace():
             # oracle-p0d6: a PL/SQL CREATE OR REPLACE now floors at DDL (was
             # READ_WRITE) and drives oracle_create_or_replace's OWN DDL grant
@@ -1284,35 +1324,143 @@ class Ladder:
             )
             return out
 
-        def source_compile_object():
-            args_c = {"object_type": "PROCEDURE", "name": proc}
+        def create_plsql_source(label, source_code):
+            """Create one throwaway PL/SQL unit through its own DDL tool flow."""
+            preview = structured(
+                self.session.call(
+                    "oracle_create_or_replace", {"source_code": source_code}
+                )
+            )
+            require(
+                preview.get("gate_decision") == "allow",
+                f"create_or_replace({label}) preview allows at DDL",
+                preview,
+            )
+            require(
+                preview.get("required_level") == "DDL",
+                f"create_or_replace({label}) is DDL-gated",
+                preview,
+            )
+            token = (preview.get("confirmation") or {}).get("confirm")
+            require(
+                token,
+                f"create_or_replace({label}) preview mints its own single-use grant",
+                preview,
+            )
+            self.harness.grant = "execute"
+            out = structured(
+                self.session.call(
+                    "oracle_create_or_replace",
+                    {"source_code": source_code, "execute": True, "confirm": token},
+                )
+            )
+            self.harness.grant = "none"
+            require(out.get("applied") is True, f"create_or_replace({label}) applied", out)
+            require(
+                out.get("committed") is True,
+                f"create_or_replace({label}) committed",
+                out,
+            )
+            return out
+
+        def source_create_function_via_create_or_replace():
+            out = create_plsql_source("function", function_src)
+            self.function_created = True
+            return out
+
+        def source_create_package_via_create_or_replace():
+            spec = create_plsql_source("package spec", package_spec_src)
+            self.package_created = True
+            body = create_plsql_source("package body", package_body_src)
+            errors = structured(
+                self.session.call("oracle_compile_errors", {"name": package})
+            )
+            require(
+                errors.get("errors") == [],
+                "created PACKAGE and PACKAGE_BODY have no compile errors",
+                errors,
+            )
+            return {"spec": spec, "body": body}
+
+        def compile_source_object(object_type, name, label):
+            args_c = {"object_type": object_type, "name": name}
             if self.proc_owner:
                 args_c["owner"] = self.proc_owner
             preview = structured(self.session.call("oracle_compile_object", args_c))
             require(
                 preview.get("gate_decision") == "allow",
-                "compile_object preview allows at DDL",
+                f"compile_object({label}) preview allows at DDL",
                 preview,
             )
             require(
                 preview.get("required_level") == "DDL",
-                "compile_object requires the DDL level (ALTER ... COMPILE is DDL)",
+                f"compile_object({label}) requires the DDL level (ALTER ... COMPILE is DDL)",
                 preview,
             )
             token = (preview.get("confirmation") or {}).get("confirm")
-            require(token, "compile_object preview mints a single-use grant", preview)
+            require(
+                token,
+                f"compile_object({label}) preview mints a single-use grant",
+                preview,
+            )
             execute_args = dict(args_c)
             execute_args["execute"] = True
             execute_args["confirmation_token"] = token
             out = structured(self.session.call("oracle_compile_object", execute_args))
-            require(out.get("compiled") is True, "object compiled", out)
-            errors = structured(self.session.call("oracle_compile_errors", {"name": proc}))
+            require(out.get("compiled") is True, f"{label} compiled", out)
+            errors = structured(self.session.call("oracle_compile_errors", {"name": name}))
             require(
                 errors.get("errors") == [],
-                "compiled procedure has no compile errors through the dedicated dictionary tool",
+                f"compiled {label} has no compile errors through the dedicated dictionary tool",
                 errors,
             )
             return {"compiled": True}
+
+        def source_compile_object():
+            return compile_source_object("PROCEDURE", proc, "procedure")
+
+        def source_compile_function():
+            return compile_source_object("FUNCTION", function, "function")
+
+        def source_compile_package():
+            spec = compile_source_object("PACKAGE", package, "package spec")
+            body = compile_source_object("PACKAGE_BODY", package, "package body")
+            return {"spec": spec, "body": body}
+
+        def source_invoke_procedure_via_oracle_execute():
+            return self.governed_execute(
+                f"BEGIN {proc}; END;",
+                commit=True,
+                expect={"committed": True},
+            )
+
+        def source_invoke_function_via_oracle_execute():
+            return self.governed_execute(
+                f"BEGIN INSERT INTO {plsql_table} (id, marker) "
+                f"VALUES ({function}(), 'function'); END;",
+                commit=True,
+                expect={"committed": True},
+            )
+
+        def source_invoke_package_via_oracle_execute():
+            return self.governed_execute(
+                f"BEGIN {package}.mark; END;",
+                commit=True,
+                expect={"committed": True},
+            )
+
+        def source_verify_plsql_round_trip():
+            rows = self.query_rows(
+                f"SELECT id, marker FROM {plsql_table} ORDER BY id"
+            )
+            observed = {str(row.get("ID")): row.get("MARKER") for row in rows}
+            expected = {"2001": "function", "2002": "procedure", "2003": "package"}
+            require(
+                observed == expected,
+                "FUNCTION, PROCEDURE, and PACKAGE invocations persist exactly their markers",
+                {"observed": observed, "expected": expected},
+            )
+            return observed
 
         def source_patch_source():
             args_p = {
@@ -1357,6 +1505,14 @@ class Ladder:
 
         def source_drop_objects():
             self.governed_execute(
+                f"DROP PACKAGE {package}", commit=True, expect={"committed": True}
+            )
+            self.package_dropped = True
+            self.governed_execute(
+                f"DROP FUNCTION {function}", commit=True, expect={"committed": True}
+            )
+            self.function_dropped = True
+            self.governed_execute(
                 f"DROP PROCEDURE {proc}", commit=True, expect={"committed": True}
             )
             self.proc_dropped = True
@@ -1364,18 +1520,30 @@ class Ladder:
                 f"DROP VIEW {view}", commit=True, expect={"committed": True}
             )
             self.view_dropped = True
-            proc_source = structured(
-                self.session.call(
-                    "oracle_get_source",
-                    {"name": proc, "object_type": "PROCEDURE", "max_chars": 4096},
+            self.governed_execute(
+                f"DROP TABLE {plsql_table} PURGE",
+                commit=True,
+                expect={"committed": True},
+            )
+            self.plsql_table_dropped = True
+            for name, object_type in [
+                (proc, "PROCEDURE"),
+                (function, "FUNCTION"),
+                (package, "PACKAGE"),
+                (package, "PACKAGE_BODY"),
+            ]:
+                source = structured(
+                    self.session.call(
+                        "oracle_get_source",
+                        {"name": name, "object_type": object_type, "max_chars": 4096},
+                    )
                 )
-            )
-            require(
-                (proc_source.get("source") or {}).get("line_count") == 0,
-                "the dropped PROCEDURE is absent through the dedicated source tool",
-                proc_source,
-            )
-            return {"dropped": [proc, view]}
+                require(
+                    (source.get("source") or {}).get("line_count") == 0,
+                    f"the dropped {object_type} is absent through the dedicated source tool",
+                    source,
+                )
+            return {"dropped": [package, function, proc, view, plsql_table]}
 
         def drop_to_read_only_mid():
             dropped = self.drop_level()
@@ -1935,12 +2103,36 @@ class Ladder:
                 "source_create_or_replace_wrong_grant_refused",
                 source_create_or_replace_wrong_grant_refused,
             ),
+            ("source_create_plsql_fixture", source_create_plsql_fixture),
             (
                 "source_create_procedure_via_create_or_replace",
                 source_create_procedure_via_create_or_replace,
             ),
             ("source_compile_object", source_compile_object),
+            (
+                "source_invoke_procedure_via_oracle_execute",
+                source_invoke_procedure_via_oracle_execute,
+            ),
             ("source_patch_source", source_patch_source),
+            (
+                "source_create_function_via_create_or_replace",
+                source_create_function_via_create_or_replace,
+            ),
+            ("source_compile_function", source_compile_function),
+            (
+                "source_invoke_function_via_oracle_execute",
+                source_invoke_function_via_oracle_execute,
+            ),
+            (
+                "source_create_package_via_create_or_replace",
+                source_create_package_via_create_or_replace,
+            ),
+            ("source_compile_package", source_compile_package),
+            (
+                "source_invoke_package_via_oracle_execute",
+                source_invoke_package_via_oracle_execute,
+            ),
+            ("source_verify_plsql_round_trip", source_verify_plsql_round_trip),
             ("source_drop_objects", source_drop_objects),
             ("drop_to_read_only_mid", drop_to_read_only_mid),
             ("elevate_read_write", elevate_read_write),
@@ -1998,16 +2190,23 @@ class Ladder:
                     f"governed teardown failed; throwaway VECTOR table may remain: {exc}",
                 )
         leftovers = []
+        if self.package_created and not self.package_dropped:
+            leftovers.append(("PACKAGE", self.package))
+        if self.function_created and not self.function_dropped:
+            leftovers.append(("FUNCTION", self.function))
         if self.proc_created and not self.proc_dropped:
             leftovers.append(("PROCEDURE", self.proc))
         if self.view_created and not self.view_dropped:
             leftovers.append(("VIEW", self.view))
+        if self.plsql_table_created and not self.plsql_table_dropped:
+            leftovers.append(("TABLE", self.plsql_table))
         if leftovers:
             try:
                 self.elevate("DDL")
                 for kind, name in leftovers:
+                    suffix = " PURGE" if kind == "TABLE" else ""
                     self.governed_execute(
-                        f"DROP {kind} {name}", commit=True, expect={}
+                        f"DROP {kind} {name}{suffix}", commit=True, expect={}
                     )
                 self.harness.emit(
                     "cleanup_drop_source_objects", "teardown", "pass", 0,

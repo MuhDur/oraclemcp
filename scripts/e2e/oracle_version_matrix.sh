@@ -12,6 +12,9 @@
 #                    row counts asserted via oracle_query
 #   4. DDL         : governed CREATE TABLE / DROP TABLE through the
 #                    preview -> confirmation-grant -> execute gate
+#                    plus CREATE OR REPLACE PROCEDURE/FUNCTION/PACKAGE,
+#                    compile, oracle_execute invocation, marker verification,
+#                    and governed drop of every throwaway source object
 #   5. drop back to READ_ONLY and prove writes refuse again
 #   6. audit hash-chain: per-step records present, chain re-verified with
 #                    `oraclemcp audit verify` (isolated XDG_STATE_HOME per run)
