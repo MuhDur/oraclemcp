@@ -35,7 +35,7 @@ use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
 
-use crate::anchor::{AnchorFile, ChainAnchor, load_anchor};
+use crate::anchor::{AnchorFile, ChainAnchor};
 use crate::keyring::AuditKeyring;
 use crate::record::{
     AuditCorrelation, AuditEntryDraft, AuditRecord, AuditVerdictCertificate,
@@ -1865,7 +1865,14 @@ impl FileAuditSink {
             } = open_private_append_file_with_creation_at(&parent.dir, audit_name, path)?;
             if audit_created || lock_created {
                 run_file_audit_parent_sync_hook();
-                parent.authenticate_current_path()?;
+            }
+            // A newly created child needs a directory sync, but every
+            // successful reopen must prove that the configured parent still
+            // names the held directory. Otherwise a parent replacement after
+            // the capability walk can be reported as a successful reopen of a
+            // different configured location.
+            parent.authenticate_current_path()?;
+            if audit_created || lock_created {
                 parent.sync()?;
             }
             (lock, file)
@@ -1950,7 +1957,7 @@ impl FileAuditSink {
         anchor_path: &Path,
         keys: &[SigningKey],
     ) -> Result<AuthenticatedAuditTail, AuditError> {
-        let anchor = load_anchor(anchor_path).map_err(|error| {
+        let anchor = crate::anchor::load_anchor_for_open_audit_ledger(anchor_path).map_err(|error| {
             AuditError::ResumeRefused(format!(
                 "head anchor sidecar {} is present but unreadable ({error}); refusing to arm audit shipping without confirming the durable chain head",
                 anchor_path.display()
@@ -2456,7 +2463,10 @@ impl Auditor {
         // (truncation) nor diverge from it (rewritten history). A tail AHEAD of
         // the anchor is the explainable crash/group-commit window — accepted.
         if let Some(anchor_file) = &self.anchor
-            && let Some(anchor) = load_anchor(anchor_file.path()).map_err(|e| {
+            && let Some(anchor) = crate::anchor::load_anchor_for_open_audit_ledger(
+                anchor_file.path(),
+            )
+            .map_err(|e| {
                 AuditError::ResumeRefused(format!(
                     "head anchor sidecar {} is present but unreadable ({e}); refusing to resume \
                      without confirming the durable chain head",
@@ -2782,6 +2792,7 @@ mod open_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::load_anchor;
     use crate::record::{AuditDecision, AuditOutcome, AuditSubject};
     use crate::verify::{parse_jsonl, verify_records};
     use std::sync::Arc;
@@ -4132,6 +4143,90 @@ mod tests {
             "reopening an existing log + lock sidecar creates nothing, so no dir fsync"
         );
         drop(sink2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reopen_of_existing_ledger_refuses_a_parent_swapped_after_capability_open() {
+        // Both children already exist, so this takes the reopen branch that
+        // does not need a directory fsync. It must still authenticate the held
+        // parent: otherwise the securely opened old files are accepted while
+        // the configured path now names the replacement directory.
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("audit-parent");
+        let replacement = root.path().join("replacement-parent");
+        let parked = root.path().join("parked-parent");
+        std::fs::create_dir(&parent).expect("create audit parent");
+        std::fs::create_dir(&replacement).expect("create replacement parent");
+        let path = parent.join("audit.jsonl");
+        drop(FileAuditSink::open(&path).expect("seed existing ledger and lock"));
+
+        let moved_parent = parent.clone();
+        let moved_replacement = replacement.clone();
+        let moved_parked = parked.clone();
+        set_file_audit_parent_handle_hook(move || {
+            std::fs::rename(&moved_parent, &moved_parked).expect("park held parent");
+            std::fs::rename(&moved_replacement, &moved_parent).expect("replace configured parent");
+        });
+
+        let error = match FileAuditSink::open(&path) {
+            Ok(_) => panic!("an existing ledger must not accept a swapped configured parent"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("changed identity"), "{error}");
+        assert!(
+            !path.exists(),
+            "the replacement parent must not be accepted as the existing ledger location"
+        );
+        assert!(
+            parked.join("audit.jsonl").is_file() && parked.join("audit.jsonl.lock").is_file(),
+            "the old ledger and lock remain only in the parked, capability-held parent"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn authenticated_shipping_refuses_a_missing_anchor_parent_after_primary_open() {
+        // Seed a real authenticated head anchor, then retain the primary
+        // ledger's descriptor while removing only the configured parent. The
+        // verifier must not reinterpret the hidden anchor as a legacy absence:
+        // that would accept the parked ledger without its tail-truncation
+        // proof.
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("audit-parent");
+        let parked = root.path().join("parked-parent");
+        std::fs::create_dir(&parent).expect("create audit parent");
+        let path = parent.join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open seeded primary")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                    "t0".to_owned(),
+                    true,
+                )
+                .expect("write durable anchored record");
+        }
+
+        let primary = FileAuditSink::open(&path).expect("retain exact primary ledger");
+        std::fs::rename(&parent, &parked).expect("remove configured anchor parent");
+
+        let error = primary
+            .authenticate_existing_chain(&path, &anchor_path, &[test_key()])
+            .expect_err("a missing anchor parent must not suppress an existing head anchor");
+        assert!(
+            error.to_string().contains("anchor parent is missing"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            parked.join("audit.jsonl.anchor").is_file(),
+            "the test must hide an existing anchor, not merely exercise a legacy absent sidecar"
+        );
     }
 
     #[cfg(unix)]

@@ -296,9 +296,29 @@ impl std::fmt::Display for AnchorLoadError {
 
 impl std::error::Error for AnchorLoadError {}
 
-/// Load the anchor sidecar at `path`. Absent file → `Ok(None)` (legacy log);
-/// any other read/parse failure → `Err` (fail closed at verify time).
+/// Load the anchor sidecar at `path`. An absent sidecar beneath an extant
+/// parent yields `Ok(None)` for legacy logs; any other read/parse failure
+/// yields `Err`.
 pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> {
+    load_anchor_inner(path, false)
+}
+
+/// Load an anchor while authenticating an already-open primary ledger.
+///
+/// A legacy anchor sidecar may be absent, but the sidecar's parent must still
+/// exist and resolve safely. Otherwise an attacker could move or redirect that
+/// parent after the primary file was opened and make a real head anchor look
+/// like a legacy absence, suppressing tail-truncation protection.
+pub(crate) fn load_anchor_for_open_audit_ledger(
+    path: &Path,
+) -> Result<Option<ChainAnchor>, AnchorLoadError> {
+    load_anchor_inner(path, true)
+}
+
+fn load_anchor_inner(
+    path: &Path,
+    require_existing_parent: bool,
+) -> Result<Option<ChainAnchor>, AnchorLoadError> {
     let parent_path = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -312,7 +332,15 @@ pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> 
     #[cfg(unix)]
     let directory = match open_existing_audit_directory_nofollow(parent_path) {
         Ok(directory) => directory,
-        Err(AuditDirectoryOpenError::Missing) => return Ok(None),
+        Err(AuditDirectoryOpenError::Missing) if !require_existing_parent => return Ok(None),
+        Err(AuditDirectoryOpenError::Missing) => {
+            return Err(AnchorLoadError {
+                message: format!(
+                    "{}: anchor parent is missing while an audit ledger is already open",
+                    path.display()
+                ),
+            });
+        }
         Err(AuditDirectoryOpenError::Rejected(error)) => {
             return Err(AnchorLoadError {
                 message: format!("{}: {error}", path.display()),
@@ -322,7 +350,17 @@ pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> 
     #[cfg(not(unix))]
     let directory = match CapDir::open_ambient_dir(parent_path, ambient_authority()) {
         Ok(directory) => directory,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_existing_parent => {
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AnchorLoadError {
+                message: format!(
+                    "{}: anchor parent is missing while an audit ledger is already open",
+                    path.display()
+                ),
+            });
+        }
         Err(error) => {
             return Err(AnchorLoadError {
                 message: format!("{}: {error}", path.display()),
@@ -824,6 +862,19 @@ mod tests {
             load_anchor(&anchor_path).is_err(),
             "corrupt anchor fails closed"
         );
+    }
+
+    #[test]
+    fn legacy_anchor_lookup_treats_a_genuinely_absent_parent_as_no_sidecar() {
+        // The compatibility reader remains useful for callers that have not
+        // opened a primary ledger. The stricter startup path is separate so a
+        // parent removed after a primary open cannot exploit this legacy case.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor_path = dir
+            .path()
+            .join("parent-never-created")
+            .join("audit.jsonl.anchor");
+        assert_eq!(load_anchor(&anchor_path), Ok(None));
     }
 
     #[test]
