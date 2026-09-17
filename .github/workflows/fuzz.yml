@@ -71,15 +71,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           workspaces: crates/${{ matrix.crate }}/fuzz -> target
           shared-key: fuzz-${{ matrix.crate }}-${{ matrix.target }}
           save-if: ${{ github.event_name == 'schedule' }}
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+      - uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2
         with:
           tool: cargo-fuzz
       # The two guard targets are coverage-guided safety proofs, not a fixed
@@ -89,7 +89,7 @@ jobs:
       # newest prior corpus for the same target/shard on the next campaign.
       - name: Restore persistent guard fuzz corpus
         if: ${{ matrix.crate == 'oraclemcp-guard' }}
-        uses: actions/cache/restore@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
         with:
           path: crates/${{ matrix.crate }}/fuzz/corpus/${{ matrix.target }}/shard-${{ matrix.shard }}
           key: fuzz-corpus-v1-${{ matrix.crate }}-${{ matrix.target }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -115,7 +115,7 @@ jobs:
           -artifact_prefix="artifacts/${{ matrix.target }}/shard-${{ matrix.shard }}/"
       - name: Persist expanded guard fuzz corpus
         if: ${{ success() && matrix.crate == 'oraclemcp-guard' && github.event_name == 'schedule' }}
-        uses: actions/cache/save@0c45773b623bea8c8e75f6c82b208c3cf94ea4f9 # v4
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v4
         with:
           path: crates/${{ matrix.crate }}/fuzz/corpus/${{ matrix.target }}/shard-${{ matrix.shard }}
           key: fuzz-corpus-v1-${{ matrix.crate }}-${{ matrix.target }}-shard-${{ matrix.shard }}-${{ github.run_id }}-${{ github.run_attempt }}
