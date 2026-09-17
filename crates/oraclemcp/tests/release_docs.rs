@@ -26,7 +26,7 @@ fn assert_mentions(haystack: &str, needle: &str, label: &str) {
 fn release_docs_cover_0_8_config_migration_surfaces() {
     let upgrade = read_repo_file("docs/upgrading-to-0.8.0.md");
     let downgrade = read_repo_file("docs/downgrading-0.8.0-to-0.7.2.md");
-    let readme = read_repo_file("README.md");
+    let install_manual = read_repo_file("docs/install.md");
     let configuration = read_repo_file("docs/configuration.md");
 
     for field in [
@@ -62,7 +62,11 @@ fn release_docs_cover_0_8_config_migration_surfaces() {
         "docs/downgrading-0.8.0-to-0.7.2.md",
         "docs/feature-rollout-0.8.0.md",
     ] {
-        assert_mentions(&readme, link, "README release-doc links");
+        assert_mentions(
+            &install_manual,
+            link,
+            "installation manual release-doc links",
+        );
     }
 
     for field in [
