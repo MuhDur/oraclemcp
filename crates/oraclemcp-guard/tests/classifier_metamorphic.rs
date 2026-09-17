@@ -53,7 +53,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use oraclemcp_guard::{
-    Classifier, DangerLevel, GuardDecision, ObjectRef, OperatingLevel, Purity, SideEffectOracle,
+    Classifier, ClassifierConfig, DangerLevel, GuardDecision, ObjectRef, OperatingLevel, Purity,
+    SideEffectOracle,
 };
 use proptest::prelude::*;
 
@@ -460,7 +461,9 @@ fn whitespace_renoise(sql: &str, pads: &[usize], cases: &[bool]) -> String {
 // ---------------------------------------------------------------------------
 
 fn real_classify(sql: &str) -> GuardDecision {
-    Classifier::default().classify(sql)
+    // MR3 compares the strict oracle binding to its intentional engine-free
+    // baseline; library callers instead receive the fail-closed default.
+    Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql)
 }
 
 /// An oracle that reports *every* routine and statement as side-effecting — the

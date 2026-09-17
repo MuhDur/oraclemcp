@@ -2,9 +2,9 @@
 //! beads P1-1d, P1-1e). This is the boundary-preserving seam (§0 hard rule 1):
 //! the port lives in the engine-free guard with a default impl that returns
 //! `Unknown`, so the classifier ships fully functional with no engine
-//! dependency. Routine `Unknown` is always fail-closed; statement `Unknown`
-//! stays permissive until a real engine binding opts into SELECT-side-effect
-//! tightening. The PL/SQL engine binds the *real* implementation — over
+//! dependency. Routine and statement `Unknown` are fail-closed by default; an
+//! engine-free consumer must make an explicit, independently justified opt-out
+//! before allowing an unproven plain read. The PL/SQL engine binds the *real* implementation — over
 //! its `DepGraph` / `plsql-lineage::column_writers` and the trigger/VPD walk —
 //! from the *consumer* side, exactly like every other engine tool.
 
@@ -50,8 +50,8 @@ impl ObjectRef {
 /// The three-valued purity verdict (§5.3, R15). For routine calls, **only
 /// `ProvenReadOnly` permits clearing a statement to `Safe`.** Absence of a
 /// write edge is `Unknown`, never routine-safe; `Measured::Unmeasured` /
-/// `OpaqueDynamic` / unloaded / cycle all map to `Unknown`. Statement-level
-/// `Unknown` is fail-closed only when the classifier is explicitly tightened.
+/// `OpaqueDynamic` / unloaded / cycle all map to `Unknown`. Routine and
+/// statement-level `Unknown` are fail-closed by the default classifier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 #[non_exhaustive]
@@ -77,8 +77,9 @@ impl Purity {
 
 /// The engine-aware side-effect consult port. Every method defaults to
 /// `Unknown`, so a guard with no engine bound treats every user-defined routine
-/// as side-effecting. Statement-level `Unknown` is tightened only when a real
-/// engine-bound classifier opts in.
+/// and base-object read as unproven. The default classifier fails closed; an
+/// explicit engine-free baseline is available only for callers with an
+/// independent semantic-read proof.
 pub trait SideEffectOracle: Send + Sync {
     /// The purity of a user-defined routine (function/procedure/package member).
     fn routine_purity(&self, routine: &ObjectRef) -> Purity {
@@ -93,12 +94,11 @@ pub trait SideEffectOracle: Send + Sync {
     ///
     /// Wired into the classifier's `SELECT` arm (the base objects are the
     /// resolved `FROM`/`JOIN` tables + CTE/derived bodies). The default
-    /// `UnknownOracle` preserves the engine-free baseline: a UDF-free plain
-    /// SELECT stays `Safe` unless an oracle explicitly returns
-    /// `ProvenSideEffecting`. Consumers that bind a real engine oracle opt into
-    /// statement-level `Unknown` tightening with
-    /// `Classifier::with_statement_unknown_guarded`, making any non-proven base
-    /// object force `≥ Guarded`.
+    /// `UnknownOracle` makes a UDF-free plain SELECT unproven, and the default
+    /// classifier maps it to `≥ Guarded`. Consumers that have an independent
+    /// semantic-read proof may explicitly construct
+    /// `Classifier::engine_free_baseline`; that opt-out preserves the historical
+    /// engine-free behavior without weakening the library default.
     fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
         let _ = base_objects;
         Purity::Unknown

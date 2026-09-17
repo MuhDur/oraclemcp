@@ -1370,6 +1370,14 @@ mod tests {
         AuditSubject::new("test", "cqn-client")
     }
 
+    /// CQN's static phase performs only a text-local precheck; `register_query`
+    /// immediately follows it with a fresh live relation/VPD proof before the
+    /// driver registration effect. Keep that narrow baseline explicit now that
+    /// the guard library default is a standalone fail-closed admission gate.
+    fn cqn_preflight_classifier() -> Classifier {
+        Classifier::engine_free_baseline(ClassifierConfig::new())
+    }
+
     const PROVEN_QUERY: &str = "SELECT id FROM app.cqn_target";
     const UNPROVEN_VIEW_QUERY: &str = "SELECT id FROM app.unproven_view";
 
@@ -1595,7 +1603,7 @@ mod tests {
                 CqnRegistrationScope::Query,
                 PROVEN_QUERY,
                 &[],
-                &Classifier::default(),
+                &cqn_preflight_classifier(),
                 &stepped_up_session(),
                 Some(auditor),
                 subject(),
@@ -1616,7 +1624,7 @@ mod tests {
         let result = gate.authorize(
             CqnRegistrationScope::Query,
             PROVEN_QUERY,
-            &Classifier::default(),
+            &cqn_preflight_classifier(),
             &stepped_up_session(),
             Some(&auditor),
             subject(),
@@ -1641,7 +1649,7 @@ mod tests {
         let result = gate.authorize(
             CqnRegistrationScope::Object,
             PROVEN_QUERY,
-            &Classifier::default(),
+            &cqn_preflight_classifier(),
             &stepped_up_session(),
             Some(&auditor),
             subject(),
@@ -1674,7 +1682,7 @@ mod tests {
                     CqnRegistrationScope::Object,
                     PROVEN_QUERY,
                     &[],
-                    &Classifier::default(),
+                    &cqn_preflight_classifier(),
                     &stepped_up_session(),
                     Some(&auditor),
                     subject(),
@@ -1712,7 +1720,7 @@ mod tests {
                     CqnRegistrationScope::Query,
                     PROVEN_QUERY,
                     &[],
-                    &Classifier::default(),
+                    &cqn_preflight_classifier(),
                     &stepped_up_session(),
                     Some(&auditor),
                     subject(),
@@ -1749,7 +1757,7 @@ mod tests {
                     CqnRegistrationScope::Query,
                     PROVEN_QUERY,
                     &[],
-                    &Classifier::default(),
+                    &cqn_preflight_classifier(),
                     &stepped_up_session(),
                     Some(&auditor),
                     subject(),
@@ -1799,7 +1807,7 @@ mod tests {
                         CqnRegistrationScope::Query,
                         query,
                         &[],
-                        &Classifier::default(),
+                        &cqn_preflight_classifier(),
                         &stepped_up_session(),
                         Some(&auditor),
                         subject(),
@@ -1835,7 +1843,7 @@ mod tests {
         let result = gate.authorize(
             CqnRegistrationScope::Query,
             PROVEN_QUERY,
-            &Classifier::default(),
+            &cqn_preflight_classifier(),
             &baseline_writable,
             Some(&auditor),
             subject(),
@@ -1854,7 +1862,7 @@ mod tests {
         let result = gate.authorize(
             CqnRegistrationScope::Query,
             "SELECT employee_id FROM hr.employees FOR UPDATE",
-            &Classifier::default(),
+            &cqn_preflight_classifier(),
             &stepped_up_session(),
             Some(&auditor),
             subject(),
@@ -1877,7 +1885,7 @@ mod tests {
             .authorize(
                 CqnRegistrationScope::Query,
                 PROVEN_QUERY,
-                &Classifier::default(),
+                &cqn_preflight_classifier(),
                 &stepped_up_session(),
                 Some(&auditor),
                 subject(),
@@ -1908,7 +1916,7 @@ mod tests {
         let result = gate.authorize(
             CqnRegistrationScope::Query,
             PROVEN_QUERY,
-            &Classifier::default(),
+            &cqn_preflight_classifier(),
             &stepped_up_session(),
             Some(&auditor),
             subject(),
@@ -2088,7 +2096,7 @@ mod tests {
                     CqnRegistrationScope::Query,
                     PROVEN_QUERY,
                     &[],
-                    &Classifier::default(),
+                    &cqn_preflight_classifier(),
                     &stepped_up_session(),
                     Some(&auditor),
                     subject(),

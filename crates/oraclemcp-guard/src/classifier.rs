@@ -22,9 +22,10 @@
 //!    (P1-1e, R15). A UDF-free `SELECT` also consults `statement_purity` over
 //!    its resolved
 //!    base objects (the engine's trigger/VPD walk): a base object the engine
-//!    proves `ProvenSideEffecting` escalates the `SELECT` to `Guarded`, and an
-//!    engine-bound classifier can opt into treating statement-level `Unknown`
-//!    as `Guarded`.
+//!    proves `ProvenSideEffecting` escalates the `SELECT` to `Guarded`. The
+//!    default classifier also treats statement-level `Unknown` as `Guarded`;
+//!    only the explicit engine-free baseline can opt out when another
+//!    fail-closed semantic proof governs admission.
 //!
 //! **Fail-closed law:** anything that does not parse, any PL/SQL block, any
 //! desync, and any user-defined routine the engine cannot prove
@@ -415,9 +416,9 @@ impl ClassifierConfig {
     }
 
     /// The fail-closed **served/strict** preset: enable the qualified paren-less
-    /// callable guard (bead .102). Pair with [`Classifier::served_strict`] (which
-    /// additionally tightens statement-level `Unknown` purity, bead .82) for the
-    /// full served posture.
+    /// callable guard (bead .102). [`Classifier::new`] and
+    /// [`Classifier::default`] already tighten statement-level `Unknown` purity;
+    /// pair this config with either constructor for the full served posture.
     #[must_use]
     pub fn served_strict() -> Self {
         Self::default().with_unresolved_qualified_calls_guarded()
@@ -751,6 +752,10 @@ const LEADING_DDL_VERBS: &[&str] = &[
     "ANALYZE ",
     "TRUNCATE ",
     "DROP ",
+    // `ALTER SESSION` is intentionally excluded in `starts_with_ddl_verb`:
+    // its safe-parameter policy owns its ReadWrite floor. Every other ALTER
+    // form is object DDL unless the admin scan matched it first.
+    "ALTER ",
     // Any leading `CREATE <object>` that reaches the parse-failure branch is an
     // unparseable object DDL form sqlparser 0.62 cannot handle (CREATE [OR
     // REPLACE] SYNONYM / DIRECTORY / TYPE / CONTEXT / MATERIALIZED VIEW / …).
@@ -985,18 +990,11 @@ fn starts_with_ddl_verb(upper_source: &str) -> bool {
     // `scan` is `" TOK1 TOK2 … "`; strip the leading pad so a leading verb sits
     // at offset 0 and the trailing space in each pattern enforces a word boundary.
     let leading = scan.strip_prefix(' ').unwrap_or(&scan);
-    if LEADING_DDL_VERBS.iter().any(|v| leading.starts_with(v)) {
-        return true;
-    }
-    // Generic `ALTER <object>` (ALTER TABLE/INDEX/VIEW/SEQUENCE/TRIGGER/TYPE/
-    // TABLESPACE/MATERIALIZED VIEW/…) is object DDL that sqlparser 0.62 largely
-    // cannot parse; floor it at Ddl instead of letting it under-level to ReadWrite
-    // (bead QA100 .84). The admin-scope ALTER forms (USER/SYSTEM/DATABASE/PROFILE/
-    // ROLE) are resolved to Admin by `starts_with_admin_verb`, which every caller
-    // runs FIRST, so they never reach this generic arm. `ALTER SESSION SET …` is
-    // deliberately EXCLUDED: its safe-parameter policy is owned separately and it
-    // keeps its existing ReadWrite floor — this scan must not change it.
-    leading.starts_with("ALTER ") && !leading.starts_with("ALTER SESSION ")
+    // `ALTER SESSION SET …` is deliberately excluded: its safe-parameter policy
+    // owns its existing ReadWrite floor. The admin scan runs before this function,
+    // so its ALTER USER/SYSTEM/DATABASE/PROFILE/ROLE forms retain Admin.
+    !leading.starts_with("ALTER SESSION ")
+        && LEADING_DDL_VERBS.iter().any(|v| leading.starts_with(v))
 }
 
 /// Destructive / privilege / DML verbs that, when they appear at a NON-leading
@@ -1034,6 +1032,11 @@ const BURIED_DANGEROUS_VERBS: &[&str] = &[
     " FLASHBACK ",
     " ASSOCIATE STATISTICS ",
     " DISASSOCIATE STATISTICS ",
+    // These lead-only DDL forms must remain symmetric with the buried scan: an
+    // unparseable `SELECT … <newline> COMMENT/ANALYZE …` is a stacked statement,
+    // not a harmless read.
+    " COMMENT ",
+    " ANALYZE ",
 ];
 
 /// Whether the canonical token stream of an unparseable single SQL segment
@@ -2783,8 +2786,8 @@ fn query_base_objects(query: &sqlparser::ast::Query) -> Vec<ObjectRef> {
 ///
 /// A derived table with no base table (`SELECT * FROM (SELECT 1) d`) reaches
 /// this: it has a FROM source and no base objects, so it defers to the oracle.
-/// Under the default `UnknownOracle` that remains `Safe`; only a consumer that
-/// opted into `with_statement_unknown_guarded` tightens it.
+/// The default `UnknownOracle` therefore fails closed; only the explicit
+/// engine-free baseline permits that unproven source-bearing shape.
 fn query_has_from_source(query: &sqlparser::ast::Query) -> bool {
     #[derive(Default)]
     struct FromSourceProbe {
@@ -3057,10 +3060,10 @@ fn classify_statement(
                 .all(|c| oracle.routine_purity(c).permits_safe());
             // The engine's trigger/VPD walk also gets a say: a UDF-free SELECT
             // can still fire side-effecting database logic the SQL text never
-            // names. The default UnknownOracle keeps statement-level `Unknown`
-            // permissive so the engine-free baseline stays stable; a consumer
-            // that binds a real oracle can opt into fail-closed `Unknown`
-            // handling with `Classifier::with_statement_unknown_guarded`.
+            // names. The default `UnknownOracle` leaves that statement-level
+            // verdict unproven, which the default classifier fails closed. Only
+            // an explicit engine-free baseline may opt out after an independent
+            // semantic-read proof.
             let base_objects = query_base_objects(query);
             // G2: the empty set alone cannot distinguish a genuine source-free
             // scalar read from a collector that missed the sources of a query
@@ -3398,15 +3401,38 @@ impl Default for Classifier {
         Classifier {
             config: ClassifierConfig::new(),
             oracle: Arc::new(UnknownOracle),
-            statement_unknown_guarded: false,
+            statement_unknown_guarded: true,
         }
     }
 }
 
 impl Classifier {
     /// A classifier with the default fail-closed oracle (no engine bound).
+    ///
+    /// The default treats a statement-level [`Purity::Unknown`] verdict as
+    /// guarded. Use [`Self::engine_free_baseline`] only where an independently
+    /// enforced semantic-read proof makes the historical engine-free posture
+    /// safe.
     #[must_use]
     pub fn new(config: ClassifierConfig) -> Self {
+        Classifier {
+            config,
+            oracle: Arc::new(UnknownOracle),
+            statement_unknown_guarded: true,
+        }
+    }
+
+    /// Construct the explicit historical engine-free baseline.
+    ///
+    /// This permits a statement-level [`Purity::Unknown`] verdict for a plain
+    /// read, exactly as `Classifier::default()` did before bead
+    /// `oraclemcp-ge6xe.1`. It is only appropriate when the caller has an
+    /// independent fail-closed semantic-read gate, when a test deliberately
+    /// isolates text-local classification, or for offline re-derivation of a
+    /// certificate that never admits SQL. It must never be a caller's sole
+    /// admission check for user-supplied SQL.
+    #[must_use]
+    pub fn engine_free_baseline(config: ClassifierConfig) -> Self {
         Classifier {
             config,
             oracle: Arc::new(UnknownOracle),
@@ -3422,21 +3448,23 @@ impl Classifier {
     }
 
     /// Tighten statement-level `Unknown` purity to `Guarded` for SELECT base
-    /// objects. This is intentionally opt-in so the default no-engine
-    /// `UnknownOracle` continues to keep UDF-free plain SELECTs `Safe`.
+    /// objects.
+    ///
+    /// This is the default posture. The method remains an idempotent explicit
+    /// assertion for callers that construct an engine-free baseline before
+    /// binding a semantic oracle.
     #[must_use]
     pub fn with_statement_unknown_guarded(mut self) -> Self {
         self.statement_unknown_guarded = true;
         self
     }
 
-    /// The fully fail-closed **served/strict** posture: tighten statement-level
-    /// `Unknown` purity (bead .82 — under the default `UnknownOracle` this
-    /// refuses *every* read whose base objects are not proven read-only) **and**
-    /// guard qualified paren-less callables (bead .102). Intended for the served
-    /// raw-query gate where usability is subordinate to fail-closed safety; the
-    /// caller accepts that reads then require a bound engine oracle proving the
-    /// base objects read-only, or an operator allow-list entry.
+    /// The fully fail-closed **served/strict** posture: assert the default
+    /// statement-level `Unknown` tightening (bead .82) and guard qualified
+    /// paren-less callables (bead .102). Intended for the served raw-query gate
+    /// where usability is subordinate to fail-closed safety; the caller accepts
+    /// that reads then require a bound engine oracle proving the base objects
+    /// read-only, or an operator allow-list entry.
     #[must_use]
     pub fn served_strict(mut self) -> Self {
         self.statement_unknown_guarded = true;
@@ -3914,7 +3942,7 @@ mod tests {
     use crate::levels::BlockReason;
 
     fn classify(sql: &str) -> GuardDecision {
-        Classifier::default().classify(sql)
+        Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql)
     }
 
     fn classify_one_statement(sql: &str) -> StatementClass {
@@ -4191,7 +4219,8 @@ mod tests {
         let sql = "SELECT VECTOR_DISTANCE(d.embedding, VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1), COSINE) FROM docs d";
         let d = classify(sql);
         assert_eq!(d.danger, DangerLevel::Guarded, "{d:?}");
-        let d = Classifier::default().classify_verified_local_vector_embedding(sql);
+        let d = Classifier::engine_free_baseline(ClassifierConfig::new())
+            .classify_verified_local_vector_embedding(sql);
         assert_eq!(d.danger, DangerLevel::Safe, "{d:?}");
         let plan = semantic_read_plan(sql)
             .expect("the generated text-embedding query has an exact semantic plan");
@@ -4210,7 +4239,7 @@ mod tests {
             "the dictionary-proven model is SQL grammar, not a row/column dependency"
         );
         assert_eq!(
-            Classifier::default()
+            Classifier::engine_free_baseline(ClassifierConfig::new())
                 .classify_verified_local_vector_embedding(
                     "SELECT app.VECTOR_EMBEDDING(x) FROM dual"
                 )
@@ -4271,7 +4300,7 @@ mod tests {
     fn vector_embedding_batch_normalizes_only_for_parser_splitting() {
         let verified_batch = "SELECT VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :1) FROM dual; \
             SELECT VECTOR_EMBEDDING(LOCAL_ONNX_MODEL USING :2) FROM dual";
-        let classifier = Classifier::default();
+        let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
 
         let verified = classifier.classify_verified_local_vector_embedding(verified_batch);
         assert_eq!(verified.danger, DangerLevel::Safe, "{verified:?}");
@@ -4551,6 +4580,235 @@ mod tests {
     }
 
     #[test]
+    fn canonical_oracle_admin_and_ddl_verb_catalog_is_covered_at_every_scan_position() {
+        // Bead ge6xe.6: this is deliberately a literal, independent Oracle
+        // catalog rather than a reflection of the implementation lists. Each
+        // form must retain its leading floor and its buried-statement marker.
+        // A new catalog item missing from either dimension makes this test fail.
+        let admin_forms = [
+            ("GRANT", "GRANT DBA TO app_role", " GRANT "),
+            ("REVOKE", "REVOKE DBA FROM app_role", " REVOKE "),
+            ("AUDIT", "AUDIT SELECT TABLE", " AUDIT "),
+            ("NOAUDIT", "NOAUDIT SELECT TABLE", " NOAUDIT "),
+            (
+                "CREATE USER",
+                "CREATE USER app_user IDENTIFIED BY x",
+                " CREATE ",
+            ),
+            ("ALTER USER", "ALTER USER app_user ACCOUNT LOCK", " ALTER "),
+            ("DROP USER", "DROP USER app_user", " DROP "),
+            ("CREATE ROLE", "CREATE ROLE app_role", " CREATE "),
+            (
+                "ALTER ROLE",
+                "ALTER ROLE app_role NOT IDENTIFIED",
+                " ALTER ",
+            ),
+            ("DROP ROLE", "DROP ROLE app_role", " DROP "),
+            (
+                "CREATE PROFILE",
+                "CREATE PROFILE app_profile LIMIT SESSIONS_PER_USER 1",
+                " CREATE ",
+            ),
+            (
+                "ALTER PROFILE",
+                "ALTER PROFILE app_profile LIMIT FAILED_LOGIN_ATTEMPTS 3",
+                " ALTER ",
+            ),
+            ("DROP PROFILE", "DROP PROFILE app_profile", " DROP "),
+            (
+                "ALTER SYSTEM",
+                "ALTER SYSTEM SET audit_trail = DB",
+                " ALTER ",
+            ),
+            ("ALTER DATABASE", "ALTER DATABASE OPEN", " ALTER "),
+            (
+                "CREATE SCHEMA",
+                "CREATE SCHEMA AUTHORIZATION app_user",
+                " CREATE ",
+            ),
+            ("CREATE DATABASE", "CREATE DATABASE appdb", " CREATE "),
+            ("DROP DATABASE", "DROP DATABASE", " DROP "),
+            (
+                "CREATE PLUGGABLE DATABASE",
+                "CREATE PLUGGABLE DATABASE apppdb",
+                " CREATE ",
+            ),
+            (
+                "ALTER PLUGGABLE DATABASE",
+                "ALTER PLUGGABLE DATABASE apppdb OPEN",
+                " ALTER ",
+            ),
+            (
+                "DROP PLUGGABLE DATABASE",
+                "DROP PLUGGABLE DATABASE apppdb",
+                " DROP ",
+            ),
+            (
+                "CREATE AUDIT POLICY",
+                "CREATE AUDIT POLICY app_policy ACTIONS SELECT",
+                " CREATE ",
+            ),
+            (
+                "ALTER AUDIT POLICY",
+                "ALTER AUDIT POLICY app_policy ADD ACTIONS INSERT",
+                " ALTER ",
+            ),
+            (
+                "DROP AUDIT POLICY",
+                "DROP AUDIT POLICY app_policy",
+                " DROP ",
+            ),
+            (
+                "CREATE LOCKDOWN PROFILE",
+                "CREATE LOCKDOWN PROFILE app_lockdown",
+                " CREATE ",
+            ),
+            (
+                "ALTER LOCKDOWN PROFILE",
+                "ALTER LOCKDOWN PROFILE app_lockdown DISABLE STATEMENT",
+                " ALTER ",
+            ),
+            (
+                "DROP LOCKDOWN PROFILE",
+                "DROP LOCKDOWN PROFILE app_lockdown",
+                " DROP ",
+            ),
+            ("SET ROLE", "SET ROLE app_role", " SET ROLE "),
+            (
+                "FLASHBACK DATABASE",
+                "FLASHBACK DATABASE TO SCN 1",
+                " FLASHBACK ",
+            ),
+            (
+                "FLASHBACK PLUGGABLE DATABASE",
+                "FLASHBACK PLUGGABLE DATABASE apppdb TO SCN 1",
+                " FLASHBACK ",
+            ),
+        ];
+        let canonical_admin_prefixes = [
+            "GRANT ",
+            "REVOKE ",
+            "AUDIT ",
+            "NOAUDIT ",
+            "CREATE USER ",
+            "ALTER USER ",
+            "DROP USER ",
+            "CREATE ROLE ",
+            "ALTER ROLE ",
+            "DROP ROLE ",
+            "CREATE PROFILE ",
+            "ALTER PROFILE ",
+            "DROP PROFILE ",
+            "ALTER SYSTEM ",
+            "ALTER DATABASE ",
+            "CREATE SCHEMA ",
+            "CREATE DATABASE ",
+            "DROP DATABASE ",
+            "CREATE PLUGGABLE DATABASE ",
+            "ALTER PLUGGABLE DATABASE ",
+            "DROP PLUGGABLE DATABASE ",
+            "CREATE AUDIT POLICY ",
+            "ALTER AUDIT POLICY ",
+            "DROP AUDIT POLICY ",
+            "CREATE LOCKDOWN PROFILE ",
+            "ALTER LOCKDOWN PROFILE ",
+            "DROP LOCKDOWN PROFILE ",
+            "SET ROLE ",
+            "FLASHBACK DATABASE ",
+            "FLASHBACK PLUGGABLE DATABASE ",
+        ];
+        for verb in canonical_admin_prefixes {
+            assert!(
+                LEADING_ADMIN_VERBS.contains(&verb),
+                "canonical Oracle admin prefix is missing from LEADING_ADMIN_VERBS: {verb}"
+            );
+        }
+        for (name, sql, buried_marker) in admin_forms {
+            assert!(
+                starts_with_admin_verb(sql),
+                "admin catalog form lost its leading floor: {name}"
+            );
+            assert!(
+                BURIED_DANGEROUS_VERBS.contains(&buried_marker),
+                "admin catalog form lost its buried marker: {name}"
+            );
+            let stacked = format!("SELECT 1 FROM dual\n{sql}").to_ascii_uppercase();
+            assert!(
+                has_buried_dangerous_verb(&stacked),
+                "admin catalog form is not detected when stacked: {name}"
+            );
+        }
+
+        let ddl_forms = [
+            ("RENAME", "RENAME orders TO archived_orders", " RENAME "),
+            ("PURGE", "PURGE TABLE orders", " PURGE "),
+            (
+                "FLASHBACK TABLE",
+                "FLASHBACK TABLE orders TO BEFORE DROP",
+                " FLASHBACK ",
+            ),
+            (
+                "ASSOCIATE STATISTICS",
+                "ASSOCIATE STATISTICS WITH COLUMNS orders.id",
+                " ASSOCIATE STATISTICS ",
+            ),
+            (
+                "DISASSOCIATE STATISTICS",
+                "DISASSOCIATE STATISTICS FROM COLUMNS orders.id",
+                " DISASSOCIATE STATISTICS ",
+            ),
+            ("COMMENT", "COMMENT ON TABLE orders IS 'x'", " COMMENT "),
+            (
+                "ANALYZE",
+                "ANALYZE TABLE orders COMPUTE STATISTICS",
+                " ANALYZE ",
+            ),
+            ("TRUNCATE", "TRUNCATE TABLE orders", " TRUNCATE "),
+            ("DROP", "DROP TABLE orders", " DROP "),
+            ("CREATE", "CREATE DIRECTORY stage_dir AS '/tmp'", " CREATE "),
+            (
+                "ALTER object",
+                "ALTER TABLE orders ADD archived_at DATE",
+                " ALTER ",
+            ),
+        ];
+        let canonical_ddl_prefixes = [
+            "RENAME ",
+            "PURGE ",
+            "FLASHBACK ",
+            "ASSOCIATE STATISTICS ",
+            "DISASSOCIATE STATISTICS ",
+            "COMMENT ",
+            "ANALYZE ",
+            "TRUNCATE ",
+            "DROP ",
+            "CREATE ",
+            "ALTER ",
+        ];
+        for verb in canonical_ddl_prefixes {
+            assert!(
+                LEADING_DDL_VERBS.contains(&verb),
+                "canonical Oracle DDL prefix is missing from LEADING_DDL_VERBS: {verb}"
+            );
+        }
+        for (name, sql, buried_marker) in ddl_forms {
+            assert!(
+                starts_with_ddl_verb(sql),
+                "DDL catalog form lost its leading floor: {name}"
+            );
+            assert!(
+                BURIED_DANGEROUS_VERBS.contains(&buried_marker),
+                "DDL catalog form lost its buried marker: {name}"
+            );
+            let stacked = format!("SELECT 1 FROM dual\n{sql}").to_ascii_uppercase();
+            assert!(
+                has_buried_dangerous_verb(&stacked),
+                "DDL catalog form is not detected when stacked: {name}"
+            );
+        }
+    }
+
+    #[test]
     fn genuine_sql_constructs_are_not_treated_as_udf_calls() {
         // The contrapositive of the keyword-named-UDF fix: real SQL constructs
         // (VALUES/IN/CAST/CASE/EXISTS) that legally precede `(` must NOT be
@@ -4599,7 +4857,8 @@ mod tests {
                 Purity::ProvenReadOnly
             }
         }
-        let c = Classifier::default().with_oracle(Arc::new(ProvenOracle));
+        let c = Classifier::engine_free_baseline(ClassifierConfig::new())
+            .with_oracle(Arc::new(ProvenOracle));
         let d = c.classify("SELECT billing.lookup(x) FROM dual");
         assert_eq!(d.danger, DangerLevel::Safe);
     }
@@ -4619,7 +4878,8 @@ mod tests {
             }
         }
 
-        let classifier = Classifier::default().with_oracle(Arc::new(TwoPartProof));
+        let classifier = Classifier::engine_free_baseline(ClassifierConfig::new())
+            .with_oracle(Arc::new(TwoPartProof));
         assert_eq!(
             classifier.classify("SELECT pkg.run(x) FROM dual").danger,
             DangerLevel::Safe,
@@ -4772,10 +5032,21 @@ mod tests {
     }
 
     #[test]
-    fn default_oracle_keeps_plain_select_safe_despite_statement_purity_wiring() {
-        // Baseline preservation: under the default UnknownOracle, statement_purity
-        // returns Unknown (NOT ProvenSideEffecting), so the new consult must not
-        // regress any plain SELECT to Guarded — the corpus depends on this.
+    fn default_classifier_refuses_an_unproven_base_object_read() {
+        let decision = Classifier::default().classify("SELECT * FROM orders");
+        assert_eq!(
+            decision.danger,
+            DangerLevel::Guarded,
+            "the library default must never clear an unproven base-object read"
+        );
+        assert_eq!(decision.required_level, Some(OperatingLevel::ReadWrite));
+    }
+
+    #[test]
+    fn explicit_engine_free_baseline_keeps_plain_select_safe() {
+        // The former library default remains available only under an explicit
+        // name, for consumers with an independent semantic-read proof.
+        let engine_free = Classifier::engine_free_baseline(ClassifierConfig::new());
         for sql in [
             "SELECT id, name FROM employees WHERE id = 42",
             "WITH d AS (SELECT * FROM dept) SELECT * FROM d",
@@ -4783,9 +5054,9 @@ mod tests {
             "SELECT e.id FROM employees e JOIN dept d ON e.dept = d.id",
         ] {
             assert_eq!(
-                classify(sql).danger,
+                engine_free.classify(sql).danger,
                 DangerLevel::Safe,
-                "default oracle must keep {sql:?} Safe"
+                "explicit engine-free baseline must keep {sql:?} Safe"
             );
         }
     }
@@ -4843,15 +5114,16 @@ mod tests {
             );
         }
 
-        // And the engine-free baseline is untouched: without opting into strict
-        // statement handling, the same FROM-bearing query stays Safe.
-        let permissive = Classifier::default().with_oracle(Arc::new(UnknownStatementOracle));
+        // And the engine-free baseline is untouched only when the caller opts
+        // out explicitly: the same FROM-bearing query stays Safe.
+        let permissive = Classifier::engine_free_baseline(ClassifierConfig::new())
+            .with_oracle(Arc::new(UnknownStatementOracle));
         assert_eq!(
             permissive
                 .classify("SELECT * FROM (SELECT 1 AS x) d")
                 .danger,
             DangerLevel::Safe,
-            "the default Unknown policy must remain permissive for the no-engine baseline"
+            "the explicit engine-free policy must remain permissive for the no-engine baseline"
         );
     }
 
@@ -4891,8 +5163,16 @@ mod tests {
         let default_binding = Classifier::default().with_oracle(Arc::new(UnknownStatementOracle));
         assert_eq!(
             default_binding.classify("SELECT * FROM orders").danger,
+            DangerLevel::Guarded,
+            "the default must fail closed even after an oracle is bound"
+        );
+
+        let permissive = Classifier::engine_free_baseline(ClassifierConfig::new())
+            .with_oracle(Arc::new(UnknownStatementOracle));
+        assert_eq!(
+            permissive.classify("SELECT * FROM orders").danger,
             DangerLevel::Safe,
-            "`with_oracle` alone must preserve the no-engine SELECT baseline"
+            "only the explicit engine-free baseline preserves the historical posture"
         );
 
         let tightened = Classifier::default()
@@ -4912,7 +5192,7 @@ mod tests {
     }
 
     #[test]
-    fn parenless_qualified_callable_fails_open_by_default_but_guards_under_flag() {
+    fn parenless_qualified_callable_requires_explicit_engine_free_baseline() {
         // Bead .102 — the live fail-open: Oracle invokes a zero-arg function with
         // NO parentheses, so `SELECT app_admin.run_ddl FROM dual` *runs* the
         // function `run_ddl`, but `user_defined_calls` only sees `ident(`, so the
@@ -4955,23 +5235,24 @@ mod tests {
         // the .102 flag's default-fail-open baseline. The .102 mechanism is proven
         // here on genuinely paren-less schema/package callables instead.
 
-        // Baseline: the default classifier documents the (contained-elsewhere)
-        // fail-open — plain `Classifier::new` stays permissive for backward
-        // compatibility. This half is what makes the strict half mutation-killing:
-        // if the guard logic is deleted the strict assertion below flips to Safe.
-        let permissive = Classifier::default();
+        // Baseline: the historical permissive posture is available only through
+        // an explicit engine-free constructor. This half is what makes the
+        // strict half mutation-killing: if the guard logic is deleted the strict
+        // assertion below flips to Safe.
+        let permissive = Classifier::engine_free_baseline(ClassifierConfig::new());
         for sql in payloads {
             assert_eq!(
                 permissive.classify(sql).danger,
                 DangerLevel::Safe,
-                "default (flag off) keeps the baseline: {sql:?}"
+                "engine-free baseline (flag off) keeps the baseline: {sql:?}"
             );
         }
 
         // Opt-in `.102` guard alone (no statement-Unknown tightening, so plain
         // reads stay usable) forces every paren-less qualified callable to Guarded.
-        let strict =
-            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let strict = Classifier::engine_free_baseline(
+            ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+        );
         for sql in payloads {
             let d = strict.classify(sql);
             assert_eq!(
@@ -4994,7 +5275,7 @@ mod tests {
 
     #[test]
     fn config_served_strict_enables_qualified_callable_guard_only() {
-        let strict_config = Classifier::new(ClassifierConfig::served_strict());
+        let strict_config = Classifier::engine_free_baseline(ClassifierConfig::served_strict());
 
         let callable = strict_config.classify("SELECT app_admin.run_ddl FROM dual");
         assert_eq!(callable.danger, DangerLevel::Guarded);
@@ -5022,8 +5303,9 @@ mod tests {
         // Regression guard for the .102 tightening: an in-scope `alias.column` /
         // `schema.table.column` / CTE-qualified / correlated column reference is
         // an ordinary read and must stay Safe (no destruction of normal reads).
-        let strict =
-            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let strict = Classifier::engine_free_baseline(
+            ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+        );
         for sql in [
             "SELECT e.name, e.id FROM employees e",
             "SELECT e.name FROM employees e JOIN dept d ON e.dept = d.id",
@@ -5071,8 +5353,9 @@ mod tests {
     fn parenless_qualified_callable_scope_reuses_nested_join_aliases() {
         // A nested-join alias must be collected for query scope; dropping that
         // arm can convert a column qualifier into a false-safe callable outcome.
-        let strict =
-            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let strict = Classifier::engine_free_baseline(
+            ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+        );
         let d = strict
             .classify("SELECT app_admin.run_ddl FROM (dual d JOIN dual e ON 1 = 1) app_admin");
         assert_eq!(
@@ -5089,8 +5372,9 @@ mod tests {
         // If the nested-join collector arm is dropped, `d.run_ddl` becomes an
         // unresolved paren-less call and incorrectly gates a plain column read to
         // Guarded.
-        let strict =
-            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let strict = Classifier::engine_free_baseline(
+            ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+        );
         let d = strict.classify("SELECT d.run_ddl FROM (dual d JOIN dual e ON 1 = 1)");
         assert_eq!(
             d.danger,
@@ -5104,8 +5388,9 @@ mod tests {
     fn parenless_qualified_callable_scope_reuses_json_table_alias() {
         // JSON_TABLE exposes aliases like a relation factor; dropping that
         // collector arm can turn `jt.a` into an unresolved callable.
-        let strict =
-            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let strict = Classifier::engine_free_baseline(
+            ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+        );
         let d = strict.classify(
             "SELECT jt.a FROM json_docs d, JSON_TABLE(d.doc, '$' COLUMNS(a NUMBER PATH '$.a')) jt",
         );
@@ -5121,8 +5406,9 @@ mod tests {
     fn parenless_qualified_callable_scope_reuses_xml_table_alias() {
         // TABLE-producing factor aliases must remain visible scope qualifiers for
         // paren-less resolution; otherwise base reads in strict mode downgrade.
-        let strict =
-            Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+        let strict = Classifier::engine_free_baseline(
+            ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+        );
         let d = strict.classify(
             "SELECT xt.a FROM xml_docs d, XMLTABLE('/r' PASSING d.doc COLUMNS a NUMBER PATH '.') xt",
         );
@@ -5199,12 +5485,11 @@ mod tests {
 
     #[test]
     fn served_strict_is_fully_fail_closed_over_unproven_reads() {
-        // Bead .82 containment: `served_strict` additionally tightens
-        // statement-level `Unknown` purity, so under the default `UnknownOracle`
-        // (which proves nothing) every read of a real base object — including a
-        // view whose hidden VPD/trigger dependency writes — fails closed to
-        // Guarded. This is the aggressive, documented containment; it is opt-in
-        // precisely because it refuses reads a bound engine oracle would clear.
+        // Bead .82 containment is now the library default: under the default
+        // `UnknownOracle` (which proves nothing), every read of a real base
+        // object — including a view whose hidden VPD/trigger dependency writes
+        // — fails closed to Guarded. `served_strict` additionally asserts the
+        // .102 paren-less-callable guard.
         let strict = Classifier::default().served_strict();
         for sql in [
             "SELECT * FROM orders", // .82: unprovable view/table read

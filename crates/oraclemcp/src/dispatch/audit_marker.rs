@@ -206,11 +206,11 @@ mod tests {
         // The forged `*/` and `;` are gone -> the comment cannot be closed early.
         assert!(!model.contains("*/"));
         // The whole marked statement still classifies exactly as the bare read:
-        // a single READ_ONLY SELECT, not a DROP.
+        // a guarded base-object read, never a DROP or a lower-level admission.
         let bare = classify(read);
         let with_evil = classify(&marked);
         assert_eq!(with_evil, bare);
-        assert_eq!(with_evil.required_level, Some(OperatingLevel::ReadOnly));
+        assert_eq!(with_evil.required_level, Some(OperatingLevel::ReadWrite));
     }
 
     #[test]

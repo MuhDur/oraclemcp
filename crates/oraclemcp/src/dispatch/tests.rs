@@ -4858,7 +4858,7 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
     .expect("custom tool parses");
     let loaded = oraclemcp_core::load_tools(
         &defs,
-        &Classifier::new(ClassifierConfig::new()),
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
         OperatingLevel::ReadOnly,
     )
     .expect("custom tool loads");
@@ -4904,7 +4904,7 @@ fn custom_tool_write_uses_runtime_level_refusal_before_db() {
     .expect("custom tool parses");
     let loaded = oraclemcp_core::load_tools(
         &defs,
-        &Classifier::new(ClassifierConfig::new()),
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
         OperatingLevel::ReadWrite,
     )
     .expect("write custom tool loads on writable profile ceiling");
@@ -4970,7 +4970,7 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
     .expect("custom tool parses");
     let loaded = oraclemcp_core::load_tools(
         &defs,
-        &Classifier::new(ClassifierConfig::new()),
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
         OperatingLevel::ReadWrite,
     )
     .expect("write custom tool loads on writable profile ceiling");
@@ -5079,9 +5079,12 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
 /// argument-extraction helpers (C6 de-monolith).
 fn load_single_custom_tool(toml: &str, ceiling: OperatingLevel) -> oraclemcp_core::LoadedTool {
     let defs = oraclemcp_core::parse_tools_file(toml).expect("custom tool parses");
-    let mut loaded =
-        oraclemcp_core::load_tools(&defs, &Classifier::new(ClassifierConfig::new()), ceiling)
-            .expect("custom tool loads");
+    let mut loaded = oraclemcp_core::load_tools(
+        &defs,
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
+        ceiling,
+    )
+    .expect("custom tool loads");
     assert_eq!(loaded.len(), 1, "fixture defines exactly one tool");
     loaded.remove(0)
 }
@@ -5257,7 +5260,7 @@ fn qa45_profile_switch_refreshes_every_discovery_surface_and_execution() {
         CustomToolCatalog::new(
             oraclemcp_core::load_tools(
                 &defs,
-                &Classifier::new(ClassifierConfig::new()),
+                &Classifier::engine_free_baseline(ClassifierConfig::new()),
                 OperatingLevel::ReadOnly,
             )
             .expect("custom tool loads"),
@@ -7174,8 +7177,8 @@ fn as_of_never_enters_the_classifier_input_so_the_base_decision_is_byte_identica
         marked_without, marked_with,
         "the classifier input is identical with and without as_of"
     );
-    let decision_without: GuardDecision = DEFAULT_CLASSIFIER.classify(&marked_without);
-    let decision_with: GuardDecision = DEFAULT_CLASSIFIER.classify(&marked_with);
+    let decision_without: GuardDecision = READ_PRECHECK_CLASSIFIER.classify(&marked_without);
+    let decision_with: GuardDecision = READ_PRECHECK_CLASSIFIER.classify(&marked_with);
     assert_eq!(
         decision_without, decision_with,
         "the base SELECT classifies to a byte-identical GuardDecision"
@@ -7183,7 +7186,7 @@ fn as_of_never_enters_the_classifier_input_so_the_base_decision_is_byte_identica
     assert_eq!(
         decision_without.required_level,
         Some(OperatingLevel::ReadOnly),
-        "the base SELECT is proven read-only"
+        "the text-only precheck preserves the base read decision"
     );
 }
 
@@ -15323,6 +15326,11 @@ fn preview_dml_refuses_what_it_cannot_sandbox_and_grants_nothing() {
         .expect_err("a read needs no sandbox");
     assert_eq!(read.error_class, ErrorClass::InvalidArguments);
     assert_eq!(read.suggested_tool.as_deref(), Some("oracle_query"));
+    assert!(
+        state.executed.lock().expect("executed mutex").is_empty()
+            && state.queried.lock().expect("queried mutex").is_empty(),
+        "an unproven read must be redirected before the write-preview sandbox reaches Oracle"
+    );
 
     let sql = "UPDATE employees SET salary = 1 WHERE employee_id = 100";
     let preview = dispatcher

@@ -63,12 +63,13 @@ fn a1_read_only_is_the_only_backstopped_level() {
 }
 
 #[test]
-fn a1_classifier_proves_select_read_only_but_refuses_a_misclassification_surrogate() {
+fn a1_engine_free_baseline_proves_select_read_only_but_refuses_a_misclassification_surrogate() {
     // The backstop is defense-in-depth UNDER the classifier (layer C). Confirm
-    // the classifier itself clears a SELECT as read-only and refuses a write at
-    // a READ_ONLY session — the backstop only matters if this layer is somehow
+    // the explicit offline baseline clears a SELECT as read-only and refuses a
+    // write at a READ_ONLY session. Served admission uses the stricter default
+    // plus semantic proof; the backstop only matters if that layer is somehow
     // bypassed, which is exactly why A1 exists.
-    let classifier = Classifier::new(ClassifierConfig::new());
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     let read_only = SessionLevelState::new(OperatingLevel::ReadOnly, false);
 
     let select = classifier.classify("SELECT 1 FROM dual");

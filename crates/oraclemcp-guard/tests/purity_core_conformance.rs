@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use oraclemcp_guard::{
-    Classifier, DangerLevel, ObjectRef, OperatingLevel, OperatorPureFunction,
+    Classifier, ClassifierConfig, DangerLevel, ObjectRef, OperatingLevel, OperatorPureFunction,
     OperatorPureFunctionAllowlist, OperatorPureFunctionRestriction, Purity, SideEffectOracle,
 };
 
@@ -29,8 +29,8 @@ impl SideEffectOracle for FixedRoutineOracle {
 }
 
 fn classify_routine_calls(first: Purity, second: Purity) -> (DangerLevel, Option<OperatingLevel>) {
-    let classifier =
-        Classifier::default().with_oracle(Arc::new(FixedRoutineOracle { first, second }));
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new())
+        .with_oracle(Arc::new(FixedRoutineOracle { first, second }));
     let decision = classifier.classify("SELECT app.first_fn(1), app.second_fn(2) FROM dual");
     (decision.danger, decision.required_level)
 }
@@ -70,7 +70,8 @@ fn routine_purity_core_matches_the_lean_safe_iff_all_proven_lemma() {
 
 #[test]
 fn no_user_defined_routine_is_the_vacuous_safe_case_of_the_purity_core() {
-    let decision = Classifier::default().classify("SELECT 1 FROM dual");
+    let decision =
+        Classifier::engine_free_baseline(ClassifierConfig::new()).classify("SELECT 1 FROM dual");
     assert_eq!(decision.danger, DangerLevel::Safe);
     assert_eq!(decision.required_level, Some(OperatingLevel::ReadOnly));
 }
@@ -89,15 +90,15 @@ fn restricted_classifier(independent: Arc<dyn SideEffectOracle>) -> Classifier {
         OperatorPureFunctionAllowlist::new([
             OperatorPureFunction::parse("app_read.lookup").expect("exact operator declaration")
         ]);
-    Classifier::default().with_oracle(Arc::new(OperatorPureFunctionRestriction::new(
-        independent,
-        allowlist,
-    )))
+    Classifier::engine_free_baseline(ClassifierConfig::new()).with_oracle(Arc::new(
+        OperatorPureFunctionRestriction::new(independent, allowlist),
+    ))
 }
 
 #[test]
 fn operator_pure_function_allowlist_only_narrows_independent_purity_proof() {
-    let unrestricted = Classifier::default().with_oracle(Arc::new(AllProvenOracle));
+    let unrestricted = Classifier::engine_free_baseline(ClassifierConfig::new())
+        .with_oracle(Arc::new(AllProvenOracle));
     let restricted = restricted_classifier(Arc::new(AllProvenOracle));
 
     let exact = "SELECT app_read.lookup(:id) FROM dual";
@@ -128,8 +129,12 @@ fn operator_pure_function_allowlist_never_promotes_default_unknown_oracle() {
         let with_config = restricted.classify(sql);
         assert_eq!(without_config.danger, DangerLevel::Guarded, "{sql:?}");
         assert_eq!(
-            with_config, without_config,
+            with_config.danger, without_config.danger,
             "an allowlist must not promote a statement the default classifier refuses: {sql:?}"
+        );
+        assert_eq!(
+            with_config.required_level, without_config.required_level,
+            "{sql:?}"
         );
     }
 }

@@ -263,8 +263,9 @@ fn live_schema(include_changeset: bool) -> Value {
 }
 
 /// Build the feature-gated, engine-backed classifier. The guard crate owns the
-/// port; this consumer binds the PL/SQL analysis graph to it and opts in to the
-/// Gap-2 statement-Unknown tightening.
+/// port; this consumer binds the PL/SQL analysis graph. The library baseline is
+/// already strict, and the explicit call below documents that this served path
+/// must stay fail-closed.
 #[must_use]
 pub fn classifier_from_analysis_run(run: &plsql_engine::AnalysisRun) -> Classifier {
     Classifier::new(ClassifierConfig::new())
@@ -3101,11 +3102,11 @@ mod tests {
         let classifier = classifier_from_analysis_run(&run);
 
         assert_eq!(
-            Classifier::default()
+            Classifier::engine_free_baseline(ClassifierConfig::new())
                 .classify("SELECT * FROM APP.ORDERS")
                 .danger,
             DangerLevel::Safe,
-            "the no-engine baseline stays permissive for UDF-free SELECT"
+            "the explicit engine-free baseline remains available for offline analysis"
         );
         assert_eq!(
             classifier.classify("SELECT * FROM APP.ORDERS").danger,

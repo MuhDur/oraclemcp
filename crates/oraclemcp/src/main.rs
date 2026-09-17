@@ -908,7 +908,10 @@ fn doctor_skipped_custom_tools(profile: Option<&str>) -> Vec<SkippedCustomTool> 
         ));
         return loaded.skipped;
     }
-    let classifier = Classifier::new(ClassifierConfig::new());
+    // Load-time classification is deliberately text-local. Every loaded
+    // READ_ONLY Form-A tool must still pass the strict live semantic proof in
+    // `ReadOnlyCustomToolExecutor` before Oracle receives it.
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     for definition in loaded.defs {
         if let Err(error) = classify_at_load(&definition, &classifier, max_level) {
             loaded
@@ -1043,7 +1046,9 @@ fn load_custom_catalog_from_sources_with_policy(
         })
         .transpose()?;
 
-    let classifier = Classifier::new(ClassifierConfig::new());
+    // This accepts only the historical text-local baseline at catalog load;
+    // execution of a READ_ONLY tool independently re-proves live relations.
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     let signed_defs_present = definitions.defs.iter().any(|def| def.signature.is_some());
     if !require_signed_tools && key.is_none() && signed_defs_present {
         return Err(custom_tool_error(format!(

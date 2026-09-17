@@ -8,7 +8,7 @@
 //! Pairs with `adversarial_corpus.rs`; this file concentrates the CTE-DML body
 //! nesting that sqlparser 0.62 folds into `Statement::Query { body: SetExpr::… }`.
 
-use oraclemcp_guard::{Classifier, DangerLevel};
+use oraclemcp_guard::{Classifier, ClassifierConfig, DangerLevel};
 
 /// `(sql, minimum danger the classifier must assign)`.
 const CTE_DML_CORPUS: &[(&str, DangerLevel)] = &[
@@ -96,7 +96,9 @@ const CTE_DML_CORPUS: &[(&str, DangerLevel)] = &[
 
 #[test]
 fn cte_dml_bodies_are_never_cleared_to_safe() {
-    let classifier = Classifier::default();
+    // This corpus isolates CTE/DML shape recognition and its Safe controls;
+    // the explicit baseline is not an admission path.
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     let mut failures = Vec::new();
     for (sql, min_danger) in CTE_DML_CORPUS {
         let decision = classifier.classify(sql);

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use oraclemcp_guard::{
-    Classifier, EditionLifecycleParse, EditionLifecycleSql, OperatingLevel,
+    Classifier, ClassifierConfig, EditionLifecycleParse, EditionLifecycleSql, OperatingLevel,
     parse_edition_lifecycle_sql,
 };
 use serde::{Deserialize, Serialize};
@@ -29,6 +29,14 @@ const EDITION_PROPOSAL_SCHEMA_VERSION: u8 = 1;
 const MAX_EDITION_PROPOSAL_OBJECTS: usize = 64;
 /// Tamper-token scope for change-proposal list cursors.
 const CHANGE_PROPOSAL_CURSOR_KIND: &str = "change-proposals";
+
+/// Proposal review is a text-only classification phase. Applying a proposal
+/// always enters the dispatcher, which independently binds a live semantic
+/// proof before an `oracle_query` can reach Oracle. Keep this deliberate
+/// offline baseline distinct from the library's fail-closed default.
+fn proposal_review_classifier() -> Classifier {
+    Classifier::engine_free_baseline(ClassifierConfig::new())
+}
 
 /// Persistent change-proposal store.
 pub struct ChangeProposalStore {
@@ -746,7 +754,7 @@ impl ChangeProposalStatement {
         draft: ChangeProposalStatementDraft,
     ) -> Result<Self, ChangeProposalError> {
         let sql_template = normalize_non_empty(draft.sql_template, "sql_template")?;
-        let decision = Classifier::default().classify(&sql_template);
+        let decision = proposal_review_classifier().classify(&sql_template);
         let unit = unit_for_required_level(decision.required_level);
         if draft.unit.is_some_and(|requested| requested != unit) {
             return Err(ChangeProposalError::Invalid(
@@ -774,12 +782,13 @@ impl ChangeProposalStatement {
         })
     }
 
-    /// Re-run the classifier for apply-time reporting. The dispatcher will
-    /// classify again inside the MCP tool; this view is for the review result.
+    /// Re-run the text-only review classifier for apply-time reporting. The
+    /// dispatcher independently binds a live semantic proof inside the MCP
+    /// tool; this view cannot authorize execution.
     #[must_use]
     pub fn reclassified_view(&self) -> ChangeProposalClassifierView {
         ChangeProposalClassifierView::from_decision(
-            Classifier::default().classify(self.sql_template.as_str()),
+            proposal_review_classifier().classify(self.sql_template.as_str()),
         )
     }
 

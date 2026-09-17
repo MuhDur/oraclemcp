@@ -5,7 +5,7 @@ use crate::tools::ToolRegistry;
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::{CancelReason, Cx, Outcome, PanicPayload};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use oraclemcp_guard::{Classifier, OperatingLevel};
+use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::io::Read;
@@ -208,7 +208,8 @@ impl ToolDispatch for WorkbenchDispatch {
         let tool = name.to_owned();
         Box::pin(async move {
             let classification = args.get("sql").and_then(Value::as_str).map(|sql| {
-                let decision = Classifier::default().classify(sql);
+                let decision =
+                    Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql);
                 serde_json::json!({
                     "required_level": decision.required_level,
                     "danger": decision.danger,
@@ -254,7 +255,8 @@ impl ToolDispatch for SourceHistoryDispatch {
                 }));
             }
             let classification = args.get("sql").and_then(Value::as_str).map(|sql| {
-                let decision = Classifier::default().classify(sql);
+                let decision =
+                    Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql);
                 serde_json::json!({
                     "required_level": decision.required_level,
                     "danger": decision.danger,
@@ -644,7 +646,7 @@ fn write_certificate_audit_tail_fixture(name: &str) -> PathBuf {
     )
     .expect("valid test key");
     let path = audit_tail_fixture_path(name);
-    let certificate = Classifier::default()
+    let certificate = Classifier::engine_free_baseline(ClassifierConfig::new())
         .classify("SELECT payroll.secret_bonus FROM payroll WHERE employee_id = :secret_employee")
         .verdict_certificate()
         .clone()

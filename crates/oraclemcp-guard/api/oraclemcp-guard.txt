@@ -145,6 +145,7 @@ pub struct oraclemcp_guard::classifier::Classifier
 impl oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::classify(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
 pub fn oraclemcp_guard::classifier::Classifier::classify_verified_local_vector_embedding(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
+pub fn oraclemcp_guard::classifier::Classifier::engine_free_baseline(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::served_strict(self) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self
@@ -6591,6 +6592,7 @@ pub struct oraclemcp_guard::Classifier
 impl oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::classify(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
 pub fn oraclemcp_guard::classifier::Classifier::classify_verified_local_vector_embedding(&self, &str) -> oraclemcp_guard::classifier::GuardDecision
+pub fn oraclemcp_guard::classifier::Classifier::engine_free_baseline(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::served_strict(self) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self

@@ -477,10 +477,11 @@ fn split_qualified(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classifier::ClassifierConfig;
     use crate::policy::{SqlPolicyEffectConfig, SqlPolicyMatchConfig, SqlPolicyRuleConfig};
 
     fn classifier() -> Classifier {
-        Classifier::default()
+        Classifier::engine_free_baseline(ClassifierConfig::new())
     }
 
     fn rule(

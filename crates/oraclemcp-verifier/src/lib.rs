@@ -29,8 +29,8 @@ pub use attestation::{
 
 use oraclemcp_audit::{AUDIT_SCHEMA_VERSION, AuditRecord, SigningKey, sha256_hex};
 use oraclemcp_guard::{
-    Classifier, DangerLevel, OperatingLevel, VERDICT_CERTIFICATE_CLASSIFIER_VERSION,
-    VerdictCertificate,
+    Classifier, ClassifierConfig, DangerLevel, OperatingLevel,
+    VERDICT_CERTIFICATE_CLASSIFIER_VERSION, VerdictCertificate,
 };
 use thiserror::Error;
 
@@ -126,7 +126,12 @@ pub fn verify_verdict(
         return Err(VerdictVerificationError::StatementDigestMismatch);
     }
 
-    let expected = Classifier::default().classify(sql);
+    // Offline verification re-derives only the text-local portion of a
+    // server-issued certificate. Live statement purity was proven at dispatch
+    // time and is not available in this dependency-free crate; a mismatch still
+    // fails closed below. Use the explicit historical baseline rather than the
+    // guard library's strict admission default.
+    let expected = Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql);
     let expected_certificate = expected.verdict_certificate();
     if certificate.level != expected_certificate.level
         || certificate.verdict != expected_certificate.verdict

@@ -1619,7 +1619,7 @@ impl OracleDispatcher {
     }
 }
 
-/// The process-wide default SQL classifier for **caller-supplied** SQL (the
+/// The process-wide strict SQL classifier for caller-supplied SQL (the
 /// fail-closed `UnknownOracle`). `Classifier::classify` takes `&self` and is
 /// pure given a fixed config + oracle, so every request arm can share one
 /// instance instead of rebuilding it on each call.
@@ -1633,15 +1633,20 @@ impl OracleDispatcher {
 /// `≥ Guarded` (so this READ_ONLY-ceilinged gate refuses it). It is surgical —
 /// an in-scope `alias.column` reference is never flagged.
 ///
-/// This shared classifier is only the first, text-local phase of the served raw
-/// read gate. Bead .82 is closed by the follow-up `ensure_resolved_read_only`
-/// phase: served `oracle_query`, `oracle_explain_plan`, and custom read-only
-/// tools must resolve live catalog dependencies and refuse views, SELECT VPD
-/// policies, virtual columns, remote objects, ambiguous values, and every other
-/// unproven relation before caller SQL reaches Oracle. Allow/block-list configs
-/// are not used on this served surface.
 static DEFAULT_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
     Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
+});
+
+/// The deliberately narrow text-only precheck for a served read that will
+/// immediately pass through [`ensure_resolved_read_only`]. The semantic phase
+/// binds the exact live relation/VPD/virtual-column proof into a strict
+/// classifier before Oracle sees caller SQL. This explicit opt-out preserves
+/// that two-phase protocol after the guard library default became fail-closed;
+/// it is never a standalone admission gate.
+static READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
+    Classifier::engine_free_baseline(
+        ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+    )
 });
 
 /// Classifier used for server-generated read SQL. It is deliberately separate
@@ -4993,7 +4998,7 @@ async fn owner_and_name_arg(
 /// in a SELECT, …) are rejected with a structured envelope. Proven read-only
 /// `SELECT`/`WITH` and dictionary introspection pass.
 fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
-    ensure_read_only_decision(DEFAULT_CLASSIFIER.classify(sql))
+    ensure_read_only_decision(READ_PRECHECK_CLASSIFIER.classify(sql))
         .map_err(|envelope| attach_parameterization_hint(envelope, sql))
 }
 
@@ -5107,9 +5112,9 @@ async fn resolve_read_only_relations_inner(
     verified_local_vector_embedding: bool,
 ) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
     let initial = if verified_local_vector_embedding {
-        DEFAULT_CLASSIFIER.classify_verified_local_vector_embedding(sql)
+        READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
     } else {
-        DEFAULT_CLASSIFIER.classify(sql)
+        READ_PRECHECK_CLASSIFIER.classify(sql)
     };
     ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
     let plan = semantic_read_plan(sql)
@@ -5439,7 +5444,7 @@ fn attach_parameterization_hint(envelope: ErrorEnvelope, sql: &str) -> ErrorEnve
         return envelope;
     }
     match oraclemcp_guard::suggest_parameterized_form(sql).filter(|rewrite| {
-        oraclemcp_guard::corpus::classifier_proves_rewrite(&DEFAULT_CLASSIFIER, rewrite)
+        oraclemcp_guard::corpus::classifier_proves_rewrite(&READ_PRECHECK_CLASSIFIER, rewrite)
     }) {
         Some(rewrite) => envelope.with_next_step(format!(
             "parameterize inline literals to enable cursor sharing and avoid literal exposure, \
@@ -6452,6 +6457,7 @@ fn apply_sql_policy(
     sql_policy: Option<&SqlPolicyConfig>,
     current_schema: Option<&str>,
     principal: Option<&str>,
+    classifier: &Classifier,
     base: &GuardDecision,
     sql: &str,
 ) -> Result<PolicyGateAdmission, ErrorEnvelope> {
@@ -6473,7 +6479,7 @@ fn apply_sql_policy(
         });
     }
     match enforce_sql_policy(&PolicyGateRequest {
-        classifier: &DEFAULT_CLASSIFIER,
+        classifier,
         policy: sql_policy,
         base,
         sql,
@@ -6493,6 +6499,7 @@ fn apply_preview_sql_policy(
     sql_policy: Option<&SqlPolicyConfig>,
     current_schema: Option<&str>,
     binding: &ExecGrantBinding,
+    classifier: &Classifier,
     base: &GuardDecision,
     sql: &str,
 ) -> PolicyGate {
@@ -6508,7 +6515,7 @@ fn apply_preview_sql_policy(
         }));
     }
     enforce_sql_policy(&PolicyGateRequest {
-        classifier: &DEFAULT_CLASSIFIER,
+        classifier,
         policy: sql_policy,
         base,
         sql,
@@ -8554,7 +8561,12 @@ async fn preview_dml_inner(
 ) -> Result<Value, ErrorEnvelope> {
     let cx = ctx.cx;
     let conn = ctx.conn;
-    let decision = DEFAULT_CLASSIFIER.classify(&args.sql);
+    // This selects the sandbox protocol, not whether a read may execute: every
+    // read is refused from this write-only tool before database I/O, while a
+    // supplied witness goes through `ensure_resolved_read_only` below. Preserve
+    // the explicit text precheck so an ordinary SELECT is not misclassified as
+    // sandboxable DML by the guard library's strict admission default.
+    let decision = READ_PRECHECK_CLASSIFIER.classify(&args.sql);
     let gate = decision.gate(ctx.session);
     if !matches!(gate, LevelDecision::Allow) {
         return Err(execute_gate_error(&decision, gate, ctx.session));
@@ -8626,7 +8638,7 @@ async fn preview_dml_inner(
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()?;
     let executed_sql = with_audit_marker(&args.sql, ctx.active_profile, "oracle_preview_dml");
-    if DEFAULT_CLASSIFIER.classify(&executed_sql) != decision {
+    if READ_PRECHECK_CLASSIFIER.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
             ErrorClass::Internal,
             "audit marker changed the classifier verdict; refusing to execute",
@@ -8893,6 +8905,7 @@ async fn execute_sql_inner(
         ctx.sql_policy,
         ctx.current_schema,
         Some(ctx.grant_binding.subject_id.as_str()),
+        &DEFAULT_CLASSIFIER,
         &base,
         &args.sql,
     )?;
@@ -11170,13 +11183,23 @@ fn preview_sql(
     sql_policy: Option<&SqlPolicyConfig>,
     current_schema: Option<&str>,
 ) -> Value {
-    let base = DEFAULT_CLASSIFIER.classify(sql);
+    // Previewing never admits or executes SQL. Mirror the read path's explicit
+    // text precheck so an ordinary read remains previewable; any later execute
+    // still re-enters the strict execution gate, and oracle_query still binds
+    // live semantic purity before its own effect.
+    let base = READ_PRECHECK_CLASSIFIER.classify(sql);
     // Arc N runs at PREVIEW too, and it has to: the grant is minted here, at the
     // required level. If a policy floor raised that level and preview did not know
     // it, the grant would be issued below the bar and refused at execute — the
     // agent could never obtain a usable one. A denied statement mints NOTHING.
-    let admission = match apply_preview_sql_policy(sql_policy, current_schema, binding, &base, sql)
-    {
+    let admission = match apply_preview_sql_policy(
+        sql_policy,
+        current_schema,
+        binding,
+        &READ_PRECHECK_CLASSIFIER,
+        &base,
+        sql,
+    ) {
         PolicyGate::Denied(denial) => {
             return json!({
                 "danger": base.danger,
@@ -12370,14 +12393,15 @@ impl OracleDispatcher {
                 // through the SAME semantic read gate as any other statement, so a
                 // rewrite can never widen what the read path admits.
                 let base_decision = if verified_local_vector_embedding {
-                    DEFAULT_CLASSIFIER.classify_verified_local_vector_embedding(&parsed.sql)
+                    READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(&parsed.sql)
                 } else {
-                    DEFAULT_CLASSIFIER.classify(&parsed.sql)
+                    READ_PRECHECK_CLASSIFIER.classify(&parsed.sql)
                 };
                 let policy = apply_sql_policy(
                     sql_policy.as_ref(),
                     current_schema.as_deref(),
                     context.principal_key(),
+                    &READ_PRECHECK_CLASSIFIER,
                     &base_decision,
                     &parsed.sql,
                 )?;
@@ -14682,7 +14706,8 @@ impl OracleDispatcher {
                     sql_policy.as_ref(),
                     current_schema.as_deref(),
                     context.principal_key(),
-                    &DEFAULT_CLASSIFIER.classify(&parsed.sql),
+                    &READ_PRECHECK_CLASSIFIER,
+                    &READ_PRECHECK_CLASSIFIER.classify(&parsed.sql),
                     &parsed.sql,
                 )?;
                 let policy_sql = policy

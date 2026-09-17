@@ -1102,7 +1102,14 @@ fn deny(schema: &str, reason: &str) -> PolicyDecision {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classifier::Classifier;
+    use crate::classifier::{Classifier, ClassifierConfig};
+
+    /// Policy rewrite tests isolate text/policy composition. Their caller is
+    /// responsible for the separate semantic-read proof, so model the explicit
+    /// engine-free baseline rather than the library's new fail-closed default.
+    fn text_only_classifier() -> Classifier {
+        Classifier::engine_free_baseline(ClassifierConfig::new())
+    }
 
     fn permissive(schema: &str) -> SchemaPolicySet {
         SchemaPolicySet::new().with_schema(
@@ -1265,7 +1272,7 @@ mod tests {
 
     #[test]
     fn sql_policy_composes_as_base_and_policy_without_allowing() {
-        let base = Classifier::default().classify("SELECT * FROM app.orders");
+        let base = text_only_classifier().classify("SELECT * FROM app.orders");
         assert_eq!(base.required_level, Some(OperatingLevel::ReadOnly));
 
         let result = operator_policy().evaluate(&base, &operator_context());
@@ -1351,7 +1358,7 @@ mod tests {
 
     #[test]
     fn policy_predicate_rewrite_uses_ast_placement_then_reclassifies() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "SELECT id FROM app.orders WHERE status = 'OPEN'";
         let base = classifier.classify(original);
         let rewritten = rewrite_predicates_and_reclassify(
@@ -1379,7 +1386,7 @@ mod tests {
         // N1 rejects this fragment at load time. Constructing the narrowing
         // directly exercises the SEC-1 recovery check: even an implementation
         // discrepancy that got this far cannot upgrade a safe base read.
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "SELECT id FROM app.orders";
         let base = classifier.classify(original);
         assert!(matches!(
@@ -1399,7 +1406,7 @@ mod tests {
 
     #[test]
     fn policy_predicate_rewrite_refuses_aliases_instead_of_guessing_target_placement() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "SELECT id FROM app.orders o";
         let base = classifier.classify(original);
         assert!(matches!(
@@ -1611,7 +1618,7 @@ mod tests {
 
     #[test]
     fn rewrite_statement_ast_rejects_unqualified_target_name_mismatch() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let base = classifier.classify("SELECT id FROM app.orders");
         let narrowing = PolicyNarrowing {
             base_required_level: base.required_level.unwrap(),
@@ -1722,7 +1729,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rejects_query_rewrite_when_predicate_target_verbs_mismatch() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "SELECT * FROM hr.emp";
         let base = classifier.classify(original);
         let narrowing = PolicyNarrowing {
@@ -1763,7 +1770,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rejects_target_context_verb_mismatch_for_update_statement() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "UPDATE hr.emp SET id = 7 WHERE dept = 2";
         let base = classifier.classify(original);
         let narrowing = PolicyNarrowing {
@@ -1804,7 +1811,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rejects_update_rewrite_when_predicate_target_verbs_mismatch() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "UPDATE hr.emp SET id = 7 WHERE dept = 2";
         let base = classifier.classify(original);
         let narrowing = PolicyNarrowing {
@@ -1845,7 +1852,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rejects_delete_rewrite_when_predicate_target_verbs_mismatch() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "DELETE FROM hr.emp WHERE id = 7";
         let base = classifier.classify(original);
         let narrowing = PolicyNarrowing {
@@ -1886,7 +1893,7 @@ mod tests {
 
     #[test]
     fn policy_predicate_rewrite_supports_one_part_table_targets() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let original = "SELECT id FROM orders";
         let base = classifier.classify(original);
         let narrowing = PolicyNarrowing {
@@ -2201,7 +2208,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rejects_target_context_mismatch() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let base = classifier.classify("SELECT id FROM app.orders WHERE status = 'OPEN'");
         let narrowing = PolicyNarrowing {
             base_required_level: OperatingLevel::ReadOnly,
@@ -2241,7 +2248,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rejects_unsupported_select_shapes() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let base = classifier.classify("SELECT id FROM app.orders");
         let narrowing = predicate_narrowing("tenant_id = 7");
 
@@ -2326,7 +2333,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rewrites_two_part_schema_qualified_select_targets() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let base = classifier.classify("SELECT id FROM app.orders WHERE status = 'OPEN'");
         let rewritten = rewrite_predicates_and_reclassify(
             &classifier,
@@ -2913,7 +2920,7 @@ mod tests {
 
     #[test]
     fn policy_rewrite_rejects_three_part_relation_names() {
-        let classifier = Classifier::default();
+        let classifier = text_only_classifier();
         let base = classifier.classify("SELECT id FROM app.orders");
         assert!(matches!(
             rewrite_predicates_and_reclassify(

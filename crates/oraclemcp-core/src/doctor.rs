@@ -2628,7 +2628,10 @@ fn check_snapshot_freshness() -> CheckResult {
 }
 
 fn check_classifier_selftest() -> CheckResult {
-    let classifier = Classifier::new(ClassifierConfig::new());
+    // This diagnostic exercises the text classifier's historical no-engine
+    // baseline. It does not admit SQL: served reads independently bind a live
+    // semantic purity proof before execution.
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     let mut leaked = Vec::new();
     for sql in ADVERSARIAL_CORPUS {
         let d = classifier.classify(sql);

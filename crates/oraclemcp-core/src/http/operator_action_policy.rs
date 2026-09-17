@@ -195,9 +195,15 @@ pub(super) fn dashboard_workbench_release_gate(
                     "tool": tool,
                 }));
             };
-            oraclemcp_guard::Classifier::default()
-                .classify(sql)
-                .required_level
+            // Browser policy is an early text-only check. The dispatched tool
+            // remains the admission authority and binds live purity evidence
+            // before a read can execute, so preserve the intentional baseline
+            // rather than treating this UI precheck as a standalone grant.
+            oraclemcp_guard::Classifier::engine_free_baseline(
+                oraclemcp_guard::ClassifierConfig::new(),
+            )
+            .classify(sql)
+            .required_level
         }
     };
     if matches!(

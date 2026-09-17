@@ -5,7 +5,7 @@ use oraclemcp_audit::{
 use std::sync::Arc;
 
 use oraclemcp_guard::{
-    Classifier, DangerLevel, ObjectRef, OperatingLevel, Purity, SideEffectOracle,
+    Classifier, ClassifierConfig, DangerLevel, ObjectRef, OperatingLevel, Purity, SideEffectOracle,
     VERDICT_CERTIFICATE_CLASSIFIER_VERSION, VerdictCertificate, VerdictCertificateBindingError,
 };
 
@@ -19,10 +19,14 @@ fn assert_no_secret_material(certificate: &VerdictCertificate, forbidden: &[&str
     }
 }
 
+fn engine_free_classifier() -> Classifier {
+    Classifier::engine_free_baseline(ClassifierConfig::new())
+}
+
 #[test]
 fn certificate_is_emitted_from_the_same_safe_classification_call() {
     let sql = "SELECT payroll.secret_bonus FROM payroll WHERE employee_id = :secret_employee";
-    let decision = Classifier::default().classify(sql);
+    let decision = engine_free_classifier().classify(sql);
     let certificate = decision.verdict_certificate();
 
     assert_eq!(decision.danger, DangerLevel::Safe);
@@ -90,7 +94,7 @@ fn routine_purity_consult_emits_r15_without_the_routine_identifier() {
 
 #[test]
 fn certificate_core_hash_binds_every_core_field_but_not_response_audit_hash() {
-    let certificate = Classifier::default()
+    let certificate = engine_free_classifier()
         .classify("SELECT 1 FROM dual")
         .verdict_certificate()
         .clone();
@@ -124,7 +128,7 @@ fn certificate_core_hash_binds_every_core_field_but_not_response_audit_hash() {
 
 #[test]
 fn certificate_refuses_a_mismatched_or_malformed_audit_binding() {
-    let certificate = Classifier::default()
+    let certificate = engine_free_classifier()
         .classify("SELECT 1 FROM dual")
         .verdict_certificate()
         .clone();
@@ -169,7 +173,7 @@ fn the_bound_audit_hash_must_be_a_canonical_sha256_and_not_merely_sha256_shaped(
     // shape is a hash an attacker (or a truncating bug) can choose: a 63-digit
     // stub, an uppercase spelling that hashes differently downstream, or a
     // non-hex string that is not a digest at all. Each must be refused.
-    let certificate = Classifier::default()
+    let certificate = engine_free_classifier()
         .classify("SELECT 1 FROM dual")
         .verdict_certificate()
         .clone();
@@ -219,7 +223,7 @@ fn the_bound_audit_hash_must_be_a_canonical_sha256_and_not_merely_sha256_shaped(
 
 #[test]
 fn certificate_core_hash_uses_the_jcs_key_order_for_fixed_certificate_values() {
-    let certificate = Classifier::default()
+    let certificate = engine_free_classifier()
         .classify("SELECT 1 FROM dual")
         .verdict_certificate()
         .clone();
@@ -260,7 +264,7 @@ fn audit_projection_preserves_the_core_hash_and_only_registered_labels() {
 #[test]
 fn same_classification_certificate_binds_to_the_durable_audit_record() {
     let sql = "SELECT 1 FROM dual";
-    let certificate = Classifier::default()
+    let certificate = engine_free_classifier()
         .classify(sql)
         .verdict_certificate()
         .clone()
@@ -351,7 +355,7 @@ fn every_verdict_class_projects_into_the_closed_audit_grammar() {
             "final_verdict:FORBIDDEN",
         ),
     ] {
-        let certificate = Classifier::default()
+        let certificate = engine_free_classifier()
             .classify(sql)
             .verdict_certificate()
             .clone();

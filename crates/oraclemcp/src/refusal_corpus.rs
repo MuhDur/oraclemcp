@@ -660,7 +660,10 @@ mod tests {
     #[test]
     fn stored_refusal_never_replays_a_verdict_to_widen_admission() {
         let (_dir, writer) = writer();
-        let classifier = Classifier::default();
+        // Persistence tests exercise the historical text-only rewrite shape;
+        // no record is executable authority, and a served read is independently
+        // proven by the live dispatcher before it reaches Oracle.
+        let classifier = Classifier::engine_free_baseline(oraclemcp_guard::ClassifierConfig::new());
         let raw_rewrite = "UPDATE acme_corp.customers SET status = :status WHERE id = :id";
         let stored = writer
             .append_refusal_with_candidate(

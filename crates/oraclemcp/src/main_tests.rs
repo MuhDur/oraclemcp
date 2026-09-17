@@ -4395,7 +4395,10 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
     let custom_catalog = CustomToolCatalog::new(
         oraclemcp_core::load_tools(
             &defs,
-            &Classifier::new(ClassifierConfig::new()),
+            // Catalog loading is a text-only phase. The runtime executor
+            // performs the strict catalog-backed read-only proof before SQL
+            // reaches a connection.
+            &Classifier::engine_free_baseline(ClassifierConfig::new()),
             OperatingLevel::ReadOnly,
         )
         .expect("custom tool loads"),

@@ -1159,9 +1159,16 @@ mod tests {
         }
     }
 
+    /// Catalog loading is the text-only first phase for a Form-A read. The
+    /// dispatch executor independently proves its live relations before Oracle
+    /// receives the body, so the explicit baseline must remain visible here.
+    fn text_only_load_classifier() -> Classifier {
+        Classifier::engine_free_baseline(oraclemcp_guard::ClassifierConfig::new())
+    }
+
     #[test]
     fn read_only_tool_loads_at_read_only() {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         // No binds here: `def_sql` declares no params, and (post-audit-5u1n.46)
         // a `:bind` with no matching parameter is a load-time error.
         let d = def_sql("cust", "SELECT * FROM t WHERE active = 1", None);
@@ -1171,7 +1178,7 @@ mod tests {
 
     #[test]
     fn write_statement_refuses_on_a_read_only_profile() {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         // Static DML is Guarded (ReadWrite); on a READ_ONLY ceiling it refuses
         // to load fail-fast. The literal avoids an undeclared :bind (post-5u1n.46).
         let d = def_sql("bump", "UPDATE t SET x = 1 WHERE id = 7", None);
@@ -1186,7 +1193,7 @@ mod tests {
 
     #[test]
     fn forbidden_body_refuses_to_load() {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         // Dynamic SQL in a PL/SQL block is Forbidden (fail-closed).
         let d = def_sql("evil", "BEGIN EXECUTE IMMEDIATE 'DROP TABLE x'; END;", None);
         let err = classify_at_load(&d, &c, OperatingLevel::Admin).unwrap_err();
@@ -1195,7 +1202,7 @@ mod tests {
 
     #[test]
     fn declared_level_can_only_make_stricter() {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         // A read-only SELECT the author declares DDL: the floor is raised to DDL,
         // so it refuses on a READ_ONLY ceiling.
         let d = def_sql("sel", "SELECT 1 FROM dual", Some("DDL"));
@@ -1212,7 +1219,7 @@ mod tests {
 
     #[test]
     fn unparseable_declared_level_is_rejected_not_silently_dropped() {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         // A typo'd declared_level ("DLL" for "DDL") must NOT be silently dropped
         // and loaded at the looser classifier-derived level (ReadOnly). It is a
         // structural error surfaced as `LoadError::Invalid` at load time — never
@@ -1244,7 +1251,7 @@ mod tests {
 
     #[test]
     fn load_tools_is_fail_fast() {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         let defs = vec![
             def_sql("ok", "SELECT 1 FROM dual", None),
             def_sql("evil", "BEGIN EXECUTE IMMEDIATE 'x'; END;", None),
@@ -1573,7 +1580,7 @@ mod tests {
     #[test]
     fn load_tools_for_profile_enforces_signing_then_classifies() {
         let key = key();
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         let mut d = def_sql("rep", "SELECT 1 FROM dual", None);
         d.signature = Some(sign(&d, &key));
         // Protected: signed + read-only -> loads.
@@ -1706,7 +1713,7 @@ mod tests {
 
     #[test]
     fn execute_custom_tool_binds_and_runs_at_derived_level() {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         let d = def_with_params(
             "SELECT * FROM t WHERE id = :id",
             vec![p("id", ParamType::Integer, true)],
@@ -1758,11 +1765,11 @@ mod tests {
 
     #[test]
     fn form_b_rejected_at_load_without_an_oracle() {
-        // With the production default classifier (no engine oracle), a Form B
-        // package call is refused at load as unsupported — a clear, actionable
+        // Even with the no-engine text-only precheck, a Form B package call is
+        // refused at load as unsupported — a clear, actionable
         // error rather than an over-ceiling classification quirk — even when the
         // profile grants write headroom that would otherwise admit it.
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         let d = def_call("cust360", "billing_api.get_360(:id)");
         let err = classify_at_load(&d, &c, OperatingLevel::ReadWrite).unwrap_err();
         assert!(matches!(err, LoadError::Invalid { reason, .. } if reason.contains("Form B")));
@@ -1771,7 +1778,7 @@ mod tests {
     // ── Catalog: first-class registration (QA100 .65) ─────────────────────────
 
     fn catalog() -> CustomToolCatalog {
-        let c = Classifier::new(oraclemcp_guard::ClassifierConfig::new());
+        let c = text_only_load_classifier();
         let defs = vec![
             def_with_params(
                 "SELECT * FROM v WHERE id = :id",

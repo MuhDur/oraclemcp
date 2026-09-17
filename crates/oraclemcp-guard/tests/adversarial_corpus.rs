@@ -19,7 +19,8 @@ use oraclemcp_guard::{Classifier, ClassifierConfig, DangerLevel};
 /// Served/strict-mode corpus (beads .82 + .102). Each entry is a statement the
 /// **served/strict** classifier — the fail-closed posture of the raw-query gate
 /// — MUST classify at least as strictly as `min_danger`. These are the live
-/// fail-opens the default (permissive) classifier still admits as `Safe`:
+/// fail-opens the historical engine-free baseline admitted as `Safe` before
+/// the served semantic proof:
 ///
 /// - **.102** a paren-less function invocation — Oracle runs a zero-arg function
 ///   with no `()`, so `SELECT app_admin.run_ddl FROM dual` *calls* `run_ddl`, but
@@ -139,16 +140,16 @@ fn strict_corpus_is_never_underclassified() {
             "strict posture must never admit {sql:?} at READ_ONLY"
         );
     }
-    // Mutation-killing counterpart: the DEFAULT (permissive) classifier still
-    // admits every `.102` entry as Safe — proving it is the guard, not some
-    // unrelated rule, that closes the hole under strict mode.
-    let permissive = Classifier::default();
+    // Mutation-killing counterpart: the explicit historical engine-free
+    // baseline still admits every `.102` entry as Safe — proving it is the
+    // qualified-callable guard, not an unrelated rule, that closes the hole.
+    let permissive = Classifier::engine_free_baseline(ClassifierConfig::new());
     assert_eq!(
         permissive
             .classify("SELECT app_admin.run_ddl FROM dual")
             .danger,
         DangerLevel::Safe,
-        "the default classifier documents the .102 fail-open (closed only under strict mode)"
+        "the explicit engine-free baseline documents the .102 fail-open (closed only under strict mode)"
     );
 }
 
@@ -156,8 +157,9 @@ fn strict_corpus_is_never_underclassified() {
 fn strict_102_guard_spares_genuine_column_references() {
     // The `.102` guard in isolation (no `.82` statement-Unknown tightening) must
     // keep ordinary in-scope qualified column references Safe.
-    let guard_102 =
-        Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded());
+    let guard_102 = Classifier::engine_free_baseline(
+        ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+    );
     for sql in STRICT_FALSE_POSITIVE_GUARD {
         let d = guard_102.classify(sql);
         assert_eq!(
@@ -687,7 +689,7 @@ fn derived_subquery_smuggled_dml_is_never_read_only() {
     // CTE-DML check and cleared to Safe. Assert the write is caught AND that
     // legitimate nested reads (incl. columns/tables whose names merely contain a
     // DML verb, and literals carrying DML words) stay Safe — no false positives.
-    let c = Classifier::default();
+    let c = Classifier::engine_free_baseline(ClassifierConfig::new());
     let writes = [
         "SELECT * FROM (UPDATE t SET x=1)",
         "SELECT * FROM (DELETE FROM t)",
@@ -730,7 +732,7 @@ fn classifier_never_panics_on_arbitrary_input() {
     // A stable-CI stand-in for the cargo-fuzz target: feed adversarial / garbage
     // inputs and assert the classifier returns a decision rather than panicking,
     // and that nothing garbage is ever cleared to Safe incorrectly.
-    let classifier = Classifier::default();
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     let garbage = [
         "",
         " ",
@@ -777,7 +779,7 @@ fn multibyte_literal_contents_are_data_not_statements() {
     // literal as a single token regardless of non-ASCII bytes around the `;`,
     // and the whole thing stays exactly one Safe SELECT. (No false split, no
     // false danger — a false positive here would block legitimate reads.)
-    let classifier = Classifier::default();
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     for sql in [
         "SELECT 'café; DROP TABLE Ω; END; EXECUTE IMMEDIATE x' AS p FROM dual",
         "SELECT N'你好; DROP TABLE 世界; END;' AS p FROM dual",
@@ -799,7 +801,7 @@ fn qquote_keyword_is_data_but_real_execute_immediate_is_forbidden() {
     // (`EXECUTE IMMEDIATE`) is data, not a statement — it must NOT trip the
     // PL/SQL dynamic-SQL marker scan. The literal is a single token, so the
     // SELECT stays Safe.
-    let classifier = Classifier::default();
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
     for benign in [
         "SELECT q'[EXECUTE IMMEDIATE]' AS p FROM dual",
         "SELECT q'<EXECUTE IMMEDIATE 'DROP TABLE t'>' AS p FROM dual",
@@ -850,7 +852,7 @@ fn dangerous_markers_are_forbidden_anywhere_in_a_block() {
 
 #[test]
 fn unicode_literal_forms_remain_data_but_confusable_keywords_do_not_parse_safe() {
-    let classifier = Classifier::default();
+    let classifier = Classifier::engine_free_baseline(ClassifierConfig::new());
 
     for sql in [
         r"SELECT U&'\0045\0058\0045\0043\0055\0054\0045\0020\0049\004D\004D\0045\0044\0049\0041\0054\0045; DROP TABLE t' AS p FROM dual",

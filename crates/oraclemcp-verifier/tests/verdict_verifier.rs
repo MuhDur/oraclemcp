@@ -2,7 +2,12 @@ use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject, GENESIS_HASH,
     SigningKey,
 };
-use oraclemcp_guard::{Classifier, DangerLevel, OperatingLevel, VerdictCertificate};
+use std::sync::Arc;
+
+use oraclemcp_guard::{
+    Classifier, ClassifierConfig, DangerLevel, ObjectRef, OperatingLevel, Purity, SideEffectOracle,
+    VerdictCertificate,
+};
 use oraclemcp_verifier::{VerdictEvidence, VerdictVerificationError, verify_verdict};
 
 fn test_key() -> SigningKey {
@@ -13,12 +18,11 @@ fn test_key() -> SigningKey {
     .expect("test key must be valid")
 }
 
-fn evidence_for(sql: &str) -> (VerdictCertificate, AuditRecord, SigningKey) {
-    let certificate = Classifier::default()
-        .classify(sql)
-        .verdict_certificate()
-        .clone()
-        .with_observed_scn(Some(42_000_001));
+fn evidence_for_certificate(
+    sql: &str,
+    certificate: VerdictCertificate,
+) -> (VerdictCertificate, AuditRecord, SigningKey) {
+    let certificate = certificate.clone().with_observed_scn(Some(42_000_001));
     let key = test_key();
     let audit_record =
         AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash(
@@ -52,6 +56,22 @@ fn evidence_for(sql: &str) -> (VerdictCertificate, AuditRecord, SigningKey) {
     (certificate, audit_record, key)
 }
 
+fn evidence_for(sql: &str) -> (VerdictCertificate, AuditRecord, SigningKey) {
+    let certificate = Classifier::engine_free_baseline(ClassifierConfig::new())
+        .classify(sql)
+        .verdict_certificate()
+        .clone();
+    evidence_for_certificate(sql, certificate)
+}
+
+struct ProvenReadOnlyStatement;
+
+impl SideEffectOracle for ProvenReadOnlyStatement {
+    fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
+        Purity::ProvenReadOnly
+    }
+}
+
 #[test]
 fn externally_rederives_a_sample_verdict_and_confirms_its_bound_audit_hash() {
     let sql = "SELECT 1 FROM dual";
@@ -69,6 +89,29 @@ fn externally_rederives_a_sample_verdict_and_confirms_its_bound_audit_hash() {
     assert_eq!(verified.required_level, Some(OperatingLevel::ReadOnly));
     assert_eq!(verified.audit_entry_hash, audit_record.entry_hash);
     assert_eq!(verified.observed_scn, Some(42_000_001));
+}
+
+#[test]
+fn externally_rederives_a_live_proven_base_read_without_weakening_admission() {
+    let sql = "SELECT id FROM app.orders";
+    let certificate = Classifier::default()
+        .with_oracle(Arc::new(ProvenReadOnlyStatement))
+        .classify(sql)
+        .verdict_certificate()
+        .clone();
+    assert_eq!(certificate.verdict, DangerLevel::Safe);
+    let (certificate, audit_record, key) = evidence_for_certificate(sql, certificate);
+
+    let verified = verify_verdict(VerdictEvidence {
+        sql,
+        certificate: &certificate,
+        audit_record: &audit_record,
+        audit_keys: std::slice::from_ref(&key),
+    })
+    .expect("offline verification must reproduce a dispatch certificate after live proof");
+
+    assert_eq!(verified.danger, DangerLevel::Safe);
+    assert_eq!(verified.required_level, Some(OperatingLevel::ReadOnly));
 }
 
 #[test]
