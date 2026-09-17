@@ -248,6 +248,21 @@ impl OperatorIdempotencyLedger {
                 // would otherwise lose its marker and double-execute. Runs after
                 // the lookup, so it can never evict the entry for this key.
                 evict_completed_operator_idempotency_entries_to_capacity(&mut entries);
+                if entries.len() >= OPERATOR_IDEMPOTENCY_MAX_ENTRIES {
+                    // Every retained entry is live. Never evict one: losing
+                    // its marker could turn a retry into a second execution.
+                    // The ledger itself is the final capacity boundary because
+                    // embedded callers need not carry a transport permit.
+                    return OperatorIdempotencyBegin::CapacityExhausted(operator_json_response(
+                        503,
+                        route,
+                        json!({
+                            "error": "operator_idempotency_capacity_exhausted",
+                            "message": "operator action capacity is temporarily exhausted by in-progress requests",
+                            "next_step": "retry after an in-progress operator action completes",
+                        }),
+                    ));
+                }
                 let storage_key = facts.storage_key.clone();
                 let generation = self
                     .next_generation
@@ -385,6 +400,7 @@ pub(super) enum OperatorIdempotencyBegin {
     Replay(HttpResponse),
     InProgress(HttpResponse),
     Conflict(HttpResponse),
+    CapacityExhausted(HttpResponse),
 }
 
 /// Drop TTL-expired *completed* idempotency entries.
@@ -406,9 +422,8 @@ fn prune_expired_operator_idempotency_entries(
 /// Enforce the capacity bound by evicting the oldest COMPLETED entries. An
 /// in-progress entry (`response` is `None`) is never evicted — dropping it would
 /// discard the marker a concurrent retry relies on and let the operator action
-/// double-execute. If every entry is in-progress the cap may be briefly
-/// exceeded; the in-progress count is separately bounded by request-concurrency
-/// limits and drains as operations complete. Called only on a fresh insert,
+/// double-execute. If every entry is in-progress, the caller must refuse a
+/// genuinely new key rather than exceed the cap. Called only on a fresh insert,
 /// after the key lookup, so it can never evict the key being served.
 pub(super) fn evict_completed_operator_idempotency_entries_to_capacity(
     entries: &mut HashMap<String, OperatorIdempotencyEntry>,
@@ -4094,7 +4109,8 @@ fn handle_operator_action_route(
         OperatorIdempotencyBegin::Fresh(lease) => lease,
         OperatorIdempotencyBegin::Replay(response)
         | OperatorIdempotencyBegin::InProgress(response)
-        | OperatorIdempotencyBegin::Conflict(response) => return response,
+        | OperatorIdempotencyBegin::Conflict(response)
+        | OperatorIdempotencyBegin::CapacityExhausted(response) => return response,
     };
     let operator_key;
     let mut context = request_context

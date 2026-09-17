@@ -42,23 +42,33 @@
 //! advisory rather than failing, because pre-anchor logs are indistinguishable;
 //! operators should treat an unexpectedly missing anchor as suspicious.
 
-use std::fs;
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+#[cfg(not(unix))]
 use cap_std::ambient_authority;
+#[cfg(not(unix))]
+use cap_std::fs::Dir as CapDir;
+use cap_std::fs::OpenOptions as CapOpenOptions;
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt as _;
-use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::hmac::ct_eq;
 use crate::record::{AuditRecord, SigningKey};
 use crate::sink::AuditError;
+#[cfg(unix)]
+use crate::sink::{
+    AuditDirectoryOpenError, authenticate_held_audit_directory, create_new_private_file_at,
+    open_existing_audit_directory_nofollow,
+};
 use crate::verify::JsonlReader;
+
+#[cfg(not(unix))]
+use std::fs;
 
 /// Current anchor document version.
 pub const ANCHOR_VERSION: u16 = 1;
@@ -163,19 +173,87 @@ impl AnchorFile {
         // operator-writable file. An exclusive create on an unpredictable name
         // refuses a symlink and cannot be pre-planted; the same-directory
         // location keeps the final `rename` atomic.
-        let tmp = anchor_tmp_path(&self.path);
         let io_err = |e: std::io::Error| AuditError::Io(e.to_string());
+        #[cfg(unix)]
         {
+            let parent_path = self
+                .path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            let name = self
+                .path
+                .file_name()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    AuditError::Io(format!(
+                        "anchor path {} has no file name",
+                        self.path.display()
+                    ))
+                })?;
+            let directory =
+                open_existing_audit_directory_nofollow(parent_path).map_err(AuditError::from)?;
+            run_anchor_parent_open_hook();
+            let tmp = anchor_tmp_path(&self.path);
+            let tmp_name = tmp
+                .file_name()
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| {
+                    AuditError::Io(format!(
+                        "anchor temporary {} has no file name",
+                        tmp.display()
+                    ))
+                })?;
+            {
+                let mut file = create_new_private_file_at(&directory, Path::new(tmp_name), &tmp)?;
+                file.write_all(&body).map_err(io_err)?;
+                // fsync the tmp content BEFORE the rename: a crash must never
+                // surface a renamed-but-empty/partial anchor (that would look like
+                // tampering instead of an explainable anchor-behind window).
+                file.sync_all().map_err(io_err)?;
+            }
+            directory
+                .rename(tmp_name, &directory, name)
+                .map_err(io_err)?;
+            authenticate_held_audit_directory(&directory, parent_path)
+        }
+        #[cfg(not(unix))]
+        {
+            let tmp = anchor_tmp_path(&self.path);
             let mut file = crate::sink::create_new_private_file(&tmp)?;
             file.write_all(&body).map_err(io_err)?;
             // fsync the tmp content BEFORE the rename: a crash must never
             // surface a renamed-but-empty/partial anchor (that would look like
             // tampering instead of an explainable anchor-behind window).
             file.sync_all().map_err(io_err)?;
+            drop(file);
+            fs::rename(&tmp, &self.path).map_err(io_err)
         }
-        fs::rename(&tmp, &self.path).map_err(io_err)
     }
 }
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static ANCHOR_PARENT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn set_anchor_parent_open_hook(hook: impl FnOnce() + 'static) {
+    ANCHOR_PARENT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, unix))]
+fn run_anchor_parent_open_hook() {
+    ANCHOR_PARENT_OPEN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(all(test, unix)))]
+fn run_anchor_parent_open_hook() {}
 
 /// Process-wide counter feeding [`anchor_tmp_path`] for collision-free,
 /// unpredictable temporary names.
@@ -221,7 +299,7 @@ impl std::error::Error for AnchorLoadError {}
 /// Load the anchor sidecar at `path`. Absent file → `Ok(None)` (legacy log);
 /// any other read/parse failure → `Err` (fail closed at verify time).
 pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> {
-    let parent = path
+    let parent_path = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
@@ -231,7 +309,18 @@ pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> 
         .ok_or_else(|| AnchorLoadError {
             message: format!("{}: anchor path has no file name", path.display()),
         })?;
-    let directory = match CapDir::open_ambient_dir(parent, ambient_authority()) {
+    #[cfg(unix)]
+    let directory = match open_existing_audit_directory_nofollow(parent_path) {
+        Ok(directory) => directory,
+        Err(AuditDirectoryOpenError::Missing) => return Ok(None),
+        Err(AuditDirectoryOpenError::Rejected(error)) => {
+            return Err(AnchorLoadError {
+                message: format!("{}: {error}", path.display()),
+            });
+        }
+    };
+    #[cfg(not(unix))]
+    let directory = match CapDir::open_ambient_dir(parent_path, ambient_authority()) {
         Ok(directory) => directory,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
@@ -286,6 +375,12 @@ pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> 
     })?;
     let anchor: ChainAnchor = serde_json::from_str(body.trim()).map_err(|e| AnchorLoadError {
         message: format!("{}: {e}", path.display()),
+    })?;
+    #[cfg(unix)]
+    authenticate_held_audit_directory(&directory, parent_path).map_err(|error| {
+        AnchorLoadError {
+            message: format!("{}: {error}", path.display()),
+        }
     })?;
     Ok(Some(anchor))
 }
@@ -758,6 +853,69 @@ mod tests {
             std::fs::read(&target).expect("read target"),
             target_bytes,
             "loading an anchor must not follow or alter its symlink target"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anchor_reader_and_writer_refuse_a_symlinked_parent_without_touching_its_target() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let real_parent = root.path().join("real-parent");
+        let configured_parent = root.path().join("configured-parent");
+        std::fs::create_dir(&real_parent).expect("create real parent");
+        symlink(&real_parent, &configured_parent).expect("plant parent symlink");
+        let target = real_parent.join("audit.jsonl.anchor");
+        AnchorFile::new(&target, key())
+            .record_head(1, "sha256:target-head")
+            .expect("write direct target anchor");
+        let before = std::fs::read(&target).expect("read target before linked attempt");
+        let configured = configured_parent.join("audit.jsonl.anchor");
+
+        assert!(
+            load_anchor(&configured).is_err(),
+            "a configured parent symlink must never be followed while reading an anchor"
+        );
+        assert!(
+            AnchorFile::new(&configured, key())
+                .record_head(2, "sha256:redirected-head")
+                .is_err(),
+            "a configured parent symlink must never receive an anchor write"
+        );
+        assert_eq!(
+            std::fs::read(&target).expect("read target after linked attempt"),
+            before,
+            "the symlink target must not be read as configured evidence or modified"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn anchor_writer_refuses_a_parent_replacement_after_its_capability_is_opened() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let configured_parent = root.path().join("configured-parent");
+        let parked_parent = root.path().join("parked-parent");
+        std::fs::create_dir(&configured_parent).expect("create configured parent");
+        let anchor = configured_parent.join("audit.jsonl.anchor");
+        let moved_parent = configured_parent.clone();
+        let moved_parked = parked_parent.clone();
+        set_anchor_parent_open_hook(move || {
+            std::fs::rename(&moved_parent, &moved_parked).expect("park held parent");
+            std::fs::create_dir(&moved_parent).expect("create replacement parent");
+        });
+
+        let error = AnchorFile::new(&anchor, key())
+            .record_head(1, "sha256:head")
+            .expect_err("a replaced configured parent must fail closed");
+        assert!(error.to_string().contains("changed identity"), "{error}");
+        assert!(
+            !anchor.exists(),
+            "the replacement configured parent must not receive the anchor"
+        );
+        assert!(
+            parked_parent.join("audit.jsonl.anchor").exists(),
+            "the held capability may have written only to the parked original parent"
         );
     }
 

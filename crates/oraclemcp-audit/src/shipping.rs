@@ -57,11 +57,38 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 use crate::record::{AuditRecord, BoundAuditVerdictCertificate, SigningKey};
+use crate::sink::{AuditError, AuditSink, FileAuditSink, open_file_identity};
+#[cfg(unix)]
 use crate::sink::{
-    AuditError, AuditSink, FileAuditSink, open_file_identity, open_private_append_file,
-    path_identity,
+    authenticate_held_audit_directory, cap_metadata_identity,
+    open_existing_audit_directory_nofollow, open_private_append_file_at,
 };
+#[cfg(not(unix))]
+use crate::sink::{open_private_append_file, path_identity};
 use crate::verify::{ChainVerifier, JsonlReader, VerifyOutcome};
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static WORM_PARENT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn set_worm_parent_open_hook(hook: impl FnOnce() + 'static) {
+    WORM_PARENT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, unix))]
+fn run_worm_parent_open_hook() {
+    WORM_PARENT_OPEN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(all(test, unix)))]
+fn run_worm_parent_open_hook() {}
 
 /// A shipping (forwarding) failure. Distinct from [`AuditError`] because a
 /// shipping failure is **non-fatal** to the local durable chain: the decorator
@@ -218,6 +245,47 @@ impl WormFileForwarder {
         let primary_identity = primary
             .open_identity()
             .map_err(|error| ShippingError::Transport(error.to_string()))?;
+        #[cfg(unix)]
+        let parent_path = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        #[cfg(unix)]
+        let name = path
+            .file_name()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| {
+                ShippingError::Transport(format!(
+                    "WORM destination {} has no file name",
+                    path.display()
+                ))
+            })?;
+        #[cfg(unix)]
+        let parent = open_existing_audit_directory_nofollow(parent_path)
+            .map_err(|error| ShippingError::Transport(error.to_string()))?;
+        #[cfg(unix)]
+        match parent.symlink_metadata(name) {
+            Ok(metadata)
+                if metadata.file_type().is_symlink() || !metadata.file_type().is_file() =>
+            {
+                return Err(ShippingError::Transport(format!(
+                    "cannot securely open WORM destination {}: destination is a symlink or non-regular file",
+                    path.display()
+                )));
+            }
+            Ok(metadata) if cap_metadata_identity(&metadata) == primary_identity => {
+                return Err(ShippingError::AliasedPrimaryAuditLog);
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(ShippingError::Transport(format!(
+                    "cannot inspect WORM destination {}: {error}",
+                    path.display()
+                )));
+            }
+        }
+        #[cfg(not(unix))]
         match path_identity(path) {
             Ok(identity) if identity == primary_identity => {
                 return Err(ShippingError::AliasedPrimaryAuditLog);
@@ -231,12 +299,27 @@ impl WormFileForwarder {
                 )));
             }
         }
+        #[cfg(unix)]
+        let file =
+            open_private_append_file_at(&parent, Path::new(name), path).map_err(|error| {
+                ShippingError::Transport(format!(
+                    "cannot securely open WORM destination {}: {error}",
+                    path.display()
+                ))
+            })?;
+        #[cfg(not(unix))]
         let file = open_private_append_file(path).map_err(|error| {
             ShippingError::Transport(format!(
                 "cannot securely open WORM destination {}: {error}",
                 path.display()
             ))
         })?;
+        #[cfg(unix)]
+        {
+            run_worm_parent_open_hook();
+            authenticate_held_audit_directory(&parent, parent_path)
+                .map_err(|error| ShippingError::Transport(error.to_string()))?;
+        }
         let mirror_identity = open_file_identity(&file).map_err(|error| {
             ShippingError::Transport(format!("cannot establish WORM file identity: {error}"))
         })?;
@@ -1621,7 +1704,66 @@ mod tests {
             Err(error) => error,
             Ok(_) => panic!("symlink alias must be rejected"),
         };
-        assert!(matches!(error, ShippingError::AliasedPrimaryAuditLog));
+        assert!(
+            error.to_string().contains("securely open WORM destination"),
+            "a final symlink is refused without resolving its target: {error}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worm_open_refuses_a_symlinked_parent_without_creating_a_redirected_mirror() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let primary_path = root.path().join("audit.jsonl");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        let real_parent = root.path().join("real-parent");
+        let configured_parent = root.path().join("configured-parent");
+        std::fs::create_dir(&real_parent).expect("create real parent");
+        symlink(&real_parent, &configured_parent).expect("plant parent symlink");
+        let mirror = configured_parent.join("worm.jsonl");
+
+        assert!(
+            WormFileForwarder::open_distinct(&mirror, &primary, &[key()]).is_err(),
+            "a WORM destination must reject every symlinked parent component"
+        );
+        assert!(
+            !real_parent.join("worm.jsonl").exists(),
+            "rejecting the configured parent must not create a redirected mirror"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn worm_open_refuses_a_parent_replacement_after_its_capability_is_opened() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let primary_path = root.path().join("audit.jsonl");
+        let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
+        let configured_parent = root.path().join("configured-parent");
+        let parked_parent = root.path().join("parked-parent");
+        std::fs::create_dir(&configured_parent).expect("create configured parent");
+        let mirror = configured_parent.join("worm.jsonl");
+        let moved_parent = configured_parent.clone();
+        let moved_parked = parked_parent.clone();
+        set_worm_parent_open_hook(move || {
+            std::fs::rename(&moved_parent, &moved_parked).expect("park held parent");
+            std::fs::create_dir(&moved_parent).expect("create replacement parent");
+        });
+
+        let error = match WormFileForwarder::open_distinct(&mirror, &primary, &[key()]) {
+            Ok(_) => panic!("a replaced configured WORM parent must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("changed identity"), "{error}");
+        assert!(
+            !mirror.exists(),
+            "the replacement configured parent must not receive the WORM mirror"
+        );
+        assert!(
+            parked_parent.join("worm.jsonl").is_file(),
+            "the held capability may have created only the parked original mirror"
+        );
     }
 
     #[cfg(unix)]

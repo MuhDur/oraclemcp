@@ -1554,7 +1554,6 @@ fn operator_v1_serves_schema_health_events_and_action_mapping() {
     }
 }
 
-
 #[test]
 fn operator_events_reject_an_inactive_lane_id() {
     // QA100 .24: a specific lane_id must name an active lane; the default
@@ -2350,6 +2349,7 @@ fn operator_idempotency_begin_kind(begin: &OperatorIdempotencyBegin) -> &'static
         OperatorIdempotencyBegin::Replay(_) => "replay",
         OperatorIdempotencyBegin::InProgress(_) => "in_progress",
         OperatorIdempotencyBegin::Conflict(_) => "conflict",
+        OperatorIdempotencyBegin::CapacityExhausted(_) => "capacity_exhausted",
     }
 }
 

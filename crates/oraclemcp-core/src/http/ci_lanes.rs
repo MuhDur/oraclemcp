@@ -126,6 +126,32 @@ const CI_HEARTBEAT_SCHEDULED_PREFIX: &str = "scheduled:";
 static CI_LANE_CATALOG: OnceLock<Result<Vec<CiLaneCatalogEntry>, String>> = OnceLock::new();
 static CI_LANE_SNAPSHOT_WRITE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+// Test-only interleaving point between the authenticated no-follow descriptor
+// open and the final pathname identity check. It makes a regular-to-regular
+// replacement deterministic rather than relying on scheduler luck.
+#[cfg(test)]
+thread_local! {
+    static CI_LANE_SNAPSHOT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(super) fn set_ci_lane_snapshot_open_hook(hook: impl FnOnce() + 'static) {
+    CI_LANE_SNAPSHOT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_ci_lane_snapshot_open_hook() {
+    CI_LANE_SNAPSHOT_OPEN_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(test))]
+fn run_ci_lane_snapshot_open_hook() {}
+
 #[derive(Clone, Debug, Deserialize)]
 struct CiTaxonomyDocument {
     schema: String,
@@ -1182,6 +1208,30 @@ pub(super) fn load_ci_lane_snapshot(path: &Path) -> Result<CiLaneSnapshot, Strin
 /// on a FIFO. This input feeds an authenticated but synchronous operator
 /// request; unsafe inputs must render the normal unavailable state, rather
 /// than tying up the serving worker or leaking the configured path.
+fn ci_lane_snapshot_identity_matches(opened: &fs::Metadata, current: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+
+        opened.dev() == current.dev() && opened.ino() == current.ino()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+
+        return opened.volume_serial_number() == current.volume_serial_number()
+            && opened.file_index() == current.file_index();
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        // This route reports unavailable on unreadable evidence. A platform
+        // that cannot expose stable file identity must take that fail-closed
+        // path rather than accept a substituted regular file.
+        let _ = (opened, current);
+        false
+    }
+}
+
 fn open_ci_lane_snapshot(path: &Path) -> Result<fs::File, String> {
     let initial_metadata = fs::symlink_metadata(path)
         .map_err(|_| "cannot inspect stored CI lane snapshot".to_owned())?;
@@ -1220,9 +1270,13 @@ fn open_ci_lane_snapshot(path: &Path) -> Result<fs::File, String> {
             return Err("opened CI lane snapshot is a reparse point".to_owned());
         }
     }
+    run_ci_lane_snapshot_open_hook();
     let current_metadata = fs::symlink_metadata(path)
         .map_err(|_| "configured CI lane snapshot changed while opening".to_owned())?;
     if current_metadata.file_type().is_symlink() || !current_metadata.file_type().is_file() {
+        return Err("configured CI lane snapshot changed while opening".to_owned());
+    }
+    if !ci_lane_snapshot_identity_matches(&metadata, &current_metadata) {
         return Err("configured CI lane snapshot changed while opening".to_owned());
     }
     Ok(file)

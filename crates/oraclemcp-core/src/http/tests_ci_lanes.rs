@@ -145,9 +145,15 @@ fn heartbeat_snapshot_maps_real_success_and_failure_without_upgrading_unknown() 
     let snapshot =
         ci_lane_snapshot_from_heartbeat(&catalog, &success).expect("heartbeat success parses");
     assert!(snapshot.errors.is_empty());
-    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "success");
     assert_eq!(
-        snapshot.lanes[0].latest.as_ref().map(|latest| latest.run_id),
+        ci_lane_health_json(&snapshot.lanes[0], false)["state"],
+        "success"
+    );
+    assert_eq!(
+        snapshot.lanes[0]
+            .latest
+            .as_ref()
+            .map(|latest| latest.run_id),
         Some(42)
     );
 
@@ -177,7 +183,10 @@ fn heartbeat_snapshot_maps_real_success_and_failure_without_upgrading_unknown() 
     );
     let snapshot =
         ci_lane_snapshot_from_heartbeat(&catalog, &unknown).expect("heartbeat unknown parses");
-    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "unknown");
+    assert_eq!(
+        ci_lane_health_json(&snapshot.lanes[0], false)["state"],
+        "unknown"
+    );
 }
 
 #[test]
@@ -360,8 +369,9 @@ fn heartbeat_snapshot_rejects_or_quarantines_contradictory_evidence() {
         ),
     ] {
         let raw = heartbeat_document(false, false, false, lane);
-        let snapshot = ci_lane_snapshot_from_heartbeat(&catalog, &raw)
-            .unwrap_or_else(|error| panic!("{name} should quarantine one lane, not abort: {error}"));
+        let snapshot = ci_lane_snapshot_from_heartbeat(&catalog, &raw).unwrap_or_else(|error| {
+            panic!("{name} should quarantine one lane, not abort: {error}")
+        });
         assert_eq!(
             ci_lane_health_json(&snapshot.lanes[0], false)["state"],
             "unknown",
@@ -618,7 +628,10 @@ fn wait_for_snapshot(path: &Path) -> CiLaneSnapshot {
         if let Ok(snapshot) = load_ci_lane_snapshot(path) {
             return snapshot;
         }
-        assert!(Instant::now() < deadline, "poller did not deliver a snapshot");
+        assert!(
+            Instant::now() < deadline,
+            "poller did not deliver a snapshot"
+        );
         std::thread::sleep(Duration::from_millis(10));
     }
 }
@@ -680,7 +693,10 @@ fn fetch_ci_lane_snapshot_never_upgrades_a_transport_failure_to_green() {
 
     assert!(!snapshot.errors.is_empty());
     assert_eq!(snapshot.lanes.len(), 1);
-    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "unknown");
+    assert_eq!(
+        ci_lane_health_json(&snapshot.lanes[0], false)["state"],
+        "unknown"
+    );
 }
 
 #[test]
@@ -723,7 +739,10 @@ fn production_poller_delivers_current_per_job_state_outside_the_request_path() {
 
     assert!(snapshot.errors.is_empty(), "errors: {:?}", snapshot.errors);
     assert_eq!(snapshot.lanes.len(), 2);
-    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "success");
+    assert_eq!(
+        ci_lane_health_json(&snapshot.lanes[0], false)["state"],
+        "success"
+    );
     assert_eq!(
         ci_lane_health_json(&snapshot.lanes[1], false)["state"],
         "not_green"
@@ -749,7 +768,10 @@ fn production_poller_persists_unknown_when_github_is_unavailable() {
 
     assert!(!snapshot.errors.is_empty());
     assert_eq!(snapshot.lanes.len(), 1);
-    assert_eq!(ci_lane_health_json(&snapshot.lanes[0], false)["state"], "unknown");
+    assert_eq!(
+        ci_lane_health_json(&snapshot.lanes[0], false)["state"],
+        "unknown"
+    );
 }
 
 #[test]
@@ -779,7 +801,10 @@ fn ci_lane_snapshot_round_trips_through_durable_storage() {
         reloaded.lanes[0].catalog.check_name,
         snapshot.lanes[0].catalog.check_name
     );
-    assert_eq!(reloaded.lanes[0].streak_count, snapshot.lanes[0].streak_count);
+    assert_eq!(
+        reloaded.lanes[0].streak_count,
+        snapshot.lanes[0].streak_count
+    );
 }
 
 #[test]
@@ -793,8 +818,11 @@ fn load_ci_lane_snapshot_fails_closed_on_a_missing_or_corrupt_file() {
     assert!(load_ci_lane_snapshot(&corrupt).is_err());
 
     let wrong_schema = dir.join("wrong-schema.json");
-    std::fs::write(&wrong_schema, br#"{"schema":"other/v1","refreshed_at_unix":1,"lanes":[],"errors":[]}"#)
-        .expect("write wrong-schema fixture");
+    std::fs::write(
+        &wrong_schema,
+        br#"{"schema":"other/v1","refreshed_at_unix":1,"lanes":[],"errors":[]}"#,
+    )
+    .expect("write wrong-schema fixture");
     assert!(load_ci_lane_snapshot(&wrong_schema).is_err());
 }
 
@@ -861,6 +889,33 @@ fn load_ci_lane_snapshot_refuses_a_symlink_without_leaking_its_path() {
     assert!(!error.contains("customer-tenant-ci-lanes"));
 }
 
+#[cfg(unix)]
+#[test]
+fn load_ci_lane_snapshot_refuses_a_regular_file_replacement_after_open() {
+    let dir = dashboard_test_dir("ci-lanes-regular-swap");
+    let configured = dir.join("customer-tenant-ci-lanes.json");
+    let replacement = dir.join("replacement.json");
+    let snapshot =
+        br#"{"schema":"ci-lane-snapshot/v1","refreshed_at_unix":1,"lanes":[],"errors":[]}"#;
+    std::fs::write(&configured, snapshot).expect("write configured snapshot");
+    std::fs::write(&replacement, snapshot).expect("write replacement snapshot");
+
+    let moved_configured = configured.clone();
+    let moved_replacement = replacement.clone();
+    super::ci_lanes::set_ci_lane_snapshot_open_hook(move || {
+        std::fs::rename(&moved_replacement, &moved_configured)
+            .expect("atomically replace the configured regular file");
+    });
+
+    let error = load_ci_lane_snapshot(&configured)
+        .expect_err("a regular-file replacement after open must fail closed");
+    assert_eq!(error, "configured CI lane snapshot changed while opening");
+    assert!(
+        !error.contains("customer-tenant-ci-lanes"),
+        "the unavailable diagnostic must not reveal the configured path"
+    );
+}
+
 #[test]
 fn operator_ci_lanes_route_is_unavailable_without_a_configured_snapshot() {
     let (auditor, _sink) = operator_auditor();
@@ -884,7 +939,10 @@ fn operator_ci_lanes_route_is_unavailable_without_a_configured_snapshot() {
     assert_eq!(body["data"]["source"], serde_json::json!("unavailable"));
     assert_eq!(body["data"]["refresh_state"], serde_json::json!("failed"));
     assert_eq!(body["data"]["freshness"], serde_json::json!("unavailable"));
-    assert_eq!(body["data"]["summary"]["posture"], serde_json::json!("unknown"));
+    assert_eq!(
+        body["data"]["summary"]["posture"],
+        serde_json::json!("unknown")
+    );
     assert!(
         body["data"]["lanes"]
             .as_array()
@@ -899,7 +957,10 @@ fn operator_ci_lanes_route_is_unavailable_without_a_configured_snapshot() {
 fn operator_ci_lanes_route_serves_a_fresh_configured_snapshot() {
     let raw = include_str!("../../../../docs/ci_taxonomy.json");
     let catalog = parse_ci_lane_catalog(raw).expect("lane catalog parses");
-    let watched = catalog.first().expect("catalog has at least one lane").clone();
+    let watched = catalog
+        .first()
+        .expect("catalog has at least one lane")
+        .clone();
     let watched_check_name = watched.check_name.clone();
     let health = ci_lane_health_from_observations(
         watched,
@@ -953,8 +1014,10 @@ fn operator_ci_lanes_route_serves_a_fresh_configured_snapshot() {
     assert_eq!(
         lanes
             .iter()
-            .filter(|lane| lane["check_name"] != serde_json::json!(watched_check_name)
-                && lane["state"] == "unknown")
+            .filter(
+                |lane| lane["check_name"] != serde_json::json!(watched_check_name)
+                    && lane["state"] == "unknown"
+            )
             .count(),
         unwatched_count,
         "lanes absent from the stored snapshot must render unknown, never green"

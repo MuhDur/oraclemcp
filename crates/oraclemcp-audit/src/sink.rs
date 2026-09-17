@@ -14,11 +14,23 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
+#[cfg(unix)]
+use std::path::Component;
+
 use parking_lot::Mutex;
 use thiserror::Error;
 
 #[cfg(unix)]
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+#[cfg(unix)]
+use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
+#[cfg(unix)]
+use cap_std::ambient_authority;
+#[cfg(unix)]
+use cap_std::fs::OpenOptionsExt as CapOpenOptionsExt;
+#[cfg(unix)]
+use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
@@ -53,6 +65,7 @@ pub(crate) fn open_file_identity(file: &File) -> std::io::Result<OpenFileIdentit
 }
 
 #[cfg(unix)]
+#[cfg_attr(unix, allow(dead_code))]
 fn metadata_identity(metadata: &std::fs::Metadata) -> std::io::Result<OpenFileIdentity> {
     use std::os::unix::fs::MetadataExt as _;
 
@@ -89,8 +102,20 @@ fn metadata_identity(_metadata: &std::fs::Metadata) -> std::io::Result<OpenFileI
 /// Identity reached by a path lookup. This is used only for early alias
 /// classification; callers must still perform a no-follow descriptor open
 /// before any read or write.
+#[cfg(not(unix))]
 pub(crate) fn path_identity(path: &Path) -> std::io::Result<OpenFileIdentity> {
     metadata_identity(&std::fs::metadata(path)?)
+}
+
+/// Stable identity for metadata obtained through an already-held audit
+/// directory capability.  Callers must not fall back to resolving a raw path
+/// after a no-follow parent walk just to perform this comparison.
+#[cfg(unix)]
+pub(crate) fn cap_metadata_identity(metadata: &cap_std::fs::Metadata) -> OpenFileIdentity {
+    OpenFileIdentity {
+        volume: cap_fs_ext::MetadataExt::dev(metadata),
+        file: cap_fs_ext::MetadataExt::ino(metadata),
+    }
 }
 
 #[cfg(windows)]
@@ -229,6 +254,7 @@ struct AuditLogLock {
 impl AuditLogLock {
     /// Take the exclusive advisory lock guarding writes to `audit_path`, or
     /// fail closed if another instance already holds it.
+    #[cfg(not(unix))]
     fn acquire(audit_path: &Path) -> Result<(Self, bool), AuditError> {
         let lock_path = lock_path_for(audit_path);
         // Symlink-safe, private (0600), never-truncate-on-open sidecar: a
@@ -261,6 +287,36 @@ impl AuditLogLock {
         // We hold the lock. Record our pid so the NEXT contender can name us in
         // its fail-closed message. Best-effort: a failure here does not
         // surrender the lock (the lock is the fd's, not the file content's).
+        let _ = file.set_len(0);
+        let _ = file.seek(SeekFrom::Start(0));
+        let _ = writeln!(file, "{}", std::process::id());
+        Ok((AuditLogLock { file }, created))
+    }
+
+    /// Unix creation is relative to one retained parent capability, so a
+    /// directory rename cannot send the lock and ledger into one directory and
+    /// the required durability sync into another.
+    #[cfg(unix)]
+    fn acquire_at(parent: &HeldAuditParent, audit_path: &Path) -> Result<(Self, bool), AuditError> {
+        let lock_path = lock_path_for(audit_path);
+        let lock_name = audit_file_name(&lock_path)?;
+        let OpenedPrivateAuditFile { mut file, created } =
+            open_private_lock_file_at(parent, lock_name, &lock_path)?;
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(TryLockError::WouldBlock) => {
+                return Err(AuditError::Locked {
+                    path: audit_path.display().to_string(),
+                    holder_pid: read_holder_pid(&mut file),
+                });
+            }
+            Err(TryLockError::Error(e)) => {
+                return Err(AuditError::Io(format!(
+                    "cannot lock audit log {}: {e}",
+                    audit_path.display()
+                )));
+            }
+        }
         let _ = file.set_len(0);
         let _ = file.seek(SeekFrom::Start(0));
         let _ = writeln!(file, "{}", std::process::id());
@@ -313,6 +369,25 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+// The second hook is deliberately after both child files have been securely
+// opened but before their directory entry is made crash-durable. It proves a
+// parent-directory rename cannot redirect the fsync to an attacker-selected
+// replacement (bead oraclemcp-xoflp.5.31).
+#[cfg(all(test, unix))]
+thread_local! {
+    static FILE_AUDIT_PARENT_SYNC_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// This hook runs after the no-follow parent walk but before the descriptor used
+// for its durability sync is derived.  It proves that deriving that descriptor
+// never reopens a newly substituted configured pathname.
+#[cfg(all(test, unix))]
+thread_local! {
+    static FILE_AUDIT_PARENT_HANDLE_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(test)]
 pub(crate) fn set_file_audit_open_hook(hook: impl FnOnce() + 'static) {
     FILE_AUDIT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
@@ -327,6 +402,40 @@ fn run_file_audit_open_hook() {
     });
 }
 
+#[cfg(all(test, unix))]
+fn set_file_audit_parent_sync_hook(hook: impl FnOnce() + 'static) {
+    FILE_AUDIT_PARENT_SYNC_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, unix))]
+fn set_file_audit_parent_handle_hook(hook: impl FnOnce() + 'static) {
+    FILE_AUDIT_PARENT_HANDLE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(all(test, unix))]
+fn run_file_audit_parent_sync_hook() {
+    FILE_AUDIT_PARENT_SYNC_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(all(test, unix))]
+fn run_file_audit_parent_handle_hook() {
+    FILE_AUDIT_PARENT_HANDLE_HOOK.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook();
+        }
+    });
+}
+
+#[cfg(not(all(test, unix)))]
+fn run_file_audit_parent_sync_hook() {}
+
+#[cfg(not(all(test, unix)))]
+fn run_file_audit_parent_handle_hook() {}
+
 #[cfg(not(test))]
 fn run_file_audit_open_hook() {}
 
@@ -335,12 +444,480 @@ struct OpenedPrivateAuditFile {
     created: bool,
 }
 
+/// Normalize an audit directory without resolving any filesystem links.  The
+/// subsequent capability walk owns each component with a no-follow open, so a
+/// configured `..` path remains supported without giving a substituted parent
+/// directory a chance to redirect the audit log.
+#[cfg(unix)]
+fn lexically_normalize_audit_directory(path: &Path) -> Result<PathBuf, AuditError> {
+    let mut normalized = if path.is_absolute() {
+        PathBuf::from("/")
+    } else {
+        std::env::current_dir().map_err(|error| {
+            AuditError::Io(format!(
+                "cannot determine the current directory while opening audit directory {}: {error}",
+                path.display()
+            ))
+        })?
+    };
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized = PathBuf::from("/"),
+            Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(AuditError::Io(format!(
+                        "audit directory {} escapes its filesystem root",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+/// Open every existing audit-directory component relative to a stable root
+/// without following a symlink.  Holding the resulting capability keeps all
+/// subsequent child operations bound to this exact directory even if its
+/// configured pathname is replaced.
+#[cfg(unix)]
+pub(crate) enum AuditDirectoryOpenError {
+    /// A real component was absent. Anchor readers preserve the historical
+    /// absent-sidecar result only for this precise outcome.
+    Missing,
+    /// A present component could not be opened safely.
+    Rejected(AuditError),
+}
+
+#[cfg(unix)]
+impl std::fmt::Display for AuditDirectoryOpenError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Missing => formatter.write_str("audit directory is missing"),
+            Self::Rejected(error) => error.fmt(formatter),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl From<AuditDirectoryOpenError> for AuditError {
+    fn from(error: AuditDirectoryOpenError) -> Self {
+        match error {
+            AuditDirectoryOpenError::Missing => Self::Io("audit directory is missing".to_owned()),
+            AuditDirectoryOpenError::Rejected(error) => error,
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn open_existing_audit_directory_nofollow(
+    path: &Path,
+) -> Result<CapDir, AuditDirectoryOpenError> {
+    use cap_fs_ext::DirExt as _;
+
+    let normalized =
+        lexically_normalize_audit_directory(path).map_err(AuditDirectoryOpenError::Rejected)?;
+    let mut current = CapDir::open_ambient_dir("/", ambient_authority()).map_err(|error| {
+        AuditDirectoryOpenError::Rejected(AuditError::Io(format!(
+            "cannot open audit directory root while resolving {}: {error}",
+            path.display()
+        )))
+    })?;
+    for component in normalized.components() {
+        let Component::Normal(name) = component else {
+            continue;
+        };
+        current = match current.open_dir_nofollow(name) {
+            Ok(next) => next,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Err(AuditDirectoryOpenError::Missing);
+            }
+            Err(error) => {
+                return Err(AuditDirectoryOpenError::Rejected(AuditError::Io(format!(
+                    "audit directory {} contains an unsafe or unreadable component: {error}",
+                    path.display()
+                ))));
+            }
+        };
+    }
+    Ok(current)
+}
+
+/// Fail closed if a configured audit parent was replaced after it was opened.
+/// The comparison is against another no-follow component walk, never a fresh
+/// ambient pathname open that could accept a redirected parent.
+#[cfg(unix)]
+pub(crate) fn authenticate_held_audit_directory(
+    held: &CapDir,
+    configured_path: &Path,
+) -> Result<(), AuditError> {
+    let current =
+        open_existing_audit_directory_nofollow(configured_path).map_err(AuditError::from)?;
+    let held_metadata = held.dir_metadata().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot stat held audit directory {}: {error}",
+            configured_path.display()
+        ))
+    })?;
+    let current_metadata = current.dir_metadata().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot stat current audit directory {}: {error}",
+            configured_path.display()
+        ))
+    })?;
+    if cap_fs_ext::MetadataExt::dev(&held_metadata)
+        != cap_fs_ext::MetadataExt::dev(&current_metadata)
+        || cap_fs_ext::MetadataExt::ino(&held_metadata)
+            != cap_fs_ext::MetadataExt::ino(&current_metadata)
+    {
+        return Err(AuditError::Io(format!(
+            "audit directory {} changed identity while an audit file was opened; refusing to \
+             report an audit result whose durable files are no longer at the configured path",
+            configured_path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Capability for the exact directory in which a writable audit ledger and
+/// its lock sidecar live.  Keeping this descriptor from child creation through
+/// the durability sync prevents a directory rename from redirecting `fsync` to
+/// a replacement path.
+#[cfg(unix)]
+struct HeldAuditParent {
+    dir: CapDir,
+    /// A read-capable descriptor for the same directory as `dir`. `cap_std`
+    /// may retain an O_PATH-like capability that is intentionally unsuitable
+    /// for `fsync`, so the durable operation uses this separately authenticated
+    /// descriptor rather than reopening the pathname after child creation.
+    sync_handle: File,
+    configured_path: PathBuf,
+}
+
+#[cfg(unix)]
+impl HeldAuditParent {
+    fn open(audit_path: &Path) -> Result<Self, AuditError> {
+        let configured_path = audit_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let dir =
+            open_existing_audit_directory_nofollow(&configured_path).map_err(AuditError::from)?;
+        run_file_audit_parent_handle_hook();
+        // Derive the durable descriptor from the held capability instead of
+        // reopening `configured_path`.  An ambient reopen would follow a
+        // replacement symlink (or block on a replacement FIFO) between the
+        // no-follow walk and this identity check.
+        let sync_handle = dir
+            .open(Path::new("."))
+            .map(|file| file.into_std())
+            .map_err(|e| {
+                AuditError::Io(format!(
+                    "cannot open held audit directory {} for durability sync: {e}",
+                    configured_path.display()
+                ))
+            })?;
+        let capability_metadata = dir.dir_metadata().map_err(|e| {
+            AuditError::Io(format!(
+                "cannot stat audit directory capability {}: {e}",
+                configured_path.display()
+            ))
+        })?;
+        let sync_metadata = sync_handle.metadata().map_err(|e| {
+            AuditError::Io(format!(
+                "cannot stat audit directory sync handle {}: {e}",
+                configured_path.display()
+            ))
+        })?;
+        use std::os::unix::fs::MetadataExt as _;
+        if cap_fs_ext::MetadataExt::dev(&capability_metadata) != sync_metadata.dev()
+            || cap_fs_ext::MetadataExt::ino(&capability_metadata) != sync_metadata.ino()
+        {
+            return Err(AuditError::Io(format!(
+                "audit directory {} changed identity while its capability was opened",
+                configured_path.display()
+            )));
+        }
+        Ok(Self {
+            dir,
+            sync_handle,
+            configured_path,
+        })
+    }
+
+    /// Ensure the configured pathname still resolves to this exact held
+    /// directory before success is reported.  A replacement is fail-closed;
+    /// the subsequent sync always targets the descriptor that contained the
+    /// just-created entries.
+    fn authenticate_current_path(&self) -> Result<(), AuditError> {
+        authenticate_held_audit_directory(&self.dir, &self.configured_path)
+    }
+
+    /// Sync the *held* directory descriptor, never a freshly resolved pathname.
+    fn sync(&self) -> Result<(), AuditError> {
+        #[cfg(test)]
+        PARENT_DIR_FSYNCS.with(|c| c.set(c.get() + 1));
+        self.sync_handle.sync_all().map_err(|e| {
+            AuditError::Io(format!(
+                "cannot fsync held audit directory {}: {e}",
+                self.configured_path.display()
+            ))
+        })
+    }
+}
+
+#[cfg(unix)]
+fn audit_file_name(path: &Path) -> Result<&Path, AuditError> {
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .map(Path::new)
+        .ok_or_else(|| AuditError::Io(format!("audit path {} has no file name", path.display())))
+}
+
+#[cfg(unix)]
+fn reject_unsafe_existing_at(
+    parent: &CapDir,
+    name: &Path,
+    display_path: &Path,
+) -> Result<(), AuditError> {
+    match parent.symlink_metadata(name) {
+        Ok(metadata) => {
+            let file_type = metadata.file_type();
+            if file_type.is_symlink() || !file_type.is_file() {
+                Err(AuditError::Io(format!(
+                    "refusing to open audit path {} — it is a symlink, directory, FIFO, device, or \
+                     other non-regular object; audit files must be private regular files (inspect \
+                     the path and its parent directory ownership/mode, then retry)",
+                    display_path.display()
+                )))
+            } else {
+                Ok(())
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(AuditError::Io(format!(
+            "cannot inspect audit path {} before opening it: {e}",
+            display_path.display()
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn harden_open_regular_file_at(
+    parent: &CapDir,
+    file: &File,
+    name: &Path,
+    display_path: &Path,
+) -> Result<(), AuditError> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = file.metadata().map_err(|e| {
+        AuditError::Io(format!(
+            "cannot stat opened audit file {} to confirm it is a private regular file: {e}",
+            display_path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(AuditError::Io(format!(
+            "audit path {} is not a regular file after opening (the path may have been swapped); \
+             refusing to write audit records to it",
+            display_path.display()
+        )));
+    }
+    let path_metadata = parent.symlink_metadata(name).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot authenticate audit path {} after opening it: {e}",
+            display_path.display()
+        ))
+    })?;
+    if path_metadata.file_type().is_symlink() || !path_metadata.file_type().is_file() {
+        return Err(AuditError::Io(format!(
+            "audit path {} changed to a link or non-regular object while it was opened",
+            display_path.display()
+        )));
+    }
+    let opened_identity = open_file_identity(file).map_err(|e| {
+        AuditError::Io(format!(
+            "cannot authenticate opened audit file {}: {e}",
+            display_path.display()
+        ))
+    })?;
+    let path_identity = OpenFileIdentity {
+        volume: cap_fs_ext::MetadataExt::dev(&path_metadata),
+        file: cap_fs_ext::MetadataExt::ino(&path_metadata),
+    };
+    if opened_identity != path_identity {
+        return Err(AuditError::Io(format!(
+            "audit path {} changed identity while it was opened",
+            display_path.display()
+        )));
+    }
+    if metadata.nlink() != 1 {
+        return Err(AuditError::Io(format!(
+            "audit path {} has {} hard links; refusing a file that can alias another path",
+            display_path.display(),
+            metadata.nlink()
+        )));
+    }
+    let expected_uid = rustix::process::geteuid().as_raw();
+    if metadata.uid() != expected_uid {
+        return Err(AuditError::Io(format!(
+            "audit path {} is owned by uid {}, expected the effective uid {expected_uid}",
+            display_path.display(),
+            metadata.uid()
+        )));
+    }
+    let mode = metadata.permissions().mode() & 0o777;
+    if mode != 0o600 {
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(0o600);
+        file.set_permissions(permissions).map_err(|e| {
+            AuditError::Io(format!(
+                "cannot set private 0600 mode on audit file {}: {e}",
+                display_path.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn configure_private_cap_open(options: &mut CapOpenOptions) {
+    options
+        .mode(0o600)
+        .follow(FollowSymlinks::No)
+        // A final-component race to a FIFO must not make server startup block.
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
+}
+
+#[cfg(unix)]
+fn open_private_append_file_with_creation_at(
+    parent: &CapDir,
+    name: &Path,
+    display_path: &Path,
+) -> Result<OpenedPrivateAuditFile, AuditError> {
+    reject_unsafe_existing_at(parent, name, display_path)?;
+    let open_existing = || {
+        let mut options = CapOpenOptions::new();
+        options.read(true).append(true);
+        configure_private_cap_open(&mut options);
+        parent.open_with(name, &options).map(|file| file.into_std())
+    };
+    let (file, created) = match open_existing() {
+        Ok(file) => (file, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut create = CapOpenOptions::new();
+            create.create_new(true).read(true).append(true);
+            configure_private_cap_open(&mut create);
+            match parent.open_with(name, &create) {
+                Ok(file) => (file.into_std(), true),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let file = open_existing().map_err(|error| {
+                        AuditError::Io(format!(
+                            "failed to authenticate concurrently created audit log {}: {error}",
+                            display_path.display()
+                        ))
+                    })?;
+                    (file, false)
+                }
+                Err(error) => {
+                    return Err(AuditError::Io(format!(
+                        "failed to create audit log {}: {error}",
+                        display_path.display()
+                    )));
+                }
+            }
+        }
+        Err(error) => {
+            return Err(AuditError::Io(format!(
+                "failed to open audit log {}: {error}",
+                display_path.display()
+            )));
+        }
+    };
+    harden_open_regular_file_at(parent, &file, name, display_path)?;
+    Ok(OpenedPrivateAuditFile { file, created })
+}
+
+/// Open a private append-only audit file through an already authenticated
+/// directory capability.  This is intentionally Unix-only: the Windows path
+/// has a separate DACL creation protocol.
+#[cfg(unix)]
+pub(crate) fn open_private_append_file_at(
+    parent: &CapDir,
+    name: &Path,
+    display_path: &Path,
+) -> Result<File, AuditError> {
+    Ok(open_private_append_file_with_creation_at(parent, name, display_path)?.file)
+}
+
+#[cfg(unix)]
+fn open_private_lock_file_at(
+    parent: &HeldAuditParent,
+    name: &Path,
+    display_path: &Path,
+) -> Result<OpenedPrivateAuditFile, AuditError> {
+    reject_unsafe_existing_at(&parent.dir, name, display_path)?;
+    let open_existing = || {
+        let mut options = CapOpenOptions::new();
+        options.read(true).write(true).truncate(false);
+        configure_private_cap_open(&mut options);
+        parent
+            .dir
+            .open_with(name, &options)
+            .map(|file| file.into_std())
+    };
+    let (file, created) = match open_existing() {
+        Ok(file) => (file, false),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut create = CapOpenOptions::new();
+            create
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .truncate(false);
+            configure_private_cap_open(&mut create);
+            match parent.dir.open_with(name, &create) {
+                Ok(file) => (file.into_std(), true),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let file = open_existing().map_err(|error| {
+                        AuditError::Io(format!(
+                            "cannot authenticate concurrently created audit lock sidecar {}: {error}",
+                            display_path.display()
+                        ))
+                    })?;
+                    (file, false)
+                }
+                Err(error) => {
+                    return Err(AuditError::Io(format!(
+                        "cannot create audit lock sidecar {}: {error}",
+                        display_path.display()
+                    )));
+                }
+            }
+        }
+        Err(error) => {
+            return Err(AuditError::Io(format!(
+                "cannot open audit lock sidecar {}: {error}",
+                display_path.display()
+            )));
+        }
+    };
+    harden_open_regular_file_at(&parent.dir, &file, name, display_path)?;
+    Ok(OpenedPrivateAuditFile { file, created })
+}
+
 /// Reject a pre-planted symlink or non-regular filesystem object at `path`
 /// *before* creating/opening it (bead oraclemcp-qa100 .15). In a shared or
 /// attacker-writable audit directory a symlink at the log/lock/anchor path would
 /// otherwise redirect or truncate an operator-writable target; a FIFO/device
 /// would block or corrupt. Audit files must be private *regular* files, so
 /// anything else fails closed. An absent path is fine — the open creates it.
+#[cfg_attr(unix, allow(dead_code))]
 fn reject_unsafe_existing(path: &Path) -> Result<(), AuditError> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) => {
@@ -388,6 +965,7 @@ fn windows_private_dacl_sddl(sid: &str, directory: bool) -> String {
     format!("D:P(A;{inheritance};FA;;;{sid})")
 }
 
+#[cfg_attr(unix, allow(dead_code))]
 fn configure_no_follow(options: &mut OpenOptions) {
     #[cfg(unix)]
     {
@@ -888,6 +1466,7 @@ pub(crate) fn harden_windows_private_file_handle(
 /// authenticates a second no-follow handle to the same file, requires current-
 /// user ownership, installs one protected full-control ACE for that SID, and
 /// reads it back before returning.
+#[cfg_attr(unix, allow(dead_code))]
 pub(crate) fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), AuditError> {
     let metadata = file.metadata().map_err(|e| {
         AuditError::Io(format!(
@@ -974,6 +1553,7 @@ pub(crate) fn harden_open_regular_file(file: &File, path: &Path) -> Result<(), A
 /// report whether this exact open created its directory entry. That outcome,
 /// rather than an earlier path observation, determines the required parent
 /// directory fsync.
+#[cfg_attr(unix, allow(dead_code))]
 fn open_private_append_file_with_creation(
     path: &Path,
 ) -> Result<OpenedPrivateAuditFile, AuditError> {
@@ -1034,12 +1614,14 @@ fn open_private_append_file_with_creation(
 /// Open (creating when absent) a private, symlink-safe append handle for the
 /// audit log at `path`: reject a pre-planted non-regular target, create with
 /// mode `0600` on Unix, then confirm/harden the opened inode.
+#[cfg_attr(unix, allow(dead_code))]
 pub(crate) fn open_private_append_file(path: &Path) -> Result<File, AuditError> {
     Ok(open_private_append_file_with_creation(path)?.file)
 }
 
 /// Open (creating when absent) a private, symlink-safe read/write handle and
 /// report whether this exact open created the lock sidecar.
+#[cfg(not(unix))]
 fn open_private_lock_file(path: &Path) -> Result<OpenedPrivateAuditFile, AuditError> {
     reject_unsafe_existing(path)?;
     #[cfg(windows)]
@@ -1106,6 +1688,7 @@ fn open_private_lock_file(path: &Path) -> Result<OpenedPrivateAuditFile, AuditEr
 /// Create a brand-new private file at `path`, failing closed if it already
 /// exists (`O_CREAT|O_EXCL`, which also refuses a pre-planted symlink). Used for
 /// the anchor's unpredictable same-directory temporary (bead oraclemcp-qa100 .15).
+#[cfg_attr(unix, allow(dead_code))]
 pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
     #[cfg(windows)]
     let _creation_parent = windows_private_creation_parent(path)?;
@@ -1123,6 +1706,32 @@ pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
     Ok(file)
 }
 
+/// Create a private audit file relative to an already authenticated parent
+/// directory.  The returned descriptor and all identity checks stay bound to
+/// that parent capability, so a parent-path replacement cannot redirect an
+/// anchor temporary after it was accepted.
+#[cfg(unix)]
+pub(crate) fn create_new_private_file_at(
+    parent: &CapDir,
+    name: &Path,
+    display_path: &Path,
+) -> Result<File, AuditError> {
+    let mut options = CapOpenOptions::new();
+    options.write(true).create_new(true);
+    configure_private_cap_open(&mut options);
+    let file = parent
+        .open_with(name, &options)
+        .map(|file| file.into_std())
+        .map_err(|error| {
+            AuditError::Io(format!(
+                "cannot create private audit temporary {}: {error}",
+                display_path.display()
+            ))
+        })?;
+    harden_open_regular_file_at(parent, &file, name, display_path)?;
+    Ok(file)
+}
+
 /// fsync the parent directory of `path` so a *newly created* file's directory
 /// entry is itself durable (bead oraclemcp-g4xi). Creating and even fsyncing a
 /// file only guarantees its contents are on disk once the directory entry that
@@ -1130,7 +1739,7 @@ pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
 /// audit log (or its lock sidecar) could lose the file entirely, taking with it
 /// the tamper-evidence for everything logged in that window. Fails closed: audit
 /// durability is not best-effort.
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 fn fsync_parent_dir(path: &Path) -> Result<(), AuditError> {
     #[cfg(test)]
     PARENT_DIR_FSYNCS.with(|c| c.set(c.get() + 1));
@@ -1241,22 +1850,40 @@ impl FileAuditSink {
         // a no-follow open. The test hook occupies that historical gap; only
         // each secure open's actual create result controls directory durability.
         run_file_audit_open_hook();
-        // Lock BEFORE opening the append fd: fail fast on contention, and never
-        // leave a half-armed writer if the lock is already held.
-        let (lock, lock_created) = AuditLogLock::acquire(path)?;
-        // Symlink-safe, private (0600) append handle: reject a pre-planted
-        // symlink/non-regular target and harden the opened inode to owner-only
-        // (bead oraclemcp-qa100 .15).
-        let OpenedPrivateAuditFile {
-            file,
-            created: audit_created,
-        } = open_private_append_file_with_creation(path)?;
-        // Directory durability: if we just created the audit log or its lock
-        // sidecar, fsync the parent directory so the new file survives a crash
-        // instead of vanishing with the tamper-evidence it was about to hold.
-        if audit_created || lock_created {
-            fsync_parent_dir(path)?;
-        }
+        #[cfg(unix)]
+        let (lock, file) = {
+            // Hold the parent capability before either sibling is opened. Both
+            // child opens and the later fsync are relative to this exact
+            // descriptor, so a path rename cannot split their durability
+            // relationship.
+            let parent = HeldAuditParent::open(path)?;
+            let (lock, lock_created) = AuditLogLock::acquire_at(&parent, path)?;
+            let audit_name = audit_file_name(path)?;
+            let OpenedPrivateAuditFile {
+                file,
+                created: audit_created,
+            } = open_private_append_file_with_creation_at(&parent.dir, audit_name, path)?;
+            if audit_created || lock_created {
+                run_file_audit_parent_sync_hook();
+                parent.authenticate_current_path()?;
+                parent.sync()?;
+            }
+            (lock, file)
+        };
+        #[cfg(not(unix))]
+        let (lock, file) = {
+            // Lock BEFORE opening the append fd: fail fast on contention, and
+            // never leave a half-armed writer if the lock is already held.
+            let (lock, lock_created) = AuditLogLock::acquire(path)?;
+            let OpenedPrivateAuditFile {
+                file,
+                created: audit_created,
+            } = open_private_append_file_with_creation(path)?;
+            if audit_created || lock_created {
+                fsync_parent_dir(path)?;
+            }
+            (lock, file)
+        };
         Ok(FileAuditSink {
             file: Mutex::new(file),
             _lock: lock,
@@ -3505,6 +4132,116 @@ mod tests {
             "reopening an existing log + lock sidecar creates nothing, so no dir fsync"
         );
         drop(sink2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_fails_closed_when_parent_changes_before_durability_sync() {
+        // A pathname-based fsync could silently sync `replacement` after the
+        // ledger + sidecar had been created in `original`. The retained parent
+        // capability detects that substitution before it reports a usable
+        // sink, and therefore never claims the new configured path is durable.
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("audit-parent");
+        let replacement = root.path().join("replacement-parent");
+        let parked = root.path().join("original-parent-parked");
+        std::fs::create_dir(&parent).expect("create audit parent");
+        std::fs::create_dir(&replacement).expect("create replacement parent");
+        let path = parent.join("audit.jsonl");
+        let before = PARENT_DIR_FSYNCS.with(std::cell::Cell::get);
+
+        let moved_parent = parent.clone();
+        let moved_replacement = replacement.clone();
+        let moved_parked = parked.clone();
+        set_file_audit_parent_sync_hook(move || {
+            std::fs::rename(&moved_parent, &moved_parked).expect("park original parent");
+            std::fs::rename(&moved_replacement, &moved_parent)
+                .expect("put replacement at configured path");
+        });
+
+        let error = match FileAuditSink::open(&path) {
+            Ok(_) => panic!("a swapped audit parent must fail closed"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("changed identity"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            PARENT_DIR_FSYNCS.with(std::cell::Cell::get),
+            before,
+            "a parent replacement is refused before any directory fsync can target it"
+        );
+        assert!(
+            !path.exists(),
+            "the replacement parent must not gain an audit file from the old capability"
+        );
+        assert!(
+            parked.join("audit.jsonl").is_file(),
+            "the securely created file remains in the held original directory"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn open_never_reopens_a_parent_replaced_with_a_fifo_after_the_nofollow_walk() {
+        // `File::open(configured_parent)` would block indefinitely here: a FIFO
+        // has no writer.  The sync descriptor must instead be derived from the
+        // already-held directory capability, then the later path authentication
+        // refuses the replacement without writing into it.
+        use rustix::fs::{Mode, mkfifoat};
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let parent = root.path().join("audit-parent");
+        let parked = root.path().join("parked-parent");
+        std::fs::create_dir(&parent).expect("create audit parent");
+        let root_handle = File::open(root.path()).expect("open test root directory");
+        let moved_parent = parent.clone();
+        let moved_parked = parked.clone();
+        set_file_audit_parent_handle_hook(move || {
+            std::fs::rename(&moved_parent, &moved_parked).expect("park held parent");
+            mkfifoat(&root_handle, "audit-parent", Mode::RUSR | Mode::WUSR)
+                .expect("replace configured parent with a FIFO");
+        });
+
+        let error = match FileAuditSink::open(parent.join("audit.jsonl")) {
+            Ok(_) => panic!("a FIFO replacement must be refused without blocking on it"),
+            Err(error) => error,
+        };
+        assert!(
+            error.to_string().contains("unsafe or unreadable component"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            parked.join("audit.jsonl").is_file(),
+            "only the held original parent may receive created children"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_refuses_a_symlinked_parent_without_creating_a_redirected_audit_log() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let real_parent = root.path().join("real-parent");
+        let configured_parent = root.path().join("configured-parent");
+        std::fs::create_dir(&real_parent).expect("create real parent");
+        symlink(&real_parent, &configured_parent).expect("plant parent symlink");
+        let configured_log = configured_parent.join("audit.jsonl");
+
+        assert!(
+            FileAuditSink::open(&configured_log).is_err(),
+            "the primary audit sink must refuse any symlinked parent component"
+        );
+        assert!(
+            !real_parent.join("audit.jsonl").exists(),
+            "refusing the configured parent must not create a redirected audit log"
+        );
+        assert!(
+            !real_parent.join("audit.jsonl.lock").exists(),
+            "refusing the configured parent must not create a redirected lock sidecar"
+        );
     }
 
     #[cfg(unix)]

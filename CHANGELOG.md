@@ -34,6 +34,18 @@ unchanged in contract.
 - **Audit DB-evidence verification remains memory-bounded.** `audit verify
   --with-db-evidence` now streams correlation data and caps report samples and
   unavailable-reason summaries instead of retaining a full ledger.
+- **New audit ledgers bind their directory durability to the opened parent.** A
+  directory replacement during startup now fails closed instead of allowing the
+  audit/lock entries and their `fsync` to target different directories.
+- **Audit ledgers, anchors, and WORM mirrors reject redirected parent paths.**
+  Their Unix paths now walk each existing parent component without following
+  links and retain that directory capability through child open, identity
+  checks, and anchor replacement; a later parent swap is refused rather than
+  silently reporting a parked or redirected artifact as configured.
+- **CI evidence and operator idempotency remain bounded under races.** A
+  regular-file replacement of a CI-lane snapshot is refused after descriptor
+  open, and a fully live operator idempotency ledger refuses a new action until
+  a lease completes or drops rather than growing past its configured cap.
 - **Approved config writes and the entire durable-spool lifecycle retain
   no-follow directory capabilities.** A local parent-directory swap now
   refuses a config write before it can redirect it, and cannot redirect spool
