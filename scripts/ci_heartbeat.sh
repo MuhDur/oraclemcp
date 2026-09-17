@@ -3,9 +3,10 @@
 # + C8): "the deepest operator-trust wound was the operator discovering red CI
 # himself." This script polls the REAL GitHub Actions state — never local git
 # state, which can be stale or unpushed — for the required + scheduled lanes
-# this repo's own `docs/ci_taxonomy.json` names, plus, trivially in scope, the
-# sibling driver repo's required lane and its Live nightly (the chronically-red
-# lane plan §27.7 F-D2 names by hand). It is designed to run on a schedule (see
+# this repo's own `docs/ci_taxonomy.json` names, plus, advisory-only, the
+# sibling driver repo's lanes (both its required gate and its Live nightly are
+# watched but non-gating; the driver repo is discontinued and off-limits — see
+# the DRIVER_REPO note below). It is designed to run on a schedule (see
 # `.github/workflows/ci-heartbeat.yml`) so a red or blocked lane is surfaced
 # within one cycle, not discovered later by a human reading the Actions tab.
 #
@@ -56,9 +57,20 @@ SERVER_REPO="MuhDur/oraclemcp"
 DRIVER_REPO="MuhDur/rust-oracledb"
 # The driver repo's own CI taxonomy is not generated/embedded here (that would
 # be a second copy of a different repo's source of truth — out of proportion
-# for a heartbeat). Its required gate (hard-fail) and its Live nightly (advisory;
-# plan §27.7 F-D2) are small and stable enough to name directly; review this
-# list if the driver restructures its workflows.
+# for a heartbeat). Its required gate and its Live nightly are small and stable
+# enough to name directly; review this list if the driver restructures its
+# workflows.
+#
+# BOTH driver lanes are ADVISORY (watched, non-gating) from this heartbeat's
+# perspective. The in-house driver `rust-oracledb` (driver-cx) was DISCONTINUED
+# upstream on 2026-08-06 and is off-limits to this repo — oraclemcp consumes the
+# last published crate plus the official `oracledb` beta as a connect-time
+# fallback, so its source repo's own required gate is not part of oraclemcp's
+# health. Its `required.yml` has been red since the discontinuation; letting a
+# separate, unfixable repo redden oraclemcp's heartbeat would train the operator
+# to ignore a red badge — the exact opposite of this bead's operator-trust goal.
+# Both lanes are still recorded in the snapshot (visible, honestly not_green),
+# they just no longer drive this script's exit code.
 DRIVER_REQUIRED_WORKFLOWS=("required.yml")
 DRIVER_SCHEDULED_WORKFLOWS=("live.yml")
 
@@ -348,10 +360,19 @@ for file in "${server_scheduled_files[@]}"; do
   watch_server_scheduled_jobs "$file"
 done
 
-# --- Driver (rust-oracledb): trivially-in-scope required + Live nightly.
+# --- Driver (rust-oracledb): watched ADVISORY-only (see the DRIVER_REPO note
+# above). The driver source repo is discontinued and off-limits; neither its
+# required gate nor its Live nightly gates oraclemcp's heartbeat. Both are still
+# recorded in the snapshot so a reader sees their real state.
 if [ "$INCLUDE_DRIVER" = "1" ]; then
   for file in "${DRIVER_REQUIRED_WORKFLOWS[@]}"; do
-    watch_workflow "$DRIVER_REPO" "$file" "driver_required" "&branch=main&event=push" 1
+    # Demoted from a hard gate (notify=1) to advisory (notify=0): the driver's
+    # own required.yml has been red since the 2026-08-06 driver-cx
+    # discontinuation and cannot be fixed from here, so it must not redden
+    # oraclemcp's heartbeat. Tier is `driver_advisory` to name the demotion
+    # honestly in the snapshot (it is the driver's required gate, watched
+    # advisory-only from oraclemcp's side).
+    watch_workflow "$DRIVER_REPO" "$file" "driver_advisory" "&branch=main&event=push" 0
   done
   for file in "${DRIVER_SCHEDULED_WORKFLOWS[@]}"; do
     # Advisory (see the scheduled note above): the Live nightly self-skips its
