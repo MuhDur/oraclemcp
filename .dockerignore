@@ -7,6 +7,11 @@
 !Cargo.lock
 !rust-toolchain.toml
 
+# The Dockerfile copies this into /usr/share/licenses/oraclemcp (the official
+# `oracledb` root-data ships under CDLA-Permissive-2.0). The build context is a
+# deny-all allowlist, so it must be un-ignored explicitly or `COPY` fails.
+!LICENSE-CDLA-Permissive-2.0
+
 !.cargo/
 .cargo/**
 !.cargo/config.toml

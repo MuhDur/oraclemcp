@@ -211,6 +211,7 @@ ALLOWED = {
     "!Cargo.toml",
     "!Cargo.lock",
     "!rust-toolchain.toml",
+    "!LICENSE-CDLA-Permissive-2.0",
     "!.cargo/",
     "!.cargo/config.toml",
     "!scripts/",
