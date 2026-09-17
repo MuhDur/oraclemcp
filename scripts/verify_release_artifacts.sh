@@ -75,9 +75,13 @@ for payload in "${payloads[@]}"; do
     --certificate-identity "$certificate_identity" \
     --certificate-oidc-issuer "$oidc_issuer" \
     "$payload" >/dev/null || fail "cosign attestation verification failed for $payload"
+  # `gh attestation verify` treats [cert-identity, cert-identity-regex,
+  # signer-repo, signer-workflow] as mutually exclusive (newer gh CLI). We pass
+  # the exact `--cert-identity` (the full SAN, which already pins
+  # `.github/workflows/release.yml@refs/tags/vX.Y.Z`), so `--signer-workflow`
+  # here is both redundant and now rejected — keep the stricter cert-identity.
   "$gh_bin" attestation verify "$payload" \
     --repo "$repository" \
-    --signer-workflow "$repository/.github/workflows/release.yml" \
     --source-ref "$source_ref" \
     --source-digest "$source_digest" \
     --cert-identity "$certificate_identity" \
