@@ -21,6 +21,16 @@
 
 oraclemcp connects through its **own mature, pure-Rust Oracle driver** as the **primary** path. The official `oracledb` crate from Oracle — whose crate name we handed to Oracle in a friendly handshake — is currently in **beta**, and therefore ships purely as a bounded, connect-time **fallback** for the rare case something goes awry. No Oracle Instant Client, ODPI-C, or C toolchain is required.
 
+```mermaid
+flowchart LR
+    A["Connection request"] --> D["driver-cx<br/>pure-Rust · primary<br/>password · IAM · wallet · TCPS/PEM"]
+    D -->|"basic-password<br/>connect fails"| O["oracledb<br/>Oracle · beta<br/>connect-time fallback"]
+    D --> DB[("Oracle Database")]
+    O --> DB
+```
+
+<sub>Only a failed basic-password connect ever falls back; IAM, wallet, and TCPS/PEM always stay on driver-cx, and a fallback never migrates a live session.</sub>
+
 ## At a glance
 
 | | |
@@ -89,6 +99,20 @@ The core invariant is a **fail-closed SQL guard** — not "read-only forever." O
 - the **classifier still gating every statement** at the *current* level,
 - **DML rolling back by default**, `protected` profiles pinned at `READ_ONLY` with an immutable ceiling, and OAuth scopes that can only *lower* the effective level,
 - a **signed, append-only, HMAC-SHA256 hash-chained audit** record for every privileged action.
+
+```mermaid
+flowchart LR
+    A["Agent SQL"] --> C{"Fail-closed<br/>classifier"}
+    C -->|"proven READ_ONLY"| R["Read tools · rows returned"]
+    C -->|"forbidden / unparseable"| X["Refuse<br/>typed ErrorEnvelope"]
+    C -->|"non-read"| L{"Operating-level gate<br/>READ_ONLY → READ_WRITE → DDL → ADMIN"}
+    L -->|"above level / ceiling"| X
+    L -->|"within profile ceiling"| P["Preview → confirmation token"]
+    P --> E["Execute"]
+    E -->|"DML"| RB["Rollback by default<br/>commit only with grant"]
+    R --> AU[("Signed hash-chained audit")]
+    E --> AU
+```
 
 An unparseable or unclassifiable statement fails **closed**. Statements can emit a verdict certificate bound to the classified bytes and the audit record; the routine-purity law it relies on is specified in [`proofs/purity-core/PurityCore.lean`](proofs/purity-core/PurityCore.lean) and pinned to the Rust classifier by a conformance test.
 
