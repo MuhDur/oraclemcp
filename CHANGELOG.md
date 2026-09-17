@@ -11,6 +11,18 @@ installation path, plus a driver repin to `driver-cx` 0.9.2. The fail-closed SQL
 guard and the `READ_ONLY < READ_WRITE < DDL < ADMIN` operating-level ladder are
 unchanged in contract.
 
+### Documentation
+
+- **The README is rewritten to a concise, professional front page**
+  (1,606 → ~230 lines). It leads with a short driver story (the in-house
+  pure-Rust driver is primary; the official `oracledb` crate — handed to Oracle
+  in a friendly handshake — is in beta and ships purely as a connect-time
+  fallback), an at-a-glance capabilities table with real numbers, and a compact
+  governed-dimensions table. The full operator and configuration depth now lives
+  behind [`docs/configuration.md`](docs/configuration.md) and
+  [`docs/operations.md`](docs/operations.md); the generated tool and alias tables
+  are unchanged.
+
 ### Security
 
 - **A Windows audit-DACL takeover is refused, and the private owner is
