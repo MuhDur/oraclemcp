@@ -358,15 +358,14 @@ class Ladder:
         self.vector_table_dropped = False
         # Throwaway source objects for the create_or_replace / compile_object /
         # patch_source governed-DDL sub-ladder. A PROCEDURE, FUNCTION, and
-        # PACKAGE exercise their own CREATE OR REPLACE + compile paths and are
-        # invoked through oracle_execute. Their marker table is separate from
-        # the DML ladder table so the PL/SQL proof cannot mask rollback/commit
-        # behavior below.
+        # PACKAGE exercise their own CREATE OR REPLACE + compile paths. Generic
+        # oracle_execute intentionally does not invoke them: without the
+        # catalog-aware routine analysis tracked by oraclemcp-ge6xe.2, that
+        # path must stay fail-closed rather than guessing about hidden effects.
         self.view = f"{args.table}_V"
         self.proc = f"{args.table}_P"
         self.function = f"{args.table}_F"
         self.package = f"{args.table}_PKG"
-        self.plsql_table = f"{args.table}_PL"
         self.proc_owner = None
         self.view_created = False
         self.view_dropped = False
@@ -376,8 +375,6 @@ class Ladder:
         self.function_dropped = False
         self.package_created = False
         self.package_dropped = False
-        self.plsql_table_created = False
-        self.plsql_table_dropped = False
         self.failures = 0
 
     def new_session(self, profile):
@@ -499,6 +496,49 @@ class Ladder:
         )
         self.harness.level = "READ_ONLY"
         return dropped
+
+    def reconnect_primary(self, elevate_to=None, client_name="oracle-ladder-reconnect-e2e"):
+        """Resume the main ladder on a fresh primary session.
+
+        A single pinned ladder session accumulates cursors across its many
+        governed statements; `DBMS_XPLAN.DISPLAY` later opens enough additional
+        cursors that the session can exceed the database's `OPEN_CURSORS`.
+        Reconnecting between heavy phases hands the next phase a clean cursor
+        budget without changing what any step proves. Optionally re-elevate to
+        ``elevate_to``.
+
+        The prior primary session is closed first so its Oracle session is
+        released back to the database before the replacement connects. Without
+        this the abandoned sessions accumulate and, on the small FREE 23ai
+        session pool, the next ``initialize`` blocks on connection acquisition
+        and times out.
+        """
+        previous = self.session
+        if previous is not None:
+            try:
+                previous.close()
+            except Exception:
+                pass
+        self.session = self.new_session(self.primary_profile)
+        resumed = self.session.rpc(
+            "initialize",
+            {
+                "protocolVersion": "2025-11-25"
+                if isinstance(self.session, HttpMcpSession)
+                else "2025-03-26",
+                "capabilities": {},
+                "clientInfo": {"name": client_name, "version": "1"},
+            },
+        )
+        require(
+            resumed.get("result", {}).get("serverInfo", {}).get("name") == "oraclemcp",
+            "resumed primary session identifies the served server",
+            resumed,
+        )
+        self.session.notify("notifications/initialized")
+        self.harness.profile = self.primary_profile
+        if elevate_to:
+            self.elevate(elevate_to)
 
     def governed_execute(self, sql, commit, expect):
         """preview -> single-use confirmation grant -> oracle_execute."""
@@ -1109,25 +1149,7 @@ class Ladder:
             # Resume the main ladder on a fresh primary session. The fixture's
             # DDL/DML was committed through the prior governed session, and the
             # cleanup below still goes through the normal DDL confirmation gate.
-            self.session = self.new_session(self.primary_profile)
-            resumed = self.session.rpc(
-                "initialize",
-                {
-                    "protocolVersion": "2025-11-25"
-                    if isinstance(self.session, HttpMcpSession)
-                    else "2025-03-26",
-                    "capabilities": {},
-                    "clientInfo": {"name": "oracle-vector-resume-e2e", "version": "1"},
-                },
-            )
-            require(
-                resumed.get("result", {}).get("serverInfo", {}).get("name") == "oraclemcp",
-                "resumed primary session identifies the served server",
-                resumed,
-            )
-            self.session.notify("notifications/initialized")
-            self.harness.profile = self.primary_profile
-            self.elevate("DDL")
+            self.reconnect_primary(elevate_to="DDL", client_name="oracle-vector-resume-e2e")
 
             self.governed_execute(
                 f"DROP TABLE {vector_table} PURGE", commit=True, expect={"committed": True}
@@ -1163,12 +1185,8 @@ class Ladder:
         proc = self.proc
         function = self.function
         package = self.package
-        plsql_table = self.plsql_table
         view_src = f"CREATE OR REPLACE VIEW {view} AS SELECT 1 AS id FROM dual"
-        proc_src = (
-            f"CREATE OR REPLACE PROCEDURE {proc} AS BEGIN "
-            f"NULL; INSERT INTO {plsql_table} (id, marker) VALUES (2002, 'procedure'); END;"
-        )
+        proc_src = f"CREATE OR REPLACE PROCEDURE {proc} AS BEGIN NULL; END;"
         function_src = (
             f"CREATE OR REPLACE FUNCTION {function} RETURN NUMBER AS BEGIN RETURN 2001; END;"
         )
@@ -1177,8 +1195,7 @@ class Ladder:
         )
         package_body_src = (
             f"CREATE OR REPLACE PACKAGE BODY {package} AS "
-            f"PROCEDURE mark IS BEGIN INSERT INTO {plsql_table} (id, marker) "
-            f"VALUES (2003, 'package'); END mark; END {package};"
+            f"PROCEDURE mark IS BEGIN NULL; END mark; END {package};"
         )
 
         def source_create_or_replace_view():
@@ -1257,20 +1274,6 @@ class Ladder:
                 content,
             )
             return {"error_class": content.get("error_class")}
-
-        def source_create_plsql_fixture():
-            result = self.governed_execute(
-                f"CREATE TABLE {plsql_table} (id NUMBER PRIMARY KEY, marker VARCHAR2(32))",
-                commit=True,
-                expect={"committed": True},
-            )
-            self.plsql_table_created = True
-            require(
-                self.count_rows(f"SELECT COUNT(*) AS n FROM {plsql_table}") == 0,
-                "the separate PL/SQL marker table starts empty",
-                plsql_table,
-            )
-            return result
 
         def source_create_procedure_via_create_or_replace():
             # oracle-p0d6: a PL/SQL CREATE OR REPLACE now floors at DDL (was
@@ -1427,40 +1430,85 @@ class Ladder:
             body = compile_source_object("PACKAGE_BODY", package, "package body")
             return {"spec": spec, "body": body}
 
-        def source_invoke_procedure_via_oracle_execute():
-            return self.governed_execute(
-                f"BEGIN {proc}; END;",
-                commit=True,
-                expect={"committed": True},
-            )
-
-        def source_invoke_function_via_oracle_execute():
-            return self.governed_execute(
-                f"BEGIN INSERT INTO {plsql_table} (id, marker) "
-                f"VALUES ({function}(), 'function'); END;",
-                commit=True,
-                expect={"committed": True},
-            )
-
-        def source_invoke_package_via_oracle_execute():
-            return self.governed_execute(
-                f"BEGIN {package}.mark; END;",
-                commit=True,
-                expect={"committed": True},
-            )
-
-        def source_verify_plsql_round_trip():
-            rows = self.query_rows(
-                f"SELECT id, marker FROM {plsql_table} ORDER BY id"
-            )
-            observed = {str(row.get("ID")): row.get("MARKER") for row in rows}
-            expected = {"2001": "function", "2002": "procedure", "2003": "package"}
+        def source_routine_invocation_via_oracle_execute_refused():
+            # The DDL tools above create and compile routine source safely. The
+            # generic execution surface deliberately cannot invoke a stored
+            # procedure until the served classifier has catalog-aware routine
+            # analysis (oraclemcp-ge6xe.2). This must be a policy block, not a
+            # level or confirmation problem, and must reach neither Oracle nor
+            # the procedure body.
+            sql = f"BEGIN {proc}; END;"
+            preview = self.preview(sql)
             require(
-                observed == expected,
-                "FUNCTION, PROCEDURE, and PACKAGE invocations persist exactly their markers",
-                {"observed": observed, "expected": expected},
+                preview.get("gate_decision") == "blocked"
+                and preview.get("danger") == "FORBIDDEN",
+                "stored-routine invocation is fail-closed at the classifier",
+                preview,
             )
-            return observed
+            require(
+                (preview.get("blocked_reason") or {}).get("type") == "forbidden",
+                "stored-routine refusal is not an operating-level ceiling",
+                preview,
+            )
+            require(
+                "procedural PL/SQL expression without complete semantic analysis"
+                in str(preview.get("reason") or "")
+                and "hidden routine effects cannot be ruled out"
+                in str(preview.get("reason") or ""),
+                "refusal identifies the unproven routine-effect boundary",
+                preview,
+            )
+            require(
+                preview.get("safe_alternative")
+                == "submit each static SQL statement directly; procedural execution requires catalog-aware resolution that is not available on this path",
+                "refusal exposes the catalog-aware-analysis prerequisite",
+                preview,
+            )
+            require(
+                preview.get("execute_confirmation") is None,
+                "a forbidden routine invocation never mints an execution grant",
+                preview,
+            )
+            result = self.session.call("oracle_execute", {"sql": sql})
+            content = structured(result)
+            require(
+                result.get("isError") is True
+                and content.get("error_class") == "FORBIDDEN_STATEMENT",
+                "oracle_execute refuses the stored routine before it can run",
+                content,
+            )
+            return {"error_class": content.get("error_class")}
+
+        def source_verify_plsql_lifecycle():
+            expected_sources = [
+                (proc, "PROCEDURE", "NULL; NULL"),
+                (function, "FUNCTION", "RETURN 2001"),
+                (package, "PACKAGE", "PROCEDURE mark"),
+                (package, "PACKAGE_BODY", "PROCEDURE mark IS BEGIN NULL"),
+            ]
+            verified = []
+            for name, object_type, expected_text in expected_sources:
+                source = structured(
+                    self.session.call(
+                        "oracle_get_source",
+                        {"name": name, "object_type": object_type, "max_chars": 4096},
+                    )
+                )
+                document = source.get("source") or {}
+                source_text = document.get("source") or ""
+                require(
+                    document.get("line_count", 0) > 0 and expected_text in source_text,
+                    f"{object_type} source is present through the dedicated source tool",
+                    source,
+                )
+                errors = structured(self.session.call("oracle_compile_errors", {"name": name}))
+                require(
+                    errors.get("errors") == [],
+                    f"{object_type} has no compile errors after its governed lifecycle",
+                    errors,
+                )
+                verified.append(object_type)
+            return {"verified": verified}
 
         def source_patch_source():
             args_p = {
@@ -1520,12 +1568,6 @@ class Ladder:
                 f"DROP VIEW {view}", commit=True, expect={"committed": True}
             )
             self.view_dropped = True
-            self.governed_execute(
-                f"DROP TABLE {plsql_table} PURGE",
-                commit=True,
-                expect={"committed": True},
-            )
-            self.plsql_table_dropped = True
             for name, object_type in [
                 (proc, "PROCEDURE"),
                 (function, "FUNCTION"),
@@ -1543,13 +1585,19 @@ class Ladder:
                     f"the dropped {object_type} is absent through the dedicated source tool",
                     source,
                 )
-            return {"dropped": [package, function, proc, view, plsql_table]}
+            return {"dropped": [package, function, proc, view]}
 
         def drop_to_read_only_mid():
             dropped = self.drop_level()
             refusal = self.query_refused(
                 f"INSERT INTO {table} (id, note) VALUES (1, 'refused-again')"
             )
+            # The source-object PL/SQL sub-ladder above ran many governed
+            # statements on this pinned session; hand the diagnostics phase
+            # (explain_plan's DBMS_XPLAN.DISPLAY) a fresh cursor budget so it
+            # cannot exceed OPEN_CURSORS. A fresh session is READ_ONLY, matching
+            # the drop this step just proved.
+            self.reconnect_primary()
             return {"dropped": dropped, "refusal": refusal}
 
         def elevate_read_write():
@@ -2103,16 +2151,11 @@ class Ladder:
                 "source_create_or_replace_wrong_grant_refused",
                 source_create_or_replace_wrong_grant_refused,
             ),
-            ("source_create_plsql_fixture", source_create_plsql_fixture),
             (
                 "source_create_procedure_via_create_or_replace",
                 source_create_procedure_via_create_or_replace,
             ),
             ("source_compile_object", source_compile_object),
-            (
-                "source_invoke_procedure_via_oracle_execute",
-                source_invoke_procedure_via_oracle_execute,
-            ),
             ("source_patch_source", source_patch_source),
             (
                 "source_create_function_via_create_or_replace",
@@ -2120,19 +2163,15 @@ class Ladder:
             ),
             ("source_compile_function", source_compile_function),
             (
-                "source_invoke_function_via_oracle_execute",
-                source_invoke_function_via_oracle_execute,
-            ),
-            (
                 "source_create_package_via_create_or_replace",
                 source_create_package_via_create_or_replace,
             ),
             ("source_compile_package", source_compile_package),
             (
-                "source_invoke_package_via_oracle_execute",
-                source_invoke_package_via_oracle_execute,
+                "source_routine_invocation_via_oracle_execute_refused",
+                source_routine_invocation_via_oracle_execute_refused,
             ),
-            ("source_verify_plsql_round_trip", source_verify_plsql_round_trip),
+            ("source_verify_plsql_lifecycle", source_verify_plsql_lifecycle),
             ("source_drop_objects", source_drop_objects),
             ("drop_to_read_only_mid", drop_to_read_only_mid),
             ("elevate_read_write", elevate_read_write),
@@ -2198,8 +2237,6 @@ class Ladder:
             leftovers.append(("PROCEDURE", self.proc))
         if self.view_created and not self.view_dropped:
             leftovers.append(("VIEW", self.view))
-        if self.plsql_table_created and not self.plsql_table_dropped:
-            leftovers.append(("TABLE", self.plsql_table))
         if leftovers:
             try:
                 self.elevate("DDL")

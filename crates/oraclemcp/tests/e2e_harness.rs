@@ -193,7 +193,7 @@ fn e2e_scripts_emit_required_json_line_fields() {
 }
 
 #[test]
-fn blocking_free23_matrix_keeps_the_plsql_round_trip_contract() {
+fn blocking_free23_matrix_keeps_the_governed_plsql_lifecycle_contract() {
     let root = repo_root();
     let ladder = std::fs::read_to_string(root.join("scripts/e2e/oracle_ladder_session.py"))
         .expect("read Oracle ladder session");
@@ -204,10 +204,8 @@ fn blocking_free23_matrix_keeps_the_plsql_round_trip_contract() {
         "source_compile_object",
         "source_compile_function",
         "source_compile_package",
-        "source_invoke_procedure_via_oracle_execute",
-        "source_invoke_function_via_oracle_execute",
-        "source_invoke_package_via_oracle_execute",
-        "source_verify_plsql_round_trip",
+        "source_routine_invocation_via_oracle_execute_refused",
+        "source_verify_plsql_lifecycle",
         "DROP PACKAGE {package}",
         "DROP FUNCTION {function}",
         "DROP PROCEDURE {proc}",
