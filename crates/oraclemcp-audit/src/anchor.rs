@@ -310,21 +310,12 @@ impl std::error::Error for AnchorLoadError {}
 
 /// Load the anchor sidecar at `path`. An absent sidecar beneath an extant
 /// parent yields `Ok(None)` for legacy logs; any other read/parse failure
-/// yields `Err`.
+/// yields `Err`. This standalone path-based reader is only for inspection
+/// before any ledger is opened; post-open verification must use
+/// [`load_anchor_from_open_audit_parent`] with the ledger's held parent
+/// capability.
 pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> {
-    load_anchor_inner(path, false)
-}
-
-/// Load an anchor while authenticating an already-open primary ledger.
-///
-/// A legacy anchor sidecar may be absent, but the sidecar's parent must still
-/// exist and resolve safely. Otherwise an attacker could move or redirect that
-/// parent after the primary file was opened and make a real head anchor look
-/// like a legacy absence, suppressing tail-truncation protection.
-pub fn load_anchor_for_open_audit_ledger(
-    path: &Path,
-) -> Result<Option<ChainAnchor>, AnchorLoadError> {
-    load_anchor_inner(path, true)
+    load_standalone_anchor(path)
 }
 
 /// Load an anchor relative to the exact parent capability that opened its
@@ -343,10 +334,7 @@ pub fn load_anchor_from_open_audit_parent(
     load_anchor_from_directory(path, name, parent)
 }
 
-fn load_anchor_inner(
-    path: &Path,
-    require_existing_parent: bool,
-) -> Result<Option<ChainAnchor>, AnchorLoadError> {
+fn load_standalone_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> {
     let parent_path = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -355,15 +343,7 @@ fn load_anchor_inner(
     #[cfg(unix)]
     let directory = match open_existing_audit_directory_nofollow(parent_path) {
         Ok(directory) => directory,
-        Err(AuditDirectoryOpenError::Missing) if !require_existing_parent => return Ok(None),
-        Err(AuditDirectoryOpenError::Missing) => {
-            return Err(AnchorLoadError {
-                message: format!(
-                    "{}: anchor parent is missing while an audit ledger is already open",
-                    path.display()
-                ),
-            });
-        }
+        Err(AuditDirectoryOpenError::Missing) => return Ok(None),
         Err(AuditDirectoryOpenError::Rejected(error)) => {
             return Err(AnchorLoadError {
                 message: format!("{}: {error}", path.display()),
@@ -372,20 +352,12 @@ fn load_anchor_inner(
     };
     #[cfg(windows)]
     let held_parent = match std::fs::symlink_metadata(parent_path) {
-        // Preserve the legacy absence contract only when the parent was
-        // genuinely absent before the no-reparse walk. Once it exists, the
-        // walk below remains authoritative and rejects a final or
+        // A standalone legacy lookup may report no sidecar only when the
+        // parent was genuinely absent before the no-reparse walk. Once it
+        // exists, the walk below remains authoritative and rejects a final or
         // intermediate reparse point rather than following it.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_existing_parent => {
-            return Ok(None);
-        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AnchorLoadError {
-                message: format!(
-                    "{}: anchor parent is missing while an audit ledger is already open",
-                    path.display()
-                ),
-            });
+            return Ok(None);
         }
         Err(error) => {
             return Err(AnchorLoadError {
@@ -401,16 +373,8 @@ fn load_anchor_inner(
     #[cfg(not(unix))]
     let directory = match CapDir::open_ambient_dir(parent_path, ambient_authority()) {
         Ok(directory) => directory,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_existing_parent => {
-            return Ok(None);
-        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(AnchorLoadError {
-                message: format!(
-                    "{}: anchor parent is missing while an audit ledger is already open",
-                    path.display()
-                ),
-            });
+            return Ok(None);
         }
         Err(error) => {
             return Err(AnchorLoadError {
