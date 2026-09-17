@@ -7,58 +7,450 @@
   <a href="https://crates.io/crates/oraclemcp"><img src="https://img.shields.io/crates/v/oraclemcp.svg" alt="crates.io"></a>
   <a href="#license"><img src="https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue.svg" alt="license"></a>
   <img src="https://img.shields.io/badge/unsafe-forbidden-success.svg" alt="forbid(unsafe_code)">
-  <img src="https://img.shields.io/badge/tests-~3300-success.svg" alt="~3,300 tests">
   <img src="https://img.shields.io/badge/rustc-nightly--2026--05--11-orange.svg" alt="nightly-2026-05-11">
 </p>
 
 > **Governed, least-privilege Oracle Database access for AI agents — in pure Rust.**
 
-`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database. Every raw statement the agent submits is classified **before** it can reach Oracle: read tools admit only statements *proven* read-only, and non-read SQL runs only through an explicit, profile-gated path that **rolls DML back by default** and requires a preview-derived grant before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
+`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database: schema introspection, DDL, compile errors, source search, ad-hoc read queries, plan analysis, and an explicit profile-gated execution path for non-read SQL. Every raw statement the agent submits is classified *before* it can reach Oracle. Read tools only admit statements proven read-only; `oracle_execute` only runs statements permitted by the active profile/session level, rolls DML back by default, and requires a preview-derived execution grant before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
 
-> _An independent open-source project — not affiliated with Oracle. See [how it compares](#how-it-compares) to Oracle's own MCP servers._
+> _An independent open-source project; not affiliated with Oracle. For Oracle's own MCP servers, see [oracle/mcp](https://github.com/oracle/mcp)._
 
-### Drivers
+## Install, service, dashboard
 
-oraclemcp connects through its **own mature, pure-Rust Oracle driver** as the **primary** path. The official `oracledb` crate from Oracle — whose crate name we handed to Oracle in a friendly handshake — is currently in **beta**, and therefore ships purely as a bounded, connect-time **fallback** for the rare case something goes awry. No Oracle Instant Client, ODPI-C, or C toolchain is required.
-
-```mermaid
-flowchart LR
-    A["Connection request"] --> D["driver-cx<br/>pure-Rust · primary<br/>password · IAM · wallet · TCPS/PEM"]
-    D -->|"basic-password<br/>connect fails"| O["oracledb<br/>Oracle · beta<br/>connect-time fallback"]
-    D --> DB[("Oracle Database")]
-    O --> DB
-```
-
-<sub>Only a failed basic-password connect ever falls back; IAM, wallet, and TCPS/PEM always stay on driver-cx, and a fallback never migrates a live session.</sub>
-
-## At a glance
-
-| | |
-|---|---|
-| **Tools** | **34 governed MCP tools** + 25 compatibility aliases, each with a real JSON Schema and MCP safety hints |
-| **Safety** | fail-closed SQL classifier · 4-level ladder `READ_ONLY → READ_WRITE → DDL → ADMIN` · DML rollback-by-default · signed, hash-chained audit |
-| **Auth** | username/password over TCP · IAM / OCI ADB token · TLS/TCPS + PEM · Oracle wallet (`cwallet.sso`) |
-| **Oracle** | 18c · 21c · 23ai — including governed native **VECTOR** search |
-| **Code** | **9 pure-Rust crates + binary** · `#![forbid(unsafe_code)]` · **~3,300 tests** + a differential fuzzer |
-| **Transports** | stdio (default) + Streamable HTTP with rustls TLS/mTLS and optional OAuth |
-
-## Quick start
-
-One line installs or updates on macOS and Linux (works pasted in a terminal or in a non-interactive agent run):
+One line installs or updates `oraclemcp` on macOS and Linux. It works as pasted
+for a human terminal and for a non-interactive agent run:
 
 ```sh
 curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash
 ```
 
-It verifies a SHA-256 digest (plus cosign signature/provenance when cosign is present) and installs `oraclemcp` and the short `om` alias into `$HOME/.local`. Also available: **Windows** (`install.ps1`), **Docker** (`ghcr.io/muhdur/oraclemcp:latest`), `cargo binstall oraclemcp`, and Homebrew/winget once those channels resolve. Air-gapped offline install, verification postures, and service install are documented via `bash install.sh --help` and [`docs/`](docs/). No npm/npx channel is offered.
+The hosted script fetch includes a cache buster so stale CDN/proxy copies do not
+hide installer updates. This command installs the latest published release; add
+`--version X.Y.Z` (or `vX.Y.Z`) to pin a specific release instead. Later
+examples that contain `...`, `<pw>`, `<profile>`, or placeholder env values are
+templates: replace those placeholders before running them.
 
-Onboard and connect a client:
+The normal command downloads, verifies, and installs into `$HOME/.local` unless
+you pass `--prefix`. It requires the SHA-256 digest check, verifies the cosign
+blob signature and provenance attestation when cosign is installed, and installs
+`oraclemcp` plus the short `om` alias. Missing cosign is a visible
+authenticity-unverified posture by default; use `--verify require` when your
+environment requires cosign to be present.
+
+In an interactive terminal, the installer then offers a short guided flow:
+append the binary directory to `PATH`, run `doctor`, offer zero-config database
+discovery from `tnsnames.ora`, print an MCP client snippet, and optionally
+install the loopback service. In a pipe, CI job, or agent run, it never prompts,
+never scans, and never starts a service; it installs the binary and prints the
+exact `PATH` line plus next steps on stderr. Every install finishes with next
+steps on stderr: discover databases, run `doctor`, write the starter profile,
+and generate MCP client snippets.
+
+### Zero-config onboarding
+
+`oraclemcp setup --discover` finds every database defined in your `tnsnames.ora`
+and writes one **read-only** connection profile per net-service — through the
+same governed config-ops path (timestamped backup, atomic write, strict
+re-validation) used everywhere else. It is **consent-gated**: an interactive run
+asks before it scans and again before it writes; a non-interactive run without
+`--discover-tns` (or `--yes`) refuses with exit code 2 and scans nothing. It
+writes **no secrets to disk** (each profile references an environment variable,
+`env:ORACLE_<NAME>_PASSWORD`, that you export yourself), keeps every profile
+capped at `READ_ONLY`, and is **idempotent and non-destructive**: existing
+profiles and hand edits are preserved, only new databases are added. When no
+`tnsnames.ora` is found it falls back to the minimal starter profile so you
+still boot. Add
+`--json` for a names-only agent report, or `--dry-run` to preview without
+writing. Run `oraclemcp doctor` afterwards to see exactly which credentials
+remain to be set. Full contract: `docs/tns-discovery-onboarding.md`.
+
+Re-running the same one-liner is the update path. Re-running the same verified
+archive is a no-op for identical installed files; re-running with a newer target
+updates atomically after backing up the previous binary. A downgrade is refused unless you pass `--force`.
+
+Operator migration notes for the current field-hardening train:
+[`docs/oraclemcp-091-field-hardening-notes.md`](docs/oraclemcp-091-field-hardening-notes.md).
+Config-migration runbooks introduced in 0.8.0 still apply when upgrading from an
+older release:
+[`docs/upgrading-to-0.8.0.md`](docs/upgrading-to-0.8.0.md),
+[`docs/downgrading-0.8.0-to-0.7.2.md`](docs/downgrading-0.8.0-to-0.7.2.md),
+and [`docs/feature-rollout-0.8.0.md`](docs/feature-rollout-0.8.0.md).
+
+Use the dry-run command first when you want a preview: it prints the archive,
+verification inputs, files, service plan, client-registration plan, and
+installer lock path, then exits before downloading, verifying, writing files, or
+touching the service manager. Dry-run exists for review and automation plans;
+the normal command above is the install/update command.
+
+### Advanced install paths
+
+Preview the Linux/macOS host plan without changing the machine:
 
 ```sh
-oraclemcp setup --discover           # one READ_ONLY profile per tnsnames.ora entry — consent-gated, no secrets written to disk
-oraclemcp doctor                     # offline diagnostics: driver, TNS/wallet, classifier, NLS
-oraclemcp serve --profile db_ro --allow-no-auth    # stdio (local dev)
+curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash -s -- --dry-run
 ```
+
+From an installed binary, preview or run the same update path:
+
+```sh
+oraclemcp --json self-update --dry-run
+oraclemcp self-update --no-service
+```
+
+On Windows, download and run the PowerShell installer:
+
+```powershell
+iwr -UseBasicParsing https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.ps1 -OutFile install.ps1
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -DryRun
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+The Windows installer accepts the same release operations: `-Update` for the
+explicit update path, `-NoService` to suppress service prompts, and
+`-Verify prefer`, `-Verify require`, or `-Verify checksum-only` for the
+verification posture. `prefer` installs after a hard SHA-256 check when cosign
+is missing; `require` fails without cosign.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Update -NoService
+```
+
+For air-gapped hosts, stage five inputs: the release archive, its `.sha256`,
+`.sigstore.json`, and `.attestation.sigstore.json` siblings, plus a Sigstore
+`trusted_root.json` obtained independently on a connected staging host. With a
+trusted Cosign v3 installation, refresh that root through Sigstore's TUF
+metadata before moving it across the air gap:
+
+```sh
+cosign trusted-root create --with-default-services --out sigstore-trusted-root.json
+```
+
+Then require authenticity and provenance verification during the offline
+install:
+
+```sh
+bash install.sh \
+  --offline ./oraclemcp-x86_64-unknown-linux-musl.tar.gz \
+  --version 0.10.0 \
+  --verify require \
+  --trusted-root ./sigstore-trusted-root.json
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 `
+  -Offline .\oraclemcp-x86_64-pc-windows-msvc.zip `
+  -Version 0.10.0 `
+  -Verify require `
+  -TrustedRoot .\sigstore-trusted-root.json
+```
+
+The trusted root is trust material, not another self-authenticating release
+asset. Provision and protect it separately from the archive bundle. Offline
+Cosign verification fails closed when it is absent; `checksum-only` remains an
+explicit integrity-only posture.
+
+The release installer does not silently fall back from a missing release archive
+to a source build. Use `--source` explicitly when you want `cargo install`
+instead of the verified archive path.
+
+On Linux the installer auto-detects the static musl build, which runs everywhere
+(including WSL2). The published glibc tarballs are also installable, but only by
+explicit request: `--target x86_64-unknown-linux-gnu` (or
+`aarch64-unknown-linux-gnu`).
+
+Uninstall is preview-first and idempotent. Service removal remains an explicit
+service-manager mutation:
+
+```sh
+bash install.sh --uninstall --dry-run
+bash install.sh --uninstall --yes
+bash install.sh --uninstall --service --yes
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -DryRun
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Uninstall -Yes
+```
+
+Install the local service only with explicit consent. Keep it on loopback unless
+you deliberately configure remote HTTP, and use service-owned client credentials,
+OAuth, or mTLS for HTTP MCP clients. For Windows service install, the PowerShell
+installer also requires explicit consent.
+
+```sh
+oraclemcp --json service install --dry-run --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+oraclemcp service install --yes --profile db_ro --listen 127.0.0.1:7070 --client-credentials
+oraclemcp --json clients issue --label claude --scope oracle:read
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Service -Yes -Profile db_ro
+```
+
+Request a listener-bound pairing URL plus a one-time code, open the printed URL,
+and paste the code into the form it serves:
+
+```sh
+om dashboard
+```
+
+The printed URL carries **no secret**, so it is safe in browser history, in a
+`Referer`, and in the view of any extension holding `tabs`/`webNavigation`
+permission. The one-time code is accepted only from the pairing form's POST body
+— never from a URL query or fragment — and the CLI never hands either to a
+desktop launcher (where process argv could expose it). The dashboard uses a
+one-time loopback pairing ticket bound to the exact live listener instance and
+scheme/host/port, then an HttpOnly, SameSite=Strict cookie plus CSRF and
+route-scoped action tickets. The cookie is
+`Secure` under native TLS or explicit trusted HTTPS termination; the only
+non-Secure exception is server-observed loopback HTTP, and remote plaintext
+requests never receive privileged browser cookies. Browser
+requests do not supply the database Subject: the server derives the Subject from
+the authenticated transport principal, session, and lane context. Authenticated
+HTTP sessions run on isolated per-principal lanes with their own Oracle
+connection, operating level, grants, cancellation, and audit context. Intentional
+`--allow-no-auth` HTTP development uses one anonymous lane; stdio remains the
+single local client path.
+
+Other release channels come from the same signed archive matrix. These channels
+can lag the GitHub release tag, so use the check command first and install only
+after it resolves the target version.
+
+```sh
+cargo binstall oraclemcp
+docker run -i --rm ghcr.io/muhdur/oraclemcp:latest
+```
+
+Pending registry-backed channels:
+
+```sh
+brew info MuhDur/oraclemcp/oraclemcp
+winget search --id MuhDur.oraclemcp --exact
+```
+
+After the relevant check resolves the target version, these commands are
+copy-pasteable:
+
+```sh
+brew install MuhDur/oraclemcp/oraclemcp
+winget install --id MuhDur.oraclemcp --exact
+```
+
+An npm/npx channel is not offered. Install with the one-line installer above, or
+`cargo binstall oraclemcp`, the GHCR Docker image, or the Homebrew/winget
+channels once they resolve.
+
+## Why oraclemcp
+
+- **Fail-closed by construction.** A SELECT that an agent dreams up should never silently turn into a `DELETE`. Each raw statement runs through the hardened classifier. Read tools admit only **proven** read-only `SELECT`/`WITH` and dictionary introspection. Non-read execution is isolated in `oracle_execute`, bounded by profile `max_level`/`default_level`, rollback-by-default for DML, and explicit-confirm-before-commit. Temporary elevation through `oracle_set_session_level` can never exceed the profile ceiling. *Forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching the database, with an `OperatingLevelTooLow` or `ForbiddenStatement` envelope and a suggested safe alternative.
+- **Agent-first UX.** Every tool ships a real JSON Schema, title, and explicit MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) so clients do not infer unsafe defaults. Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints, not bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface; MCP resources expose the capability/tool documents plus schema/object read templates; and an offline build degrades to a `RuntimeStateRequired` contract instead of crashing.
+- **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier carries a differential cargo-fuzz target.
+- **Two transports.** stdio (default) and Streamable HTTP (`--listen`) with
+  fail-closed auth defaults, optional OAuth bearer enforcement, and native
+  rustls TLS/mTLS.
+
+## Governed dimensions
+
+oraclemcp treats a database session as a governed surface with several
+independent controls, not only a guarded read path. Each control below names the
+tool or knob it uses and the proof script that exercises it. The depth is in
+operators' hands; this section links to docs rather than repeating them.
+
+What an agent sees depends on the active operating level. At `READ_ONLY`,
+`initialize` advertises `tools`, `prompts`, `resources`, and `completions`
+(protocol `2025-11-25`); `tools/list` then returns **27 `oracle_*` tools plus 16
+compatibility aliases**. Tools that require `READ_WRITE` or `DDL` are absent
+from that list; once the session is elevated within the profile ceiling,
+`tools/list` returns **35 `oracle_*` tools plus 25 aliases**. A call to a
+not-yet-visible tool before elevation is refused with the same typed
+`ErrorEnvelope` as any other below-level statement (`oracle_execute` answers
+`OPERATING_LEVEL_TOO_LOW` on a `READ_ONLY` profile); tools that appear only
+after elevation still refuse with a typed envelope if the classifier or profile
+ceiling does not admit them — see [Safety model](#safety-model). Both counts
+were measured by driving the served binary in this release; the generated tool
+table below is the canonical name reference.
+
+- **Cost.** `oracle_query` takes an optional per-call `max_query_cost` that can
+  only lower the profile's ceiling, and a profile can set a durable
+  per-principal `profiles.cumulative_query_cost_budget` (`max_cost`,
+  `window_seconds`). An over-ceiling or unavailable optimizer estimate is
+  refused before the target query executes. Proof:
+  [`scripts/e2e/cost_gate.sh`](scripts/e2e/cost_gate.sh).
+- **Time.** `oracle_query` accepts `as_of` to read a past committed SCN or
+  timestamp through a bound `DBMS_FLASHBACK` window; `oracle_diff` compares one
+  proven read-only query across two SCNs or two databases; and
+  `oracle_plan_timeline` reads historical optimizer-plan history (AWR-gated per
+  [ADR 0005](docs/adr/0005-awr-diagnostics-license-gating.md)). Proof:
+  [`scripts/e2e/time_diff.sh`](scripts/e2e/time_diff.sh).
+- **Egress.** A profile-scoped result-masking policy is evaluated after the read
+  guard and before rows leave the server, and served results carry mask
+  certificates. See
+  [ADR 0008](docs/adr/0008-result-masking-policy.md). Proof:
+  [`scripts/e2e/served_egress.sh`](scripts/e2e/served_egress.sh).
+- **Proof.** A statement classified through the governed path can emit a verdict
+  certificate bound to the classified bytes and the MAC-authenticated audit
+  record, checked by the standalone verifier; durable audit heads can be
+  anchored to Rekor asynchronously without gating an audit append
+  (`crates/oraclemcp-audit/src/rekor.rs`). The routine-purity law the
+  certificate relies on is formally specified in
+  [`proofs/purity-core/PurityCore.lean`](proofs/purity-core/PurityCore.lean)
+  and pinned to the Rust classifier by a conformance test. See
+  [ADR 0010](docs/adr/0010-verdict-certificate-schema.md). Proof:
+  [`scripts/e2e/verdict_certificate.sh`](scripts/e2e/verdict_certificate.sh).
+- **Policy.** A profile can carry a SQL policy written in a deny/narrow-only
+  grammar: a policy may refuse statements and tighten the level or predicates,
+  never widen the base classifier. See
+  [ADR 0009](docs/adr/0009-policy-as-code-grammar.md). Proof:
+  [`scripts/e2e/sql_policy.sh`](scripts/e2e/sql_policy.sh).
+- **Living database.** A profile can subscribe to CQN query-change
+  notifications that reduce to a single coalesced URI update rather than
+  emitting row data; `oracle_orient` returns a freshness/drift snapshot; and
+  `oracle_query format=arrow` returns base64 Arrow IPC after the identical
+  masking and audit path. Proof:
+  [`scripts/e2e/living_db.sh`](scripts/e2e/living_db.sh).
+- **Governed vector search.** `oracle_semantic_search` runs a bounded,
+  fail-closed 23ai vector search through the same policy, semantic-resolution,
+  masking, and audit path as `oracle_query`; on a pre-23ai database the served
+  request fails with a typed `requires_23ai` refusal. Proof:
+  [`scripts/e2e/governed_rag.sh`](scripts/e2e/governed_rag.sh).
+- **Lineage.** In the `plsql-intelligence` build, `oracle_lineage` derives
+  column lineage from stored source and reports type and missing-object drift
+  markers rather than inventing an edge. Proof:
+  [`scripts/e2e/live_lineage.sh`](scripts/e2e/live_lineage.sh).
+- **Fleet.** `oracle_orient fleet=true`, cross-profile `oracle_diff`, and
+  `oracle_search_objects fleet=true` map or compare several MCP-visible profiles
+  at once; unreachable targets become typed `UNREACHABLE`/`FAIL_CLOSED` lane
+  results, and each source profile's egress policy is applied before
+  aggregation. Proof: [`scripts/e2e/fleet.sh`](scripts/e2e/fleet.sh).
+- **Reversible workspace.** `oracle_checkpoint` opens a native Oracle SAVEPOINT;
+  `oracle_execute hold=true` leaves DML pending instead of committing, and
+  `oracle_undo_to` walks it back; `oracle_preview_dml` shows before/after rows
+  and refuses a sequence-touching statement it cannot undo. Proof:
+  [`scripts/e2e/reversible.sh`](scripts/e2e/reversible.sh).
+- **Editions.** Edition-based redefinition is governed through an
+  `ALTER SESSION SET EDITION` allowlist, persisted edition proposals, and an
+  `ADMIN`-only merge, with a typed `NOT_EDITIONABLE` refusal where an object
+  cannot be editioned. Proof:
+  [`scripts/e2e/editions.sh`](scripts/e2e/editions.sh).
+- **Incident capture.** `om incident capture` writes a redacted, deterministic
+  bundle and `om incident replay` re-classifies it offline under the recorded
+  seed. See
+  [ADR 0011](docs/adr/0011-incident-artifact-manifest.md). Proof:
+  [`scripts/e2e/incident.sh`](scripts/e2e/incident.sh).
+- **Refusal corpus.** `om refusal-corpus export` emits the accumulated,
+  deduplicated, re-validated refusals as JSONL. Proof:
+  [`scripts/e2e/refusal_corpus.sh`](scripts/e2e/refusal_corpus.sh).
+- **Diagnostics.** `oracle_top_queries` ranks top SQL from the free live cursor
+  cache (`V$SQLSTATS`) rather than the separately licensed AWR/ASH data, and
+  `oracle_db_health` runs a read-only DBA health suite that degrades cleanly on
+  an unlicensed or least-privilege account. See
+  [ADR 0005](docs/adr/0005-awr-diagnostics-license-gating.md). There is no
+  single dedicated e2e script for this dimension; the tools are exercised by the
+  live version-matrix lanes.
+
+## Source builds and runtime requirements
+
+This branch is pinned to **`nightly-2026-05-11`** and has no stable MSRV. The
+pin is required, for two independent reasons: this checkout resolves
+**asupersync 0.3.9**, whose
+`nightly-outcome-try` feature enables `#![feature(try_trait_v2)]` and
+`try_trait_v2_residual` inside asupersync (it is opt-in, but in asupersync's
+default feature set, and reaches us through the `oraclemcp-driver-cx` dependency), and on
+**Windows** `oraclemcp-core` additionally needs `windows_by_handle`. The pinned
+`oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean — it is its asupersync
+dependency declaration that pulls the nightly feature in.
+[`docs/toolchain.md`](docs/toolchain.md) has the exact mechanism. The
+repository's `rust-toolchain.toml` selects the pin for local builds. Use the release installer above when you want
+the prebuilt binary; use `cargo install` only when you intentionally want a
+source build.
+
+```sh
+rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
+```
+
+Direct source install:
+
+```sh
+cargo +nightly-2026-05-11 install oraclemcp
+```
+
+Live database access is built in through the pure-Rust thin `oraclemcp-driver-cx` driver.
+
+**Runtime requirements** for live database access:
+
+- Optionally `TNS_ADMIN` pointing at a directory with `tnsnames.ora` if you connect by net-service name.
+
+No Oracle Instant Client, ODPI-C library, or C toolchain is required by the
+driver.
+
+Use `oraclemcp --json doctor` to verify the binary and offline setup,
+`oraclemcp --json doctor --profile <profile>` to inspect non-secret profile
+metadata without resolving secrets, and
+`oraclemcp --json doctor --online --profile <profile>` to add live
+connectivity, authentication, role/open-mode, standby, and privilege checks.
+`oraclemcp doctor oauth --token <JWT>` validates one supplied OAuth token against
+the local resource-server config before any live connection; the token is never
+logged, persisted, or rendered.
+Doctor output is safe to paste into agent sessions: it omits connect strings,
+usernames, `credential_ref` values, passwords, proxy identities, wallet
+passwords, IAM tokens, wallet paths, and server DNs while keeping structured
+failure classes and ORA codes visible.
+
+Generate generic local setup templates for profiles, wrappers, and MCP client
+snippets:
+
+```sh
+oraclemcp --json setup --profile db_ro
+```
+
+To create a minimal starter profiles file directly, use the same config-ops
+backend the dashboard uses. This validates the draft, writes a backup,
+atomically replaces the target, and reports the reload/rollback metadata
+without echoing the raw profile TOML:
+
+```sh
+oraclemcp --json setup --write --profile db_ro
+```
+
+**Docker:** a ready-to-run thin-driver image, published to GHCR and listed in the [MCP registry](https://registry.modelcontextprotocol.io) on release as `io.github.MuhDur/oraclemcp`. The image defaults to UID/GID `10001:10001`. On Linux, run it as your invoking non-root UID/GID so a private host config remains readable and its private state mount remains writable:
+
+```sh
+if [ "$(id -u)" -eq 0 ]; then
+  printf '%s\n' 'Refusing to run oraclemcp as root.' >&2
+else
+  container_state="${XDG_STATE_HOME:-$HOME/.local/state}/oraclemcp-container"
+  mkdir -p "$container_state" && chmod 0700 "$container_state" &&
+    docker run -i --rm --user "$(id -u):$(id -g)" \
+      -v "$HOME/.config/oraclemcp:/home/oraclemcp/.config/oraclemcp:ro" \
+      -v "$container_state:/home/oraclemcp/.local/state/oraclemcp" \
+      -e ORACLE_APP_PASSWORD \
+      ghcr.io/muhdur/oraclemcp:latest
+fi
+
+docker run -i --rm ghcr.io/muhdur/oraclemcp:latest  # tool surface only (no DB)
+```
+
+An optional PL/SQL intelligence image is available from the manual Docker
+workflow. It is the same server compiled with `--features plsql-intelligence`;
+it can start without a database connection and advertises the offline
+`oracle_plsql_*` tools immediately. Live PL/SQL tools still require a profile.
+
+```sh
+docker run -i --rm ghcr.io/muhdur/oraclemcp:plsql-intelligence-latest --json info
+docker run -i --rm ghcr.io/muhdur/oraclemcp:plsql-intelligence-latest capabilities
+```
+
+Local feature-image builds resolve the PL/SQL engine crates from crates.io:
+
+```sh
+docker buildx build \
+  --target runtime-plsql-intelligence \
+  -t oraclemcp:plsql-intelligence .
+docker run -i --rm oraclemcp:plsql-intelligence --json info
+```
+
+> The Docker image and crates are Apache-2.0 OR MIT and do not redistribute Oracle Instant Client.
 
 Wire it into an MCP client (e.g. Claude Desktop) over stdio:
 
@@ -73,88 +465,809 @@ Wire it into an MCP client (e.g. Claude Desktop) over stdio:
 }
 ```
 
-Or run authenticated HTTP with a shown-once bearer, and open the local dashboard through a secret-free one-time pairing URL:
+For Codex-style TOML config, the same command is:
+
+```toml
+[mcp_servers.oracle]
+command = "oraclemcp"
+args = ["serve", "--profile", "db_ro", "--allow-no-auth"]
+```
+
+Or run it directly:
+
+```sh
+oraclemcp serve                      # stdio (default); --allow-no-auth for local dev
+oraclemcp --json clients issue --label claude --scope oracle:read  # shown-once HTTP bearer
+oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile db_ro
+claude mcp add oracle --transport http http://127.0.0.1:7070/mcp --header "Authorization: Bearer <bearer>"
+oraclemcp serve --listen 127.0.0.1:7070 --allow-no-auth   # local HTTP dev only
+oraclemcp --json setup --profile db_ro    # generic onboarding templates
+oraclemcp --json setup --write --profile db_ro  # write starter profiles via SCFG
+oraclemcp capabilities               # the advertised tool surface + feature tiers (JSON)
+oraclemcp --json profiles            # configured profile names and non-secret metadata
+oraclemcp doctor                     # offline diagnostics (thin driver, TNS/wallet, classifier, NLS)
+oraclemcp doctor --profile dev_ro    # inspect profile metadata offline
+oraclemcp doctor --online --profile dev_ro  # include live connectivity/auth/role/privilege checks
+oraclemcp info                       # build info: version, tools, transports, thin DB
+oraclemcp robot-docs guide           # compact in-binary guide for agents
+oraclemcp completions bash           # shell completions: bash, zsh, fish, powershell
+oraclemcp --json service install --dry-run --profile db_ro  # preview systemd/launchd/Windows service changes
+oraclemcp service install --yes --client-credentials --profile db_ro
+oraclemcp --json service status       # inspect service-manager state
+oraclemcp --json service logs         # inspect recent service logs
+oraclemcp --json service backup --dry-run  # preview state+config backup
+oraclemcp --json service restore /path/to/backup --dry-run  # verify audit chain before restore
+oraclemcp dashboard                   # open the local dashboard through a one-time pairing URL
+```
+
+`--json` is a visible alias for `--robot-json` and keeps stdout as a single
+machine-readable JSON object.
+
+### Stdio init-token clients
+
+`ORACLEMCP_STDIO_TOKEN` (or `serve --stdio-token`) enables a handshake token
+for a **custom MCP client** that controls the raw `initialize` request. The
+client must send the shared token as a JSON string at exactly
+`params._meta["oraclemcp/initToken"]`; a missing key or a non-string value is
+reported as missing. This is not a generic Claude/Codex-style configuration
+snippet: mainstream MCP client configuration surfaces do not provide a way to
+inject `initialize` metadata. If the client cannot control that frame, keep
+stdio local and use `--allow-no-auth` deliberately, or use authenticated HTTP
+instead.
+
+Release archives also include `om` (`om.exe` on Windows) as an argv0-aware
+short alias. `om dashboard` is equivalent to `oraclemcp dashboard` and uses the
+short name in CLI help and dashboard diagnostics when invoked through that
+alias.
+
+`oraclemcp service install` targets the platform user service manager: systemd
+`--user` on Linux, launchd on macOS, and Windows services on Windows. Mutating
+service operations (`install`, `uninstall`, `restart`, `backup`, `restore`) require `--yes`;
+`--dry-run` emits the exact file and command plan without changing the host.
+Generated service definitions include bounded host caps for the 64-lane default:
+systemd uses `Type=notify`, `NotifyAccess=main`, `Restart=on-failure`,
+`LimitNOFILE=65536`, `TasksMax=512`, `MemoryMax=2G`, and
+`OOMScoreAdjust=100`; launchd uses `KeepAlive` plus file/process
+`SoftResourceLimits`; Windows configures automatic start and restart-on-failure
+through `sc.exe`. `oraclemcp --json doctor` reports those configured caps plus
+the effective open-file, task, memory-cgroup, and OOM caps visible to the
+current process. `service backup` snapshots the XDG service state directory plus
+the resolved profiles config into a new manifest directory; `service restore`
+verifies the backed-up audit hash-chain before stopping the service, restoring
+files, and starting it again.
+Streamable HTTP auth rules are unchanged for service mode: configure
+service-owned per-client credentials, OAuth, or mTLS with registered client leaf
+fingerprints, or pass `--allow-no-auth` only for intentional local development.
+The HTTP service also owns a private `service-instance.json` lock in its state
+root (`$XDG_STATE_HOME/oraclemcp`, or `$HOME/.local/state/oraclemcp` when XDG
+is unset). A second `serve --listen` process using that same state root refuses
+to start and reports the existing pid/listen metadata instead of silently
+taking over another port or socket. For intentionally independent instances,
+give each process a distinct `XDG_STATE_HOME` and listener port; that also
+separates their service-owned credentials, audit records, and durable state.
+
+The browser dashboard is paired separately even on loopback. `oraclemcp
+dashboard` creates a 0600 one-time ticket under the user runtime directory and
+prints a secret-free `/dashboard/pair` URL alongside a one-time code. A
+`dashboard` run without `--url` resolves the listener recorded in the
+`service-instance.json` lock (its recorded TLS posture picks the scheme, its
+recorded listen picks host:port), so `om dashboard` pairs with the live instance
+even on a non-default port instead of probing `:7070`; with no lock it falls
+back to `http://127.0.0.1:7070`. The resolved `listener` and its `source`
+(`service-instance`, `--url`, or `default`) are printed in the human reminder and
+returned in the `--json` object, so an operator with several state roots can see
+which instance the code belongs to. That URL
+serves a script-free form; submitting the code POSTs it in the request body, and
+the server exchanges it for an HttpOnly, SameSite=Strict dashboard cookie. The
+code is never read from the request target — a `/dashboard/pair?ticket=...` URL
+is refused outright without consuming the ticket — so the bootstrap secret
+cannot be recovered from browser history, a `Referer`, an access log, or a
+browser extension watching navigations. The cookie is `Secure` under
+native TLS or `[http].trusted_https_termination = true`; non-Secure cookies are
+limited to server-observed loopback HTTP. Forwarded scheme headers are ignored,
+and remote plaintext requests do not receive privileged browser cookies. The
+ticket expires in 60 seconds
+and is single-use; dashboard POSTs also require same-origin headers, a CSRF
+token, and a route-scoped action ticket. The dashboard origin threat-model
+addendum documents why the browser contract stays fail-closed:
+[`docs/dashboard-origin-threat-model-addendum.md`](docs/dashboard-origin-threat-model-addendum.md).
+
+The dashboard Workbench is not a terminal or SQL shell. It is disabled unless
+`[http].dashboard_workbench = true`; the Database Explorer remains available
+for governed metadata browsing when it is off. Classify and preview actions
+forward to `oracle_preview_sql`, read execution forwards to `oracle_query`, and
+guarded DML forwards to `oracle_execute` with the same single-use confirmation
+grant and audit path agents use. Browser-originated DDL/Admin apply remains
+blocked; DDL can be previewed, but applying it requires a non-browser operator
+path.
+When compiled with `plsql-intelligence`, the Workbench IDE panel also exposes
+the static `oracle_plsql_parse`, `oracle_plsql_analyze`,
+`oracle_plsql_lineage`, `oracle_plsql_sast`, `oracle_plsql_doc`, and
+`oracle_plsql_what_breaks` tools for source navigation, dependency, lint, doc,
+and impact previews; live snapshot/blast-radius tools remain outside the
+browser allowlist.
+The Reviews board stores profile-scoped Change Proposals as service-owned SQL
+templates plus captured binds, then applies them by re-classifying each
+template and forwarding through the same guarded action route; stored proposal
+verdicts are never authorization inputs. For source-replaceable
+`CREATE OR REPLACE` DDL, proposal apply captures the prior source into
+content-addressed service files before dispatch when the current source is
+visible. `/operator/v1/source-history` lists source-free snapshot metadata, and
+dashboard revert creates a normal DDL Change Proposal from the stored snapshot
+instead of bypassing review, confirmation, or profile ceilings.
+The Explorer page includes global search across visible schemas: object-name
+matches use `oracle_search_objects` with all object types, and source-text
+matches use `oracle_search_source`; both are sent through the same guarded
+operator action route as the rest of the dashboard.
+The Reviews page can also compare two supplied schema snapshots and export a
+reviewable migration script. The diff view omits raw DDL and shows hashes/counts;
+any executable export step must be drafted into the normal Change Proposal board
+before apply, where the server re-classifies and re-checks the statement.
+
+The Streamable HTTP transport (`--listen`) fails closed. It starts only when
+service-owned per-client credentials, OAuth bearer enforcement, mTLS
+client-certificate verification, or `--allow-no-auth` is supplied, and mTLS
+requests become application principals only through registered leaf
+fingerprints. It refuses any non-loopback bind unless
+`ORACLEMCP_HTTP_ALLOW_REMOTE=1` is set. Per-client credentials are one bearer
+per MCP client; the bearer is shown once by `oraclemcp clients issue` or
+`oraclemcp clients rotate`, while `clients.json` stores only salted hashes:
 
 ```sh
 oraclemcp --json clients issue --label claude --scope oracle:read
 oraclemcp serve --listen 127.0.0.1:7070 --client-credentials --profile db_ro
-om dashboard
+claude mcp add oracle --transport http http://127.0.0.1:7070/mcp --header "Authorization: Bearer <bearer>"
+oraclemcp --json clients rotate <client_id>
+oraclemcp --json clients revoke <client_id>
 ```
 
-`doctor` output is safe to paste into agent sessions — it omits connect strings, usernames, credential references, passwords, wallet paths, IAM tokens, and server DNs while keeping structured failure classes and ORA codes.
+### Online client-credential lifecycle
 
-## Why oraclemcp
+For a running HTTP service, use the dashboard's Client Credentials control or
+the authorized operator routes: `GET /operator/v1/client-credentials`,
+`POST /operator/v1/client-credentials/rotate`, and
+`POST /operator/v1/client-credentials/revoke`. The two mutation routes accept
+`{"client_id":"..."}`. Browser calls use the normal dashboard pairing, CSRF,
+and route-action tickets; non-browser calls need the normal `/operator/v1`
+authority. Do not expose these controls to ordinary MCP clients.
 
-- **Fail-closed by construction.** A `SELECT` an agent dreams up can never silently become a `DELETE`. Read tools admit only **proven** read-only `SELECT`/`WITH` and dictionary introspection. Non-read execution is isolated in `oracle_execute`, bounded by the profile ceiling, rollback-by-default for DML, and explicit-confirm-before-commit. *Forbidden* constructs (multi-statement batches, string-concat dynamic SQL, an unproven function call inside a SELECT) are rejected before touching Oracle, with a typed envelope and a suggested safe alternative.
-- **Agent-first UX.** Every tool ships a real JSON Schema, title, and explicit MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints — never bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface.
-- **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier is a real `sqlparser` AST classifier and carries a differential cargo-fuzz target.
-- **Two transports.** stdio (default) and Streamable HTTP (`--listen`) with fail-closed auth defaults, optional OAuth bearer enforcement, and native rustls TLS/mTLS.
+A rotate or revoke is a per-client online lifecycle operation, not a service
+restart procedure. After its credential-store mutation is authoritative, the
+server removes that client's HTTP sessions and buffered SSE results, closes its
+stateful lanes, and installs the new credential generation as the admission
+floor. A request that authenticated with the old bearer but is still creating a
+lane is refused rather than gaining a fresh lane; subsequent requests with the
+old bearer fail authentication. On rotation, retain the one-time replacement
+bearer and reconnect with it to establish a fresh session. Other clients keep
+their sessions and bearers. Database credentials and OAuth/audit signing keys
+have separate restart lifecycles; see the operations guide.
 
-## How it compares
+OAuth configuration can come from `profiles.toml` or CLI flags. The resolved
+HS256 secret must be at least 32 bytes (256 bits); use randomly generated key
+material rather than a password or memorable phrase:
 
-Oracle ships an official MCP built into SQLcl; ours is independent. On the axis that decides whether you can safely point an AI agent at a database — **the guard between the agent and your data** — here is the honest, evidence-backed contrast:
-
-| | Oracle SQLcl MCP | **oraclemcp** |
-|---|---|---|
-| **Default posture** | Not read-only | **Read-only, fail-closed** |
-| **Write / DDL control** | No in-server gate — relies on DB grants + a non-prod replica | **In-server: classifier + `READ_ONLY→ADMIN` ladder + preview→confirm-token + rollback-by-default** |
-| **Safety boundary** | Your grant hygiene — a wrong grant or a clever prompt can write | **The server itself — enforced regardless of grants** |
-| **SQL handling** | Free-form, tagged `/* LLM in use */` | Free-form, but **classified before it reaches Oracle** |
-| **Audit** | DB-side log table (`DBTOOLS$MCP_LOG`) | **Signed, hash-chained HMAC audit + verdict certificates** |
-| **Runtime** | Java — needs the JVM + a SQLcl install | **One pure-Rust static binary — no JVM, C toolchain, or Instant Client** |
-
-<sub>SQLcl-MCP rows reflect [Oracle's own documentation](https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html) (configure a minimum-privilege user, prefer a non-prod replica, audit via `DBTOOLS$MCP_LOG`); the oraclemcp rows are enforced in this repository. Oracle is the official, supported option, and its managed Autonomous MCP takes a different curated-report approach with per-user identity — strong for locked-down read-only BI.</sub>
-
-## Safety model
-
-The core invariant is a **fail-closed SQL guard** — not "read-only forever." Operating levels form a ladder, `READ_ONLY < READ_WRITE < DDL < ADMIN`, surfaced through `oracle_execute`, `oracle_compile_object`, `oracle_create_or_replace`, `oracle_patch_source`, and `oracle_set_session_level`. Read-only is the **default** and the cap for unconfigured or `protected` profiles; a profile's `max_level` may permit escalation up to `ADMIN`. Every escalation is guarded:
-
-- a **preview → confirmation-token** step-up before any non-read statement runs,
-- a **temporary, TTL-bounded** elevation window,
-- the **classifier still gating every statement** at the *current* level,
-- **DML rolling back by default**, `protected` profiles pinned at `READ_ONLY` with an immutable ceiling, and OAuth scopes that can only *lower* the effective level,
-- a **signed, append-only, HMAC-SHA256 hash-chained audit** record for every privileged action.
-
-```mermaid
-flowchart LR
-    A["Agent SQL"] --> C{"Fail-closed<br/>classifier"}
-    C -->|"proven READ_ONLY"| R["Read tools · rows returned"]
-    C -->|"forbidden / unparseable"| X["Refuse<br/>typed ErrorEnvelope"]
-    C -->|"non-read"| L{"Operating-level gate<br/>READ_ONLY → READ_WRITE → DDL → ADMIN"}
-    L -->|"above level / ceiling"| X
-    L -->|"within profile ceiling"| P["Preview → confirmation token"]
-    P --> E["Execute"]
-    E -->|"DML"| RB["Rollback by default<br/>commit only with grant"]
-    R --> AU[("Signed hash-chained audit")]
-    E --> AU
+```sh
+export ORACLEMCP_OAUTH_HS256_SECRET='replace-with-a-long-random-secret'
+oraclemcp serve --listen 127.0.0.1:7070 \
+  --oauth-resource http://127.0.0.1:7070/mcp \
+  --oauth-issuer https://issuer.example.com \
+  --oauth-authorization-server https://issuer.example.com \
+  --oauth-required-scope oracle:read \
+  --oauth-hs256-secret-ref env:ORACLEMCP_OAUTH_HS256_SECRET \
+  --http-allowed-host 127.0.0.1:7070 \
+  --http-allowed-origin https://client.example.com
 ```
 
-An unparseable or unclassifiable statement fails **closed**. Statements can emit a verdict certificate bound to the classified bytes and the audit record; the routine-purity law it relies on is specified in [`proofs/purity-core/PurityCore.lean`](proofs/purity-core/PurityCore.lean) and pinned to the Rust classifier by a conformance test.
+When OAuth is enabled, `/.well-known/oauth-protected-resource` stays public,
+`/mcp` requires a valid bearer token, and granted `oracle:*` scopes lower the
+request's effective operating ceiling monotonically. `oracle:read` caps the
+request at `READ_ONLY`, `oracle:write`/`oracle:execute` at `READ_WRITE`,
+`oracle:ddl` at `DDL`, and `oracle:admin` at `ADMIN`; none of them can raise a
+profile above its `max_level`, and protected profiles remain `READ_ONLY`.
+JWT bearer tokens must use the RFC 9068 access-token profile: the protected
+`typ` header is `at+jwt` (or `application/at+jwt`), and `iss`, `sub`, `aud`,
+`exp`, `client_id`, `iat`, and `jti` have their required access-token shapes.
+Generic JWTs and OpenID Connect ID tokens are rejected; there is no implicit
+generic-JWT compatibility mode.
 
-## Governed dimensions
+### OAuth bearer-token contract
 
-A database session is treated as a governed surface with several independent controls, each with an executable proof script:
+`--oauth-hs256-secret-ref` is a **secret reference**, not an encoded-key
+setting. The server resolves the reference and uses the resolved value's raw
+UTF-8 bytes as the HS256 key; it does not base64- or hex-decode them. For
+example, `env:ORACLEMCP_OAUTH_HS256_SECRET` reads that environment variable,
+while putting a raw key in the field makes the literal `env:...` text the key.
+The resolved key must contain at least 32 bytes.
 
-| Dimension | What it governs | Proof |
-|---|---|---|
-| **Cost** | per-call `max_query_cost` + durable per-principal budget; over-ceiling estimates refused pre-execution | [`cost_gate.sh`](scripts/e2e/cost_gate.sh) |
-| **Time** | `as_of` flashback reads, cross-SCN/cross-DB `oracle_diff`, historical plan timelines | [`time_diff.sh`](scripts/e2e/time_diff.sh) |
-| **Egress** | profile-scoped result masking applied before rows leave the server, with mask certificates ([ADR 0008](docs/adr/0008-result-masking-policy.md)) | [`served_egress.sh`](scripts/e2e/served_egress.sh) |
-| **Proof** | verdict certificates + async Rekor anchoring of audit heads ([ADR 0010](docs/adr/0010-verdict-certificate-schema.md)) | [`verdict_certificate.sh`](scripts/e2e/verdict_certificate.sh) |
-| **Policy** | per-profile deny/narrow-only SQL policy that can tighten but never widen the base classifier ([ADR 0009](docs/adr/0009-policy-as-code-grammar.md)) | [`sql_policy.sh`](scripts/e2e/sql_policy.sh) |
-| **Living DB** | CQN change notifications, `oracle_orient` freshness/drift, Arrow IPC output | [`living_db.sh`](scripts/e2e/living_db.sh) |
-| **Vector search** | bounded, fail-closed 23ai `oracle_semantic_search` through the full policy/masking/audit path | [`governed_rag.sh`](scripts/e2e/governed_rag.sh) |
-| **Fleet** | map or compare several MCP-visible profiles at once; unreachable targets become typed `UNREACHABLE`/`FAIL_CLOSED` lanes | [`fleet.sh`](scripts/e2e/fleet.sh) |
-| **Reversible workspace** | native SAVEPOINT checkpoints, held DML, `oracle_undo_to`, undo-aware `oracle_preview_dml` | [`reversible.sh`](scripts/e2e/reversible.sh) |
-| **Editions** | edition-based redefinition via an allowlist, persisted proposals, and an `ADMIN`-only merge | [`editions.sh`](scripts/e2e/editions.sh) |
-| **Incident capture** | `om incident capture`/`replay` — redacted, deterministic bundles re-classified offline ([ADR 0011](docs/adr/0011-incident-artifact-manifest.md)) | [`incident.sh`](scripts/e2e/incident.sh) |
-| **Diagnostics** | `oracle_top_queries` (free `V$SQLSTATS`) and a read-only `oracle_db_health` suite that degrades cleanly on least-privilege accounts ([ADR 0005](docs/adr/0005-awr-diagnostics-license-gating.md)) | version-matrix lanes |
+An accepted access token has `typ: at+jwt` (or `application/at+jwt`), a
+supported `alg`, and non-empty string `iss`, `sub`, `client_id`, and `jti`
+claims; numeric `iat`; a future numeric `exp`; and an `aud` that is either the
+configured resource string or an array containing it. The issuer must exactly
+match `http.oauth.allowed_issuers`. A token supplies scopes as either a
+space-delimited `scope` string or an `scp` array, and must satisfy every
+non-empty `http.oauth.required_scopes` entry.
 
-What an agent sees depends on the active level: at `READ_ONLY`, `tools/list` returns the read-safe subset; once elevated within the profile ceiling it returns the full **34 tools + 25 aliases**. A call to a not-yet-visible tool is refused with the same typed `ErrorEnvelope` as any other below-level statement.
+Rejected requests keep the response body and `WWW-Authenticate` challenge
+generic: a presented but rejected bearer always receives `error="invalid_token"`
+with no `error_description`. This prevents an unauthenticated caller learning
+whether a token was malformed, signed correctly but expired, or missing a
+particular claim. The server records the fixed rejection category in its
+operator audit/security trail; it never records or echoes a bearer token,
+signature, or untrusted issuer value.
+
+Native TLS uses rustls when `[http.tls]` or `--tls-cert` / `--tls-key` are
+configured. Adding `[http.tls.client_ca_path]` or `--mtls-client-ca` requires
+client certificates (mTLS) verified against that CA, but a CA-verified cert is
+not an application identity until its leaf DER SHA-256 fingerprint is listed in
+`[http.mtls].client_fingerprints` or passed with `--mtls-client-fingerprint`.
+The resulting principal key is `mtls:sha256:<hex>`. Server-only TLS encrypts the
+transport but is not application authentication, so `/mcp` still needs
+per-client credentials, OAuth, or an explicit `--allow-no-auth` development
+opt-in. Non-loopback binds require `ORACLEMCP_HTTP_ALLOW_REMOTE=1` even with
+TLS. Native TLS on a non-loopback listener emits
+`Strict-Transport-Security: max-age=31536000; includeSubDomains`; loopback
+HTTPS deliberately omits HSTS so browser pinning cannot disrupt local HTTP
+development.
+
+When Claude Code connects over HTTPS to a self-signed or private-CA listener,
+start it with that CA PEM in Node's trust store: `NODE_EXTRA_CA_CERTS=/path/to/private-ca.pem claude`.
+
+Connection profiles are resolved from layered configuration (`oraclemcp-config`); select one with `serve --profile <name>`.
+
+### Connection profiles
+
+> **See also:** [`oraclemcp.example.toml`](oraclemcp.example.toml) is a fully
+> annotated, copy-pasteable config showing every field with its default;
+> [`docs/configuration.md`](docs/configuration.md) is the canonical field
+> reference (types, defaults, precedence, the operating-level ladder, the
+> `mcp_exposed` opt-out, auth modes, and `base` inheritance). The
+> `oraclemcp setup --write` starter is intentionally smaller so it can boot
+> before you add wallet, proxy, DRCP, pool, app-context, or writable-profile
+> settings.
+
+### Signed audit and unsigned refusal trail
+
+For live database access, create `~/.config/oraclemcp/profiles.toml`:
+
+```toml
+schema_version = 2
+default_profile = "dev_ro"
+# Optional least-privilege profile for fleet-wide DB observability.
+# monitor_profile = "monitor_ro"
+
+[http]
+allowed_hosts = ["127.0.0.1:7070"]
+allowed_origins = ["https://client.example.com"]
+json_response = true
+stateful = false
+dashboard_workbench = false
+
+[http.oauth]
+resource = "http://127.0.0.1:7070/mcp"
+allowed_issuers = ["https://issuer.example.com"]
+authorization_servers = ["https://issuer.example.com"]
+required_scopes = ["oracle:read"]
+hs256_secret_ref = "env:ORACLEMCP_OAUTH_HS256_SECRET"
+
+# Optional native HTTPS / mTLS listener.
+# [http.tls]
+# cert_chain_path = "/path/to/server-chain.pem"
+# private_key_path = "/path/to/server-key.pem"
+# client_ca_path = "/path/to/client-ca.pem"  # require mTLS client certs
+#
+# [http.mtls]
+# client_fingerprints = ["sha256:<client-leaf-der-sha256>"]
+#
+# Optional dedicated remote incident-response ingress. This is a second,
+# separately bounded listener; it is mandatory-mTLS and accepts only registered
+# certificates. The same fingerprint must also be allow-listed as an operator.
+# [http.control]
+# listen = "0.0.0.0:7071"
+# preauth_workers = 4
+# operator_workers = 1
+# doctor_workers = 1
+# The authenticated control probe bounds each request header and body to one
+# second to limit slowloris exposure. A slow request is closed and emits a
+# warn-level `reason=ingress_timeout` event; an unregistered certificate emits
+# a separate warn with its computed `mtls:sha256:...` fingerprint.
+#
+# [http.operator]
+# allow_loopback_owner = true
+# allowed_subjects = ["mtls:sha256:<client-leaf-der-sha256>"]
+
+# Signed audit chain. It records every privileged action in an append-only,
+# hash-chained, HMAC-SHA256-signed JSONL stream. Omit `path` to use
+# $XDG_STATE_HOME/oraclemcp/audit/audit.jsonl (or
+# $HOME/.local/state/oraclemcp/audit/audit.jsonl when XDG_STATE_HOME is unset).
+[audit]
+path = "/var/lib/oraclemcp/audit/audit.jsonl"
+# `key_ref` resolves through SecretResolver (env:, file:, or keyring:); its
+# resolved value must be at least 32 bytes of independently random material.
+key_ref = "env:ORACLEMCP_AUDIT_KEY"
+key_id = "2026-q3"
+# Retain old verification-only keys during rotation.
+# [[audit.verification_keys]]
+# key_id = "2026-q2"
+# key_ref = "env:ORACLEMCP_AUDIT_KEY_2026_Q2"
+
+# When no signed auditor exists because every reachable profile is READ_ONLY,
+# this separate redacted refusal/security-event floor is on by default at
+# $XDG_STATE_HOME/oraclemcp/corpus/refusals.jsonl. It is unsigned and not
+# tamper-evident; it never replaces the signed chain. Set false only to opt out.
+unsigned_refusal_log = true
+
+[[profiles]]
+name = "dev_ro"
+description = "Read-only development database"
+connect_string = "localhost:1521/FREEPDB1"
+username = "APP_READONLY"
+credential_ref = "env:ORACLE_APP_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+require_signed_tools = true
+dashboard_ddl_workbench = false
+# Optional Oracle call timeout and request-budget ceiling. Omit for the 30s
+# default; set 0 only to opt out deliberately. Tool calls can tighten it with
+# timeout_seconds where advertised.
+call_timeout_seconds = 30
+# Optional thin Session Data Unit request. Validated as 512..=65535 bytes.
+sdu = 32768
+login_statements = [
+  "ALTER SESSION SET NLS_LANGUAGE = english",
+  "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'",
+]
+# Optional trusted local setup, authored by the profile owner and never by the
+# agent. Use for session-local initialization that is not an ALTER SESSION.
+trusted_session_statements = [
+  "BEGIN DBMS_OUTPUT.ENABLE(500000); END;",
+]
+
+[profiles.oci]
+# Optional TCPS/wallet fields. Prefer these named fields over raw
+# connect_string query parameters when the value should be validated or redacted.
+wallet_location = "/etc/oracle/wallet"
+wallet_password_ref = "env:WALLET_PASSWORD"
+ssl_server_dn_match = true
+ssl_server_cert_dn = "CN=dbhost.example.com"
+# Optional SNI override. Omit for the driver default; set true only when the
+# endpoint's routing name is a rustls-valid DNS name.
+# use_sni = true
+
+# Optional proxy authentication. If enabled, `credential_ref` belongs to
+# `proxy_user`; omit top-level `username` or set it to the same value.
+# The database needs: ALTER USER <target_schema> GRANT CONNECT THROUGH <proxy_user>
+# [profiles.proxy_auth]
+# proxy_user = "MCP_PROXY"
+# target_schema = "APP_OWNER"
+
+# Optional DRCP server routing. Prefer these named fields over raw
+# connect_string query parameters so inheritance, validation, and redaction stay
+# predictable. This is separate from [profiles.pool], which controls local
+# client-side reuse.
+[profiles.drcp]
+pooled = true
+connection_class = "ORACLE_MCP_AGENTS"
+purity = "reuse"
+
+# Optional local client-side pool for stateless metadata/catalog reads where
+# pool-backed reads are used.
+# User SQL, LOB/sample reads, DBMS_OUTPUT, transactions, and session state stay
+# on the pinned main session. Served stateless HTTP uses bounded read-worker
+# lanes instead of sharing one pool across lane runtimes.
+# [profiles.pool]
+# max_size = 4
+# min_idle = 1
+# acquire_timeout_secs = 5
+# statement_cache_size = 50
+
+# Optional driver-level application context, applied during thin logon. Values
+# can carry tenant/session identifiers, so list_profiles and diagnostics redact
+# them. If inherited, setting entries here replaces the base list; omit to
+# inherit or set app_context = [] in the profile table to clear it.
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"
+key = "tenant_id"
+value = "tenant-123"
+
+[[profiles.app_context]]
+namespace = "ORACLEMCP_CTX"
+key = "request_id"
+value = "req-456"
+
+[profiles.session_identity]
+# Optional: all values are profile-local and are not shown by list_profiles.
+# oracle_connection_info reports these only as redacted field names.
+# Edition selection is applied during thin authentication before user SQL.
+# edition = "ORA$BASE"
+program = "oraclemcp"
+machine = "local-workstation"
+os_user = "local-operator"
+terminal = "agent"
+driver_name = "oraclemcp"
+module = "oraclemcp"
+action = "inspect"
+client_identifier = "agent"
+client_info = "local-workstation"
+```
+
+Keep the signed JSONL and its `<audit path>.anchor` sidecar together. Run
+`oraclemcp audit verify /var/lib/oraclemcp/audit/audit.jsonl` with the same
+secret reference to re-walk the hashes, verify the MAC, and detect a truncated
+tail against that anchor. The unsigned refusal trail is deliberately outside
+this command and cannot provide those tamper-evidence guarantees; it is the
+diagnostic floor only while the signed tier is unavailable.
+
+`max_level` is the profile ceiling; `default_level` is the starting session
+level and must not exceed that ceiling. `call_timeout_seconds` defaults to 30
+seconds when omitted. It sets the Oracle driver call timeout for the physical
+connection and the dispatcher request-budget ceiling for the whole tool call;
+tools that expose `timeout_seconds` can tighten that budget for one call but
+cannot loosen the profile ceiling. Set `call_timeout_seconds = 0` only as an
+explicit opt-out from the driver call timeout; `doctor` warns on that posture.
+`login_statements` and `login_script` are for profile-local session policy only
+and are restricted to allowlisted `ALTER SESSION SET ...` parameters.
+`trusted_session_statements` are an explicit profile-owner escape hatch for
+local session initialization such as `DBMS_APPLICATION_INFO`, application
+contexts, or `DBMS_OUTPUT`; they are never accepted from agent tool calls, and
+they keep environment-specific conventions in private config rather than in the
+open-source core.
+`session_release_statements` and `logoff_statements` are the matching teardown
+hooks for profile-owner cleanup: release hooks run only before a successful
+pooled call returns its physical session to idle reuse, while failed or
+cancelled pooled calls are discarded; logoff hooks run immediately before
+logical Oracle logoff.
+The `oracle_connection_info` tool reports allow-listed connection posture
+(`backend`, connection strategy, server version, role/open mode, read-only
+status). Session identity and client topology fields such as `os_user`,
+`program`, `machine`, `terminal`, `client_driver`, `module`, `action`,
+`client_identifier`, and `client_info` are redacted by default and appear only
+as names in `redacted_fields` when present. The Rust thin backend can still set
+the connect-time client identity fields (`program`, `machine`, `os_user`,
+`terminal`, and `driver_name`) from profile config, and it applies `module`,
+`action`, `client_identifier`, and `client_info` after connect through Oracle
+session APIs.
+`require_signed_tools = true` requires HMAC signatures for operator-defined
+custom tools on that profile; `protected = true` implies the same policy. The
+resolved audit, OAuth HS256, and custom-tool HMAC keys must each contain at
+least 32 bytes of randomly generated key material.
+
+A few further profile keys are optional:
+
+- `base = "other_profile"`: inherit another profile's **unset** fields. A
+  child may override any inherited field, including raising `max_level` above
+  the base's value; `base` is configuration reuse, **not** a fleet safety
+  ceiling. To pin a production profile at `READ_ONLY`, set
+  `protected = true` (which requires `max_level = "READ_ONLY"`) on that child;
+  do not rely on a `READ_ONLY` base to constrain it.
+- `[profiles.pool]`: local client-side connection reuse settings
+  (`max_size`, `min_idle`, `acquire_timeout_secs`, `statement_cache_size`).
+  This enables the hybrid runtime strategy for stdio/direct dispatch and
+  lane-local metadata reads: catalog and metadata tools such as
+  schema/object/source inspection can use bounded stateless read connections,
+  while agent queries, sampled rows, LOB reads, DDL/write previews,
+  transactions, savepoints, temp tables, package globals, login setup, session
+  identity, and `DBMS_OUTPUT` stay on the pinned main session. Served stateless
+  HTTP routes generated metadata reads through bounded read-worker lanes instead
+  of sharing one pool across lane runtimes. When the stateless surface is live,
+  expect at least a pinned main Oracle session plus stateless pool session(s);
+  `oracle_connection_info` reports `connection_strategy = "pinned_plus_stateless"`
+  and the stateless pool details separately. `max_size` is the knob that caps
+  those additional stateless connections. `statement_cache_size` is passed to
+  the thin driver's bounded per-connection statement cache where pool-backed
+  reads are used; omit it to keep the driver default. This is separate from DRCP
+  server routing.
+- `[profiles.oci]`: OCI-specific connection settings for the underlying driver.
+  For TCPS/wallet connections, named fields are available for `wallet_location`,
+  `wallet_password_ref`, `ssl_server_dn_match`, `ssl_server_cert_dn`, and
+  `use_sni`. A wallet does not imply SNI; omit `use_sni` for the driver default
+  and opt in only when the endpoint's routing name is a rustls-valid DNS name.
+  Oracle's CPython driver can pass Oracle routing tokens through
+  `server_hostname`; rustls `ServerName` cannot, so host-as-SNI may skip that
+  one-negotiation routing fast path without breaking TCPS connectivity. Use the
+  named fields for values that should inherit through profiles, be redacted from
+  diagnostics, or be validated by strict config parsing.
+- `sdu = 32768`: optional thin driver Session Data Unit request size. Values are
+  validated as `512..=65535`; omit it to keep the driver's negotiated default.
+- `[profiles.drcp]`: Database Resident Connection Pooling server routing.
+  `pooled = true` appends `server=pooled`; `connection_class` maps to
+  `pool_connection_class`; `purity = "reuse" | "new"` maps to `pool_purity`.
+  Existing `connect_string` query parameters such as `wallet_location` are
+  preserved and DRCP parameters are appended with `&`. Prefer these named fields
+  over raw DRCP query parameters when the values should inherit, validate, and be
+  covered by redaction tests.
+- `[profiles.proxy_auth]`: thin proxy authentication. `proxy_user` is the
+  account that authenticates with `credential_ref`; `target_schema` is the
+  Oracle user granted `CONNECT THROUGH`. The connect `username`, if present,
+  must match `proxy_user`.
+- `[[profiles.app_context]]`: driver-level application context triples sent
+  during thin logon. Use typed `namespace` / `key` / `value` entries instead of
+  raw strings; values are treated as sensitive and omitted from ordinary profile
+  output. A child profile inherits the base list when omitted, replaces the whole
+  list when entries are set, and can clear inherited entries with
+  `app_context = []`.
+- `read_only_standby = true`: mark the target as a read-only standby so the
+  profile cannot be elevated above `READ_ONLY` regardless of `max_level`.
+- `mcp_exposed = false`: hide this profile from the MCP **agent-facing** surface
+  (E5). This is a **per-profile opt-out** — a profile is exposed to the agent
+  **by default**, and setting `false` hides only that one profile. A hidden
+  profile is invisible to `oracle_list_profiles`, `oracle_switch_profile`,
+  `oracle_search_objects`, and completion (a hidden or guessed name fails closed
+  identically); the operator/CLI (`oraclemcp profiles`, `doctor`, `--profile`)
+  still sees every profile. There is no global flip, and one profile's setting
+  never affects another's. It is a **visibility/scoping convenience, not an
+  access control** — the real bound on what a profile can do is
+  `max_level`/`protected`/DB privileges/the fail-closed classifier. At startup
+  the server logs a behavior-neutral exposure summary to stderr, e.g.
+  `MCP exposing 1 profile(s): dev_ro [ReadOnly] (1 hidden via mcp_exposed=false)`.
+  See [`docs/configuration.md`](docs/configuration.md) and the cross-profile
+  exposure threat in [`docs/threat-model.md`](docs/threat-model.md).
+
+Then launch:
+
+```sh
+export ORACLE_APP_PASSWORD='...'
+oraclemcp serve --allow-no-auth
+```
+
+Config discovery order is:
+
+1. `$ORACLEMCP_CONFIG`
+2. `$XDG_CONFIG_HOME/oraclemcp/profiles.toml`, then `config.toml` (only when
+   `XDG_CONFIG_HOME` is set to an absolute path)
+3. `~/.config/oraclemcp/profiles.toml`, then `config.toml`
+
+`credential_ref` and `wallet_password_ref` resolve through the same
+SecretResolver seam as audit and HTTP secrets. Supported forms are `env:VAR`,
+`file:/path/to/secret`, `keyring:account` / `keyring:service/account`, and the
+future `vault:path` seam (fail-closed unless wired). `literal:value` is for
+local development only and is rejected when `protected = true`.
+File-backed secrets are bounded to 64 KiB and must resolve without following a
+link to a regular file. On Unix, the file must be owned by the service user,
+have one hard link, and grant no permissions to group or other users.
+
+The current `oraclemcp` thin adapter fails explicitly for auth/features it
+cannot serve end-to-end safely, such as external wallet auth without
+username/password, autonomous OCI SDK/resource-principal token minting, and
+Kerberos/RADIUS auth. These appear as structured unsupported diagnostics in
+`oraclemcp doctor --online --profile <profile>` and MCP error envelopes; the
+binary does not silently fall back to thick mode.
+
+#### OCI IAM database-token auth
+
+`use_iam_token = true` under `[profiles.oci]` resolves a pre-fetched database
+token (a JWT) from exactly one source: `token_env`, `token_file`, `token_exec`,
+or the built-in `ORACLEMCP_IAM_TOKEN` when no explicit source is set. The token
+is injected through the thin driver's access-token connect path and is **refused
+over a non-TCPS transport** before it can reach the driver; `token_exec` is also
+refused before spawn on non-TCPS. Token values are never persisted, rendered, or
+logged. `iam_config_profile` still only parses and is reserved for a future
+autonomous OCI SDK/resource-principal token source. Real-ADB acceptance remains
+an operator smoke gate; autonomous OCI SDK minting/refresh remains deferred
+(bead k6q.9).
+
+Thin result conversion materializes driver-side locators and cursors before
+serializing tool output: CLOB/BLOB/BFILE locators are read with the query LOB
+caps, and valid REF CURSOR values or implicit result sets are returned as nested
+objects containing child `columns`, `rows`, `row_count`, `fetched_count`, and
+`truncated` metadata. Nested cursor materialization has separate row, cell, byte,
+and depth caps, and unsupported shapes remain explicit instead of silently
+flattening or guessing. The same versioned `OracleCell.structured` payload is
+the catalog-snapshot contract for the optional embedded `plsql-intelligence`
+engine: a catalog value is either preserved in a documented structured
+representation or reported as a typed unsupported marker with provenance,
+never as an ordinary-looking placeholder string. The separate `plsql-mcp`
+server is deprecated.
+
+To live-verify driver-level application context against Oracle 23ai/FREE, create
+an application context namespace in the test database, configure matching
+`[[profiles.app_context]]` triples, then query
+`SYS_CONTEXT('<namespace>', '<key>')` through `oracle_query` or run the optional
+live test with `ORACLEMCP_TEST_APP_CONTEXT='namespace:key:value;namespace:key2:value2'`.
+Invalid or unauthorized context namespaces should fail at connect time with a
+structured Oracle server error rather than falling back to post-connect SQL.
+
+To live-verify edition selection against Oracle 23ai/FREE, create or reuse a
+valid edition, set `[profiles.session_identity].edition`, connect with that
+profile, and query `SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME')` through
+`oracle_query` or `oracle_connection_info`. Invalid or unauthorized editions
+should fail during connect/authentication with a structured Oracle server error;
+oraclemcp must not silently fall back to the database default edition.
+
+Profile/config regression commands:
+
+```sh
+# Local, non-secret profile parsing/redaction/setup checks.
+cargo test -p oraclemcp-config -p oraclemcp-core profile -- --nocapture
+cargo test -p oraclemcp setup_payload_is_generic_and_client_ready -- --nocapture
+cargo test -p oraclemcp --test cli setup_write_round_trips_profiles_through_config_ops -- --nocapture
+cargo test -p oraclemcp profiles_json_reports_non_secret_metadata -- --nocapture
+
+# Live Oracle 23ai/FREE thin profile/config matrix.
+# Required: ORACLEMCP_TEST_DSN, ORACLEMCP_TEST_USER, ORACLEMCP_TEST_PASSWORD.
+# Optional: ORACLEMCP_TEST_WALLET_LOCATION, ORACLEMCP_TEST_WALLET_PASSWORD,
+# ORACLEMCP_TEST_SSL_SERVER_DN_MATCH, ORACLEMCP_TEST_SSL_SERVER_CERT_DN,
+# ORACLEMCP_TEST_USE_SNI, ORACLEMCP_TEST_PROXY_USER,
+# ORACLEMCP_TEST_PROXY_TARGET_SCHEMA, ORACLEMCP_TEST_EDITION,
+# ORACLEMCP_TEST_APP_CONTEXT, ORACLEMCP_TEST_DRCP=1,
+# ORACLEMCP_TEST_DRCP_CLASS.
+cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture
+
+# Faster profile-only smoke subset.
+cargo test -p oraclemcp-db --features live-xe live_profile_config -- --nocapture
+
+# Heavy live load/soak (latency p50/p95/p99, leak/balance/drain). Additionally
+# opt-in via ORACLEMCP_LIVE_XE=1 on top of the same ORACLEMCP_TEST_* connection
+# env. See docs/performance-footprint.md.
+ORACLEMCP_LIVE_XE=1 \
+  ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1 \
+  ORACLEMCP_TEST_USER=... ORACLEMCP_TEST_PASSWORD=... \
+  cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+
+# Structured e2e harness and JSON-line logs for acceptance beads.
+bash scripts/e2e/run_all.sh --log --dry-run
+bash scripts/e2e/run_all.sh --log
+```
+
+Start a throwaway Oracle FREE 23ai database for the live suite with Docker (it
+provides `FREEPDB1` on `:1521`):
+
+```sh
+docker run -d --name oracle-free -p 1521:1521 \
+  -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim
+```
+
+If `serve --profile <name>` is provided, it overrides `default_profile`. If neither is set and exactly one profile exists, that sole profile is used.
+
+Agents can inspect available profiles with `oracle_list_profiles` and reconnect
+the running MCP server with `oracle_switch_profile`. A failed switch leaves the
+current connection in place.
+`oraclemcp serve --profile <name>` fails fast when the profile or config cannot
+be resolved. Without an explicit profile, startup keeps discovery available even
+when the default live connection cannot be opened; live database calls then
+return structured tool errors instead of crashing the MCP server.
+
+### Operator-defined read-only tools
+
+Operators can expose environment-specific read helpers without forking the
+server by placing TOML files in `~/.config/oraclemcp/tools.d/*.toml`. Set
+`ORACLEMCP_TOOLS_DIR` to use a different directory. Definitions are loaded and
+advertised when `serve` starts, then revalidated before `oracle_switch_profile`
+replaces the active connection; malformed files fail closed instead of silently
+disappearing.
+
+```toml
+[[tool]]
+name = "app_customer_lookup"
+description = "Lookup customer rows by id"
+sql = "SELECT id, name, status FROM app_customers WHERE id = :id"
+output_mode = "rows"
+
+[[tool.params]]
+name = "id"
+type = "integer"
+required = true
+description = "Customer id"
+```
+
+Custom tool SQL uses named binds (`:id` above). Agent-supplied values are typed
+from `params` and bound by name; they are never interpolated into SQL text. The
+binary loads definitions the classifier deems safe for the active profile
+ceiling and binds them to the same runtime gate as operator-facing execution
+tools. Read-only tools execute on a dedicated read-only executor. Write/DDL/PL/SQL
+tools run through `oracle_execute`-equivalent semantics: statement-level
+classification, session/profile gating, preview token verification when required,
+rollback-by-default for non-confirmed DML, and write-intent/audit recording on
+committed effects. Unproven package call definitions are rejected by gate policy
+as forbidden.
+
+On protected profiles, every custom tool must carry a valid HMAC signature. Set
+`ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` in the server environment to verify signed
+definitions. On unprotected profiles, unsigned tools are allowed for local use;
+if any definition includes a `signature`, the same key is required and invalid
+signatures are rejected. The key must contain at least 32 bytes of randomly
+generated key material.
+
+Sign local tool definitions from the same binary:
+
+```sh
+export ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY='...'
+oraclemcp sign-tool ~/.config/oraclemcp/tools.d/customer.toml --tool app_customer_lookup --write
+```
+
+By default the command prints signature values to place into matching `[[tool]]`
+blocks; it does not print the HMAC key. Pass `--write` (alias `--in-place`) to
+atomically place each generated signature in its matching `[[tool]]` block —
+including when the file ends with `[[tool.params]]`.
+
+Custom-tool signatures use the self-identifying
+`oraclemcp-custom-tool:v2:hmac-sha256:…` format. Version 2 authenticates every
+semantic and agent-visible definition field, including nested parameter
+descriptions, parameter order, and `output_mode`; only the `signature` envelope
+itself is excluded. Bare 64-hex signatures emitted by older releases are not
+accepted when present, and protected-profile startup fails with re-sign
+guidance instead of silently falling back to the incomplete legacy format.
+During upgrade, run `oraclemcp sign-tool` for each tools file and replace every
+legacy `signature` value before restarting a protected profile.
+
+## Building and testing
+
+`oraclemcp` builds on a single **pinned Rust nightly** (`nightly-2026-05-11`,
+recorded in `rust-toolchain.toml`). Two independent things need it: asupersync 0.3.9's
+`nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`), which
+is opt-in but on by default and reaches us via the `oraclemcp-driver-cx` 0.9.2 dependency; and,
+on Windows only, `windows_by_handle`. The pin is **build-time only**: the
+shipped binary has no runtime dependency on nightly. See
+[`docs/toolchain.md`](docs/toolchain.md) for the full rationale and the
+re-pin runbook.
+
+```sh
+rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
+
+# Build and run the full test matrix (the workspace's rust-toolchain.toml picks the pin).
+cargo build --workspace
+cargo test --workspace --all-targets
+cargo test --workspace --doc
+```
+
+Before a release, the same gates CI enforces must pass on the pinned toolchain
+(full list and a copy-pasteable checklist in
+[`docs/release-checklist.md`](docs/release-checklist.md)):
+
+```sh
+cargo fmt --all -- --check                                  # formatting
+cargo clippy --workspace --all-targets -- -D warnings       # lint, warnings = errors
+cargo deny check                                            # advisories / licenses / bans / sources
+bash scripts/oraclemcp_agent_surface_lint.sh                # no arbitrary routine MCP surface
+bash scripts/oraclemcp_driver_seam_lint.sh                  # driver-adapter seam stays one file
+bash scripts/oraclemcp_honesty_grep.sh                      # no over-claiming framing
+bash scripts/oraclemcp_api_lock.sh                          # public API lock (no unreviewed surface drift)
+RELEASE_TAG=vX.Y.Z bash scripts/release_preflight.sh        # release metadata sync
+```
+
+### Running the live suite
+
+The default test run needs no database. The live thin paths run against a real
+Oracle 23ai via the unified `ORACLEMCP_TEST_*` env; a throwaway Oracle FREE is
+enough (provides `FREEPDB1` on `:1521`):
+
+```sh
+docker run -d --name oracle-free -p 1521:1521 \
+  -e ORACLE_PASSWORD=<pw> gvenzl/oracle-free:23-slim
+
+export ORACLEMCP_TEST_DSN=localhost:1521/FREEPDB1
+export ORACLEMCP_TEST_USER=... ORACLEMCP_TEST_PASSWORD=...
+cargo test -p oraclemcp-db --features live-xe --test live_oracle -- --nocapture
+
+# Heavy load/soak is additionally opt-in via ORACLEMCP_LIVE_XE=1.
+ORACLEMCP_LIVE_XE=1 cargo test -p oraclemcp-db --test load_soak -- --ignored --nocapture
+```
+
+The full live env block (wallet/TCPS, proxy, DRCP, edition, app-context vars) is
+in [the live test commands above](#connection-profiles) and in
+[`docs/operations.md`](docs/operations.md) §5.7. Connection-profile fields are
+documented in [`docs/configuration.md`](docs/configuration.md).
+
+## Supported Oracle versions
+
+| Dimension | Support |
+|---|---|
+| **Database version** | Tested against **Oracle Database 23ai**, including the free **Oracle FREE 23ai** image (`gvenzl/oracle-free:23-slim`, `FREEPDB1`). The pure-Rust thin `oraclemcp-driver-cx` driver speaks the Oracle Net protocol directly — no Instant Client or ODPI-C. |
+| **EZConnect** | Supported (`host:port/service`, plus EZConnect-Plus `tcps://…?wallet_location=…`) and `tnsnames.ora` aliases. |
+| **TCPS / wallet (TLS, mTLS)** | Supported with `ewallet.pem` (with its wallet password), auto-login `cwallet.sso`, or standalone `ewallet.p12` (with its wallet password), plus `ssl_server_dn_match` / `ssl_server_cert_dn` / `use_sni` controls. All three wallet modes load through the default build's thin driver. |
+| **OCI IAM database token** | Supported for pre-fetched JWT sources over TCPS (`token_env`, `token_file`, `token_exec`, or `ORACLEMCP_IAM_TOKEN`). Non-TCPS is refused before token use. Autonomous OCI SDK/resource-principal minting and real-ADB acceptance remain separate gated work — see the [OCI section](#oci-iam-database-token-auth) and [`docs/configuration.md`](docs/configuration.md). |
+| **Proxy auth** | Supported (`proxy_user` + `target_schema` with `CONNECT THROUGH`). |
+| **DRCP** | Supported (server routing: `pooled` / `connection_class` / `purity`). |
+| **Read-only standby (Active Data Guard)** | Supported — mark the profile `read_only_standby = true` to force `READ_ONLY` regardless of `max_level`; `oracle_explain_plan` (which writes `PLAN_TABLE`) refuses on a standby. |
+
+Connection modes are configured per profile in `profiles.toml`; see
+[`docs/configuration.md`](docs/configuration.md) for the field reference.
 
 ## Tools
 
-The tables below are generated from the server's tool registry — the same descriptors `tools/list` serves — by `scripts/docs_generate.sh` (rendered from `oraclemcp robot-docs tools --markdown`). Do not hand-edit them; edit the registry and run `bash scripts/docs_generate.sh --write`.
+The tables below are generated from the server's tool registry — the same
+descriptors `tools/list` serves — by `scripts/docs_generate.sh`, which renders
+them from `oraclemcp robot-docs tools --markdown`. Do not hand-edit them; edit
+the registry and run `bash scripts/docs_generate.sh --write`.
 
 <!-- generated:tools -->
 | Tool | Title | Purpose | Visible from | Destructive |
@@ -195,11 +1308,48 @@ The tables below are generated from the server's tool registry — the same desc
 | `oracle_db_health` | Oracle Db Health | Read-only DBA health-check suite. | `READ_ONLY` | no |
 <!-- /generated:tools -->
 
-Every advertised tool descriptor includes a human title plus explicit MCP annotations; these hints are advisory for clients, while the fail-closed classifier and operating-level gate remain the enforcement boundary. `oracle_query` and `oracle_explain_plan` also advertise `outputSchema`, and query results keep Oracle `NUMBER` cells as strings by default (opt into `numbers_as_float=true` explicitly). Beyond `tools/*`, `initialize` advertises `resources`, `prompts`, and `completions` (protocol `2025-11-25`): `resources/list` exposes `oracle://capabilities` and `oracle://tools`, and read templates for `oracle://schema/{owner}` and `oracle://object/{owner}/{type}/{name}` route through the same safe dispatch path.
+Every advertised tool descriptor includes a human title plus explicit MCP
+annotations. Read-only tools set `readOnlyHint=true`,
+`destructiveHint=false`, `idempotentHint=true`, and `openWorldHint=false`.
+Guarded execution, session elevation, compile, patch, deploy, and diagnostic
+write tools set `destructiveHint=true` and `readOnlyHint=false`. These hints
+are advisory for MCP clients; the fail-closed classifier and operating-level
+gate remain the enforcement boundary.
+`oracle_query`/`query` and `oracle_explain_plan` also advertise
+`outputSchema` for their `structuredContent`; the query schema keeps Oracle
+`NUMBER` cells as strings by default unless the caller explicitly opts into
+`numbers_as_float=true`. Structured ARRAY/JSON/VECTOR cells use safe
+row/cell/byte/depth decode caps by default; set `deep_decode=true` to opt into
+larger capped limits, with `max_structured_rows`, `max_structured_cells`,
+`max_structured_bytes`, and `max_structured_depth` available for narrower
+per-call budgets.
+
+### MCP resources
+
+In addition to `tools/list` and `tools/call`, initialize advertises
+`resources` with `subscribe=false` and `listChanged=false`.
+`resources/list` exposes concrete static resources for `oracle://capabilities`
+and `oracle://tools`. `resources/templates/list` exposes read templates for
+`oracle://schema/{owner}` and `oracle://object/{owner}/{type}/{name}`; reading
+those routes through the same safe tool dispatch path as
+`oracle_schema_inspect`, `oracle_get_source`, and `oracle_get_ddl`, including
+the active transport authorization context. `prompts/list` and `prompts/get`
+serve the built-in expert playbook catalog. `initialize` advertises `completions`
+alongside `prompts`, `resources`, and `tools` (protocol `2025-11-25`);
+subscriptions remain unadvertised in this release.
 
 ### Compatibility aliases
 
-For migrations from shorter Oracle MCP tool surfaces, the server advertises compatibility aliases that route to the guarded `oracle_*` tools and share their classifier, validation, and operating-level behavior. `execute_approved`, `deploy_ddl`, and `read_patch_preview` are wrappers rather than plain renames.
+For migrations from shorter Oracle MCP tool surfaces, the server also advertises
+compatibility aliases that route to the guarded `oracle_*` tools:
+
+The table below is generated from the registry/routing metadata; do not
+hand-edit it. `execute_approved`, `deploy_ddl`, and `read_patch_preview` are
+compatibility wrappers rather than plain renames: the first replays a
+`preview_sql` grant through `oracle_execute` (token-only calls work for five
+minutes in one server process), the second previews then applies one DDL
+statement through the DDL gate, and the third lists or reads the last
+in-process source-patch preview.
 
 <!-- generated:tools-aliases -->
 | Alias | Routes to |
@@ -231,39 +1381,226 @@ For migrations from shorter Oracle MCP tool surfaces, the server advertises comp
 | `get_clob` | `oracle_read_clob` |
 <!-- /generated:tools-aliases -->
 
-## Configuration
+Aliases share the same SQL classifier, argument validation, profile handling,
+and operating-level behavior as their `oracle_*` targets.
 
-Connection profiles live in `profiles.toml`. **No secrets are written to disk** — credentials are references resolved at runtime through `env:`, `file:`, or `keyring:`. A minimal read-only profile:
+`oracle_query` and the inner SQL of `oracle_explain_plan` pass through the read-only gate. `oracle_explain_plan` is not a pure read on Oracle primary databases: `EXPLAIN PLAN` writes `PLAN_TABLE`, so the tool refuses by default, refuses on read-only standby, and only runs when the active session is already `READ_WRITE` and the caller passes `allow_plan_table_write=true`. `oracle_preview_sql` runs the classifier without executing the SQL and includes the active profile ceiling so agents can distinguish "allowed on this profile", "requires a higher profile/session level", and "blocked by policy." When a non-read statement is currently executable, `oracle_preview_sql` also returns `execute_confirmation.confirm`; pass that opaque grant reference to `oracle_execute` when you intend either to commit that exact statement or to permit a non-transactional effect such as sequence `NEXTVAL` on the active profile, MCP session, lane, principal, and lane generation. A query-shaped `NEXTVAL` is refused because `oracle_execute` reports row counts rather than fetching query rows; use it inside governed direct DML instead. Engine-free caller PL/SQL is deliberately limited to `NULL` and literal/bind-only `SYS.DBMS_OUTPUT.PUT_LINE` statements because Oracle permits zero-argument functions to omit parentheses, making general procedural expressions impossible to prove safe lexically. Explicit `CALL` is always refused on the engine-free surface: exact catalog identity prevents name-collision mistakes but does not prove the resolved PL/SQL body or its argument expressions side-effect-free. A future admission path would need both exact identity and a complete transitive body-purity proof; identity alone is never sufficient. The dictionary tools build their own parameterized SQL and never execute caller-supplied statements.
 
-```toml
-[profiles.db_ro]
-connect_string = "//db.example.com:1521/FREEPDB1"
-username       = "APP_RO"
-credential_ref = "env:ORACLE_APP_PASSWORD"
-# default_level defaults to read_only and is the ceiling for this profile;
-# set max_level to permit explicit, TTL-bounded elevation up to ADMIN.
+Execution grants are process-local, single-use preview grants. Regenerate them
+after restarting the server, switching profiles, changing session level, or
+changing HTTP session/principal/lane.
+
+For committing tools and confirmed non-transactional effects, the server also
+writes a durable intent before it touches Oracle. The intent log stores only
+non-secret hashes and routing facts
+(idempotency-key hash, subject, lane, SQL hash, timestamp) under
+`$XDG_STATE_HOME/oraclemcp/write-intents/intents.jsonl`, or
+`$HOME/.local/state/oraclemcp/...` when `XDG_STATE_HOME` is unset. If a writable
+server restarts and recovers an unresolved intent, startup fails closed with
+`ORACLEMCP_WRITE_INTENT_IN_DOUBT`; verify the database outcome before starting a
+writable service again. Resolved terminal records are also recovered as an
+idempotency index, so the same confirmation grant hash plus SQL hash cannot be
+appended again after a restart.
+
+When a statement is allowed by the profile ceiling but above the current session
+level, call `oracle_set_session_level` first without `execute=true`. The preview
+returns the target level, TTL, gate decision, and a single-use confirmation
+grant. A second call with `execute=true` and that grant applies a temporary
+elevation window.
+Lowering to a less-capable level is allowed without a token; use
+`oracle_set_session_level` with `action="drop"` (or the `disable_writes` alias)
+to return the session to `READ_ONLY`. Elevation cannot raise `max_level`; if a
+profile ceiling is `READ_ONLY`, write/DDL/admin work remains blocked and the
+next action is selecting a different profile.
+
+## Safety model
+
+Statements are graded on an operating-level ladder:
+
+```
+READ_ONLY  <  READ_WRITE  <  DDL  <  ADMIN
 ```
 
-The full field reference — HTTP TLS/mTLS/OAuth listeners, the signed audit chain, result-masking policy, fleet/monitor profiles, TCPS/wallet and IAM/DRCP/proxy auth, and per-call timeout/SDU budgets — is in **[`docs/configuration.md`](docs/configuration.md)**.
+Profiles default to **`READ_ONLY`** unless the operator explicitly sets a higher `default_level`, and `max_level` is an immutable ceiling for that profile. For every raw statement, the classifier derives the *minimum* level the statement needs; the level gate then admits it only when the active session already permits that level. Everything else is refused fail-closed, and a statement the classifier cannot prove safe is treated as dangerous, never the reverse. The classifier is whitespace-, comment-, quote-, and batch-aware (it fails closed on desynchronized multi-statement input), and is continuously exercised by a differential adversarial corpus and a cargo-fuzz target.
 
-## Documentation
+A profile can also be scoped **out of the agent's view** with `mcp_exposed =
+false` (a per-profile opt-out; profiles are exposed by default). A hidden profile
+is invisible to the agent-facing tools while the operator/CLI still sees it. This
+is a visibility convenience, *not* a security boundary — the enforced limit on
+what any profile can do remains `max_level`/`protected`/DB privileges/the
+classifier, so keep a hidden privileged target genuinely least-privileged too.
+The startup log prints which profiles are exposed and at what ceiling. See
+[`docs/configuration.md`](docs/configuration.md) for the full model.
 
-- **[Configuration reference](docs/configuration.md)** — every profile, auth, transport, audit, and masking field.
-- **[Operating & deployment](docs/operations.md)** — containerized deployment, least-privilege account, network posture, service management (systemd/launchd/Windows), air-gapped install, and the operator runbook.
-- **[TNS discovery onboarding](docs/tns-discovery-onboarding.md)** · **[Toolchain](docs/toolchain.md)** · **[Upgrade runbooks](docs/upgrading-to-0.8.0.md)** and [field-hardening notes](docs/oraclemcp-091-field-hardening-notes.md).
-- **Architecture decisions:** [`docs/adr/`](docs/adr/) · **Formal proofs:** [`proofs/purity-core/`](proofs/purity-core/).
+`oracle_set_session_level` is the only general session-elevation tool. It never
+touches database data, never raises the profile ceiling, and defaults to
+preview. Elevating to `READ_WRITE`, `DDL`, or `ADMIN` requires the preview token
+and creates a bounded window (default 900 seconds, maximum 3600 seconds).
+Lowering to a less-capable level is immediate and does not require a token.
 
-## Build from source
+`oracle_execute` is intentionally narrow. It accepts one statement with positional binds, refuses read-only SQL (use `oracle_query`), refuses anything above the active profile/session level, rolls DML back unless `commit=true`, and requires the single-use `oracle_preview_sql` execution grant before any commit. Sequence `NEXTVAL` is non-transactional: governed direct DML containing it also requires confirmation when `commit=false`, records a durable intent, and warns that rollback cannot restore the consumed value. A query-shaped `NEXTVAL` is refused because this execute-with-rowcount path cannot prove the effect occurred without fetching a row. DDL/Admin statements cannot be rollback-previewed by Oracle, so they require `commit=true` plus confirmation before execution. Set `capture_dbms_output=true` to enable `DBMS_OUTPUT` before the statement and return bounded output after the commit or rollback; caller SQL must spell the reviewed built-in as `SYS.DBMS_OUTPUT.PUT_LINE`, and its arguments are restricted to literal/bind-derived expressions. `dbms_output_max_lines` and `dbms_output_max_chars` cap the response.
 
-This branch is pinned to **`nightly-2026-05-11`** and has no stable MSRV (the pin arrives transitively through `asupersync`, and Windows needs `windows_by_handle`; see [`docs/toolchain.md`](docs/toolchain.md)). Prefer the verified release archive above; build from source only when you intend to:
+Cancellation and timeouts are fail-closed at the DB boundary. Profile
+`call_timeout_seconds` defaults to 30 seconds and is met with any per-tool
+`timeout_seconds` override to form one total request budget; the Oracle driver
+call timeout bounds the wire round trip. A cancelled or failed pooled call is
+treated as an uncertain Oracle session and is discarded instead of returned to
+idle reuse. Lease-backed preview DML rolls back to its savepoint even when
+cancellation is observed after the DML; if cleanup certainty is lost, the lease
+is dropped and the structured error/audit outcome is `rolled_back`,
+`commit_in_doubt`, or `unknown_discarded` as appropriate. A failed commit is
+never "fixed" by a follow-up rollback; the dispatcher quarantines that session
+as `commit_in_doubt` and requires the operator to verify the Oracle outcome
+before retrying non-idempotent work. `commit_in_doubt` and unknown outcomes keep
+their durable write intent unresolved, so a restart cannot silently re-execute
+the same non-idempotent work. Safe terminal outcomes remain in the durable
+write-intent history and reject exact grant+SQL replay.
 
-```sh
-rustup toolchain install nightly-2026-05-11 --component rustfmt --component clippy
-cargo +nightly-2026-05-11 install oraclemcp
+`oracle_compile_object` is the structured alternative to handcrafting `ALTER ... COMPILE`. A call without `execute=true` only previews the validated compile statements, required `DDL` level, gate decision, and single-use confirmation grant. A second call with `execute=true` and that grant runs the compile and returns current `ALL_ERRORS` rows for the object. Set `plscope=true` to apply PL/Scope collection to that PL/SQL unit, or `warnings=true` to apply `PLSQL_WARNINGS='ENABLE:ALL'` to that unit. The options are embedded in the one `ALTER ... COMPILE` statement and leave the surrounding Oracle session settings unchanged; because views are not PL/SQL units, either option is rejected for `VIEW`. Both options remain profile-gated at `DDL`; `compile_with_warnings` is a compatibility alias for the warnings path.
+
+`oracle_create_or_replace` is the structured deployment macro for one full
+`CREATE OR REPLACE` statement. It validates that the source has the expected
+shape, classifies it, defaults to preview, and applies only through the same
+single-use execution-grant and `DDL` session/profile gate as `oracle_execute`. When it
+can infer the target object from a simple package/procedure/function/trigger/
+type/view name, the apply result includes current compile errors for that
+object.
+
+`deploy_ddl` is a compatibility wrapper over that same path. It accepts `name`
+and `wait_seconds` for older callers, returns them in the response, and executes
+synchronously in the generic core.
+
+`oracle_patch_source`, `patch_package`, and `patch_view` preview exact
+`old_text` to `new_text` replacements against current stored source. The
+`read_patch_preview` compatibility helper can list or return the last remembered
+in-process patch preview for the active profile, but the applying call must
+still pass the single-use confirmation grant from the preview.
+
+### Least-privilege database account
+
+The classifier and the per-DB operating-level ceiling are the *enforced*
+control, but they are strongest when paired with a database account that simply
+**cannot** write — defense in depth. For a read-only profile, connect as a
+least-privilege user (ideally a [proxy
+user](#connection-profiles) so individual identity is preserved in the audit
+trail) granted only:
+
+```sql
+-- Minimum: connect + read the data dictionary the read tools rely on.
+CREATE USER mcp_ro IDENTIFIED BY <secret>;
+GRANT CREATE SESSION TO mcp_ro;
+GRANT SELECT ANY DICTIONARY TO mcp_ro;   -- powers schema_inspect / get_ddl / describe
+-- Then grant SELECT only on the specific objects the agent should read, e.g.:
+GRANT SELECT ON app.customers TO mcp_ro;
+-- For proxy auth (preferred), let the proxy connect as the read-only target:
+ALTER USER mcp_ro GRANT CONNECT THROUGH mcp_proxy;
 ```
 
-Live database access is built in through the pure-Rust thin driver — **no Oracle Instant Client, ODPI-C, or C toolchain**. Optionally set `TNS_ADMIN` for net-service-name connections. An optional `--features plsql-intelligence` build embeds the offline PL/SQL engine (also published as the `:plsql-intelligence-latest` GHCR image).
+Grant **no** write-implying system privileges (`CREATE TABLE`, `INSERT/UPDATE/
+DELETE ANY TABLE`, `CREATE/ALTER ANY PROCEDURE`, `ALTER SYSTEM`, …). For a
+read-write profile, grant only the specific object DML/DDL the agent needs, and
+keep the profile `max_level` no higher than that work requires.
+
+`oraclemcp doctor --online --profile <p>` includes a **Write posture** check
+(11): with a live connection it reads the session's own `SESSION_PRIVS` and
+reports a read-only posture when the principal holds no write-implying system
+privilege, or **warns** (naming the offending privileges) when it can write. The
+same check reports the wallet mode truth table: the default build supports
+`ewallet.pem` and standalone `ewallet.p12` with their wallet password, plus
+auto-login `cwallet.sso`. `doctor --fix`
+may copy the legacy `~/.config/oraclemcp/audit.jsonl` default audit log into
+the XDG state audit path when the current target is absent, leaving the legacy
+file untouched and recording a backup artifact. It never changes Oracle, rewrites
+or merges the audit hash-chain, edits the SQL classifier, or raises a profile
+`max_level`; those findings are detect-only and refused with exit 4.
+
+## Architecture
+
+The engine-free MCP core is a small, one-way dependency DAG; no crate here imports a PL/SQL analysis engine (a boundary the CI enforces):
+
+```
+oraclemcp-error                          structured, agent-facing error envelope (leaf)
+oraclemcp-telemetry  → error             tracing / health-endpoint observability
+oraclemcp-audit      → error             durable fsync-before-execute audit hash-chain
+oraclemcp-guard      → audit, error      fail-closed SQL classifier + operating levels
+oraclemcp-config     → guard, error      layered configuration + connection profiles
+oraclemcp-db         → guard, error      Oracle connectivity, pooling, NLS-stable serializer, dictionary ops
+oraclemcp-auth       → audit, guard, …   transport auth: OAuth 2.1, mTLS, init token
+oraclemcp-core       → all of the above  MCP protocol surface, server, tool registry, capabilities
+oraclemcp            → core, db, …        this binary
+```
+
+## oraclemcp Core vs. PL/SQL Intelligence
+
+`oraclemcp` now owns the Oracle MCP server surface:
+
+- **Core build**: the default, engine-free Oracle **database** MCP server for schema introspection, guarded reads, and tightly gated SQL execution.
+- **PL/SQL intelligence build**: the same MCP server compiled with the offline [plsql-intelligence](https://github.com/MuhDur/plsql-intelligence) engine. It adds `oracle_plsql_*` tools for parse/analyze, dependency graph, lineage, SAST, documentation, and impact workflows while keeping live database access behind the usual profile controls.
+
+## Offline behavior
+
+If no profile is configured or Oracle is unreachable, `oraclemcp` falls back to
+a stub connection: `serve`, `capabilities`, and `doctor` all work, and any live
+tool call returns a structured error envelope rather than crashing. This makes
+the binary safe to install, inspect, and test anywhere, CI included.
+
+## Limitations
+
+Honest constraints, each documented in more detail in the sections above:
+
+- **Nightly-only build, no stable MSRV.** The workspace pins
+  `nightly-2026-05-11` (see [Source builds and runtime
+  requirements](#source-builds-and-runtime-requirements)). The pin is
+  build-time only; the shipped binary has no runtime dependency on nightly.
+- **Thin driver, not thick.** The adapter never silently falls back to thick
+  mode. External wallet auth without username/password, autonomous OCI
+  SDK/resource-principal token minting, and Kerberos/RADIUS auth are refused
+  with structured unsupported diagnostics rather than served.
+- **OCI IAM is pre-fetched tokens only.** Only pre-fetched JWT sources over
+  TCPS are supported (`token_env`, `token_file`, `token_exec`, or
+  `ORACLEMCP_IAM_TOKEN`); non-TCPS is refused before token use. Autonomous OCI
+  SDK minting/refresh and real-ADB acceptance remain separate gated work.
+- **Browser DDL apply is release-gated.** The dashboard Workbench can preview
+  DDL, but applying DDL/Admin requires a non-browser operator path until a
+  profile-level dashboard DDL opt-in exists.
+- **`oracle_explain_plan` is not a pure read.** `EXPLAIN PLAN` writes
+  `PLAN_TABLE`, so the tool refuses by default, refuses on a read-only standby,
+  and runs only at `READ_WRITE` with `allow_plan_table_write=true`.
+- **Native-Windows runtime audit-DACL hardening is under active repair.** Strict
+  TokenUser ownership for pre-existing audit objects needs an atomic
+  create-with-security-descriptor primitive that has no vetted safe wrapper under
+  `#![forbid(unsafe_code)]` (tracked by bead `oraclemcp-xuaea`). The native-Windows
+  runtime workspace lane is therefore advisory until that lands; Windows
+  installer/service packaging remains gated and tested, and Linux and WSL are
+  unaffected.
+- **No npm/npx channel.** Install with the one-line installer, `cargo binstall`,
+  the GHCR image, or the Homebrew/winget channels once they resolve.
+
+## About Contributions
+
+Please don't take this the wrong way, but I do not accept outside contributions
+for any of my projects. I simply don't have the mental bandwidth to review
+anything, and it's my name on the thing, so I'm responsible for any problems it
+causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also
+have to worry about other "stakeholders," which seems unwise for tools I mostly
+make for myself for free. Feel free to submit issues, and even PRs if you want to
+illustrate a proposed fix, but know I won't merge them directly. Instead, I'll
+have Claude or Codex review submissions via `gh` and independently decide whether
+and how to address them. Bug reports in particular are welcome. Sorry if this
+offends, but I want to avoid wasted time and hurt feelings. I understand this
+isn't in sync with the prevailing open-source ethos that seeks community
+contributions, but it's the only way I can move at this velocity and keep my
+sanity.
 
 ## License
 
-Licensed under **Apache-2.0 OR MIT**. The Docker image and crates do not redistribute Oracle Instant Client.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+
+---
+
+### Work with me
+
+I help enterprises with the hard parts — databases at scale, systems modernization, and AI in production, vendor-neutral (cloud or self-hosted). Building something hard in databases, Rust / C++, or AI? Reach out.
+
+→ **[durakovic.ai](https://durakovic.ai)** · hello@durakovic.ai
