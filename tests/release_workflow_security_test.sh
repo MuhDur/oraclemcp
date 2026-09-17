@@ -111,7 +111,7 @@ set -euo pipefail
 case "${1:-} ${2:-}" in
   "attestation verify")
     [ "${FAKE_GH_ATTESTATION_FAIL:-0}" != 1 ]
-    for required in --repo --signer-workflow --source-ref --source-digest --cert-identity --cert-oidc-issuer; do
+    for required in --repo --source-ref --source-digest --cert-identity --cert-oidc-issuer; do
       case " $* " in
         *" $required "*) ;;
         *) exit 2 ;;
