@@ -5724,7 +5724,8 @@ fn run_audit_verify(
 ) -> ExitCode {
     use oraclemcp_audit::{
         AnchorReaderError, AnchorStatus, AnchorViolation, JsonlError, VerifyOutcome,
-        anchor_path_for, check_anchor_reader, load_anchor, verify_reader, verify_reader_with,
+        anchor_path_for, check_anchor_reader, load_anchor_for_open_audit_ledger, verify_reader,
+        verify_reader_with,
     };
     use std::io::BufReader;
 
@@ -5788,7 +5789,7 @@ fn run_audit_verify(
             // present-but-invalid anchor; report an explicit advisory when the
             // sidecar is absent (legacy log, or removed with the tail).
             let anchor_path = anchor_path_for(file);
-            let anchor = match load_anchor(&anchor_path) {
+            let anchor = match load_anchor_for_open_audit_ledger(&anchor_path) {
                 Ok(anchor) => anchor,
                 Err(e) => {
                     emit_status_error(robot_json, "ORACLEMCP_AUDIT_ANCHOR_INVALID", &e.to_string());

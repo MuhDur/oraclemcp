@@ -323,7 +323,7 @@ pub fn load_anchor(path: &Path) -> Result<Option<ChainAnchor>, AnchorLoadError> 
 /// exist and resolve safely. Otherwise an attacker could move or redirect that
 /// parent after the primary file was opened and make a real head anchor look
 /// like a legacy absence, suppressing tail-truncation protection.
-pub(crate) fn load_anchor_for_open_audit_ledger(
+pub fn load_anchor_for_open_audit_ledger(
     path: &Path,
 ) -> Result<Option<ChainAnchor>, AnchorLoadError> {
     load_anchor_inner(path, true)
@@ -361,12 +361,34 @@ fn load_anchor_inner(
             });
         }
     };
-    #[cfg(not(unix))]
     #[cfg(windows)]
-    let held_parent =
-        open_windows_audit_directory_nofollow(parent_path).map_err(|error| AnchorLoadError {
-            message: format!("{}: {error}", path.display()),
-        })?;
+    let held_parent = match std::fs::symlink_metadata(parent_path) {
+        // Preserve the legacy absence contract only when the parent was
+        // genuinely absent before the no-reparse walk. Once it exists, the
+        // walk below remains authoritative and rejects a final or
+        // intermediate reparse point rather than following it.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_existing_parent => {
+            return Ok(None);
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(AnchorLoadError {
+                message: format!(
+                    "{}: anchor parent is missing while an audit ledger is already open",
+                    path.display()
+                ),
+            });
+        }
+        Err(error) => {
+            return Err(AnchorLoadError {
+                message: format!("{}: {error}", path.display()),
+            });
+        }
+        Ok(_) => {
+            open_windows_audit_directory_nofollow(parent_path).map_err(|error| AnchorLoadError {
+                message: format!("{}: {error}", path.display()),
+            })?
+        }
+    };
     #[cfg(not(unix))]
     let directory = match CapDir::open_ambient_dir(parent_path, ambient_authority()) {
         Ok(directory) => directory,
@@ -900,6 +922,18 @@ mod tests {
             .path()
             .join("parent-never-created")
             .join("audit.jsonl.anchor");
+        assert_eq!(load_anchor(&anchor_path), Ok(None));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_legacy_anchor_lookup_treats_a_genuinely_absent_parent_as_no_sidecar() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let anchor_path = dir
+            .path()
+            .join("parent-never-created-on-windows")
+            .join("audit.jsonl.anchor");
+
         assert_eq!(load_anchor(&anchor_path), Ok(None));
     }
 
