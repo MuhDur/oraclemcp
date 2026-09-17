@@ -50,11 +50,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 #[cfg(not(unix))]
 use cap_std::ambient_authority;
-#[cfg(not(unix))]
-use cap_std::fs::Dir as CapDir;
-use cap_std::fs::OpenOptions as CapOpenOptions;
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt as _;
+use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::hmac::ct_eq;
@@ -329,6 +327,22 @@ pub fn load_anchor_for_open_audit_ledger(
     load_anchor_inner(path, true)
 }
 
+/// Load an anchor relative to the exact parent capability that opened its
+/// primary audit ledger.
+///
+/// The caller must retain `parent` from the no-follow open that yielded the
+/// primary ledger. Resolving the anchor through this capability, rather than
+/// through `path.parent()` again, keeps a post-open parent replacement from
+/// making a real head anchor look absent. `Ok(None)` therefore means that the
+/// anchor child is genuinely absent beneath this exact bound parent.
+pub fn load_anchor_from_open_audit_parent(
+    path: &Path,
+    parent: &CapDir,
+) -> Result<Option<ChainAnchor>, AnchorLoadError> {
+    let name = anchor_file_name(path)?;
+    load_anchor_from_directory(path, name, parent)
+}
+
 fn load_anchor_inner(
     path: &Path,
     require_existing_parent: bool,
@@ -337,12 +351,7 @@ fn load_anchor_inner(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let name = path
-        .file_name()
-        .filter(|name| !name.is_empty())
-        .ok_or_else(|| AnchorLoadError {
-            message: format!("{}: anchor path has no file name", path.display()),
-        })?;
+    let name = anchor_file_name(path)?;
     #[cfg(unix)]
     let directory = match open_existing_audit_directory_nofollow(parent_path) {
         Ok(directory) => directory,
@@ -409,6 +418,36 @@ fn load_anchor_inner(
             });
         }
     };
+    let anchor = load_anchor_from_directory(path, name, &directory)?;
+    #[cfg(unix)]
+    authenticate_held_audit_directory(&directory, parent_path).map_err(|error| {
+        AnchorLoadError {
+            message: format!("{}: {error}", path.display()),
+        }
+    })?;
+    #[cfg(windows)]
+    held_parent
+        .authenticate_current_path()
+        .map_err(|error| AnchorLoadError {
+            message: format!("{}: {error}", path.display()),
+        })?;
+    Ok(anchor)
+}
+
+fn anchor_file_name(path: &Path) -> Result<&Path, AnchorLoadError> {
+    path.file_name()
+        .filter(|name| !name.is_empty())
+        .map(Path::new)
+        .ok_or_else(|| AnchorLoadError {
+            message: format!("{}: anchor path has no file name", path.display()),
+        })
+}
+
+fn load_anchor_from_directory(
+    path: &Path,
+    name: &Path,
+    directory: &CapDir,
+) -> Result<Option<ChainAnchor>, AnchorLoadError> {
     let mut options = CapOpenOptions::new();
     options.read(true).follow(FollowSymlinks::No);
     // Opening a FIFO for reading blocks until a writer appears. Take a
@@ -456,18 +495,6 @@ fn load_anchor_inner(
     let anchor: ChainAnchor = serde_json::from_str(body.trim()).map_err(|e| AnchorLoadError {
         message: format!("{}: {e}", path.display()),
     })?;
-    #[cfg(unix)]
-    authenticate_held_audit_directory(&directory, parent_path).map_err(|error| {
-        AnchorLoadError {
-            message: format!("{}: {error}", path.display()),
-        }
-    })?;
-    #[cfg(windows)]
-    held_parent
-        .authenticate_current_path()
-        .map_err(|error| AnchorLoadError {
-            message: format!("{}: {error}", path.display()),
-        })?;
     Ok(Some(anchor))
 }
 

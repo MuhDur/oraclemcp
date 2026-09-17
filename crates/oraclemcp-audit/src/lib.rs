@@ -34,7 +34,7 @@ mod verify;
 pub use anchor::{
     ANCHOR_VERSION, AnchorFile, AnchorLoadError, AnchorReaderError, AnchorStatus, AnchorViolation,
     ChainAnchor, anchor_path_for, check_anchor, check_anchor_reader, load_anchor,
-    load_anchor_for_open_audit_ledger,
+    load_anchor_for_open_audit_ledger, load_anchor_from_open_audit_parent,
 };
 pub use hmac::{
     HmacSha256Key, HmacSha256KeyError, MIN_HMAC_SHA256_KEY_BYTES, ct_eq, hmac_sha256,

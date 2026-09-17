@@ -167,7 +167,9 @@ fn audit_verification_input_rejects_links_and_fifos_and_keeps_one_opened_ledger(
     let moved = directory.path().join("moved-audit.jsonl");
     std::fs::write(&audit, b"original signed ledger\n").expect("seed ledger");
 
-    let mut held = crate::open_audit_verification_file(&audit).expect("open regular ledger");
+    let mut held = crate::open_audit_verification_file(&audit)
+        .expect("open regular ledger")
+        .file;
     std::fs::rename(&audit, &moved).expect("replace ledger path");
     std::fs::write(&replacement, b"replacement ledger\n").expect("seed replacement");
     std::fs::rename(&replacement, &audit).expect("install replacement ledger");
@@ -198,7 +200,7 @@ fn audit_verification_input_rejects_links_and_fifos_and_keeps_one_opened_ledger(
 
 #[cfg(unix)]
 #[test]
-fn audit_verify_anchor_check_refuses_a_parent_removed_after_primary_open() {
+fn audit_verify_anchor_check_uses_the_parent_bound_to_the_open_primary() {
     let root = tempfile::tempdir().expect("test root");
     let audit_parent = root.path().join("audit-parent");
     let parked_parent = root.path().join("parked-audit-parent");
@@ -210,20 +212,39 @@ fn audit_verify_anchor_check_refuses_a_parent_removed_after_primary_open() {
         .record_head(1, "sha256:anchored-head")
         .expect("seed existing head anchor");
 
-    let _opened_primary =
+    let opened_primary =
         crate::open_audit_verification_file(&audit_path).expect("open exact primary ledger");
     std::fs::rename(&audit_parent, &parked_parent)
-        .expect("remove anchor parent after primary open");
+        .expect("park original anchor parent after primary open");
+    std::fs::create_dir(&audit_parent).expect("install normal empty replacement parent");
 
-    let error = oraclemcp_audit::load_anchor_for_open_audit_ledger(&anchor_path).expect_err(
-        "audit verify must not turn an existing head anchor into a legacy absence after primary open",
-    );
-    assert!(
-        error.to_string().contains("anchor parent is missing"),
-        "unexpected error: {error}"
-    );
+    let anchor =
+        oraclemcp_audit::load_anchor_from_open_audit_parent(&anchor_path, &opened_primary.parent)
+            .expect("load anchor relative to primary parent")
+            .expect("a replacement directory must not hide the original anchor");
+    assert_eq!(anchor.seq, 1);
     assert!(
         parked_parent.join("audit.jsonl.anchor").is_file(),
-        "the refused configured path had a real anchored head before its parent was removed"
+        "the bound parent retains the genuine head anchor despite pathname replacement"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn audit_verify_anchor_check_returns_none_only_when_absent_under_bound_parent() {
+    let root = tempfile::tempdir().expect("test root");
+    let audit_parent = root.path().join("audit-parent");
+    std::fs::create_dir(&audit_parent).expect("create audit parent");
+    let audit_path = audit_parent.join("audit.jsonl");
+    let anchor_path = oraclemcp_audit::anchor_path_for(&audit_path);
+    std::fs::write(&audit_path, b"signed ledger bytes\n").expect("seed regular primary");
+
+    let opened_primary =
+        crate::open_audit_verification_file(&audit_path).expect("open exact primary ledger");
+    assert_eq!(
+        oraclemcp_audit::load_anchor_from_open_audit_parent(&anchor_path, &opened_primary.parent,)
+            .expect("read exact bound parent"),
+        None,
+        "legacy absence remains valid only beneath the parent that opened the primary"
     );
 }

@@ -5646,11 +5646,19 @@ fn run_incident_replay(robot_json: bool, args: IncidentReplayCliArgs) -> ExitCod
     stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS)
 }
 
+/// One user-supplied audit ledger plus the exact parent capability that opened
+/// it. The parent stays live until anchor verification has resolved its sidecar
+/// relative to the same directory.
+struct OpenAuditVerificationFile {
+    file: cap_std::fs::File,
+    parent: cap_std::fs::Dir,
+}
+
 /// Open a user-supplied audit ledger through its held parent directory, without
 /// following a final-component link. The nonblocking Unix flag matters even
 /// though the descriptor is immediately type-checked: otherwise opening a FIFO
 /// would wait for a writer before we can reject it as a non-regular input.
-fn open_audit_verification_file(path: &Path) -> io::Result<cap_std::fs::File> {
+fn open_audit_verification_file(path: &Path) -> io::Result<OpenAuditVerificationFile> {
     use cap_fs_ext::{DirExt as _, FollowSymlinks, OpenOptionsFollowExt as _};
     use cap_std::ambient_authority;
     use cap_std::fs::{Dir, OpenOptions as CapOpenOptions};
@@ -5700,7 +5708,7 @@ fn open_audit_verification_file(path: &Path) -> io::Result<cap_std::fs::File> {
             "audit verification input is not a regular file",
         ));
     }
-    Ok(file)
+    Ok(OpenAuditVerificationFile { file, parent })
 }
 
 fn rewind_audit_verification_file(
@@ -5724,7 +5732,7 @@ fn run_audit_verify(
 ) -> ExitCode {
     use oraclemcp_audit::{
         AnchorReaderError, AnchorStatus, AnchorViolation, JsonlError, VerifyOutcome,
-        anchor_path_for, check_anchor_reader, load_anchor_for_open_audit_ledger, verify_reader,
+        anchor_path_for, check_anchor_reader, load_anchor_from_open_audit_parent, verify_reader,
         verify_reader_with,
     };
     use std::io::BufReader;
@@ -5757,11 +5765,14 @@ fn run_audit_verify(
     let mut db_evidence_accumulator = with_db_evidence.then(AuditDbEvidenceSummaryAccumulator::new);
     let verification = match db_evidence_accumulator.as_mut() {
         Some(accumulator) => verify_reader_with(
-            BufReader::new(&mut audit_file),
+            BufReader::new(&mut audit_file.file),
             keyring.verification_keys(),
             |record| accumulator.observe(record),
         ),
-        None => verify_reader(BufReader::new(&mut audit_file), keyring.verification_keys()),
+        None => verify_reader(
+            BufReader::new(&mut audit_file.file),
+            keyring.verification_keys(),
+        ),
     };
     let outcome = match verification {
         Ok(outcome) => outcome,
@@ -5789,7 +5800,8 @@ fn run_audit_verify(
             // present-but-invalid anchor; report an explicit advisory when the
             // sidecar is absent (legacy log, or removed with the tail).
             let anchor_path = anchor_path_for(file);
-            let anchor = match load_anchor_for_open_audit_ledger(&anchor_path) {
+            let anchor = match load_anchor_from_open_audit_parent(&anchor_path, &audit_file.parent)
+            {
                 Ok(anchor) => anchor,
                 Err(e) => {
                     emit_status_error(robot_json, "ORACLEMCP_AUDIT_ANCHOR_INVALID", &e.to_string());
@@ -5808,7 +5820,7 @@ fn run_audit_verify(
                     // descriptor and stream it rather than retaining every
                     // record from verification.
                     if let Err(message) = rewind_audit_verification_file(
-                        &mut audit_file,
+                        &mut audit_file.file,
                         file,
                         "head-anchor verification",
                     ) {
@@ -5816,7 +5828,7 @@ fn run_audit_verify(
                         return ExitCode::from(2);
                     }
                     match check_anchor_reader(
-                        BufReader::new(&mut audit_file),
+                        BufReader::new(&mut audit_file.file),
                         anchor,
                         keyring.verification_keys(),
                     ) {

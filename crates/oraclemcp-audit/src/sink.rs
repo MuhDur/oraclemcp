@@ -27,10 +27,12 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt as _};
 #[cfg(unix)]
 use cap_std::ambient_authority;
+#[cfg(any(unix, windows))]
+use cap_std::fs::Dir as CapDir;
+#[cfg(unix)]
+use cap_std::fs::OpenOptions as CapOpenOptions;
 #[cfg(unix)]
 use cap_std::fs::OpenOptionsExt as CapOpenOptionsExt;
-#[cfg(unix)]
-use cap_std::fs::{Dir as CapDir, OpenOptions as CapOpenOptions};
 
 #[cfg(windows)]
 use std::os::windows::fs::OpenOptionsExt;
@@ -967,6 +969,7 @@ const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 pub(crate) struct WindowsAuditParent {
     _component_handles: Vec<File>,
     final_handle: File,
+    cap_dir: CapDir,
     final_identity: OpenFileIdentity,
     configured_path: PathBuf,
 }
@@ -1086,9 +1089,16 @@ pub(crate) fn open_windows_audit_directory_nofollow(
             configured_path.display()
         ))
     })?;
+    let cap_dir = CapDir::from_std_file(final_handle.try_clone().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot duplicate audit directory handle {} for capability-relative access: {error}",
+            configured_path.display()
+        ))
+    })?);
     Ok(WindowsAuditParent {
         _component_handles: component_handles,
         final_handle,
+        cap_dir,
         final_identity,
         configured_path,
     })
@@ -1105,6 +1115,10 @@ fn open_windows_audit_parent_for_file(path: &Path) -> Result<WindowsAuditParent,
 
 #[cfg(windows)]
 impl WindowsAuditParent {
+    pub(crate) fn directory(&self) -> &CapDir {
+        &self.cap_dir
+    }
+
     pub(crate) fn authenticate_current_path(&self) -> Result<(), AuditError> {
         let current = open_windows_audit_directory_nofollow(&self.configured_path)?;
         if current.final_identity != self.final_identity {
@@ -1900,6 +1914,10 @@ pub struct FileAuditSink {
     /// for the sink's lifetime; released when the sink drops. Never read after
     /// construction — its lifetime IS its purpose.
     _lock: AuditLogLock,
+    #[cfg(unix)]
+    parent: HeldAuditParent,
+    #[cfg(windows)]
+    parent: WindowsAuditParent,
 }
 
 /// Opaque proof that one exact open primary audit ledger was fully
@@ -1964,7 +1982,7 @@ impl FileAuditSink {
         // each secure open's actual create result controls directory durability.
         run_file_audit_open_hook();
         #[cfg(unix)]
-        let (lock, file) = {
+        let (lock, file, parent) = {
             // Hold the parent capability before either sibling is opened. Both
             // child opens and the later fsync are relative to this exact
             // descriptor, so a path rename cannot split their durability
@@ -1988,10 +2006,10 @@ impl FileAuditSink {
             if audit_created || lock_created {
                 parent.sync()?;
             }
-            (lock, file)
+            (lock, file, parent)
         };
         #[cfg(windows)]
-        let (lock, file) = {
+        let (lock, file, parent) = {
             // The Windows child opens use no-follow handles, but those flags
             // protect only a pathname's final component. Retain the complete
             // parent walk across both sibling opens so an intermediate junction
@@ -2006,7 +2024,7 @@ impl FileAuditSink {
             if audit_created || lock_created {
                 fsync_parent_dir(path)?;
             }
-            (lock, file)
+            (lock, file, parent)
         };
         #[cfg(not(any(unix, windows)))]
         let (lock, file) = {
@@ -2025,6 +2043,10 @@ impl FileAuditSink {
         Ok(FileAuditSink {
             file: Mutex::new(file),
             _lock: lock,
+            #[cfg(unix)]
+            parent,
+            #[cfg(windows)]
+            parent,
         })
     }
 
@@ -2088,7 +2110,19 @@ impl FileAuditSink {
         anchor_path: &Path,
         keys: &[SigningKey],
     ) -> Result<AuthenticatedAuditTail, AuditError> {
-        let anchor = crate::anchor::load_anchor_for_open_audit_ledger(anchor_path).map_err(|error| {
+        #[cfg(unix)]
+        self.parent.authenticate_current_path()?;
+        #[cfg(windows)]
+        self.parent.authenticate_current_path()?;
+        #[cfg(unix)]
+        let anchor =
+            crate::anchor::load_anchor_from_open_audit_parent(anchor_path, &self.parent.dir);
+        #[cfg(windows)]
+        let anchor =
+            crate::anchor::load_anchor_from_open_audit_parent(anchor_path, self.parent.directory());
+        #[cfg(not(any(unix, windows)))]
+        let anchor = crate::anchor::load_anchor_for_open_audit_ledger(anchor_path);
+        let anchor = anchor.map_err(|error| {
             AuditError::ResumeRefused(format!(
                 "head anchor sidecar {} is present but unreadable ({error}); refusing to arm audit shipping without confirming the durable chain head",
                 anchor_path.display()
@@ -4351,7 +4385,7 @@ mod tests {
             .authenticate_existing_chain(&path, &anchor_path, &[test_key()])
             .expect_err("a missing anchor parent must not suppress an existing head anchor");
         assert!(
-            error.to_string().contains("anchor parent is missing"),
+            error.to_string().contains("audit directory is missing"),
             "unexpected error: {error}"
         );
         assert!(
