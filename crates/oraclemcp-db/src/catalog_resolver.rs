@@ -1784,12 +1784,16 @@ mod tests {
     }
 
     struct ScriptedRows {
-        responses: Mutex<VecDeque<Vec<OracleRow>>>,
+        responses: Mutex<VecDeque<Result<Vec<OracleRow>, DbError>>>,
         queries: Mutex<Vec<(String, Vec<OracleBind>)>>,
     }
 
     impl ScriptedRows {
         fn new(responses: impl IntoIterator<Item = Vec<OracleRow>>) -> Self {
+            Self::results(responses.into_iter().map(Ok))
+        }
+
+        fn results(responses: impl IntoIterator<Item = Result<Vec<OracleRow>, DbError>>) -> Self {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 queries: Mutex::new(Vec::new()),
@@ -1829,7 +1833,7 @@ mod tests {
                 .lock()
                 .expect("responses lock")
                 .pop_front()
-                .ok_or_else(|| DbError::Query("unexpected dictionary query".to_owned()))
+                .unwrap_or_else(|| Err(DbError::Query("unexpected dictionary query".to_owned())))
         }
 
         async fn execute(
@@ -2084,6 +2088,70 @@ mod tests {
                     oraclemcp_guard::Purity::Unknown
                 );
                 assert!(no_io.queries.lock().expect("queries lock").is_empty());
+            }
+        });
+    }
+
+    /// Default-build differential for the VPD and virtual-column metadata
+    /// boundary.  Only a complete, successful clean snapshot earns the
+    /// `READ_ONLY`-permitting purity proof.  A visible VPD policy is
+    /// deliberately `Unknown`; unavailable policy or column metadata aborts
+    /// the proof, which the dispatcher turns into its fail-closed refusal.
+    #[test]
+    fn default_resolver_vpd_metadata_never_grants_read_only_on_uncertainty() {
+        run_with_cx(|cx| async move {
+            let clean = ScriptedRows::new([Vec::new(), Vec::new(), Vec::new(), Vec::new()]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &clean, &[table_object()])
+                    .await
+                    .expect("complete clean metadata proves read-only"),
+                oraclemcp_guard::Purity::ProvenReadOnly
+            );
+
+            let vpd = ScriptedRows::new([vec![row(&[("POLICY_NAME", Some("SYNTHETIC_VPD"))])]]);
+            let vpd_purity = resolved_relations_read_purity(&cx, &vpd, &[table_object()])
+                .await
+                .expect("visible VPD is a normal, non-error metadata answer");
+            assert_eq!(vpd_purity, oraclemcp_guard::Purity::Unknown);
+            assert!(
+                !vpd_purity.permits_safe(),
+                "a table with a SELECT VPD policy must not be admitted at READ_ONLY"
+            );
+
+            for (name, responses, expected_probe) in [
+                (
+                    "policy catalog",
+                    vec![Err(DbError::Query(
+                        "ORA-00942: ALL_POLICIES unavailable".to_owned(),
+                    ))],
+                    SELECT_POLICY_SQL,
+                ),
+                (
+                    "column catalog",
+                    vec![
+                        Ok(Vec::new()),
+                        Err(DbError::Query(
+                            "ORA-00942: ALL_TAB_COLS unavailable".to_owned(),
+                        )),
+                    ],
+                    VIRTUAL_COLUMN_SQL,
+                ),
+            ] {
+                let blind = ScriptedRows::results(responses);
+                let refusal = resolved_relations_read_purity(&cx, &blind, &[table_object()]).await;
+                assert!(
+                    refusal.is_err(),
+                    "unavailable {name} metadata must abort the proof so dispatch refuses; got {refusal:?}"
+                );
+                assert!(
+                    blind
+                        .queries
+                        .lock()
+                        .expect("queries lock")
+                        .iter()
+                        .any(|(sql, _)| sql == expected_probe),
+                    "the intended {name} boundary must be queried before refusal"
+                );
             }
         });
     }
