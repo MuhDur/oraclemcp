@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.13",
+  "scope": {"summary": "Operator audit-tail proof exports omit the configured source pathname.", "in_scope": ["crates/oraclemcp-core/src/http/operator.rs"], "out_of_scope": ["Audit record cryptographic contents." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "operator audit-tail proof export", "kind": "route", "trace": "Fix fd4e83d48d3299069966c485b3cb88f490983eb9; regression audit_tail_filters_exports_redacted_proof_bundle. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["Response-level redaction regression only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

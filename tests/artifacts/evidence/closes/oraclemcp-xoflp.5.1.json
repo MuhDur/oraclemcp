@@ -1,0 +1,18 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-17T06:00:00Z",
+  "bead_id": "oraclemcp-xoflp.5.1",
+  "scope": {
+    "summary": "Config operations retain no-follow parent capabilities across approved writes and reads.",
+    "in_scope": ["crates/oraclemcp-core/src/config_ops.rs"],
+    "out_of_scope": ["Direct startup config-source handling, tracked separately by oraclemcp-xoflp.5.19."]
+  },
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"},
+  "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "operator config operations", "kind": "api", "trace": "Fix a34c28eeb4101278ec5a8caa89dbedaf6c985ce7; regression config_read_refuses_a_parent_swap_without_returning_stale_bytes. GrayKite clean-detached convergence PASS in agent-mail thread oraclemcp-xoflp.5.34 message 2352 reports the exact-source full Rust, arch/taxonomy/docs, and web gates green with no new P0/P1."}]},
+  "live_evidence": {"claimed": false, "artifacts": []},
+  "limitations": ["Deterministic filesystem regression coverage; no live customer configuration was used."],
+  "known_defects": [], "follow_ups": [],
+  "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

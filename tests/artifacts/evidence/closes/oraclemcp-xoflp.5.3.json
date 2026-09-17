@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.3",
+  "scope": {"summary": "Durable spool record and acknowledgement lifecycle is descriptor-relative after directory authentication.", "in_scope": ["crates/oraclemcp-audit/src/shipping_spool.rs"], "out_of_scope": ["External destination delivery semantics." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "durable spool record lifecycle", "kind": "api", "trace": "Fix c71186274e4fb87a75295ad5823b689808dc06bf; regression post_open_directory_swap_keeps_record_and_ack_lifecycle_on_held_spool. GrayKite convergence PASS, agent-mail oraclemcp-xoflp.5.34 message 2352, exact-source gate green with no new P0/P1."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["Deterministic local spool test only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

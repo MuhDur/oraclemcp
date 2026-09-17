@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.23",
+  "scope": {"summary": "Audit lock PID hints are read from the already authenticated descriptor with a bound.", "in_scope": ["crates/oraclemcp-audit/src/sink.rs"], "out_of_scope": ["Lock acquisition semantics beyond the holder hint." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "audit lock contention response", "kind": "api", "trace": "Fix 614a1a70cd7840b2ef1b9172063cec0b75a571c3; regressions holder_pid_hint_reads_only_a_bounded_open_descriptor_prefix and oversized_locked_sidecar_still_returns_the_fail_closed_contention_error. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["Local lock-file regression coverage only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

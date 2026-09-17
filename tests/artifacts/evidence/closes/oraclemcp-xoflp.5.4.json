@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.4",
+  "scope": {"summary": "In-progress operator idempotency leases remain authoritative past completed-replay TTL.", "in_scope": ["crates/oraclemcp-core/src/http/operator.rs"], "out_of_scope": ["The separate all-live capacity bound tracked by oraclemcp-xoflp.5.33." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "operator action idempotency ledger", "kind": "route", "trace": "Fix 49c8040ab80b193fc14525c662d409da61110ebd; regressions idempotency_ttl_never_expires_an_in_progress_lease and idempotency_ttl_still_expires_a_completed_replay. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352: exact-source full gate green and no new P0/P1."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["In-memory ledger regression coverage only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

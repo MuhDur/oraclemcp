@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.5",
+  "scope": {"summary": "Config reads and rollback backups are capability-relative, bounded, and swap-resistant.", "in_scope": ["crates/oraclemcp-core/src/config_ops.rs"], "out_of_scope": ["Startup config source reads, tracked by oraclemcp-xoflp.5.19." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "config rollback operation", "kind": "api", "trace": "Fix a34c28eeb4101278ec5a8caa89dbedaf6c985ce7; regressions config_read_refuses_a_file_swap_to_a_symlink_after_metadata_check and rollback_refuses_a_parent_swap_before_a_backup_can_be_redirected. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["Local filesystem regressions only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.20",
+  "scope": {"summary": "All operator ingress applies the shared request-body cap before audit or JSON dispatch.", "in_scope": ["crates/oraclemcp-core/src/http/mod.rs"], "out_of_scope": ["Transport framing limits beyond the shared operator branch." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "embedded operator request dispatch", "kind": "route", "trace": "Fix 17aeca879c06d919cdf07e17dec91302afaa69c0; regression public_operator_dispatch_refuses_oversized_body_before_audit_or_json_parsing. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["In-process ingress regression only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

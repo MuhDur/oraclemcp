@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.11",
+  "scope": {"summary": "Doctor obtains wallet certificate validity through the bounded driver seam and its wallet precedence.", "in_scope": ["crates/oraclemcp-core/src/doctor.rs"], "out_of_scope": ["Live TLS handshakes." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "doctor certificate-expiry assessment", "kind": "cli", "trace": "Driver-seam adoption 090c07982c94ab9ef9447170d566facbf0edee14 and bounded wallet posture fix 4e385ba4e304d141ce3722224d661cc0c9b3881b; regression seam_reads_wallet_certificate_validity_offline. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["Offline certificate fixtures only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

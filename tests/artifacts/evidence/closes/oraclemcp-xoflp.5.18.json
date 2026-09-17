@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.18",
+  "scope": {"summary": "Direct CLI configuration paths are validated fail-closed before Figment opens them.", "in_scope": ["crates/oraclemcp-config/src/lib.rs"], "out_of_scope": ["Descriptor-bound startup source reads, tracked by oraclemcp-xoflp.5.19." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "CLI and environment config source", "kind": "cli", "trace": "Fix 10ba73b3587cbda7993105024215c2c08ae7d123; regressions cli_config_path_is_validated_fail_closed and cli_config_path_refuses_fifo_without_opening_it. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["Validation-layer regression coverage only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "bead-close-evidence/v1", "repo": "oraclemcp", "generated_at": "2026-09-17T06:00:00Z", "bead_id": "oraclemcp-xoflp.5.19",
+  "scope": {"summary": "Startup configuration is parsed from a bounded descriptor-bound source rather than a re-resolved path.", "in_scope": ["crates/oraclemcp-config/src/lib.rs"], "out_of_scope": ["Config operations rollback paths, tracked by oraclemcp-xoflp.5.5." ]},
+  "source": {"sha": "31ac3fe3f9024844742aee2d413a3cba1a910d82", "tree_clean": true, "branch": "main"}, "proofs": [],
+  "integration_evidence": {"entry_points": [{"name": "startup config loader", "kind": "cli", "trace": "Fix 68b6a2de0cb3442a9596662098eaf9576e699175; regressions startup_config_refuses_regular_file_replaced_after_cli_validation and startup_config_refuses_a_fifo_swapped_in_after_validation_without_blocking. GrayKite convergence PASS, thread oraclemcp-xoflp.5.34 message 2352."}]},
+  "live_evidence": {"claimed": false, "artifacts": []}, "limitations": ["Filesystem regression coverage only."], "known_defects": [], "follow_ups": [], "readiness": {"claim": "not-ready", "basis": "scoped-test"}
+}
