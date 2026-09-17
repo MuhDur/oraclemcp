@@ -28,6 +28,7 @@ mod discover;
 mod readiness;
 mod robot_docs;
 mod service_lifecycle;
+mod tls_config_material;
 
 #[cfg(test)]
 use audit_evidence::audit_db_evidence_summary;
@@ -75,7 +76,7 @@ use oraclemcp_auth::{
 };
 use oraclemcp_config::{
     AuditConfig, CONFIG_PATH_ENV, ConnectionProfile, CumulativeQueryCostBudgetConfig, HttpConfig,
-    HttpControlConfig, HttpTlsConfig, OracleMcpConfig,
+    HttpControlConfig, OracleMcpConfig,
 };
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
 use oraclemcp_core::http::SinglePrincipalGuard;
@@ -98,8 +99,8 @@ use oraclemcp_core::{
     MtlsClientRegistry, OAuthEnforcement, ObservabilityState, OperatorAuthorityPolicy,
     OracleMcpServer, PROTECTED_RESOURCE_METADATA_PATH, PreparedLaneDispatch, ServerIamTokenSource,
     ServiceOwner, ServiceTransport, ShutdownCoordinator, SiemFormat, SiemHttpForwarder,
-    SkippedCustomTool, SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsMaterial,
-    TlsServerConfig, ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
+    SkippedCustomTool, SourceHistoryStore, StatefulLaneDispatch, StdioAuthPolicy, TlsServerConfig,
+    ToolDispatch, ToolStreamSender, WriteIntentLog, apply_legacy_state_migration,
     build_server_config, classify_at_load, default_dashboard_ticket_dir, enforce_signature,
     mint_dashboard_pairing_ticket, operator_subject_id_hash, parse_tools_file,
     prepare_dashboard_pairing, probe_dashboard_http_service, requires_mtls, run_doctor,
@@ -120,6 +121,7 @@ use service_lifecycle::{
     ServiceLogsOptions, ServiceMutationOptions, ServiceReadOptions, ServiceRestoreOptions,
     acquire_service_instance_guard, resolve_dashboard_listener,
 };
+use tls_config_material::tls_material_from_config;
 
 /// Whether this binary was built with Oracle connectivity support. This is a
 /// build capability, not a claim about a currently reachable database.
@@ -3345,39 +3347,6 @@ fn http_allow_remote_from_env() -> bool {
 
 fn effective_http_allow_remote(config_allow_remote: bool) -> bool {
     config_allow_remote || http_allow_remote_from_env()
-}
-
-fn tls_material_from_config(
-    tls: &HttpTlsConfig,
-) -> Result<Option<TlsMaterial>, (&'static str, String)> {
-    let Some(cert_path) = tls.cert_chain_path.as_deref() else {
-        return Ok(None);
-    };
-    let key_path = tls
-        .private_key_path
-        .as_deref()
-        .expect("validated TLS private_key_path");
-    let cert_chain_pem = read_tls_pem("server certificate chain", cert_path)?;
-    let private_key_pem = read_tls_pem("server private key", key_path)?;
-    let client_ca_pem = tls
-        .client_ca_path
-        .as_deref()
-        .map(|path| read_tls_pem("client CA", path))
-        .transpose()?;
-    Ok(Some(TlsMaterial {
-        cert_chain_pem,
-        private_key_pem,
-        client_ca_pem,
-    }))
-}
-
-fn read_tls_pem(role: &'static str, path: &Path) -> Result<Vec<u8>, (&'static str, String)> {
-    fs::read(path).map_err(|e| {
-        (
-            "ORACLEMCP_HTTP_TLS_INVALID",
-            format!("failed to read HTTP TLS {role} at {}: {e}", path.display()),
-        )
-    })
 }
 
 fn run_serve(

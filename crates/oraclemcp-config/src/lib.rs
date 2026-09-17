@@ -62,6 +62,121 @@ pub const CONFIG_PATH_ENV: &str = "ORACLEMCP_CONFIG";
 /// an unexpectedly large local file.
 const MAX_CONFIG_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 
+/// A failed descriptor-bound read of a security-sensitive configured file.
+///
+/// This error deliberately carries no pathname or file contents: TLS material,
+/// IAM credentials, and profile hooks can be configured outside the normal
+/// state root, and their location is not useful in a server-facing diagnostic.
+#[derive(Clone, Debug, Error, Eq, PartialEq)]
+pub enum SensitiveFileReadError {
+    /// The path did not name one stable, no-follow regular-file descriptor.
+    #[error("configured file is unusable: {0}")]
+    Unusable(&'static str),
+    /// The supplied byte ceiling could not safely bound the read, or was exceeded.
+    #[error("configured file exceeds its bounded read limit")]
+    TooLarge,
+}
+
+impl SensitiveFileReadError {
+    const fn reason(&self) -> &'static str {
+        match self {
+            Self::Unusable(reason) => reason,
+            Self::TooLarge => "file exceeds the requested bounded read limit",
+        }
+    }
+}
+
+/// Read a configured security-sensitive file through a held no-follow parent
+/// capability, refusing special files, symlinks, path swaps, and reads beyond
+/// `max_bytes`.
+///
+/// The returned bytes come from the same descriptor whose identity was checked
+/// against the pre-open observation. The parent is re-authenticated before the
+/// descriptor is consumed, so a concurrent parent replacement is refused
+/// rather than silently redirecting the read. Callers choose an artifact-sized
+/// cap and decide whether the bytes must be UTF-8; diagnostics remain
+/// path-redacted through [`SensitiveFileReadError`].
+pub fn read_sensitive_file(
+    path: &Path,
+    max_bytes: usize,
+) -> Result<Vec<u8>, SensitiveFileReadError> {
+    let normalized = normalize_startup_config_path(path)
+        .map_err(|_| SensitiveFileReadError::Unusable("path does not name a safe file"))?;
+    let (parent_path, name) = startup_config_parent_and_name(&normalized)
+        .map_err(|_| SensitiveFileReadError::Unusable("path does not name a safe file"))?;
+    let parent = open_startup_config_parent(&parent_path)
+        .map_err(|_| SensitiveFileReadError::Unusable("parent is not a safe existing directory"))?;
+    let before = parent.symlink_metadata(&name).map_err(|error| {
+        SensitiveFileReadError::Unusable(if error.kind() == std::io::ErrorKind::NotFound {
+            "file disappeared before it could be opened"
+        } else {
+            "file metadata could not be read safely"
+        })
+    })?;
+    if before.file_type().is_symlink() {
+        return Err(SensitiveFileReadError::Unusable("file is a symbolic link"));
+    }
+    if !before.is_file() {
+        return Err(SensitiveFileReadError::Unusable(
+            "file is not a regular file",
+        ));
+    }
+
+    run_startup_config_open_hook();
+
+    let mut options = CapOpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NONBLOCK);
+    let mut file = parent.open_with(&name, &options).map_err(|_| {
+        SensitiveFileReadError::Unusable("file could not be opened without following links")
+    })?;
+    let after = file.metadata().map_err(|_| {
+        SensitiveFileReadError::Unusable("opened file metadata could not be inspected")
+    })?;
+    verify_startup_config_parent(&parent, &parent_path, &normalized).map_err(|_| {
+        SensitiveFileReadError::Unusable("parent directory changed while the file was opened")
+    })?;
+    if !after.is_file() || before.dev() != after.dev() || before.ino() != after.ino() {
+        return Err(SensitiveFileReadError::Unusable(
+            "file changed while it was opened",
+        ));
+    }
+
+    let max_bytes_u64 = u64::try_from(max_bytes).map_err(|_| SensitiveFileReadError::TooLarge)?;
+    let read_limit = max_bytes_u64
+        .checked_add(1)
+        .ok_or(SensitiveFileReadError::TooLarge)?;
+    if after.len() > max_bytes_u64 {
+        return Err(SensitiveFileReadError::TooLarge);
+    }
+    let capacity = usize::try_from(after.len()).map_err(|_| SensitiveFileReadError::TooLarge)?;
+    let mut bytes = Vec::with_capacity(capacity);
+    (&mut file)
+        .take(read_limit)
+        .read_to_end(&mut bytes)
+        .map_err(|_| SensitiveFileReadError::Unusable("file could not be read safely"))?;
+    if bytes.len() > max_bytes {
+        return Err(SensitiveFileReadError::TooLarge);
+    }
+    run_sensitive_file_post_read_hook();
+    verify_startup_config_parent(&parent, &parent_path, &normalized).map_err(|_| {
+        SensitiveFileReadError::Unusable("parent directory changed while the file was read")
+    })?;
+    let final_metadata = file.metadata().map_err(|_| {
+        SensitiveFileReadError::Unusable("opened file metadata could not be inspected")
+    })?;
+    if !final_metadata.is_file()
+        || before.dev() != final_metadata.dev()
+        || before.ino() != final_metadata.ino()
+    {
+        return Err(SensitiveFileReadError::Unusable(
+            "file changed while it was read",
+        ));
+    }
+    Ok(bytes)
+}
+
 const IGNORED_ENV_KEYS: &[&str] = &[
     "audit_key",
     "config",
@@ -106,73 +221,16 @@ const IGNORED_ENV_KEYS: &[&str] = &[
 /// the descriptor identity against the observation, and bound the bytes before
 /// passing an owned string to Figment.
 fn read_startup_config_source(path: &Path) -> Result<String, ConfigError> {
-    let normalized = normalize_startup_config_path(path)?;
-    let (parent_path, name) = startup_config_parent_and_name(&normalized)?;
-    let parent = open_startup_config_parent(&parent_path)?;
-    let before = parent.symlink_metadata(&name).map_err(|error| {
-        startup_config_read_error(
-            &normalized,
-            if error.kind() == std::io::ErrorKind::NotFound {
-                "file disappeared before it could be opened"
-            } else {
-                "file metadata could not be read safely"
-            },
-        )
+    let bytes = read_sensitive_file(path, MAX_CONFIG_SOURCE_BYTES).map_err(|error| {
+        let reason = if error == SensitiveFileReadError::TooLarge {
+            "file exceeds the 16 MiB startup-config limit"
+        } else {
+            error.reason()
+        };
+        startup_config_read_error(path, reason)
     })?;
-    if before.file_type().is_symlink() {
-        return Err(startup_config_read_error(
-            &normalized,
-            "file is a symbolic link",
-        ));
-    }
-    if !before.is_file() {
-        return Err(startup_config_read_error(
-            &normalized,
-            "file is not a regular file",
-        ));
-    }
-
-    run_startup_config_open_hook();
-
-    let mut options = CapOpenOptions::new();
-    options.read(true).follow(FollowSymlinks::No);
-    #[cfg(unix)]
-    options.custom_flags(libc::O_NONBLOCK);
-    let file = parent.open_with(&name, &options).map_err(|_| {
-        startup_config_read_error(
-            &normalized,
-            "file could not be opened without following links",
-        )
-    })?;
-    let after = file.metadata().map_err(|_| {
-        startup_config_read_error(&normalized, "opened file metadata could not be inspected")
-    })?;
-    verify_startup_config_parent(&parent, &parent_path, &normalized)?;
-    if !after.is_file() || before.dev() != after.dev() || before.ino() != after.ino() {
-        return Err(startup_config_read_error(
-            &normalized,
-            "file changed while it was opened",
-        ));
-    }
-    if after.len() > MAX_CONFIG_SOURCE_BYTES as u64 {
-        return Err(startup_config_read_error(
-            &normalized,
-            "file exceeds the 16 MiB startup-config limit",
-        ));
-    }
-
-    let mut bytes = Vec::with_capacity(after.len() as usize);
-    file.take((MAX_CONFIG_SOURCE_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .map_err(|_| startup_config_read_error(&normalized, "file could not be read safely"))?;
-    if bytes.len() > MAX_CONFIG_SOURCE_BYTES {
-        return Err(startup_config_read_error(
-            &normalized,
-            "file exceeds the 16 MiB startup-config limit",
-        ));
-    }
     String::from_utf8(bytes)
-        .map_err(|_| startup_config_read_error(&normalized, "file is not valid UTF-8 TOML"))
+        .map_err(|_| startup_config_read_error(path, "file is not valid UTF-8 TOML"))
 }
 
 fn normalize_startup_config_path(path: &Path) -> Result<PathBuf, ConfigError> {
@@ -327,6 +385,28 @@ fn run_startup_config_open_hook() {
         hook();
     }
 }
+
+#[cfg(test)]
+thread_local! {
+    static SENSITIVE_FILE_POST_READ_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_sensitive_file_post_read_hook(hook: impl FnOnce() + 'static) {
+    SENSITIVE_FILE_POST_READ_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
+}
+
+#[cfg(test)]
+fn run_sensitive_file_post_read_hook() {
+    let hook = SENSITIVE_FILE_POST_READ_HOOK.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(not(test))]
+fn run_sensitive_file_post_read_hook() {}
 
 #[cfg(not(test))]
 fn run_startup_config_open_hook() {}
@@ -2092,6 +2172,10 @@ mod config_path_tests;
 #[cfg(test)]
 #[path = "lib/config_source_tests.rs"]
 mod config_source_tests;
+
+#[cfg(test)]
+#[path = "lib/sensitive_file_tests.rs"]
+mod sensitive_file_tests;
 
 #[cfg(test)]
 mod tests {

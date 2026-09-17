@@ -62,7 +62,7 @@ use std::{
 };
 
 use command_group::{CommandGroup, GroupChild};
-use oraclemcp_config::{ConnectionProfile, OciConfig};
+use oraclemcp_config::{ConnectionProfile, OciConfig, read_sensitive_file};
 use oraclemcp_db::{
     IamTokenFuture, IamTokenRefreshError, IamTokenSourceHandle, OracleConnectOptions,
     RefreshableIamTokenSource,
@@ -78,6 +78,13 @@ pub const EXEC_TIMEOUT: Duration = Duration::from_secs(5);
 /// Hard cap on the bytes read from a `token_exec` command's stdout. Output beyond
 /// this fails closed rather than being buffered unbounded (a flood defense).
 pub const EXEC_OUTPUT_CAP: usize = 64 * 1024;
+
+/// A database-token JWT must remain small enough for the driver request and
+/// should never make a physical connect allocate from an arbitrary file.
+const TOKEN_FILE_BYTES_CAP: usize = EXEC_OUTPUT_CAP;
+/// PEM proof-of-possession keys are compact; this permits unusually large key
+/// encodings while keeping a configured local path strictly bounded.
+const TOKEN_KEY_FILE_BYTES_CAP: usize = 1024 * 1024;
 
 /// The built-in environment variable checked for an IAM database token when a
 /// profile enables `use_iam_token` without naming its own `token_env`.
@@ -96,8 +103,8 @@ pub enum IamTokenError {
     /// The named environment variable is not set.
     #[error("IAM token environment variable `{0}` is not set")]
     EnvMissing(String),
-    /// The token file could not be read (missing / unreadable).
-    #[error("IAM token file `{0}` could not be read")]
+    /// The token file could not be read safely (missing / special / swapped / oversized).
+    #[error("IAM token file could not be read safely")]
     FileUnreadable(String),
     /// The resolved source produced an empty token (whitespace-only or empty).
     #[error("resolved IAM token from {0} is empty")]
@@ -154,8 +161,8 @@ pub enum IamTokenError {
     )]
     AmbiguousKeySource,
     /// The IAM token proof-of-possession private-key file could not be read
-    /// (missing / unreadable). Carries the path reference only, never the key.
-    #[error("IAM token key file `{0}` could not be read")]
+    /// (missing / special / swapped / oversized). The path and key are never rendered.
+    #[error("IAM token key file could not be read safely")]
     KeyFileUnreadable(String),
     /// The environment variable named by `token_key_env` is not set. Carries the
     /// variable name only, never the key.
@@ -305,8 +312,12 @@ impl ServerIamTokenSource {
             ServerIamTokenSource::File { path } => {
                 // Re-read on every call: a rotated token file is picked up with
                 // no caching across calls.
-                let raw = std::fs::read_to_string(path)
-                    .map_err(|_| IamTokenError::FileUnreadable(path.display().to_string()))?;
+                let raw = String::from_utf8(
+                    read_sensitive_file(path, TOKEN_FILE_BYTES_CAP).map_err(|_| {
+                        IamTokenError::FileUnreadable("configured token file".to_owned())
+                    })?,
+                )
+                .map_err(|_| IamTokenError::FileUnreadable("configured token file".to_owned()))?;
                 non_empty(raw.trim(), "file")
             }
             ServerIamTokenSource::Exec { argv } => {
@@ -829,8 +840,14 @@ fn resolve_iam_token_key(
     match (file, env) {
         (Some(_), Some(_)) => Err(IamTokenError::AmbiguousKeySource),
         (Some(path), None) => {
-            let raw = std::fs::read_to_string(path)
-                .map_err(|_| IamTokenError::KeyFileUnreadable(path.to_owned()))?;
+            let raw = String::from_utf8(
+                read_sensitive_file(std::path::Path::new(path), TOKEN_KEY_FILE_BYTES_CAP).map_err(
+                    |_| IamTokenError::KeyFileUnreadable("configured token key file".to_owned()),
+                )?,
+            )
+            .map_err(|_| {
+                IamTokenError::KeyFileUnreadable("configured token key file".to_owned())
+            })?;
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 return Err(IamTokenError::KeyEmpty("file"));
@@ -1046,6 +1063,37 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn token_file_fifo_is_refused_without_blocking_or_rendering_its_path() {
+        let path = std::env::temp_dir().join(format!(
+            "oraclemcp-iam-token-fifo-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let status = Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo must create the FIFO fixture");
+
+        let started = Instant::now();
+        let error = ServerIamTokenSource::File { path: path.clone() }
+            .get_token()
+            .expect_err("a configured token FIFO must fail closed before blocking");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a configured token FIFO must not stall a physical connect; took {:?}",
+            started.elapsed()
+        );
+        assert!(matches!(error, IamTokenError::FileUnreadable(_)));
+        assert!(
+            !error.to_string().contains(&path.display().to_string()),
+            "the configured credential path leaked: {error}"
+        );
+        std::fs::remove_file(&path).expect("remove FIFO fixture");
+    }
+
     #[test]
     fn from_oci_sources_are_mutually_exclusive() {
         let mut oci = OciConfig {
@@ -1227,7 +1275,7 @@ mod tests {
         // Every IamTokenError Display is token-free — including the exec variants.
         for err in [
             IamTokenError::EnvMissing("SENTINEL_VAR".to_owned()),
-            IamTokenError::FileUnreadable("/etc/oracle/iam.jwt".to_owned()),
+            IamTokenError::FileUnreadable("configured token file".to_owned()),
             IamTokenError::Empty("env"),
             IamTokenError::Empty("exec"),
             IamTokenError::NonTcpsTransport,

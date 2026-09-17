@@ -7,9 +7,11 @@
 //! already omits secret references). Profile login statements are allowlisted
 //! and carried to both the default connection and leased sessions.
 
-use std::{fs, path::Path, time::Duration};
+use std::{path::Path, time::Duration};
 
-use oraclemcp_config::{ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity};
+use oraclemcp_config::{
+    ConnectionProfile, DrcpRoutingConfig, DrcpSessionPurity, read_sensitive_file,
+};
 use oraclemcp_db::{
     AuthAdapter, DbError, DrcpConfig, OracleConnectOptions, OracleSessionIdentity, PoolSettings,
     SessionPurity, canonical_nls_statements,
@@ -393,11 +395,19 @@ fn validate_trusted_hook_statement(
     Ok(trimmed.to_owned())
 }
 
+/// Profile login hooks are intentionally smaller than configuration sources:
+/// allowlisted `ALTER SESSION` setup does not need a multi-megabyte payload.
+const MAX_LOGIN_SCRIPT_BYTES: usize = 1024 * 1024;
+
 fn read_login_script(profile: &str, path: &Path) -> Result<Vec<String>, DbError> {
-    let text = fs::read_to_string(path).map_err(|e| {
+    let bytes = read_sensitive_file(path, MAX_LOGIN_SCRIPT_BYTES).map_err(|error| {
         DbError::UnsupportedAuth(format!(
-            "failed to read login_script for profile `{profile}` at {}: {e}",
-            path.display()
+            "failed safely to read login_script for profile `{profile}`: {error}"
+        ))
+    })?;
+    let text = String::from_utf8(bytes).map_err(|_| {
+        DbError::UnsupportedAuth(format!(
+            "login_script for profile `{profile}` is not valid UTF-8"
         ))
     })?;
     Ok(split_login_script(&text))
@@ -1190,6 +1200,39 @@ mod tests {
                 .iter()
                 .any(|s| s == "ALTER SESSION SET PLSQL_WARNINGS = 'ENABLE:ALL'")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn login_script_fifo_is_refused_without_blocking_or_disclosing_its_path() {
+        use std::time::{Duration, Instant};
+
+        let path = std::env::temp_dir().join(format!(
+            "oraclemcp-login-fifo-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let status = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo must create the FIFO fixture");
+
+        let started = Instant::now();
+        let error = read_login_script("dev", &path)
+            .expect_err("a configured FIFO must be rejected before it can block");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "a configured login-script FIFO must not stall startup; took {:?}",
+            started.elapsed()
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("failed safely to read login_script"));
+        assert!(
+            !rendered.contains(&path.display().to_string()),
+            "the sensitive configured path leaked: {rendered}"
+        );
+        std::fs::remove_file(&path).expect("remove FIFO fixture");
     }
 
     #[test]
