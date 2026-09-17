@@ -15,7 +15,7 @@
 
 `oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database. Every raw statement the agent submits is classified **before** it can reach Oracle: read tools admit only statements *proven* read-only, and non-read SQL runs only through an explicit, profile-gated path that **rolls DML back by default** and requires a preview-derived grant before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
 
-> _An independent open-source project; not affiliated with Oracle. For Oracle's own MCP servers, see [oracle/mcp](https://github.com/oracle/mcp)._
+> _An independent open-source project — not affiliated with Oracle. See [how it compares](#how-it-compares) to Oracle's own MCP servers._
 
 ### Drivers
 
@@ -89,6 +89,21 @@ om dashboard
 - **Agent-first UX.** Every tool ships a real JSON Schema, title, and explicit MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). Errors are structured [`ErrorEnvelope`](crates/oraclemcp-error)s with machine-stable classes, fuzzy suggestions, and next-step hints — never bare strings. A zero-arg `oracle_capabilities` tool lets an agent discover the surface.
 - **Pure Rust, no `unsafe`.** Every crate is `#![forbid(unsafe_code)]`; the fail-closed classifier is a real `sqlparser` AST classifier and carries a differential cargo-fuzz target.
 - **Two transports.** stdio (default) and Streamable HTTP (`--listen`) with fail-closed auth defaults, optional OAuth bearer enforcement, and native rustls TLS/mTLS.
+
+## How it compares
+
+Oracle ships an official MCP built into SQLcl; ours is independent. On the axis that decides whether you can safely point an AI agent at a database — **the guard between the agent and your data** — here is the honest, evidence-backed contrast:
+
+| | Oracle SQLcl MCP | **oraclemcp** |
+|---|---|---|
+| **Default posture** | Not read-only | **Read-only, fail-closed** |
+| **Write / DDL control** | No in-server gate — relies on DB grants + a non-prod replica | **In-server: classifier + `READ_ONLY→ADMIN` ladder + preview→confirm-token + rollback-by-default** |
+| **Safety boundary** | Your grant hygiene — a wrong grant or a clever prompt can write | **The server itself — enforced regardless of grants** |
+| **SQL handling** | Free-form, tagged `/* LLM in use */` | Free-form, but **classified before it reaches Oracle** |
+| **Audit** | DB-side log table (`DBTOOLS$MCP_LOG`) | **Signed, hash-chained HMAC audit + verdict certificates** |
+| **Runtime** | Java — needs the JVM + a SQLcl install | **One pure-Rust static binary — no JVM, C toolchain, or Instant Client** |
+
+<sub>SQLcl-MCP rows reflect [Oracle's own documentation](https://docs.oracle.com/en/database/oracle/sql-developer-command-line/25.2/sqcug/using-oracle-sqlcl-mcp-server.html) (configure a minimum-privilege user, prefer a non-prod replica, audit via `DBTOOLS$MCP_LOG`); the oraclemcp rows are enforced in this repository. Oracle is the official, supported option, and its managed Autonomous MCP takes a different curated-report approach with per-user identity — strong for locked-down read-only BI.</sub>
 
 ## Safety model
 
