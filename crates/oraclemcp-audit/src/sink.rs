@@ -2400,7 +2400,10 @@ fn structural_break(records: &[AuditRecord]) -> Option<String> {
 /// check: a caller cannot verify a ledger from one directory and then inspect
 /// an anchor through a replacement pathname.
 struct BoundAuditLedger {
-    file: File,
+    // `None` means the primary child is genuinely absent beneath this held
+    // parent. Retaining the parent is still essential: a surviving anchor
+    // proves that absence is a removed ledger, not a first-run genesis state.
+    file: Option<File>,
     #[cfg(unix)]
     parent: CapDir,
     #[cfg(windows)]
@@ -2502,8 +2505,8 @@ impl BoundAuditLedger {
             options.read(true);
             configure_private_cap_open(&mut options);
             let file = match parent.open_with(name, &options) {
-                Ok(file) => file.into_std(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Ok(file) => Some(file.into_std()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => {
                     return Err(AuditError::ResumeRefused(format!(
                         "cannot open audit log {} through its bound parent to resume the hash chain: {error}",
@@ -2511,7 +2514,9 @@ impl BoundAuditLedger {
                     )));
                 }
             };
-            harden_open_regular_file_at(&parent, &file, name, path)?;
+            if let Some(file) = file.as_ref() {
+                harden_open_regular_file_at(&parent, file, name, path)?;
+            }
             Ok(Some(Self { file, parent }))
         }
 
@@ -2536,8 +2541,8 @@ impl BoundAuditLedger {
             let mut options = CapOpenOptions::new();
             options.read(true).follow(FollowSymlinks::No);
             let file = match parent.directory().open_with(name, &options) {
-                Ok(file) => file.into_std(),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Ok(file) => Some(file.into_std()),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
                 Err(error) => {
                     return Err(AuditError::ResumeRefused(format!(
                         "cannot open audit log {} through its bound parent to resume the hash chain: {error}",
@@ -2547,7 +2552,9 @@ impl BoundAuditLedger {
             };
             // The retained Windows component handles deny parent replacement;
             // this existing identity check then rejects a final-file swap.
-            harden_open_regular_file(&file, path)?;
+            if let Some(file) = file.as_ref() {
+                harden_open_regular_file(file, path)?;
+            }
             Ok(Some(Self { file, parent }))
         }
 
@@ -2838,11 +2845,12 @@ impl Auditor {
             // A genuinely absent ledger is a first-run genesis state.
             return Ok(self);
         };
-        let tail = analyze_open_resume_log(
-            &mut ledger.file,
-            audit_path,
-            self.keyring.verification_keys(),
-        )?;
+        let tail = match ledger.file.as_mut() {
+            Some(file) => {
+                analyze_open_resume_log(file, audit_path, self.keyring.verification_keys())?
+            }
+            None => None,
+        };
 
         run_audit_resume_anchor_hook();
 
@@ -2877,13 +2885,19 @@ impl Auditor {
             // fetches only that one record's entry_hash (the verified chain is
             // contiguous, so it exists at or before the tail) — never the whole
             // Vec.
-            ledger.file.seek(SeekFrom::Start(0)).map_err(|error| {
+            let Some(file) = ledger.file.as_mut() else {
+                return Err(AuditError::ResumeRefused(format!(
+                    "head anchor attests impossible seq 0 while audit log {disp} is absent; \
+                     restore the authenticated ledger before restarting"
+                )));
+            };
+            file.seek(SeekFrom::Start(0)).map_err(|error| {
                 AuditError::ResumeRefused(format!(
                     "cannot rewind audit log {disp} to confirm the anchored record: {error}"
                 ))
             })?;
             let anchored_hash =
-                find_entry_hash_at_seq_in_open_log(&mut ledger.file, audit_path, anchor.seq)?;
+                find_entry_hash_at_seq_in_open_log(file, audit_path, anchor.seq)?;
             if anchored_hash.as_deref() != Some(anchor.entry_hash.as_str()) {
                 return Err(AuditError::ResumeRefused(format!(
                     "record at the anchored seq {} in {disp} does not match the head anchor's \
@@ -3785,6 +3799,47 @@ mod tests {
             ),
             Err(error) => panic!("expected anchored truncation refusal, got {error}"),
             Ok(_) => panic!("an anchor must prevent zero-record genesis resume"),
+        }
+    }
+
+    #[test]
+    fn resume_refuses_a_missing_ledger_beneath_a_bound_anchored_parent() {
+        // The missing-child form of the same attack: after a durable head is
+        // anchored, removing the JSONL child must not make a public
+        // `resume_from` caller mistake the still-held parent for a first run.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        let anchor_path = crate::anchor_path_for(&path);
+        {
+            let auditor = Auditor::new(
+                Box::new(FileAuditSink::open(&path).expect("open seeded ledger")),
+                test_key(),
+            )
+            .with_head_anchor(&anchor_path);
+            auditor
+                .append(
+                    &draft("DELETE FROM t WHERE id=1", "GUARDED"),
+                    "t1".to_owned(),
+                    true,
+                )
+                .expect("write anchored record");
+        }
+        std::fs::remove_file(&path).expect("remove primary ledger only");
+        assert!(
+            anchor_path.is_file(),
+            "the durable head anchor still exists"
+        );
+
+        let resumed = Auditor::new(Box::new(MemoryAuditSink::new()), test_key())
+            .with_head_anchor(&anchor_path)
+            .resume_from(&path);
+        match resumed {
+            Err(AuditError::ResumeRefused(message)) => assert!(
+                message.contains("tail truncation") && message.contains("ends at seq 0"),
+                "the anchored missing ledger must be named: {message}"
+            ),
+            Err(error) => panic!("expected anchored truncation refusal, got {error}"),
+            Ok(_) => panic!("a surviving anchor must prevent missing-ledger genesis resume"),
         }
     }
 
