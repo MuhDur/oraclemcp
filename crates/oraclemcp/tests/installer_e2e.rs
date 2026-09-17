@@ -88,30 +88,28 @@ fn installer_lint_and_offline_smoke_passes() {
 }
 
 #[test]
-fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
+fn install_manual_preserves_detailed_contract_and_readme_stays_install_first() {
     let root = repo_root();
     let readme = fs::read_to_string(root.join("README.md")).expect("read README.md");
-    let install = readme
-        .find("## Install, service, dashboard")
-        .expect("install-first heading");
+    let manual = fs::read_to_string(root.join("docs/install.md")).expect("read docs/install.md");
+    // README is the concise public surface; the detailed installer contract
+    // deliberately lives in docs/install.md.
+    let quick_start = readme.find("## Quick start").expect("quick-start heading");
     let why = readme.find("## Why oraclemcp").expect("why heading");
-    let source = readme
-        .find("## Source builds and runtime requirements")
-        .expect("source-build heading");
 
     assert!(
-        install < why,
-        "README must lead with installation before rationale"
+        quick_start < why,
+        "README must lead with Quick start before rationale"
     );
     assert!(
-        install < source,
-        "release installer must come before source-build instructions"
+        readme.contains("[Installation manual](docs/install.md)"),
+        "README Documentation must link the detailed installation manual"
     );
-    let install_section = &readme[install..why];
-    let first_shell_fence = install_section
+    let quick_start_section = &readme[quick_start..why];
+    let first_shell_fence = quick_start_section
         .find("```sh\n")
-        .expect("install section must have a shell code fence");
-    let first_shell_body = &install_section[first_shell_fence + "```sh\n".len()..];
+        .expect("Quick start must have a shell code fence");
+    let first_shell_body = &quick_start_section[first_shell_fence + "```sh\n".len()..];
     let first_shell_end = first_shell_body
         .find("\n```")
         .expect("first shell fence must close");
@@ -127,6 +125,10 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "dry-run must be advanced preview text, not the primary install command"
     );
 
+    let install = manual
+        .find("## Install, service, dashboard")
+        .expect("install-manual heading");
+    let install_section = &manual[install..];
     for needle in [
         "One line installs or updates `oraclemcp`",
         "works as pasted",
@@ -158,7 +160,6 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "next steps on stderr",
         "oraclemcp --json self-update --dry-run",
         "oraclemcp self-update --no-service",
-        "literal",
         "### Advanced install paths",
         "placeholder env values",
         "The release installer does not silently fall back",
@@ -178,8 +179,8 @@ fn readme_leads_with_hosted_install_one_liner_service_and_dashboard() {
         "An npm/npx channel is not offered",
     ] {
         assert!(
-            readme.contains(needle),
-            "README install-first section must contain {needle}"
+            install_section.contains(needle),
+            "installation manual must contain {needle}"
         );
     }
 }
@@ -553,7 +554,7 @@ fn release_sbom_merge_script_includes_rust_and_dashboard_components() {
 fn npm_release_channel_is_retired() {
     let root = repo_root();
     let read = |path: &str| fs::read_to_string(root.join(path)).expect(path);
-    let readme = read("README.md");
+    let install_manual = read("docs/install.md");
     let release_checklist = read("docs/release-checklist.md");
     let release_workflow = read(".github/workflows/release.yml");
     let npm_workflow = read(".github/workflows/publish-npm.yml");
@@ -562,7 +563,7 @@ fn npm_release_channel_is_retired() {
     let preflight = read("scripts/release_preflight.sh");
     let publish_input_validator = read("scripts/validate_npm_publish_input.sh");
 
-    assert!(readme.contains("An npm/npx channel is not offered"));
+    assert!(install_manual.contains("An npm/npx channel is not offered"));
     assert!(release_checklist.contains("There is no npm/npx release channel."));
     assert!(
         npm_workflow.contains("npm/npx release channel is retired"),

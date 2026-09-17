@@ -248,6 +248,7 @@ The full field reference — HTTP TLS/mTLS/OAuth listeners, the signed audit cha
 
 ## Documentation
 
+- **[Installation manual](docs/install.md)** — verified installers, air-gapped installs, updates, uninstall, services, dashboard pairing, and release channels.
 - **[Configuration reference](docs/configuration.md)** — every profile, auth, transport, audit, and masking field.
 - **[Operating & deployment](docs/operations.md)** — containerized deployment, least-privilege account, network posture, service management (systemd/launchd/Windows), air-gapped install, and the operator runbook.
 - **[TNS discovery onboarding](docs/tns-discovery-onboarding.md)** · **[Toolchain](docs/toolchain.md)** · **[Upgrade runbooks](docs/upgrading-to-0.8.0.md)** and [field-hardening notes](docs/oraclemcp-091-field-hardening-notes.md).
