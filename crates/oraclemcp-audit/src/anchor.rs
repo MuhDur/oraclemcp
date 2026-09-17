@@ -60,6 +60,8 @@ use serde::{Deserialize, Serialize};
 use crate::hmac::ct_eq;
 use crate::record::{AuditRecord, SigningKey};
 use crate::sink::AuditError;
+#[cfg(windows)]
+use crate::sink::open_windows_audit_directory_nofollow;
 #[cfg(unix)]
 use crate::sink::{
     AuditDirectoryOpenError, authenticate_held_audit_directory, create_new_private_file_at,
@@ -219,6 +221,15 @@ impl AnchorFile {
         }
         #[cfg(not(unix))]
         {
+            #[cfg(windows)]
+            let held_parent = {
+                let parent_path = self
+                    .path
+                    .parent()
+                    .filter(|parent| !parent.as_os_str().is_empty())
+                    .unwrap_or_else(|| Path::new("."));
+                open_windows_audit_directory_nofollow(parent_path)?
+            };
             let tmp = anchor_tmp_path(&self.path);
             let mut file = crate::sink::create_new_private_file(&tmp)?;
             file.write_all(&body).map_err(io_err)?;
@@ -227,7 +238,10 @@ impl AnchorFile {
             // tampering instead of an explainable anchor-behind window).
             file.sync_all().map_err(io_err)?;
             drop(file);
-            fs::rename(&tmp, &self.path).map_err(io_err)
+            fs::rename(&tmp, &self.path).map_err(io_err)?;
+            #[cfg(windows)]
+            held_parent.authenticate_current_path()?;
+            Ok(())
         }
     }
 }
@@ -348,6 +362,12 @@ fn load_anchor_inner(
         }
     };
     #[cfg(not(unix))]
+    #[cfg(windows)]
+    let held_parent =
+        open_windows_audit_directory_nofollow(parent_path).map_err(|error| AnchorLoadError {
+            message: format!("{}: {error}", path.display()),
+        })?;
+    #[cfg(not(unix))]
     let directory = match CapDir::open_ambient_dir(parent_path, ambient_authority()) {
         Ok(directory) => directory,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound && !require_existing_parent => {
@@ -420,6 +440,12 @@ fn load_anchor_inner(
             message: format!("{}: {error}", path.display()),
         }
     })?;
+    #[cfg(windows)]
+    held_parent
+        .authenticate_current_path()
+        .map_err(|error| AnchorLoadError {
+            message: format!("{}: {error}", path.display()),
+        })?;
     Ok(Some(anchor))
 }
 
@@ -875,6 +901,48 @@ mod tests {
             .join("parent-never-created")
             .join("audit.jsonl.anchor");
         assert_eq!(load_anchor(&anchor_path), Ok(None));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn load_anchor_refuses_an_intermediate_reparse_parent() {
+        use std::os::windows::fs::symlink_dir;
+
+        // The final parent is an ordinary directory. Only its *intermediate*
+        // predecessor is a reparse point, so a one-shot final-component open
+        // would follow it and return the legacy absent-sidecar result.
+        let root = tempfile::tempdir().expect("tempdir");
+        let real_root = root.path().join("real-root");
+        let real_parent = real_root.join("anchor-parent");
+        let redirected_root = root.path().join("redirected-root");
+        std::fs::create_dir(&real_root).expect("create real root");
+        std::fs::create_dir(&real_parent).expect("create ordinary final parent");
+        match symlink_dir(&real_root, &redirected_root) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                eprintln!(
+                    "SKIP load_anchor_refuses_an_intermediate_reparse_parent: this Windows runner cannot create directory reparse-point fixtures"
+                );
+                return;
+            }
+            Err(error) => panic!("create intermediate directory reparse point: {error}"),
+        }
+
+        let configured = redirected_root
+            .join("anchor-parent")
+            .join("audit.jsonl.anchor");
+        let error = load_anchor(&configured).expect_err(
+            "an intermediate reparse point must not be followed while reading an anchor",
+        );
+        assert!(
+            error.to_string().contains("reparse point"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            load_anchor(&real_parent.join("audit.jsonl.anchor")),
+            Ok(None),
+            "the fixture must leave the real final parent otherwise ordinary"
+        );
     }
 
     #[test]

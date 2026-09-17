@@ -14,7 +14,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::path::Component;
 
 use parking_lot::Mutex;
@@ -102,7 +102,7 @@ fn metadata_identity(_metadata: &std::fs::Metadata) -> std::io::Result<OpenFileI
 /// Identity reached by a path lookup. This is used only for early alias
 /// classification; callers must still perform a no-follow descriptor open
 /// before any read or write.
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 pub(crate) fn path_identity(path: &Path) -> std::io::Result<OpenFileIdentity> {
     metadata_identity(&std::fs::metadata(path)?)
 }
@@ -653,7 +653,7 @@ impl HeldAuditParent {
     /// directory before success is reported.  A replacement is fail-closed;
     /// the subsequent sync always targets the descriptor that contained the
     /// just-created entries.
-    fn authenticate_current_path(&self) -> Result<(), AuditError> {
+    pub(crate) fn authenticate_current_path(&self) -> Result<(), AuditError> {
         authenticate_held_audit_directory(&self.dir, &self.configured_path)
     }
 
@@ -959,6 +959,185 @@ const FILE_SHARE_READ_WRITE: u32 = 0x0000_0001 | 0x0000_0002;
 #[cfg(windows)]
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 
+/// Retained no-follow handles for every lexical component of a Windows audit
+/// directory. Each handle denies delete/rename sharing, so once a component is
+/// checked as a non-reparse directory it cannot be swapped for a junction
+/// while a child path is opened through it.
+#[cfg(windows)]
+pub(crate) struct WindowsAuditParent {
+    _component_handles: Vec<File>,
+    final_handle: File,
+    final_identity: OpenFileIdentity,
+    configured_path: PathBuf,
+}
+
+#[cfg(windows)]
+fn lexically_normalize_windows_audit_directory(path: &Path) -> Result<PathBuf, AuditError> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|error| {
+                AuditError::Io(format!(
+                    "cannot determine the current directory while opening audit directory {}: {error}",
+                    path.display()
+                ))
+            })?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(name) => normalized.push(name),
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(AuditError::Io(format!(
+                        "audit directory {} escapes its filesystem root",
+                        path.display()
+                    )));
+                }
+            }
+        }
+    }
+    Ok(normalized)
+}
+
+#[cfg(windows)]
+fn open_windows_audit_directory_component(path: &Path) -> Result<File, AuditError> {
+    use std::os::windows::fs::MetadataExt as _;
+    use windows_permissions::constants::AccessRights;
+
+    let access = AccessRights::ReadControl.bits() | FILE_READ_ATTRIBUTES;
+    let mut options = OpenOptions::new();
+    options
+        .access_mode(access)
+        // Deliberately omit FILE_SHARE_DELETE. The held handle is the binding
+        // that prevents an already-checked component becoming a junction or
+        // another directory before the next component is opened.
+        .share_mode(FILE_SHARE_READ_WRITE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    let directory = options.open(path).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot open audit directory component {} without following reparse points: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = directory.metadata().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot inspect audit directory component {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.file_type().is_dir()
+        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+    {
+        return Err(AuditError::Io(format!(
+            "audit directory component {} is a reparse point or non-directory",
+            path.display()
+        )));
+    }
+    // `open_file_identity` reads the handle's FileIdInfo through the
+    // windows_by_handle path. Refuse rather than accepting an unverifiable
+    // component: pathname metadata is not an identity binding.
+    open_file_identity(&directory).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot establish audit directory component handle identity {}: {error}",
+            path.display()
+        ))
+    })?;
+    Ok(directory)
+}
+
+/// Open every existing Windows audit-directory component without following a
+/// reparse point, retaining each handle until the caller finishes its child
+/// operation. This closes the otherwise hidden intermediate-junction window:
+/// `FILE_FLAG_OPEN_REPARSE_POINT` alone protects only the final component of a
+/// single pathname open.
+#[cfg(windows)]
+pub(crate) fn open_windows_audit_directory_nofollow(
+    path: &Path,
+) -> Result<WindowsAuditParent, AuditError> {
+    let configured_path = lexically_normalize_windows_audit_directory(path)?;
+    let mut current = PathBuf::new();
+    let mut component_handles = Vec::new();
+    for component in configured_path.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir | Component::Normal(_) => {
+                current.push(component.as_os_str());
+                component_handles.push(open_windows_audit_directory_component(&current)?);
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                return Err(AuditError::Io(format!(
+                    "audit directory {} was not lexically normalized",
+                    path.display()
+                )));
+            }
+        }
+    }
+    let final_handle = open_windows_audit_directory_component(&configured_path)?;
+    let final_identity = open_file_identity(&final_handle).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot establish audit directory handle identity {}: {error}",
+            configured_path.display()
+        ))
+    })?;
+    Ok(WindowsAuditParent {
+        _component_handles: component_handles,
+        final_handle,
+        final_identity,
+        configured_path,
+    })
+}
+
+#[cfg(windows)]
+fn open_windows_audit_parent_for_file(path: &Path) -> Result<WindowsAuditParent, AuditError> {
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    open_windows_audit_directory_nofollow(parent)
+}
+
+#[cfg(windows)]
+impl WindowsAuditParent {
+    pub(crate) fn authenticate_current_path(&self) -> Result<(), AuditError> {
+        let current = open_windows_audit_directory_nofollow(&self.configured_path)?;
+        if current.final_identity != self.final_identity {
+            return Err(AuditError::Io(format!(
+                "audit directory {} changed identity while an audit file was opened",
+                self.configured_path.display()
+            )));
+        }
+        Ok(())
+    }
+
+    fn require_private_creation_policy(&self) -> Result<(), AuditError> {
+        let current_sid = windows_permissions::utilities::current_process_sid().map_err(|error| {
+            AuditError::Io(format!(
+                "cannot resolve the current Windows process SID for audit creation parent {}: {error}",
+                self.configured_path.display()
+            ))
+        })?;
+        verify_windows_private_acl(
+            &self.final_handle,
+            &self.configured_path,
+            true,
+            &current_sid,
+        )
+        .map_err(|error| {
+            AuditError::Io(format!(
+                "audit file creation requires an exact protected owner-only parent DACL at {}: {error}",
+                self.configured_path.display()
+            ))
+        })
+    }
+}
+
 #[cfg(any(test, windows))]
 fn windows_private_dacl_sddl(sid: &str, directory: bool) -> String {
     let inheritance = if directory { "OICI" } else { "" };
@@ -1008,81 +1187,11 @@ fn windows_security_handle(path: &Path, directory: bool) -> Result<File, AuditEr
 /// Hold an authenticated, non-replaceable private parent directory across a
 /// Windows file creation. Rust's `OpenOptions` cannot pass a security
 /// descriptor to `CreateFileW`; requiring this exact inheritable DACL makes a
-/// newly created child owner-only from its first observable instant. Omitting
-/// `FILE_SHARE_DELETE` prevents the verified parent from being renamed while
-/// the caller creates and authenticates the child.
+/// newly created child owner-only from its first observable instant.
 #[cfg(windows)]
-fn windows_private_creation_parent(path: &Path) -> Result<File, AuditError> {
-    use std::os::windows::fs::MetadataExt as _;
-    use windows_permissions::constants::AccessRights;
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let access = AccessRights::ReadControl.bits() | FILE_READ_ATTRIBUTES;
-    let mut options = OpenOptions::new();
-    options
-        .access_mode(access)
-        .share_mode(FILE_SHARE_READ_WRITE)
-        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
-    let directory = options.open(parent).map_err(|error| {
-        AuditError::Io(format!(
-            "cannot lock audit creation parent {} for Windows DACL validation: {error}",
-            parent.display()
-        ))
-    })?;
-    let metadata = directory.metadata().map_err(|error| {
-        AuditError::Io(format!(
-            "cannot stat audit creation parent {}: {error}",
-            parent.display()
-        ))
-    })?;
-    if !metadata.file_type().is_dir()
-        || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
-        return Err(AuditError::Io(format!(
-            "audit creation parent {} is not a non-reparse directory",
-            parent.display()
-        )));
-    }
-    let path_metadata = std::fs::symlink_metadata(parent).map_err(|error| {
-        AuditError::Io(format!(
-            "cannot authenticate audit creation parent {}: {error}",
-            parent.display()
-        ))
-    })?;
-    if path_metadata.file_type().is_symlink()
-        || !path_metadata.file_type().is_dir()
-        || open_file_identity(&directory).map_err(|error| {
-            AuditError::Io(format!(
-                "cannot identify audit creation parent {}: {error}",
-                parent.display()
-            ))
-        })? != metadata_identity(&path_metadata).map_err(|error| {
-            AuditError::Io(format!(
-                "cannot identify audit creation parent path {}: {error}",
-                parent.display()
-            ))
-        })?
-    {
-        return Err(AuditError::Io(format!(
-            "audit creation parent {} changed identity during validation",
-            parent.display()
-        )));
-    }
-    let current_sid = windows_permissions::utilities::current_process_sid().map_err(|error| {
-        AuditError::Io(format!(
-            "cannot resolve the current Windows process SID for audit creation parent {}: {error}",
-            parent.display()
-        ))
-    })?;
-    verify_windows_private_acl(&directory, parent, true, &current_sid).map_err(|error| {
-        AuditError::Io(format!(
-            "audit file creation requires an exact protected owner-only parent DACL at {}: {error}",
-            parent.display()
-        ))
-    })?;
+fn windows_private_creation_parent(path: &Path) -> Result<WindowsAuditParent, AuditError> {
+    let directory = open_windows_audit_parent_for_file(path)?;
+    directory.require_private_creation_policy()?;
     Ok(directory)
 }
 
@@ -1114,6 +1223,10 @@ fn open_or_create_private_windows_file(
     mode: WindowsPrivateOpenMode,
     description: &str,
 ) -> Result<OpenedPrivateAuditFile, AuditError> {
+    // Hold every parent component before the first child-path operation. This
+    // prevents an intermediate junction from redirecting the existing-file
+    // branch as well as the create branch below.
+    let parent = open_windows_audit_parent_for_file(path)?;
     match windows_private_open_options(mode).open(path) {
         Ok(file) => {
             harden_open_regular_file(&file, path)?;
@@ -1131,7 +1244,7 @@ fn open_or_create_private_windows_file(
         }
     }
 
-    let _creation_parent = windows_private_creation_parent(path)?;
+    parent.require_private_creation_policy()?;
     let mut create = windows_private_open_options(mode);
     create.create_new(true);
     let (file, created) = match create.open(path) {
@@ -1877,7 +1990,25 @@ impl FileAuditSink {
             }
             (lock, file)
         };
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        let (lock, file) = {
+            // The Windows child opens use no-follow handles, but those flags
+            // protect only a pathname's final component. Retain the complete
+            // parent walk across both sibling opens so an intermediate junction
+            // cannot split the lock and ledger into different directories.
+            let parent = open_windows_audit_parent_for_file(path)?;
+            let (lock, lock_created) = AuditLogLock::acquire(path)?;
+            let OpenedPrivateAuditFile {
+                file,
+                created: audit_created,
+            } = open_private_append_file_with_creation(path)?;
+            parent.authenticate_current_path()?;
+            if audit_created || lock_created {
+                fsync_parent_dir(path)?;
+            }
+            (lock, file)
+        };
+        #[cfg(not(any(unix, windows)))]
         let (lock, file) = {
             // Lock BEFORE opening the append fd: fail fast on contention, and
             // never leave a half-armed writer if the lock is already held.

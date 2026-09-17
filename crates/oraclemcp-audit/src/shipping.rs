@@ -57,14 +57,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use parking_lot::Mutex;
 
 use crate::record::{AuditRecord, BoundAuditVerdictCertificate, SigningKey};
+#[cfg(not(unix))]
+use crate::sink::open_private_append_file;
+#[cfg(windows)]
+use crate::sink::open_windows_audit_directory_nofollow;
+#[cfg(not(any(unix, windows)))]
+use crate::sink::path_identity;
 use crate::sink::{AuditError, AuditSink, FileAuditSink, open_file_identity};
 #[cfg(unix)]
 use crate::sink::{
     authenticate_held_audit_directory, cap_metadata_identity,
     open_existing_audit_directory_nofollow, open_private_append_file_at,
 };
-#[cfg(not(unix))]
-use crate::sink::{open_private_append_file, path_identity};
 use crate::verify::{ChainVerifier, JsonlReader, VerifyOutcome};
 
 #[cfg(all(test, unix))]
@@ -245,6 +249,14 @@ impl WormFileForwarder {
         let primary_identity = primary
             .open_identity()
             .map_err(|error| ShippingError::Transport(error.to_string()))?;
+        #[cfg(windows)]
+        let parent_path = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        #[cfg(windows)]
+        let held_parent = open_windows_audit_directory_nofollow(parent_path)
+            .map_err(|error| ShippingError::Transport(error.to_string()))?;
         #[cfg(unix)]
         let parent_path = path
             .parent()
@@ -285,7 +297,7 @@ impl WormFileForwarder {
                 )));
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         match path_identity(path) {
             Ok(identity) if identity == primary_identity => {
                 return Err(ShippingError::AliasedPrimaryAuditLog);
@@ -320,6 +332,10 @@ impl WormFileForwarder {
             authenticate_held_audit_directory(&parent, parent_path)
                 .map_err(|error| ShippingError::Transport(error.to_string()))?;
         }
+        #[cfg(windows)]
+        held_parent
+            .authenticate_current_path()
+            .map_err(|error| ShippingError::Transport(error.to_string()))?;
         let mirror_identity = open_file_identity(&file).map_err(|error| {
             ShippingError::Transport(format!("cannot establish WORM file identity: {error}"))
         })?;
