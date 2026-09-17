@@ -181,9 +181,9 @@ for pkg in oracledb; do
   [ "$(printf '%s\n' "$lock_versions" | sed '/^$/d' | wc -l | tr -d ' ')" = "1" ] ||
     fail "Cargo.lock must resolve exactly one optional official $pkg version (got: $lock_versions)"
   [ "$lock_versions" = "$official_driver_version" ] ||
-    fail "Cargo.lock optional official $pkg version '$lock_versions' != pinned driver '$official_driver_version'"
+  fail "Cargo.lock official $pkg version '$lock_versions' != pinned driver '$official_driver_version'"
 done
-# The feature-gated official driver is an intentional, exact-pinned release
+# The compiled official driver is an intentional, exact-pinned release
 # dependency. Its similarly named protocol package remains forbidden: only the
 # driver-cx protocol core is part of the supported transport seam.
 for legacy_pkg in oracledb-protocol; do
@@ -207,7 +207,10 @@ fi
 # declaration is what pulls `nightly-outcome-try` into the graph. The previous
 # anchor pinned the inaccurate framing in place and is why it survived several
 # doc passes (bead oraclemcp-yi2z). Keep the version interpolation.
-for provenance_doc in "AGENTS.md" "README.md" "docs/operations.md"; do
+# The README is a user-facing front page, not a provenance surface: driver
+# provenance stays enforced in AGENTS.md, docs/operations.md, docs/toolchain.md,
+# the pinned-nightly ADR, behavior-inventory.md, Cargo.toml, and ci.yml (below).
+for provenance_doc in "AGENTS.md" "docs/operations.md"; do
   require_contains \
     "$provenance_doc" \
     "\`oraclemcp-driver-cx\` $driver_version driver's own source is stable-clean" \
@@ -239,7 +242,7 @@ require_contains \
   "behavior-inventory protocol pin"
 require_contains \
   "docs/comparison.md" \
-  'The opt-in `oracledb` feature is a bounded' \
+  'The official `oracledb` adapter is compiled' \
   "comparison official-driver routing"
 require_contains \
   "Cargo.toml" \
@@ -259,10 +262,6 @@ require_contains \
   "CI nightly provenance"
 require_contains \
   "AGENTS.md" \
-  "asupersync $asupersync_version" \
-  "asupersync provenance"
-require_contains \
-  "README.md" \
   "asupersync $asupersync_version" \
   "asupersync provenance"
 require_contains \

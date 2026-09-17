@@ -329,7 +329,6 @@ fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
     let compact_app = app.split_whitespace().collect::<Vec<_>>().join(" ");
     let client = read_repo_file("web/src/app/operator-client.ts");
     let behavior = read_repo_file("docs/behavior-inventory.md");
-    let readme = read_repo_file("README.md");
 
     assert_contains_all(
         "Explorer global search UI",
@@ -368,15 +367,9 @@ fn wd_search_global_explorer_uses_guarded_dictionary_tools() {
             "needle: request.needle.trim()",
         ],
     );
-    assert_contains_all(
-        "Explorer global search docs",
-        &readme,
-        &[
-            "global search across visible schemas",
-            "`oracle_search_objects` with all object types",
-            "`oracle_search_source`",
-        ],
-    );
+    // README decoupled: the global-search feature is proven by App.tsx +
+    // operator-client.ts above and documented in docs/behavior-inventory.md
+    // below. The front-page README is not a proof surface.
     assert_contains_all(
         "behavior inventory",
         &behavior,
@@ -390,7 +383,6 @@ fn wd_ide_workbench_uses_static_plsql_tools() {
     let client = read_repo_file("web/src/app/operator-client.ts");
     let http = read_http_source();
     let operations = read_repo_file("docs/operations.md");
-    let readme = read_repo_file("README.md");
 
     assert_contains_all(
         "Workbench PL/SQL IDE UI",
@@ -450,20 +442,10 @@ fn wd_ide_workbench_uses_static_plsql_tools() {
             "remain MCP-only",
         ],
     );
-    assert_contains_all(
-        "README Workbench PL/SQL IDE",
-        &readme,
-        &[
-            "Workbench IDE panel",
-            "oracle_plsql_parse",
-            "oracle_plsql_analyze",
-            "oracle_plsql_lineage",
-            "oracle_plsql_sast",
-            "oracle_plsql_doc",
-            "oracle_plsql_what_breaks",
-            "browser allowlist",
-        ],
-    );
+    // README decoupled: the Workbench IDE feature is proven by App.tsx +
+    // operator-client.ts + the operator static-allowlist http source above,
+    // and documented in docs/operations.md ("operator docs for Workbench
+    // PL/SQL IDE") above. The front-page README is not a proof surface.
 }
 
 #[test]
@@ -646,7 +628,6 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
     let http = read_http_source();
     let source_history = read_repo_file("crates/oraclemcp-core/src/source_history.rs");
     let dashboard_auth = read_repo_file("crates/oraclemcp-core/src/dashboard_auth.rs");
-    let readme = read_repo_file("README.md");
     let operations = read_repo_file("docs/operations.md");
     let conformance = read_repo_file("tests/conformance/COVERAGE.md");
     let e2e_coverage = read_repo_file("scripts/e2e/COVERAGE.md");
@@ -709,9 +690,11 @@ fn wd_history_source_snapshots_and_revert_are_review_gated() {
         &dashboard_auth,
         &["OPERATOR_ROUTE_SPECS"],
     );
+    // README decoupled: source-history docs are enforced against
+    // docs/operations.md (operator docs), not the front-page README.
     assert_contains_all(
         "source-history docs",
-        &(readme + &operations),
+        &operations,
         &[
             "content-addressed service",
             "/operator/v1/source-history",

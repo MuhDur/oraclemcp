@@ -11,6 +11,25 @@ installation path, plus a driver repin to `driver-cx` 0.9.2. The fail-closed SQL
 guard and the `READ_ONLY < READ_WRITE < DDL < ADMIN` operating-level ladder are
 unchanged in contract.
 
+### Documentation
+
+- **The README is rewritten to a concise, professional front page**
+  (1,606 → ~270 lines) with a short driver story (the in-house pure-Rust driver
+  is primary; the official `oracledb` crate — handed to Oracle in a friendly
+  handshake — is in beta and ships purely as a connect-time fallback), an
+  at-a-glance capabilities table, a governed-dimensions table, a
+  Mermaid safety-flow and driver-routing diagram, and an evidence-backed "How it
+  compares" table vs. Oracle's SQLcl MCP. The full operator/config depth is
+  referenced from [`docs/configuration.md`](docs/configuration.md) and
+  [`docs/operations.md`](docs/operations.md).
+- **The README is decoupled from CI proof gates.** `dashboard_e2e.rs`,
+  `release_surface_sync_check.sh`, and `container_supply_chain_contract_test.sh`
+  no longer assert dashboard/provenance/container-contract markers against the
+  front-page README; each proof stays enforced against its source of truth (the
+  dashboard source, `docs/operations.md`, `docs/toolchain.md`, the pinned-nightly
+  ADR, `behavior-inventory.md`, `Cargo.toml`, and `ci.yml`). The README is a
+  user-facing surface, not a proof surface.
+
 ### Security
 
 - **A Windows audit-DACL takeover is refused, and the private owner is
