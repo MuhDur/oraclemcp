@@ -383,3 +383,50 @@ fn release_publish_guard_mutation_selftest_catches_removed_job_guards() {
         );
     }
 }
+
+#[test]
+fn official_driver_root_data_license_is_distributed_with_every_artifact() {
+    let root = workspace_root();
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/release.yml"))
+        .expect("read release workflow");
+    let dockerfile = std::fs::read_to_string(root.join("Dockerfile")).expect("read Dockerfile");
+    let deny = std::fs::read_to_string(root.join("deny.toml")).expect("read deny.toml");
+    let license = std::fs::read_to_string(root.join("LICENSE-CDLA-Permissive-2.0"))
+        .expect("read CDLA redistribution license");
+
+    assert!(
+        license.contains("Community Data License Agreement - Permissive - Version 2.0")
+            && license.contains(
+                "long as the Data Recipient makes available the text of this agreement\nwith the shared Data"
+            ),
+        "the shipped CDLA file must contain the root-data redistribution condition"
+    );
+    assert_eq!(
+        workflow
+            .matches(
+                "cp README.md LICENSE-APACHE LICENSE-MIT LICENSE-CDLA-Permissive-2.0 \"$dist/\""
+            )
+            .count(),
+        2,
+        "both Unix and Windows release archives must carry the CDLA root-data license"
+    );
+    assert_eq!(
+        dockerfile
+            .matches("COPY LICENSE-CDLA-Permissive-2.0 /usr/share/licenses/oraclemcp/LICENSE-CDLA-Permissive-2.0")
+            .count(),
+        2,
+        "both core and PL/SQL runtime images must carry the CDLA root-data license"
+    );
+    assert_eq!(
+        dockerfile
+            .matches("LABEL org.opencontainers.image.licenses=\"(Apache-2.0 OR MIT) AND CDLA-Permissive-2.0\"")
+            .count(),
+        2,
+        "both runtime images must disclose the embedded root-data license"
+    );
+    assert!(
+        deny.contains("name = \"webpki-roots\"")
+            && deny.contains("allow = [\"CDLA-Permissive-2.0\"]"),
+        "the cargo-deny approval must stay package-scoped to webpki-roots"
+    );
+}

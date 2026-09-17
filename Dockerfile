@@ -3,8 +3,10 @@
 # oraclemcp container image — the engine-free Oracle Database MCP server with
 # the pure-Rust thin Oracle driver compiled in.
 #
-# Licensing: the oraclemcp binary and image are Apache-2.0 OR MIT. Unofficial —
-# not affiliated with Oracle Corporation.
+# Licensing: oraclemcp source is Apache-2.0 OR MIT. The image also contains
+# Mozilla/CCADB root-certificate data through webpki-roots; its accompanying
+# CDLA-Permissive-2.0 text is copied into /usr/share/licenses/oraclemcp.
+# Unofficial — not affiliated with Oracle Corporation.
 
 # ---- builder base: compile the thin-driver binary ----
 FROM oraclelinux:9@sha256:fe2c9e975c93c1b8c00712e5ad40e0127c0f1982c2d76031f1e09e5307e32aeb AS builder-base
@@ -74,12 +76,13 @@ RUN test "$(id -u)" -eq 10001 && \
 # ---- optional runtime: PL/SQL intelligence tools enabled, no DB required ----
 FROM runtime-base AS runtime-plsql-intelligence
 COPY --from=builder-plsql-intelligence /src/oraclemcp/target/release/oraclemcp /usr/local/bin/oraclemcp
+COPY LICENSE-CDLA-Permissive-2.0 /usr/share/licenses/oraclemcp/LICENSE-CDLA-Permissive-2.0
 
 LABEL io.modelcontextprotocol.server.name="io.github.MuhDur/oraclemcp"
 LABEL org.opencontainers.image.title="oraclemcp-plsql-intelligence"
 LABEL org.opencontainers.image.description="Unofficial, governed Oracle Database MCP server with optional offline PL/SQL intelligence tools. Not affiliated with Oracle Corporation."
 LABEL org.opencontainers.image.source="https://github.com/MuhDur/oraclemcp"
-LABEL org.opencontainers.image.licenses="Apache-2.0 OR MIT"
+LABEL org.opencontainers.image.licenses="(Apache-2.0 OR MIT) AND CDLA-Permissive-2.0"
 LABEL org.opencontainers.image.variant="plsql-intelligence"
 
 ENTRYPOINT ["oraclemcp"]
@@ -88,6 +91,7 @@ CMD ["serve", "--allow-no-auth"]
 # ---- runtime: no Oracle native client required ----
 FROM runtime-base AS runtime
 COPY --from=builder /src/oraclemcp/target/release/oraclemcp /usr/local/bin/oraclemcp
+COPY LICENSE-CDLA-Permissive-2.0 /usr/share/licenses/oraclemcp/LICENSE-CDLA-Permissive-2.0
 
 # Required by the MCP registry to verify image ownership against server.json's
 # server name (io.modelcontextprotocol.server.name == the `name` field).
@@ -95,7 +99,7 @@ LABEL io.modelcontextprotocol.server.name="io.github.MuhDur/oraclemcp"
 LABEL org.opencontainers.image.title="oraclemcp"
 LABEL org.opencontainers.image.description="Unofficial, engine-free, governed least-privilege Oracle Database MCP server with a fail-closed SQL guard and confirmation-gated operating levels. Not affiliated with Oracle Corporation."
 LABEL org.opencontainers.image.source="https://github.com/MuhDur/oraclemcp"
-LABEL org.opencontainers.image.licenses="Apache-2.0 OR MIT"
+LABEL org.opencontainers.image.licenses="(Apache-2.0 OR MIT) AND CDLA-Permissive-2.0"
 LABEL org.opencontainers.image.variant="core"
 
 # MCP over stdio by default; the client pipes JSON-RPC in/out. Supply connection

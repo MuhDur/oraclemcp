@@ -390,7 +390,7 @@ jobs:
           mkdir "$dist"
           cp "target/${{ matrix.target }}/release/oraclemcp" "$dist/"
           ln -s oraclemcp "$dist/om"
-          cp README.md LICENSE-APACHE LICENSE-MIT "$dist/"
+          cp README.md LICENSE-APACHE LICENSE-MIT LICENSE-CDLA-Permissive-2.0 "$dist/"
           tar czf "$dist.tar.gz" "$dist"
           shasum -a 256 "$dist.tar.gz" > "$dist.tar.gz.sha256"
 
@@ -402,7 +402,7 @@ jobs:
           mkdir "$dist"
           cp "target/${{ matrix.target }}/release/oraclemcp.exe" "$dist/"
           cp "target/${{ matrix.target }}/release/oraclemcp.exe" "$dist/om.exe"
-          cp README.md LICENSE-APACHE LICENSE-MIT "$dist/"
+          cp README.md LICENSE-APACHE LICENSE-MIT LICENSE-CDLA-Permissive-2.0 "$dist/"
           7z a "$dist.zip" "$dist" >/dev/null
           sha256sum "$dist.zip" > "$dist.zip.sha256"
 

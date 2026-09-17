@@ -68,6 +68,15 @@ allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
 name = "franken-decision"
 allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
 
+# `webpki-roots` embeds Mozilla/CCADB root-certificate data, pulled only by the
+# operator-approved official Oracle fallback (`oracledb`). CDLA-Permissive-2.0
+# permits the data's distribution provided its text accompanies the data; the
+# release workflow and both runtime images ship LICENSE-CDLA-Permissive-2.0.
+# Keep this package-specific: it is not a blanket approval for future CDLA data.
+[[licenses.exceptions]]
+name = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"
