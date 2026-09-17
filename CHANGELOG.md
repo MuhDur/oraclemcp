@@ -6,6 +6,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- **0.11.0 release candidate.** The audit/security hardening, fail-closed
+  classifier default, official Oracle connect-time fallback build, blocking
+  Free23 PL/SQL round trip, and scheduled guard fuzz corpora are recorded for
+  the pending `v0.11.0` tag; the detailed release notes remain below.
+
 ## [0.11.0] — 2026-09-17
 
 A hardening pass over the dashboard, the audit shipper, and the release /

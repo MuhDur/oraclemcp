@@ -2153,6 +2153,53 @@ mod tests {
                     "the intended {name} boundary must be queried before refusal"
                 );
             }
+
+            // The object-scoped probes above are not sufficient evidence by
+            // themselves: both readability proofs must run and must propagate
+            // their own errors.  Keep these separate from the earlier cases so
+            // deleting either proof cannot be masked by an earlier query
+            // failure.
+            for (name, responses, expected_proof) in [
+                (
+                    "ALL_POLICIES readability proof",
+                    vec![
+                        Ok(Vec::new()),
+                        Ok(Vec::new()),
+                        Err(DbError::Query(
+                            "ORA-00942: ALL_POLICIES readability proof unavailable".to_owned(),
+                        )),
+                    ],
+                    POLICY_CATALOG_PROOF_SQL,
+                ),
+                (
+                    "ALL_TAB_COLS readability proof",
+                    vec![
+                        Ok(Vec::new()),
+                        Ok(Vec::new()),
+                        Ok(Vec::new()),
+                        Err(DbError::Query(
+                            "ORA-00942: ALL_TAB_COLS readability proof unavailable".to_owned(),
+                        )),
+                    ],
+                    TARGET_COLUMN_CATALOG_PROOF_SQL,
+                ),
+            ] {
+                let blind = ScriptedRows::results(responses);
+                let refusal = resolved_relations_read_purity(&cx, &blind, &[table_object()]).await;
+                assert!(
+                    refusal.is_err(),
+                    "unavailable {name} must abort the proof so dispatch refuses; got {refusal:?}"
+                );
+                assert!(
+                    blind
+                        .queries
+                        .lock()
+                        .expect("queries lock")
+                        .iter()
+                        .any(|(sql, _)| sql == expected_proof),
+                    "the {name} query itself must be reached before refusal"
+                );
+            }
         });
     }
 
