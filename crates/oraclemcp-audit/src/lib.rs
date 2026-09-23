@@ -65,11 +65,11 @@ pub use shipping_spool::{
     DurableShippingShutdownOutcome, DurableShippingStatus, DurableShippingStatusHandle,
     DurableSpoolConfig,
 };
-#[cfg(windows)]
-pub use sink::harden_windows_private_directory;
 pub use sink::{
     AuditError, AuditSink, Auditor, AuthenticatedAuditTail, FileAuditSink, MemoryAuditSink,
 };
+#[cfg(windows)]
+pub use sink::{create_windows_private_audit_directory, harden_windows_private_directory};
 pub use unified::{UnifiedAuditError, UnifiedAuditPolicy, is_simple_identifier};
 pub use verify::{
     BrokenReason, JsonlError, MAX_AUDIT_LINE_LEN, ParseError, VerifyOutcome, parse_jsonl,

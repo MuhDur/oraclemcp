@@ -64,7 +64,7 @@ use oraclemcp::dispatch::{
 };
 use oraclemcp::registry;
 #[cfg(windows)]
-use oraclemcp_audit::harden_windows_private_directory;
+use oraclemcp_audit::create_windows_private_audit_directory;
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditError, AuditKeyring, AuditOutcome, AuditSink,
     AuditSubject, Auditor, AuthenticatedAuditTail, FileAuditSink, HmacSha256Key, ShippingAuditSink,
@@ -1465,51 +1465,50 @@ fn exposed_profiles_summary(config: &OracleMcpConfig) -> String {
 /// directory group/world-accessible under a permissive umask or a custom
 /// layout.
 fn create_private_audit_dir(path: &Path) -> std::io::Result<()> {
-    match fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AlreadyExists,
-                    format!(
-                        "{} is a symlink or non-directory; audit logs require a private directory",
-                        path.display()
-                    ),
-                ));
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt as _;
-                let mode = metadata.permissions().mode() & 0o777;
-                if mode != 0o700 {
-                    let mut permissions = metadata.permissions();
-                    permissions.set_mode(0o700);
-                    fs::set_permissions(path, permissions)?;
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut builder = fs::DirBuilder::new();
-            builder.recursive(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::DirBuilderExt as _;
-                builder.mode(0o700);
-            }
-            builder.create(path)?;
-        }
-        Err(error) => return Err(error),
-    }
-
     #[cfg(windows)]
     {
-        harden_windows_private_directory(path).map_err(|error| {
-            std::io::Error::other(format!(
-                "cannot install the protected owner-only DACL for audit directory {}: {error}",
-                path.display()
-            ))
-        })?;
+        return create_windows_private_audit_directory(path)
+            .map_err(|error| std::io::Error::other(error.to_string()));
     }
-    Ok(())
+    #[cfg(not(windows))]
+    {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::AlreadyExists,
+                        format!(
+                            "{} is a symlink or non-directory; audit logs require a private directory",
+                            path.display()
+                        ),
+                    ));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    let mode = metadata.permissions().mode() & 0o777;
+                    if mode != 0o700 {
+                        let mut permissions = metadata.permissions();
+                        permissions.set_mode(0o700);
+                        fs::set_permissions(path, permissions)?;
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                let mut builder = fs::DirBuilder::new();
+                builder.recursive(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::DirBuilderExt as _;
+                    builder.mode(0o700);
+                }
+                builder.create(path)?;
+            }
+            Err(error) => return Err(error),
+        }
+
+        Ok(())
+    }
 }
 
 fn build_auditor(

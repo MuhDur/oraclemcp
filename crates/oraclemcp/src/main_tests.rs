@@ -948,7 +948,7 @@ fn audit_keyring_historical_secrets_follow_protected_policy_and_require_active_k
 #[test]
 fn startup_performs_authenticated_mixed_key_rotation_end_to_end() {
     let root = tempfile::tempdir().expect("private audit tempdir");
-    let path = root.path().join("audit.jsonl");
+    let path = root.path().join("private/audit.jsonl");
     let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(|name: &str| match name {
         "QA37_OLD" => Some("O".repeat(32)),
         "QA37_NEW" => Some("N".repeat(32)),

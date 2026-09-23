@@ -5,7 +5,7 @@ fn build_auditor_installs_when_writable_profile_has_a_key() {
     // Startup hardens this pre-existing parent to its exact owner-only policy.
     let dir = tempfile::tempdir().expect("private audit tempdir");
     let audit = AuditConfig {
-        path: Some(dir.path().join("audit.jsonl")),
+        path: Some(dir.path().join("private/audit.jsonl")),
         key_ref: Some("literal:0123456789abcdef0123456789abcdef".to_owned()),
         ..AuditConfig::default()
     };

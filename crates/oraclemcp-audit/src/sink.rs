@@ -1200,14 +1200,27 @@ fn configure_no_follow(options: &mut OpenOptions) {
 }
 
 #[cfg(windows)]
-fn windows_security_handle(path: &Path, directory: bool) -> Result<File, AuditError> {
+fn windows_security_handle(
+    path: &Path,
+    directory: bool,
+    freshly_created: bool,
+    exclusive: bool,
+) -> Result<File, AuditError> {
     use windows_permissions::constants::AccessRights;
 
-    let access = (AccessRights::ReadControl | AccessRights::WriteDac).bits() | FILE_READ_ATTRIBUTES;
+    let mut access =
+        (AccessRights::ReadControl | AccessRights::WriteDac).bits() | FILE_READ_ATTRIBUTES;
+    if freshly_created {
+        access |= AccessRights::WriteOwner.bits();
+    }
     let mut options = OpenOptions::new();
     options
         .access_mode(access)
-        .share_mode(FILE_SHARE_READ_WRITE_DELETE)
+        .share_mode(if exclusive {
+            0
+        } else {
+            FILE_SHARE_READ_WRITE_DELETE
+        })
         .custom_flags(
             FILE_FLAG_OPEN_REPARSE_POINT
                 | if directory {
@@ -1270,6 +1283,16 @@ fn open_or_create_private_windows_file(
     let parent = open_windows_audit_parent_for_file(path)?;
     match windows_private_open_options(mode).open(path) {
         Ok(file) => {
+            drop(file);
+            harden_existing_windows_path(path, false)?;
+            let file = windows_private_open_options(mode)
+                .open(path)
+                .map_err(|error| {
+                    AuditError::Io(format!(
+                        "cannot reopen authenticated {description} {}: {error}",
+                        path.display()
+                    ))
+                })?;
             harden_open_regular_file(&file, path)?;
             return Ok(OpenedPrivateAuditFile {
                 file,
@@ -1308,7 +1331,7 @@ fn open_or_create_private_windows_file(
             )));
         }
     };
-    harden_open_regular_file(&file, path)?;
+    harden_windows_private_acl(&file, path, false, created, false)?;
     Ok(OpenedPrivateAuditFile { file, created })
 }
 
@@ -1409,6 +1432,8 @@ fn harden_windows_private_acl(
     opened: &File,
     path: &Path,
     directory: bool,
+    freshly_created: bool,
+    exclusive: bool,
 ) -> Result<(), AuditError> {
     use std::os::windows::fs::MetadataExt as _;
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
@@ -1420,7 +1445,16 @@ fn harden_windows_private_acl(
             path.display()
         ))
     })?;
-    let mut security_handle = windows_security_handle(path, directory)?;
+    let mut security_handle = if exclusive {
+        opened.try_clone().map_err(|error| {
+            AuditError::Io(format!(
+                "cannot duplicate exclusive Windows ACL handle for {}: {error}",
+                path.display()
+            ))
+        })?
+    } else {
+        windows_security_handle(path, directory, freshly_created, false)?
+    };
     let security_metadata = security_handle.metadata().map_err(|error| {
         AuditError::Io(format!(
             "cannot stat the Windows ACL handle for audit path {}: {error}",
@@ -1483,9 +1517,19 @@ fn harden_windows_private_acl(
             path.display()
         ))
     })?;
-    if before.owner() != Some(&*current_sid) {
+    if !freshly_created && before.owner() != Some(&*current_sid) {
         return Err(AuditError::Io(format!(
             "audit path {} is not owned by the current Windows process user",
+            path.display()
+        )));
+    }
+
+    if !freshly_created
+        && !exclusive
+        && verify_windows_private_acl(&security_handle, path, directory, &current_sid).is_err()
+    {
+        return Err(AuditError::Io(format!(
+            "audit path {} has a non-private Windows DACL and requires an exclusive handle before hardening",
             path.display()
         )));
     }
@@ -1505,8 +1549,18 @@ fn harden_windows_private_acl(
     windows_permissions::wrappers::SetSecurityInfo(
         &mut security_handle,
         SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::ProtectedDacl,
-        None,
+        SecurityInformation::Dacl
+            | SecurityInformation::ProtectedDacl
+            | if freshly_created {
+                SecurityInformation::Owner
+            } else {
+                SecurityInformation::empty()
+            },
+        if freshly_created {
+            Some(&*current_sid)
+        } else {
+            None
+        },
         None,
         Some(desired_dacl),
         None,
@@ -1518,6 +1572,13 @@ fn harden_windows_private_acl(
         ))
     })?;
     verify_windows_private_acl(&security_handle, path, directory, &current_sid)?;
+
+    // The exclusive handle itself pins the path and disallows a competing
+    // open, rename, or delete. A pathname metadata probe would conflict with
+    // our own share-mode-zero handle.
+    if exclusive {
+        return Ok(());
+    }
 
     let final_metadata = std::fs::symlink_metadata(path).map_err(|error| {
         AuditError::Io(format!(
@@ -1552,8 +1613,78 @@ fn harden_windows_private_acl(
 /// instant.
 #[cfg(windows)]
 pub fn harden_windows_private_directory(path: &Path) -> Result<(), AuditError> {
-    let directory = windows_security_handle(path, true)?;
-    harden_windows_private_acl(&directory, path, true)
+    harden_existing_windows_path(path, true)
+}
+
+#[cfg(windows)]
+fn harden_existing_windows_path(path: &Path, directory: bool) -> Result<(), AuditError> {
+    let probe = windows_security_handle(path, directory, false, false)?;
+    let current_sid = windows_permissions::utilities::current_process_sid().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot resolve current Windows process SID for audit path {}: {error}",
+            path.display()
+        ))
+    })?;
+    if verify_windows_private_acl(&probe, path, directory, &current_sid).is_ok() {
+        return harden_windows_private_acl(&probe, path, directory, false, false);
+    }
+    drop(probe);
+    let exclusive = windows_security_handle(path, directory, false, true)?;
+    harden_windows_private_acl(&exclusive, path, directory, false, true)
+}
+
+/// Only call after this process's non-recursive `create_dir` succeeded for this
+/// exact path. Existing or concurrently planted paths must use the strict
+/// owner check in `harden_windows_private_directory`.
+#[cfg(windows)]
+pub fn harden_fresh_windows_private_directory(path: &Path) -> Result<(), AuditError> {
+    let directory = windows_security_handle(path, true, true, false)?;
+    harden_windows_private_acl(&directory, path, true, true, false)
+}
+
+/// Prepare startup's directory tree one component at a time. Each successful
+/// non-recursive creation carries its own fresh-object proof; a raced or
+/// pre-existing final directory must pass the strict owner check.
+#[cfg(windows)]
+pub fn create_windows_private_audit_directory(path: &Path) -> Result<(), AuditError> {
+    let normalized = lexically_normalize_windows_audit_directory(path)?;
+    let mut current = PathBuf::new();
+    let mut hardened_final = false;
+    for component in normalized.components() {
+        match component {
+            Component::Prefix(prefix) => current.push(prefix.as_os_str()),
+            Component::RootDir => current.push(component.as_os_str()),
+            Component::Normal(name) => {
+                let parent = open_windows_audit_directory_nofollow(&current)?;
+                current.push(name);
+                match std::fs::create_dir(&current) {
+                    Ok(()) => {
+                        harden_fresh_windows_private_directory(&current)?;
+                        hardened_final = current == normalized;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                        open_windows_audit_directory_nofollow(&current)?;
+                        if current == normalized {
+                            harden_windows_private_directory(&current)?;
+                            hardened_final = true;
+                        }
+                    }
+                    Err(error) => {
+                        return Err(AuditError::Io(format!(
+                            "cannot create private Windows audit directory {}: {error}",
+                            current.display()
+                        )));
+                    }
+                }
+                parent.authenticate_current_path()?;
+            }
+            Component::CurDir | Component::ParentDir => unreachable!("normalized path"),
+        }
+    }
+    if !hardened_final {
+        harden_windows_private_directory(&normalized)?;
+    }
+    Ok(())
 }
 
 /// Harden a directory that was already opened through a no-follow capability.
@@ -1564,7 +1695,7 @@ pub(crate) fn harden_windows_private_directory_handle(
     directory: &File,
     display_path: &Path,
 ) -> Result<(), AuditError> {
-    harden_windows_private_acl(directory, display_path, true)
+    harden_windows_private_acl(directory, display_path, true, false, false)
 }
 
 /// Harden an already-open private regular file without resolving its pathname
@@ -1611,7 +1742,7 @@ pub(crate) fn harden_windows_private_file_handle(
             )));
         }
     }
-    harden_windows_private_acl(file, display_path, false)
+    harden_windows_private_acl(file, display_path, false, false, false)
 }
 
 /// After opening, confirm the OPEN handle is a regular file — catching a TOCTOU
@@ -5260,6 +5391,28 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn redacted_windows_dacl_sddl(path: &Path) -> String {
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+
+        let descriptor = windows_permissions::wrappers::GetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl,
+        )
+        .expect("read observed Windows DACL");
+        let rendered =
+            windows_permissions::wrappers::ConvertSecurityDescriptorToStringSecurityDescriptor(
+                &descriptor,
+                SecurityInformation::Dacl,
+            )
+            .expect("render observed Windows DACL");
+        let observed = rendered.to_string_lossy();
+        let current_sid = windows_permissions::utilities::current_process_sid()
+            .expect("resolve current TokenUser SID");
+        observed.replace(&current_sid.to_string(), "TokenUser")
+    }
+
+    #[cfg(windows)]
     #[test]
     fn broad_windows_file_and_directory_dacls_are_tightened_and_read_back() {
         use windows_permissions::constants::{SeObjectType, SecurityInformation};
@@ -5298,19 +5451,23 @@ mod tests {
         }
 
         let root = tempfile::tempdir().expect("tempdir");
+        harden_fresh_windows_private_directory(root.path())
+            .expect("fresh test root has a private TokenUser owner");
         let file_path = root.path().join("audit.jsonl");
-        std::fs::write(&file_path, b"").expect("seed audit file");
+        drop(open_private_append_file(&file_path).expect("create private audit file"));
         install_broad_dacl(&file_path, false);
         let file = open_private_append_file(&file_path).expect("harden broad file DACL");
         let current_sid = windows_permissions::utilities::current_process_sid()
             .expect("resolve current process SID");
-        let file_acl_handle = windows_security_handle(&file_path, false).expect("file ACL handle");
+        let file_acl_handle =
+            windows_security_handle(&file_path, false, false, false).expect("file ACL handle");
         verify_windows_private_acl(&file_acl_handle, &file_path, false, &current_sid)
             .expect("file DACL must be exact after hardening");
         drop(file);
 
         let directory_path = root.path().join("spool");
-        std::fs::create_dir(&directory_path).expect("create spool directory");
+        create_windows_private_audit_directory(&directory_path)
+            .expect("create private spool directory");
         install_broad_dacl(&directory_path, true);
         let refused_child = directory_path.join("refused-new.jsonl");
         let error = open_private_append_file(&refused_child)
@@ -5321,8 +5478,8 @@ mod tests {
             "fail-closed Windows creation must not leave a child behind"
         );
         harden_windows_private_directory(&directory_path).expect("harden broad directory DACL");
-        let directory_acl_handle =
-            windows_security_handle(&directory_path, true).expect("directory ACL handle");
+        let directory_acl_handle = windows_security_handle(&directory_path, true, false, false)
+            .expect("directory ACL handle");
         verify_windows_private_acl(&directory_acl_handle, &directory_path, true, &current_sid)
             .expect("directory DACL must be exact after hardening");
 
@@ -5330,10 +5487,324 @@ mod tests {
         let child = open_private_append_file(&created_child)
             .expect("create beneath an authenticated private parent");
         let child_acl_handle =
-            windows_security_handle(&created_child, false).expect("child ACL handle");
+            windows_security_handle(&created_child, false, false, false).expect("child ACL handle");
         verify_windows_private_acl(&child_acl_handle, &created_child, false, &current_sid)
             .expect("new child DACL must be exact after creation");
         drop(child);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_fresh_parent_and_file_owner_is_token_user_with_exact_dacl() {
+        let root = tempfile::tempdir().expect("fresh test root");
+        let parent = root.path().join("private/audit");
+        create_windows_private_audit_directory(&parent).expect("create private audit parent");
+        let file_path = parent.join("audit.jsonl");
+        let file = open_private_append_file(&file_path).expect("create private audit file");
+        let current_sid = windows_permissions::utilities::current_process_sid()
+            .expect("resolve current TokenUser SID");
+        let parent_handle =
+            windows_security_handle(&parent, true, false, false).expect("open created parent ACL");
+        verify_windows_private_acl(&parent_handle, &parent, true, &current_sid)
+            .expect("fresh parent owner and DACL are exact");
+        let file_handle = windows_security_handle(&file_path, false, false, false)
+            .expect("open created file ACL");
+        verify_windows_private_acl(&file_handle, &file_path, false, &current_sid)
+            .expect("fresh file owner and DACL are exact");
+        drop(file);
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_fresh_parent_and_file_owner_is_token_user_with_exact_dacl",
+                "fixture": "fresh_create",
+                "expected": "private",
+                "actual": "private",
+                "owner_sid_kind": "TokenUser",
+                "dacl_sddl": [redacted_windows_dacl_sddl(&parent), redacted_windows_dacl_sddl(&file_path)]
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_refuses_preplanted_foreign_owned_file() {
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+        use windows_permissions::{LocalBox, Sid};
+
+        let root = tempfile::tempdir().expect("fresh test root");
+        let foreign_owner: LocalBox<Sid> = "S-1-5-32-544"
+            .parse()
+            .expect("parse BUILTIN Administrators SID");
+        let current_sid = windows_permissions::utilities::current_process_sid()
+            .expect("resolve current TokenUser SID");
+        assert_ne!(
+            &*foreign_owner, &*current_sid,
+            "fixture owner must differ from TokenUser"
+        );
+
+        let file_path = root.path().join("preplanted.jsonl");
+        std::fs::write(&file_path, b"").expect("preplant file");
+        windows_permissions::wrappers::SetNamedSecurityInfo(
+            file_path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner,
+            Some(&foreign_owner),
+            None,
+            None,
+            None,
+        )
+        .expect("install foreign file owner fixture");
+        let file_error = open_private_append_file(&file_path)
+            .expect_err("preplanted foreign-owned file must be refused");
+        assert!(file_error.to_string().contains("not owned"), "{file_error}");
+
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_refuses_preplanted_foreign_owned_file",
+                "fixture": "preplanted_file_with_foreign_owner",
+                "expected": "refused",
+                "actual": "refused",
+                "owner_sid_kind": "BUILTIN\\Administrators",
+                "dacl_sddl": redacted_windows_dacl_sddl(&file_path)
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_refuses_preplanted_foreign_owned_directory() {
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+        use windows_permissions::{LocalBox, Sid};
+
+        let root = tempfile::tempdir().expect("fresh test root");
+        let foreign_owner: LocalBox<Sid> = "S-1-5-32-544"
+            .parse()
+            .expect("parse BUILTIN Administrators SID");
+        let current_sid = windows_permissions::utilities::current_process_sid()
+            .expect("resolve current TokenUser SID");
+        assert_ne!(&*foreign_owner, &*current_sid);
+        let path = root.path().join("preplanted-dir");
+        std::fs::create_dir(&path).expect("preplant directory");
+        windows_permissions::wrappers::SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Owner,
+            Some(&foreign_owner),
+            None,
+            None,
+            None,
+        )
+        .expect("install foreign directory owner fixture");
+        let error = create_windows_private_audit_directory(&path)
+            .expect_err("preplanted foreign-owned directory must be refused");
+        assert!(error.to_string().contains("not owned"), "{error}");
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_refuses_preplanted_foreign_owned_directory",
+                "fixture": "preplanted_directory_with_foreign_owner",
+                "expected": "refused",
+                "actual": "refused",
+                "owner_sid_kind": "BUILTIN\\Administrators",
+                "dacl_sddl": redacted_windows_dacl_sddl(&path)
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_refuses_broad_dacl_object_with_foreign_open_handle() {
+        use windows_permissions::constants::{SeObjectType, SecurityInformation};
+        use windows_permissions::{LocalBox, SecurityDescriptor};
+
+        let root = tempfile::tempdir().expect("fresh test root");
+        harden_fresh_windows_private_directory(root.path()).expect("private test root");
+        let path = root.path().join("broad.jsonl");
+        drop(open_private_append_file(&path).expect("create private file"));
+        let current_sid = windows_permissions::utilities::current_process_sid()
+            .expect("resolve current TokenUser SID");
+        let broad: LocalBox<SecurityDescriptor> = format!("D:(A;;FA;;;WD)(A;;FA;;;{current_sid})")
+            .parse()
+            .expect("parse broad fixture DACL");
+        windows_permissions::wrappers::SetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl | SecurityInformation::UnprotectedDacl,
+            None,
+            None,
+            broad.dacl(),
+            None,
+        )
+        .expect("install broad fixture DACL");
+
+        let ready = root.path().join("foreign-ready");
+        let release = root.path().join("foreign-release");
+        let script = "$h=[System.IO.File]::Open($env:AUDIT_TEST_PATH,'Open','ReadWrite','ReadWrite'); [System.IO.File]::WriteAllText($env:AUDIT_TEST_READY,'ready'); for($i=0;$i -lt 100 -and -not (Test-Path $env:AUDIT_TEST_RELEASE);$i++){ Start-Sleep -Milliseconds 100 }; $h.Dispose()";
+        let mut child = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-Command", script])
+            .env("AUDIT_TEST_PATH", &path)
+            .env("AUDIT_TEST_READY", &ready)
+            .env("AUDIT_TEST_RELEASE", &release)
+            .spawn()
+            .expect("launch foreign handle holder");
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(ready.exists(), "foreign process must hold the file handle");
+        let error = open_private_append_file(&path)
+            .expect_err("broad pre-existing DACL with foreign handle must be refused");
+        assert!(error.to_string().contains("cannot open audit"), "{error}");
+        assert!(child.try_wait().expect("poll holder").is_none());
+        std::fs::write(&release, b"release").expect("release foreign holder");
+        assert!(child.wait().expect("wait for holder").success());
+        let descriptor = windows_permissions::wrappers::GetNamedSecurityInfo(
+            path.as_os_str(),
+            SeObjectType::SE_FILE_OBJECT,
+            SecurityInformation::Dacl,
+        )
+        .expect("read DACL after refusal");
+        assert_eq!(descriptor.dacl().expect("DACL").len(), 2);
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_refuses_broad_dacl_object_with_foreign_open_handle",
+                "fixture": "broad_dacl_foreign_process_handle",
+                "expected": "refused",
+                "actual": "refused",
+                "owner_sid_kind": "TokenUser",
+                "dacl_sddl": redacted_windows_dacl_sddl(&path)
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_refuses_junction_audit_directory() {
+        let root = tempfile::tempdir().expect("test root");
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).expect("create junction target");
+        let junction = root.path().join("audit-junction");
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .expect("create junction fixture");
+        assert!(status.success(), "junction fixture must be real");
+        let error = create_windows_private_audit_directory(&junction)
+            .expect_err("junction audit directory must be refused");
+        assert!(error.to_string().contains("reparse point"), "{error}");
+        assert!(target.is_dir(), "junction target must remain untouched");
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_refuses_junction_audit_directory",
+                "fixture": "mklink /J final component",
+                "expected": "refused",
+                "actual": "refused",
+                "owner_sid_kind": "irrelevant",
+                "dacl_sddl": serde_json::Value::Null
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_refuses_reparse_intermediate_component() {
+        let root = tempfile::tempdir().expect("test root");
+        let target = root.path().join("target");
+        std::fs::create_dir(&target).expect("create junction target");
+        let junction = root.path().join("junction-parent");
+        let status = std::process::Command::new("cmd.exe")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&target)
+            .status()
+            .expect("create junction fixture");
+        assert!(status.success(), "junction fixture must be real");
+        let child = junction.join("audit");
+        let error = create_windows_private_audit_directory(&child)
+            .expect_err("reparse-point intermediate component must be refused");
+        assert!(error.to_string().contains("reparse point"), "{error}");
+        assert!(
+            !target.join("audit").exists(),
+            "target must remain untouched"
+        );
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_refuses_reparse_intermediate_component",
+                "fixture": "mklink /J intermediate component",
+                "expected": "refused",
+                "actual": "refused",
+                "owner_sid_kind": "irrelevant",
+                "dacl_sddl": serde_json::Value::Null
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_refuses_hard_linked_audit_file() {
+        let root = tempfile::tempdir().expect("test root");
+        harden_fresh_windows_private_directory(root.path()).expect("private test root");
+        let path = root.path().join("audit.jsonl");
+        drop(open_private_append_file(&path).expect("create private audit file"));
+        let alias = root.path().join("alias.jsonl");
+        std::fs::hard_link(&path, &alias).expect("create hard-link fixture");
+        let error = open_private_append_file(&path)
+            .expect_err("multiply-linked audit file must be refused");
+        assert!(error.to_string().contains("hard links"), "{error}");
+        assert!(alias.is_file(), "hard-link target must remain untouched");
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_refuses_hard_linked_audit_file",
+                "fixture": "std::fs::hard_link",
+                "expected": "refused",
+                "actual": "refused",
+                "owner_sid_kind": "TokenUser",
+                "dacl_sddl": redacted_windows_dacl_sddl(&path)
+            })
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_refuses_identity_swap_before_hardening() {
+        let root = tempfile::tempdir().expect("test root");
+        let configured = root.path().join("audit.jsonl");
+        let replacement = root.path().join("replacement.jsonl");
+        let parked = root.path().join("parked.jsonl");
+        std::fs::write(&configured, b"original").expect("create original fixture");
+        std::fs::write(&replacement, b"replacement").expect("create replacement fixture");
+        let opened = windows_security_handle(&configured, false, false, false)
+            .expect("hold original no-follow handle");
+        std::fs::rename(&configured, &parked).expect("park original after opening");
+        std::fs::rename(&replacement, &configured).expect("swap configured path");
+        let error = harden_windows_private_acl(&opened, &configured, false, false, false)
+            .expect_err("identity swap before second ACL open must be refused");
+        assert!(error.to_string().contains("changed identity"), "{error}");
+        assert_eq!(
+            std::fs::read(&configured).expect("replacement bytes"),
+            b"replacement"
+        );
+        assert_eq!(std::fs::read(&parked).expect("original bytes"), b"original");
+        eprintln!(
+            "{}",
+            serde_json::json!({
+                "case_id": "windows_audit_refuses_identity_swap_before_hardening",
+                "fixture": "rename between two no-follow opens",
+                "expected": "refused",
+                "actual": "refused",
+                "owner_sid_kind": "unread",
+                "dacl_sddl": serde_json::Value::Null
+            })
+        );
     }
 
     // --- Bounded streaming resume (bead oraclemcp-qa100 .29) ---

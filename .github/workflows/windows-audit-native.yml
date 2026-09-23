@@ -1,0 +1,47 @@
+# The operator uses this exact-SHA verdict to verify Windows audit ACL
+# hardening (.12.1) before the 0.12 release. The observed defect is the
+# elevated runner's TokenOwner differing from TokenUser on fresh objects.
+# Remove this manual lane when the regular Windows workspace job is required
+# on main again.
+name: Windows audit native proof
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact source revision to verify
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  windows-audit-native:
+    name: Windows audit native workspace
+    runs-on: windows-latest
+    timeout-minutes: 110
+    env:
+      RUSTC_WRAPPER: ""
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify exact source revision
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          $actual = git rev-parse HEAD
+          if ($actual -ne $env:EXPECTED_SHA) {
+            throw "Windows proof checked out $actual, expected $env:EXPECTED_SHA"
+          }
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: nightly-2026-05-11
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          cache-on-failure: true
+      - name: Test Windows workspace libraries and binaries
+        run: cargo test --workspace --lib --bins
