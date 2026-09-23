@@ -19,6 +19,7 @@ use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use serde_json::{Map, Value, json};
 
 use crate::capabilities::{CapabilitiesReport, ConnectionStatus, OperatingLevelReport};
+use crate::edition_executor::{OperatorLanePolicy, ValidatedEditionIdent};
 use crate::init_token::StdioAuthPolicy;
 use crate::request_budget::{
     CLEANUP_POLL_QUOTA, CLEANUP_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, RequestBudget,
@@ -43,6 +44,10 @@ pub const INIT_TOKEN_META_KEY: &str = "oraclemcp/initToken";
 
 /// The zero-arg discovery tool name (§8.1).
 pub const CAPABILITIES_TOOL: &str = "oracle_capabilities";
+
+/// Internal dispatcher name used only by [`ToolDispatch::operator_edition_flip`].
+/// Every agent-facing tool path refuses it before dispatch.
+pub const OPERATOR_EDITION_INTERNAL_DISPATCH: &str = "__operator_edition_flip_internal";
 
 fn capabilities_detail_level(args: &Value) -> Result<&'static str, ErrorEnvelope> {
     let Some(args) = args.as_object() else {
@@ -744,6 +749,24 @@ pub trait ToolDispatch: Send + Sync + 'static {
         args: Value,
     ) -> DispatchFuture<'a>;
 
+    /// Execute the fixed operator-only edition template on the owning lane.
+    /// The core executor has already bound a one-use confirmation; this entry
+    /// is never exposed through the MCP registry or `tools/call`.
+    fn operator_edition_flip<'a>(
+        &'a self,
+        cx: &'a Cx,
+        context: DispatchContext<'a>,
+        edition: &ValidatedEditionIdent,
+        expected_profile: &str,
+    ) -> DispatchFuture<'a> {
+        self.dispatch(
+            cx,
+            context,
+            OPERATOR_EDITION_INTERNAL_DISPATCH,
+            json!({ "edition": edition.as_str(), "profile": expected_profile }),
+        )
+    }
+
     /// Start a streaming dispatch and return a receiver for its final outcome
     /// without waiting for completion. Stateful HTTP uses this to drain the
     /// bounded row channel while the lane continues producing frames.
@@ -1338,6 +1361,12 @@ impl OracleMcpServer {
         name: String,
         args: Value,
     ) -> DispatchOutcome {
+        if name == OPERATOR_EDITION_INTERNAL_DISPATCH {
+            return Outcome::Err(ErrorEnvelope::new(
+                ErrorClass::ForbiddenStatement,
+                "operator edition executor is not an MCP tool",
+            ));
+        }
         if name == CAPABILITIES_TOOL {
             return self
                 .capabilities_result_json_with_context(cx, context, &args)
@@ -1398,6 +1427,66 @@ impl OracleMcpServer {
                 return Outcome::Err(envelope);
             };
             self.run_tool_json_outcome_with_context(&cx, context, name, args)
+                .await
+        })
+    }
+
+    pub(crate) fn operator_lane_policy_blocking_with_context(
+        &self,
+        context: DispatchContext<'_>,
+    ) -> Result<OperatorLanePolicy, ErrorEnvelope> {
+        crate::lane::block_on_lane_bridge(async {
+            let cx = Cx::current().ok_or_else(|| {
+                ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "operator lane context is unavailable",
+                )
+            })?;
+            match self
+                .dispatcher
+                .mcp_surface_state(&cx, context, McpSurfaceDetail::LevelOnly)
+                .await
+            {
+                Outcome::Ok(Some(surface)) => Ok(OperatorLanePolicy {
+                    profile: surface.active_profile.ok_or_else(|| {
+                        ErrorEnvelope::new(
+                            ErrorClass::RuntimeStateRequired,
+                            "operator edition lane has no active profile",
+                        )
+                    })?,
+                    max_level: surface.max_level,
+                    effective_ceiling: surface.effective_ceiling,
+                    current_level: surface.current_level,
+                    protected: surface.protected,
+                }),
+                Outcome::Ok(None) => Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "operator edition lane policy is unavailable",
+                )),
+                Outcome::Err(error) => Err(error),
+                Outcome::Cancelled(_) | Outcome::Panicked(_) => Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "operator edition lane policy could not be verified",
+                )),
+            }
+        })
+    }
+
+    pub(crate) fn run_operator_edition_blocking_with_context(
+        &self,
+        context: DispatchContext<'_>,
+        edition: ValidatedEditionIdent,
+        expected_profile: &str,
+    ) -> DispatchOutcome {
+        crate::lane::block_on_lane_bridge(async {
+            let Some(cx) = Cx::current() else {
+                return Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "operator edition lane context is unavailable",
+                ));
+            };
+            self.dispatcher
+                .operator_edition_flip(&cx, context, &edition, expected_profile)
                 .await
         })
     }

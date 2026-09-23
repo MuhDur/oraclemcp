@@ -945,7 +945,7 @@ fn load_edition_proposal_from_path(path: &Path) -> Result<EditionProposal, Chang
     Ok(proposal)
 }
 
-fn normalize_edition_identifier(value: String) -> Result<String, ChangeProposalError> {
+pub(crate) fn normalize_edition_identifier(value: String) -> Result<String, ChangeProposalError> {
     let value = normalize_non_empty(value, "edition")?;
     let candidate = format!("CREATE EDITION {value} AS CHILD OF ORACLEMCP_BASE");
     match parse_edition_lifecycle_sql(&candidate) {

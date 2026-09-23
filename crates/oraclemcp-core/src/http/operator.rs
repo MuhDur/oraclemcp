@@ -36,10 +36,12 @@
 //! name in exactly the environment it was written in.
 use super::*;
 use crate::change_proposal::{
-    EditionProposal, EditionProposalCreateRequest, EditionProposalStatus,
-    EditionProposalTransitionRequest,
+    EditionProposalCreateRequest, EditionProposalStatus, EditionProposalTransitionRequest,
 };
-use oraclemcp_guard::{Classifier, OperatingLevel};
+use crate::edition_executor::{
+    EditionApplyInput, EditionFlipTarget, OperatorAuth, OperatorEditionExecutor,
+};
+use oraclemcp_guard::OperatingLevel;
 use serde::Deserialize;
 use std::io::Read as _;
 
@@ -200,12 +202,17 @@ pub(super) const OPERATOR_IDEMPOTENCY_MAX_ENTRIES: usize = 1024;
 pub struct OperatorIdempotencyLedger {
     entries: Arc<Mutex<HashMap<String, OperatorIdempotencyEntry>>>,
     next_generation: AtomicU64,
+    edition_executor: OperatorEditionExecutor,
 }
 
 impl OperatorIdempotencyLedger {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn edition_executor(&self) -> &OperatorEditionExecutor {
+        &self.edition_executor
     }
 
     pub(super) fn begin(
@@ -1784,38 +1791,13 @@ fn handle_operator_edition_proposal_route(
                 scope_grant: request_context.scope_grant,
             };
             let flip = if route == OperatorRouteKind::EditionProposalsMerge {
-                EditionDefaultFlip::Merge
+                EditionFlipTarget::Merge
             } else {
-                EditionDefaultFlip::Rollback
+                EditionFlipTarget::Rollback
             };
             handle_operator_edition_default_flip(&context, store, flip)
         }
         _ => unreachable!("non-edition-proposal route"),
-    }
-}
-
-/// The only two database-wide default-edition operations exposed by the board.
-/// The target is selected from persisted, validated metadata; callers cannot
-/// supply arbitrary SQL or an alternative edition identifier.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum EditionDefaultFlip {
-    Merge,
-    Rollback,
-}
-
-impl EditionDefaultFlip {
-    fn action(self) -> &'static str {
-        match self {
-            Self::Merge => "merge",
-            Self::Rollback => "rollback",
-        }
-    }
-
-    fn target_edition(self, proposal: &EditionProposal) -> &str {
-        match self {
-            Self::Merge => &proposal.child_edition,
-            Self::Rollback => &proposal.base_edition,
-        }
     }
 }
 
@@ -1840,15 +1822,12 @@ struct EditionProposalFlipRequest {
 
 /// Merge to a proposal child, or re-flip to its base edition.
 ///
-/// This handler is intentionally not an executor.  It refuses unsafe review
-/// state locally, reclassifies the canonical SQL from scratch, then delegates
-/// profile ceilings, protected/read-only profiles, the ADMIN elevation window,
-/// and one-use confirmation-token validation to the same `oracle_execute`
-/// dispatch path used by every other privileged operation.
+/// Preview or apply through the dedicated operator executor. The route takes
+/// no SQL, and the executor constructs its fixed template from the proposal.
 fn handle_operator_edition_default_flip(
     context: &ChangeProposalApplyContext<'_>,
     store: &crate::change_proposal::ChangeProposalStore,
-    flip: EditionDefaultFlip,
+    flip: EditionFlipTarget,
 ) -> HttpResponse {
     if !content_type_is_json(context.original_request) {
         return empty_response(415);
@@ -1906,84 +1885,117 @@ fn handle_operator_edition_default_flip(
         );
     }
 
-    // SEC-1: the review record has no verdict and is never treated as one.  A
-    // new classifier decision is required for the exact canonical statement on
-    // every merge and rollback request.  The live dispatch repeats this with
-    // the active lane policy before Oracle can see the statement.
-    let target_edition = flip.target_edition(&proposal);
-    let sql = format!("ALTER DATABASE DEFAULT EDITION = {target_edition}");
-    let decision = Classifier::default().classify(&sql);
-    if decision.required_level != Some(OperatingLevel::Admin) {
-        return operator_json_response(
-            409,
-            &context.original_request.path,
-            json!({
-                "source": "edition_proposals",
-                "error": "edition_default_classifier_refused",
-                "message": "default-edition change was not proven to require ADMIN by the current classifier; refusing rather than falling through",
-                "proposal_id": proposal.proposal_id,
-            }),
-        );
+    let binding = match operator_action_lane_binding(
+        context.config,
+        apply.lane_id.as_deref(),
+        apply.lane_generation,
+    ) {
+        Ok(binding) => binding,
+        Err((status, data)) => {
+            return operator_json_response(status, &context.original_request.path, data);
+        }
+    };
+    let operator_key = context.operator_subject.legacy_agent_identity();
+    let auth = OperatorAuth::authenticated(operator_key.clone());
+    let mut dispatch_context = context
+        .scope_grant
+        .map(DispatchContext::with_scope_grant)
+        .unwrap_or_default();
+    if let Some(binding) = binding.as_ref() {
+        dispatch_context = dispatch_context
+            .with_http_session_id(&binding.mcp_session_id)
+            .with_principal_key(&binding.principal_key)
+            .with_lane_identity(&binding.lane_id, binding.generation);
+    } else {
+        dispatch_context = dispatch_context.with_principal_key(&operator_key);
     }
+    let policy = match context
+        .server
+        .operator_lane_policy_blocking_with_context(dispatch_context)
+    {
+        Ok(policy) => policy,
+        Err(error) => {
+            return operator_json_response(
+                409,
+                &context.original_request.path,
+                json!({
+                    "source": "edition_proposals", "error": "edition_lane_policy_unavailable",
+                    "message": error.message,
+                }),
+            );
+        }
+    };
+    let executor = context.config.operator_idempotency.edition_executor();
+    let target_edition = match flip {
+        EditionFlipTarget::Merge => &proposal.child_edition,
+        EditionFlipTarget::Rollback => &proposal.base_edition,
+    };
     let Some(confirm) = apply
         .confirm
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|s| !s.is_empty())
     else {
-        return operator_json_response(
-            409,
-            &context.original_request.path,
-            json!({
-                "source": "edition_proposals",
-                "error": "edition_default_confirmation_required",
-                "message": "database-wide default-edition changes require an ADMIN preview confirmation; this endpoint never performs a bare execution",
-                "proposal_id": proposal.proposal_id,
-                "required_level": OperatingLevel::Admin,
-                "next_step": "obtain an oracle_preview_sql confirmation for this proposal's canonical ALTER DATABASE DEFAULT EDITION statement, then resubmit it here",
-            }),
-        );
+        return match executor.preview(&auth, &proposal, flip, apply.lane_generation, &policy) {
+            Ok(preview) => operator_json_response(
+                200,
+                &context.original_request.path,
+                json!({
+                    "source": "edition_proposals", "status": "preview",
+                    "action": flip.action(), "proposal_id": proposal.proposal_id,
+                    "target_edition": target_edition,
+                    "lane_id": apply.lane_id.as_deref(),
+                    "lane_generation": apply.lane_generation,
+                    "confirmation": preview.token, "sql_sha256": preview.sql_sha256,
+                    "required_level": OperatingLevel::Admin,
+                }),
+            ),
+            Err(refusal) => operator_json_response(
+                409,
+                &context.original_request.path,
+                json!({
+                    "source": "edition_proposals", "error": refusal.code(),
+                    "proposal_id": proposal.proposal_id,
+                }),
+            ),
+        };
     };
-
-    let key_prefix = apply
-        .idempotency_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("edition-default-flip");
-    let response = forward_operator_action(
-        context,
-        OperatorActionForward {
-            idempotency_key: format!("{key_prefix}:{}:{}", flip.action(), proposal.proposal_id),
-            lane_id: apply.lane_id.as_deref(),
-            lane_generation: apply.lane_generation,
-            tool: "oracle_execute",
-            arguments: json!({
-                "sql": sql.as_str(),
-                "binds": [],
-                "commit": true,
-                "confirm": confirm,
-                "capture_dbms_output": false,
+    let outcome = match executor.apply(EditionApplyInput {
+        auth: &auth,
+        confirmation: confirm,
+        proposal: &proposal,
+        target: flip,
+        lane_generation: apply.lane_generation,
+        policy: &policy,
+        server: context.server,
+        context: dispatch_context,
+    }) {
+        Ok(outcome) => outcome,
+        Err(refusal) => {
+            return operator_json_response(
+                409,
+                &context.original_request.path,
+                json!({
+                    "source": "edition_proposals", "error": refusal.code(),
+                    "proposal_id": proposal.proposal_id,
+                }),
+            );
+        }
+    };
+    let (status, executor_response) = match outcome {
+        Outcome::Ok(value) => (200, value),
+        Outcome::Err(error) => (
+            409,
+            json!({"error_class": error.error_class, "message": error.message}),
+        ),
+        Outcome::Cancelled(_) | Outcome::Panicked(_) => (
+            503,
+            json!({
+                "error": "edition_execution_outcome_unknown"
             }),
-        },
-    );
-    let action_body: Value = serde_json::from_slice(&response.body).unwrap_or_else(|_| {
-        json!({
-            "error": "invalid_operator_action_response",
-            "message": "guarded default-edition action response was not valid JSON",
-        })
-    });
-    let mcp_response = action_body
-        .pointer("/data/mcp_response")
-        .cloned()
-        .unwrap_or(action_body);
-    let action_failed = operator_action_response_failed(
-        response.status,
-        &json!({
-            "data": { "mcp_response": &mcp_response }
-        }),
-    );
-    let rollback_scope = (flip == EditionDefaultFlip::Rollback).then(|| {
+        ),
+    };
+    let rollback_scope = (flip == EditionFlipTarget::Rollback).then(|| {
         json!({
             "changes_default_edition_for": "new_sessions_only",
             "not_a_global_instant_undo": true,
@@ -1995,24 +2007,18 @@ fn handle_operator_edition_default_flip(
         })
     });
     operator_json_response(
-        response.status,
+        status,
         &context.original_request.path,
         json!({
             "source": "edition_proposals",
-            "status": if action_failed { "refused" } else { "forwarded" },
+            "status": if status == 200 { "applied" } else { "refused" },
             "action": flip.action(),
             "proposal": proposal.view(),
             "target_edition": target_edition,
             "lane_id": apply.lane_id.as_deref().map(str::trim).filter(|value| !value.is_empty()),
             "lane_generation": apply.lane_generation,
-            "sql_sha256": prefixed_sha256_hex(sql.as_bytes()),
-            "reclassified": {
-                "required_level": decision.required_level,
-                "danger": decision.danger,
-                "stored_proposal_is_authority": false,
-                "live_dispatch_reclassifies": true,
-            },
-            "mcp_response": mcp_response,
+            "idempotency_key": apply.idempotency_key.as_deref(),
+            "executor_response": executor_response,
             "rollback_scope": rollback_scope,
         }),
     )

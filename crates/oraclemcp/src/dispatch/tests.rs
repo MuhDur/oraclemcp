@@ -16189,3 +16189,15 @@ fn previews_and_effectless_bodies_stay_cancellable() {
         "only a response carrying the executed statement counts as terminal"
     );
 }
+#[test]
+fn operator_edition_success_is_terminal_after_deadline() {
+    let tool = oraclemcp_core::server::OPERATOR_EDITION_INTERNAL_DISPATCH;
+    assert!(response_reports_terminal_effect(
+        tool,
+        &serde_json::json!({"status": "applied", "edition": "SYNTHETIC_CHILD"})
+    ));
+    assert!(!response_reports_terminal_effect(
+        tool,
+        &serde_json::json!({"status": "preview", "edition": "SYNTHETIC_CHILD"})
+    ));
+}

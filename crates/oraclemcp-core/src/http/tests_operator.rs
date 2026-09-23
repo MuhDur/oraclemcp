@@ -1,4 +1,7 @@
 use super::operator::{OPERATOR_IDEMPOTENCY_TTL, OperatorEventTarget, config_error_value};
+use crate::{
+    ConnectionStatus, McpSurfaceDetail, McpSurfaceFuture, McpSurfaceState, McpToolCatalogSnapshot,
+};
 
 #[test]
 fn config_preview_errors_keep_their_distinct_operator_codes() {
@@ -3399,12 +3402,90 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 
+struct EditionDispatch {
+    calls: Arc<AtomicUsize>,
+    profile: &'static str,
+    deny: bool,
+}
+
+impl ToolDispatch for EditionDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        name: &'a str,
+        args: Value,
+    ) -> DispatchFuture<'a> {
+        Box::pin(async move {
+            if name != crate::server::OPERATOR_EDITION_INTERNAL_DISPATCH {
+                return Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::ForbiddenStatement,
+                    "only the private edition command is expected",
+                ));
+            }
+            self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            if self.deny {
+                Outcome::Err(ErrorEnvelope::new(
+                    ErrorClass::PolicyDenied,
+                    "current operator policy refused the edition change",
+                ))
+            } else {
+                Outcome::Ok(serde_json::json!({"edition": args["edition"], "status": "applied"}))
+            }
+        })
+    }
+
+    fn mcp_surface_state<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        _detail: McpSurfaceDetail,
+    ) -> McpSurfaceFuture<'a> {
+        Box::pin(async move {
+            Outcome::Ok(Some(McpSurfaceState {
+                current_level: OperatingLevel::Admin,
+                effective_ceiling: OperatingLevel::Admin,
+                max_level: OperatingLevel::Admin,
+                protected: false,
+                active_profile: Some(self.profile.to_owned()),
+                custom_catalog: McpToolCatalogSnapshot {
+                    generation: 0,
+                    tools: Arc::from([]),
+                },
+                connection: ConnectionStatus::default(),
+            }))
+        })
+    }
+}
+
+#[test]
+fn operator_executor_not_registered_as_mcp_tool() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
+        calls: Arc::clone(&calls),
+        profile: "synthetic_stage",
+        deny: false,
+    }));
+    let response = server.run_tool_blocking(
+        crate::server::OPERATOR_EDITION_INTERNAL_DISPATCH.to_owned(),
+        serde_json::json!({"edition": "SYNTHETIC_CHILD"}),
+    );
+    assert_eq!(response["isError"], serde_json::json!(true));
+    assert_eq!(
+        response["structuredContent"]["error_class"],
+        serde_json::json!("FORBIDDEN_STATEMENT")
+    );
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+}
+
 #[test]
 fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
-    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
         calls: Arc::clone(&calls),
+        profile: "synthetic_stage",
+        deny: false,
     }));
     let dir = dashboard_test_dir("edition-default-flip");
     let store = Arc::new(
@@ -3445,9 +3526,9 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
     );
     assert_eq!(reviewing.status, 200);
 
-    // A merge is never a convenience bare tool call.  The token is transient
-    // input; the durable record contains no token and cannot execute by itself.
-    let without_confirmation = handle_http_request(
+    // The first call is a preview. It mints a one-use operator confirmation
+    // without sending any statement to the database.
+    let merge_preview = handle_http_request(
         &server,
         &cfg,
         operator_json_post(
@@ -3455,11 +3536,15 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
             &serde_json::json!({ "proposal_id": proposal_id }),
         ),
     );
-    assert_eq!(without_confirmation.status, 409);
+    assert_eq!(merge_preview.status, 200);
     assert_eq!(
-        response_json(&without_confirmation)["data"]["error"],
-        serde_json::json!("edition_default_confirmation_required")
+        response_json(&merge_preview)["data"]["status"],
+        serde_json::json!("preview")
     );
+    let merge_token = response_json(&merge_preview)["data"]["confirmation"]
+        .as_str()
+        .expect("operator confirmation")
+        .to_owned();
     assert_eq!(
         calls.load(AtomicOrdering::SeqCst),
         0,
@@ -3473,7 +3558,7 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
             "/operator/v1/edition-proposals/merge",
             &serde_json::json!({
                 "proposal_id": proposal_id,
-                "confirm": "synthetic-admin-preview-grant",
+                "confirm": merge_token,
                 "idempotency_key": "synthetic-edition-merge"
             }),
         ),
@@ -3481,31 +3566,29 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
     assert_eq!(merge.status, 200);
     let merge_json = response_json(&merge);
     assert_eq!(merge_json["data"]["action"], serde_json::json!("merge"));
+    assert_eq!(merge_json["data"]["status"], serde_json::json!("applied"));
     assert_eq!(
-        merge_json["data"]["reclassified"]["required_level"],
-        serde_json::json!("ADMIN"),
-        "apply must freshly classify the generated default-edition SQL at ADMIN"
+        merge_json["data"]["executor_response"]["edition"],
+        serde_json::json!("SYNTHETIC_CHILD")
     );
-    assert_eq!(
-        merge_json["data"]["reclassified"]["stored_proposal_is_authority"],
-        serde_json::json!(false)
+    assert!(
+        merge_json["data"].get("mcp_response").is_none(),
+        "edition execution must not use oracle_execute or any MCP tool"
     );
-    let merged_action = &merge_json["data"]["mcp_response"]["result"]["structuredContent"];
-    assert_eq!(merged_action["tool"], serde_json::json!("oracle_execute"));
-    assert_eq!(
-        merged_action["classification"]["required_level"],
-        serde_json::json!("ADMIN"),
-        "the guarded execution seam must receive the same fresh ADMIN classification"
+
+    let rollback_preview = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/rollback",
+            &serde_json::json!({ "proposal_id": proposal_id }),
+        ),
     );
-    assert_eq!(
-        merged_action["args"]["sql"],
-        serde_json::json!("ALTER DATABASE DEFAULT EDITION = SYNTHETIC_CHILD")
-    );
-    assert_eq!(merged_action["args"]["commit"], serde_json::json!(true));
-    assert_eq!(
-        merged_action["args"]["confirm"],
-        serde_json::json!("synthetic-admin-preview-grant")
-    );
+    assert_eq!(rollback_preview.status, 200);
+    let rollback_token = response_json(&rollback_preview)["data"]["confirmation"]
+        .as_str()
+        .expect("rollback confirmation")
+        .to_owned();
 
     let rollback = handle_http_request(
         &server,
@@ -3514,7 +3597,7 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
             "/operator/v1/edition-proposals/rollback",
             &serde_json::json!({
                 "proposal_id": proposal_id,
-                "confirm": "synthetic-rollback-preview-grant",
+                "confirm": rollback_token,
                 "idempotency_key": "synthetic-edition-rollback"
             }),
         ),
@@ -3547,7 +3630,7 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
     let records = sink.records();
     assert_eq!(
         records.len(),
-        10,
+        12,
         "every default-edition attempt is hash-chain audited"
     );
     assert_operator_audit_pair(
@@ -3560,7 +3643,11 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
         AuditDecision::Allowed,
         AuditOutcome::Succeeded,
     );
-    assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(
+        &records[4..6],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
     assert_operator_audit_pair(
         &records[6..8],
         AuditDecision::Allowed,
@@ -3571,14 +3658,21 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
         AuditDecision::Allowed,
         AuditOutcome::Succeeded,
     );
+    assert_operator_audit_pair(
+        &records[10..12],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
 }
 
 #[test]
 fn edition_default_flip_preserves_the_exact_lane_generation() {
     let (auditor, _sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
-    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
         calls: Arc::clone(&calls),
+        profile: "prod",
+        deny: false,
     }));
     let dir = dashboard_test_dir("edition-default-lane-generation");
     let store = Arc::new(
@@ -3626,7 +3720,6 @@ fn edition_default_flip_preserves_the_exact_lane_generation() {
         let mut body = serde_json::json!({
             "proposal_id": proposal_id,
             "lane_id": "lane-a",
-            "confirm": "synthetic-admin-preview-grant",
             "idempotency_key": key,
         });
         if let Some(generation) = generation {
@@ -3642,13 +3735,13 @@ fn edition_default_flip_preserves_the_exact_lane_generation() {
     let missing = flip(None, "edition-generation-missing");
     assert_eq!(missing.status, 400);
     assert_eq!(
-        response_json(&missing)["data"]["mcp_response"]["data"]["error"],
+        response_json(&missing)["data"]["error"],
         serde_json::json!("operator_lane_generation_required")
     );
     let stale = flip(Some(6), "edition-generation-stale");
     assert_eq!(stale.status, 409);
     assert_eq!(
-        response_json(&stale)["data"]["mcp_response"]["data"]["error"],
+        response_json(&stale)["data"]["error"],
         serde_json::json!("operator_lane_generation_mismatch")
     );
     assert_eq!(
@@ -3662,9 +3755,26 @@ fn edition_default_flip_preserves_the_exact_lane_generation() {
     let exact = response_json(&exact);
     assert_eq!(exact["data"]["lane_id"], serde_json::json!("lane-a"));
     assert_eq!(exact["data"]["lane_generation"], serde_json::json!(7));
+    assert_eq!(exact["data"]["status"], serde_json::json!("preview"));
+    let token = exact["data"]["confirmation"]
+        .as_str()
+        .expect("confirmation");
+    let applied = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/merge",
+            &serde_json::json!({
+                "proposal_id": proposal_id,
+                "lane_id": "lane-a", "lane_generation": 7,
+                "confirm": token,
+            }),
+        ),
+    );
+    assert_eq!(applied.status, 200);
     assert_eq!(
-        exact["data"]["mcp_response"]["result"]["structuredContent"]["tool"],
-        serde_json::json!("oracle_execute")
+        response_json(&applied)["data"]["status"],
+        serde_json::json!("applied")
     );
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
 }
@@ -3673,8 +3783,10 @@ fn edition_default_flip_preserves_the_exact_lane_generation() {
 fn edition_default_flip_refuses_forked_or_replayed_review_state() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
-    let server = server_with_dispatch(Arc::new(WorkbenchDispatch {
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
         calls: Arc::clone(&calls),
+        profile: "synthetic_stage",
+        deny: false,
     }));
     let dir = dashboard_test_dir("edition-default-fork");
     let store = Arc::new(
@@ -3811,7 +3923,11 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
 #[test]
 fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
     let (auditor, sink) = operator_auditor();
-    let server = server_with_dispatch(Arc::new(PolicyDeniedDispatch));
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
+        calls: Arc::new(AtomicUsize::new(0)),
+        profile: "synthetic_stage",
+        deny: true,
+    }));
     let dir = dashboard_test_dir("edition-default-reclassified-refusal");
     let store = Arc::new(
         crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
@@ -3852,6 +3968,19 @@ fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
         200
     );
 
+    let preview = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/merge",
+            &serde_json::json!({ "proposal_id": proposal_id }),
+        ),
+    );
+    assert_eq!(preview.status, 200);
+    let token = response_json(&preview)["data"]["confirmation"]
+        .as_str()
+        .expect("operator confirmation")
+        .to_owned();
     let refused = handle_http_request(
         &server,
         &cfg,
@@ -3859,20 +3988,20 @@ fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
             "/operator/v1/edition-proposals/merge",
             &serde_json::json!({
                 "proposal_id": proposal_id,
-                "confirm": "synthetic-admin-preview-grant"
+                "confirm": token
             }),
         ),
     );
-    assert_eq!(refused.status, 200);
+    assert_eq!(refused.status, 409);
     let refused_json = response_json(&refused);
     assert_eq!(refused_json["data"]["status"], serde_json::json!("refused"));
     assert_eq!(
-        refused_json["data"]["mcp_response"]["result"]["structuredContent"]["error_class"],
+        refused_json["data"]["executor_response"]["error_class"],
         serde_json::json!("POLICY_DENIED"),
         "a current dispatcher denial wins over any prior review-board state"
     );
     let records = sink.records();
-    assert_eq!(records.len(), 6);
+    assert_eq!(records.len(), 8);
     assert_operator_audit_pair(
         &records[0..2],
         AuditDecision::Allowed,
@@ -3883,7 +4012,12 @@ fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
         AuditDecision::Allowed,
         AuditOutcome::Succeeded,
     );
-    assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(
+        &records[4..6],
+        AuditDecision::Allowed,
+        AuditOutcome::Succeeded,
+    );
+    assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 
 fn change_proposals_test_config() -> (OracleMcpServer, HttpTransportConfig, String) {

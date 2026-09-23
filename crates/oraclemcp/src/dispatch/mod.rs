@@ -79,10 +79,10 @@ use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel,
     EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, EscalationError,
     ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
-    OperatingLevel, PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity,
-    QuoteSemantics, RawName, Resolution, ResolvedObject, SessionLevelState, SideEffectOracle,
-    SqlPolicyConfig, VerdictCertificate, enforce_sql_policy, parse_edition_lifecycle_sql,
-    semantic_read_plan,
+    OperatingLevel, OperatorStatementClass, PolicyGate, PolicyGateAdmission, PolicyGateDenial,
+    PolicyGateRequest, Purity, QuoteSemantics, RawName, Resolution, ResolvedObject,
+    SessionLevelState, SideEffectOracle, SqlPolicyConfig, VerdictCertificate, enforce_sql_policy,
+    parse_edition_lifecycle_sql, semantic_read_plan,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -12367,6 +12367,78 @@ impl OracleDispatcher {
                 return Err(error);
             }
             match tool {
+            oraclemcp_core::server::OPERATOR_EDITION_INTERNAL_DISPATCH => {
+                #[derive(Deserialize)]
+                #[serde(deny_unknown_fields)]
+                struct OperatorEditionArgs { edition: String, profile: String }
+                let edition: OperatorEditionArgs = serde_json::from_value(args)
+                    .map_err(|_| invalid_args("operator edition dispatch requires only one validated edition identifier"))?;
+                if edition.edition.is_empty() || edition.edition.len() > 128
+                    || edition.edition.contains(['"', '\0'])
+                    || edition.edition.chars().any(char::is_control)
+                {
+                    return Err(invalid_args("operator edition identifier is invalid"));
+                }
+                let sql = format!("ALTER DATABASE DEFAULT EDITION = \"{}\"", edition.edition);
+                if OperatorStatementClass::from_exact_rendered_sql(&sql)
+                    != Some(OperatorStatementClass::DefaultEditionFlip)
+                {
+                    return Err(ErrorEnvelope::new(ErrorClass::ForbiddenStatement,
+                        "operator edition SQL differs from the fixed template"));
+                }
+                if state.level.is_protected() || scoped_level.is_protected()
+                    || state.level.max_level() != OperatingLevel::Admin
+                    || scoped_level.max_level() != OperatingLevel::Admin
+                    || scoped_level.effective_level() != OperatingLevel::Admin
+                {
+                    return Err(ErrorEnvelope::new(ErrorClass::OperatingLevelTooLow,
+                        "operator edition change requires an unprotected ADMIN lane"));
+                }
+                if state.active_profile.as_deref() != Some(edition.profile.as_str()) {
+                    return Err(ErrorEnvelope::new(ErrorClass::RuntimeStateRequired,
+                        "operator edition proposal profile no longer matches the active lane"));
+                }
+                let db_evidence = collect_effect_audit_db_evidence_bounded(
+                    cx, self.auditor.as_deref(), conn, &request_budget, &self.quarantine,
+                ).await?;
+                let audit_entry = AuditEntryCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &request_subject,
+                    db_evidence: db_evidence.as_ref(),
+                };
+                append_audit(audit_entry, "operator_edition_default_flip", &sql,
+                    "ADMIN", None, AuditOutcome::Pending)?;
+                state.catalog_cache.invalidate(CatalogInvalidation::Ddl);
+                let outcome = execute_conn(cx, conn, &sql, &[]).await;
+                match outcome {
+                    Ok(rows) => {
+                        if let Err(error) = append_audit(audit_entry,
+                            "operator_edition_default_flip", &sql, "ADMIN",
+                            Some(rows), AuditOutcome::Succeeded)
+                        {
+                            mark_connection_quarantined(&self.quarantine,
+                                AuditOutcome::Succeeded,
+                                "operator edition succeeded but terminal audit failed")?;
+                            return Err(error);
+                        }
+                        Ok(json!({ "status": "applied", "edition": edition.edition,
+                            "rows_affected": rows }))
+                    }
+                    Err(error) => {
+                        mark_connection_quarantined(&self.quarantine,
+                            AuditOutcome::UnknownDiscarded,
+                            format!("operator edition outcome uncertain: {error}"))?;
+                        let terminal = append_audit(audit_entry,
+                            "operator_edition_default_flip", &sql, "ADMIN", None,
+                            AuditOutcome::UnknownDiscarded);
+                        if let Err(audit_error) = terminal {
+                            tracing::error!(error = %audit_error.message,
+                                "operator edition terminal audit failed after uncertain outcome");
+                        }
+                        Err(DbError::into_envelope(error))
+                    }
+                }
+            }
             #[cfg(feature = "plsql-intelligence")]
             "oracle_lineage" => {
                 return crate::plsql_tools::dispatch_live(cx, &guarded_metadata_conn, tool, args)

@@ -1691,6 +1691,49 @@ export async function fetchEditionProposals(
   return operatorGet("/operator/v1/edition-proposals", context);
 }
 
+export type EditionDefaultFlipTarget = "merge" | "rollback";
+
+export type EditionDefaultFlipRequest = {
+  proposalId: string;
+  target: EditionDefaultFlipTarget;
+  lane?: OperatorLaneTarget;
+};
+
+export type EditionDefaultFlipPreviewData = {
+  status: "preview";
+  action: EditionDefaultFlipTarget;
+  proposal_id: string;
+  target_edition: string;
+  confirmation: string;
+  sql_sha256: string;
+  lane_generation?: number;
+};
+
+/** Mint a one-use operator confirmation from the reviewed proposal record. */
+export async function previewEditionDefaultFlip(
+  session: DashboardSession,
+  request: EditionDefaultFlipRequest
+): Promise<OperatorResponse<EditionDefaultFlipPreviewData>> {
+  return operatorPost(`/operator/v1/edition-proposals/${request.target}`, session, {
+    proposal_id: request.proposalId,
+    ...operatorLanePayload(request.lane)
+  });
+}
+
+/** Apply only the confirmation minted by previewEditionDefaultFlip. */
+export async function applyEditionDefaultFlip(
+  session: DashboardSession,
+  request: EditionDefaultFlipRequest,
+  confirmation: string
+): Promise<OperatorResponse<Record<string, unknown>>> {
+  return operatorPost(`/operator/v1/edition-proposals/${request.target}`, session, {
+    proposal_id: request.proposalId,
+    ...operatorLanePayload(request.lane),
+    confirm: confirmation,
+    idempotency_key: requestId(`edition-default-${request.target}`)
+  });
+}
+
 /** Project the edition-proposal list into the timeline builder's input. */
 export function parseEditionProposals(
   data: EditionProposalsData | null

@@ -39,6 +39,9 @@ pub(crate) fn canonical_tool_name(name: &str) -> &str {
 pub(super) fn response_reports_terminal_effect(name: &str, value: &Value) -> bool {
     let bool_field = |field| value.get(field).and_then(Value::as_bool) == Some(true);
     match canonical_tool_name(name) {
+        oraclemcp_core::server::OPERATOR_EDITION_INTERNAL_DISPATCH => {
+            value.get("status").and_then(Value::as_str) == Some("applied")
+        }
         "oracle_switch_profile" => true,
         "oracle_set_session_level" => bool_field("changed"),
         "oracle_compile_object" => bool_field("compiled"),
