@@ -13,14 +13,16 @@ use asupersync::Cx;
 use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart, Resolution,
     ResolveCtx, ResolvedContainer, ResolvedIdentity, ResolvedObject, ResolvedOverload,
-    StatementScope, SynonymHop, SyntacticRole,
+    RoutineArgument, RoutineArgumentValue, RoutineIdentifier, RoutineRef, StatementScope,
+    SynonymHop, SyntacticRole,
 };
 
 #[cfg(test)]
 use crate::catalog_query::{
-    ALL_POLICIES_VISIBILITY_SQL, COLUMN_CONFLICT_SQL, MEMBER_ARGUMENTS_SQL, OBJECTS_SQL,
-    POLICY_CATALOG_PROOF_SQL, RELATION_COLUMN_SQL, SELECT_POLICY_SQL, STANDALONE_ARGUMENTS_SQL,
-    SYNONYMS_SQL, TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL,
+    ALL_POLICIES_VISIBILITY_SQL, COLUMN_CONFLICT_SQL, MEMBER_ARGUMENTS_SQL, MEMBER_PROCEDURES_SQL,
+    OBJECTS_SQL, POLICY_CATALOG_PROOF_SQL, RELATION_COLUMN_SQL, SELECT_POLICY_SQL,
+    STANDALONE_ARGUMENTS_SQL, STANDALONE_PROCEDURES_SQL, SYNONYMS_SQL,
+    TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL,
 };
 use crate::catalog_query::{CatalogQueryId, run_catalog_query};
 use crate::{DbError, OracleBind, OracleConnection, OracleRow};
@@ -474,6 +476,93 @@ pub async fn resolved_relations_read_purity(
 }
 
 impl OracleCatalogResolver {
+    /// Resolve one local routine call against a live, exact session context.
+    /// No matching or ambiguous overload yields no identity. The caller must
+    /// still obtain an independent complete effect proof for this identity.
+    pub async fn resolve_routine_call(
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        candidate: &RoutineRef,
+        arguments: &[RoutineArgument],
+        context: &ResolveCtx,
+    ) -> Result<Option<RoutineRef>, DbError> {
+        if arguments.len() > 128
+            || read_catalog_resolve_context(
+                cx,
+                conn,
+                context.generation,
+                context.statement_scope.clone(),
+            )
+            .await?
+                != *context
+        {
+            return Ok(None);
+        }
+        let lookup = DictionaryLookup { cx, conn, context };
+        let current = context.current_schema.as_str();
+        let result = match (&candidate.schema, &candidate.package) {
+            (Some(owner), Some(package)) => {
+                lookup
+                    .exact_routine(
+                        owner.text.as_str(),
+                        Some(package.text.as_str()),
+                        candidate.member.text.as_str(),
+                        false,
+                        arguments,
+                    )
+                    .await?
+            }
+            (Some(owner), None) => {
+                lookup
+                    .exact_routine(
+                        owner.text.as_str(),
+                        None,
+                        candidate.member.text.as_str(),
+                        false,
+                        arguments,
+                    )
+                    .await?
+            }
+            (None, Some(first)) => {
+                let standalone = lookup
+                    .exact_routine(
+                        first.text.as_str(),
+                        None,
+                        candidate.member.text.as_str(),
+                        false,
+                        arguments,
+                    )
+                    .await?;
+                let packaged = lookup
+                    .exact_routine(
+                        current,
+                        Some(first.text.as_str()),
+                        candidate.member.text.as_str(),
+                        true,
+                        arguments,
+                    )
+                    .await?;
+                match (standalone, packaged) {
+                    (Some(_), Some(_)) => None,
+                    (Some(one), None) | (None, Some(one)) => Some(one),
+                    (None, None) => None,
+                }
+            }
+            (None, None) => {
+                lookup
+                    .exact_routine(
+                        current,
+                        None,
+                        candidate.member.text.as_str(),
+                        true,
+                        arguments,
+                    )
+                    .await?
+            }
+        };
+        Ok(result)
+    }
+
     /// Load bounded dictionary evidence for `names` using `conn`.
     ///
     /// The connection's session user, current schema, edition, and enabled
@@ -714,6 +803,105 @@ struct DictionaryLookup<'a> {
 }
 
 impl DictionaryLookup<'_> {
+    async fn exact_routine(
+        &self,
+        owner: &str,
+        package: Option<&str>,
+        member: &str,
+        allow_public: bool,
+        arguments: &[RoutineArgument],
+    ) -> Result<Option<RoutineRef>, DbError> {
+        let object_name = package.unwrap_or(member);
+        let walked = self
+            .walk_synonyms(owner, object_name, allow_public, |kind| {
+                if package.is_some() {
+                    matches!(kind, CatalogObjectKind::Package)
+                } else {
+                    matches!(
+                        kind,
+                        CatalogObjectKind::Procedure | CatalogObjectKind::Function
+                    )
+                }
+            })
+            .await?;
+        let WalkResult::Objects { objects, .. } = walked else {
+            return Ok(None);
+        };
+        let [object] = objects.as_slice() else {
+            return Ok(None);
+        };
+        let binds = if package.is_some() {
+            vec![
+                OracleBind::from(object.owner.as_str()),
+                OracleBind::from(object.name.as_str()),
+                OracleBind::from(member),
+                OracleBind::from((MAX_CANDIDATES + 1) as i64),
+            ]
+        } else {
+            vec![
+                OracleBind::from(object.owner.as_str()),
+                OracleBind::from(object.name.as_str()),
+                OracleBind::from((MAX_CANDIDATES + 1) as i64),
+            ]
+        };
+        let query = if package.is_some() {
+            CatalogQueryId::MemberProcedures
+        } else {
+            CatalogQueryId::StandaloneProcedures
+        };
+        let rows = run_catalog_query(self.cx, self.conn, query, &binds).await?;
+        if rows.is_empty() || rows.len() > MAX_CANDIDATES {
+            return Ok(None);
+        }
+        let Some(facts) = self
+            .argument_rows(
+                &object.owner,
+                package.map(|_| object.name.as_str()),
+                if package.is_some() {
+                    member
+                } else {
+                    &object.name
+                },
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut matches = Vec::new();
+        for row in &rows {
+            let Some(id) = row
+                .parse_i64("SUBPROGRAM_ID")
+                .and_then(|id| u32::try_from(id).ok())
+            else {
+                return Ok(None);
+            };
+            let overload = optional_text(row, "OVERLOAD");
+            let params: Vec<_> = facts
+                .iter()
+                .filter(|fact| fact.subprogram_id == id && fact.overload == overload)
+                .collect();
+            if routine_arguments_match(&params, arguments) {
+                matches.push(id);
+            }
+        }
+        if matches.len() != 1 {
+            return Ok(None);
+        }
+        Ok(Some(RoutineRef {
+            schema: Some(RoutineIdentifier::new(&object.owner, true)),
+            package: package.map(|_| RoutineIdentifier::new(&object.name, true)),
+            member: RoutineIdentifier::new(
+                if package.is_some() {
+                    member
+                } else {
+                    &object.name
+                },
+                true,
+            ),
+            overload: Some(matches[0]),
+        }))
+    }
+
     async fn resolve_name(&self, raw: &RawName) -> Result<Resolution, DbError> {
         if let Some(db_link) = &raw.db_link {
             return Ok(Resolution::Remote {
@@ -1310,6 +1498,8 @@ struct ArgumentFact {
     data_level: u32,
     in_out: String,
     defaulted: bool,
+    argument_name: Option<String>,
+    data_type: Option<String>,
 }
 
 impl ArgumentFact {
@@ -1321,7 +1511,76 @@ impl ArgumentFact {
             data_level: u32::try_from(row.parse_i64("DATA_LEVEL")?).ok()?,
             in_out: required_text(row, "IN_OUT")?,
             defaulted: row.text("DEFAULTED")? == "Y",
+            argument_name: optional_text(row, "ARGUMENT_NAME"),
+            data_type: optional_text(row, "DATA_TYPE"),
         })
+    }
+}
+
+fn routine_arguments_match(params: &[&ArgumentFact], arguments: &[RoutineArgument]) -> bool {
+    if params.iter().any(|p| p.data_level > 0) {
+        return false;
+    }
+    let params: Vec<_> = params
+        .iter()
+        .copied()
+        .filter(|p| p.data_level == 0 && p.position > 0)
+        .collect();
+    let mut positions = HashSet::new();
+    if params.iter().any(|p| !positions.insert(p.position)) {
+        return false;
+    }
+    let mut supplied = HashSet::new();
+    let mut next_pos = 1_u32;
+    for argument in arguments {
+        let position = if let Some(name) = &argument.name {
+            let Some(param) = params
+                .iter()
+                .find(|p| p.argument_name.as_deref() == Some(name.text.as_str()))
+            else {
+                return false;
+            };
+            param.position
+        } else {
+            let position = next_pos;
+            next_pos += 1;
+            position
+        };
+        let Some(param) = params.iter().find(|p| p.position == position) else {
+            return false;
+        };
+        if !supplied.insert(position) || !argument_type_matches(param, &argument.value) {
+            return false;
+        }
+    }
+    params
+        .iter()
+        .all(|p| p.defaulted || supplied.contains(&p.position))
+}
+
+fn argument_type_matches(param: &ArgumentFact, value: &RoutineArgumentValue) -> bool {
+    let Some(data_type) = param.data_type.as_deref() else {
+        return false;
+    };
+    if !matches!(value, RoutineArgumentValue::Bind) && param.in_out != "IN" {
+        return false;
+    }
+    match value {
+        RoutineArgumentValue::Bind | RoutineArgumentValue::Null => true,
+        RoutineArgumentValue::Number => matches!(
+            data_type,
+            "NUMBER"
+                | "INTEGER"
+                | "BINARY_INTEGER"
+                | "PLS_INTEGER"
+                | "BINARY_FLOAT"
+                | "BINARY_DOUBLE"
+                | "FLOAT"
+        ),
+        RoutineArgumentValue::Text => matches!(
+            data_type,
+            "VARCHAR2" | "VARCHAR" | "CHAR" | "NVARCHAR2" | "NCHAR" | "CLOB" | "NCLOB"
+        ),
     }
 }
 
@@ -1726,6 +1985,230 @@ mod tests {
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
 
+    fn synthetic_object(owner: &str, name: &str) -> OracleRow {
+        row(&[
+            ("OWNER", Some(owner)),
+            ("OBJECT_NAME", Some(name)),
+            ("OBJECT_TYPE", Some("PROCEDURE")),
+            ("OBJECT_ID", Some("91")),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+        ])
+    }
+
+    fn synthetic_synonym(owner: &str, target_owner: &str) -> OracleRow {
+        row(&[
+            ("OWNER", Some(owner)),
+            ("SYNONYM_NAME", Some("P")),
+            ("TABLE_OWNER", Some(target_owner)),
+            ("TABLE_NAME", Some("RUN")),
+            ("DB_LINK", None),
+            ("OBJECT_ID", Some("31")),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+        ])
+    }
+
+    #[test]
+    fn call_ambiguous_overload_is_unknown() {
+        let args = [RoutineArgument {
+            name: None,
+            value: RoutineArgumentValue::Bind,
+        }];
+        let a = ArgumentFact {
+            subprogram_id: 1,
+            overload: Some("1".to_owned()),
+            position: 1,
+            data_level: 0,
+            in_out: "IN".to_owned(),
+            defaulted: false,
+            argument_name: Some("VALUE".to_owned()),
+            data_type: Some("NUMBER".to_owned()),
+        };
+        let b = ArgumentFact {
+            subprogram_id: 2,
+            overload: Some("2".to_owned()),
+            data_type: Some("VARCHAR2".to_owned()),
+            ..a.clone()
+        };
+        assert!(routine_arguments_match(&[&a], &args));
+        assert!(routine_arguments_match(&[&b], &args));
+        // Both candidates fit an untyped bind. The catalog path must return
+        // None rather than arbitrarily selecting either subprogram.
+        run_with_cx(|cx| async move {
+            let context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(1));
+            let conn = ScriptedRows::new([
+                vec![synthetic_object("APP", "RUN")],
+                vec![
+                    row(&[("SUBPROGRAM_ID", Some("1")), ("OVERLOAD", Some("1"))]),
+                    row(&[("SUBPROGRAM_ID", Some("2")), ("OVERLOAD", Some("2"))]),
+                ],
+                vec![
+                    row(&[
+                        ("SUBPROGRAM_ID", Some("1")),
+                        ("OVERLOAD", Some("1")),
+                        ("POSITION", Some("1")),
+                        ("DATA_LEVEL", Some("0")),
+                        ("IN_OUT", Some("IN")),
+                        ("DEFAULTED", Some("N")),
+                        ("ARGUMENT_NAME", Some("VALUE")),
+                        ("DATA_TYPE", Some("NUMBER")),
+                    ]),
+                    row(&[
+                        ("SUBPROGRAM_ID", Some("2")),
+                        ("OVERLOAD", Some("2")),
+                        ("POSITION", Some("1")),
+                        ("DATA_LEVEL", Some("0")),
+                        ("IN_OUT", Some("IN")),
+                        ("DEFAULTED", Some("N")),
+                        ("ARGUMENT_NAME", Some("VALUE")),
+                        ("DATA_TYPE", Some("VARCHAR2")),
+                    ]),
+                ],
+            ]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            assert_eq!(
+                lookup
+                    .exact_routine("APP", None, "RUN", false, &args)
+                    .await
+                    .unwrap(),
+                None
+            );
+        });
+    }
+
+    #[test]
+    fn named_notation_and_literal_type_select_only_one_overload() {
+        let numeric = ArgumentFact {
+            subprogram_id: 1,
+            overload: Some("1".to_owned()),
+            position: 1,
+            data_level: 0,
+            in_out: "IN".to_owned(),
+            defaulted: false,
+            argument_name: Some("VALUE".to_owned()),
+            data_type: Some("NUMBER".to_owned()),
+        };
+        let textual = ArgumentFact {
+            subprogram_id: 2,
+            overload: Some("2".to_owned()),
+            data_type: Some("VARCHAR2".to_owned()),
+            ..numeric.clone()
+        };
+        let named = [RoutineArgument {
+            name: Some(RoutineIdentifier::new("value", false)),
+            value: RoutineArgumentValue::Text,
+        }];
+        assert!(!routine_arguments_match(&[&numeric], &named));
+        assert!(routine_arguments_match(&[&textual], &named));
+        let wrong_case = [RoutineArgument {
+            name: Some(RoutineIdentifier::new("value", true)),
+            value: RoutineArgumentValue::Text,
+        }];
+        assert!(!routine_arguments_match(&[&textual], &wrong_case));
+        assert!(!routine_arguments_match(&[&textual, &textual], &named));
+        let nested = ArgumentFact {
+            data_level: 1,
+            ..textual.clone()
+        };
+        assert!(!routine_arguments_match(&[&textual, &nested], &named));
+    }
+
+    #[test]
+    fn call_synonym_resolves_to_exact_target() {
+        run_with_cx(|cx| async move {
+            let context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(1));
+            let conn = ScriptedRows::new([
+                Vec::new(),
+                vec![synthetic_synonym("APP", "OWNER")],
+                vec![synthetic_object("OWNER", "RUN")],
+                vec![row(&[("SUBPROGRAM_ID", Some("7")), ("OVERLOAD", None)])],
+                Vec::new(),
+            ]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            let exact = lookup
+                .exact_routine("APP", None, "P", true, &[])
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(exact.schema.unwrap().text, "OWNER");
+            assert_eq!(exact.member.text, "RUN");
+            assert_eq!(exact.overload, Some(7));
+            assert_eq!(conn.queries.lock().unwrap().len(), 5);
+        });
+    }
+
+    #[test]
+    fn call_remote_synonym_refused() {
+        run_with_cx(|cx| async move {
+            let context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(1));
+            let conn = ScriptedRows::new([
+                Vec::new(),
+                vec![row(&[
+                    ("OWNER", Some("APP")),
+                    ("SYNONYM_NAME", Some("P")),
+                    ("TABLE_OWNER", Some("OWNER")),
+                    ("TABLE_NAME", Some("RUN")),
+                    ("DB_LINK", Some("REMOTE")),
+                    ("OBJECT_ID", Some("31")),
+                    ("STATUS", Some("VALID")),
+                    ("EDITION_NAME", None),
+                ])],
+            ]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            assert_eq!(
+                lookup
+                    .exact_routine("APP", None, "P", true, &[])
+                    .await
+                    .unwrap(),
+                None
+            );
+            assert_eq!(conn.queries.lock().unwrap().len(), 2);
+        });
+    }
+
+    #[test]
+    fn call_public_synonym_after_private() {
+        run_with_cx(|cx| async move {
+            let context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(1));
+            let conn = ScriptedRows::new([
+                Vec::new(),
+                Vec::new(),
+                vec![synthetic_synonym("PUBLIC", "OWNER")],
+                vec![synthetic_object("OWNER", "RUN")],
+                vec![row(&[("SUBPROGRAM_ID", Some("7")), ("OVERLOAD", None)])],
+                Vec::new(),
+            ]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            let exact = lookup
+                .exact_routine("APP", None, "P", true, &[])
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(exact.schema.unwrap().text, "OWNER");
+            assert_eq!(exact.overload, Some(7));
+            let queries = conn.queries.lock().unwrap();
+            assert_eq!(queries[2].0, SYNONYMS_SQL);
+            assert_eq!(queries.len(), 6);
+        });
+    }
+
     fn write_catalog_test_artifact(name: &str, cases: &[serde_json::Value]) {
         let target = std::env::var_os("CARGO_TARGET_DIR")
             .map(PathBuf::from)
@@ -1856,6 +2339,8 @@ mod tests {
             SYNONYMS_SQL,
             STANDALONE_ARGUMENTS_SQL,
             MEMBER_ARGUMENTS_SQL,
+            STANDALONE_PROCEDURES_SQL,
+            MEMBER_PROCEDURES_SQL,
             COLUMN_CONFLICT_SQL,
             RELATION_COLUMN_SQL,
             SELECT_POLICY_SQL,
@@ -1873,7 +2358,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 13);
+        assert_eq!(specs.len(), 15);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -2254,6 +2739,8 @@ mod tests {
                 data_level: 0,
                 in_out: "OUT".to_owned(),
                 defaulted: false,
+                argument_name: None,
+                data_type: None,
             },
             ArgumentFact {
                 subprogram_id: 2,
@@ -2262,6 +2749,8 @@ mod tests {
                 data_level: 0,
                 in_out: "OUT".to_owned(),
                 defaulted: false,
+                argument_name: None,
+                data_type: None,
             },
             ArgumentFact {
                 subprogram_id: 2,
@@ -2270,6 +2759,8 @@ mod tests {
                 data_level: 0,
                 in_out: "IN".to_owned(),
                 defaulted: false,
+                argument_name: None,
+                data_type: None,
             },
             ArgumentFact {
                 subprogram_id: 3,
@@ -2278,6 +2769,8 @@ mod tests {
                 data_level: 0,
                 in_out: "OUT".to_owned(),
                 defaulted: false,
+                argument_name: None,
+                data_type: None,
             },
             ArgumentFact {
                 subprogram_id: 3,
@@ -2286,6 +2779,8 @@ mod tests {
                 data_level: 0,
                 in_out: "IN".to_owned(),
                 defaulted: true,
+                argument_name: None,
+                data_type: None,
             },
         ];
         let overloads = callable_overloads(&rows, true).expect("bounded overload set");

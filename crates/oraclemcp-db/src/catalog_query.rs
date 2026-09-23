@@ -73,6 +73,10 @@ pub enum CatalogQueryId {
     StandaloneArguments,
     /// Packaged routine signatures.
     MemberArguments,
+    /// Standalone subprogram identities, including zero-argument routines.
+    StandaloneProcedures,
+    /// Packaged member identities, including zero-argument routines.
+    MemberProcedures,
     /// Ambiguous unqualified column candidates.
     ColumnConflict,
     /// One relation's column identity.
@@ -91,13 +95,15 @@ pub enum CatalogQueryId {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 15] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
         Self::Synonyms,
         Self::StandaloneArguments,
         Self::MemberArguments,
+        Self::StandaloneProcedures,
+        Self::MemberProcedures,
         Self::ColumnConflict,
         Self::RelationColumn,
         Self::SelectPolicy,
@@ -160,6 +166,20 @@ impl CatalogQueryId {
                 MEMBER_ARGUMENTS_SQL,
                 TTTI,
                 "resolve member callable overloads",
+                InternalProof,
+                NameResolution,
+            ),
+            Self::StandaloneProcedures => (
+                STANDALONE_PROCEDURES_SQL,
+                TTI,
+                "resolve standalone subprogram identities",
+                InternalProof,
+                NameResolution,
+            ),
+            Self::MemberProcedures => (
+                MEMBER_PROCEDURES_SQL,
+                TTTI,
+                "resolve packaged subprogram identities",
                 InternalProof,
                 NameResolution,
             ),
@@ -261,14 +281,22 @@ pub(crate) const SYNONYMS_SQL: &str = "SELECT s.owner, s.synonym_name, s.table_o
     FROM all_synonyms s LEFT JOIN all_objects o \
       ON o.owner = s.owner AND o.object_name = s.synonym_name AND o.object_type = 'SYNONYM' \
     WHERE s.owner = :1 AND s.synonym_name = :2 AND ROWNUM <= :3";
-pub(crate) const STANDALONE_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted \
-    FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, sequence \
+pub(crate) const STANDALONE_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type \
+    FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type, sequence \
           FROM all_arguments WHERE owner = :1 AND package_name IS NULL AND object_name = :2 \
           ORDER BY subprogram_id, sequence) WHERE ROWNUM <= :3";
-pub(crate) const MEMBER_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted \
-    FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, sequence \
+pub(crate) const MEMBER_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type \
+    FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type, sequence \
           FROM all_arguments WHERE owner = :1 AND package_name = :2 AND object_name = :3 \
           ORDER BY subprogram_id, sequence) WHERE ROWNUM <= :4";
+pub(crate) const STANDALONE_PROCEDURES_SQL: &str = "SELECT subprogram_id, overload \
+    FROM (SELECT subprogram_id, overload FROM all_procedures \
+          WHERE owner = :1 AND object_name = :2 AND procedure_name IS NULL \
+          ORDER BY subprogram_id) WHERE ROWNUM <= :3";
+pub(crate) const MEMBER_PROCEDURES_SQL: &str = "SELECT subprogram_id, overload \
+    FROM (SELECT subprogram_id, overload FROM all_procedures \
+          WHERE owner = :1 AND object_name = :2 AND procedure_name = :3 \
+          ORDER BY subprogram_id) WHERE ROWNUM <= :4";
 pub(crate) const COLUMN_CONFLICT_SQL: &str = "SELECT owner, table_name, column_name, column_id \
     FROM all_tab_columns WHERE column_name = :1 AND ROWNUM <= :2";
 pub(crate) const RELATION_COLUMN_SQL: &str = "SELECT column_name, column_id FROM all_tab_columns \

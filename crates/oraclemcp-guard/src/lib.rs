@@ -66,8 +66,8 @@ pub use policy_gate::{
 pub use purity::{
     AdmissionContext, EffectRefusal, ObjectRef, OperatorPureFunction,
     OperatorPureFunctionAllowlist, OperatorPureFunctionError, OperatorPureFunctionRestriction,
-    OperatorStatementClass, Purity, RoutineEffect, RoutineEffectsV1, SideEffectOracle,
-    UnknownOracle, admit,
+    OperatorStatementClass, Purity, RoutineArgument, RoutineArgumentValue, RoutineEffect,
+    RoutineEffectsV1, RoutineIdentifier, RoutineRef, SideEffectOracle, UnknownOracle, admit,
 };
 pub use resolver::{
     CatalogGeneration, CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart,

@@ -54,7 +54,10 @@ use crate::classifier_grammar::normalize_vector_embedding_for_parser;
 use crate::edition_lifecycle::{EditionLifecycleParse, parse_edition_lifecycle_sql};
 use crate::enforcement::alter_session_policy;
 use crate::levels::{DangerLevel, LevelDecision, OperatingLevel, SessionLevelState};
-use crate::purity::{ObjectRef, Purity, SideEffectOracle, UnknownOracle};
+use crate::purity::{
+    AdmissionContext, ObjectRef, Purity, RoutineArgument, RoutineArgumentValue, RoutineIdentifier,
+    RoutineRef, SideEffectOracle, UnknownOracle, admit,
+};
 use crate::resolver::{
     QuoteSemantics, RawName, RawNamePart, SemanticReadPlan, StatementRelation, StatementScope,
     SyntacticRole,
@@ -1876,8 +1879,7 @@ fn is_reviewed_dbms_output_statement(segment: &str) -> bool {
 /// A BEGIN block remains available only for NULL and the exact reviewed
 /// SYS.DBMS_OUTPUT statement above. Static DML must be submitted directly so
 /// its SQL grammar is classified without PL/SQL name-resolution ambiguity.
-/// Explicit CALL also fails closed because the current two-field ObjectRef
-/// cannot distinguish schema routines, package/type members, and synonyms.
+/// Explicit CALL is handled by the exact routine path before this fallback.
 fn unanalyzable_plsql_construct(sql: &str) -> Option<&'static str> {
     let keyword = plsql_invocation_keyword(sql)?;
     if keyword == "CALL" {
@@ -1924,6 +1926,184 @@ fn unanalyzable_plsql_construct(sql: &str) -> Option<&'static str> {
         }
         _ => Some("unrecognized PL/SQL invocation context"),
     }
+}
+
+/// Parse only a single routine invocation whose arguments cannot themselves
+/// execute SQL or another routine. Everything else retains the PL/SQL refusal.
+fn parsed_routine_invocation(sql: &str) -> Option<(RoutineRef, Vec<RoutineArgument>)> {
+    let keyword = plsql_invocation_keyword(sql)?;
+    let source = match keyword {
+        "CALL" => sql,
+        "BEGIN" => {
+            let shape = analyze_batch(sql);
+            if !shape.balanced
+                || shape.saw_top_level_after_block_close
+                || shape.statement_count != 1
+            {
+                return None;
+            }
+            let segments = block_interior_segments(sql);
+            if segments.len() != 1 {
+                return None;
+            }
+            // The owned string is needed only for the short tokenization below.
+            return parse_routine_tokens(&segments[0], false);
+        }
+        _ => return None,
+    };
+    parse_routine_tokens(source, true)
+}
+
+fn parse_routine_tokens(
+    source: &str,
+    expect_call: bool,
+) -> Option<(RoutineRef, Vec<RoutineArgument>)> {
+    let tokens = Tokenizer::new(&OracleDialect {}, source).tokenize().ok()?;
+    let tokens: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    let mut pos = 0;
+    if expect_call {
+        if !matches!(tokens.first(), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("CALL"))
+        {
+            return None;
+        }
+        pos = 1;
+    }
+    let mut parts = Vec::new();
+    loop {
+        let Token::Word(word) = *tokens.get(pos)? else {
+            return None;
+        };
+        if word.value.is_empty()
+            || word.value.len() > 128
+            || word.value.chars().any(char::is_control)
+            || !matches!(word.quote_style, None | Some('"'))
+            || (word.quote_style.is_none() && !word.value.is_ascii())
+        {
+            return None;
+        }
+        parts.push(RoutineIdentifier::new(
+            &word.value,
+            word.quote_style.is_some(),
+        ));
+        pos += 1;
+        if matches!(tokens.get(pos), Some(Token::Period)) {
+            pos += 1;
+            if parts.len() >= 3 {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    // @, including a database link on a package member, is never admitted.
+    if !matches!(tokens.get(pos), Some(Token::LParen)) {
+        return None;
+    }
+    pos += 1;
+    let mut arguments = Vec::new();
+    let mut saw_named = false;
+    while !matches!(tokens.get(pos), Some(Token::RParen)) {
+        if arguments.len() >= 128 {
+            return None;
+        }
+        let name = if matches!(tokens.get(pos + 1), Some(Token::RArrow)) {
+            let Token::Word(word) = *tokens.get(pos)? else {
+                return None;
+            };
+            if word.value.is_empty()
+                || word.value.len() > 128
+                || word.value.chars().any(char::is_control)
+                || !matches!(word.quote_style, None | Some('"'))
+                || (word.quote_style.is_none() && !word.value.is_ascii())
+            {
+                return None;
+            }
+            pos += 2;
+            saw_named = true;
+            Some(RoutineIdentifier::new(
+                &word.value,
+                word.quote_style.is_some(),
+            ))
+        } else {
+            if saw_named {
+                return None;
+            }
+            None
+        };
+        let value = match tokens.get(pos)? {
+            Token::Colon
+                if matches!(
+                    tokens.get(pos + 1),
+                    Some(Token::Word(_) | Token::Number(_, _))
+                ) =>
+            {
+                pos += 2;
+                RoutineArgumentValue::Bind
+            }
+            Token::Placeholder(_) => {
+                pos += 1;
+                RoutineArgumentValue::Bind
+            }
+            Token::Number(_, _) => {
+                pos += 1;
+                RoutineArgumentValue::Number
+            }
+            Token::SingleQuotedString(_) | Token::NationalStringLiteral(_) => {
+                pos += 1;
+                RoutineArgumentValue::Text
+            }
+            Token::Word(word)
+                if word.quote_style.is_none() && word.value.eq_ignore_ascii_case("NULL") =>
+            {
+                pos += 1;
+                RoutineArgumentValue::Null
+            }
+            _ => return None,
+        };
+        arguments.push(RoutineArgument { name, value });
+        match tokens.get(pos)? {
+            Token::Comma => {
+                pos += 1;
+                if matches!(tokens.get(pos), Some(Token::RParen)) {
+                    return None;
+                }
+            }
+            Token::RParen => break,
+            _ => return None,
+        }
+    }
+    pos += 1;
+    if matches!(tokens.get(pos), Some(Token::SemiColon)) {
+        pos += 1;
+    }
+    if pos != tokens.len() {
+        return None;
+    }
+    let reference = match parts.as_slice() {
+        [member] => RoutineRef {
+            schema: None,
+            package: None,
+            member: member.clone(),
+            overload: None,
+        },
+        [package, member] => RoutineRef {
+            schema: None,
+            package: Some(package.clone()),
+            member: member.clone(),
+            overload: None,
+        },
+        [schema, package, member] => RoutineRef {
+            schema: Some(schema.clone()),
+            package: Some(package.clone()),
+            member: member.clone(),
+            overload: None,
+        },
+        _ => return None,
+    };
+    Some((reference, arguments))
 }
 
 /// Find Oracle sequence `NEXTVAL` pseudocolumn references.
@@ -3670,6 +3850,57 @@ impl Classifier {
             );
         }
 
+        // A call is admitted only after the oracle resolves one exact local
+        // subprogram and proves its complete effects. The served UnknownOracle
+        // resolves nothing. Keep stage-A block patterns and dynamic markers
+        // ahead of this positive path.
+        if matches!(plsql_invocation_keyword(sql), Some("CALL" | "BEGIN")) {
+            if let Some((candidate, arguments)) = parsed_routine_invocation(sql) {
+                let shape = analyze_batch(sql);
+                let stage = stage_a(sql, &self.config);
+                let blocked = !shape.balanced
+                    || shape.statement_count != 1
+                    || shape.saw_top_level_after_block_close
+                    || matches!(
+                        stage,
+                        StageA::BlockListed(_) | StageA::PlSqlBlock { dangerous: true }
+                    );
+                if !blocked
+                    && let Some(exact) = self.oracle.resolve_routine(&candidate, &arguments)
+                    && exact.schema.is_some()
+                    && exact.overload.is_some()
+                    && let Ok(required) = admit(
+                        &self.oracle.routine_effects(&exact),
+                        AdmissionContext::CustomToolCall,
+                    )
+                {
+                    let danger = match required {
+                        OperatingLevel::ReadOnly => DangerLevel::Safe,
+                        OperatingLevel::ReadWrite => DangerLevel::Guarded,
+                        OperatingLevel::Ddl | OperatingLevel::Admin => DangerLevel::Destructive,
+                    };
+                    return GuardDecision {
+                        danger,
+                        required_level: Some(required),
+                        objects_affected: Vec::new(),
+                        safe_alternative: None,
+                        reason: "exact routine call with proven effects".to_owned(),
+                        reason_category: (required > OperatingLevel::ReadOnly)
+                            .then_some(ReasonCategory::RequiresHigherLevel),
+                        offending_construct: Some("routine call".to_owned()),
+                        non_transactional_effect: false,
+                        query_effect_requires_fetch: false,
+                        verdict_certificate: None,
+                        certificate_derivation: Vec::new(),
+                    };
+                }
+            }
+            if plsql_invocation_keyword(sql) == Some("CALL") {
+                return forbidden_decision("CALL target or effects could not be proven".to_owned())
+                    .categorized(ReasonCategory::UnprovenSideEffect, Some("CALL".to_owned()));
+            }
+        }
+
         // Oracle allows zero/default-argument functions to omit parentheses in
         // PL/SQL expressions. Without a semantic symbol table, `pkg.value` (or
         // even bare `value`) might be a variable, record field, or an opaque
@@ -4009,6 +4240,135 @@ fn forbidden_decision(reason: String) -> GuardDecision {
 mod tests {
     use super::*;
     use crate::levels::BlockReason;
+    use crate::purity::{RoutineEffect, RoutineEffectsV1};
+
+    struct ExactRoutineOracle(RoutineEffect);
+
+    impl SideEffectOracle for ExactRoutineOracle {
+        fn resolve_routine(
+            &self,
+            candidate: &RoutineRef,
+            _: &[RoutineArgument],
+        ) -> Option<RoutineRef> {
+            (candidate
+                .package
+                .as_ref()
+                .is_some_and(|part| part.text == "PKG")
+                && candidate.member.text == "P")
+                .then(|| RoutineRef {
+                    schema: Some(RoutineIdentifier::new("APP", false)),
+                    package: Some(RoutineIdentifier::new("PKG", false)),
+                    member: RoutineIdentifier::new("P", false),
+                    overload: Some(7),
+                })
+        }
+
+        fn routine_effects(&self, routine: &RoutineRef) -> RoutineEffectsV1 {
+            assert_eq!(routine.overload, Some(7));
+            RoutineEffectsV1::new([self.0])
+        }
+    }
+
+    #[test]
+    fn routine_ref_quoted_identity_preserved() {
+        let (reference, _) = parsed_routine_invocation(r#"CALL "App"."Pkg"."p"()"#).unwrap();
+        assert_eq!(reference.schema.unwrap().text, "App");
+        assert_eq!(reference.package.unwrap().text, "Pkg");
+        assert_eq!(reference.member.text, "p");
+        assert!(reference.member.quoted);
+        assert_ne!(reference.member, RoutineIdentifier::new("p", false));
+    }
+
+    #[test]
+    fn routine_ref_unquoted_uppercased() {
+        let (reference, _) = parsed_routine_invocation("CALL app.pkg.p()").unwrap();
+        assert_eq!(reference.schema.unwrap().text, "APP");
+        assert_eq!(reference.package.unwrap().text, "PKG");
+        assert_eq!(reference.member.text, "P");
+    }
+
+    #[test]
+    fn call_with_db_link_refused() {
+        let classifier =
+            Classifier::default().with_oracle(Arc::new(ExactRoutineOracle(RoutineEffect::ReadDb)));
+        assert_eq!(
+            classifier.classify("CALL pkg.p@remote()").danger,
+            DangerLevel::Forbidden
+        );
+    }
+
+    #[test]
+    fn call_arguments_are_parsed_and_opaque_expressions_refused() {
+        let (reference, arguments) =
+            parsed_routine_invocation("CALL pkg.p(value => 'safe')").unwrap();
+        assert_eq!(reference.package.unwrap().text, "PKG");
+        assert_eq!(arguments[0].name.as_ref().unwrap().text, "VALUE");
+        assert_eq!(arguments[0].value, RoutineArgumentValue::Text);
+        let classifier =
+            Classifier::default().with_oracle(Arc::new(ExactRoutineOracle(RoutineEffect::ReadDb)));
+        for sql in [
+            "CALL pkg.p(other_function())",
+            "CALL pkg.p(1,)",
+            "CALL pkg.p(:x); DROP TABLE users",
+            "CALL pkg.p(value => :x, 1)",
+        ] {
+            assert_eq!(
+                classifier.classify(sql).danger,
+                DangerLevel::Forbidden,
+                "{sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn call_unresolved_stays_refused() {
+        for level in [
+            OperatingLevel::ReadOnly,
+            OperatingLevel::ReadWrite,
+            OperatingLevel::Ddl,
+            OperatingLevel::Admin,
+        ] {
+            let decision = Classifier::default().classify("CALL pkg.p()");
+            assert_eq!(decision.danger, DangerLevel::Forbidden);
+            assert!(matches!(
+                decision.gate(&SessionLevelState::new(level, false)),
+                LevelDecision::Blocked { .. }
+            ));
+        }
+        for effect in [
+            RoutineEffect::Unknown,
+            RoutineEffect::TxnControl,
+            RoutineEffect::DynamicSql,
+            RoutineEffect::ExternalIo,
+        ] {
+            let classifier =
+                Classifier::default().with_oracle(Arc::new(ExactRoutineOracle(effect)));
+            assert_eq!(
+                classifier.classify("CALL pkg.p()").danger,
+                DangerLevel::Forbidden
+            );
+        }
+    }
+
+    #[test]
+    fn call_proven_by_oracle_admitted_at_derived_level() {
+        for (effect, expected) in [
+            (RoutineEffect::ReadDb, OperatingLevel::ReadOnly),
+            (RoutineEffect::Dml, OperatingLevel::ReadWrite),
+        ] {
+            let classifier =
+                Classifier::default().with_oracle(Arc::new(ExactRoutineOracle(effect)));
+            for sql in ["CALL pkg.p(:id)", "BEGIN pkg.p(:id); END;"] {
+                let decision = classifier.classify(sql);
+                assert_eq!(
+                    decision.required_level,
+                    Some(expected),
+                    "{sql}: {decision:?}"
+                );
+                assert_ne!(decision.danger, DangerLevel::Forbidden);
+            }
+        }
+    }
 
     fn classify(sql: &str) -> GuardDecision {
         Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql)

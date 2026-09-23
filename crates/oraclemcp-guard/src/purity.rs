@@ -233,6 +233,54 @@ impl ObjectRef {
     }
 }
 
+/// One Oracle identifier, retaining the spelling rule used at the call site.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RoutineIdentifier {
+    pub text: String,
+    pub quoted: bool,
+}
+
+impl RoutineIdentifier {
+    #[must_use]
+    pub fn new(text: impl Into<String>, quoted: bool) -> Self {
+        let text = text.into();
+        Self {
+            text: if quoted {
+                text
+            } else {
+                text.to_ascii_uppercase()
+            },
+            quoted,
+        }
+    }
+}
+
+/// Exact routine identity. `None` overload is only a lookup candidate and
+/// cannot by itself identify one of several catalog subprograms.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct RoutineRef {
+    pub schema: Option<RoutineIdentifier>,
+    pub package: Option<RoutineIdentifier>,
+    pub member: RoutineIdentifier,
+    pub overload: Option<u32>,
+}
+
+/// An argument whose evaluation is known to have no routine or SQL effects.
+/// Binds have unknown type, so overloaded type matches remain ambiguous.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum RoutineArgumentValue {
+    Bind,
+    Number,
+    Text,
+    Null,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RoutineArgument {
+    pub name: Option<RoutineIdentifier>,
+    pub value: RoutineArgumentValue,
+}
+
 /// The three-valued purity verdict (§5.3, R15). For routine calls, **only
 /// `ProvenReadOnly` permits clearing a statement to `Safe`.** Absence of a
 /// write edge is `Unknown`, never routine-safe; `Measured::Unmeasured` /
@@ -267,6 +315,23 @@ impl Purity {
 /// explicit engine-free baseline is available only for callers with an
 /// independent semantic-read proof.
 pub trait SideEffectOracle: Send + Sync {
+    /// Resolve synonyms and overloads to one exact local identity. The default
+    /// cannot resolve even an apparently qualified call from SQL text alone.
+    fn resolve_routine(
+        &self,
+        candidate: &RoutineRef,
+        arguments: &[RoutineArgument],
+    ) -> Option<RoutineRef> {
+        let _ = (candidate, arguments);
+        None
+    }
+
+    /// Effects of the complete closure for an already resolved routine.
+    fn routine_effects(&self, routine: &RoutineRef) -> RoutineEffectsV1 {
+        let _ = routine;
+        RoutineEffectsV1::new([RoutineEffect::Unknown])
+    }
+
     /// The purity of a user-defined routine (function/procedure/package member).
     fn routine_purity(&self, routine: &ObjectRef) -> Purity {
         let _ = routine;
