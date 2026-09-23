@@ -1,0 +1,40 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T18:00:00Z",
+  "bead_id": "oraclemcp-xoflp.4.5",
+  "scope": {
+    "summary": "SUPERSEDED by train-0.12 T8.7 oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.7 (Absorbs names this bead; PLAN_0_12_0 23.1 Supersede, don't mutate)",
+    "in_scope": [
+      "docs/plan/PLAN_0_12_0.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "1bdebf496c0d9dcfa55215364c6e800173a2716e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded, not implemented here: Prove empty and multi-row streaming parity. Remaining scope is carried by train bead(s) T8.7 oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.7, whose Absorbs section names oraclemcp-xoflp.4.5 (verified with br show at source)."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.7"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

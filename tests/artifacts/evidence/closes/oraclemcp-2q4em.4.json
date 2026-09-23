@@ -1,0 +1,40 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T18:00:00Z",
+  "bead_id": "oraclemcp-2q4em.4",
+  "scope": {
+    "summary": "SUPERSEDED: container epic replaced by train-0.12 root oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq (PLAN_0_12_0 23.1 Supersede, don't mutate); all children closed or superseded first",
+    "in_scope": [
+      "docs/plan/PLAN_0_12_0.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "1bdebf496c0d9dcfa55215364c6e800173a2716e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded, not implemented: B4 Every documented distribution channel is verified at release or not documented. Container epic; its open children were each closed as superseded by a named train bead before this close. The train root does not carry an Absorbs list for containers (it absorbs leaf beads only)."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

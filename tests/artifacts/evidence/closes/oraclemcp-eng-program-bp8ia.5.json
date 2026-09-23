@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T18:00:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5",
+  "scope": {
+    "summary": "RETIRED: retired R34: CI velocity tranche 2 (coverage + mutation integrity) is ceremony; its fuzz half landed (bp8ia.5.4) and the mutation re-seal is cut (plan \u00a724)",
+    "in_scope": [
+      "docs/plan/PLAN_0_12_0.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "1bdebf496c0d9dcfa55215364c6e800173a2716e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Retired, not implemented: Cluster D: CI velocity - Tranche 2 (coverage + mutation integrity). retired R34: CI velocity tranche 2 (coverage + mutation integrity) is ceremony; its fuzz half landed (bp8ia.5.4) and the mutation re-seal is cut (plan \u00a724)."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T18:00:00Z",
+  "bead_id": "oraclemcp-2q4em.1.3",
+  "scope": {
+    "summary": "SUPERSEDED by train-0.12 T8.10 oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.10 (Absorbs names this bead; PLAN_0_12_0 23.1 Supersede, don't mutate)",
+    "in_scope": [
+      "docs/plan/PLAN_0_12_0.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "1bdebf496c0d9dcfa55215364c6e800173a2716e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded, not implemented here: B1.3 Sync-in-async design spike: blocking Oracle driver inside asupersync lanes, cancellation/timeout/quarantine proven, loom model. Remaining scope is carried by train bead(s) T8.10 oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.10, whose Absorbs section names oraclemcp-2q4em.1.3 (verified with br show at source)."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.10"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
