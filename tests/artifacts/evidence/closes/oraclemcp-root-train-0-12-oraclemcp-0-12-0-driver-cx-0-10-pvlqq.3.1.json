@@ -1,0 +1,60 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T01:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.3.1",
+  "scope": {
+    "summary": "Homebrew, winget and npm channels retired fully (3ce5a43c): packaging/homebrew, packaging/winget, packaging/README.md, publish-npm.yml and scripts/validate_npm_publish_input.sh deleted under the operator-approved RULE 1 rulings R17/R32/R35; docs, release.yml, rollback runbook, honesty grep and tests updated.",
+    "in_scope": [
+      "README.md",
+      "AGENTS.md",
+      "docs/install.md",
+      "docs/release-checklist.md",
+      ".github/workflows/release.yml",
+      "scripts/oraclemcp_honesty_grep.sh",
+      "scripts/e2e/release_rollback_dry_run.sh",
+      "crates/oraclemcp/tests/installer_e2e.rs"
+    ],
+    "out_of_scope": [
+      "Deleted paths are recorded in 3ce5a43c; they cannot appear in a clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "334a50af5f30a96ac4eb3487679a7f903b6db02a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release shell tests",
+        "kind": "cli",
+        "trace": "Orchestrator re-execution in clean detached worktree at 334a50af (dirty=0, lease): tests/release_contract_test.sh OK; tests/release_workflow_security_test.sh OK; scripts/validate_release_security_workflows.sh OK; scripts/workflow_supply_chain_check.sh OK."
+      },
+      {
+        "name": "rollback runbook",
+        "kind": "cli",
+        "trace": "Orchestrator re-execution in clean detached worktree at 334a50af (dirty=0, lease): release_rollback_dry_run.sh --dry-run --broken-version 0.12.0 --previous-good 0.11.0: passed; plans GitHub release, GHCR, MCP registry (immutable) and signed evidence; no brew/winget/npm channel; non-mutating (refuses without --dry-run)."
+      },
+      {
+        "name": "installer_e2e + leftovers",
+        "kind": "cli",
+        "trace": "Orchestrator re-execution in clean detached worktree at 334a50af (dirty=0, lease): cargo test -p oraclemcp --test e2e_harness installer_e2e ok; repo grep: remaining brew/winget/npm hits are only absence assertions in tests, the \"no npm/npx channel\" statements, and npx playwright dev tooling in CI."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

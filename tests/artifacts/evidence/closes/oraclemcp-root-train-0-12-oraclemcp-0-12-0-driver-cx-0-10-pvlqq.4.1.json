@@ -1,0 +1,58 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T01:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.4.1",
+  "scope": {
+    "summary": "oraclemcp-verifier shipped as a first-class crate (1c2bedc6): README/metadata/licenses, committed package list, API lock, publish order with verify-published post-check; publishing itself remains the operator human gate.",
+    "in_scope": [
+      "crates/oraclemcp-verifier/Cargo.toml",
+      "crates/oraclemcp-verifier/README.md",
+      "crates/oraclemcp-verifier/api/oraclemcp-verifier.txt",
+      "tests/fixtures/release/oraclemcp-verifier.package-list",
+      "scripts/publish_crates.sh",
+      "tests/release_contract_test.sh"
+    ],
+    "out_of_scope": [
+      "No crate was published (human gate R.3/R.4/R.7)."
+    ]
+  },
+  "source": {
+    "sha": "334a50af5f30a96ac4eb3487679a7f903b6db02a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release contract",
+        "kind": "cli",
+        "trace": "Orchestrator re-execution in clean detached worktree at 334a50af (dirty=0, lease): tests/release_contract_test.sh OK (manifest, publish order, strict registry JSON, bounded curl, verifier package list, verify-published)."
+      },
+      {
+        "name": "verifier crate",
+        "kind": "cli",
+        "trace": "Orchestrator re-execution in clean detached worktree at 334a50af (dirty=0, lease): cargo package -p oraclemcp-verifier --list succeeds; cargo test -p oraclemcp-verifier ok."
+      },
+      {
+        "name": "negative controls (implementer)",
+        "kind": "cli",
+        "trace": "moving the verifier in the publish order fails the contract test; planting an extra source file fails the package-list check."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
