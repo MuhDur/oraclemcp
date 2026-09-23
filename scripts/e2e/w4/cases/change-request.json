@@ -1,0 +1,22 @@
+[
+  {
+    "case_id": "w4_oracle_change_request_agent_default_edition_flip_refused",
+    "tool": "oracle_execute",
+    "level": "ADMIN",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "ALTER DATABASE DEFAULT EDITION = ORA$BASE /* W4MARK_EDITIONFLIP0001 */",
+        "commit": true,
+        "confirm": "invalid-agent-confirmation"
+      },
+      "vsql_absent_marker": "W4MARK_EDITIONFLIP0001"
+    },
+    "expect": {"error_class": "FORBIDDEN_STATEMENT"},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+  }
+]
