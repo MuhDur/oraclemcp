@@ -30,6 +30,8 @@ pub enum CatalogOutputPolicy {
     SessionContext,
     /// Rows are diagnostic observations, not proof of absence.
     VisibilityObservation,
+    /// Dictionary metadata returned by a governed inspection tool.
+    DictionaryMetadata,
 }
 
 /// The purpose attached to a dictionary query for audit routing.
@@ -99,11 +101,31 @@ pub enum CatalogQueryId {
     FgaCatalogProof,
     /// Readability of the target column catalog.
     TargetColumnCatalogProof,
+    /// Diagnostic access to DBA_OBJECTS.
+    DbaObjectsProbe,
+    /// Diagnostic access to ALL_OBJECTS.
+    AllObjectsProbe,
+    /// Whether the Diagnostics Pack is enabled for this database.
+    DiagnosticsPackProbe,
+    /// Diagnostic access to PL/Scope identifiers.
+    AllIdentifiersProbe,
+    /// Effective privileges of the current session.
+    SessionPrivileges,
+    /// Whether Oracle Advanced Security is available for native redaction.
+    NativeRedactionOption,
+    /// Whether the free Statspack catalog can be read.
+    StatspackProbe,
+    /// Licensed AWR plan-cost history for one SQL ID.
+    PlanCostTimeline,
+    /// Bounded PL/Scope identifier map.
+    PlscopeIdentifiers,
+    /// Bounded PL/Scope statement map.
+    PlscopeStatements,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 29] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -123,6 +145,16 @@ impl CatalogQueryId {
         Self::PolicyCatalogProof,
         Self::FgaCatalogProof,
         Self::TargetColumnCatalogProof,
+        Self::DbaObjectsProbe,
+        Self::AllObjectsProbe,
+        Self::DiagnosticsPackProbe,
+        Self::AllIdentifiersProbe,
+        Self::SessionPrivileges,
+        Self::NativeRedactionOption,
+        Self::StatspackProbe,
+        Self::PlanCostTimeline,
+        Self::PlscopeIdentifiers,
+        Self::PlscopeStatements,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -130,7 +162,9 @@ impl CatalogQueryId {
     pub const fn spec(self) -> CatalogReadSpec {
         use CatalogAuditClass::{Diagnostic, NameResolution, ReadPurity};
         use CatalogBindKind::{Integer, Text};
-        use CatalogOutputPolicy::{InternalProof, SessionContext, VisibilityObservation};
+        use CatalogOutputPolicy::{
+            DictionaryMetadata, InternalProof, SessionContext, VisibilityObservation,
+        };
         const EMPTY: BindSchema = BindSchema(&[]);
         const I: BindSchema = BindSchema(&[Integer]);
         const TT: BindSchema = BindSchema(&[Text, Text]);
@@ -272,6 +306,82 @@ impl CatalogQueryId {
                 "prove target column catalog is readable",
                 InternalProof,
                 ReadPurity,
+            ),
+            Self::DbaObjectsProbe => (
+                "SELECT 1 FROM dba_objects WHERE rownum = 1",
+                EMPTY,
+                "observe DBA_OBJECTS access",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::AllObjectsProbe => (
+                "SELECT 1 FROM all_objects WHERE rownum = 1",
+                EMPTY,
+                "observe ALL_OBJECTS access",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::DiagnosticsPackProbe => (
+                "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'",
+                EMPTY,
+                "observe Diagnostics Pack availability",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::AllIdentifiersProbe => (
+                "SELECT 1 FROM all_identifiers WHERE rownum = 1",
+                EMPTY,
+                "observe PL/Scope access",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::SessionPrivileges => (
+                "SELECT privilege FROM session_privs",
+                EMPTY,
+                "observe effective session privileges",
+                SessionContext,
+                Diagnostic,
+            ),
+            Self::NativeRedactionOption => (
+                crate::native_redaction::NATIVE_REDACTION_OPTION_SQL,
+                EMPTY,
+                "observe Advanced Security option availability",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::StatspackProbe => (
+                "SELECT 1 FROM perfstat.stats$snapshot WHERE rownum = 1",
+                EMPTY,
+                "observe Statspack access",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::PlanCostTimeline => (
+                crate::awr::PLAN_COST_TIMELINE_SQL,
+                TI,
+                "read licensed AWR plan-cost history",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::PlscopeIdentifiers => (
+                "SELECT * FROM ( \
+                 SELECT name, type, usage, line, col, signature FROM all_identifiers \
+                 WHERE owner = :1 AND object_name = :2 ORDER BY line, col \
+             ) WHERE ROWNUM <= :3",
+                TTI,
+                "read bounded PL/Scope identifiers",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::PlscopeStatements => (
+                "SELECT * FROM ( \
+                 SELECT type, line, sql_id FROM all_statements \
+                 WHERE owner = :1 AND object_name = :2 ORDER BY line \
+             ) WHERE ROWNUM <= :3",
+                TTI,
+                "read bounded PL/Scope statement map",
+                DictionaryMetadata,
+                Diagnostic,
             ),
         };
         CatalogReadSpec {

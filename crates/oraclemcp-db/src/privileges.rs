@@ -10,6 +10,7 @@ use asupersync::Cx;
 use serde::{Deserialize, Serialize};
 
 use crate::connection::OracleConnection;
+use crate::{CatalogQueryId, run_catalog_query};
 
 /// The dictionary-access tier the connected account has.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,22 +51,17 @@ pub struct PrivilegeProfile {
 /// Probe an account's capabilities. Best-effort: each probe tolerates a
 /// privilege error (the absence is recorded, never fatal).
 pub async fn probe_privileges(cx: &Cx, conn: &dyn OracleConnection) -> PrivilegeProfile {
-    async fn can(cx: &Cx, conn: &dyn OracleConnection, sql: &str) -> bool {
-        conn.query_rows(cx, sql, &[]).await.is_ok()
+    async fn can(cx: &Cx, conn: &dyn OracleConnection, id: CatalogQueryId) -> bool {
+        run_catalog_query(cx, conn, id, &[]).await.is_ok()
     }
-    let dictionary_tier = if can(cx, conn, "SELECT 1 FROM dba_objects WHERE rownum = 1").await {
+    let dictionary_tier = if can(cx, conn, CatalogQueryId::DbaObjectsProbe).await {
         DictionaryTier::Dba
-    } else if can(cx, conn, "SELECT 1 FROM all_objects WHERE rownum = 1").await {
+    } else if can(cx, conn, CatalogQueryId::AllObjectsProbe).await {
         DictionaryTier::All
     } else {
         DictionaryTier::User
     };
-    let diagnostics_pack = conn
-        .query_rows(
-            cx,
-            "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'",
-            &[],
-        )
+    let diagnostics_pack = run_catalog_query(cx, conn, CatalogQueryId::DiagnosticsPackProbe, &[])
         .await
         .ok()
         .and_then(|rows| {
@@ -73,7 +69,7 @@ pub async fn probe_privileges(cx: &Cx, conn: &dyn OracleConnection) -> Privilege
                 .and_then(|r| r.text("VALUE").map(str::to_owned))
         })
         .is_some_and(|v| v.to_ascii_uppercase().contains("DIAGNOSTIC"));
-    let plscope = can(cx, conn, "SELECT 1 FROM all_identifiers WHERE rownum = 1").await;
+    let plscope = can(cx, conn, CatalogQueryId::AllIdentifiersProbe).await;
     PrivilegeProfile {
         dictionary_tier,
         diagnostics_pack,
@@ -139,10 +135,7 @@ pub async fn probe_write_posture(
     conn: &dyn OracleConnection,
     proxy_user: bool,
 ) -> WritePosture {
-    match conn
-        .query_rows(cx, "SELECT privilege FROM session_privs", &[])
-        .await
-    {
+    match run_catalog_query(cx, conn, CatalogQueryId::SessionPrivileges, &[]).await {
         Ok(rows) => {
             let held: Vec<String> = rows
                 .iter()

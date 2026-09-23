@@ -15,6 +15,7 @@ use asupersync::Cx;
 use crate::connection::OracleConnection;
 use crate::error::DbError;
 use crate::types::OracleBind;
+use crate::{CatalogQueryId, run_catalog_query};
 
 /// A PL/Scope identifier cross-reference row (`ALL_IDENTIFIERS`).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -133,20 +134,17 @@ pub async fn plscope_identifiers(
     name: &str,
     max_rows: usize,
 ) -> Result<Vec<PlscopeIdentifier>, DbError> {
-    let rows = conn
-        .query_rows(
-            cx,
-            "SELECT * FROM ( \
-                 SELECT name, type, usage, line, col, signature FROM all_identifiers \
-                 WHERE owner = :1 AND object_name = :2 ORDER BY line, col \
-             ) WHERE ROWNUM <= :3",
-            &[
-                OracleBind::from(owner),
-                OracleBind::from(name),
-                OracleBind::from(max_rows.max(1) as i64),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PlscopeIdentifiers,
+        &[
+            OracleBind::from(owner),
+            OracleBind::from(name),
+            OracleBind::from(max_rows.max(1) as i64),
+        ],
+    )
+    .await?;
     Ok(rows
         .iter()
         .map(|r| PlscopeIdentifier {
@@ -169,20 +167,17 @@ pub async fn plscope_statements(
     name: &str,
     max_rows: usize,
 ) -> Result<Vec<PlscopeStatement>, DbError> {
-    let rows = conn
-        .query_rows(
-            cx,
-            "SELECT * FROM ( \
-                 SELECT type, line, sql_id FROM all_statements \
-                 WHERE owner = :1 AND object_name = :2 ORDER BY line \
-             ) WHERE ROWNUM <= :3",
-            &[
-                OracleBind::from(owner),
-                OracleBind::from(name),
-                OracleBind::from(max_rows.max(1) as i64),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PlscopeStatements,
+        &[
+            OracleBind::from(owner),
+            OracleBind::from(name),
+            OracleBind::from(max_rows.max(1) as i64),
+        ],
+    )
+    .await?;
     Ok(rows
         .iter()
         .map(|r| PlscopeStatement {

@@ -20,6 +20,7 @@ use thiserror::Error;
 use crate::connection::OracleConnection;
 use crate::error::DbError;
 use crate::types::OracleBind;
+use crate::{CatalogQueryId, run_catalog_query};
 
 /// Read-only probe for Oracle's Advanced Security option.
 ///
@@ -148,7 +149,7 @@ pub async fn probe_native_redaction(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> Result<NativeRedactionAvailability, DbError> {
-    match conn.query_rows(cx, NATIVE_REDACTION_OPTION_SQL, &[]).await {
+    match run_catalog_query(cx, conn, CatalogQueryId::NativeRedactionOption, &[]).await {
         Ok(rows) => Ok(
             if rows
                 .first()

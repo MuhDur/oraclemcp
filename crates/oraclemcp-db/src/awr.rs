@@ -8,6 +8,7 @@
 //! contract, gated by the P2-9 privilege matrix).
 
 use crate::error_envelope::{ErrorClass, ErrorEnvelope};
+use crate::{CatalogQueryId, run_catalog_query};
 use oraclemcp_error::parse_ora_code;
 
 /// Which performance-diagnostics source is available for this target.
@@ -111,14 +112,7 @@ pub(crate) async fn detect_statspack_for_preflight(
     cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
 ) -> Result<bool, crate::error::DbError> {
-    match conn
-        .query_rows(
-            cx,
-            "SELECT 1 FROM perfstat.stats$snapshot WHERE rownum = 1",
-            &[],
-        )
-        .await
-    {
+    match run_catalog_query(cx, conn, CatalogQueryId::StatspackProbe, &[]).await {
         Ok(_) => Ok(true),
         Err(error) if error.is_uncertain_session_state() => Err(error),
         Err(error) if is_probe_absence_or_privilege(&error) => Ok(false),
@@ -148,14 +142,7 @@ pub(crate) async fn detect_diagnostics_pack_for_preflight(
     cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
 ) -> Result<bool, crate::error::DbError> {
-    match conn
-        .query_rows(
-            cx,
-            "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'",
-            &[],
-        )
-        .await
-    {
+    match run_catalog_query(cx, conn, CatalogQueryId::DiagnosticsPackProbe, &[]).await {
         Ok(rows) => Ok(rows
             .first()
             .and_then(|row| row.text("value").map(str::to_owned))
@@ -305,7 +292,7 @@ pub const PLAN_COST_TIMELINE_NOTE: &str = "AWR observations are bounded by snaps
 not exact historical SCNs. optimizer_cost is the optimizer's relative estimate, not elapsed time \
 or a runtime guarantee; a row exists only when AWR captured that SQL cursor in the interval.";
 
-const PLAN_COST_TIMELINE_SQL: &str = "SELECT * FROM (\
+pub(crate) const PLAN_COST_TIMELINE_SQL: &str = "SELECT * FROM (\
 SELECT s.snap_id AS snapshot_id, s.instance_number AS instance_number, \
        TO_CHAR(sn.begin_interval_time, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6') AS snapshot_begin_time, \
        TO_CHAR(sn.end_interval_time, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6') AS snapshot_end_time, \
@@ -403,17 +390,17 @@ pub async fn plan_cost_timeline(
         Err(error) => return Err(error.into_envelope()),
     }
 
-    let rows = conn
-        .query_rows(
-            cx,
-            PLAN_COST_TIMELINE_SQL,
-            &[
-                crate::types::OracleBind::String(sql_id.clone()),
-                crate::types::OracleBind::I64(i64::from(max_points.clamp(1, 1_000))),
-            ],
-        )
-        .await
-        .map_err(crate::error::DbError::into_envelope)?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PlanCostTimeline,
+        &[
+            crate::types::OracleBind::String(sql_id.clone()),
+            crate::types::OracleBind::I64(i64::from(max_points.clamp(1, 1_000))),
+        ],
+    )
+    .await
+    .map_err(crate::error::DbError::into_envelope)?;
     Ok(assemble_plan_cost_timeline(sql_id, &rows))
 }
 
