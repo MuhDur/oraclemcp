@@ -13,6 +13,7 @@ E2E_LEVEL="READ_ONLY"
 export E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
 
 run_real_adb=false
+run_oci_tier_c=false
 commit_proof=false
 proof_dir=""
 
@@ -26,6 +27,10 @@ wallet + IAM-token path against a loopback TCPS terminator using CN=oracle-test.
 Options:
   --real-adb       also run scripts/e2e/real_adb_tcps_signoff.sh; requires real
                    operator-supplied ADB wallet and IAM-token environment
+  --oci-tier-c     also run the tier-C OCI lane (scripts/e2e/oci_adb_terraform.sh
+                   --tier-c): one Always Free ADB per free-enabled version,
+                   zero-cost checks, destroy; results under target/e2e only.
+                   With --dry-run, runs the lane's offline --selftest instead
   --commit-proof   write the sanitized synthetic proof under tests/artifacts/local_gate
   --proof-dir DIR  override the synthetic proof output directory
 USAGE
@@ -49,6 +54,9 @@ while [ "$#" -gt 0 ]; do
       case "$arg" in
         --real-adb)
           run_real_adb=true
+          ;;
+        --oci-tier-c)
+          run_oci_tier_c=true
           ;;
         --commit-proof)
           commit_proof=true
@@ -154,6 +162,23 @@ if [ "$run_real_adb" = true ]; then
   fi
 else
   e2e_log_event "real_adb_deferred" "assert" "skipped" 0 "real ADB/OCI-IAM signoff requires operator-supplied runtime credentials"
+fi
+
+if [ "$run_oci_tier_c" = true ]; then
+  if [ "$E2E_DRY_RUN" = "1" ]; then
+    if ! e2e_run_command "act" bash scripts/e2e/oci_adb_terraform.sh --selftest; then
+      e2e_finish_fail "tier-C OCI lane offline selftest failed"
+    fi
+  else
+    oci_args=(--tier-c --results-out "$ORACLEMCP_E2E_ARTIFACT_DIR/local_release_gate/oci_adb_results-$source_sha.json")
+    [ "$E2E_LOG" = "1" ] && oci_args+=(--log)
+    mkdir -p "$ORACLEMCP_E2E_ARTIFACT_DIR/local_release_gate"
+    if ! e2e_run_command "act" bash scripts/e2e/oci_adb_terraform.sh "${oci_args[@]}"; then
+      e2e_finish_fail "tier-C OCI Always Free ADB lane failed"
+    fi
+  fi
+else
+  e2e_log_event "oci_tier_c_deferred" "assert" "skipped" 0 "tier-C OCI lane runs only with --oci-tier-c (release candidate SHA)"
 fi
 
 if [ "$commit_proof" = true ] && [ "$E2E_DRY_RUN" != "1" ]; then

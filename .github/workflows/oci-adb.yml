@@ -13,14 +13,24 @@ on:
         options:
           - plan
           - apply-and-signoff
+          - tier-c
       confirmation:
-        description: "Required for apply-and-signoff: enter provision-and-destroy"
+        description: "Required for apply-and-signoff and tier-c: enter provision-and-destroy"
         required: false
         type: string
       iam_principal_name:
         description: "OCI IAM local-user principal name (or domain/name) mapped to the throwaway global DB user"
         required: false
         type: string
+      run_command:
+        description: "tier-c only: command run per free version with ORACLEMCP_OCI_TARGET_ENV set (e.g. a W4 subset); empty = control connect + doctor only"
+        required: false
+        type: string
+      fail_after_apply:
+        description: "tier-c test switch: fail right after provisioning to prove teardown still destroys (run ends red)"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -68,21 +78,22 @@ jobs:
           printf 'OCI_KEY_PATH=%s\n' "$key" >> "$GITHUB_ENV"
 
       - name: Validate explicit apply confirmation
-        if: ${{ inputs.operation == 'apply-and-signoff' }}
+        if: ${{ inputs.operation != 'plan' }}
         shell: bash
         env:
+          OPERATION: ${{ inputs.operation }}
           CONFIRMATION: ${{ inputs.confirmation }}
           IAM_PRINCIPAL_NAME: ${{ inputs.iam_principal_name }}
         run: |
           set -euo pipefail
           [ "$CONFIRMATION" = "provision-and-destroy" ] || {
-            echo "apply-and-signoff requires confirmation=provision-and-destroy" >&2
+            echo "$OPERATION requires confirmation=provision-and-destroy" >&2
             exit 1
           }
-          [ -n "$IAM_PRINCIPAL_NAME" ] || {
+          if [ "$OPERATION" = apply-and-signoff ] && [ -z "$IAM_PRINCIPAL_NAME" ]; then
             echo "apply-and-signoff requires iam_principal_name" >&2
             exit 1
-          }
+          fi
 
       - name: Plan or provision, sign off, and destroy
         shell: bash
@@ -95,11 +106,35 @@ jobs:
           TF_VAR_region: ${{ secrets.OCI_REGION }}
           TF_VAR_compartment_ocid: ${{ secrets.OCI_COMPARTMENT_OCID }}
           ORACLEMCP_ADB_IAM_PRINCIPAL_NAME: ${{ inputs.iam_principal_name }}
+          OPERATION: ${{ inputs.operation }}
+          RUN_COMMAND: ${{ inputs.run_command }}
+          FAIL_AFTER_APPLY: ${{ inputs.fail_after_apply }}
+          RESULTS_OUT: ${{ runner.temp }}/oci-adb-results/oci_adb_results.json
         run: |
           set -euo pipefail
           args=(--log)
-          if [ "${{ inputs.operation }}" = "apply-and-signoff" ]; then
-            export ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
-            args+=(--apply-and-signoff)
-          fi
+          case "$OPERATION" in
+            apply-and-signoff)
+              export ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
+              args+=(--apply-and-signoff)
+              ;;
+            tier-c)
+              export ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
+              mkdir -p "$(dirname "$RESULTS_OUT")"
+              args+=(--tier-c --results-out "$RESULTS_OUT")
+              [ -z "$RUN_COMMAND" ] || args+=(--run "$RUN_COMMAND")
+              [ "$FAIL_AFTER_APPLY" != true ] || args+=(--fail-after-apply)
+              ;;
+          esac
           bash scripts/e2e/oci_adb_terraform.sh "${args[@]}"
+
+      # The harness writes RESULTS_OUT only after its confidentiality scan
+      # passed, so an absent file means nothing is uploaded.
+      - name: Upload scanned tier-C results
+        if: ${{ always() && inputs.operation == 'tier-c' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: oci-adb-tier-c-results
+          path: ${{ runner.temp }}/oci-adb-results/oci_adb_results.json
+          if-no-files-found: warn
+          retention-days: 30

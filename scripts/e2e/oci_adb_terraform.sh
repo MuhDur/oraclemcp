@@ -33,13 +33,67 @@ Required live-run env:
 Required only with --apply-and-signoff:
   ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1
   ORACLEMCP_ADB_IAM_PRINCIPAL_NAME
+
+Modes:
+  (default)            credential-gated Terraform plan, no cloud mutation
+  --apply-and-signoff  provision one ADB, run the password + IAM signoff, destroy
+  --tier-c             tier-C lane: zero-cost check, discover every free-tier
+                       enabled ADB version, then per version (one at a time)
+                       provision -> python-oracledb control connect -> oraclemcp
+                       doctor attempt -> run schema open -> --run hook -> close
+                       -> destroy; zero-cost check again; write the scanned
+                       results JSON. Requires ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1.
+  --selftest           offline checks of version filter, ownership and
+                       zero-cost decisions against synthetic fixtures
+
+Options:
+  --db-version V       exact ADB version (default: discovered; plan and
+                       apply-and-signoff use the highest free-enabled version)
+  --run CMD            tier-C hook, run per version with ORACLEMCP_OCI_TARGET_ENV
+                       naming a runner-private env file (connect string file,
+                       wallet dir, credentials files, version, run id, schema)
+  --fail-after-apply   test switch: fail right after provisioning; teardown
+                       must still destroy the ADB and the run must be red
+  --results-out FILE   tier-C: copy the confidentiality-scanned results JSON here
+
+Optional env:
+  ORACLEMCP_OCI_PYTHON  Python with python-oracledb for the control connect
+                        (default python3)
 USAGE
   e2e_usage_common
 }
 
-for arg in "$@"; do
+db_version=""
+run_id=""
+run_cmd=""
+fail_after_apply=false
+results_file=""
+results_out=""
+deny_file="${ORACLEMCP_OCI_DENY_FILE:-}"
+
+while [ "$#" -gt 0 ]; do
+  arg="$1"
+  shift
   case "$arg" in
     --apply-and-signoff) mode="apply-and-signoff" ;;
+    --tier-c) mode="tier-c" ;;
+    --provision-only) mode="provision-only" ;;
+    --selftest) mode="selftest" ;;
+    --fail-after-apply) fail_after_apply=true ;;
+    --db-version|--run-id|--run|--results-file|--results-out)
+      [ "$#" -gt 0 ] || {
+        echo "oci_adb_terraform: $arg requires a value" >&2
+        exit 2
+      }
+      case "$arg" in
+        --db-version) db_version="$1" ;;
+        --run-id) run_id="$1" ;;
+        --run) run_cmd="$1" ;;
+        --results-file) results_file="$1" ;;
+        --results-out) results_out="$1" ;;
+      esac
+      shift
+      ;;
     *)
       set +e
       e2e_parse_common_arg "$arg"
@@ -59,6 +113,188 @@ for arg in "$@"; do
       ;;
   esac
 done
+
+# ---------------------------------------------------------------------------
+# Pure decisions over OCI CLI JSON. No network; output carries no identifier
+# except ids the caller passed in. Exercised offline by --selftest against the
+# synthetic fixtures under scripts/e2e/fixtures/oci/.
+# ---------------------------------------------------------------------------
+
+# $1: file holding `oci db autonomous-db-version list` output. The CLI prints
+# nothing at all for an empty list, so an empty file means "no versions".
+# Stdout: exact free-tier-enabled, non-dedicated version strings, sorted.
+# Exit 3 = SKIP_NO_FREE_VERSION (never a silent pass); exit 4 = malformed.
+oci_free_versions() {
+  local versions
+  if ! versions="$(jq -r '
+      (.data // [])[]
+      | select(."is-free-tier-enabled" == true)
+      | select((."is-dedicated" // false) == false)
+      | .version' "$1")"; then
+    return 4
+  fi
+  versions="$(printf '%s\n' "$versions" | grep -E '^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$' | sort -uV || true)"
+  [ -n "$versions" ] || return 3
+  printf '%s\n' "$versions"
+}
+
+# $1: ADB list captured before apply; $2: ADB list after apply; $3: run id.
+# Stdout: the ADBs this run owns: new since $1, tagged with this run id, and
+# not terminated. Anything that existed before the run is never selected, even
+# when it carries the same tag.
+oci_owned_adbs() {
+  jq -r --arg run "$3" --slurpfile pre "$1" '
+    ([($pre[0] // {}) | (.data // [])[] | .id]) as $preids
+    | (.data // [])[]
+    | select(.id as $id | ($preids | index($id)) | not)
+    | select((."freeform-tags" // {})["oraclemcp-run-id"] == $run)
+    | select(."lifecycle-state" != "TERMINATED" and ."lifecycle-state" != "TERMINATING")
+    | .id' "$2"
+}
+
+# $1 pre list, $2 post list, $3 run id, $4 the id Terraform reports.
+# Exit 0 only if the run owns exactly one ADB, it is Terraform's, and it is
+# Always Free. On failure prints a typed reason.
+oci_assert_single_owned() {
+  local owned count free
+  owned="$(oci_owned_adbs "$1" "$2" "$3")" || {
+    echo OWNERSHIP_UNREADABLE
+    return 1
+  }
+  count="$(printf '%s' "$owned" | grep -c . || true)"
+  if [ "$count" -ne 1 ]; then
+    echo "OWNERSHIP_COUNT_$count"
+    return 1
+  fi
+  if [ "$owned" != "$4" ]; then
+    echo OWNERSHIP_TERRAFORM_MISMATCH
+    return 1
+  fi
+  free="$(jq -r --arg id "$owned" '(.data // [])[] | select(.id == $id) | ."is-free-tier"' "$2")"
+  if [ "$free" != true ]; then
+    echo OWNERSHIP_NOT_FREE_TIER
+    return 1
+  fi
+}
+
+# $1 control output (`oci iam compartment list` under the tenancy, a
+# known-non-empty query that must contain $3 as ACTIVE), $2 the ADB list for
+# $3 (empty when the CLI omitted it), $3 compartment id, $4 the run's own ADB
+# id or empty. Passes only when the control proves the principal can see $3
+# and no ADB other than the run's own Always Free one is in a non-terminated
+# state. Without the control, "empty" is indistinguishable from
+# "unauthorized", so a missing or non-matching control fails closed.
+oci_zero_cost_verdict() {
+  local control_hits foreign owned_free
+  control_hits="$(jq -r --arg c "$3" '
+    [(.data // [])[] | select(.id == $c and ."lifecycle-state" == "ACTIVE")] | length' "$1" 2>/dev/null || true)"
+  if [ "$control_hits" != 1 ]; then
+    echo ZERO_COST_CONTROL_MISSING
+    return 1
+  fi
+  if [ -s "$2" ]; then
+    if ! foreign="$(jq -r --arg own "$4" '
+        [(.data // [])[]
+          | select(."lifecycle-state" != "TERMINATED")
+          | select(.id != $own)] | length' "$2" 2>/dev/null)"; then
+      echo ZERO_COST_LIST_MALFORMED
+      return 1
+    fi
+    if [ "$foreign" != 0 ]; then
+      echo "ZERO_COST_FOREIGN_ADB_$foreign"
+      return 1
+    fi
+    if [ -n "$4" ]; then
+      owned_free="$(jq -r --arg own "$4" '(.data // [])[] | select(.id == $own) | ."is-free-tier"' "$2")"
+      if [ -n "$owned_free" ] && [ "$owned_free" != true ]; then
+        echo ZERO_COST_OWNED_NOT_FREE
+        return 1
+      fi
+    fi
+  fi
+  echo ZERO_COST_PASS
+}
+
+oci_selftest() {
+  local fx="$ROOT/scripts/e2e/fixtures/oci"
+  local scratch out status r
+  local failures=0
+  scratch="$(mktemp -d)"
+  : >"$scratch/empty.json"
+
+  check() {
+    if [ "$2" = true ]; then
+      echo "ok $1"
+    else
+      echo "FAIL $1" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # oci_harness_version_filter
+  out="$(oci_free_versions "$fx/versions_mixed.json")" && status=0 || status=$?
+  [ "$status" -eq 0 ] && [ "$out" = "$(printf '19c\n23ai')" ] && r=true || r=false
+  check "oci_harness_version_filter: free, shared versions only" "$r"
+  oci_free_versions "$fx/versions_none_free.json" >/dev/null && status=0 || status=$?
+  [ "$status" -eq 3 ] && r=true || r=false
+  check "oci_harness_version_filter: all non-free -> SKIP_NO_FREE_VERSION" "$r"
+  oci_free_versions "$scratch/empty.json" >/dev/null && status=0 || status=$?
+  [ "$status" -eq 3 ] && r=true || r=false
+  check "oci_harness_version_filter: CLI-omitted empty list -> SKIP_NO_FREE_VERSION" "$r"
+
+  # oci_harness_ownership
+  out="$(oci_owned_adbs "$fx/adb_list_pre.json" "$fx/adb_list_post.json" omcp-selftest-run-v1)"
+  [ "$out" = synthetic-adb-owned-0001 ] && r=true || r=false
+  check "oci_harness_ownership: only the new, run-tagged, live ADB is owned" "$r"
+  if printf '%s\n' "$out" | grep -q '^synthetic-adb-pre-'; then r=false; else r=true; fi
+  check "oci_harness_ownership: pre-existing ADBs (even same-tagged) never selected" "$r"
+  oci_assert_single_owned "$fx/adb_list_pre.json" "$fx/adb_list_post.json" \
+    omcp-selftest-run-v1 synthetic-adb-owned-0001 >/dev/null && r=true || r=false
+  check "oci_harness_ownership: exactly one owned ADB matching Terraform passes" "$r"
+  out="$(oci_assert_single_owned "$fx/adb_list_pre.json" "$fx/adb_list_post.json" \
+    omcp-selftest-run-v1 synthetic-adb-pre-0001)" && r=false || r=true
+  [ "$out" = OWNERSHIP_TERRAFORM_MISMATCH ] || r=false
+  check "oci_harness_ownership: a pre-existing id is refused as the owned target" "$r"
+  out="$(oci_assert_single_owned "$fx/adb_list_pre.json" "$fx/adb_list_pre.json" \
+    omcp-selftest-run-v1 synthetic-adb-owned-0001)" && r=false || r=true
+  [ "$out" = OWNERSHIP_COUNT_0 ] || r=false
+  check "oci_harness_ownership: nothing new -> refused (count 0)" "$r"
+
+  # oci_harness_zero_cost_empty_list
+  out="$(oci_zero_cost_verdict "$fx/compartment_control.json" "$scratch/empty.json" synthetic-compartment-0001 "")"
+  [ "$out" = ZERO_COST_PASS ] && r=true || r=false
+  check "oci_harness_zero_cost_empty_list: empty list with control present passes" "$r"
+  out="$(oci_zero_cost_verdict "$scratch/empty.json" "$scratch/empty.json" synthetic-compartment-0001 "")" && r=false || r=true
+  [ "$out" = ZERO_COST_CONTROL_MISSING ] || r=false
+  check "oci_harness_zero_cost_empty_list: missing control result fails closed" "$r"
+  out="$(oci_zero_cost_verdict "$fx/compartment_control.json" "$scratch/empty.json" synthetic-compartment-0002 "")" && r=false || r=true
+  [ "$out" = ZERO_COST_CONTROL_MISSING ] || r=false
+  check "oci_harness_zero_cost_empty_list: control for another compartment fails closed" "$r"
+  out="$(oci_zero_cost_verdict "$fx/compartment_control.json" "$scratch/empty.json" synthetic-compartment-0003 "")" && r=false || r=true
+  [ "$out" = ZERO_COST_CONTROL_MISSING ] || r=false
+  check "oci_harness_zero_cost_empty_list: a non-ACTIVE compartment fails closed" "$r"
+  out="$(oci_zero_cost_verdict "$fx/compartment_control.json" "$fx/adb_list_post.json" synthetic-compartment-0001 synthetic-adb-owned-0001)" && r=false || r=true
+  [ "$out" = ZERO_COST_FOREIGN_ADB_3 ] || r=false
+  check "oci_harness_zero_cost: foreign live ADBs fail (terminated ones ignored)" "$r"
+  out="$(oci_zero_cost_verdict "$fx/compartment_control.json" "$fx/adb_list_owned_only.json" synthetic-compartment-0001 synthetic-adb-owned-0001)"
+  [ "$out" = ZERO_COST_PASS ] && r=true || r=false
+  check "oci_harness_zero_cost: only the run's own Always Free ADB passes" "$r"
+  out="$(oci_zero_cost_verdict "$fx/compartment_control.json" "$fx/adb_list_owned_only.json" synthetic-compartment-0001 "")" && r=false || r=true
+  [ "$out" = ZERO_COST_FOREIGN_ADB_1 ] || r=false
+  check "oci_harness_zero_cost: a live ADB the run does not own fails" "$r"
+
+  rm -r -- "$scratch"
+  if [ "$failures" -ne 0 ]; then
+    echo "oci_adb_terraform selftest: $failures failure(s)" >&2
+    return 1
+  fi
+  echo "oci_adb_terraform selftest: OK"
+}
+
+if [ "$mode" = selftest ]; then
+  oci_selftest
+  exit $?
+fi
 
 cd "$ROOT"
 
@@ -90,6 +326,77 @@ oci_config="$run_dir/oci-config"
 terraform_source="$ROOT/infra/oci-adb"
 terraform_dir="$state_dir/module"
 destroy_needed=false
+steps_file="$run_dir/steps.jsonl"
+owned_file="$run_dir/owned_adb_id"
+teardown_verdict="not_needed"
+zero_cost_pre="not_run"
+zero_cost_post="not_run"
+oci_python="${ORACLEMCP_OCI_PYTHON:-python3}"
+export SUPPRESS_LABEL_WARNING=True
+
+oci_cli() {
+  OCI_CLI_CONFIG_FILE="$oci_config" oci --profile DEFAULT "$@"
+}
+
+# One identifier-free JSONL record per harness step:
+# {case_id, phase, expected, actual, verdict, duration_ms, gating}.
+oci_step() {
+  jq -cn --arg case_id "$1" --arg phase "$2" --arg expected "$3" --arg actual "$4" \
+    --arg verdict "$5" --argjson duration_ms "${6:-0}" --argjson gating "${7:-true}" \
+    '{case_id: $case_id, phase: $phase, expected: $expected, actual: $actual,
+      verdict: $verdict, duration_ms: $duration_ms, gating: $gating}' >>"$steps_file"
+}
+
+# Record this run's live values in the runner-private deny file (never
+# uploaded); the confidentiality scan fails any artifact containing one.
+# Values shorter than 6 characters are too generic to deny exactly.
+oci_deny() {
+  local value
+  [ -n "$deny_file" ] || return 0
+  for value in "$@"; do
+    [ "${#value}" -ge 6 ] && printf '%s\n' "$value" >>"$deny_file"
+  done
+  return 0
+}
+
+# Authoritative zero-cost check for the run's compartment (the only
+# compartment this principal may create ADBs in). $1 label, $2 the run's own
+# ADB id or empty. Prints the typed verdict; exit 0 only on ZERO_COST_PASS.
+zero_cost_check() {
+  local label="$1" own="$2"
+  local control="$run_dir/zero_cost_${label}_control.json"
+  local list="$run_dir/zero_cost_${label}_adb_list.json"
+  if ! oci_cli iam compartment list --compartment-id "$TF_VAR_tenancy_ocid" --all \
+    >"$control" 2>"$control.err"; then
+    : >"$control"
+  fi
+  if ! oci_cli db autonomous-database list --compartment-id "$TF_VAR_compartment_ocid" --all \
+    >"$list" 2>"$list.err"; then
+    echo ZERO_COST_LIST_FAILED
+    return 1
+  fi
+  oci_zero_cost_verdict "$control" "$list" "$TF_VAR_compartment_ocid" "$own"
+}
+
+# $1 ADB id. Exit 0 once OCI reports it TERMINATED (or no longer knows it).
+verify_destroyed() {
+  local attempt state
+  for attempt in 1 2 3 4 5 6 7 8 9 10; do
+    if oci_cli db autonomous-database get --autonomous-database-id "$1" \
+      >"$run_dir/verify_destroyed.json" 2>"$run_dir/verify_destroyed.err"; then
+      state="$(jq -r '.data."lifecycle-state"' "$run_dir/verify_destroyed.json")"
+    elif grep -q '"status": 404' "$run_dir/verify_destroyed.err"; then
+      state=GONE
+    else
+      state=UNKNOWN
+    fi
+    case "$state" in
+      TERMINATED | GONE) return 0 ;;
+    esac
+    [ "$attempt" -lt 10 ] && sleep 30
+  done
+  return 1
+}
 
 assert_free_tier_module() {
   local module="$1"
@@ -151,8 +458,18 @@ cleanup() {
       e2e_log_event "terraform_destroy" "teardown" "fail" 0 "terraform destroy failed; trying OCI CLI fallback"
       adb_id=""
       if [ -f "$oci_config" ] && command -v oci >/dev/null 2>&1; then
-        adb_id="$(terraform -chdir="$terraform_dir" output -state="$state_file" -raw adb_id 2>/dev/null || true)"
-        if [ -n "$adb_id" ] && OCI_CLI_CONFIG_FILE="$oci_config" oci db autonomous-database delete \
+        adb_id="$(cat "$owned_file" 2>/dev/null || true)"
+        if [ -z "$adb_id" ]; then
+          # Ownership was never proven (failure between apply and the post
+          # snapshot): delete Terraform's id only if it carries this run's tag.
+          adb_id="$(terraform -chdir="$terraform_dir" output -state="$state_file" -raw adb_id 2>/dev/null || true)"
+          if [ -n "$adb_id" ] && ! oci_cli db autonomous-database get --autonomous-database-id "$adb_id" 2>/dev/null |
+            jq -e --arg run "$run_id" '.data."freeform-tags"["oraclemcp-run-id"] == $run' >/dev/null; then
+            e2e_log_event "terraform_destroy" "teardown" "fail" 0 "refusing OCI CLI delete: Terraform's ADB does not carry this run's tag"
+            adb_id=""
+          fi
+        fi
+        if [ -n "$adb_id" ] && oci_cli db autonomous-database delete \
           --autonomous-database-id "$adb_id" --force >"$run_dir/oci_cli_destroy.log" 2>&1; then
           e2e_log_event "terraform_destroy" "teardown" "pass" 0 "OCI CLI deleted throwaway Always Free ADB after Terraform destroy failure"
           destroy_status=0
@@ -165,6 +482,34 @@ cleanup() {
       if [ "$destroy_status" -ne 0 ]; then
         echo "OCI ADB acceptance teardown failed; the operator must destroy the throwaway resource using its runtime state." >&2
       fi
+    fi
+    teardown_verdict="destroy_failed"
+    if [ "$destroy_status" -eq 0 ]; then
+      if [ ! -s "$owned_file" ] || verify_destroyed "$(<"$owned_file")"; then
+        teardown_verdict="destroyed"
+      else
+        teardown_verdict="destroy_unverified"
+        destroy_status=1
+        e2e_log_event "terraform_destroy" "teardown" "fail" 0 "OCI still reports the owned ADB as not terminated"
+      fi
+    fi
+    oci_step teardown teardown destroyed "$teardown_verdict" \
+      "$([ "$teardown_verdict" = destroyed ] && echo pass || echo fail)"
+  fi
+  if [ "$mode" = provision-only ] && [ "$E2E_DRY_RUN" != "1" ] && [ -f "$oci_config" ]; then
+    zero_cost_post="$(zero_cost_check post "")" || destroy_status=1
+    oci_step zero_cost_post teardown ZERO_COST_PASS "$zero_cost_post" \
+      "$([ "$zero_cost_post" = ZERO_COST_PASS ] && echo pass || echo fail)"
+    if [ -n "$results_file" ]; then
+      touch "$steps_file"
+      jq -n --arg db_version "$db_version" --arg run_id "$run_id" \
+        --arg teardown "$teardown_verdict" --arg zpre "$zero_cost_pre" --arg zpost "$zero_cost_post" \
+        --argjson ok "$([ "$prior_status" -eq 0 ] && [ "$destroy_status" -eq 0 ] && echo true || echo false)" \
+        --slurpfile cases "$steps_file" \
+        '{db_version: $db_version, run_id: $run_id, connection: "adb_high",
+          cases: $cases, teardown: $teardown,
+          zero_cost: {pre: $zpre, post: $zpost},
+          verdict: (if $ok then "pass" else "fail" end)}' >"$results_file"
     fi
   fi
   if [ "$prior_status" -eq 0 ] && [ "$destroy_status" -ne 0 ]; then
@@ -221,6 +566,18 @@ if [ "$mode" = "apply-and-signoff" ]; then
     e2e_finish_fail "ORACLEMCP_ADB_IAM_PRINCIPAL_NAME has unsupported characters"
   fi
 fi
+if [ "$mode" = tier-c ] || [ "$mode" = provision-only ]; then
+  [ "${ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION:-}" = "1" ] || \
+    e2e_finish_fail "set ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1 after confirming the lane is throwaway"
+fi
+if [ "$mode" = provision-only ] && [ -z "$db_version" ]; then
+  e2e_finish_fail "--provision-only requires --db-version"
+fi
+
+if [ -z "$run_id" ]; then
+  run_id="omcp-$(date -u +%Y%m%d%H%M%S)-$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+fi
+[[ "$run_id" =~ ^[a-z0-9][a-z0-9-]{5,62}$ ]] || e2e_finish_fail "run id must be 6-63 lowercase alphanumerics or hyphens"
 
 umask 077
 mkdir -p "$terraform_dir"
@@ -236,6 +593,112 @@ key_file=$TF_VAR_private_key_path
 EOF
 chmod 600 "$oci_config"
 
+if [ "$mode" = tier-c ]; then
+  deny_file="$run_dir/deny_values"
+  : >"$deny_file"
+  chmod 600 "$deny_file"
+  export ORACLEMCP_OCI_DENY_FILE="$deny_file"
+fi
+oci_deny "$TF_VAR_tenancy_ocid" "$TF_VAR_user_ocid" "$TF_VAR_compartment_ocid" \
+  "$TF_VAR_region" "$TF_VAR_fingerprint"
+
+# Discover the free-tier-enabled versions OCI offers this compartment today.
+discover_free_versions() {
+  local raw="$run_dir/adb_versions.json" status
+  if ! oci_cli db autonomous-db-version list --compartment-id "$TF_VAR_compartment_ocid" \
+    --db-workload OLTP --all >"$raw" 2>"$raw.err"; then
+    e2e_finish_fail "listing ADB versions failed"
+  fi
+  oci_free_versions "$raw" >"$run_dir/free_versions" && status=0 || status=$?
+  case "$status" in
+    0) ;;
+    3) e2e_finish_fail "SKIP_NO_FREE_VERSION: OCI offers no free-tier-enabled OLTP ADB version" ;;
+    *) e2e_finish_fail "ADB version list was malformed" ;;
+  esac
+  jq -r '(.data // [])[] | "candidate version=\(.version) free_tier=\(."is-free-tier-enabled") dedicated=\(."is-dedicated" // false)"' \
+    "$raw" | while IFS= read -r line; do
+    e2e_log_event "version_candidate" "setup" "running" 0 "$line"
+  done
+}
+
+if [ "$mode" = tier-c ]; then
+  if [ "$E2E_DRY_RUN" = "1" ]; then
+    e2e_finish_fail "--tier-c has no dry-run; use --selftest for the offline checks"
+  fi
+  zero_cost_pre="$(zero_cost_check pre "")" || e2e_finish_fail "zero-cost pre-check failed: $zero_cost_pre"
+  e2e_log_event "zero_cost" "setup" "pass" 0 "pre-run: $zero_cost_pre"
+  discover_free_versions
+  mapfile -t versions <"$run_dir/free_versions"
+  e2e_log_event "version_discovery" "setup" "pass" 0 "${#versions[@]} free-tier-enabled version(s): ${versions[*]}"
+
+  lane_ok=true
+  index=0
+  for version in "${versions[@]}"; do
+    index=$((index + 1))
+    child_args=(--provision-only --db-version "$version" --run-id "$run_id-v$index"
+      --results-file "$run_dir/results_v$index.json")
+    [ -n "$run_cmd" ] && child_args+=(--run "$run_cmd")
+    [ "$fail_after_apply" = true ] && child_args+=(--fail-after-apply)
+    [ "$E2E_LOG" = "1" ] && child_args+=(--log)
+    e2e_log_event "version_run" "act" "running" 0 "version $version: provision, exercise, destroy"
+    if bash "$ROOT/scripts/e2e/oci_adb_terraform.sh" "${child_args[@]}"; then
+      e2e_log_event "version_run" "act" "pass" 0 "version $version passed"
+    else
+      lane_ok=false
+      e2e_log_event "version_run" "act" "fail" 0 "version $version failed"
+    fi
+    if [ ! -s "$run_dir/results_v$index.json" ]; then
+      jq -n --arg v "$version" '{db_version: $v, cases: [], teardown: "unknown", verdict: "no_result"}' \
+        >"$run_dir/results_v$index.json"
+    fi
+    # Never provision the next version while this one may still exist.
+    if [ "$(jq -r '.teardown' "$run_dir/results_v$index.json")" != destroyed ]; then
+      lane_ok=false
+      e2e_log_event "version_run" "act" "fail" 0 "teardown of version $version not proven; stopping before the next version"
+      break
+    fi
+  done
+
+  zero_cost_post="$(zero_cost_check post "")" || lane_ok=false
+  e2e_log_event "zero_cost" "teardown" "$([ "$zero_cost_post" = ZERO_COST_PASS ] && echo pass || echo fail)" 0 \
+    "post-run: $zero_cost_post"
+
+  mkdir -p "$run_dir/publish"
+  results_json="$run_dir/publish/oci_adb_results.json"
+  jq -s --arg run_id "$run_id" --arg zpre "$zero_cost_pre" --arg zpost "$zero_cost_post" \
+    --argjson ok "$lane_ok" --argjson discovered "$(jq -R . "$run_dir/free_versions" | jq -s .)" \
+    '{schema: "oraclemcp-oci-adb-results/v1", lane: "tier-c-oci-adb", run_id: $run_id,
+      discovered_free_versions: $discovered, versions: .,
+      zero_cost: {pre: $zpre, post: $zpost},
+      verdict: (if $ok and $zpost == "ZERO_COST_PASS" and ([.[] | .verdict == "pass"] | all)
+                then "pass" else "fail" end)}' \
+    "$run_dir"/results_v*.json >"$results_json"
+
+  # Nothing leaves the run dir until it is free of every live value.
+  if ! bash "$ROOT/scripts/secret_scan.sh" --deny-values-from "$deny_file" "$results_json" \
+    >"$run_dir/confidentiality_scan.log" 2>&1; then
+    e2e_finish_fail "confidentiality scan found a live identifier in the results; nothing was published"
+  fi
+  e2e_log_event "confidentiality_scan" "assert" "pass" 0 "results JSON free of live identifiers"
+  if [ -n "$results_out" ]; then
+    cp "$results_json" "$results_out"
+  fi
+  if [ "$(jq -r .verdict "$results_json")" != pass ]; then
+    e2e_finish_fail "tier-C OCI lane failed; see the per-version verdicts in the results JSON"
+  fi
+  e2e_finish_pass
+  exit 0
+fi
+
+if [ -z "$db_version" ]; then
+  discover_free_versions
+  db_version="$(tail -n 1 "$run_dir/free_versions")"
+fi
+[[ "$db_version" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$ ]] || e2e_finish_fail "unsafe ADB version string"
+export TF_VAR_db_version="$db_version"
+export TF_VAR_run_id="$run_id"
+e2e_log_event "adb_version" "setup" "running" 0 "ADB version $db_version, run tag set"
+
 if ! run_redacted "setup" "terraform init (OCI provider lock)" terraform -chdir="$terraform_dir" init -backend=false -input=false -no-color; then
   e2e_finish_fail "Terraform initialization failed"
 fi
@@ -249,10 +712,23 @@ if [ "$mode" = "plan" ]; then
   exit 0
 fi
 
+zero_cost_pre="$(zero_cost_check pre "")" || {
+  oci_step zero_cost_pre setup ZERO_COST_PASS "$zero_cost_pre" fail
+  e2e_finish_fail "zero-cost pre-check failed before provisioning: $zero_cost_pre"
+}
+oci_step zero_cost_pre setup ZERO_COST_PASS "$zero_cost_pre" pass
+if ! oci_cli db autonomous-database list --compartment-id "$TF_VAR_compartment_ocid" --all \
+  >"$run_dir/adb_list_pre.json" 2>"$run_dir/adb_list_pre.err"; then
+  e2e_finish_fail "could not snapshot pre-existing ADBs before apply"
+fi
+
 destroy_needed=true
+apply_started="$(e2e_epoch_ms)"
 if ! run_redacted "act" "terraform apply throwaway Always Free ADB" terraform -chdir="$terraform_dir" apply -input=false -auto-approve -no-color -state="$state_file" "$plan_file"; then
+  oci_step provision act "Always Free ADB AVAILABLE" "terraform apply failed" fail "$(($(e2e_epoch_ms) - apply_started))"
   e2e_finish_fail "Terraform apply failed"
 fi
+oci_step provision act "Always Free ADB AVAILABLE" "terraform apply succeeded" pass "$(($(e2e_epoch_ms) - apply_started))"
 
 terraform_output() {
   local name="$1"
@@ -270,6 +746,39 @@ terraform_output admin_password "$run_dir/admin_password"
 terraform_output wallet_base64 "$run_dir/wallet_base64"
 terraform_output wallet_password "$run_dir/wallet_password"
 terraform_output iam_database_user "$run_dir/iam_database_user"
+
+# Ownership: the run owns exactly the new ADB carrying its run tag, and it
+# must be the one Terraform reports. Assertions and the teardown fallback act
+# on that id only; pre-existing ADBs are never touched.
+ownership_started="$(e2e_epoch_ms)"
+ownership=""
+for attempt in 1 2 3; do
+  if oci_cli db autonomous-database list --compartment-id "$TF_VAR_compartment_ocid" --all \
+    >"$run_dir/adb_list_post.json" 2>"$run_dir/adb_list_post.err" &&
+    ownership="$(oci_assert_single_owned "$run_dir/adb_list_pre.json" "$run_dir/adb_list_post.json" \
+      "$run_id" "$(<"$run_dir/adb_id")")"; then
+    ownership=OWNED
+    break
+  fi
+  [ "$attempt" -lt 3 ] && sleep 10
+done
+if [ "$ownership" != OWNED ]; then
+  oci_step ownership act "exactly one new run-tagged Always Free ADB" "${ownership:-list_failed}" fail \
+    "$(($(e2e_epoch_ms) - ownership_started))"
+  e2e_finish_fail "ownership check failed: ${ownership:-ADB list failed}"
+fi
+cp "$run_dir/adb_id" "$owned_file"
+chmod 600 "$owned_file"
+oci_step ownership act "exactly one new run-tagged Always Free ADB" "owned" pass \
+  "$(($(e2e_epoch_ms) - ownership_started))"
+oci_deny "$(<"$owned_file")" "$(<"$run_dir/admin_password")" "$(<"$run_dir/wallet_password")" \
+  "$(jq -r --arg id "$(<"$owned_file")" '(.data // [])[] | select(.id == $id) | ."db-name" // empty' "$run_dir/adb_list_post.json")" \
+  "$(jq -r --arg id "$(<"$owned_file")" '(.data // [])[] | select(.id == $id) | ."display-name" // empty' "$run_dir/adb_list_post.json")"
+
+if [ "$fail_after_apply" = true ]; then
+  oci_step forced_failure act "test switch fails after apply" "forced failure" fail 0
+  e2e_finish_fail "FORCED_FAILURE_AFTER_APPLY: teardown must still destroy the owned ADB"
+fi
 
 admin_password="$(<"$run_dir/admin_password")"
 wallet_password="$(<"$run_dir/wallet_password")"
@@ -400,7 +909,164 @@ fi
 # service-form SNI, so preserve it while keeping the DN check enabled.
 wallet_use_sni=true
 
+toml_string() {
+  jq -Rn --arg value "$1" '$value'
+}
+
+bootstrap_config="$run_dir/bootstrap-admin-profile.toml"
+bootstrap_state="$run_dir/bootstrap-state"
+bootstrap_binary="${CARGO_TARGET_DIR:-/home/durakovic/.cache/cargo-target-server}/debug/oraclemcp"
+bootstrap_connect_string="$(toml_string "$(<"$run_dir/admin_connect_string")")"
+bootstrap_wallet="$(toml_string "$wallet_dir")"
+bootstrap_ssl_dn="$(toml_string "$ssl_dn")"
+{
+  printf 'schema_version = 2\n'
+  printf 'default_profile = "oci_adb_bootstrap"\n\n'
+  printf '[[profiles]]\n'
+  printf 'name = "oci_adb_bootstrap"\n'
+  printf 'description = "runtime-only throwaway ADB IAM TCPS readiness probe; never committed"\n'
+  printf 'connect_string = %s\n' "$bootstrap_connect_string"
+  printf 'username = "ADMIN"\n'
+  printf 'credential_ref = "env:ADB_ADMIN_PASSWORD"\n'
+  printf 'max_level = "READ_ONLY"\n'
+  printf 'default_level = "READ_ONLY"\n'
+  # The wallet supplies a full Oracle Net descriptor.  The server correctly
+  # refuses to inject connect_timeout_seconds into one; a harness retry bounds
+  # startup instead, while any descriptor-specific transport timeout remains
+  # authored inside tnsnames.ora.
+  printf 'call_timeout_seconds = 30\n\n'
+  printf '[profiles.oci]\n'
+  printf 'wallet_location = %s\n' "$bootstrap_wallet"
+  printf 'wallet_password_ref = "env:ADB_WALLET_PASSWORD"\n'
+  printf 'ssl_server_dn_match = true\n'
+  if [ -n "$ssl_dn" ]; then
+    printf 'ssl_server_cert_dn = %s\n' "$bootstrap_ssl_dn"
+  fi
+  printf 'use_sni = %s\n' "$wallet_use_sni"
+} >"$bootstrap_config"
+chmod 600 "$bootstrap_config"
+
+if [ "$mode" = provision-only ]; then
+  # The doctor attempt is informational in the tier-C lane: a build failure
+  # is recorded by that step, not allowed to mask the control connect.
+  e2e_run_cargo_capped "setup" build -p oraclemcp --bin oraclemcp || true
+else
+  if ! e2e_run_cargo_capped "setup" build -p oraclemcp --bin oraclemcp; then
+    e2e_finish_fail "building oraclemcp for the IAM TCPS readiness probe failed"
+  fi
+  [ -x "$bootstrap_binary" ] || e2e_finish_fail "IAM TCPS readiness-probe binary was not produced"
+fi
+
 adb_id="$(<"$run_dir/adb_id")"
+
+# ADMIN control actions (connect / open-schema / close-schema) through the
+# independent python-oracledb helper; see scripts/e2e/oci_adb_control.py.
+adb_py() {
+  env ADB_ADMIN_PASSWORD="$admin_password" ADB_WALLET_PASSWORD="$wallet_password" \
+    RUN_SCHEMA_PASSWORD="${run_schema_password:-}" \
+    "$oci_python" "$ROOT/scripts/e2e/oci_adb_control.py" \
+    "$run_dir/admin_connect_string" "$wallet_dir" "$@"
+}
+
+# Time one gating or informational step and record it.
+timed_step() {
+  local case_id="$1" expected="$2" gating="$3"
+  shift 3
+  local started status
+  started="$(e2e_epoch_ms)"
+  set +e
+  "$@" >"$run_dir/step_${case_id}.log" 2>&1
+  status=$?
+  set -e
+  oci_step "$case_id" act "$expected" "exit $status" \
+    "$([ "$status" -eq 0 ] && echo pass || echo fail)" "$(($(e2e_epoch_ms) - started))" "$gating"
+  return "$status"
+}
+
+if [ "$mode" = provision-only ]; then
+  # Wallet endpoints are live identifiers: deny them in every artifact.
+  mapfile -t wallet_values < <(grep -oiE '\((host|service_name)[[:space:]]*=[[:space:]]*[^)[:space:]]+' \
+    "$wallet_dir/tnsnames.ora" | sed -E 's/^[^=]*=[[:space:]]*//' | sort -u)
+  for value in "${wallet_values[@]}"; do
+    oci_deny "$value"
+    if [[ "$value" =~ ^[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+      mapfile -t addresses < <(getent ahosts "$value" 2>/dev/null | awk '{print $1}' | sort -u)
+      [ "${#addresses[@]}" -eq 0 ] || oci_deny "${addresses[@]}"
+    fi
+  done
+  oci_deny "$ssl_dn"
+
+  lane_ok=true
+  if timed_step control_connect "python-oracledb thin ADMIN connect over the wallet" true \
+    adb_py control; then
+    e2e_log_event "control_connect" "act" "pass" 0 "python-oracledb thin control connect succeeded"
+  else
+    lane_ok=false
+    e2e_log_event "control_connect" "act" "fail" 0 "python-oracledb thin control connect failed"
+    e2e_finish_fail "control connect failed; the ADB, wallet or credentials are not usable"
+  fi
+
+  # Informational until T9.3: the verdict is recorded, never hidden, and does
+  # not gate this lane.
+  timed_step doctor_online "oraclemcp doctor --online (informational until T9.3)" false \
+    env -i "HOME=$HOME" "PATH=$PATH" "XDG_STATE_HOME=$bootstrap_state" \
+    "ORACLEMCP_CONFIG=$bootstrap_config" "ADB_ADMIN_PASSWORD=$admin_password" \
+    "ADB_WALLET_PASSWORD=$wallet_password" \
+    "$bootstrap_binary" --json doctor --online --profile oci_adb_bootstrap || true
+
+  run_schema="OMCP_RUN_$(printf '%s' "$run_id" | tr 'a-z-' 'A-Z_')"
+  run_schema_password="$(python3 -c 'import secrets, string
+alphabet = string.ascii_letters + string.digits + "_#"
+while True:
+    p = "R" + "".join(secrets.choice(alphabet) for _ in range(23))
+    if any(c.islower() for c in p) and any(c.isupper() for c in p) and any(c.isdigit() for c in p):
+        print(p)
+        break')"
+  oci_deny "$run_schema_password"
+  schema_open=false
+  if timed_step schema_open "isolated run schema created" true adb_py open-schema "$run_schema"; then
+    schema_open=true
+  else
+    lane_ok=false
+  fi
+
+  if [ "$schema_open" = true ] && [ -n "$run_cmd" ]; then
+    jq -n --arg u ADMIN --arg p "$admin_password" --arg w "$wallet_password" \
+      '{user: $u, password: $p, wallet_password: $w}' >"$run_dir/admin_credentials.json"
+    jq -n --arg u "$run_schema" --arg p "$run_schema_password" --arg w "$wallet_password" \
+      '{user: $u, password: $p, wallet_password: $w}' >"$run_dir/run_schema_credentials.json"
+    target_env="$run_dir/target.env"
+    {
+      printf 'ORACLEMCP_OCI_DB_VERSION=%s\n' "$db_version"
+      printf 'ORACLEMCP_OCI_RUN_ID=%s\n' "$run_id"
+      printf 'ORACLEMCP_OCI_CONNECTION=adb_high\n'
+      printf 'ORACLEMCP_OCI_CONNECT_STRING_FILE=%s\n' "$run_dir/admin_connect_string"
+      printf 'ORACLEMCP_OCI_WALLET_DIR=%s\n' "$wallet_dir"
+      printf 'ORACLEMCP_OCI_ADMIN_CREDENTIALS_FILE=%s\n' "$run_dir/admin_credentials.json"
+      printf 'ORACLEMCP_OCI_CREDENTIALS_FILE=%s\n' "$run_dir/run_schema_credentials.json"
+      printf 'ORACLEMCP_OCI_RUN_SCHEMA=%s\n' "$run_schema"
+    } >"$target_env"
+    if timed_step run_hook "supplied tier-C command exits 0" true \
+      env ORACLEMCP_OCI_TARGET_ENV="$target_env" bash -c "$run_cmd"; then
+      e2e_log_event "run_hook" "act" "pass" 0 "tier-C command passed on version $db_version"
+    else
+      lane_ok=false
+      e2e_log_event "run_hook" "act" "fail" 0 "tier-C command failed on version $db_version"
+    fi
+  fi
+
+  if [ "$schema_open" = true ]; then
+    timed_step schema_close "isolated run schema dropped" true adb_py close-schema "$run_schema" ||
+      lane_ok=false
+  fi
+
+  if [ "$lane_ok" != true ]; then
+    e2e_finish_fail "tier-C version $db_version failed; see its results cases"
+  fi
+  e2e_finish_pass
+  exit 0
+fi
+
 scope="urn:oracle:db::id::$TF_VAR_compartment_ocid::$adb_id"
 if ! run_redacted "act" "mint scoped OCI database token" env OCI_CLI_CONFIG_FILE="$oci_config" oci --profile DEFAULT iam db-token get --db-token-location "$token_dir" --scope "$scope"; then
   e2e_finish_fail "OCI database-token mint failed"
@@ -470,47 +1136,6 @@ fi
 e2e_log_event "iam_token_principal" "act" "pass" 0 \
   "scoped OCI token userName/dbUserName matches the configured IAM user (${#token_subject} char sub OCID captured for audit only; the principal NAME is the IAM_PRINCIPAL_NAME mapping key)"
 
-toml_string() {
-  jq -Rn --arg value "$1" '$value'
-}
-
-bootstrap_config="$run_dir/bootstrap-admin-profile.toml"
-bootstrap_state="$run_dir/bootstrap-state"
-bootstrap_binary="${CARGO_TARGET_DIR:-/home/durakovic/.cache/cargo-target-server}/debug/oraclemcp"
-bootstrap_connect_string="$(toml_string "$(<"$run_dir/admin_connect_string")")"
-bootstrap_wallet="$(toml_string "$wallet_dir")"
-bootstrap_ssl_dn="$(toml_string "$ssl_dn")"
-{
-  printf 'schema_version = 2\n'
-  printf 'default_profile = "oci_adb_bootstrap"\n\n'
-  printf '[[profiles]]\n'
-  printf 'name = "oci_adb_bootstrap"\n'
-  printf 'description = "runtime-only throwaway ADB IAM TCPS readiness probe; never committed"\n'
-  printf 'connect_string = %s\n' "$bootstrap_connect_string"
-  printf 'username = "ADMIN"\n'
-  printf 'credential_ref = "env:ADB_ADMIN_PASSWORD"\n'
-  printf 'max_level = "READ_ONLY"\n'
-  printf 'default_level = "READ_ONLY"\n'
-  # The wallet supplies a full Oracle Net descriptor.  The server correctly
-  # refuses to inject connect_timeout_seconds into one; a harness retry bounds
-  # startup instead, while any descriptor-specific transport timeout remains
-  # authored inside tnsnames.ora.
-  printf 'call_timeout_seconds = 30\n\n'
-  printf '[profiles.oci]\n'
-  printf 'wallet_location = %s\n' "$bootstrap_wallet"
-  printf 'wallet_password_ref = "env:ADB_WALLET_PASSWORD"\n'
-  printf 'ssl_server_dn_match = true\n'
-  if [ -n "$ssl_dn" ]; then
-    printf 'ssl_server_cert_dn = %s\n' "$bootstrap_ssl_dn"
-  fi
-  printf 'use_sni = %s\n' "$wallet_use_sni"
-} >"$bootstrap_config"
-chmod 600 "$bootstrap_config"
-
-if ! e2e_run_cargo_capped "setup" build -p oraclemcp --bin oraclemcp; then
-  e2e_finish_fail "building oraclemcp for the IAM TCPS readiness probe failed"
-fi
-[ -x "$bootstrap_binary" ] || e2e_finish_fail "IAM TCPS readiness-probe binary was not produced"
 
 wait_for_adb_tcps() {
   local attempt status started ended output cert_chain server_dn

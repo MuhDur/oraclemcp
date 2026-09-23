@@ -1,0 +1,6 @@
+{
+  "data": [
+    {"version": "19c", "db-workload": "OLTP", "is-free-tier-enabled": false, "is-dedicated": false, "is-paid-enabled": true, "details": "synthetic paid-only"},
+    {"version": "23ai", "db-workload": "OLTP", "is-free-tier-enabled": false, "is-dedicated": false, "is-paid-enabled": true, "details": "synthetic paid-only"}
+  ]
+}

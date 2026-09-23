@@ -1,0 +1,7 @@
+{
+  "data": [
+    {"id": "synthetic-adb-pre-0001", "lifecycle-state": "AVAILABLE", "is-free-tier": true, "freeform-tags": {"oraclemcp-run-id": "omcp-selftest-run-v1"}},
+    {"id": "synthetic-adb-pre-0002", "lifecycle-state": "AVAILABLE", "is-free-tier": false, "freeform-tags": {}},
+    {"id": "synthetic-adb-pre-0003", "lifecycle-state": "TERMINATED", "is-free-tier": true, "freeform-tags": {"oraclemcp-run-id": "omcp-selftest-run-v0"}}
+  ]
+}

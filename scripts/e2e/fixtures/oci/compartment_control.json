@@ -1,0 +1,6 @@
+{
+  "data": [
+    {"id": "synthetic-compartment-0001", "name": "synthetic-compartment", "lifecycle-state": "ACTIVE"},
+    {"id": "synthetic-compartment-0003", "name": "synthetic-deleted", "lifecycle-state": "DELETED"}
+  ]
+}

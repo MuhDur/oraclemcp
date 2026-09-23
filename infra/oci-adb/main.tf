@@ -53,6 +53,29 @@ variable "compartment_ocid" {
   sensitive = true
 }
 
+# The exact ADB version string, discovered per run from the free-tier-enabled
+# entries of `oci db autonomous-db-versions list`. Required: the harness never
+# lets the service pick a default version, so every result names its version.
+variable "db_version" {
+  type = string
+
+  validation {
+    condition     = can(regex("^[0-9A-Za-z][0-9A-Za-z._-]{0,31}$", var.db_version))
+    error_message = "db_version must be an exact OCI ADB version string."
+  }
+}
+
+# The harness run id. Tagged on the ADB so ownership is provable: a run only
+# ever asserts on, or tears down, the ADB carrying its own run id.
+variable "run_id" {
+  type = string
+
+  validation {
+    condition     = can(regex("^[a-z0-9][a-z0-9-]{5,62}$", var.run_id))
+    error_message = "run_id must be 6-63 lowercase alphanumerics or hyphens."
+  }
+}
+
 resource "random_string" "suffix" {
   length  = 8
   special = false
@@ -89,9 +112,14 @@ resource "oci_database_autonomous_database" "signoff" {
   db_name                     = "OMCP${upper(random_string.suffix.result)}"
   display_name                = "oraclemcp-iam-acceptance-${random_string.suffix.result}"
   db_workload                 = "OLTP"
+  db_version                  = var.db_version
   is_free_tier                = true
   is_mtls_connection_required = true
   license_model               = "LICENSE_INCLUDED"
+
+  freeform_tags = {
+    "oraclemcp-run-id" = var.run_id
+  }
 }
 
 check "free_tier_only" {

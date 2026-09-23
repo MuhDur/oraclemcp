@@ -8,14 +8,29 @@
 # Usage:
 #   bash scripts/secret_scan.sh           # full scan (exit 1 on any hit)
 #   bash scripts/secret_scan.sh --self-test  # verify the scanner trips on a planted marker
+#   bash scripts/secret_scan.sh --deny-values-from FILE PATH...
+#       scan artifacts a lane is about to persist against the structural
+#       patterns plus the exact live values in FILE (one per line, runner-
+#       private, never committed). Hits are reported by file:line only; the
+#       matched value is never echoed.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 SELFTEST=false
+DENY_VALUES_FILE=""
+DENY_VALUES_PATHS=()
 if [[ "${1:-}" == --self-test ]]; then
   SELFTEST=true
+elif [[ "${1:-}" == --deny-values-from ]]; then
+  [[ $# -ge 3 ]] || {
+    echo "secret_scan: --deny-values-from needs FILE and at least one PATH" >&2
+    exit 2
+  }
+  DENY_VALUES_FILE="$2"
+  shift 2
+  DENY_VALUES_PATHS=("$@")
 fi
 
 # Gitignored operator denylist (one regex per line; # comments allowed).
@@ -105,8 +120,85 @@ run_selftest() {
   return 0
 }
 
+# Scan PATH... (files or directories) for the structural patterns and for every
+# exact value (>= 6 chars) in the deny file. Fails closed on an unreadable deny
+# file or a missing path. Reports only file:line so a hit never re-leaks.
+run_deny_values_scan() {
+  local deny_file="$1"
+  shift
+  local hits=0 path pattern values lines
+  [[ -r "$deny_file" ]] || {
+    echo "secret_scan: deny-values file is not readable" >&2
+    return 1
+  }
+  values="$(mktemp)"
+  awk 'length($0) >= 6' "$deny_file" | sort -u >"$values"
+  for path in "$@"; do
+    [[ -e "$path" ]] || {
+      echo "secret_scan: artifact path does not exist: $path" >&2
+      hits=$((hits + 1))
+      continue
+    }
+    for pattern in "${STRUCTURAL_PATTERNS[@]}"; do
+      lines="$(grep -rnE -- "$pattern" "$path" | cut -d: -f1,2 | head -5 || true)"
+      if [[ -n "$lines" ]]; then
+        echo "secret_scan: structural match in: ${lines//$'\n'/ }" >&2
+        hits=$((hits + 1))
+      fi
+    done
+    if [[ -s "$values" ]]; then
+      lines="$(grep -rnF -f "$values" -- "$path" | cut -d: -f1,2 | head -5 || true)"
+      if [[ -n "$lines" ]]; then
+        echo "secret_scan: live deny-value match in: ${lines//$'\n'/ }" >&2
+        hits=$((hits + 1))
+      fi
+    fi
+  done
+  rm -f "$values"
+  if [[ "$hits" -gt 0 ]]; then
+    echo "secret_scan: FAIL (artifact contains live identifiers; do not persist it)" >&2
+    return 1
+  fi
+  echo "secret_scan: OK (artifacts free of structural patterns and deny values)"
+}
+
+# oci_confidentiality_deny_values: a planted synthetic deny value must fail the
+# artifact scan without being echoed; the clean synthetic artifact must pass.
+run_deny_values_selftest() {
+  local scratch planted="omcp-synthetic-deny-value-7f3a" output
+  scratch="$(mktemp -d)"
+  printf '%s\n' "$planted" "short" >"$scratch/deny"
+  printf '{"db_version":"23ai","note":"prefix %s suffix"}\n' "$planted" >"$scratch/dirty.json"
+  printf '{"db_version":"23ai","note":"synthetic clean result"}\n' >"$scratch/clean.json"
+  printf 'the word short alone is below the exact-match floor\n' >"$scratch/short.txt"
+  local ok=true
+  if output="$(run_deny_values_scan "$scratch/deny" "$scratch/dirty.json" 2>&1)"; then
+    echo "secret_scan: oci_confidentiality_deny_values FAILED (planted deny value passed)" >&2
+    ok=false
+  elif [[ "$output" == *"$planted"* ]]; then
+    echo "secret_scan: oci_confidentiality_deny_values FAILED (scan output echoed the value)" >&2
+    ok=false
+  fi
+  if ! run_deny_values_scan "$scratch/deny" "$scratch/clean.json" "$scratch/short.txt" >/dev/null 2>&1; then
+    echo "secret_scan: oci_confidentiality_deny_values FAILED (clean artifact rejected)" >&2
+    ok=false
+  fi
+  if run_deny_values_scan "$scratch/missing-deny" "$scratch/clean.json" >/dev/null 2>&1; then
+    echo "secret_scan: oci_confidentiality_deny_values FAILED (missing deny file passed)" >&2
+    ok=false
+  fi
+  rm -rf "$scratch"
+  $ok || return 1
+  echo "secret_scan: self-test OK (oci_confidentiality_deny_values)" >&2
+}
+
 if $SELFTEST; then
-  run_selftest
+  run_selftest && run_deny_values_selftest
+  exit $?
+fi
+
+if [[ -n "$DENY_VALUES_FILE" ]]; then
+  run_deny_values_scan "$DENY_VALUES_FILE" "${DENY_VALUES_PATHS[@]}"
   exit $?
 fi
 

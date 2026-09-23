@@ -128,6 +128,49 @@ An absent OCI input produces the typed, zero-success-exit result
 teardown is an error: retain the runtime-only state under `target/e2e/` and
 destroy the throwaway resource before retrying.
 
+### Tier-C lane (every free-enabled ADB version)
+
+The `tier-c` dispatch operation (same `provision-and-destroy` confirmation; no
+IAM principal needed), or `scripts/local_release_gate.sh --oci-tier-c`, or
+directly:
+
+```sh
+ORACLEMCP_REAL_ADB_NON_CUSTOMER_ASSERTION=1 \
+  bash scripts/e2e/oci_adb_terraform.sh --log --tier-c [--run '<cmd>'] [--results-out FILE]
+```
+
+1. Zero-cost pre-check. It lists the ADBs in the run's compartment together
+   with a known-non-empty control query (the compartment list must contain
+   that compartment). The CLI omits `data` on an empty list, so an empty
+   answer without the control fails closed. Any ADB in a non-terminated state
+   fails the check, except the run's own Always Free one.
+2. Discovery. `oci db autonomous-db-version list --db-workload OLTP` keeps the
+   shared versions that are free-tier enabled. If there are none, the run
+   fails as `SKIP_NO_FREE_VERSION`; it never passes silently.
+3. Per version, one at a time. A child run tags its ADB `oraclemcp-run-id` and
+   snapshots the pre-existing ADBs before apply. It then proves that it owns
+   exactly one new tagged Always Free ADB, and that ADB must be Terraform's.
+   It runs a python-oracledb thin control connect over the wallet
+   (`scripts/e2e/oci_adb_control.py`, independent of oraclemcp). It attempts
+   `oraclemcp doctor --online`; this is recorded and informational until T9.3.
+   It creates an isolated `OMCP_RUN_<run id>` schema and runs `--run` with
+   `ORACLEMCP_OCI_TARGET_ENV` naming a runner-private env file. It drops the
+   schema and destroys the ADB. The CLI fallback only ever deletes the run's
+   own tagged ADB. OCI must report the ADB `TERMINATED` before the next
+   version starts.
+4. Zero-cost post-check.
+5. Confidentiality scan. `scripts/secret_scan.sh --deny-values-from` checks
+   the results JSON against the structural patterns and against every live
+   value the run saw: tenancy, user and compartment OCIDs, region,
+   fingerprint, ADB id and name, wallet hosts and services, resolved IPs,
+   passwords. These values are kept in a runner-private `deny_values` file.
+   Nothing is copied to `--results-out` or uploaded unless the scan passes.
+
+`--fail-after-apply` is the test switch that proves teardown still destroys
+the ADB after a failure, and that the run ends red. Offline checks:
+`bash scripts/e2e/oci_adb_terraform.sh --selftest` and
+`bash scripts/secret_scan.sh --self-test`.
+
 ## Evidence Handling
 
 Auto-verified and commit-safe:
