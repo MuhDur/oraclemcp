@@ -568,14 +568,52 @@ def enclosing_struct(lines: list[str], target: int) -> str | None:
     return None
 
 
+# `Name {` that opens something other than a struct literal or pattern: a
+# return type (`-> Name {`), an impl/trait/for header or an item definition.
+NOT_LITERAL = re.compile(
+    r"(?:->|\b(?:impl|for|struct|enum|union|trait|mod|dyn|type)(?:\s*<[^>]*>)?)\s*$"
+)
+PATH_QUALIFIER = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*$")
+
+
+def is_literal_use(code: str, name: str) -> bool:
+    """True when some `name {` on this line is a struct literal/pattern."""
+    for match in re.finditer(rf"\b{name}\s*\{{", code):
+        prefix = PATH_QUALIFIER.sub("", code[: match.start()]).rstrip()
+        if not NOT_LITERAL.search(prefix):
+            return True
+    return False
+
+
 def literal_sites(name: str) -> list[tuple[str, int]]:
-    try:
-        out = git("grep", "-n", "-E", rf"\b{name}\s*\{{", "--", "*.rs")
-    except subprocess.CalledProcessError:
+    # Read the SAME source the added field came from: the index for
+    # --staged, the revision for --commit. A worktree grep would mix in
+    # other agents' unstaged edits and shift line numbers against file_at.
+    # `git grep` takes --cached before the pattern and a revision after it.
+    args = ["grep", "-n", "-E"]
+    if not revision:
+        args.append("--cached")
+    args += ["-e", rf"\b{name}\s*\{{"]
+    if revision:
+        args.append(revision)
+    result = subprocess.run(
+        ["git", "-C", repo, *args, "--", "*.rs"], capture_output=True, text=True
+    )
+    # Exit 1 is "no matches". Anything else is a failed search, and a failed
+    # search must refuse, never read as "no initializer sites" (fail closed).
+    if result.returncode == 1:
         return []
+    if result.returncode != 0:
+        print(f"swarm-discipline: git grep failed: {result.stderr.strip()}", file=sys.stderr)
+        raise SystemExit(65)
+    out = result.stdout
     sites = []
     for row in out.splitlines():
-        path, number, _ = row.split(":", 2)
+        if revision:
+            row = row[len(revision) + 1 :]
+        path, number, text = row.split(":", 2)
+        if not is_literal_use(text.split("//", 1)[0], name):
+            continue
         sites.append((path, int(number)))
     return sites
 
@@ -807,6 +845,75 @@ PY
     >/dev/null 2>&1 || status=$?
   (( status == 0 )) || die "selftest: an ordinary commit was called a stale delete (exit $status)"
   printf 'PASS selftest: a change that deletes nothing passes the stale-delete check\n'
+
+  # Rule 17 precision: `-> Ctx {`, `impl Ctx {` and friends open a body, not
+  # a struct literal, so they are never orphaned initializers. A real literal
+  # left behind still is, and --staged judges the index, not the worktree.
+  cat >"$work/crates/demo/src/sig.rs" <<'RS'
+use crate::Ctx;
+
+impl Ctx {
+    pub fn fresh() -> Ctx {
+        crate::make()
+    }
+}
+
+pub fn via() -> crate::Ctx {
+    Ctx::fresh()
+}
+RS
+  cat >"$work/crates/demo/src/lit.rs" <<'RS'
+use crate::Ctx;
+
+pub fn lit() -> Ctx {
+    Ctx { a: 4, b: 4 }
+}
+RS
+  git -C "$work" add crates/demo/src/sig.rs crates/demo/src/lit.rs
+  git -C "$work" commit -qm "signature-only and literal users of Ctx"
+  "$PYTHON_BIN" - "$work/crates/demo/src" <<'PY'
+import sys
+root = sys.argv[1]
+for name, old, new in (
+    ("lib.rs", "    pub b: u8,\n", "    pub b: u8,\n    pub c: u8,\n"),
+    ("other.rs", "Ctx { a: 2, b: 2 }", "Ctx { a: 2, b: 2, c: 2 }"),
+):
+    path = f"{root}/{name}"
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    assert old in text, (name, old)
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write(text.replace(old, new))
+PY
+  git -C "$work" add crates/demo/src/lib.rs crates/demo/src/other.rs
+  local report
+  status=0
+  report="$( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" struct-atomicity --staged 2>&1 )" \
+    || status=$?
+  (( status == 65 )) || die "selftest: a real struct literal left behind was accepted (exit $status)"
+  [[ "$report" == *"lit.rs:4"* ]] || die "selftest: the orphaned literal in lit.rs was not reported: $report"
+  [[ "$report" != *"sig.rs"* ]] || die "selftest: a signature/impl header was reported as a literal: $report"
+  printf 'PASS selftest: a real literal left behind is refused; signatures are not literals\n'
+
+  printf 'use crate::Ctx;\n\npub fn lit() -> Ctx {\n    Ctx { a: 4, b: 4, c: 4 }\n}\n' \
+    >"$work/crates/demo/src/lit.rs"
+  status=0
+  ( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" struct-atomicity --staged ) >/dev/null 2>&1 \
+    || status=$?
+  (( status == 65 )) || die "selftest: an unstaged worktree fix satisfied --staged (exit $status)"
+  printf 'PASS selftest: --staged judges the index, not unstaged worktree edits\n'
+
+  git -C "$work" add crates/demo/src/lit.rs
+  status=0
+  ( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" struct-atomicity --staged ) >/dev/null 2>&1 \
+    || status=$?
+  (( status == 0 )) || die "selftest: signature/impl users of a struct were refused (exit $status)"
+  git -C "$work" commit -qm "field c with every initializer"
+  status=0
+  ( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" struct-atomicity --commit HEAD ) >/dev/null 2>&1 \
+    || status=$?
+  (( status == 0 )) || die "selftest: --commit refused a complete change with signature users (exit $status)"
+  printf 'PASS selftest: a complete change passes with -> Type { and impl Type { users untouched\n'
 
   # A stale index: the path is staged as deleted while it still exists on disk,
   # which is how one pane committed another pane's landed evidence away.
