@@ -613,6 +613,12 @@ pub async fn fga_closure(
     relations: &[ResolvedObject],
     kind: FgaStatementKind,
 ) -> FgaClosure {
+    // No base object can have an FGA policy. This is a complete structural
+    // proof for relationless reads; requiring catalog visibility here would
+    // refuse SELECT 1 without increasing safety.
+    if relations.is_empty() {
+        return FgaClosure::ProvenReadOnly;
+    }
     if relations.len() > 256 {
         return FgaClosure::Unknown {
             reason: "fga_relation_cap_exceeded",
@@ -3148,6 +3154,18 @@ mod tests {
     }
 
     #[test]
+    fn fga_relationless_read_needs_no_catalog_probe() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &[], FgaStatementKind::Select).await,
+                FgaClosure::ProvenReadOnly
+            );
+            assert!(conn.queries.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
     fn fga_truncated_evidence_is_unknown() {
         run_with_cx(|cx| async move {
             let row = fga_row("NO", ["YES", "NO", "NO", "NO"], None, None);
@@ -3412,6 +3430,180 @@ mod tests {
                 edition: None,
             },
         }
+    }
+
+    fn table_catalog_row(owner: &str, name: &str, object_id: &str) -> OracleRow {
+        row(&[
+            ("OWNER", Some(owner)),
+            ("OBJECT_NAME", Some(name)),
+            ("OBJECT_TYPE", Some("TABLE")),
+            ("OBJECT_ID", Some(object_id)),
+            ("STATUS", Some("VALID")),
+            ("EDITION_NAME", None),
+        ])
+    }
+
+    #[test]
+    fn issue31_three_part_column_binds_unqualified_from_by_identity() {
+        run_with_cx(|cx| async move {
+            let mut context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(1));
+            context
+                .statement_scope
+                .relations
+                .push(oraclemcp_guard::StatementRelation {
+                    name: RawName::new(
+                        [RawNamePart::unquoted("orders")],
+                        SyntacticRole::FromFactor,
+                    ),
+                    alias: None,
+                });
+            let conn = ScriptedRows::new([
+                vec![table_catalog_row("APP", "ORDERS", "42")],
+                vec![table_catalog_row("APP", "ORDERS", "42")],
+                vec![table_catalog_row("APP", "ORDERS", "42")],
+                vec![row(&[("COLUMN_ID", Some("1"))])],
+            ]);
+            let raw = RawName::new(
+                [
+                    RawNamePart::unquoted("app"),
+                    RawNamePart::unquoted("orders"),
+                    RawNamePart::unquoted("id"),
+                ],
+                SyntacticRole::ValuePosition,
+            );
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            let resolved = lookup.resolve_name(&raw).await.expect("catalog proof");
+            let Resolution::Resolved(column) = resolved else {
+                panic!("the owner-qualified column must bind the unaliased FROM identity")
+            };
+            assert_eq!(column.kind, CatalogObjectKind::Column);
+            assert_eq!(column.owner, "APP");
+            assert_eq!(column.name, "ID");
+            assert_eq!(column.identity.object_id, 42);
+            assert_eq!(conn.queries.lock().unwrap().len(), 4);
+        });
+    }
+
+    #[test]
+    fn issue31_three_part_column_with_other_owner_stays_refused() {
+        let expected = table_object();
+        let different_owner = ResolvedObject {
+            owner: "OTHER".to_owned(),
+            ..expected.clone()
+        };
+        let different_identity = ResolvedObject {
+            identity: ResolvedIdentity {
+                object_id: 43,
+                edition: None,
+            },
+            ..expected.clone()
+        };
+        assert!(!resolved_relation_identity_matches(
+            &expected,
+            &different_owner
+        ));
+        assert!(!resolved_relation_identity_matches(
+            &expected,
+            &different_identity
+        ));
+    }
+
+    fn merged_join_context(natural: bool) -> ResolveCtx {
+        let left = oraclemcp_guard::StatementRelation {
+            name: RawName::new([RawNamePart::unquoted("t1")], SyntacticRole::FromFactor),
+            alias: None,
+        };
+        let right = oraclemcp_guard::StatementRelation {
+            name: RawName::new([RawNamePart::unquoted("t2")], SyntacticRole::FromFactor),
+            alias: None,
+        };
+        let mut context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(1));
+        context.statement_scope.relations = vec![left.clone(), right.clone()];
+        context
+            .statement_scope
+            .merged_joins
+            .push(oraclemcp_guard::resolver::MergedJoin {
+                left,
+                right,
+                using_columns: (!natural).then(|| vec![RawNamePart::unquoted("id")]),
+            });
+        context
+    }
+
+    fn merged_id_catalog() -> ScriptedRows {
+        ScriptedRows::new([
+            vec![table_catalog_row("APP", "T1", "42")],
+            vec![row(&[("COLUMN_ID", Some("1"))])],
+            vec![table_catalog_row("APP", "T2", "43")],
+            vec![row(&[("COLUMN_ID", Some("1"))])],
+        ])
+    }
+
+    #[test]
+    fn issue29_using_column_resolves_once() {
+        run_with_cx(|cx| async move {
+            let context = merged_join_context(false);
+            let conn = merged_id_catalog();
+            let raw = RawName::new([RawNamePart::unquoted("id")], SyntacticRole::ValuePosition);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            let Resolution::Resolved(column) =
+                lookup.resolve_name(&raw).await.expect("catalog proof")
+            else {
+                panic!("USING must merge two proved ID columns into one output")
+            };
+            assert_eq!(column.kind, CatalogObjectKind::Column);
+            assert_eq!(column.name, "ID");
+            assert_eq!(conn.queries.lock().unwrap().len(), 4);
+        });
+    }
+
+    #[test]
+    fn issue29_natural_join_merges_shared_columns() {
+        run_with_cx(|cx| async move {
+            let context = merged_join_context(true);
+            let conn = merged_id_catalog();
+            let raw = RawName::new([RawNamePart::unquoted("id")], SyntacticRole::ValuePosition);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            assert!(matches!(
+                lookup.resolve_name(&raw).await.expect("catalog proof"),
+                Resolution::Resolved(_)
+            ));
+            assert_eq!(conn.queries.lock().unwrap().len(), 4);
+        });
+    }
+
+    #[test]
+    fn issue29_qualified_using_column_stays_refused() {
+        run_with_cx(|cx| async move {
+            let context = merged_join_context(false);
+            let conn = ScriptedRows::new([]);
+            let raw = RawName::new(
+                [RawNamePart::unquoted("t1"), RawNamePart::unquoted("id")],
+                SyntacticRole::ValuePosition,
+            );
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            assert!(matches!(
+                lookup.resolve_name(&raw).await.expect("merge refusal"),
+                Resolution::Unresolved
+            ));
+            assert!(conn.queries.lock().unwrap().is_empty());
+        });
     }
 
     #[test]
