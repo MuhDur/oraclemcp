@@ -627,6 +627,11 @@ jobs:
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: bash scripts/publish_crates.sh
+      # Read-only post-publication check: every crate exists on crates.io at
+      # the tag version and is not yanked, and oraclemcp-verifier installs
+      # from the registry at exactly that version (R23).
+      - name: Verify published crates
+        run: bash scripts/publish_crates.sh --verify-published
 
   docker:
     name: publish GHCR image

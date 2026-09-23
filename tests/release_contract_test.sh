@@ -68,6 +68,9 @@ if [ -n "${ORACLEMCP_RELEASE_FAKE_CURL_MODE:-}" ]; then
   if [ "${ORACLEMCP_FAKE_YANKED_CRATE:-}" = "$crate" ]; then
     mode="yanked"
   fi
+  if [ "${ORACLEMCP_FAKE_MISSING_CRATE:-}" = "$crate" ]; then
+    mode="not-found"
+  fi
 
   case "$mode" in
     valid)
@@ -228,4 +231,27 @@ assert_fails_with "oraclemcp-verifier $server_version is yanked" run_with_fake_c
 assert_fails_with "invalid crates.io response" run_with_fake_curl malformed \
   bash "$ROOT/scripts/publish_crates.sh"
 
-echo "release-contract-test: OK (manifest, publish order, strict registry JSON, bounded curl)"
+# verifier_package_list: the published oraclemcp-verifier package carries its
+# library, binary, README and license texts, and nothing else (no tests or
+# fixtures). A change to the list must update the committed expectation.
+expected_verifier_package="$ROOT/tests/fixtures/release/oraclemcp-verifier.package-list"
+actual_verifier_package="$(cargo package --list -p oraclemcp-verifier --allow-dirty 2>/dev/null)" ||
+  fail "cargo package --list -p oraclemcp-verifier failed"
+[ "$actual_verifier_package" = "$(cat "$expected_verifier_package")" ] ||
+  fail "oraclemcp-verifier package list drifted from $expected_verifier_package: $actual_verifier_package"
+
+# --verify-published is read-only and fails before any install when crates.io
+# lacks the exact version or reports it yanked.
+# publish_crates_verify_published_rejects_missing_version
+assert_fails_with "oraclemcp-verifier $server_version is not published" run_with_fake_curl valid \
+  env ORACLEMCP_FAKE_MISSING_CRATE=oraclemcp-verifier \
+  bash "$ROOT/scripts/publish_crates.sh" --verify-published
+# publish_crates_verify_published_rejects_yanked
+assert_fails_with "oraclemcp-verifier $server_version is yanked" run_with_fake_curl valid \
+  env ORACLEMCP_FAKE_YANKED_CRATE=oraclemcp-verifier \
+  bash "$ROOT/scripts/publish_crates.sh" --verify-published
+assert_fails_with "does not match" run_with_fake_curl wrong-version \
+  bash "$ROOT/scripts/publish_crates.sh" --verify-published
+assert_fails_with "unknown argument" bash "$ROOT/scripts/publish_crates.sh" --verify-publish
+
+echo "release-contract-test: OK (manifest, publish order, strict registry JSON, bounded curl, verifier package list, verify-published)"

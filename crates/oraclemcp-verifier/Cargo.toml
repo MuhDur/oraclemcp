@@ -8,6 +8,11 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
+readme = "README.md"
+documentation = "https://docs.rs/oraclemcp-verifier"
+# Ship the library, the test-attestation binary, the README and the license
+# texts; tests and their fixtures stay in the repository.
+include = ["src/**", "README.md", "LICENSE-MIT", "LICENSE-APACHE"]
 
 [dependencies]
 oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.11.0" }

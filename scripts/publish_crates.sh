@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Publish the workspace to crates.io in dependency order. The script is
 # idempotent for release retries: an already-published exact version is skipped.
+#
+# --print-order       print the derived publish order and exit.
+# --verify-published  read-only post-publication check: every crate in publish
+#                     order must exist on crates.io at the workspace version and
+#                     not be yanked, and `oraclemcp-verifier` at that exact
+#                     version must install with `cargo install --locked`.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,9 +21,9 @@ command -v cargo >/dev/null 2>&1 || fail "missing cargo"
 command -v python3 >/dev/null 2>&1 || fail "missing python3"
 
 mode="${1:-}"
-[ "$#" -le 1 ] || fail "usage: scripts/publish_crates.sh [--print-order]"
+[ "$#" -le 1 ] || fail "usage: scripts/publish_crates.sh [--print-order|--verify-published]"
 case "$mode" in
-  "" | --print-order) ;;
+  "" | --print-order | --verify-published) ;;
   *) fail "unknown argument: $mode" ;;
 esac
 
@@ -128,6 +134,38 @@ wait_for_index() {
   done
   fail "$crate $version did not appear on crates.io after publish"
 }
+
+if [ "$mode" = "--verify-published" ]; then
+  install_timeout="${ORACLEMCP_VERIFY_INSTALL_TIMEOUT_SECONDS:-900}"
+  bounded_integer ORACLEMCP_VERIFY_INSTALL_TIMEOUT_SECONDS "$install_timeout" 60 3600
+  for crate in "${order[@]}"; do
+    if crate_version_exists "$crate"; then
+      echo "publish-crates: verified $crate $version on crates.io (exact version, not yanked)"
+      continue
+    else
+      probe_status=$?
+    fi
+    case "$probe_status" in
+      1) fail "$crate $version is not published on crates.io" ;;
+      *) fail "could not verify that $crate $version is published and not yanked" ;;
+    esac
+  done
+  command -v timeout >/dev/null 2>&1 || fail "missing timeout command"
+  # A fixed, gitignored install root: re-runs replace it (--force), so the
+  # check never deletes anything.
+  install_root="${CARGO_TARGET_DIR:-$ROOT/target}/verify-published/$version"
+  mkdir -p "$install_root"
+  timeout "$install_timeout" cargo install --locked --force --quiet oraclemcp-verifier \
+    --version "=$version" --root "$install_root" ||
+    fail "cargo install --locked oraclemcp-verifier --version =$version failed or timed out"
+  installed="$(cargo install --list --root "$install_root" |
+    sed -n 's/^oraclemcp-verifier v\([^:]*\):$/\1/p')"
+  [ "$installed" = "$version" ] ||
+    fail "installed oraclemcp-verifier version '$installed' is not $version"
+  echo "publish-crates: installed oraclemcp-verifier $installed from crates.io"
+  echo "publish-crates: OK verify-published version=$version"
+  exit 0
+fi
 
 missing=()
 for crate in "${order[@]}"; do

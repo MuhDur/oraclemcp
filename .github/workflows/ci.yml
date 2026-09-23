@@ -787,7 +787,7 @@ jobs:
       - run: bash scripts/oraclemcp_api_lock.sh
       # SemVer contract for each locked crate (working tree vs last published
       # release). Skipped automatically for a crate with no published baseline.
-      - run: cargo semver-checks check-release -p oraclemcp-error -p oraclemcp-guard -p oraclemcp-db
+      - run: cargo semver-checks check-release -p oraclemcp-error -p oraclemcp-guard -p oraclemcp-db -p oraclemcp-verifier
 
   release-metadata:
     name: release metadata sync

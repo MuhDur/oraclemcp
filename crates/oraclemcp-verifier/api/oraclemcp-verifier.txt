@@ -1,0 +1,621 @@
+pub mod oraclemcp_verifier
+#[non_exhaustive] pub enum oraclemcp_verifier::TestAttestationFormatError
+pub oraclemcp_verifier::TestAttestationFormatError::DuplicateArtifactPath
+pub oraclemcp_verifier::TestAttestationFormatError::DuplicateTestName
+pub oraclemcp_verifier::TestAttestationFormatError::FrameMismatch
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidArtifactCount
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidArtifactDigest
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidArtifactPath
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidCommand
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidCreatedAt
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidGitSha
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidLane
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidRepo
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidTestCount
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidTestDetail
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidTestName
+pub oraclemcp_verifier::TestAttestationFormatError::InvalidToolchain
+pub oraclemcp_verifier::TestAttestationFormatError::UnsupportedSchema
+impl core::clone::Clone for oraclemcp_verifier::TestAttestationFormatError
+pub fn oraclemcp_verifier::TestAttestationFormatError::clone(&self) -> oraclemcp_verifier::TestAttestationFormatError
+impl core::cmp::Eq for oraclemcp_verifier::TestAttestationFormatError
+impl core::cmp::PartialEq for oraclemcp_verifier::TestAttestationFormatError
+pub fn oraclemcp_verifier::TestAttestationFormatError::eq(&self, &oraclemcp_verifier::TestAttestationFormatError) -> bool
+impl core::convert::From<oraclemcp_verifier::TestAttestationFormatError> for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::from(oraclemcp_verifier::TestAttestationFormatError) -> Self
+impl core::error::Error for oraclemcp_verifier::TestAttestationFormatError
+impl core::fmt::Debug for oraclemcp_verifier::TestAttestationFormatError
+pub fn oraclemcp_verifier::TestAttestationFormatError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_verifier::TestAttestationFormatError
+pub fn oraclemcp_verifier::TestAttestationFormatError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::TestAttestationFormatError
+impl core::marker::Freeze for oraclemcp_verifier::TestAttestationFormatError
+impl core::marker::Send for oraclemcp_verifier::TestAttestationFormatError
+impl core::marker::Sync for oraclemcp_verifier::TestAttestationFormatError
+impl core::marker::Unpin for oraclemcp_verifier::TestAttestationFormatError
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationFormatError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationFormatError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationFormatError
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationFormatError where U: core::convert::From<T>
+pub fn oraclemcp_verifier::TestAttestationFormatError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationFormatError where U: core::convert::Into<T>
+pub type oraclemcp_verifier::TestAttestationFormatError::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::TestAttestationFormatError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::TestAttestationFormatError where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::TestAttestationFormatError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::TestAttestationFormatError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestationFormatError where T: core::clone::Clone
+pub type oraclemcp_verifier::TestAttestationFormatError::Owned = T
+pub fn oraclemcp_verifier::TestAttestationFormatError::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::TestAttestationFormatError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_verifier::TestAttestationFormatError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationFormatError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for oraclemcp_verifier::TestAttestationFormatError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationFormatError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationFormatError where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationFormatError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::TestAttestationFormatError where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationFormatError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationFormatError where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::TestAttestationFormatError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationFormatError
+pub fn oraclemcp_verifier::TestAttestationFormatError::from(T) -> T
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationFormatError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationFormatError
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationFormatError
+pub type oraclemcp_verifier::TestAttestationFormatError::Output = T
+#[non_exhaustive] pub enum oraclemcp_verifier::TestAttestationVerificationError
+pub oraclemcp_verifier::TestAttestationVerificationError::AmbiguousKey
+pub oraclemcp_verifier::TestAttestationVerificationError::InvalidPayload(oraclemcp_verifier::TestAttestationFormatError)
+pub oraclemcp_verifier::TestAttestationVerificationError::MalformedDocument
+pub oraclemcp_verifier::TestAttestationVerificationError::MalformedPayload
+pub oraclemcp_verifier::TestAttestationVerificationError::MalformedSignature
+pub oraclemcp_verifier::TestAttestationVerificationError::PayloadDigestMismatch
+pub oraclemcp_verifier::TestAttestationVerificationError::SignatureInvalid
+pub oraclemcp_verifier::TestAttestationVerificationError::UnsupportedSignatureSchema
+pub oraclemcp_verifier::TestAttestationVerificationError::UntrustedKey
+impl core::clone::Clone for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::clone(&self) -> oraclemcp_verifier::TestAttestationVerificationError
+impl core::cmp::Eq for oraclemcp_verifier::TestAttestationVerificationError
+impl core::cmp::PartialEq for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::eq(&self, &oraclemcp_verifier::TestAttestationVerificationError) -> bool
+impl core::convert::From<oraclemcp_verifier::TestAttestationFormatError> for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::from(oraclemcp_verifier::TestAttestationFormatError) -> Self
+impl core::error::Error for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::TestAttestationVerificationError
+impl core::marker::Freeze for oraclemcp_verifier::TestAttestationVerificationError
+impl core::marker::Send for oraclemcp_verifier::TestAttestationVerificationError
+impl core::marker::Sync for oraclemcp_verifier::TestAttestationVerificationError
+impl core::marker::Unpin for oraclemcp_verifier::TestAttestationVerificationError
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationVerificationError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationVerificationError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationVerificationError
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationVerificationError where U: core::convert::From<T>
+pub fn oraclemcp_verifier::TestAttestationVerificationError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationVerificationError where U: core::convert::Into<T>
+pub type oraclemcp_verifier::TestAttestationVerificationError::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::TestAttestationVerificationError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::TestAttestationVerificationError where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::TestAttestationVerificationError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::TestAttestationVerificationError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestationVerificationError where T: core::clone::Clone
+pub type oraclemcp_verifier::TestAttestationVerificationError::Owned = T
+pub fn oraclemcp_verifier::TestAttestationVerificationError::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::TestAttestationVerificationError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_verifier::TestAttestationVerificationError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationVerificationError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for oraclemcp_verifier::TestAttestationVerificationError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationVerificationError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationVerificationError where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationVerificationError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::TestAttestationVerificationError where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationVerificationError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationVerificationError where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::TestAttestationVerificationError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationVerificationError
+pub fn oraclemcp_verifier::TestAttestationVerificationError::from(T) -> T
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationVerificationError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationVerificationError
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationVerificationError
+pub type oraclemcp_verifier::TestAttestationVerificationError::Output = T
+pub enum oraclemcp_verifier::TestOutcome
+pub oraclemcp_verifier::TestOutcome::Fail
+pub oraclemcp_verifier::TestOutcome::Pass
+pub oraclemcp_verifier::TestOutcome::Skip
+impl core::clone::Clone for oraclemcp_verifier::TestOutcome
+pub fn oraclemcp_verifier::TestOutcome::clone(&self) -> oraclemcp_verifier::TestOutcome
+impl core::cmp::Eq for oraclemcp_verifier::TestOutcome
+impl core::cmp::PartialEq for oraclemcp_verifier::TestOutcome
+pub fn oraclemcp_verifier::TestOutcome::eq(&self, &oraclemcp_verifier::TestOutcome) -> bool
+impl core::fmt::Debug for oraclemcp_verifier::TestOutcome
+pub fn oraclemcp_verifier::TestOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_verifier::TestOutcome
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::TestOutcome
+impl serde_core::ser::Serialize for oraclemcp_verifier::TestOutcome
+pub fn oraclemcp_verifier::TestOutcome::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_verifier::TestOutcome
+pub fn oraclemcp_verifier::TestOutcome::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_verifier::TestOutcome
+impl core::marker::Send for oraclemcp_verifier::TestOutcome
+impl core::marker::Sync for oraclemcp_verifier::TestOutcome
+impl core::marker::Unpin for oraclemcp_verifier::TestOutcome
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestOutcome
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestOutcome
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestOutcome where U: core::convert::From<T>
+pub fn oraclemcp_verifier::TestOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestOutcome where U: core::convert::Into<T>
+pub type oraclemcp_verifier::TestOutcome::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::TestOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::TestOutcome where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::TestOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::TestOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestOutcome where T: core::clone::Clone
+pub type oraclemcp_verifier::TestOutcome::Owned = T
+pub fn oraclemcp_verifier::TestOutcome::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::TestOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::TestOutcome where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::TestOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestOutcome where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::TestOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::TestOutcome
+pub fn oraclemcp_verifier::TestOutcome::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::TestOutcome where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestOutcome
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestOutcome
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestOutcome
+pub type oraclemcp_verifier::TestOutcome::Output = T
+#[non_exhaustive] pub enum oraclemcp_verifier::VerdictVerificationError
+pub oraclemcp_verifier::VerdictVerificationError::AuditCertificateCoreHashMismatch
+pub oraclemcp_verifier::VerdictVerificationError::AuditRecordHashInvalid
+pub oraclemcp_verifier::VerdictVerificationError::AuditSignatureInvalid
+pub oraclemcp_verifier::VerdictVerificationError::AuditSqlDigestMismatch
+pub oraclemcp_verifier::VerdictVerificationError::BoundAuditHashMismatch
+pub oraclemcp_verifier::VerdictVerificationError::DerivationMismatch
+pub oraclemcp_verifier::VerdictVerificationError::MissingAuditKeyIdentity
+pub oraclemcp_verifier::VerdictVerificationError::ObservedScnMismatch
+pub oraclemcp_verifier::VerdictVerificationError::StatementDigestMismatch
+pub oraclemcp_verifier::VerdictVerificationError::UnsupportedAuditSchema
+pub oraclemcp_verifier::VerdictVerificationError::UnsupportedClassifierVersion
+pub oraclemcp_verifier::VerdictVerificationError::UntrustedAuditKey
+pub oraclemcp_verifier::VerdictVerificationError::VerdictMismatch
+impl core::clone::Clone for oraclemcp_verifier::VerdictVerificationError
+pub fn oraclemcp_verifier::VerdictVerificationError::clone(&self) -> oraclemcp_verifier::VerdictVerificationError
+impl core::cmp::Eq for oraclemcp_verifier::VerdictVerificationError
+impl core::cmp::PartialEq for oraclemcp_verifier::VerdictVerificationError
+pub fn oraclemcp_verifier::VerdictVerificationError::eq(&self, &oraclemcp_verifier::VerdictVerificationError) -> bool
+impl core::error::Error for oraclemcp_verifier::VerdictVerificationError
+impl core::fmt::Debug for oraclemcp_verifier::VerdictVerificationError
+pub fn oraclemcp_verifier::VerdictVerificationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_verifier::VerdictVerificationError
+pub fn oraclemcp_verifier::VerdictVerificationError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_verifier::VerdictVerificationError
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::VerdictVerificationError
+impl core::marker::Freeze for oraclemcp_verifier::VerdictVerificationError
+impl core::marker::Send for oraclemcp_verifier::VerdictVerificationError
+impl core::marker::Sync for oraclemcp_verifier::VerdictVerificationError
+impl core::marker::Unpin for oraclemcp_verifier::VerdictVerificationError
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::VerdictVerificationError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerdictVerificationError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerdictVerificationError
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerdictVerificationError where U: core::convert::From<T>
+pub fn oraclemcp_verifier::VerdictVerificationError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerdictVerificationError where U: core::convert::Into<T>
+pub type oraclemcp_verifier::VerdictVerificationError::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::VerdictVerificationError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::VerdictVerificationError where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::VerdictVerificationError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::VerdictVerificationError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::VerdictVerificationError where T: core::clone::Clone
+pub type oraclemcp_verifier::VerdictVerificationError::Owned = T
+pub fn oraclemcp_verifier::VerdictVerificationError::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::VerdictVerificationError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_verifier::VerdictVerificationError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictVerificationError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for oraclemcp_verifier::VerdictVerificationError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictVerificationError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerdictVerificationError where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictVerificationError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::VerdictVerificationError where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictVerificationError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::VerdictVerificationError where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::VerdictVerificationError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::VerdictVerificationError
+pub fn oraclemcp_verifier::VerdictVerificationError::from(T) -> T
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerdictVerificationError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerdictVerificationError
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerdictVerificationError
+pub type oraclemcp_verifier::VerdictVerificationError::Output = T
+pub struct oraclemcp_verifier::AttestedArtifact
+pub oraclemcp_verifier::AttestedArtifact::path: alloc::string::String
+pub oraclemcp_verifier::AttestedArtifact::sha256: alloc::string::String
+impl core::clone::Clone for oraclemcp_verifier::AttestedArtifact
+pub fn oraclemcp_verifier::AttestedArtifact::clone(&self) -> oraclemcp_verifier::AttestedArtifact
+impl core::cmp::Eq for oraclemcp_verifier::AttestedArtifact
+impl core::cmp::PartialEq for oraclemcp_verifier::AttestedArtifact
+pub fn oraclemcp_verifier::AttestedArtifact::eq(&self, &oraclemcp_verifier::AttestedArtifact) -> bool
+impl core::fmt::Debug for oraclemcp_verifier::AttestedArtifact
+pub fn oraclemcp_verifier::AttestedArtifact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::AttestedArtifact
+impl serde_core::ser::Serialize for oraclemcp_verifier::AttestedArtifact
+pub fn oraclemcp_verifier::AttestedArtifact::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_verifier::AttestedArtifact
+pub fn oraclemcp_verifier::AttestedArtifact::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_verifier::AttestedArtifact
+impl core::marker::Send for oraclemcp_verifier::AttestedArtifact
+impl core::marker::Sync for oraclemcp_verifier::AttestedArtifact
+impl core::marker::Unpin for oraclemcp_verifier::AttestedArtifact
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::AttestedArtifact
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::AttestedArtifact
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::AttestedArtifact
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::AttestedArtifact where U: core::convert::From<T>
+pub fn oraclemcp_verifier::AttestedArtifact::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::AttestedArtifact where U: core::convert::Into<T>
+pub type oraclemcp_verifier::AttestedArtifact::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::AttestedArtifact::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::AttestedArtifact where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::AttestedArtifact::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::AttestedArtifact::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::AttestedArtifact where T: core::clone::Clone
+pub type oraclemcp_verifier::AttestedArtifact::Owned = T
+pub fn oraclemcp_verifier::AttestedArtifact::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::AttestedArtifact::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::AttestedArtifact where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedArtifact::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::AttestedArtifact where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedArtifact::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::AttestedArtifact where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedArtifact::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::AttestedArtifact where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::AttestedArtifact::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::AttestedArtifact
+pub fn oraclemcp_verifier::AttestedArtifact::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::AttestedArtifact where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::AttestedArtifact
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::AttestedArtifact
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::AttestedArtifact
+pub type oraclemcp_verifier::AttestedArtifact::Output = T
+pub struct oraclemcp_verifier::AttestedTest
+pub oraclemcp_verifier::AttestedTest::detail: core::option::Option<alloc::string::String>
+pub oraclemcp_verifier::AttestedTest::name: alloc::string::String
+pub oraclemcp_verifier::AttestedTest::outcome: oraclemcp_verifier::TestOutcome
+impl core::clone::Clone for oraclemcp_verifier::AttestedTest
+pub fn oraclemcp_verifier::AttestedTest::clone(&self) -> oraclemcp_verifier::AttestedTest
+impl core::cmp::Eq for oraclemcp_verifier::AttestedTest
+impl core::cmp::PartialEq for oraclemcp_verifier::AttestedTest
+pub fn oraclemcp_verifier::AttestedTest::eq(&self, &oraclemcp_verifier::AttestedTest) -> bool
+impl core::fmt::Debug for oraclemcp_verifier::AttestedTest
+pub fn oraclemcp_verifier::AttestedTest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::AttestedTest
+impl serde_core::ser::Serialize for oraclemcp_verifier::AttestedTest
+pub fn oraclemcp_verifier::AttestedTest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_verifier::AttestedTest
+pub fn oraclemcp_verifier::AttestedTest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_verifier::AttestedTest
+impl core::marker::Send for oraclemcp_verifier::AttestedTest
+impl core::marker::Sync for oraclemcp_verifier::AttestedTest
+impl core::marker::Unpin for oraclemcp_verifier::AttestedTest
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::AttestedTest
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::AttestedTest
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::AttestedTest
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::AttestedTest where U: core::convert::From<T>
+pub fn oraclemcp_verifier::AttestedTest::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::AttestedTest where U: core::convert::Into<T>
+pub type oraclemcp_verifier::AttestedTest::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::AttestedTest::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::AttestedTest where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::AttestedTest::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::AttestedTest::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::AttestedTest where T: core::clone::Clone
+pub type oraclemcp_verifier::AttestedTest::Owned = T
+pub fn oraclemcp_verifier::AttestedTest::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::AttestedTest::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::AttestedTest where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedTest::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::AttestedTest where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedTest::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::AttestedTest where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedTest::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::AttestedTest where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::AttestedTest::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::AttestedTest
+pub fn oraclemcp_verifier::AttestedTest::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::AttestedTest where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::AttestedTest
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::AttestedTest
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::AttestedTest
+pub type oraclemcp_verifier::AttestedTest::Output = T
+pub struct oraclemcp_verifier::TestAttestation
+impl oraclemcp_verifier::TestAttestation
+pub fn oraclemcp_verifier::TestAttestation::all_tests_passed(&self) -> bool
+pub fn oraclemcp_verifier::TestAttestation::artifacts(&self) -> &[oraclemcp_verifier::AttestedArtifact]
+pub fn oraclemcp_verifier::TestAttestation::command(&self) -> &str
+pub fn oraclemcp_verifier::TestAttestation::created_at(&self) -> &str
+pub fn oraclemcp_verifier::TestAttestation::frame(&self) -> &str
+pub fn oraclemcp_verifier::TestAttestation::from_draft(oraclemcp_verifier::TestAttestationDraft) -> core::result::Result<Self, oraclemcp_verifier::TestAttestationFormatError>
+pub fn oraclemcp_verifier::TestAttestation::git_sha(&self) -> &str
+pub fn oraclemcp_verifier::TestAttestation::lane(&self) -> &str
+pub fn oraclemcp_verifier::TestAttestation::repo(&self) -> &str
+pub fn oraclemcp_verifier::TestAttestation::tests(&self) -> &[oraclemcp_verifier::AttestedTest]
+pub fn oraclemcp_verifier::TestAttestation::toolchain(&self) -> &str
+impl core::clone::Clone for oraclemcp_verifier::TestAttestation
+pub fn oraclemcp_verifier::TestAttestation::clone(&self) -> oraclemcp_verifier::TestAttestation
+impl core::cmp::Eq for oraclemcp_verifier::TestAttestation
+impl core::cmp::PartialEq for oraclemcp_verifier::TestAttestation
+pub fn oraclemcp_verifier::TestAttestation::eq(&self, &oraclemcp_verifier::TestAttestation) -> bool
+impl core::fmt::Debug for oraclemcp_verifier::TestAttestation
+pub fn oraclemcp_verifier::TestAttestation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::TestAttestation
+impl serde_core::ser::Serialize for oraclemcp_verifier::TestAttestation
+pub fn oraclemcp_verifier::TestAttestation::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_verifier::TestAttestation
+pub fn oraclemcp_verifier::TestAttestation::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_verifier::TestAttestation
+impl core::marker::Send for oraclemcp_verifier::TestAttestation
+impl core::marker::Sync for oraclemcp_verifier::TestAttestation
+impl core::marker::Unpin for oraclemcp_verifier::TestAttestation
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestation
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestation where U: core::convert::From<T>
+pub fn oraclemcp_verifier::TestAttestation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestation where U: core::convert::Into<T>
+pub type oraclemcp_verifier::TestAttestation::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::TestAttestation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::TestAttestation where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::TestAttestation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::TestAttestation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestation where T: core::clone::Clone
+pub type oraclemcp_verifier::TestAttestation::Owned = T
+pub fn oraclemcp_verifier::TestAttestation::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::TestAttestation::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::TestAttestation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestation where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::TestAttestation where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestation where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::TestAttestation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestation
+pub fn oraclemcp_verifier::TestAttestation::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::TestAttestation where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestation
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestation
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestation
+pub type oraclemcp_verifier::TestAttestation::Output = T
+pub struct oraclemcp_verifier::TestAttestationDraft
+pub oraclemcp_verifier::TestAttestationDraft::artifacts: alloc::vec::Vec<oraclemcp_verifier::AttestedArtifact>
+pub oraclemcp_verifier::TestAttestationDraft::command: alloc::string::String
+pub oraclemcp_verifier::TestAttestationDraft::created_at: alloc::string::String
+pub oraclemcp_verifier::TestAttestationDraft::git_sha: alloc::string::String
+pub oraclemcp_verifier::TestAttestationDraft::lane: alloc::string::String
+pub oraclemcp_verifier::TestAttestationDraft::repo: alloc::string::String
+pub oraclemcp_verifier::TestAttestationDraft::tests: alloc::vec::Vec<oraclemcp_verifier::AttestedTest>
+pub oraclemcp_verifier::TestAttestationDraft::toolchain: alloc::string::String
+impl core::clone::Clone for oraclemcp_verifier::TestAttestationDraft
+pub fn oraclemcp_verifier::TestAttestationDraft::clone(&self) -> oraclemcp_verifier::TestAttestationDraft
+impl core::fmt::Debug for oraclemcp_verifier::TestAttestationDraft
+pub fn oraclemcp_verifier::TestAttestationDraft::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_verifier::TestAttestationDraft
+impl core::marker::Send for oraclemcp_verifier::TestAttestationDraft
+impl core::marker::Sync for oraclemcp_verifier::TestAttestationDraft
+impl core::marker::Unpin for oraclemcp_verifier::TestAttestationDraft
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationDraft
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationDraft
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationDraft
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationDraft where U: core::convert::From<T>
+pub fn oraclemcp_verifier::TestAttestationDraft::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationDraft where U: core::convert::Into<T>
+pub type oraclemcp_verifier::TestAttestationDraft::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::TestAttestationDraft::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::TestAttestationDraft where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::TestAttestationDraft::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::TestAttestationDraft::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestationDraft where T: core::clone::Clone
+pub type oraclemcp_verifier::TestAttestationDraft::Owned = T
+pub fn oraclemcp_verifier::TestAttestationDraft::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::TestAttestationDraft::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::TestAttestationDraft where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationDraft::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationDraft where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationDraft::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::TestAttestationDraft where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationDraft::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationDraft where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::TestAttestationDraft::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationDraft
+pub fn oraclemcp_verifier::TestAttestationDraft::from(T) -> T
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationDraft
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationDraft
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationDraft
+pub type oraclemcp_verifier::TestAttestationDraft::Output = T
+pub struct oraclemcp_verifier::TestAttestationSignature
+pub oraclemcp_verifier::TestAttestationSignature::key_id: alloc::string::String
+pub oraclemcp_verifier::TestAttestationSignature::payload_sha256: alloc::string::String
+pub oraclemcp_verifier::TestAttestationSignature::schema: alloc::string::String
+pub oraclemcp_verifier::TestAttestationSignature::signature: alloc::string::String
+impl core::clone::Clone for oraclemcp_verifier::TestAttestationSignature
+pub fn oraclemcp_verifier::TestAttestationSignature::clone(&self) -> oraclemcp_verifier::TestAttestationSignature
+impl core::cmp::Eq for oraclemcp_verifier::TestAttestationSignature
+impl core::cmp::PartialEq for oraclemcp_verifier::TestAttestationSignature
+pub fn oraclemcp_verifier::TestAttestationSignature::eq(&self, &oraclemcp_verifier::TestAttestationSignature) -> bool
+impl core::fmt::Debug for oraclemcp_verifier::TestAttestationSignature
+pub fn oraclemcp_verifier::TestAttestationSignature::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::TestAttestationSignature
+impl serde_core::ser::Serialize for oraclemcp_verifier::TestAttestationSignature
+pub fn oraclemcp_verifier::TestAttestationSignature::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_verifier::TestAttestationSignature
+pub fn oraclemcp_verifier::TestAttestationSignature::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_verifier::TestAttestationSignature
+impl core::marker::Send for oraclemcp_verifier::TestAttestationSignature
+impl core::marker::Sync for oraclemcp_verifier::TestAttestationSignature
+impl core::marker::Unpin for oraclemcp_verifier::TestAttestationSignature
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationSignature
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationSignature
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationSignature
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationSignature where U: core::convert::From<T>
+pub fn oraclemcp_verifier::TestAttestationSignature::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationSignature where U: core::convert::Into<T>
+pub type oraclemcp_verifier::TestAttestationSignature::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::TestAttestationSignature::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::TestAttestationSignature where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::TestAttestationSignature::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::TestAttestationSignature::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestationSignature where T: core::clone::Clone
+pub type oraclemcp_verifier::TestAttestationSignature::Owned = T
+pub fn oraclemcp_verifier::TestAttestationSignature::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::TestAttestationSignature::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::TestAttestationSignature where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationSignature::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationSignature where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationSignature::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::TestAttestationSignature where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationSignature::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationSignature where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::TestAttestationSignature::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationSignature
+pub fn oraclemcp_verifier::TestAttestationSignature::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::TestAttestationSignature where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationSignature
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationSignature
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationSignature
+pub type oraclemcp_verifier::TestAttestationSignature::Output = T
+pub struct oraclemcp_verifier::VerdictEvidence<'a>
+pub oraclemcp_verifier::VerdictEvidence::audit_keys: &'a [oraclemcp_audit::record::SigningKey]
+pub oraclemcp_verifier::VerdictEvidence::audit_record: &'a oraclemcp_audit::record::AuditRecord
+pub oraclemcp_verifier::VerdictEvidence::certificate: &'a oraclemcp_guard::classifier::VerdictCertificate
+pub oraclemcp_verifier::VerdictEvidence::sql: &'a str
+impl<'a> core::marker::Freeze for oraclemcp_verifier::VerdictEvidence<'a>
+impl<'a> core::marker::Send for oraclemcp_verifier::VerdictEvidence<'a>
+impl<'a> core::marker::Sync for oraclemcp_verifier::VerdictEvidence<'a>
+impl<'a> core::marker::Unpin for oraclemcp_verifier::VerdictEvidence<'a>
+impl<'a> core::marker::UnsafeUnpin for oraclemcp_verifier::VerdictEvidence<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerdictEvidence<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerdictEvidence<'a>
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerdictEvidence<'a> where U: core::convert::From<T>
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerdictEvidence<'a> where U: core::convert::Into<T>
+pub type oraclemcp_verifier::VerdictEvidence<'a>::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::VerdictEvidence<'a> where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::VerdictEvidence<'a>::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> core::any::Any for oraclemcp_verifier::VerdictEvidence<'a> where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerdictEvidence<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::VerdictEvidence<'a> where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_verifier::VerdictEvidence<'a>
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::from(T) -> T
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerdictEvidence<'a>
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerdictEvidence<'a>
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerdictEvidence<'a>
+pub type oraclemcp_verifier::VerdictEvidence<'a>::Output = T
+pub struct oraclemcp_verifier::VerifiedTestAttestation
+pub oraclemcp_verifier::VerifiedTestAttestation::attestation: oraclemcp_verifier::TestAttestation
+pub oraclemcp_verifier::VerifiedTestAttestation::key_id: alloc::string::String
+pub oraclemcp_verifier::VerifiedTestAttestation::payload_sha256: alloc::string::String
+impl core::clone::Clone for oraclemcp_verifier::VerifiedTestAttestation
+pub fn oraclemcp_verifier::VerifiedTestAttestation::clone(&self) -> oraclemcp_verifier::VerifiedTestAttestation
+impl core::cmp::Eq for oraclemcp_verifier::VerifiedTestAttestation
+impl core::cmp::PartialEq for oraclemcp_verifier::VerifiedTestAttestation
+pub fn oraclemcp_verifier::VerifiedTestAttestation::eq(&self, &oraclemcp_verifier::VerifiedTestAttestation) -> bool
+impl core::fmt::Debug for oraclemcp_verifier::VerifiedTestAttestation
+pub fn oraclemcp_verifier::VerifiedTestAttestation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::VerifiedTestAttestation
+impl core::marker::Freeze for oraclemcp_verifier::VerifiedTestAttestation
+impl core::marker::Send for oraclemcp_verifier::VerifiedTestAttestation
+impl core::marker::Sync for oraclemcp_verifier::VerifiedTestAttestation
+impl core::marker::Unpin for oraclemcp_verifier::VerifiedTestAttestation
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::VerifiedTestAttestation
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerifiedTestAttestation
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerifiedTestAttestation
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerifiedTestAttestation where U: core::convert::From<T>
+pub fn oraclemcp_verifier::VerifiedTestAttestation::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerifiedTestAttestation where U: core::convert::Into<T>
+pub type oraclemcp_verifier::VerifiedTestAttestation::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::VerifiedTestAttestation::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::VerifiedTestAttestation where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::VerifiedTestAttestation::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::VerifiedTestAttestation::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::VerifiedTestAttestation where T: core::clone::Clone
+pub type oraclemcp_verifier::VerifiedTestAttestation::Owned = T
+pub fn oraclemcp_verifier::VerifiedTestAttestation::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::VerifiedTestAttestation::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::VerifiedTestAttestation where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedTestAttestation::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerifiedTestAttestation where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedTestAttestation::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::VerifiedTestAttestation where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedTestAttestation::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::VerifiedTestAttestation where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::VerifiedTestAttestation::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::VerifiedTestAttestation
+pub fn oraclemcp_verifier::VerifiedTestAttestation::from(T) -> T
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerifiedTestAttestation
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerifiedTestAttestation
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerifiedTestAttestation
+pub type oraclemcp_verifier::VerifiedTestAttestation::Output = T
+pub struct oraclemcp_verifier::VerifiedVerdict
+pub oraclemcp_verifier::VerifiedVerdict::audit_entry_hash: alloc::string::String
+pub oraclemcp_verifier::VerifiedVerdict::danger: oraclemcp_guard::levels::DangerLevel
+pub oraclemcp_verifier::VerifiedVerdict::observed_scn: core::option::Option<u64>
+pub oraclemcp_verifier::VerifiedVerdict::required_level: core::option::Option<oraclemcp_guard::levels::OperatingLevel>
+impl core::clone::Clone for oraclemcp_verifier::VerifiedVerdict
+pub fn oraclemcp_verifier::VerifiedVerdict::clone(&self) -> oraclemcp_verifier::VerifiedVerdict
+impl core::cmp::Eq for oraclemcp_verifier::VerifiedVerdict
+impl core::cmp::PartialEq for oraclemcp_verifier::VerifiedVerdict
+pub fn oraclemcp_verifier::VerifiedVerdict::eq(&self, &oraclemcp_verifier::VerifiedVerdict) -> bool
+impl core::fmt::Debug for oraclemcp_verifier::VerifiedVerdict
+pub fn oraclemcp_verifier::VerifiedVerdict::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_verifier::VerifiedVerdict
+impl core::marker::Freeze for oraclemcp_verifier::VerifiedVerdict
+impl core::marker::Send for oraclemcp_verifier::VerifiedVerdict
+impl core::marker::Sync for oraclemcp_verifier::VerifiedVerdict
+impl core::marker::Unpin for oraclemcp_verifier::VerifiedVerdict
+impl core::marker::UnsafeUnpin for oraclemcp_verifier::VerifiedVerdict
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerifiedVerdict
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerifiedVerdict
+impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerifiedVerdict where U: core::convert::From<T>
+pub fn oraclemcp_verifier::VerifiedVerdict::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerifiedVerdict where U: core::convert::Into<T>
+pub type oraclemcp_verifier::VerifiedVerdict::Error = core::convert::Infallible
+pub fn oraclemcp_verifier::VerifiedVerdict::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::VerifiedVerdict where U: core::convert::TryFrom<T>
+pub type oraclemcp_verifier::VerifiedVerdict::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_verifier::VerifiedVerdict::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::VerifiedVerdict where T: core::clone::Clone
+pub type oraclemcp_verifier::VerifiedVerdict::Owned = T
+pub fn oraclemcp_verifier::VerifiedVerdict::clone_into(&self, &mut T)
+pub fn oraclemcp_verifier::VerifiedVerdict::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_verifier::VerifiedVerdict where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedVerdict::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerifiedVerdict where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedVerdict::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::VerifiedVerdict where T: ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedVerdict::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_verifier::VerifiedVerdict where T: core::clone::Clone
+pub unsafe fn oraclemcp_verifier::VerifiedVerdict::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_verifier::VerifiedVerdict
+pub fn oraclemcp_verifier::VerifiedVerdict::from(T) -> T
+impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerifiedVerdict
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerifiedVerdict
+impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerifiedVerdict
+pub type oraclemcp_verifier::VerifiedVerdict::Output = T
+pub const oraclemcp_verifier::TEST_ATTESTATION_FRAME: &str
+pub const oraclemcp_verifier::TEST_ATTESTATION_SCHEMA: &str
+pub const oraclemcp_verifier::TEST_ATTESTATION_SIGNATURE_SCHEMA: &str
+pub fn oraclemcp_verifier::sign_test_attestation(&oraclemcp_verifier::TestAttestation, &oraclemcp_audit::record::SigningKey) -> alloc::string::String
+pub fn oraclemcp_verifier::verify_test_attestation(&str, &[oraclemcp_audit::record::SigningKey]) -> core::result::Result<oraclemcp_verifier::VerifiedTestAttestation, oraclemcp_verifier::TestAttestationVerificationError>
+pub fn oraclemcp_verifier::verify_verdict(oraclemcp_verifier::VerdictEvidence<'_>) -> core::result::Result<oraclemcp_verifier::VerifiedVerdict, oraclemcp_verifier::VerdictVerificationError>

@@ -27,13 +27,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# The locked crates: the published spine plsql-mcp consumes, plus the canonical
-# foundation. oraclemcp-core (the binary-facing aggregation crate) is
-# deliberately NOT locked — it is an internal consumer, not a shared product API.
+# The locked crates: the published spine plsql-mcp consumes, the canonical
+# foundation, and the standalone verifier external auditors build on (R23).
+# oraclemcp-core (the binary-facing aggregation crate) is deliberately NOT
+# locked — it is an internal consumer, not a shared product API.
 LOCKED_CRATES=(
   oraclemcp-error
   oraclemcp-guard
   oraclemcp-db
+  oraclemcp-verifier
 )
 
 if ! command -v cargo-public-api >/dev/null 2>&1; then
