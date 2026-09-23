@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T18:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.1",
+  "scope": {
+    "summary": "T4.1: checked-in release case manifest for field issues #28-#56 (40 cases, every issue 28..56 covered) with a validator (schema, coverage, uniqueness, confidentiality, --required-ids, --check-results, --selftest) wired into the CI lint job.",
+    "in_scope": [
+      "scripts/e2e/cases"
+    ],
+    "out_of_scope": [
+      "No issue is claimed fixed; the manifest only defines the cases.",
+      "T4.2's manifest_enforcement_integration test (listed as a consumer test in the acceptance) belongs to T4.2 and does not exist yet.",
+      ".github/workflows/ci.yml step is wired but no CI run at this SHA is cited."
+    ]
+  },
+  "source": {
+    "sha": "2dea2197f89f4490f8ebbc4647126e63310f1d1f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "python3 scripts/e2e/cases/validate_manifest.py scripts/e2e/cases/release_0_12.json",
+        "kind": "cli",
+        "trace": "Orchestrator re-ran in clean detached worktree at 2dea2197: exit 0; 40 cases; issues 28..56 all present, none missing."
+      },
+      {
+        "name": "validate_manifest.py --required-ids --lane free23 --transport stdio",
+        "kind": "cli",
+        "trace": "exit 0; prints 31 live case ids for FREE 23ai/stdio."
+      },
+      {
+        "name": "validate_manifest.py --selftest",
+        "kind": "cli",
+        "trace": "exit 0; rejects duplicate case_id, unsanitized hostname, unsanitized OCID, non-synthetic object, confidentiality_reviewed false, missing live result, missing unit result."
+      },
+      {
+        "name": "independent planted negatives (orchestrator-authored, not the tool's selftest)",
+        "kind": "cli",
+        "trace": "manifest without issue 44 -> exit 1 'missing issue(s): [44]'; duplicate case -> exit 1; confidentiality_reviewed false -> exit 1; --check-results with one required free23/stdio case dropped -> exit 1 naming rel012_i28_order_alias. Confidentiality grep for OCIDs/IPs/cloud hostnames in the manifest: no hits."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class is offline by design (bead acceptance); no database was contacted.",
+    "Verified by the orchestrator (independent of the implementing pane) by re-execution; the CI lint-job run is not cited."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
