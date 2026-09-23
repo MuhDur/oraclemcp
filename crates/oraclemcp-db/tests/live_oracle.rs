@@ -29,6 +29,8 @@
 
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
+#[cfg(feature = "oracledb")]
+use oraclemcp_db::OfficialOracleConnection;
 use oraclemcp_db::{
     AuthAdapter, CatalogExtractRequest, CatalogRowSetName, CqnNotificationOutcome, DbError,
     DependentsProbe, DrcpConfig, NativeRedactionAvailability, OracleBind, OracleConnectOptions,
@@ -1298,6 +1300,91 @@ fn tstz_live_bind_fetch_preserves_numeric_offset() {
             })
         );
         assert_eq!(v["TSTZ_VALUE"], json!(expected));
+
+        // When the W4 disposable fixture is supplied, persist the same bind
+        // through driver-cx and read it back on a fresh connection. Oracle's
+        // TO_CHAR performs the reread independently of our TSTZ projector.
+        if let Ok(run_id) = std::env::var("ORACLEMCP_TEST_W4_RUN_ID") {
+            assert!(
+                run_id.len() == 12
+                    && run_id.starts_with("W4")
+                    && run_id[2..6].bytes().all(|byte| byte.is_ascii_digit())
+                    && run_id[6..]
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()),
+                "W4 run id must be an exact owned fixture identifier"
+            );
+            let table = format!("W4O_{run_id}.T_TYPES_{run_id}");
+            let changed = conn
+                .execute(
+                    &cx,
+                    &format!("UPDATE {table} SET TSTZ_VAL = :1 WHERE ID = 1"),
+                    &[OracleBind::TimestampTz {
+                        year: 2026,
+                        month: 6,
+                        day: 29,
+                        hour: 12,
+                        minute: 34,
+                        second: 56,
+                        nanosecond: 987_654_000,
+                        offset_minutes: -330,
+                    }],
+                )
+                .await
+                .expect("persist TSTZ bind in owned W4 fixture");
+            assert_eq!(changed, 1);
+            conn.commit(&cx).await.expect("commit TSTZ fixture row");
+            let reread = RustOracleConnection::connect(&cx, test_opts())
+                .await
+                .expect("independent reread connection");
+            let rows = reread
+                .query_rows(
+                    &cx,
+                    &format!(
+                        "SELECT TO_CHAR(TSTZ_VAL, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6TZH:TZM') AS TSTZ_TEXT FROM {table} WHERE ID = 1"
+                    ),
+                    &[],
+                )
+                .await
+                .expect("independent Oracle TSTZ reread");
+            let actual = serialize_row(&rows[0], &SerializeOptions::default());
+            assert_eq!(
+                actual["TSTZ_TEXT"],
+                json!("2026-06-29T12:34:56.987654-05:30")
+            );
+        }
+    });
+}
+
+#[cfg(feature = "oracledb")]
+#[test]
+fn tstz_live_official_bind_refuses_offset_loss() {
+    run_with_cx(|cx| async move {
+        let mut opts = test_opts();
+        opts.session_identity = None;
+        let conn = OfficialOracleConnection::connect(&cx, opts)
+            .await
+            .expect("official backend live connection");
+        let rows = conn
+            .query_rows(
+                &cx,
+                "SELECT CAST(:1 AS TIMESTAMP WITH TIME ZONE) AS tstz_value FROM dual",
+                &[OracleBind::TimestampTz {
+                    year: 2026,
+                    month: 6,
+                    day: 29,
+                    hour: 12,
+                    minute: 34,
+                    second: 56,
+                    nanosecond: 987_654_321,
+                    offset_minutes: -330,
+                }],
+            )
+            .await;
+        assert!(matches!(
+            rows,
+            Err(DbError::UnsupportedFeature(message)) if message.contains("without losing its UTC offset")
+        ));
     });
 }
 

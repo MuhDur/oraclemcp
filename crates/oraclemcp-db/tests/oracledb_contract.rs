@@ -771,7 +771,8 @@ fn contract_call_routine_returns_ordered_out_binds() {
     ]);
     let args = vec![
         OracleRoutineArg::return_output(2, 1, 22),
-        OracleRoutineArg::input(OracleBind::String("input".to_owned())),
+        OracleRoutineArg::input(OracleBind::String("input".to_owned()))
+            .expect("valid routine input"),
         OracleRoutineArg::output(1, 1, 32_767),
     ];
     let c = &conn;
@@ -1279,7 +1280,8 @@ mod live {
                     &[
                         // ORA_TYPE_NUM_NUMBER + CS_FORM_IMPLICIT.
                         OracleRoutineArg::return_output(2, 1, 22),
-                        OracleRoutineArg::input(OracleBind::String("r4".to_owned())),
+                        OracleRoutineArg::input(OracleBind::String("r4".to_owned()))
+                            .expect("valid routine input"),
                         // ORA_TYPE_NUM_VARCHAR + CS_FORM_IMPLICIT.
                         OracleRoutineArg::output(1, 1, 32_767),
                     ],

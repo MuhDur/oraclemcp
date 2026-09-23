@@ -440,7 +440,6 @@ enum OfficialBind {
     I64(i64),
     F64(f64),
     Bool(bool),
-    Timestamp(oracledb::OracleTimestamp),
 }
 
 impl OfficialBinds {
@@ -465,49 +464,10 @@ impl OfficialBind {
             OracleBind::I64(value) => Ok(Self::I64(*value)),
             OracleBind::F64(value) => Ok(Self::F64(*value)),
             OracleBind::Bool(value) => Ok(Self::Bool(*value)),
-            OracleBind::TimestampTz {
-                year,
-                month,
-                day,
-                hour,
-                minute,
-                second,
-                nanosecond,
-                offset_minutes,
-            } => {
-                let offset_abs = offset_minutes.unsigned_abs();
-                let offset_sign = if *offset_minutes < 0 { -1_i8 } else { 1_i8 };
-                let tz_hour_offset = i8::try_from(offset_abs / 60).map_err(|_| {
-                    DbError::UnsupportedFeature(
-                        "official Oracle backend cannot represent this timestamp UTC offset"
-                            .to_owned(),
-                    )
-                })? * offset_sign;
-                let tz_minute_offset = i8::try_from(offset_abs % 60).map_err(|_| {
-                    DbError::UnsupportedFeature(
-                        "official Oracle backend cannot represent this timestamp UTC offset"
-                            .to_owned(),
-                    )
-                })? * offset_sign;
-                Ok(Self::Timestamp(
-                    oracledb::OracleTimestamp::new_timestamp_tz(
-                        i16::try_from(*year).map_err(|_| {
-                            DbError::UnsupportedFeature(
-                                "official Oracle backend cannot represent this timestamp year"
-                                    .to_owned(),
-                            )
-                        })?,
-                        *month,
-                        *day,
-                        *hour,
-                        *minute,
-                        *second,
-                        *nanosecond,
-                        tz_hour_offset,
-                        tz_minute_offset,
-                    ),
-                ))
-            }
+            OracleBind::TimestampTz { .. } => Err(DbError::UnsupportedFeature(
+                "official Oracle backend cannot bind TIMESTAMP WITH TIME ZONE without losing its UTC offset"
+                    .to_owned(),
+            )),
         }
     }
 
@@ -518,7 +478,6 @@ impl OfficialBind {
             Self::I64(value) => value,
             Self::F64(value) => value,
             Self::Bool(value) => value,
-            Self::Timestamp(value) => value,
         }
     }
 }
@@ -1787,7 +1746,7 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_tz_bind_keeps_negative_hour_and_minute_offsets() {
+    fn timestamp_tz_bind_refuses_official_driver_offset_loss() {
         let bind = OracleBind::TimestampTz {
             year: 2026,
             month: 9,
@@ -1799,13 +1758,10 @@ mod tests {
             offset_minutes: -330,
         };
 
-        let OfficialBind::Timestamp(timestamp) = OfficialBind::from_oracle_bind(&bind)
-            .expect("the official driver represents a -05:30 offset")
-        else {
-            panic!("timestamp bind must remain a timestamp");
-        };
-        assert_eq!(timestamp.tz_hour_offset(), -5);
-        assert_eq!(timestamp.tz_minute_offset(), -30);
+        assert!(matches!(
+            OfficialBind::from_oracle_bind(&bind),
+            Err(DbError::UnsupportedFeature(message)) if message.contains("without losing its UTC offset")
+        ));
     }
 
     #[test]

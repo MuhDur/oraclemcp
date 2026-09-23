@@ -50,6 +50,7 @@ use crate::types::{
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{Budget, Cx, Time};
 use async_trait::async_trait;
+use chrono::{Datelike, Timelike};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(feature = "test-utils")]
@@ -624,12 +625,12 @@ pub struct OracleRoutineArg {
 }
 
 impl OracleRoutineArg {
-    /// Build an input-only routine argument.
-    #[must_use]
-    pub fn input(value: OracleBind) -> Self {
-        Self {
-            bind: oracle_bind_to_driver(&value),
-        }
+    /// Build an input-only routine argument, refusing invalid timestamp values
+    /// before they can reach the driver.
+    pub fn input(value: OracleBind) -> Result<Self, DbError> {
+        Ok(Self {
+            bind: oracle_bind_to_driver(&value)?,
+        })
     }
 
     /// Build a scalar OUT or IN-OUT argument. The pinned driver has no separate
@@ -735,8 +736,10 @@ impl std::fmt::Debug for OracleRoutineArg {
     }
 }
 
-fn oracle_bind_to_driver(bind: &OracleBind) -> oraclemcp_driver_cx::protocol::thin::BindValue {
-    match bind {
+fn oracle_bind_to_driver(
+    bind: &OracleBind,
+) -> Result<oraclemcp_driver_cx::protocol::thin::BindValue, DbError> {
+    Ok(match bind {
         OracleBind::Null => oraclemcp_driver_cx::protocol::thin::BindValue::Null,
         OracleBind::String(value) => {
             oraclemcp_driver_cx::protocol::thin::BindValue::Text(value.clone())
@@ -759,17 +762,32 @@ fn oracle_bind_to_driver(bind: &OracleBind) -> oraclemcp_driver_cx::protocol::th
             second,
             nanosecond,
             offset_minutes,
-        } => oraclemcp_driver_cx::protocol::thin::BindValue::TimestampTz {
-            year: *year,
-            month: *month,
-            day: *day,
-            hour: *hour,
-            minute: *minute,
-            second: *second,
-            nanosecond: *nanosecond,
-            offset_minutes: *offset_minutes,
-        },
-    }
+        } => {
+            let utc = timestamp_tz_utc_clock(
+                *year,
+                *month,
+                *day,
+                *hour,
+                *minute,
+                *second,
+                *nanosecond,
+                *offset_minutes,
+            )
+            .ok_or_else(|| {
+                DbError::UnsupportedFeature("invalid TIMESTAMP WITH TIME ZONE bind".to_owned())
+            })?;
+            oraclemcp_driver_cx::protocol::thin::BindValue::TimestampTz {
+                year: utc.year(),
+                month: utc.month() as u8,
+                day: utc.day() as u8,
+                hour: utc.hour() as u8,
+                minute: utc.minute() as u8,
+                second: utc.second() as u8,
+                nanosecond: utc.nanosecond(),
+                offset_minutes: *offset_minutes,
+            }
+        }
+    })
 }
 
 /// Result of adapter-internal PL/SQL routine execution.
@@ -1973,6 +1991,33 @@ pub(crate) fn timestamp_tz_wall_clock(
         .checked_add_signed(chrono::Duration::minutes(i64::from(offset_minutes)))
 }
 
+/// `OracleBind::TimestampTz` carries a local wall clock. The thin driver
+/// expects the UTC instant in its timestamp fields and the offset separately.
+#[allow(clippy::too_many_arguments)]
+fn timestamp_tz_utc_clock(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanosecond: u32,
+    offset_minutes: i32,
+) -> Option<chrono::NaiveDateTime> {
+    if !(-1439..=1439).contains(&offset_minutes) {
+        return None;
+    }
+    let utc = chrono::NaiveDate::from_ymd_opt(year, u32::from(month), u32::from(day))?
+        .and_hms_nano_opt(
+            u32::from(hour),
+            u32::from(minute),
+            u32::from(second),
+            nanosecond,
+        )?
+        .checked_sub_signed(chrono::Duration::minutes(i64::from(offset_minutes)))?;
+    (1..=9999).contains(&utc.year()).then_some(utc)
+}
+
 mod driver {
     use super::{
         CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver,
@@ -2605,7 +2650,7 @@ mod driver {
         Ok(())
     }
 
-    fn to_bind(bind: &OracleBind) -> BindValue {
+    fn to_bind(bind: &OracleBind) -> Result<BindValue, DbError> {
         oracle_bind_to_driver(bind)
     }
 
@@ -6742,7 +6787,7 @@ mod driver {
             serialize_opts: &SerializeOptions,
         ) -> Result<Vec<OracleRow>, DbError> {
             super::db_checkpoint(cx, "oracle_db.query_rows.before")?;
-            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
             let result = execute_with_timeout(
@@ -6773,7 +6818,7 @@ mod driver {
             serialize_opts: &SerializeOptions,
         ) -> Result<Option<crate::query::QueryResponse>, DbError> {
             super::db_checkpoint(cx, "oracle_db.query_bounded_page.before")?;
-            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
             let result = execute_with_timeout(
@@ -6812,7 +6857,8 @@ mod driver {
             serialize_opts: &SerializeOptions,
         ) -> Result<QueryRowStreamStart, DbError> {
             super::db_checkpoint(cx, "oracle_db.query_row_stream.before")?;
-            let driver_binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let driver_binds: Vec<BindValue> =
+                binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let arraysize = arraysize.clamp(1, u32::MAX as usize) as u32;
             let arraysize = NonZeroU32::new(arraysize).expect("arraysize clamped to non-zero");
             let limits = self.wire_limits()?;
@@ -6902,8 +6948,8 @@ mod driver {
             super::db_checkpoint(cx, "oracle_db.query_rows_named.before")?;
             let binds: Vec<(String, BindValue)> = binds
                 .iter()
-                .map(|(name, bind)| (name.clone(), to_bind(bind)))
-                .collect();
+                .map(|(name, bind)| Ok((name.clone(), to_bind(bind)?)))
+                .collect::<Result<_, DbError>>()?;
             let ordered_binds = order_named_binds_for_driver(sql, binds)?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
@@ -6937,8 +6983,8 @@ mod driver {
             super::db_checkpoint(cx, "oracle_db.query_bounded_page_named.before")?;
             let binds: Vec<(String, BindValue)> = binds
                 .iter()
-                .map(|(name, bind)| (name.clone(), to_bind(bind)))
-                .collect();
+                .map(|(name, bind)| Ok((name.clone(), to_bind(bind)?)))
+                .collect::<Result<_, DbError>>()?;
             let ordered_binds = order_named_binds_for_driver(sql, binds)?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
@@ -6971,7 +7017,7 @@ mod driver {
 
         async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
             super::db_checkpoint(cx, "oracle_db.execute.before")?;
-            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
             let result = execute_with_timeout(
@@ -6994,7 +7040,7 @@ mod driver {
             binds: &[OracleBind],
         ) -> Result<super::CqnQueryRegistration, DbError> {
             super::db_checkpoint(cx, "oracle_db.cqn_register_query.before")?;
-            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect();
+            let binds: Vec<BindValue> = binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let limits = self.wire_limits()?;
             // `subscribe_register` / `register_query` receive the request Cx
             // directly. Sampling the effective limit here preserves the shared
@@ -7414,6 +7460,134 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn timestamp_tz_binds_convert_wall_clock_to_utc_fields() {
+        // UTC expectations are calendar arithmetic worked out independently of
+        // timestamp_tz_utc_clock; copying the wall fields would fail this table.
+        let cases = [
+            (
+                "+05:45 leap-day crossing",
+                (2020, 2, 29, 0, 15, 0, 0),
+                345,
+                (2020, 2, 28, 18, 30, 0, 0),
+            ),
+            (
+                "-09:30 next-day UTC",
+                (2020, 2, 29, 22, 45, 0, 0),
+                -570,
+                (2020, 3, 1, 8, 15, 0, 0),
+            ),
+            (
+                "UTC",
+                (2020, 2, 29, 23, 59, 0, 0),
+                0,
+                (2020, 2, 29, 23, 59, 0, 0),
+            ),
+            (
+                "+14:00 previous-day UTC",
+                (2020, 3, 1, 7, 0, 0, 0),
+                840,
+                (2020, 2, 29, 17, 0, 0, 0),
+            ),
+            (
+                "New York before DST",
+                (2020, 3, 8, 1, 59, 0, 0),
+                -300,
+                (2020, 3, 8, 6, 59, 0, 0),
+            ),
+            (
+                "New York after DST",
+                (2020, 3, 8, 3, 1, 0, 0),
+                -240,
+                (2020, 3, 8, 7, 1, 0, 0),
+            ),
+            (
+                "fraction",
+                (2026, 6, 29, 12, 34, 56, 987_654_321),
+                -330,
+                (2026, 6, 29, 18, 4, 56, 987_654_321),
+            ),
+        ];
+        for (label, (year, month, day, hour, minute, second, nanosecond), offset, expected) in cases
+        {
+            let bind = OracleBind::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes: offset,
+            };
+            let oraclemcp_driver_cx::protocol::thin::BindValue::TimestampTz {
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanosecond,
+                offset_minutes,
+            } = oracle_bind_to_driver(&bind).expect(label)
+            else {
+                panic!("{label}: expected TIMESTAMP WITH TIME ZONE bind");
+            };
+            assert_eq!(
+                (year, month, day, hour, minute, second, nanosecond),
+                expected,
+                "{label}"
+            );
+            assert_eq!(offset_minutes, offset, "{label}");
+        }
+
+        for invalid in [
+            OracleBind::TimestampTz {
+                year: 2020,
+                month: 2,
+                day: 30,
+                hour: 12,
+                minute: 0,
+                second: 0,
+                nanosecond: 0,
+                offset_minutes: 345,
+            },
+            OracleBind::TimestampTz {
+                year: 2020,
+                month: 2,
+                day: 29,
+                hour: 12,
+                minute: 0,
+                second: 0,
+                nanosecond: 0,
+                offset_minutes: 1440,
+            },
+            OracleBind::TimestampTz {
+                year: 1,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+                nanosecond: 0,
+                offset_minutes: 840,
+            },
+            OracleBind::TimestampTz {
+                year: 9999,
+                month: 12,
+                day: 31,
+                hour: 23,
+                minute: 59,
+                second: 59,
+                nanosecond: 0,
+                offset_minutes: -840,
+            },
+        ] {
+            assert!(oracle_bind_to_driver(&invalid).is_err());
+            assert!(OracleRoutineArg::input(invalid).is_err());
+        }
+    }
 
     fn selector_test_options() -> OracleConnectOptions {
         OracleConnectOptions {
@@ -8557,7 +8731,8 @@ mod tests {
 
         let args = [
             OracleRoutineArg::return_output(1, 1, 32_767),
-            OracleRoutineArg::input(OracleBind::String("ignored input".to_owned())),
+            OracleRoutineArg::input(OracleBind::String("ignored input".to_owned()))
+                .expect("valid routine input"),
             OracleRoutineArg::output(2, 1, 22),
         ];
 
@@ -8579,7 +8754,8 @@ mod tests {
         let err = driver::ordered_routine_out_values(
             &missing,
             &[
-                OracleRoutineArg::input(OracleBind::String("ignored input".to_owned())),
+                OracleRoutineArg::input(OracleBind::String("ignored input".to_owned()))
+                    .expect("valid routine input"),
                 OracleRoutineArg::output(1, 1, 32_767),
             ],
         )
