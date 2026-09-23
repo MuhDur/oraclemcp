@@ -468,6 +468,74 @@ fn issue53_sample_rows_masked_and_certified() {
 }
 
 #[test]
+fn custom_read_tool_masked_and_audit_certified() {
+    let defs = oraclemcp_core::parse_tools_file(
+        r#"
+            [[tool]]
+            name = "app_customer_lookup"
+            description = "Lookup a customer row by id"
+            sql = "SELECT id, name FROM app_customers WHERE id = :id"
+            output_mode = "rows"
+
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            required = true
+            description = "Customer id"
+            "#,
+    )
+    .expect("custom tool parses");
+    let loaded = oraclemcp_core::load_tools(
+        &defs,
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
+        OperatingLevel::ReadOnly,
+    )
+    .expect("custom tool loads");
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_cx, _profile| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+        CustomToolCatalog::new(loaded),
+        None,
+    )
+    .with_auditor(auditor)
+    .with_result_masking_policy(Some(mask_all_policy()));
+
+    let result = dispatcher
+        .dispatch("app_customer_lookup", json!({"id": 7}))
+        .expect("ordinary custom read is admitted");
+    assert_eq!(result["row_count"], json!(1));
+    let unmasked_visible = result["rows"].to_string().contains("EMPLOYEES");
+    assert!(!unmasked_visible);
+    let certificate = result["mask_certificate"]
+        .as_object()
+        .expect("custom read carries a masking certificate");
+    let records = sink.records();
+    let completed = records
+        .last()
+        .expect("custom read has a completed audit record");
+    assert_eq!(completed.tool, "app_customer_lookup");
+    assert_eq!(completed.outcome, AuditOutcome::Succeeded);
+    assert_eq!(certificate["audit_entry_hash"], json!(completed.entry_hash));
+    assert!(completed.result_masking.is_some());
+    write_executor_test_artifact(
+        "custom_read_tool_masked_and_audit_certified",
+        &[json!({
+            "case_id": "custom_read_tool_masked_and_audit_certified",
+            "expected": {"row_count": 1, "unmasked_value_visible": false, "tool": "app_customer_lookup", "certificate_bound": true},
+            "actual": {
+                "row_count": result["row_count"],
+                "unmasked_value_visible": unmasked_visible,
+                "tool": completed.tool,
+                "certificate_bound": certificate["audit_entry_hash"] == json!(completed.entry_hash),
+            },
+        })],
+    );
+}
+
+#[test]
 fn read_clob_masked_and_certified() {
     let (auditor, sink) = auditor_with_sink();
     let dispatcher =

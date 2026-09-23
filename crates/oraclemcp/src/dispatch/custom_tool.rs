@@ -6,70 +6,13 @@
 
 use std::collections::HashMap;
 
-use asupersync::Cx;
-use oraclemcp_core::{CustomToolExecutor, ToolBody, narrow_to_read_path};
-use oraclemcp_db::{
-    DbError, OracleBind, OracleCatalogResolverCache, OracleConnection, QueryCaps, SerializeOptions,
-    read_query_named,
-};
+use oraclemcp_core::ToolBody;
+use oraclemcp_db::OracleBind;
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use oraclemcp_guard::{OperatingLevel, named_bind_placeholders};
+use oraclemcp_guard::named_bind_placeholders;
 use serde_json::{Value, json};
 
-use super::{ExecuteArgs, dispatch_checkpoint, ensure_resolved_read_only, invalid_args};
-
-pub(super) struct ReadOnlyCustomToolExecutor<'a> {
-    pub(super) cx: &'a Cx,
-    pub(super) conn: &'a dyn OracleConnection,
-    pub(super) catalog_cache: &'a OracleCatalogResolverCache,
-}
-
-#[async_trait::async_trait(?Send)]
-impl CustomToolExecutor for ReadOnlyCustomToolExecutor<'_> {
-    async fn run(
-        &self,
-        body: ToolBody<'_>,
-        level: OperatingLevel,
-        binds: &[(String, OracleBind)],
-    ) -> Result<Value, ErrorEnvelope> {
-        if level > OperatingLevel::ReadOnly {
-            return Err(ErrorEnvelope::new(
-                ErrorClass::OperatingLevelTooLow,
-                format!(
-                    "custom tool requires {} but this server executes only READ_ONLY custom tools",
-                    level.as_str()
-                ),
-            )
-            .with_next_step(
-                "move write or DDL workflows behind a separate guarded execution service",
-            ));
-        }
-
-        // Only Form A reaches execution; Form B (`call = ...`) is rejected at
-        // catalog load, so the body is always inline SQL (QA100 .65).
-        let ToolBody::InlineSql(sql) = body;
-        let sql = sql.to_owned();
-        ensure_resolved_read_only(self.cx, self.conn, self.catalog_cache, &sql).await?;
-        // A9: operator-defined read tools also narrow the handler context to the
-        // read-path capability row. The cancellation checkpoint runs under the
-        // narrowed `read_cx`; only the locked, object-safe `OracleConnection`
-        // round trip takes the full `cx` (the one documented IO exception).
-        let read_cx = narrow_to_read_path(self.cx);
-        dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.custom_read.before")?;
-        read_query_named(
-            self.cx,
-            self.conn,
-            &sql,
-            binds,
-            QueryCaps::default(),
-            0,
-            &SerializeOptions::default(),
-        )
-        .await
-        .map(|resp| serde_json::to_value(resp).unwrap_or(Value::Null))
-        .map_err(DbError::into_envelope)
-    }
-}
+use super::{ExecuteArgs, invalid_args};
 
 fn consume_custom_tool_control_string(
     args: &mut serde_json::Map<String, Value>,
@@ -172,7 +115,7 @@ fn consume_custom_tool_control_u64(
     Ok(value)
 }
 
-fn ordered_custom_tool_binds(
+pub(super) fn ordered_custom_tool_binds(
     sql: &str,
     bind_values: Vec<(String, OracleBind)>,
 ) -> Result<Vec<Value>, ErrorEnvelope> {

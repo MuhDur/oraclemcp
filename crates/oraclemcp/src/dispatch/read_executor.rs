@@ -77,7 +77,7 @@ fn fga_refusal(code: &'static str) -> ErrorEnvelope {
 pub(super) struct ReadExecutionPlan {
     pub(super) args: QueryArgs,
     /// The served tool that owns this query's audit record.
-    pub(super) audit_tool: &'static str,
+    pub(super) audit_tool: String,
     /// The audit-marked SQL actually executed (== the text that was classified).
     pub(super) executed_sql: String,
     /// The read-only gate verdict for `executed_sql`, computed once.
@@ -175,7 +175,7 @@ impl<'a> GuardedReadExecutor<'a> {
         cx: &Cx,
         state: &mut DispatcherState,
         context: DispatchContext<'_>,
-        audit_tool: &'static str,
+        audit_tool: &str,
         mut args: Value,
         server_sql: ServerSql,
         request_budget: RequestBudget,
@@ -232,12 +232,7 @@ impl<'a> GuardedReadExecutor<'a> {
         tool: &str,
     ) -> Result<Value, ErrorEnvelope> {
         let (prepared, semantic_metadata) = {
-            let audit_tool = match tool {
-                "oracle_semantic_search" => "oracle_semantic_search",
-                "oracle_sample_rows" => "oracle_sample_rows",
-                "oracle_read_clob" => "oracle_read_clob",
-                _ => "oracle_query",
-            };
+            let audit_tool = tool.to_owned();
             let (parsed, semantic_metadata) = if tool == "oracle_semantic_search" {
                 let result_masking = self.result_masking_policy()?;
                 let (parsed, metadata) = semantic_search_as_query_args(
@@ -310,7 +305,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 .clone()
                 .unwrap_or_else(|| parsed.sql.clone());
             let executed_sql =
-                with_audit_marker(&policy_sql, state.active_profile.as_deref(), audit_tool);
+                with_audit_marker(&policy_sql, state.active_profile.as_deref(), &audit_tool);
             let classified = if verified_local_vector_embedding {
                 resolve_read_only_relations_with_verified_local_vector_embedding(
                     cx,
@@ -587,7 +582,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 };
                 ReadExecutionPlan {
                     args: parsed,
-                    audit_tool: "oracle_query",
+                    audit_tool: "oracle_query".to_owned(),
                     executed_sql,
                     gate,
                     verdict_certificate,
@@ -912,7 +907,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 if let Some(audit_certificate) = audit_certificate.as_ref() {
                     append_query_read_audit(
                         read_audit,
-                        audit_tool,
+                        &audit_tool,
                         &executed_sql,
                         observed_scn,
                         audit_certificate,
@@ -954,7 +949,7 @@ impl<'a> GuardedReadExecutor<'a> {
                         if let Some(audit_certificate) = audit_certificate.as_ref() {
                             append_query_read_audit(
                                 read_audit,
-                                audit_tool,
+                                &audit_tool,
                                 &executed_sql,
                                 observed_scn,
                                 audit_certificate,
@@ -973,7 +968,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 if let Some(audit_certificate) = audit_certificate.as_ref() {
                     append_query_read_audit(
                         read_audit,
-                        audit_tool,
+                        &audit_tool,
                         &executed_sql,
                         observed_scn,
                         audit_certificate,

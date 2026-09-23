@@ -47,9 +47,9 @@ use oraclemcp_config::{
 use oraclemcp_core::{
     CLEANUP_POLL_QUOTA, ConnectionStatus, CustomToolCatalog, DEFAULT_REQUEST_TIMEOUT,
     DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, McpSurfaceDetail,
-    McpSurfaceFuture, McpSurfaceState, McpToolCatalogSnapshot, RequestBudget, ToolDispatch,
-    ToolRegistry, ToolStreamFrame, ToolStreamSender, WriteIntent, WriteIntentDetails,
-    WriteIntentError, WriteIntentLog, WriteIntentOutcome, execute_custom_tool, narrow_to_read_path,
+    McpSurfaceFuture, McpSurfaceState, McpToolCatalogSnapshot, RequestBudget, ToolBody,
+    ToolDispatch, ToolRegistry, ToolStreamFrame, ToolStreamSender, WriteIntent, WriteIntentDetails,
+    WriteIntentError, WriteIntentLog, WriteIntentOutcome, bind_params, narrow_to_read_path,
     sign_token, verify_token,
 };
 use oraclemcp_db::{
@@ -12763,6 +12763,35 @@ impl OracleDispatcher {
             }
             return Ok(response);
         }
+        if let Some(loaded) = state.custom_catalog.catalog.get(tool)
+            && loaded.required_level <= OperatingLevel::ReadOnly
+        {
+            let loaded = loaded.clone();
+            let binds = bind_params(&loaded.def, &args)?;
+            let ToolBody::InlineSql(sql) = loaded.def.body().map_err(|error| {
+                ErrorEnvelope::new(
+                    ErrorClass::InvalidArguments,
+                    format!("invalid tool body: {error}"),
+                )
+            })?;
+            let ordered_binds = ordered_custom_tool_binds(sql, binds)?;
+            let server_sql = ServerSql::new(sql.to_owned(), Vec::new());
+            return GuardedReadExecutor::new(self)
+                .run_server_read(
+                    cx,
+                    &mut state,
+                    context,
+                    tool,
+                    json!({ "binds": ordered_binds }),
+                    server_sql,
+                    request_budget,
+                    &request_subject,
+                    sql_policy,
+                    current_schema,
+                    &scoped_level,
+                )
+                .await;
+        }
         let generated_read = generated_read_tool(tool);
         if generated_read
             && (generated_read_uses_primary_session(tool) || state.stateless_conn.is_none())
@@ -14449,12 +14478,10 @@ impl OracleDispatcher {
             other => {
                 if let Some(loaded) = state.custom_catalog.catalog.get(other) {
                     if loaded.required_level <= OperatingLevel::ReadOnly {
-                        let executor = ReadOnlyCustomToolExecutor {
-                            cx,
-                            conn: &observed_conn,
-                            catalog_cache: &state.catalog_cache,
-                        };
-                        execute_custom_tool(loaded, &args, &executor).await
+                        Err(ErrorEnvelope::new(
+                            ErrorClass::Internal,
+                            "custom read bypassed the guarded read dispatch entry",
+                        ))
                     } else {
                         let grant_binding = grant_binding_for_context(&state, context);
                         let active_profile = state.active_profile.clone();

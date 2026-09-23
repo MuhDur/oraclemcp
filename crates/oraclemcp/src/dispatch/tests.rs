@@ -5377,6 +5377,74 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
 }
 
 #[test]
+fn custom_read_tool_refuses_fga_handler_before_application_sql() {
+    let defs = oraclemcp_core::parse_tools_file(
+        r#"
+            [[tool]]
+            name = "app_order_lookup"
+            description = "Lookup one order"
+            sql = "SELECT id FROM APP.ORDERS WHERE id = :id"
+            output_mode = "rows"
+
+            [[tool.params]]
+            name = "id"
+            type = "integer"
+            required = true
+            description = "Order id"
+            "#,
+    )
+    .expect("custom tool parses");
+    let loaded = oraclemcp_core::load_tools(
+        &defs,
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
+        OperatingLevel::ReadOnly,
+    )
+    .expect("custom tool loads");
+    let state = Arc::new(SemanticGuardState::default());
+    *state.fga_handler_table.lock().expect("FGA fixture lock") = Some("ORDERS".to_owned());
+    let connector_state = Arc::clone(&state);
+    let dispatcher = OracleDispatcher::new_switchable_with_custom_tools(
+        Box::new(SemanticGuardMock {
+            state: Arc::clone(&state),
+        }),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(move |_cx, _profile| {
+            let state = Arc::clone(&connector_state);
+            Box::pin(async move { Ok(session_bundle(SemanticGuardMock { state })) })
+        }),
+        CustomToolCatalog::new(loaded),
+        None,
+    );
+
+    let error = dispatcher
+        .dispatch("app_order_lookup", json!({"id": 7}))
+        .expect_err("custom read must use the executor's FGA proof");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+    assert_eq!(
+        error
+            .structured_reason
+            .as_ref()
+            .and_then(|reason| reason.offending_construct.as_deref()),
+        Some("fga_handler_autonomous")
+    );
+    let caller_queries = state.caller_queries.load(Ordering::SeqCst);
+    assert_eq!(caller_queries, 0);
+    write_executor_test_artifact(
+        "custom_read_tool_refuses_fga_handler_before_application_sql",
+        &[json!({
+            "case_id": "custom_read_tool_refuses_fga_handler_before_application_sql",
+            "expected": {"error_class": "ForbiddenStatement", "reason": "fga_handler_autonomous", "caller_queries": 0},
+            "actual": {
+                "error_class": format!("{:?}", error.error_class),
+                "reason": error.structured_reason.as_ref().and_then(|reason| reason.offending_construct.as_deref()),
+                "caller_queries": caller_queries,
+            },
+        })],
+    );
+}
+
+#[test]
 fn custom_tool_default_edition_flip_refused() {
     let definitions = oraclemcp_core::parse_tools_file(
         r#"
