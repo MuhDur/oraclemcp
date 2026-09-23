@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T20:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.6",
+  "scope": {
+    "summary": "RoutineEffectsV1 effect set, single admit() function and level derivation seam in oraclemcp-guard (committed 4702f732; later extended by 992dd9a4/ca100b7c).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/purity.rs",
+      "crates/oraclemcp-guard/src/policy_gate.rs"
+    ],
+    "out_of_scope": [
+      "Engine-derived effects from real PL/SQL (T7.2) are not proven here (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "ca100b7ca988b344a19a97a28a696254668feada",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at ca100b7c (dirty=0, build lease held): cargo fmt --check OK; cargo clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 114 suites, 3279 passed, 0 failed; cargo deny check OK."
+      },
+      {
+        "name": "17 named test-plan tests",
+        "kind": "cli",
+        "trace": "all present; 15 by exact name in the gate log as ok (effects_* and admission_required_level_never_lowered_by_effects)."
+      },
+      {
+        "name": "orchestrator planted mutants at 1064d28a",
+        "kind": "cli",
+        "trace": "TxnControl admitted at DDL -> killed by effects_package_init_commit_refused; OperatorOnly mapped to Admin -> killed by effects_literal_alter_database_default_edition_is_operator_only_on_admin_lane; DDL-trigger admits Dml -> killed by effects_ddl_trigger_context_refuses_dml. File restored, tree clean."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit/offline per the bead; verified by the orchestrator by re-execution, independent of the implementing pane.",
+    "Mutants were run at 1064d28a; purity.rs was later extended by 992dd9a4 (T13.1 exact-template class) and is covered at ca100b7c by the gate, not by re-run mutants."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

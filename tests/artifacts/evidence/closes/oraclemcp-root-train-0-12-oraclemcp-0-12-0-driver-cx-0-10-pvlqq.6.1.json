@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T20:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.1",
+  "scope": {
+    "summary": "GuardedReadExecutor seam: AdmittedRead only constructible in read_executor, closed CatalogQueryId runner with typed bind-arity refusal, backstop nested under the executor (1de73206, a6f3cf85 incl. operator-approved RULE 1 git mv).",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "crates/oraclemcp/src/dispatch/read_executor",
+      "crates/oraclemcp-db/src/catalog_query.rs",
+      "crates/oraclemcp-db/src/catalog_resolver.rs"
+    ],
+    "out_of_scope": [
+      "dispatch/mod.rs and dispatch/tests.rs were also changed by 1de73206 but currently carry another agent's uncommitted .8.1 edits, so they are excluded from the clean-scope claim; their committed state is covered by the gate at ca100b7c."
+    ]
+  },
+  "source": {
+    "sha": "ca100b7ca988b344a19a97a28a696254668feada",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at ca100b7c (dirty=0, build lease held): cargo fmt --check OK; cargo clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 114 suites, 3279 passed, 0 failed; cargo deny check OK."
+      },
+      {
+        "name": "compile_fail doctest",
+        "kind": "cli",
+        "trace": "dispatch::read_executor::AdmittedRead (line 49) - compile fail ... ok in the gate log."
+      },
+      {
+        "name": "adversarial corpus + read_executor tests",
+        "kind": "cli",
+        "trace": "tests/adversarial_corpus.rs ran; 6 read_executor tests ok; every pre-existing dispatch/guard test passed (0 failures workspace-wide)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit/offline per the bead; verified by the orchestrator by re-execution, independent of the implementing pane.",
+    "Negatives verified as the bead named tests passing; no orchestrator-authored mutants for this bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

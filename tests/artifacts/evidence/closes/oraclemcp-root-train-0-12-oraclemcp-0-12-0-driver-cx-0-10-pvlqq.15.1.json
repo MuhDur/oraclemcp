@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T20:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.15.1",
+  "scope": {
+    "summary": "ScopedGrant seam: construction-time refusals, keyed HMAC scope digest, lifecycle store with generation/TTL invalidation, SignedGrantRef distinct from grant:execute tokens (20edb0e4).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/scoped_grant",
+      "crates/oraclemcp-guard/tests/scoped_grant_seam.rs"
+    ],
+    "out_of_scope": [
+      "No database or live claim; consumers (T14.x) wire it into execution."
+    ]
+  },
+  "source": {
+    "sha": "ca100b7ca988b344a19a97a28a696254668feada",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at ca100b7c (dirty=0, build lease held): cargo fmt --check OK; cargo clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 114 suites, 3279 passed, 0 failed; cargo deny check OK."
+      },
+      {
+        "name": "tests/scoped_grant_seam.rs + unit tests",
+        "kind": "cli",
+        "trace": "binary ran in the gate; 13 named tests from acceptance/test plan passed by exact name."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit/offline per the bead; verified by the orchestrator by re-execution, independent of the implementing pane.",
+    "Negatives verified as the bead named tests passing; no orchestrator-authored mutants for this bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
