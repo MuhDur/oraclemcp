@@ -34,6 +34,39 @@ fn positional_placeholders(text: &str) -> BTreeMap<u32, usize> {
             index += 1;
             continue;
         }
+        // Expected timestamp text in nearby Rust unit tests can contain a
+        // clock such as `03:01:00`. Neither colon is an Oracle bind marker.
+        // Check the complete HH:MM:SS token, including when `index` points at
+        // its second colon; do not suppress a free-standing `:n` elsewhere.
+        let is_clock = [index.checked_sub(2), index.checked_sub(5)]
+            .into_iter()
+            .flatten()
+            .any(|start| {
+                bytes.get(start..start + 8).is_some_and(|clock| {
+                    clock[0].is_ascii_digit()
+                        && clock[1].is_ascii_digit()
+                        && clock[2] == b':'
+                        && clock[3].is_ascii_digit()
+                        && clock[4].is_ascii_digit()
+                        && clock[5] == b':'
+                        && clock[6].is_ascii_digit()
+                        && clock[7].is_ascii_digit()
+                })
+            });
+        if is_clock {
+            index += 1;
+            continue;
+        }
+        let is_numeric_zone = index >= 3
+            && matches!(bytes[index - 3], b'+' | b'-')
+            && bytes[index - 2].is_ascii_digit()
+            && bytes[index - 1].is_ascii_digit()
+            && bytes.get(index + 1).is_some_and(u8::is_ascii_digit)
+            && bytes.get(index + 2).is_some_and(u8::is_ascii_digit);
+        if is_numeric_zone {
+            index += 1;
+            continue;
+        }
         // `::` is a Rust path separator, never a bind.
         let mut end = index + 1;
         while end < bytes.len() && bytes[end].is_ascii_digit() {
@@ -171,4 +204,11 @@ fn the_scanner_sees_the_defect_it_was_written_for() {
 
     // A Rust path separator is not a bind.
     assert!(positional_placeholders("std::process::exit").is_empty());
+
+    // A clock in the same SQL literal must not hide a repeated real bind.
+    let with_clock = "SELECT TIMESTAMP '2020-03-08 03:01:00 -04:00' FROM dual WHERE a=:1 OR b=:1";
+    let counts = positional_placeholders(with_clock);
+    assert_eq!(counts.get(&1), Some(&2));
+    assert_eq!(counts.len(), 1);
+    assert!(positional_placeholders("2020-03-08T03:01:00-04:00").is_empty());
 }
