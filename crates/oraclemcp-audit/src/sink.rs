@@ -1638,7 +1638,63 @@ fn harden_existing_windows_path(path: &Path, directory: bool) -> Result<(), Audi
 /// owner check in `harden_windows_private_directory`.
 #[cfg(windows)]
 pub fn harden_fresh_windows_private_directory(path: &Path) -> Result<(), AuditError> {
+    use std::os::windows::fs::MetadataExt as _;
+
     let directory = windows_security_handle(path, true, true, false)?;
+    let identity = open_file_identity(&directory).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot identify fresh Windows audit directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    let metadata = directory.metadata().map_err(|error| {
+        AuditError::Io(format!(
+            "cannot inspect fresh Windows audit directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(AuditError::Io(format!(
+            "fresh Windows audit directory {} is a reparse point or non-directory",
+            path.display()
+        )));
+    }
+    let mut entries = std::fs::read_dir(path).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot inspect entries in fresh Windows audit directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if let Some(entry) = entries.next() {
+        entry.map_err(|error| {
+            AuditError::Io(format!(
+                "cannot inspect entry in fresh Windows audit directory {}: {error}",
+                path.display()
+            ))
+        })?;
+        return Err(AuditError::Io(format!(
+            "fresh Windows audit directory {} gained an entry before ownership hardening",
+            path.display()
+        )));
+    }
+    let current = std::fs::symlink_metadata(path).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot recheck fresh Windows audit directory {}: {error}",
+            path.display()
+        ))
+    })?;
+    if metadata_identity(&current).map_err(|error| {
+        AuditError::Io(format!(
+            "cannot identify fresh Windows audit directory path {}: {error}",
+            path.display()
+        ))
+    })? != identity
+    {
+        return Err(AuditError::Io(format!(
+            "fresh Windows audit directory {} changed identity before owner hardening",
+            path.display()
+        )));
+    }
     harden_windows_private_acl(&directory, path, true, true, false)
 }
 
@@ -5532,9 +5588,7 @@ mod tests {
         use windows_permissions::{LocalBox, Sid};
 
         let root = tempfile::tempdir().expect("fresh test root");
-        let foreign_owner: LocalBox<Sid> = "S-1-5-32-544"
-            .parse()
-            .expect("parse BUILTIN Administrators SID");
+        let foreign_owner: LocalBox<Sid> = "S-1-5-18".parse().expect("parse SYSTEM SID");
         let current_sid = windows_permissions::utilities::current_process_sid()
             .expect("resolve current TokenUser SID");
         assert_ne!(
@@ -5544,16 +5598,19 @@ mod tests {
 
         let file_path = root.path().join("preplanted.jsonl");
         std::fs::write(&file_path, b"").expect("preplant file");
-        windows_permissions::wrappers::SetNamedSecurityInfo(
+        let status = std::process::Command::new("icacls.exe")
+            .arg(&file_path)
+            .args(["/setowner", "*S-1-5-18"])
+            .status()
+            .expect("set SYSTEM owner fixture with icacls");
+        assert!(status.success(), "icacls must create SYSTEM-owner fixture");
+        let observed = windows_permissions::wrappers::GetNamedSecurityInfo(
             file_path.as_os_str(),
             SeObjectType::SE_FILE_OBJECT,
             SecurityInformation::Owner,
-            Some(&foreign_owner),
-            None,
-            None,
-            None,
         )
-        .expect("install foreign file owner fixture");
+        .expect("read back SYSTEM file owner fixture");
+        assert_eq!(observed.owner(), Some(&*foreign_owner));
         let file_error = open_private_append_file(&file_path)
             .expect_err("preplanted foreign-owned file must be refused");
         assert!(file_error.to_string().contains("not owned"), "{file_error}");
@@ -5565,7 +5622,7 @@ mod tests {
                 "fixture": "preplanted_file_with_foreign_owner",
                 "expected": "refused",
                 "actual": "refused",
-                "owner_sid_kind": "BUILTIN\\Administrators",
+                "owner_sid_kind": "SYSTEM",
                 "dacl_sddl": redacted_windows_dacl_sddl(&file_path)
             })
         );
@@ -5578,24 +5635,25 @@ mod tests {
         use windows_permissions::{LocalBox, Sid};
 
         let root = tempfile::tempdir().expect("fresh test root");
-        let foreign_owner: LocalBox<Sid> = "S-1-5-32-544"
-            .parse()
-            .expect("parse BUILTIN Administrators SID");
+        let foreign_owner: LocalBox<Sid> = "S-1-5-18".parse().expect("parse SYSTEM SID");
         let current_sid = windows_permissions::utilities::current_process_sid()
             .expect("resolve current TokenUser SID");
         assert_ne!(&*foreign_owner, &*current_sid);
         let path = root.path().join("preplanted-dir");
         std::fs::create_dir(&path).expect("preplant directory");
-        windows_permissions::wrappers::SetNamedSecurityInfo(
+        let status = std::process::Command::new("icacls.exe")
+            .arg(&path)
+            .args(["/setowner", "*S-1-5-18"])
+            .status()
+            .expect("set SYSTEM owner fixture with icacls");
+        assert!(status.success(), "icacls must create SYSTEM-owner fixture");
+        let observed = windows_permissions::wrappers::GetNamedSecurityInfo(
             path.as_os_str(),
             SeObjectType::SE_FILE_OBJECT,
             SecurityInformation::Owner,
-            Some(&foreign_owner),
-            None,
-            None,
-            None,
         )
-        .expect("install foreign directory owner fixture");
+        .expect("read back SYSTEM directory owner fixture");
+        assert_eq!(observed.owner(), Some(&*foreign_owner));
         let error = create_windows_private_audit_directory(&path)
             .expect_err("preplanted foreign-owned directory must be refused");
         assert!(error.to_string().contains("not owned"), "{error}");
@@ -5606,7 +5664,7 @@ mod tests {
                 "fixture": "preplanted_directory_with_foreign_owner",
                 "expected": "refused",
                 "actual": "refused",
-                "owner_sid_kind": "BUILTIN\\Administrators",
+                "owner_sid_kind": "SYSTEM",
                 "dacl_sddl": redacted_windows_dacl_sddl(&path)
             })
         );
