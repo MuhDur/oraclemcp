@@ -83,6 +83,18 @@ pub struct StatementScope {
     /// Derived/CTE outputs are intentionally omitted unless their identity can
     /// be proven; omission makes their columns unresolved rather than guessed.
     pub relations: Vec<StatementRelation>,
+    /// Exactly represented two-relation joins whose shared output column is
+    /// supplied by Oracle's USING or NATURAL merge semantics.
+    pub merged_joins: Vec<MergedJoin>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergedJoin {
+    pub left: StatementRelation,
+    pub right: StatementRelation,
+    /// `None` means NATURAL: the catalog must prove the column exists on both
+    /// sides before treating it as one output column.
+    pub using_columns: Option<Vec<RawNamePart>>,
 }
 
 /// A real `FROM`/`JOIN` relation and its optional statement-local alias.

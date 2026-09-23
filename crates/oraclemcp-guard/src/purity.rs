@@ -16,6 +16,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::levels::OperatingLevel;
+use crate::resolver::RawName;
 
 /// Statement classes reserved for an operator, even when a profile permits ADMIN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -315,6 +316,15 @@ impl Purity {
 /// explicit engine-free baseline is available only for callers with an
 /// independent semantic-read proof.
 pub trait SideEffectOracle: Send + Sync {
+    /// Confirm that this exact value reference was proved to be a column in
+    /// every lexical occurrence before a strict classifier treats a dotted,
+    /// parenthesis-free expression as data rather than a possible routine.
+    /// Syntactic resemblance to a FROM name is never sufficient.
+    fn proves_value_column(&self, name: &RawName) -> bool {
+        let _ = name;
+        false
+    }
+
     /// Resolve synonyms and overloads to one exact local identity. The default
     /// cannot resolve even an apparently qualified call from SQL text alone.
     fn resolve_routine(

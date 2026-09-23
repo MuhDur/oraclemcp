@@ -752,9 +752,14 @@ pub struct ReadPlanProof {
     pub relations: Vec<ResolvedObject>,
     by_source: HashMap<ObjectRef, Vec<ReadObjectIdentity>>,
     by_identity: HashMap<ReadObjectIdentity, Purity>,
+    proved_value_columns: HashSet<RawName>,
 }
 
 impl SideEffectOracle for ReadPlanProof {
+    fn proves_value_column(&self, name: &RawName) -> bool {
+        self.proved_value_columns.contains(name)
+    }
+
     fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
         let asked: HashSet<_> = base_objects.iter().collect();
         if asked.len() != self.by_source.len()
@@ -962,6 +967,7 @@ pub async fn prove_semantic_read_plan(
             "a relation can invoke an unproven view, policy, or virtual-column dependency",
         ));
     }
+    let mut proved_value_columns = HashSet::new();
     for (block, context) in plan.blocks.iter().zip(&contexts) {
         for name in &block.values {
             if projected_from_local_source(plan, block, name) {
@@ -972,6 +978,7 @@ pub async fn prove_semantic_read_plan(
                 let current = cache.resolve(name, context);
                 if let Resolution::Resolved(object) = current {
                     if object.kind == CatalogObjectKind::Column {
+                        proved_value_columns.insert(name.clone());
                         continue;
                     }
                     return Err(ReadPlanProofError::Unproven(
@@ -1008,6 +1015,7 @@ pub async fn prove_semantic_read_plan(
                     if let Resolution::Resolved(object) = cache.resolve(name, &outer_context)
                         && object.kind == CatalogObjectKind::Column
                     {
+                        proved_value_columns.insert(name.clone());
                         break;
                     }
                     ancestor = outer.parent;
@@ -1027,6 +1035,7 @@ pub async fn prove_semantic_read_plan(
         relations,
         by_source,
         by_identity,
+        proved_value_columns,
     })
 }
 
@@ -1495,29 +1504,113 @@ impl DictionaryLookup<'_> {
                 (matching, column.as_str(), relation_qualified)
             }
             [owner, relation_name, column] => {
-                let matching = relations
-                    .iter()
-                    .filter(|relation| {
-                        relation.alias.is_none()
-                            && relation_matches_owner_name(relation, owner, relation_name)
-                    })
-                    .collect::<Vec<_>>();
+                let mut matching = Vec::new();
+                let explicit = RawName::new(raw.parts[..2].to_vec(), SyntacticRole::FromFactor);
+                let Some(explicit_parts) = normalize_parts(&explicit.parts) else {
+                    return Ok(Resolution::Unresolved);
+                };
+                let explicit_identity = match self.resolve_from(&explicit, &explicit_parts).await? {
+                    Resolution::Resolved(object) => Some(*object),
+                    _ => None,
+                };
+                for relation in relations {
+                    if relation.alias.is_some() {
+                        continue;
+                    }
+                    if relation.name.parts.len() == 2
+                        && !relation_matches_owner_name(relation, owner, relation_name)
+                    {
+                        continue;
+                    }
+                    let Some(relation_parts) = normalize_parts(&relation.name.parts) else {
+                        continue;
+                    };
+                    if let (Some(expected), Resolution::Resolved(actual)) = (
+                        explicit_identity.as_ref(),
+                        self.resolve_from(&relation.name, &relation_parts).await?,
+                    ) && resolved_relation_identity_matches(expected, &actual)
+                    {
+                        matching.push(relation);
+                    }
+                }
                 let relation_qualified = !matching.is_empty();
                 (matching, column.as_str(), relation_qualified)
             }
             _ => (Vec::new(), "", false),
         };
+        let qualified_merge = parts.len() > 1
+            && self
+                .context
+                .statement_scope
+                .merged_joins
+                .iter()
+                .any(|merge| {
+                    merge.using_columns.is_some()
+                        && merged_join_contains_column(merge, column)
+                        && candidate_relations
+                            .iter()
+                            .any(|relation| **relation == merge.left || **relation == merge.right)
+                });
+        if qualified_merge {
+            return Ok(Resolution::Unresolved);
+        }
         let mut columns = Vec::new();
-        for relation in candidate_relations {
+        for relation in &candidate_relations {
             if let Some(column) = self.resolve_relation_column(relation, column, raw).await? {
-                columns.push(column);
+                columns.push(((*relation).clone(), column));
+            }
+        }
+        for merge in self
+            .context
+            .statement_scope
+            .merged_joins
+            .iter()
+            .filter(|merge| merged_join_contains_column(merge, column))
+        {
+            let left = columns
+                .iter()
+                .position(|(relation, _)| *relation == merge.left);
+            let right = columns
+                .iter()
+                .position(|(relation, _)| *relation == merge.right);
+            if parts.len() == 1
+                && let (Some(left), Some(_right)) = (left, right)
+                && columns.len() == 2
+            {
+                return Ok(Resolution::Resolved(Box::new(columns.remove(left).1)));
+            }
+            if merge.using_columns.is_some()
+                && parts.len() == 1
+                && (left.is_some() || right.is_some())
+            {
+                return Ok(Resolution::Unresolved);
+            }
+            if merge.using_columns.is_none() && parts.len() > 1 {
+                let counterpart = if left.is_some() {
+                    Some(&merge.right)
+                } else if right.is_some() {
+                    Some(&merge.left)
+                } else {
+                    None
+                };
+                if let Some(counterpart) = counterpart
+                    && self
+                        .resolve_relation_column(counterpart, column, raw)
+                        .await?
+                        .is_some()
+                {
+                    return Ok(Resolution::Unresolved);
+                }
             }
         }
         match columns.len() {
-            1 => return Ok(Resolution::Resolved(Box::new(columns.remove(0)))),
+            1 => return Ok(Resolution::Resolved(Box::new(columns.remove(0).1))),
             2.. => {
                 return Ok(Resolution::Ambiguous {
-                    candidates: columns.into_iter().map(|column| column.identity).collect(),
+                    candidates: columns
+                        .into_iter()
+                        .map(|(_, column)| column.identity)
+                        .collect(),
                 });
             }
             _ => {}
@@ -2314,6 +2407,25 @@ fn relation_matches_owner_name(
         return false;
     };
     matches!(parts.as_slice(), [relation_owner, relation_name] if relation_owner == owner && relation_name == name)
+}
+
+fn merged_join_contains_column(
+    merge: &oraclemcp_guard::resolver::MergedJoin,
+    column: &str,
+) -> bool {
+    match &merge.using_columns {
+        None => true,
+        Some(parts) => parts.iter().any(|part| {
+            normalize_parts(std::slice::from_ref(part)).is_some_and(|name| name[0] == column)
+        }),
+    }
+}
+
+fn resolved_relation_identity_matches(expected: &ResolvedObject, actual: &ResolvedObject) -> bool {
+    expected.identity == actual.identity
+        && expected.owner == actual.owner
+        && expected.name == actual.name
+        && expected.kind == actual.kind
 }
 
 fn object_kind(value: &str) -> CatalogObjectKind {
@@ -3313,6 +3425,7 @@ mod tests {
                 ReadObjectIdentity::from(&object),
                 Purity::ProvenReadOnly,
             )]),
+            proved_value_columns: HashSet::new(),
         };
         assert_eq!(
             proof.statement_purity(std::slice::from_ref(&source)),

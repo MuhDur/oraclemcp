@@ -40,8 +40,8 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
-    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Query, Select, SetExpr,
-    TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
+    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, OrderByKind, Query,
+    Select, SelectItem, SetExpr, TableAlias, TableFactor, TableWithJoins, Visit, Visitor,
 };
 use sqlparser::dialect::OracleDialect;
 use sqlparser::keywords::Keyword;
@@ -1599,6 +1599,7 @@ fn is_builtin_function(name: &str, verified_local_vector_embedding: bool) -> boo
         "user",
         "sysdate",
         "systimestamp",
+        "localtimestamp",
         "rownum",
         "rowid",
         "concat",
@@ -2446,12 +2447,13 @@ enum QualifierScopeFrame {
     Select(SelectScopeFrame),
 }
 
-struct UnresolvedQualifiedCallVisitor {
+struct UnresolvedQualifiedCallVisitor<'a> {
     scopes: Vec<QualifierScopeFrame>,
     unresolved: Vec<String>,
+    oracle: &'a dyn SideEffectOracle,
 }
 
-impl UnresolvedQualifiedCallVisitor {
+impl UnresolvedQualifiedCallVisitor<'_> {
     fn qualifier_is_visible(&self, qualifier: &[QualifierPart]) -> bool {
         for frame in self.scopes.iter().rev() {
             match frame {
@@ -2499,7 +2501,7 @@ impl UnresolvedQualifiedCallVisitor {
     }
 }
 
-impl Visitor for UnresolvedQualifiedCallVisitor {
+impl Visitor for UnresolvedQualifiedCallVisitor<'_> {
     type Break = ();
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
@@ -2614,7 +2616,10 @@ impl Visitor for UnresolvedQualifiedCallVisitor {
             .iter()
             .map(qualifier_part)
             .collect();
-        if !self.qualifier_is_visible(&qualifier) {
+        if !self.qualifier_is_visible(&qualifier)
+            && !raw_name_from_idents(parts, SyntacticRole::ValuePosition)
+                .is_some_and(|name| self.oracle.proves_value_column(&name))
+        {
             self.unresolved.push(rendered);
         }
         ControlFlow::Continue(())
@@ -2630,10 +2635,11 @@ impl Visitor for UnresolvedQualifiedCallVisitor {
 /// local alias shadowing. Catalog-backed
 /// identity is still required for unqualified bare identifiers (the .102
 /// residual), but this containment no longer carries the original scope leaks.
-fn unresolved_qualified_calls(query: &Query) -> Vec<String> {
+fn unresolved_qualified_calls(query: &Query, oracle: &dyn SideEffectOracle) -> Vec<String> {
     let mut visitor = UnresolvedQualifiedCallVisitor {
         scopes: Vec::new(),
         unresolved: Vec::new(),
+        oracle,
     };
     let _ = query.visit(&mut visitor);
     visitor.unresolved.sort();
@@ -2643,6 +2649,8 @@ fn unresolved_qualified_calls(query: &Query) -> Vec<String> {
 
 struct SemanticValueVisitor {
     values: Vec<RawName>,
+    builtin_contexts: Vec<BuiltinIdentifierContext>,
+    order_alias_expressions: HashSet<*const Expr>,
     /// Addresses of the exact `VECTOR_DISTANCE` metric expressions currently
     /// being visited. The metric is Oracle grammar, not a caller-controlled
     /// data identifier, but this must not suppress an identically named column
@@ -2657,7 +2665,30 @@ struct SemanticValueVisitor {
 impl Visitor for SemanticValueVisitor {
     type Break = ();
 
+    fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.order_alias_expressions
+            .extend(direct_select_order_alias_expressions(query));
+        ControlFlow::Continue(())
+    }
+
+    fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        self.builtin_contexts
+            .push(BuiltinIdentifierContext::from_select(select));
+        ControlFlow::Continue(())
+    }
+
+    fn post_visit_select(&mut self, _select: &Select) -> ControlFlow<Self::Break> {
+        self.builtin_contexts.pop();
+        ControlFlow::Continue(())
+    }
+
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if self
+            .order_alias_expressions
+            .contains(&(expr as *const Expr))
+        {
+            return ControlFlow::Continue(());
+        }
         if let Expr::Function(function) = expr
             && let Some(metric) = vector_distance_metric_expr(function)
         {
@@ -2685,7 +2716,12 @@ impl Visitor for SemanticValueVisitor {
             Expr::CompoundIdentifier(parts) => parts.as_slice(),
             _ => return ControlFlow::Continue(()),
         };
-        if parts.len() == 1 && is_semantic_builtin_identifier(&parts[0]) {
+        if parts.len() == 1
+            && is_semantic_builtin_identifier(
+                &parts[0],
+                self.builtin_contexts.last().copied().unwrap_or_default(),
+            )
+        {
             return ControlFlow::Continue(());
         }
         if let Some(name) = raw_name_from_idents(parts, SyntacticRole::ValuePosition) {
@@ -2719,6 +2755,47 @@ impl Visitor for SemanticValueVisitor {
         }
         ControlFlow::Continue(())
     }
+}
+
+fn direct_select_order_alias_expressions(query: &Query) -> Vec<*const Expr> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return Vec::new();
+    };
+    let Some(order_by) = &query.order_by else {
+        return Vec::new();
+    };
+    let OrderByKind::Expressions(items) = &order_by.kind else {
+        return Vec::new();
+    };
+    let aliases = select
+        .projection
+        .iter()
+        .filter_map(|item| match item {
+            SelectItem::ExprWithAlias { alias, .. } => Some(alias),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    items
+        .iter()
+        .filter_map(|item| {
+            let Expr::Identifier(identifier) = &item.expr else {
+                return None;
+            };
+            aliases
+                .iter()
+                .any(|alias| {
+                    let normalize = |ident: &Ident| {
+                        if ident.quote_style.is_some() {
+                            ident.value.clone()
+                        } else {
+                            ident.value.to_ascii_uppercase()
+                        }
+                    };
+                    normalize(identifier) == normalize(alias)
+                })
+                .then_some(&item.expr as *const Expr)
+        })
+        .collect()
 }
 
 /// Return the exact third argument when it is one of Oracle's documented
@@ -2773,7 +2850,32 @@ fn is_vector_distance_metric(metric: &Ident) -> bool {
         )
 }
 
-fn is_semantic_builtin_identifier(ident: &Ident) -> bool {
+#[derive(Clone, Copy, Default)]
+struct BuiltinIdentifierContext {
+    hierarchy: bool,
+    nocycle: bool,
+    column_value_source: bool,
+}
+
+impl BuiltinIdentifierContext {
+    fn from_select(select: &Select) -> Self {
+        Self {
+            hierarchy: !select.connect_by.is_empty(),
+            nocycle: select.connect_by.iter().any(|clause| match clause {
+                sqlparser::ast::ConnectByKind::ConnectBy { nocycle, .. } => *nocycle,
+                _ => false,
+            }),
+            column_value_source: matches!(
+                select.from.as_slice(),
+                [source]
+                    if source.joins.is_empty()
+                        && matches!(source.relation, TableFactor::TableFunction { .. } | TableFactor::XmlTable { .. })
+            ),
+        }
+    }
+}
+
+fn is_semantic_builtin_identifier(ident: &Ident, context: BuiltinIdentifierContext) -> bool {
     if ident.quote_style.is_some() {
         return false;
     }
@@ -2785,12 +2887,17 @@ fn is_semantic_builtin_identifier(ident: &Ident) -> bool {
             | "LEVEL"
             | "ROWID"
             | "ROWNUM"
+            | "ORA_ROWSCN"
+            | "SESSIONTIMEZONE"
+            | "DBTIMEZONE"
             | "SESSION_USER"
             | "SYSDATE"
             | "SYSTIMESTAMP"
             | "UID"
             | "USER"
-    )
+    ) || (context.hierarchy && ident.value.eq_ignore_ascii_case("CONNECT_BY_ISLEAF"))
+        || (context.nocycle && ident.value.eq_ignore_ascii_case("CONNECT_BY_ISCYCLE"))
+        || (context.column_value_source && ident.value.eq_ignore_ascii_case("COLUMN_VALUE"))
 }
 
 fn raw_name_part(ident: &Ident) -> RawNamePart {
@@ -2884,6 +2991,8 @@ pub fn semantic_read_plan_checked(sql: &str) -> Result<SemanticReadPlan, PlanMis
     planned_relations_match_base_objects(&plan, &query_base_objects(query))?;
     let mut value_check = SemanticValueVisitor {
         values: Vec::new(),
+        builtin_contexts: Vec::new(),
+        order_alias_expressions: HashSet::new(),
         vector_metric_expressions: Vec::new(),
         vector_embedding_model_expressions: Vec::new(),
     };
@@ -3308,7 +3417,7 @@ fn classify_statement(
             // (served/strict): a `root.member` whose root is not a table / view /
             // alias in the current/correlated scope is an unproven call → block Safe.
             let unresolved_calls = if modes.guard_unresolved_qualified_calls {
-                unresolved_qualified_calls(query)
+                unresolved_qualified_calls(query, oracle)
             } else {
                 Vec::new()
             };
@@ -4443,6 +4552,205 @@ mod tests {
                 .any(|name| name.parts.len() == 1 && name.parts[0].text == "SYSDATE"),
             "Oracle pseudocolumn/built-in identifiers do not require catalog column proof"
         );
+    }
+
+    #[test]
+    fn issue28_order_by_select_alias_is_not_a_column() {
+        let plan =
+            semantic_read_plan_checked("SELECT a, COUNT(*) AS n FROM t GROUP BY a ORDER BY n DESC")
+                .expect("the exact bare ORDER BY alias belongs to this SELECT block");
+        assert_eq!(plan.relations.len(), 1);
+        assert!(plan.values.iter().any(|name| name.parts[0].text == "a"));
+        assert!(
+            !plan.values.iter().any(|name| name.parts[0].text == "n"),
+            "ORDER BY n names the projected expression, not a table column"
+        );
+    }
+
+    #[test]
+    fn issue33_pseudocolumns_are_builtin_in_context() {
+        for name in ["ORA_ROWSCN", "SESSIONTIMEZONE", "DBTIMEZONE"] {
+            let sql = format!("SELECT {name} FROM t");
+            let plan = semantic_read_plan_checked(&sql).expect("plain source has a proof plan");
+            assert!(plan.values.is_empty(), "{name} is Oracle grammar");
+            let quoted = format!("SELECT \"{name}\" FROM t");
+            let plan = semantic_read_plan_checked(&quoted).expect("quoted column has a proof plan");
+            assert_eq!(plan.values.len(), 1, "quoted {name} needs catalog proof");
+        }
+        for (name, hierarchy) in [
+            ("CONNECT_BY_ISLEAF", "CONNECT BY PRIOR id = parent_id"),
+            (
+                "CONNECT_BY_ISCYCLE",
+                "CONNECT BY NOCYCLE PRIOR id = parent_id",
+            ),
+        ] {
+            let sql = format!("SELECT {name} FROM t {hierarchy}");
+            let plan = semantic_read_plan_checked(&sql).expect("plain hierarchy has a proof plan");
+            assert!(
+                !plan.values.iter().any(|value| value.parts[0].text == name),
+                "{name} is grammar only in its matching hierarchy"
+            );
+        }
+        let collection = semantic_read_plan_checked("SELECT COLUMN_VALUE FROM TABLE(f())")
+            .expect("TABLE source has a structural plan pending routine proof");
+        assert!(
+            !collection
+                .values
+                .iter()
+                .any(|value| value.parts[0].text == "COLUMN_VALUE")
+        );
+        let quoted_collection =
+            semantic_read_plan_checked("SELECT \"COLUMN_VALUE\" FROM TABLE(f())")
+                .expect("quoted column remains a value dependency");
+        assert!(
+            quoted_collection
+                .values
+                .iter()
+                .any(|value| value.parts[0].text == "COLUMN_VALUE")
+        );
+        let object_value = semantic_read_plan_checked("SELECT OBJECT_VALUE FROM t")
+            .expect("object-table proof is deferred to the catalog");
+        assert!(
+            object_value
+                .values
+                .iter()
+                .any(|value| value.parts[0].text == "OBJECT_VALUE"),
+            "an ordinary table cannot bless OBJECT_VALUE by spelling alone"
+        );
+        // sqlparser produces a Function node for LOCALTIMESTAMP, not an
+        // Identifier. The function classifier must recognize that exact name.
+        let parsed = Parser::parse_sql(&OracleDialect {}, "SELECT LOCALTIMESTAMP FROM t").unwrap();
+        let [sqlparser::ast::Statement::Query(query)] = parsed.as_slice() else {
+            panic!("one query expected");
+        };
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("one SELECT expected");
+        };
+        assert!(matches!(
+            &select.projection[0],
+            SelectItem::UnnamedExpr(Expr::Function(_))
+        ));
+        assert_eq!(
+            classify("SELECT LOCALTIMESTAMP FROM t").danger,
+            DangerLevel::Safe
+        );
+    }
+
+    #[test]
+    fn issue33_connect_by_pseudocolumn_outside_connect_by_is_refused() {
+        for sql in [
+            "SELECT CONNECT_BY_ISLEAF FROM t",
+            "SELECT CONNECT_BY_ISCYCLE FROM t",
+            "SELECT CONNECT_BY_ISCYCLE FROM t CONNECT BY PRIOR id = parent_id",
+            "SELECT \"ORA_ROWSCN\" FROM t",
+            "SELECT COLUMN_VALUE FROM t",
+        ] {
+            let plan = semantic_read_plan_checked(sql).expect("source still has a proof plan");
+            let expected = if sql.contains("CONNECT_BY_ISLEAF") {
+                "CONNECT_BY_ISLEAF"
+            } else if sql.contains("CONNECT_BY_ISCYCLE") {
+                "CONNECT_BY_ISCYCLE"
+            } else if sql.contains("COLUMN_VALUE") {
+                "COLUMN_VALUE"
+            } else {
+                "ORA_ROWSCN"
+            };
+            assert!(
+                plan.values
+                    .iter()
+                    .any(|value| value.parts[0].text.eq_ignore_ascii_case(expected)),
+                "out-of-context or quoted identifier needs catalog proof: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue28_order_by_expression_over_alias_still_resolves_as_column() {
+        for sql in [
+            "SELECT a, COUNT(*) AS n FROM t GROUP BY a ORDER BY n + 1",
+            "SELECT a, COUNT(*) AS n FROM t GROUP BY a ORDER BY t.n",
+        ] {
+            let plan = semantic_read_plan_checked(sql).expect("relation scope is representable");
+            assert!(
+                plan.values
+                    .iter()
+                    .any(|name| { name.parts.last().is_some_and(|part| part.text == "n") }),
+                "non-bare alias use must still prove a real column: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn issue29_join_merge_scope_names_exact_participants() {
+        for (sql, expected) in [
+            ("SELECT id FROM t1 JOIN t2 USING (id)", Some("id")),
+            ("SELECT id FROM t1 NATURAL JOIN t2", None),
+        ] {
+            let plan = semantic_read_plan_checked(sql).expect("both relations are planned");
+            assert_eq!(plan.relations.len(), 2);
+            let [merge] = plan.blocks[0].statement_scope.merged_joins.as_slice() else {
+                panic!("one exact join merge expected: {sql}");
+            };
+            assert_eq!(merge.left.name.parts[0].text, "t1");
+            assert_eq!(merge.right.name.parts[0].text, "t2");
+            assert_eq!(
+                merge
+                    .using_columns
+                    .as_ref()
+                    .map(|columns| columns[0].text.as_str()),
+                expected
+            );
+        }
+        let plan = semantic_read_plan_checked("SELECT id FROM t1 JOIN t2 ON t1.id = t2.id")
+            .expect("ON still has a proof plan");
+        assert!(plan.blocks[0].statement_scope.merged_joins.is_empty());
+        let chain =
+            semantic_read_plan_checked("SELECT id FROM t1 JOIN t2 USING (id) JOIN t3 USING (id)")
+                .expect("all three relations still need catalog proof");
+        assert_eq!(chain.relations.len(), 3);
+        assert!(chain.blocks[0].statement_scope.merged_joins.is_empty());
+    }
+
+    #[test]
+    fn issue31_only_exact_proven_column_suppresses_qualified_callable_guard() {
+        struct ExactColumnProof(RawName);
+        impl SideEffectOracle for ExactColumnProof {
+            fn proves_value_column(&self, name: &RawName) -> bool {
+                name == &self.0
+            }
+        }
+        let column = RawName::new(
+            [
+                RawNamePart::unquoted("app"),
+                RawNamePart::unquoted("t"),
+                RawNamePart::unquoted("id"),
+            ],
+            SyntacticRole::ValuePosition,
+        );
+        let strict = Classifier::engine_free_baseline(
+            ClassifierConfig::new().with_unresolved_qualified_calls_guarded(),
+        );
+        assert_eq!(
+            strict.classify("SELECT app.t.id FROM t").danger,
+            DangerLevel::Guarded,
+            "syntax alone cannot resolve the owner-qualified column"
+        );
+        let proven = strict.with_oracle(Arc::new(ExactColumnProof(column)));
+        assert_eq!(
+            proven.classify("SELECT app.t.id FROM t").danger,
+            DangerLevel::Safe
+        );
+        for sql in [
+            "SELECT other.t.id FROM t",
+            "SELECT app.t.run_ddl FROM t",
+            "SELECT \"app\".t.id FROM t",
+        ] {
+            assert_eq!(
+                proven.classify(sql).danger,
+                DangerLevel::Guarded,
+                "unproven neighboring spelling remains guarded: {sql}"
+            );
+        }
     }
 
     #[test]

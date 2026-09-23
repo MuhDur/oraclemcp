@@ -1,7 +1,7 @@
 //! Bounded lexical query-block plan for the served read proof.
 
 use super::*;
-use crate::resolver::{QueryBlock, QueryBlockId, QueryBlockKind};
+use crate::resolver::{MergedJoin, QueryBlock, QueryBlockId, QueryBlockKind};
 use std::collections::{HashMap, HashSet};
 
 pub const MAX_QUERY_BLOCKS: usize = 128;
@@ -76,9 +76,11 @@ struct BlockWalker {
     blocks: Vec<QueryBlock>,
     query_frames: Vec<QueryFrame>,
     select_blocks: Vec<QueryBlockId>,
+    builtin_contexts: Vec<BuiltinIdentifierContext>,
     query_kinds: HashMap<usize, QueryBlockKind>,
     derived_aliases: HashMap<usize, (QueryBlockId, RawNamePart)>,
     branch_selects: HashSet<usize>,
+    order_alias_expressions: HashSet<*const Expr>,
     metric_expressions: Vec<*const Expr>,
     model_expressions: Vec<*const Expr>,
     relation_count: usize,
@@ -91,9 +93,11 @@ impl BlockWalker {
             blocks: Vec::new(),
             query_frames: Vec::new(),
             select_blocks: Vec::new(),
+            builtin_contexts: Vec::new(),
             query_kinds: HashMap::new(),
             derived_aliases: HashMap::new(),
             branch_selects: HashSet::new(),
+            order_alias_expressions: HashSet::new(),
             metric_expressions: Vec::new(),
             model_expressions: Vec::new(),
             relation_count: 0,
@@ -246,6 +250,8 @@ impl Visitor for BlockWalker {
     type Break = PlanMismatch;
 
     fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<Self::Break> {
+        self.order_alias_expressions
+            .extend(direct_select_order_alias_expressions(query));
         let pointer = query as *const Query as usize;
         let kind = if self.query_frames.is_empty() {
             QueryBlockKind::Root
@@ -320,8 +326,11 @@ impl Visitor for BlockWalker {
     }
 
     fn pre_visit_select(&mut self, select: &Select) -> ControlFlow<Self::Break> {
+        let supported_hierarchy = select.connect_by.is_empty()
+            || (select.connect_by.len() == 1
+                && matches!(select.from.as_slice(), [source] if source.joins.is_empty() && simple_statement_relation(&source.relation).is_some()));
         if select.into.is_some()
-            || !select.connect_by.is_empty()
+            || !supported_hierarchy
             || !select.lateral_views.is_empty()
             || select.prewhere.is_some()
         {
@@ -341,6 +350,59 @@ impl Visitor for BlockWalker {
             return ControlFlow::Break(PlanMismatch::UnsupportedShape);
         };
         self.select_blocks.push(block);
+        self.builtin_contexts
+            .push(BuiltinIdentifierContext::from_select(select));
+        // Only a single plain pair has unambiguous merge ownership. Larger
+        // join trees still collect every relation but do not grant a merge.
+        for source in &select.from {
+            let [join] = source.joins.as_slice() else {
+                continue;
+            };
+            let (Some(left), Some(right)) = (
+                simple_statement_relation(&source.relation),
+                simple_statement_relation(&join.relation),
+            ) else {
+                continue;
+            };
+            let constraint = match &join.join_operator {
+                sqlparser::ast::JoinOperator::Join(c)
+                | sqlparser::ast::JoinOperator::Inner(c)
+                | sqlparser::ast::JoinOperator::Left(c)
+                | sqlparser::ast::JoinOperator::LeftOuter(c)
+                | sqlparser::ast::JoinOperator::Right(c)
+                | sqlparser::ast::JoinOperator::RightOuter(c)
+                | sqlparser::ast::JoinOperator::FullOuter(c) => c,
+                _ => continue,
+            };
+            let using_columns = match constraint {
+                sqlparser::ast::JoinConstraint::Natural => None,
+                sqlparser::ast::JoinConstraint::Using(names) => {
+                    let mut columns = Vec::new();
+                    for name in names {
+                        let [part] = name.0.as_slice() else {
+                            return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+                        };
+                        let Some(ident) = part.as_ident() else {
+                            return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+                        };
+                        columns.push(raw_name_part(ident));
+                    }
+                    if columns.is_empty() {
+                        return ControlFlow::Break(PlanMismatch::UnsupportedShape);
+                    }
+                    Some(columns)
+                }
+                _ => continue,
+            };
+            self.blocks[block.0]
+                .statement_scope
+                .merged_joins
+                .push(MergedJoin {
+                    left,
+                    right,
+                    using_columns,
+                });
+        }
         for item in &select.projection {
             let projected = match item {
                 sqlparser::ast::SelectItem::ExprWithAlias { alias, .. } => {
@@ -363,6 +425,7 @@ impl Visitor for BlockWalker {
 
     fn post_visit_select(&mut self, _select: &Select) -> ControlFlow<Self::Break> {
         self.select_blocks.pop();
+        self.builtin_contexts.pop();
         ControlFlow::Continue(())
     }
 
@@ -421,6 +484,12 @@ impl Visitor for BlockWalker {
     }
 
     fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+        if self
+            .order_alias_expressions
+            .contains(&(expr as *const Expr))
+        {
+            return ControlFlow::Continue(());
+        }
         let (query, kind) = match expr {
             Expr::Exists { subquery, .. } => {
                 (Some(subquery.as_ref()), QueryBlockKind::ExistsSubquery)
@@ -459,7 +528,12 @@ impl Visitor for BlockWalker {
             Expr::CompoundIdentifier(parts) => parts.as_slice(),
             _ => return ControlFlow::Continue(()),
         };
-        if parts.len() == 1 && is_semantic_builtin_identifier(&parts[0]) {
+        if parts.len() == 1
+            && is_semantic_builtin_identifier(
+                &parts[0],
+                self.builtin_contexts.last().copied().unwrap_or_default(),
+            )
+        {
             return ControlFlow::Continue(());
         }
         if let Some(name) = raw_name_from_idents(parts, SyntacticRole::ValuePosition)
