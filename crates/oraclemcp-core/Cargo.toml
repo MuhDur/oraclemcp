@@ -62,6 +62,7 @@ rustix = { version = "1", features = ["fs", "process"] }
 
 [dev-dependencies]
 async-trait.workspace = true
+proptest = "1"
 rcgen = "0.13"
 tempfile = "3"
 # Golden-artifact discipline (D6.3d): the shared `Scrubber` in

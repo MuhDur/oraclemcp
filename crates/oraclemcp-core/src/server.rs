@@ -1534,14 +1534,14 @@ impl OracleMcpServer {
     }
 
     fn handle_stdio_frame(&self, frame: &[u8], auth: &StdioAuthPolicy) -> Option<Value> {
-        let request = match serde_json::from_slice::<Value>(frame) {
+        let request = match crate::strict_json::decode_strict_value(frame) {
             Ok(value) => value,
-            Err(_) => {
-                return Some(jsonrpc_error(
-                    Value::Null,
-                    JSONRPC_PARSE_ERROR,
-                    "Parse error",
-                ));
+            Err(error) => {
+                return Some(if error.duplicate_pointer().is_some() {
+                    error.jsonrpc_parse_error_response()
+                } else {
+                    jsonrpc_error(Value::Null, JSONRPC_PARSE_ERROR, "Parse error")
+                });
             }
         };
         self.handle_jsonrpc_request(request, Some(auth))
@@ -3435,6 +3435,50 @@ mod tests {
             oversized[0]["error"]["code"],
             serde_json::json!(JSONRPC_INVALID_REQUEST)
         );
+    }
+
+    #[test]
+    fn stdio_duplicate_member_frame_is_refused_before_dispatch() {
+        struct CountingDispatcher(Arc<AtomicUsize>);
+        impl ToolDispatch for CountingDispatcher {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: DispatchContext<'a>,
+                _name: &'a str,
+                _args: Value,
+            ) -> DispatchFuture<'a> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Outcome::Ok(json!({})) })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut server = server();
+        server.dispatcher = Arc::new(CountingDispatcher(Arc::clone(&calls)));
+        for (frame, pointer) in [
+            (
+                br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 1 FROM DUAL","sql":"SELECT 2 FROM DUAL"}}}"#.as_slice(),
+                "/params/arguments/sql",
+            ),
+            (
+                br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oracle_query","arguments":{"options":{"x":1,"x":2}}}}"#.as_slice(),
+                "/params/arguments/options/x",
+            ),
+            (
+                br#"{"jsonrpc":"2.0","id":1,"id":2,"method":"tools/call","params":{"name":"oracle_query"}}"#.as_slice(),
+                "/id",
+            ),
+        ] {
+            let mut bytes = frame.to_vec();
+            bytes.push(b'\n');
+            let replies = run_stdio_raw(&server, bytes);
+            assert_eq!(replies.len(), 1);
+            assert_eq!(replies[0]["id"], Value::Null);
+            assert_eq!(replies[0]["error"]["code"], json!(-32700));
+            assert_eq!(replies[0]["error"]["data"]["json_pointer"], pointer);
+            assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
     }
 
     #[test]

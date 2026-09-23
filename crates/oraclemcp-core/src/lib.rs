@@ -61,6 +61,7 @@ pub mod server;
 pub mod service_app;
 pub mod shutdown;
 pub mod source_history;
+pub mod strict_json;
 pub mod subscriptions;
 pub mod tamper_token;
 pub mod tls;

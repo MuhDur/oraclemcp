@@ -820,7 +820,8 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values for the witness SELECT.",
                         "items": {}
                     },
-                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Row cap for each witness read (default: the profile page size, ceiling 5000). A larger request is clamped to the ceiling and the response says so; when the witness hits the cap the response also flags witness_truncated, because the rows shown are then not the whole set." }
+                    "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Row cap for each witness read (default: the profile page size, ceiling 5000). A larger request is clamped to the ceiling and the response says so; when the witness hits the cap the response also flags witness_truncated, because the rows shown are then not the whole set." },
+                    "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Compatibility alias for max_rows." }
                 }),
                 &[timeout_seconds_prop()],
             ),
@@ -959,7 +960,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "object_type": { "type": "string", "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 500, hard cap 5000)." },
-                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
+                "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
+                "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page." }
             }),
             &[],
         )),
@@ -1271,7 +1273,9 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "health_type": { "type": "string", "description": "Either 'all' (default) or a comma-separated list of subcheck names: invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio. Unknown names are reported, not fatal." }
+                    "health_type": { "type": "string", "description": "Either 'all' (default) or a comma-separated list of subcheck names: invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio. Unknown names are reported, not fatal." },
+                    "check": { "type": "string", "description": "Compatibility alias for health_type." },
+                    "checks": { "type": "string", "description": "Compatibility alias for health_type." }
                 }),
                 &[timeout_seconds_prop()],
             ),

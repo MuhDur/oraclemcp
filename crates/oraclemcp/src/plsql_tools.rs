@@ -736,6 +736,35 @@ pub(crate) fn decode_args_for_contract(tool: &str, args: Value) -> Result<(), Er
     }
 }
 
+#[cfg(test)]
+pub(crate) fn runtime_fields_for_contract(tool: &str) -> Vec<String> {
+    fn fields<T: serde::de::DeserializeOwned>() -> Vec<String> {
+        let error = serde_json::from_value::<T>(json!({"__bogus__": 1}))
+            .err()
+            .expect("PL/SQL DTO must reject unknown probe");
+        let message = error.to_string();
+        assert!(message.contains("unknown field `__bogus__`"), "{message}");
+        message
+            .split('`')
+            .skip(3)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+    match tool {
+        "oracle_plsql_parse" => fields::<ParseArgs>(),
+        "oracle_plsql_analyze" => fields::<AnalyzeArgs>(),
+        "oracle_plsql_what_breaks" => fields::<WhatBreaksArgs>(),
+        "oracle_plsql_lineage" => fields::<LineageArgs>(),
+        "oracle_lineage" => fields::<ColumnLineageArgs>(),
+        "oracle_plsql_sast" => fields::<SastArgs>(),
+        "oracle_plsql_doc" => fields::<DocArgs>(),
+        "oracle_plsql_live_snapshot" => fields::<LiveSnapshotArgs>(),
+        "oracle_plsql_blast_radius" => fields::<BlastRadiusArgs>(),
+        other => panic!("registered PL/SQL tool {other} has no decoder contract"),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ParseArgs {

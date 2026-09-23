@@ -2105,12 +2105,17 @@ fn handle_mcp_post_exchange(
         return HttpExchange::Buffered(empty_response(406));
     }
     let session_principal_key = stateful_principal_key(principal_key);
-    let parsed = match serde_json::from_slice::<Value>(&request.body) {
+    let parsed = match crate::strict_json::decode_strict_value(&request.body) {
         Ok(value) => value,
-        Err(_) => {
+        Err(error) => {
+            let status = if error.duplicate_pointer().is_some() {
+                400
+            } else {
+                200
+            };
             return HttpExchange::Buffered(json_response(
-                200,
-                &jsonrpc_error(Value::Null, -32700, "Parse error"),
+                status,
+                &error.jsonrpc_parse_error_response(),
             ));
         }
     };
@@ -2605,17 +2610,6 @@ fn invalid_stateful_session_response() -> HttpResponse {
         headers: vec![],
         body: b"Invalid mcp-session-id".to_vec(),
     }
-}
-
-fn jsonrpc_error(id: Value, code: i64, message: &str) -> Value {
-    json!({
-        "jsonrpc": "2.0",
-        "id": id,
-        "error": {
-            "code": code,
-            "message": message,
-        },
-    })
 }
 
 fn json_response(status: u16, value: &Value) -> HttpResponse {

@@ -24,6 +24,20 @@ impl ToolDispatch for NoopDispatch {
     }
 }
 
+struct StrictJsonCountingDispatch(Arc<AtomicUsize>);
+impl ToolDispatch for StrictJsonCountingDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        _name: &'a str,
+        _args: Value,
+    ) -> DispatchFuture<'a> {
+        self.0.fetch_add(1, AtomicOrdering::SeqCst);
+        Box::pin(async { Outcome::Ok(serde_json::json!({})) })
+    }
+}
+
 struct BusyDispatch;
 impl ToolDispatch for BusyDispatch {
     fn dispatch<'a>(
@@ -417,6 +431,49 @@ fn post(body: &Value) -> HttpRequest {
         ],
         body.to_string().into_bytes(),
     )
+}
+
+#[test]
+fn http_duplicate_member_body_is_refused_before_dispatch() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(StrictJsonCountingDispatch(Arc::clone(&calls))));
+    let config = HttpTransportConfig {
+        json_response: true,
+        stateful: false,
+        ..Default::default()
+    };
+    for (body, pointer) in [
+        (
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 1 FROM DUAL","sql":"SELECT 2 FROM DUAL"}}}"#.as_slice(),
+            "/params/arguments/sql",
+        ),
+        (
+            br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"oracle_query","arguments":{"options":{"x":1,"x":2}}}}"#.as_slice(),
+            "/params/arguments/options/x",
+        ),
+        (
+            br#"{"jsonrpc":"2.0","id":1,"id":2,"method":"tools/call","params":{"name":"oracle_query"}}"#.as_slice(),
+            "/id",
+        ),
+    ] {
+        let request = HttpRequest::new(
+            "POST",
+            MCP_PATH,
+            [
+                ("host", "127.0.0.1"),
+                ("content-type", "application/json"),
+                ("accept", "application/json"),
+            ],
+            body.to_vec(),
+        );
+        let response = handle_http_request(&server, &config, request);
+        assert_eq!(response.status, 400);
+        let response = response_json(&response);
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], serde_json::json!(-32700));
+        assert_eq!(response["error"]["data"]["json_pointer"], pointer);
+        assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
+    }
 }
 
 include!("tests_config.rs");

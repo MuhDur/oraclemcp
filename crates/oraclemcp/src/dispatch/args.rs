@@ -660,7 +660,9 @@ mod strict_contract_tests {
     use super::*;
     use crate::dispatch::{canonical_tool_name, ensure_no_args, parse_args};
     use oraclemcp_error::ErrorEnvelope;
+    use serde::de::DeserializeOwned;
     use serde_json::{Map, Value, json};
+    use std::collections::{BTreeMap, BTreeSet};
 
     // Use the dispatcher's actual typed decoder, including each compatibility
     // wrapper's distinct DTO, without opening a database lane.
@@ -712,6 +714,75 @@ mod strict_contract_tests {
                 crate::plsql_tools::decode_args_for_contract(name, args)
             }
             other => panic!("registered tool {other} has no decoder contract"),
+        }
+    }
+
+    // Serde's derived struct decoder reports its complete accepted field set
+    // (including aliases) for a deliberately unknown key. This observes the
+    // runtime decoder itself, rather than maintaining a second hand-written
+    // property inventory beside the schema.
+    fn serde_fields<T: DeserializeOwned>() -> Vec<String> {
+        let error = serde_json::from_value::<T>(json!({"__bogus__": 1}))
+            .err()
+            .expect("deny_unknown_fields must reject the probe");
+        let message = error.to_string();
+        assert!(message.contains("unknown field `__bogus__`"), "{message}");
+        message
+            .split('`')
+            .skip(3)
+            .step_by(2)
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn runtime_fields(name: &str) -> Vec<String> {
+        macro_rules! fields {
+            ($ty:ty) => {
+                serde_fields::<$ty>()
+            };
+        }
+        match canonical_tool_name(name) {
+            "oracle_list_profiles" | "oracle_connection_info" => Vec::new(),
+            "oracle_switch_profile" => fields!(SwitchProfileArgs),
+            "oracle_set_session_level" => fields!(SetSessionLevelArgs),
+            "oracle_query" => fields!(QueryArgs),
+            "oracle_semantic_search" => fields!(SemanticSearchArgs),
+            "oracle_diff" => fields!(DiffArgs),
+            "oracle_preview_sql" => fields!(PreviewSqlArgs),
+            "oracle_execute" => fields!(ExecuteArgs),
+            "oracle_checkpoint" => fields!(CheckpointArgs),
+            "oracle_undo_to" => fields!(UndoToArgs),
+            "oracle_preview_dml" => fields!(PreviewDmlArgs),
+            "oracle_compile_object" => fields!(CompileObjectArgs),
+            "oracle_create_or_replace" => fields!(CreateOrReplaceArgs),
+            "oracle_patch_source" => fields!(PatchSourceArgs),
+            "oracle_list_schemas" => fields!(ListSchemasArgs),
+            "oracle_schema_inspect" => fields!(SchemaInspectArgs),
+            "oracle_search_objects" => fields!(SearchObjectsArgs),
+            "oracle_orient" => fields!(OrientArgs),
+            "oracle_describe" => fields!(DescribeArgs),
+            "oracle_describe_index" => fields!(DescribeIndexArgs),
+            "oracle_describe_trigger" => fields!(DescribeTriggerArgs),
+            "oracle_describe_view" => fields!(DescribeViewArgs),
+            "oracle_get_ddl" => fields!(GetDdlArgs),
+            "oracle_get_source" => fields!(GetSourceArgs),
+            "oracle_sample_rows" => fields!(SampleRowsArgs),
+            "oracle_read_clob" => fields!(ReadClobArgs),
+            "oracle_compile_errors" => fields!(CompileErrorsArgs),
+            "oracle_search_source" => fields!(SearchSourceArgs),
+            "oracle_plscope_inspect" => fields!(PlscopeInspectArgs),
+            "oracle_explain_plan" => fields!(ExplainPlanArgs),
+            "oracle_top_queries" => fields!(TopQueriesArgs),
+            "oracle_plan_timeline" => fields!(PlanTimelineArgs),
+            "oracle_db_health" => fields!(DbHealthArgs),
+            "execute_approved" => fields!(ExecuteApprovedArgs),
+            "deploy_ddl" => fields!(DeployDdlArgs),
+            "read_patch_preview" => fields!(ReadPatchPreviewArgs),
+            #[cfg(feature = "plsql-intelligence")]
+            name if crate::plsql_tools::TOOL_NAMES.contains(&name) => {
+                crate::plsql_tools::runtime_fields_for_contract(name)
+            }
+            other => panic!("registered tool {other} has no runtime field contract"),
         }
     }
 
@@ -852,11 +923,37 @@ mod strict_contract_tests {
     #[test]
     fn schema_runtime_differential_every_tool() {
         let mut mismatches = Vec::new();
-        for tool in crate::registry::tool_registry().tools {
+        let registry = crate::registry::tool_registry();
+        let mut advertised_by_route: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for tool in &registry.tools {
+            let fields = advertised_by_route
+                .entry(canonical_tool_name(&tool.name).to_owned())
+                .or_default();
+            fields.extend(
+                tool.input_schema.as_ref().expect("input schema")["properties"]
+                    .as_object()
+                    .expect("properties")
+                    .keys()
+                    .cloned(),
+            );
+        }
+        for tool in registry.tools {
             let schema = tool.input_schema.as_ref().expect("input schema");
             let minimal = minimal_for_tool(&tool.name, schema);
             let base = decode(&tool.name, minimal.clone());
             let accepted = schema["properties"].as_object().expect("properties");
+            let mut missing_runtime_fields = Vec::new();
+            for field in runtime_fields(&tool.name) {
+                // One DTO may serve canonical and compatibility tool names.
+                // Each name has a narrower pre-decode schema gate, while the
+                // union covers every field that the shared DTO can decode.
+                if !advertised_by_route[canonical_tool_name(&tool.name)].contains(&field) {
+                    missing_runtime_fields.push(format!(
+                        "{} DTO accepts {field} but no schema on its route advertises it",
+                        tool.name
+                    ));
+                }
+            }
             let minimal_decodes = base.is_ok();
             if !minimal_decodes {
                 mismatches.push(format!(
@@ -890,8 +987,8 @@ mod strict_contract_tests {
                     ));
                 }
             }
-            let actual = json!({"minimal_decodes": minimal_decodes, "declared_properties_accepted": rejected_properties.is_empty()});
-            let expected = json!({"minimal_decodes": true, "declared_properties_accepted": true});
+            let actual = json!({"minimal_decodes": minimal_decodes, "declared_properties_accepted": rejected_properties.is_empty(), "runtime_fields_advertised": missing_runtime_fields.is_empty()});
+            let expected = json!({"minimal_decodes": true, "declared_properties_accepted": true, "runtime_fields_advertised": true});
             log_case(
                 "schema_runtime_differential",
                 &tool.name,
@@ -899,6 +996,7 @@ mod strict_contract_tests {
                 &actual,
             );
             mismatches.extend(rejected_properties);
+            mismatches.extend(missing_runtime_fields);
         }
         assert!(
             mismatches.is_empty(),
