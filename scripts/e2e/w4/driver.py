@@ -1337,6 +1337,9 @@ def run_lane(args):
                                               "W4_OWNER_PASSWORD", value))
                     fixture_runs[transport] = fixture_id
                     owner = "W4O_" + fixture_id
+                    wait_for_setup_ready(
+                        settings, password,
+                        f"SELECT ID FROM {owner}.T_PARENT_{fixture_id} WHERE ROWNUM <= 1")
                     if any(case.get("profile_variant") == "synthetic_owner"
                            for case in family_cases if transport in case["transports"]):
                         # The disposable owner needs the same FGA catalog proof
