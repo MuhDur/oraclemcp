@@ -740,6 +740,15 @@ fn validate_config(config: &DurableSpoolConfig) -> Result<(), ShippingError> {
 }
 
 fn secure_spool_directory(directory: &Path) -> Result<CapDir, ShippingError> {
+    #[cfg(windows)]
+    crate::sink::create_windows_private_audit_directory(directory).map_err(transport)?;
+    // On Windows, a newly created directory can inherit TokenOwner =
+    // Administrators even when TokenUser is the runner. The sink's fresh-create
+    // path proves creation and normalizes ownership before this strict
+    // existing-directory check. A raced/pre-existing path remains strict.
+    #[cfg(windows)]
+    let held = open_existing_dir_nofollow(directory)?;
+    #[cfg(not(windows))]
     let held = open_or_create_dir_nofollow(directory)?;
     let metadata = held.dir_metadata().map_err(transport)?;
     run_spool_directory_hardening_hook();
@@ -812,6 +821,7 @@ fn open_existing_dir_nofollow(path: &Path) -> Result<CapDir, ShippingError> {
     open_dir_nofollow(path, false)
 }
 
+#[cfg(not(windows))]
 fn open_or_create_dir_nofollow(path: &Path) -> Result<CapDir, ShippingError> {
     open_dir_nofollow(path, true)
 }
@@ -2295,6 +2305,20 @@ mod tests {
     };
     use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_durable_spool_fresh_directory_is_private() {
+        let root = tempfile::tempdir().expect("temporary spool root");
+        let parent = root.path().join("private");
+        crate::sink::create_windows_private_audit_directory(&parent)
+            .expect("fresh private spool parent");
+        let spool = parent.join("shipping-spool").join("worm-destination");
+        let held = secure_spool_directory(&spool).expect("fresh spool owner and DACL");
+        assert!(held.dir_metadata().expect("held spool metadata").is_dir());
+        crate::sink::harden_windows_private_directory(&spool)
+            .expect("fresh spool retains the strict existing-object owner policy");
+    }
 
     fn key() -> SigningKey {
         SigningKey::new("qa14", b"0123456789abcdef0123456789abcdef".to_vec())
