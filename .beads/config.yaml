@@ -1,1 +1,3 @@
 issue_prefix: oraclemcp
+inherited_context:
+  enabled: true
