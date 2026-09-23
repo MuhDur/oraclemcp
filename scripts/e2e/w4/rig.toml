@@ -1,0 +1,16 @@
+# Only these local, disposable Oracle lanes may receive W4 DDL.
+# Credentials come from the rig environment or Docker container metadata.
+[lanes.xe18]
+lab = true
+dsn = "localhost:1518/XEPDB1"
+container = "oraclemcp-xe18-rel"
+
+[lanes.xe21]
+lab = true
+dsn = "localhost:1520/XEPDB1"
+container = "oraclemcp-xe21-rel"
+
+[lanes.free23]
+lab = true
+dsn = "localhost:1522/FREEPDB1"
+container = "rust-oracledb-free"
