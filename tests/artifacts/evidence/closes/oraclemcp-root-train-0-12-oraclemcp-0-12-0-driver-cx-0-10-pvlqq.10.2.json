@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T21:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.2",
+  "scope": {
+    "summary": "Engine (plsql-intelligence) IR: package members, initializers, init section and default expressions as addressable units (2f3e9f5), plus root-cause parser fix f55e30b (ANTLR IsNotNumericFunction predicate true; expressions starting with a literal/name/call were unparseable). Engine main = 2f3e9f5 (fast-forward from a7cae17).",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "All code lives in the plsql-intelligence repo at 2f3e9f5; oraclemcp consumes it only after the engine pin refresh (.1.6).",
+      "plsql-accretion crate tests (land_tripwire recursion) were not run by implementer or orchestrator."
+    ]
+  },
+  "source": {
+    "sha": "e64e282e5c3a580ac879cfa9f942a59ac869ed8c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "engine verify at 2f3e9f5 in a detached orchestrator worktree under the build lease",
+        "kind": "cli",
+        "trace": "on origin/main; cargo fmt --check OK; cargo clippy --locked (13 consumed crates) --all-targets -D warnings OK; cargo test --locked (13 crates) --no-fail-fast: 1249 passed, 0 failed; tree clean after."
+      },
+      {
+        "name": "generated-parser delta review (f55e30b)",
+        "kind": "cli",
+        "trace": "Only build.rs (predicate + rationale) and 2 lines of src/generated/plsqlparser.rs changed; implementer showed regeneration from unchanged build.rs is byte-identical to the committed files before the fix."
+      },
+      {
+        "name": "sec second-agent review (orchestrator)",
+        "kind": "cli",
+        "trace": "Predicate flip is justified by the grammar: the only ambiguous input (numeric aggregate call) resolves to the same standard_function parse; previously-unparseable valid expressions now parse, reducing unparseable fallbacks rather than widening any admission. The one moved engine expectation (oracle_v4wa) was explained as parser debris from the broken predicate; depth guard still covered by two parser-independent IR tests."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Named AC tests and the two planted mutants (flattening, dropped default) were run by the implementing pane; the orchestrator re-ran the full 13-crate suite, not the mutants.",
+    "Verified by the orchestrator by re-execution, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
