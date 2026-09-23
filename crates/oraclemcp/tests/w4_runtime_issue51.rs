@@ -286,9 +286,14 @@ fn handshake_ok(initialize: &Value, tools: &Value) -> bool {
 /// The typed refusal: names `code` and the holder pid, and says nothing ran.
 fn typed_lock(reply: &Value, code: &str, holder_pid: u32) -> bool {
     let text = reply.to_string();
-    text.contains(code)
-        && text.contains(&format!("(pid {holder_pid})"))
-        && text.contains("executed nothing")
+    text.contains(code) && names_holder(&text, holder_pid) && text.contains("executed nothing")
+}
+
+/// The holder pid is a Unix-only hint: on Windows the holder's mandatory
+/// `LockFileEx` lock blocks the contender from reading the lock file, so the
+/// typed refusal omits it there (see `oraclemcp-audit` `read_holder_pid`).
+fn names_holder(text: &str, holder_pid: u32) -> bool {
+    !cfg!(unix) || text.contains(&format!("(pid {holder_pid})"))
 }
 
 fn any_lock(reply: &Value) -> bool {
@@ -349,8 +354,7 @@ fn w4_runtime_issue51_second_instance_typed_locked() {
     let typed = locked
         .iter()
         .all(|reply| typed_lock(reply, "ORACLEMCP_AUDIT_LOG_LOCKED", holder));
-    let doctor_reports =
-        doctor.contains("audit_log_locked") && doctor.contains(&format!("(pid {holder})"));
+    let doctor_reports = doctor.contains("audit_log_locked") && names_holder(&doctor, holder);
     let unlocked = !any_lock(&recovered);
     emit_row(
         "offline",

@@ -4789,6 +4789,10 @@ fn writable_profile_never_runs_without_audit_sink() {
             .expect("tools/call response");
         let text = called.to_string();
         assert!(text.contains("ORACLEMCP_AUDIT_LOG_LOCKED"), "{text}");
+        // The pid hint is Unix-only: Windows' mandatory LockFileEx lock blocks
+        // the contender's read of the holder's lock file (see sink.rs
+        // read_holder_pid); the typed refusal itself holds everywhere.
+        #[cfg(unix)]
         assert!(
             text.contains(&format!("(pid {})", std::process::id())),
             "names the holder pid: {text}"
@@ -4895,6 +4899,9 @@ fn second_serve_instance_reports_audit_lock_issue_51() {
     };
     let locked = rpc(query(3)).to_string();
     assert!(locked.contains("ORACLEMCP_AUDIT_LOG_LOCKED"), "{locked}");
+    // Unix-only pid hint: Windows' mandatory LockFileEx lock blocks reading
+    // the holder's lock file (sink.rs read_holder_pid).
+    #[cfg(unix)]
     assert!(
         locked.contains(&format!("(pid {})", std::process::id())),
         "the refusal names the holder: {locked}"

@@ -572,6 +572,10 @@ mod tests {
                 "{}",
                 envelope.message
             );
+            // The pid hint is Unix-only: Windows' mandatory LockFileEx lock
+            // blocks the contender's read of the holder's lock file (see
+            // sink.rs read_holder_pid); the typed refusal holds everywhere.
+            #[cfg(unix)]
             assert!(
                 envelope
                     .message
