@@ -450,6 +450,16 @@ mod tests {
 
     use super::*;
 
+    /// The audit log's parent the way production creates it: on Windows an
+    /// owner-only DACL directory (FileAuditSink refuses a SYSTEM-owned one).
+    fn private_audit_dir(dir: &Path) {
+        #[cfg(windows)]
+        oraclemcp_audit::create_windows_private_audit_directory(dir)
+            .expect("private audit directory");
+        #[cfg(not(windows))]
+        std::fs::create_dir_all(dir).expect("audit directory");
+    }
+
     /// A stand-in for the real dispatcher: counts the calls that reach it.
     struct CountingDispatch {
         calls: Arc<AtomicUsize>,
@@ -543,7 +553,7 @@ mod tests {
     fn deferred_auditor_locked_refuses_tool_calls_without_db_work() {
         let dir = tempfile::tempdir().unwrap();
         let path = audit_path(dir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        private_audit_dir(path.parent().unwrap());
         let _holder = FileAuditSink::open(&path).expect("the first instance holds the log");
         let (connects, calls) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let dispatch = DeferredDispatch::new(audit_gated_opener(
@@ -591,7 +601,7 @@ mod tests {
     fn deferred_auditor_reopens_after_holder_exits() {
         let dir = tempfile::tempdir().unwrap();
         let path = audit_path(dir.path());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        private_audit_dir(path.parent().unwrap());
         let holder = FileAuditSink::open(&path).expect("the first instance holds the log");
         let (connects, calls) = (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
         let dispatch = DeferredDispatch::new(audit_gated_opener(
