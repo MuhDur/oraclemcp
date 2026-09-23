@@ -1,0 +1,59 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T20:20:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.4",
+  "scope": {
+    "summary": "T4.4 run-id-stamped W4 lab fixture (registry + in-schema token bind teardown to the exact run; no prefix-based DROP) with an exact janitor, committed in 8721dd9e.",
+    "in_scope": [
+      "scripts/e2e/w4/fixture.py",
+      "scripts/e2e/w4/fixture",
+      "scripts/e2e/w4/rig.toml"
+    ],
+    "out_of_scope": [
+      "Tool behaviour against the fixture (W4 tool-matrix beads).",
+      "Other files under scripts/e2e/w4 (driver.py, scrub.py, cases/, capabilities.json) are another agent's uncommitted T4.3 work and are not part of this close."
+    ]
+  },
+  "source": {
+    "sha": "faab28681fc42690cf2c0c79f3183e3c7c66de92",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "fixture.py --selftest (offline)",
+        "kind": "cli",
+        "trace": "exit 0; rejects prefix_or_foreign_drop and non_lab_lane."
+      },
+      {
+        "name": "fixture.py setup + describe --run-id + teardown --run-id on free23, xe18, xe21 (orchestrator re-execution in clean worktree at faab2868)",
+        "kind": "cli",
+        "trace": "setup exit 0 on all three lanes with inventory expected=18 missing=[]; describe exit 0; teardown verdict PASS, errors [], leftovers [] (free23 34 objects, xe18 32, xe21 32 dropped)."
+      },
+      {
+        "name": "fixture.py selftest-live --lane <each of free23, xe18, xe21>",
+        "kind": "cli",
+        "trace": "exit 0 per lane; case overlapping_runs_stale_janitor_and_unregistered_user verdict pass: two overlapping active runs with distinct run ids, exact stale registered-run janitor removal, planted unregistered W4O_ user reported and preserved; subsequent teardowns leftovers []."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live re-execution is described in integration_evidence but not claimed as a committed live artifact (no JSONL artifact committed).",
+    "Live runs were on local loopback lab containers (FREE 23ai, XE 21, XE 18); the JSONL output was inspected at run time and is not committed as an artifact.",
+    "The planted unregistered W4O_ user from each selftest-live run is preserved by design (bead negative) and remains in the lab databases.",
+    "Standalone janitor invocation was not separately exercised by the orchestrator (argument error in the verify script); janitor behaviour is covered inside selftest-live."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
