@@ -59,6 +59,7 @@ use crate::policy::{
     PolicyDenialReason, PolicyPredicateRewrite, PolicyRewriteDenialReason, PolicyTightening,
     SqlPolicyConfig, SqlPolicyEvaluationContext, SqlPolicyVerb, rewrite_predicates_and_reclassify,
 };
+use crate::purity::{AdmissionContext, EffectRefusal, RoutineEffectsV1, admit};
 
 /// Everything the gate needs, all of it server-derived.
 ///
@@ -169,6 +170,8 @@ pub struct PolicyGateAdmission {
     /// candidate when the SQL was rewritten, else the base decision.
     pub effective_decision: GuardDecision,
     /// `max(base, policy floor, candidate)`. Never below the classifier's level.
+    /// A routine closure supplied through [`enforce_sql_policy_with_effects`]
+    /// raises this field further to `max(policy result, effect level)`.
     pub required_level: OperatingLevel,
     /// `max(base, candidate)`.
     pub danger: DangerLevel,
@@ -311,6 +314,22 @@ pub fn enforce_sql_policy(request: &PolicyGateRequest<'_>) -> PolicyGate {
         danger,
         attachment: Some(attachment),
     }))
+}
+
+/// Apply the SQL policy and, when that policy admits the statement, raise its
+/// required level to cover the proven routine call closure. Effect refusals
+/// remain typed so callers cannot treat them as a request for step-up.
+pub fn enforce_sql_policy_with_effects(
+    request: &PolicyGateRequest<'_>,
+    effects: &RoutineEffectsV1,
+    context: AdmissionContext,
+) -> Result<PolicyGate, EffectRefusal> {
+    let mut gate = enforce_sql_policy(request);
+    if let PolicyGate::Admitted(admission) = &mut gate {
+        let effect_level = admit(effects, context)?;
+        admission.required_level = admission.required_level.max(effect_level);
+    }
+    Ok(gate)
 }
 
 fn deny(reason: PolicyGateDenialReason, matched_rule_ids: Vec<String>) -> PolicyGate {
@@ -608,6 +627,67 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn admission_required_level_never_lowered_by_effects() {
+        let classifier = classifier();
+        let sql = "SELECT id FROM hr.employees";
+        let base = classifier.classify(sql);
+        assert_eq!(base.required_level, Some(OperatingLevel::ReadOnly));
+        let request = PolicyGateRequest {
+            classifier: &classifier,
+            policy: None,
+            base: &base,
+            sql,
+            current_schema: Some("HR"),
+            principal: None,
+        };
+        let effects = RoutineEffectsV1::new([crate::purity::RoutineEffect::Dml]);
+        let PolicyGate::Admitted(admission) =
+            enforce_sql_policy_with_effects(&request, &effects, AdmissionContext::CustomToolCall)
+                .expect("DML effect is admissible at READ_WRITE")
+        else {
+            panic!("the classifier admitted the base SELECT");
+        };
+        assert_eq!(admission.required_level, OperatingLevel::ReadWrite);
+
+        let effects = RoutineEffectsV1::new([crate::purity::RoutineEffect::ReadDb]);
+        let PolicyGate::Admitted(admission) =
+            enforce_sql_policy_with_effects(&request, &effects, AdmissionContext::CustomToolCall)
+                .expect("read effect is admissible")
+        else {
+            panic!("the classifier admitted the base SELECT");
+        };
+        assert_eq!(admission.required_level, OperatingLevel::ReadOnly);
+
+        let effects = RoutineEffectsV1::new([crate::purity::RoutineEffect::TxnControl]);
+        assert_eq!(
+            enforce_sql_policy_with_effects(&request, &effects, AdmissionContext::CustomToolCall),
+            Err(EffectRefusal::AlwaysRefused(
+                crate::purity::RoutineEffect::TxnControl
+            ))
+        );
+
+        let configured = policy(vec![rule(
+            "ddl-floor",
+            SqlPolicyMatchConfig::default(),
+            SqlPolicyEffectConfig::RequireLevel {
+                level: OperatingLevel::Ddl,
+            },
+        )]);
+        let request = PolicyGateRequest {
+            policy: Some(&configured),
+            ..request
+        };
+        let effects = RoutineEffectsV1::new([crate::purity::RoutineEffect::Dml]);
+        let PolicyGate::Admitted(admission) =
+            enforce_sql_policy_with_effects(&request, &effects, AdmissionContext::CustomToolCall)
+                .expect("DML effect is admissible")
+        else {
+            panic!("the policy only raises the level");
+        };
+        assert_eq!(admission.required_level, OperatingLevel::Ddl);
     }
 
     /// A deny rule refuses, and says which rule did it.

@@ -60,11 +60,13 @@ pub use policy::{
 };
 pub use policy_gate::{
     PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateDenialReason, PolicyGateRequest,
-    StatementPolicyFacts, enforce_sql_policy,
+    StatementPolicyFacts, enforce_sql_policy, enforce_sql_policy_with_effects,
 };
 pub use purity::{
-    ObjectRef, OperatorPureFunction, OperatorPureFunctionAllowlist, OperatorPureFunctionError,
-    OperatorPureFunctionRestriction, Purity, SideEffectOracle, UnknownOracle,
+    AdmissionContext, EffectRefusal, ObjectRef, OperatorPureFunction,
+    OperatorPureFunctionAllowlist, OperatorPureFunctionError, OperatorPureFunctionRestriction,
+    OperatorStatementClass, Purity, RoutineEffect, RoutineEffectsV1, SideEffectOracle,
+    UnknownOracle, admit,
 };
 pub use resolver::{
     CatalogGeneration, CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart,
