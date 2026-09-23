@@ -1047,6 +1047,53 @@ fn streamable_http_e1_ladder_ceiling_drop_and_protected() {
 }
 
 #[test]
+fn write_auth_http_execute_visibility_follows_effective_ceiling() {
+    let listed = |max_level, protected, scope| {
+        let mut config = oauth_config(Vec::new());
+        config.stateful = true;
+        config.single_principal_guard = None;
+        let harness = spawn_http_with_server(
+            config,
+            per_lane_dispatcher_server_with_profile_level(max_level, protected),
+        );
+        let token = jwt_with_scope(scope);
+        let session = stateful_initialize(harness.addr, &token, "write-auth-http");
+        let request = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"});
+        let (status, _, body) = request_json_with_extra_headers(
+            harness.addr,
+            "POST",
+            MCP_PATH,
+            Some(&token),
+            &[
+                ("mcp-session-id", &session),
+                ("mcp-protocol-version", "2025-11-25"),
+            ],
+            Some(request.to_string().as_bytes()),
+        );
+        assert_eq!(status, 200);
+        sse_last_json(&body)["result"]["tools"]
+            .as_array()
+            .expect("tools/list array")
+            .iter()
+            .filter_map(|tool| tool["name"].as_str().map(str::to_owned))
+            .collect::<Vec<_>>()
+    };
+
+    let write = listed(OperatingLevel::ReadWrite, false, "oracle:write");
+    assert!(write.iter().any(|name| name == "oracle_execute"));
+    assert!(write.iter().any(|name| name == "execute_approved"));
+    assert!(!write.iter().any(|name| name == "oracle_explain_plan"));
+
+    for hidden in [
+        listed(OperatingLevel::ReadWrite, false, "oracle:read"),
+        listed(OperatingLevel::ReadOnly, true, "oracle:write"),
+    ] {
+        assert!(!hidden.iter().any(|name| name == "oracle_execute"));
+        assert!(!hidden.iter().any(|name| name == "execute_approved"));
+    }
+}
+
+#[test]
 fn stateful_http_lanes_keep_profile_switches_and_connections_isolated() {
     let mut config = oauth_config(Vec::new());
     config.stateful = true;

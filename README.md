@@ -150,7 +150,7 @@ A database session is treated as a governed surface with several independent con
 | **Incident capture** | `om incident capture`/`replay` — redacted, deterministic bundles re-classified offline ([ADR 0011](docs/adr/0011-incident-artifact-manifest.md)) | [`incident.sh`](scripts/e2e/incident.sh) |
 | **Diagnostics** | `oracle_top_queries` (free `V$SQLSTATS`) and a read-only `oracle_db_health` suite that degrades cleanly on least-privilege accounts ([ADR 0005](docs/adr/0005-awr-diagnostics-license-gating.md)) | version-matrix lanes |
 
-What an agent sees depends on the active level: at `READ_ONLY`, `tools/list` returns the read-safe subset; once elevated within the profile ceiling it returns the full **34 tools + 25 aliases**. A call to a not-yet-visible tool is refused with the same typed `ErrorEnvelope` as any other below-level statement.
+What an agent sees depends on the active level and effective ceiling. At `READ_ONLY`, `tools/list` includes `oracle_execute` and `execute_approved` when the effective profile/OAuth ceiling permits `READ_WRITE`; their visibility grants no write authority. Other higher-level tools remain hidden until the session is elevated within the ceiling. A call to a not-yet-visible tool is refused with the same typed `ErrorEnvelope` as any other below-level statement.
 
 ## Tools
 
@@ -167,7 +167,7 @@ The tables below are generated from the server's tool registry — the same desc
 | `oracle_semantic_search` | Oracle Semantic Search | Run a bounded, fail-closed 23ai vector search through the same policy, semantic-resolution, masking, and audit path as oracle_query. | `READ_ONLY` | no |
 | `oracle_diff` | Oracle Diff | Diff one proven read-only SELECT across two Oracle SCNs, or across two databases. | `READ_ONLY` | no |
 | `oracle_preview_sql` | Oracle Preview SQL | Classify a SQL statement and report whether it would pass the active profile/session gate without executing it. | `READ_ONLY` | no |
-| `oracle_execute` | Oracle Execute | Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. | `READ_WRITE` | yes |
+| `oracle_execute` | Oracle Execute | Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. | `READ_ONLY` | yes |
 | `oracle_checkpoint` | Oracle Checkpoint | Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true then leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. | `READ_WRITE` | yes |
 | `oracle_undo_to` | Oracle Undo To | Undo the reversible workspace: ROLLBACK TO SAVEPOINT <name> discards every held statement executed after that checkpoint and releases the checkpoints stacked above it, leaving the transaction open. | `READ_WRITE` | yes |
 | `oracle_preview_dml` | Oracle Preview DML | Dry-run one DML statement: the server brackets it in its own savepoint, executes it, reads the rows it touched, then rolls back to that savepoint and presents the result — nothing is committed and nothing is left behind. | `READ_WRITE` | yes |

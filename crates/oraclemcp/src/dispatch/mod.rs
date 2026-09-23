@@ -75,6 +75,10 @@ use oraclemcp_db::{SearchDetailLevel, SourceText};
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
 };
+use oraclemcp_guard::scoped_grant::{
+    ScopedGrantLookupError, ScopedGrantStore, SignedGrantRef, WriteAuthRefusal, WriteAuthorization,
+    authorize_level,
+};
 use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel,
     EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, EscalationError,
@@ -93,6 +97,14 @@ use serde_json::{Value, json};
 /// create can reach Oracle.
 static EDITION_CREATION_RESERVATIONS: LazyLock<SyncMutex<HashSet<String>>> =
     LazyLock::new(|| SyncMutex::new(HashSet::new()));
+
+/// Restart invalidates every signed scoped-grant reference. The grant store
+/// remains lane-local and its binding prevents cross-lane replay.
+static SCOPED_GRANT_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
+    let mut key = [0u8; 32];
+    getrandom::getrandom(&mut key).expect("OS randomness required for scoped grants");
+    key
+});
 
 /// State-file location for the served refusal corpus. It deliberately follows
 /// the same XDG-first layout as the audit log, but remains a separate artifact:
@@ -402,6 +414,7 @@ struct DispatcherState {
     level: SessionLevelState,
     custom_catalog: ActiveCustomCatalog,
     execute_grants: ExecGrantStore,
+    scoped_grants: ScopedGrantStore,
     grant_generation: u64,
     execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
     patch_previews: HashMap<String, PatchPreviewEntry>,
@@ -588,6 +601,7 @@ impl OracleDispatcher {
                 level,
                 custom_catalog: ActiveCustomCatalog::new(1, CustomToolCatalog::default()),
                 execute_grants: ExecGrantStore::new(),
+                scoped_grants: ScopedGrantStore::new(),
                 grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
@@ -677,6 +691,7 @@ impl OracleDispatcher {
                 level,
                 custom_catalog: ActiveCustomCatalog::new(1, custom_catalog),
                 execute_grants: ExecGrantStore::new(),
+                scoped_grants: ScopedGrantStore::new(),
                 grant_generation: 1,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
@@ -1551,6 +1566,7 @@ impl OracleDispatcher {
                 state.custom_catalog = custom_catalog;
                 state.grant_generation = state.grant_generation.saturating_add(1);
                 state.execute_grants.clear();
+                state.scoped_grants.revoke_all();
                 state.execute_approved_tokens.clear();
                 state.patch_previews.clear();
                 state
@@ -6464,6 +6480,55 @@ fn apply_sql_policy(
     }
 }
 
+/// Extract only an explicit RequireLevel floor from the policy engine's typed
+/// matched-rule proof. `PolicyGateAdmission.required_level` also includes the
+/// classifier's own level, so using it as the floor would make every ordinary
+/// UPDATE appear to require session-wide READ_WRITE and defeat scoped grants.
+fn sql_policy_level_floor(
+    config: Option<&SqlPolicyConfig>,
+    admission: &PolicyGateAdmission,
+) -> Result<OperatingLevel, ErrorEnvelope> {
+    let Some(config) = config else {
+        return Ok(OperatingLevel::ReadOnly);
+    };
+    let narrowing: oraclemcp_guard::policy::PolicyTightening =
+        serde_json::from_value(admission.attachment.clone().ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "SQL policy admission lacks its rule proof",
+            )
+        })?)
+        .map_err(|_| {
+            ErrorEnvelope::new(ErrorClass::Internal, "SQL policy rule proof is malformed")
+        })?;
+    let oraclemcp_guard::policy::PolicyTightening::Narrow(narrowing) = narrowing else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "SQL policy admission carried a denial proof",
+        ));
+    };
+    let mut floor = OperatingLevel::ReadOnly;
+    for id in &narrowing.matched_rule_ids {
+        let mut found = false;
+        for rule in &config.rules {
+            if &rule.id == id {
+                found = true;
+                if let oraclemcp_guard::SqlPolicyEffectConfig::RequireLevel { level } = &rule.effect
+                {
+                    floor = floor.max(*level);
+                }
+            }
+        }
+        if !found {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "SQL policy admission names an unknown rule",
+            ));
+        }
+    }
+    Ok(floor)
+}
+
 /// The preview's view of the policy. A statement the CLASSIFIER refused keeps the
 /// classifier's refusal — the preview must say "forbidden", not "policy denied",
 /// or it would credit the wrong control (and would say a policy refused it on a
@@ -6572,6 +6637,64 @@ fn execute_gate_error(
         },
         Some(decision),
     )
+}
+
+fn write_auth_error(refusal: WriteAuthRefusal) -> ErrorEnvelope {
+    let class = match refusal {
+        WriteAuthRefusal::GrantTokenKindMismatch | WriteAuthRefusal::GrantMismatch => {
+            ErrorClass::InvalidArguments
+        }
+        WriteAuthRefusal::GrantEnforcementUnavailable => ErrorClass::RuntimeStateRequired,
+        WriteAuthRefusal::SessionGate(_) => ErrorClass::OperatingLevelTooLow,
+        _ => ErrorClass::PolicyDenied,
+    };
+    ErrorEnvelope::new(
+        class,
+        format!(
+            "{}: write authorization refused before database I/O",
+            refusal.code()
+        ),
+    )
+}
+
+fn scoped_lookup_refusal(error: ScopedGrantLookupError) -> WriteAuthRefusal {
+    match error {
+        ScopedGrantLookupError::Unknown => WriteAuthRefusal::GrantUnknown,
+        ScopedGrantLookupError::Expired => WriteAuthRefusal::GrantExpired,
+        ScopedGrantLookupError::Revoked | ScopedGrantLookupError::GenerationMismatch { .. } => {
+            WriteAuthRefusal::GrantRevoked
+        }
+        ScopedGrantLookupError::Suspended { .. } => WriteAuthRefusal::GrantSuspendedDrift,
+        ScopedGrantLookupError::SessionMismatch
+        | ScopedGrantLookupError::LaneMismatch
+        | ScopedGrantLookupError::SubjectMismatch
+        | ScopedGrantLookupError::StoreFull => WriteAuthRefusal::GrantMismatch,
+        _ => WriteAuthRefusal::GrantMismatch,
+    }
+}
+
+fn resolve_scoped_grant(
+    ctx: &DbToolCtx<'_>,
+    material: &str,
+) -> Result<std::sync::Arc<oraclemcp_guard::ScopedGrant>, WriteAuthRefusal> {
+    if !material.starts_with("sgr1.") {
+        return Err(WriteAuthRefusal::GrantTokenKindMismatch);
+    }
+    let reference = SignedGrantRef::from_client(material);
+    let id = reference
+        .grant_id_unverified()
+        .ok_or(WriteAuthRefusal::GrantMismatch)?;
+    let grant = ctx
+        .scoped_grants
+        .get(id, ctx.grant_binding)
+        .map_err(scoped_lookup_refusal)?;
+    reference
+        .verify(&SCOPED_GRANT_KEY, ctx.grant_binding, &grant.scope_digest())
+        .ok_or(WriteAuthRefusal::GrantMismatch)?;
+    if grant.profile() != ctx.active_profile.unwrap_or_default() {
+        return Err(WriteAuthRefusal::GrantMismatch);
+    }
+    Ok(grant)
 }
 
 fn consume_execute_confirmation(
@@ -6734,12 +6857,15 @@ fn execute_approved_args(
         .with_suggested_tool("oracle_execute"));
     }
 
-    let token = args.token.filter(|s| !s.trim().is_empty()).ok_or_else(|| {
-        invalid_args("execute_approved requires token from preview_sql")
-            .with_suggested_tool("preview_sql")
-            .with_next_step("call preview_sql with the SQL statement, then pass execute_confirmation.confirm as token")
-    })?;
+    let token = args.token.filter(|s| !s.trim().is_empty());
+    if token.as_deref().is_some_and(|s| s.starts_with("sgr1.")) {
+        return Err(write_auth_error(WriteAuthRefusal::GrantTokenKindMismatch));
+    }
     if let Some(sql) = args.sql.filter(|s| !s.trim().is_empty()) {
+        if token.is_none() && args.scoped_grant.is_none() {
+            return Err(invalid_args("execute_approved requires token from preview_sql or an explicit scoped_grant with sql")
+                .with_suggested_tool("preview_sql"));
+        }
         return Ok(ExecuteArgs {
             sql,
             binds: Vec::new(),
@@ -6747,7 +6873,8 @@ fn execute_approved_args(
             // The compat alias replays a previewed statement; the reversible
             // workspace is offered on oracle_execute only.
             hold: false,
-            confirm: Some(token),
+            confirm: token,
+            scoped_grant: args.scoped_grant,
             capture_dbms_output: args.capture_dbms_output,
             dbms_output_max_lines: args.dbms_output_max_lines,
             dbms_output_max_chars: args.dbms_output_max_chars,
@@ -6755,6 +6882,10 @@ fn execute_approved_args(
         });
     }
 
+    let token = token.ok_or_else(|| {
+        invalid_args("execute_approved requires token from preview_sql when sql is omitted")
+            .with_suggested_tool("preview_sql")
+    })?;
     prune_execute_approved_tokens(state);
     let Some(grant) = state.execute_approved_tokens.remove(&token) else {
         return Err(ErrorEnvelope::new(
@@ -6776,7 +6907,9 @@ fn execute_approved_args(
             "switch back to the previewed profile or preview the SQL again on the active profile",
         ));
     }
-    if session.evaluate(Some(grant.required_level)) != LevelDecision::Allow {
+    if args.scoped_grant.is_none()
+        && session.evaluate(Some(grant.required_level)) != LevelDecision::Allow
+    {
         return Err(execute_gate_error(
             &DEFAULT_CLASSIFIER.classify(&grant.sql),
             session.evaluate(Some(grant.required_level)),
@@ -6790,6 +6923,7 @@ fn execute_approved_args(
         commit,
         hold: false,
         confirm: Some(token),
+        scoped_grant: args.scoped_grant,
         capture_dbms_output: args.capture_dbms_output,
         dbms_output_max_lines: args.dbms_output_max_lines,
         dbms_output_max_chars: args.dbms_output_max_chars,
@@ -6889,6 +7023,7 @@ struct DbToolCtx<'a> {
     active_profile: Option<&'a str>,
     session: &'a SessionLevelState,
     execute_grants: &'a ExecGrantStore,
+    scoped_grants: &'a ScopedGrantStore,
     grant_binding: &'a ExecGrantBinding,
     write_intents: Option<&'a WriteIntentLog>,
     catalog_cache: &'a OracleCatalogResolverCache,
@@ -8887,11 +9022,6 @@ async fn execute_sql_inner(
         &args.sql,
     )?;
     let decision = policy.effective_decision.clone();
-    let gate = decision.gate(session);
-    if !matches!(gate, LevelDecision::Allow) {
-        return Err(execute_gate_error(&decision, gate, session));
-    }
-
     // Two different levels, and conflating them is a bug:
     //   `statement_level` is what the statement IS — it decides what ORACLE does
     //     with it (DDL commits implicitly and cannot be rollback-previewed);
@@ -8910,9 +9040,51 @@ async fn execute_sql_inner(
         )
     })?;
     let required_level = statement_level.max(policy.required_level);
-    // The policy floor can sit ABOVE the level the classifier's own gate just
-    // proved, so the composed level is gated too. This is the only place the floor
-    // becomes authority-bearing, and it can only ever raise the bar.
+    let policy_level_floor = sql_policy_level_floor(ctx.sql_policy, &policy)?;
+    if args
+        .confirm
+        .as_deref()
+        .is_some_and(|s| s.starts_with("sgr1."))
+    {
+        return Err(write_auth_error(WriteAuthRefusal::GrantTokenKindMismatch));
+    }
+    // Supplying a reference irrevocably selects the scoped path. Resolve it
+    // before considering session authority, including when already elevated.
+    if args.scoped_grant.is_some() {
+        if session.is_protected() || session.effective_ceiling() < OperatingLevel::ReadWrite {
+            return Err(write_auth_error(WriteAuthRefusal::GrantAboveCeiling));
+        }
+        if session.effective_level() < policy_level_floor {
+            return Err(write_auth_error(WriteAuthRefusal::GrantPolicyFloorUnmet));
+        }
+        if statement_level != OperatingLevel::ReadWrite {
+            return Err(write_auth_error(WriteAuthRefusal::GrantLevelNotGrantable));
+        }
+    }
+    let scoped_grant = args
+        .scoped_grant
+        .as_deref()
+        .map(|material| resolve_scoped_grant(&ctx, material))
+        .transpose()
+        .map_err(write_auth_error)?;
+    let authorization = authorize_level(
+        statement_level,
+        policy_level_floor,
+        session,
+        session.effective_ceiling(),
+        scoped_grant.as_deref(),
+    )
+    .map_err(|refusal| match refusal {
+        WriteAuthRefusal::SessionGate(gate) => execute_gate_error(&decision, gate, session),
+        other => write_auth_error(other),
+    })?;
+    if matches!(authorization, WriteAuthorization::ScopedGrant(_)) {
+        // T13.5 replaces this terminal seam with matching, bounded rewrite,
+        // reservation and the real guarded execute path.
+        return Err(write_auth_error(
+            WriteAuthRefusal::GrantEnforcementUnavailable,
+        ));
+    }
     let composed_gate = session.evaluate(Some(required_level));
     if !matches!(composed_gate, LevelDecision::Allow) {
         return Err(execute_gate_error(&decision, composed_gate, session));
@@ -10942,6 +11114,7 @@ async fn create_or_replace_inner(
             commit: true,
             hold: false,
             confirm: args.confirm,
+            scoped_grant: None,
             capture_dbms_output: false,
             dbms_output_max_lines: None,
             dbms_output_max_chars: None,
@@ -11134,6 +11307,7 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
             commit: true,
             hold: false,
             confirm: args.confirm,
+            scoped_grant: None,
             capture_dbms_output: false,
             dbms_output_max_lines: None,
             dbms_output_max_chars: None,
@@ -11613,6 +11787,7 @@ impl OracleDispatcher {
         state.level.drop_elevation();
         state.grant_generation = state.grant_generation.saturating_add(1);
         state.execute_grants.clear();
+        state.scoped_grants.revoke_all();
         state.execute_approved_tokens.clear();
         state.patch_previews.clear();
         state
@@ -12007,6 +12182,7 @@ impl OracleDispatcher {
                     state.custom_catalog = custom_catalog;
                     state.grant_generation = state.grant_generation.saturating_add(1);
                     state.execute_grants.clear();
+                    state.scoped_grants.revoke_all();
                     state.execute_approved_tokens.clear();
                     state.patch_previews.clear();
                     state
@@ -12077,13 +12253,28 @@ impl OracleDispatcher {
         // any arm can mint/consume authority or mutate lane-local state.
         request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         let request_subject = audit_subject(context, &self.default_audit_subject);
+        let scoped_level = scoped_session_level(&state.level, context);
         // Arc N: the active profile's tightening-only policy governs every guarded
         // statement below. A policy rule names a schema, so the schema it is
         // matched against is resolved from the CONNECTION, once per session — a
         // caller that could assert its own schema could dodge the rule naming it.
         // The round trip is paid only by a lane that actually has a policy.
         let sql_policy = self.sql_policy()?;
-        if sql_policy.is_some() && state.current_schema.is_none() {
+        // A write that is about to fail its level or explicit-grant gate must
+        // not perform even this schema-discovery round trip. Qualified targets
+        // can still be checked by the policy engine without CURRENT_SCHEMA;
+        // an unresolved unqualified target is refused closed.
+        let write_auth_pre_io = matches!(tool, "oracle_execute" | "execute_approved")
+            && (scoped_level.effective_level() < OperatingLevel::ReadWrite
+                || args.get("scoped_grant").is_some()
+                || ["confirm", "token", "confirmation_token"]
+                    .iter()
+                    .any(|field| {
+                        args.get(*field)
+                            .and_then(Value::as_str)
+                            .is_some_and(|token| token.starts_with("sgr1."))
+                    }));
+        if sql_policy.is_some() && state.current_schema.is_none() && !write_auth_pre_io {
             let described = describe_conn(cx, state.conn.as_ref())
                 .await
                 .ok()
@@ -12091,7 +12282,6 @@ impl OracleDispatcher {
             state.current_schema = described.map(|schema| schema.to_ascii_uppercase());
         }
         let current_schema = state.current_schema.clone();
-        let scoped_level = scoped_session_level(&state.level, context);
         let scoped = context.scope_grant().is_some();
         if tool != "oracle_list_profiles"
             && tool != "oracle_connection_info"
@@ -12172,6 +12362,7 @@ impl OracleDispatcher {
                 state.level = staged_level;
                 state.grant_generation = state.grant_generation.saturating_add(1);
                 state.execute_grants.clear();
+                state.scoped_grants.revoke_all();
                 state.execute_approved_tokens.clear();
                 state.patch_previews.clear();
             }
@@ -12226,6 +12417,7 @@ impl OracleDispatcher {
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
                 execute_grants: &state.execute_grants,
+                scoped_grants: &state.scoped_grants,
                 grant_binding: &grant_binding,
                 write_intents: self.write_intents.as_deref(),
                 catalog_cache: &state.catalog_cache,
@@ -12255,6 +12447,7 @@ impl OracleDispatcher {
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
                 execute_grants: &state.execute_grants,
+                scoped_grants: &state.scoped_grants,
                 grant_binding: &grant_binding,
                 write_intents: self.write_intents.as_deref(),
                 catalog_cache: &state.catalog_cache,
@@ -12500,6 +12693,7 @@ impl OracleDispatcher {
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
+                    scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
@@ -12527,6 +12721,7 @@ impl OracleDispatcher {
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
+                    scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
@@ -12554,6 +12749,7 @@ impl OracleDispatcher {
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
+                    scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
@@ -12581,6 +12777,7 @@ impl OracleDispatcher {
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
+                    scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
@@ -12608,6 +12805,7 @@ impl OracleDispatcher {
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
+                    scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
@@ -12635,6 +12833,7 @@ impl OracleDispatcher {
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
+                    scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
@@ -12662,6 +12861,7 @@ impl OracleDispatcher {
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
+                    scoped_grants: &state.scoped_grants,
                     grant_binding: &grant_binding,
                     write_intents: self.write_intents.as_deref(),
                     catalog_cache: &state.catalog_cache,
@@ -14032,6 +14232,7 @@ impl OracleDispatcher {
                             active_profile: active_profile.as_deref(),
                             session: &scoped_level,
                             execute_grants: &state.execute_grants,
+                            scoped_grants: &state.scoped_grants,
                             grant_binding: &grant_binding,
                             write_intents: self.write_intents.as_deref(),
                             catalog_cache: &state.catalog_cache,

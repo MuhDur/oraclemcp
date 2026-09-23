@@ -5764,7 +5764,8 @@ fn qa99_level_changes_and_ttl_expiry_emit_list_changed_only_when_visibility_chan
     };
 
     let read_only = listed_names(1);
-    assert!(!read_only.iter().any(|name| name == "oracle_execute"));
+    assert!(read_only.iter().any(|name| name == "oracle_execute"));
+    assert!(read_only.iter().any(|name| name == "execute_approved"));
     assert!(server.drain_server_notifications(owner).is_empty());
 
     let preview = call(
@@ -5805,7 +5806,7 @@ fn qa99_level_changes_and_ttl_expiry_emit_list_changed_only_when_visibility_chan
     );
     call(6, "oracle_set_session_level", json!({"action":"drop"}));
     assert_eq!(server.drain_server_notifications(owner).len(), 1);
-    assert!(!listed_names(7).iter().any(|name| name == "oracle_execute"));
+    assert!(listed_names(7).iter().any(|name| name == "oracle_execute"));
 
     let preview = call(
         8,
@@ -5836,7 +5837,7 @@ fn qa99_level_changes_and_ttl_expiry_emit_list_changed_only_when_visibility_chan
         1,
         "the first request after monotonic TTL expiry reports catalog shrinkage"
     );
-    assert!(!listed_names(11).iter().any(|name| name == "oracle_execute"));
+    assert!(listed_names(11).iter().any(|name| name == "oracle_execute"));
 }
 
 #[test]
@@ -11706,6 +11707,8 @@ mod gate_refusal_reasons;
 /// wiring end to end: writes/DDL and escalations are chained; pure reads are not.
 mod audit_wiring;
 
+mod write_authorization;
+
 /// C8: `oracle_top_queries` surfaces the existing awr.rs builder as a served,
 /// read-only tool. The free live cursor cache (V$SQLSTATS) is the default; the
 /// licensed AWR path is opt-in and gated (proven in awr.rs unit tests).
@@ -12513,7 +12516,7 @@ mod read_only_backstop_wiring {
     }
 
     #[test]
-    fn failed_transition_rollback_prevents_write_and_quarantines_session() {
+    fn write_auth_backstop_clear_failure_quarantines() {
         let state = Arc::new(BackstopRecordingState::default());
         let dispatcher = OracleDispatcher::new_with_profile_level(
             Box::new(BackstopRecordingMock {

@@ -2780,6 +2780,9 @@ fn descriptor_visible_for_surface(descriptor: &ToolDescriptor, surface: &McpSurf
         // other than the descriptor's own minimum level.
         "enable_writes" => surface.effective_ceiling >= OperatingLevel::ReadWrite,
         "disable_writes" => surface.current_level > OperatingLevel::ReadOnly,
+        "oracle_execute" | "execute_approved" => {
+            !surface.protected && surface.effective_ceiling >= OperatingLevel::ReadWrite
+        }
         _ => {
             let required = min_visible_level_for_tool(descriptor);
             surface.current_level >= required && surface.effective_ceiling >= required
@@ -2803,6 +2806,7 @@ pub fn min_visible_level_for_tool(descriptor: &ToolDescriptor) -> OperatingLevel
         // Always advertised so an agent can discover the level workflow; the
         // elevation itself stays classifier/profile gated.
         "oracle_set_session_level" => OperatingLevel::ReadOnly,
+        "oracle_execute" | "execute_approved" => OperatingLevel::ReadOnly,
         "enable_writes" | "disable_writes" => OperatingLevel::ReadWrite,
         name => match required_current_level_for_tool(name) {
             Some(required) => required,
@@ -2814,9 +2818,7 @@ pub fn min_visible_level_for_tool(descriptor: &ToolDescriptor) -> OperatingLevel
 
 fn required_current_level_for_tool(name: &str) -> Option<OperatingLevel> {
     match name {
-        "oracle_execute" | "execute_approved" | "oracle_explain_plan" => {
-            Some(OperatingLevel::ReadWrite)
-        }
+        "oracle_explain_plan" => Some(OperatingLevel::ReadWrite),
         "oracle_compile_object"
         | "oracle_create_or_replace"
         | "oracle_patch_source"

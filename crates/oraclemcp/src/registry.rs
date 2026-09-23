@@ -732,7 +732,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_execute",
             ToolTier::FoundationLiveDb,
-            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
+            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -744,7 +744,8 @@ pub fn tool_registry() -> ToolRegistry {
                         "items": {}
                     },
                     "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require confirm from oracle_preview_sql. Set true only to commit; DDL/Admin statements require true because Oracle cannot rollback them." },
-                    "hold": { "type": "boolean", "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused." }
+                    "hold": { "type": "boolean", "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused." },
+                    "scoped_grant": { "type": "string", "description": "Explicit signed reference to one scoped grant. Its presence selects grant authorization; an invalid grant never falls back to the session level. Grant execution is unavailable until scoped enforcement is installed." }
                 }),
                 &[
                     confirm_trio("Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true and whenever the statement has a non-transactional effect such as sequence NEXTVAL, even with commit=false."),
@@ -1403,7 +1404,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "execute_approved",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for executing a statement previously previewed with preview_sql; token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit, except that non-transactional effects such as sequence NEXTVAL persist after rollback.",
+            "Compatibility alias for oracle_execute, including explicit scoped_grant selection. Visibility grants no authority. Token-only calls work for five minutes in the same server process and DML rolls back unless commit=true is explicit, except that non-transactional effects such as sequence NEXTVAL persist after rollback.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -1413,7 +1414,8 @@ pub fn tool_registry() -> ToolRegistry {
                     "confirmation_token": { "type": "string", "description": "Alias for token." },
                     "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
                     "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require the preview grant. Set true only when the grant represents deliberate commit intent; DDL/Admin statements require true." },
-                    "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." }
+                    "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." },
+                    "scoped_grant": { "type": "string", "description": "Explicit signed scoped-grant reference, forwarded to oracle_execute without a session-level fallback." }
                 }),
                 &[
                     timeout_seconds_prop(),

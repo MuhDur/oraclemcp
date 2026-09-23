@@ -2,7 +2,7 @@
 //! object, relocated from the former single-file `dispatch.rs`. Fields are
 //! `pub(super)` so the dispatcher handlers in the parent module read them.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 /// Inline representation for an `oracle_query` result page.
@@ -245,6 +245,15 @@ pub(super) struct PreviewDmlArgs {
     pub(super) timeout_seconds: Option<u64>,
 }
 
+/// Missing means no grant; an explicit JSON null is malformed, not permission
+/// to fall back to session authority.
+fn explicit_grant_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    String::deserialize(deserializer).map(Some)
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExecuteArgs {
@@ -261,6 +270,9 @@ pub(super) struct ExecuteArgs {
     pub(super) hold: bool,
     #[serde(default, alias = "token", alias = "confirmation_token")]
     pub(super) confirm: Option<String>,
+    /// Explicit signed scoped-grant reference; never inferred from active grants.
+    #[serde(default, deserialize_with = "explicit_grant_string")]
+    pub(super) scoped_grant: Option<String>,
     #[serde(default, alias = "dbms_output")]
     pub(super) capture_dbms_output: bool,
     #[serde(default, alias = "max_dbms_output_lines")]
@@ -276,6 +288,8 @@ pub(super) struct ExecuteArgs {
 pub(super) struct ExecuteApprovedArgs {
     #[serde(default, alias = "confirm", alias = "confirmation_token")]
     pub(super) token: Option<String>,
+    #[serde(default, deserialize_with = "explicit_grant_string")]
+    pub(super) scoped_grant: Option<String>,
     #[serde(default)]
     pub(super) sql: Option<String>,
     #[serde(default)]

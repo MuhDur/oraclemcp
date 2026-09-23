@@ -263,6 +263,7 @@ pub(super) fn custom_tool_execute_args(
         commit,
         hold,
         confirm,
+        scoped_grant: None,
         capture_dbms_output,
         dbms_output_max_lines,
         dbms_output_max_chars,

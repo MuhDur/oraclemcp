@@ -39,6 +39,7 @@
 //! **Redaction.** Raw predicate values never appear in `Debug`, `Display`,
 //! status serialization or error text; they are zeroized when dropped.
 
+mod authorization;
 mod signed_ref;
 mod store;
 
@@ -55,6 +56,7 @@ use crate::exec_grant::ExecGrantBinding;
 use crate::levels::OperatingLevel;
 use crate::resolver::CatalogGeneration;
 
+pub use authorization::{ScopedGrantId, WriteAuthRefusal, WriteAuthorization, authorize_level};
 pub use signed_ref::{SCOPED_GRANT_TOKEN_SCOPE, SignedGrantRef};
 pub use store::{
     GrantState, MAX_LIVE_SCOPED_GRANTS, ScopedGrantLookupError, ScopedGrantStore,
