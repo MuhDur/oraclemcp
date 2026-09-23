@@ -2559,6 +2559,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlparser",
  "thiserror",
+ "zeroize",
 ]
 
 [[package]]

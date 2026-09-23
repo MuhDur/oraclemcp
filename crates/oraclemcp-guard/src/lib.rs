@@ -27,6 +27,7 @@ pub mod policy_gate;
 pub mod purity;
 pub mod resolver;
 pub mod rewrite;
+pub mod scoped_grant;
 pub mod stepup;
 pub mod token;
 
@@ -75,6 +76,13 @@ pub use resolver::{
     UnresolvedCatalogResolver,
 };
 pub use rewrite::suggest_parameterized_form;
+pub use scoped_grant::{
+    ClosureFingerprints, ColumnIdent, EffectiveCeiling, GrantComparison, GrantContainer,
+    GrantLimits, GrantOp, GrantOperand, GrantPredicateV1, GrantState, GrantTargetIdentity,
+    GrantValue, GrantValueKind, GrantVerb, GrantVerbError, GrantVerbs, LastDdlTime,
+    SCOPED_GRANT_TOKEN_SCOPE, ScopeDigests, ScopedGrant, ScopedGrantError, ScopedGrantLookupError,
+    ScopedGrantRequest, ScopedGrantStatus, ScopedGrantStore, SignedGrantRef, SynonymIdentity,
+};
 pub use stepup::{
     ChallengeStatus, CiToken, StepUpChallenge, StepUpOption, StepUpRegistry, StepUpResolution,
 };
