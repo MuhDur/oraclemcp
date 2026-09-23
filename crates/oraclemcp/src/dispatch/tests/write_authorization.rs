@@ -98,6 +98,12 @@ fn refused(dispatcher: &OracleDispatcher, arguments: Value, code: &str) {
         .dispatch("oracle_execute", arguments)
         .expect_err("write must be refused");
     assert!(error.message.contains(code), "{error:?}");
+    assert_eq!(
+        error.statement_outcome,
+        Some(oraclemcp_db::StatementOutcome::NotStarted),
+        "authorization refusal must prove that no statement reached Oracle: {error:?}"
+    );
+    assert_eq!(error.to_json()["statement_outcome"], "not_started");
 }
 
 fn listed_execute_tools(level: SessionLevelState) -> Vec<String> {
@@ -159,6 +165,10 @@ fn write_auth_read_only_without_grant_refused_before_io() {
         .dispatch("oracle_execute", json!({"sql": UPDATE}))
         .expect_err("read-only session has no write authority");
     assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    assert_eq!(
+        error.statement_outcome,
+        Some(oraclemcp_db::StatementOutcome::NotStarted)
+    );
     assert_eq!(counts.total(), 0);
 }
 
@@ -199,6 +209,11 @@ fn write_auth_null_scoped_grant_never_falls_back() {
             .dispatch(tool, json!({"sql": UPDATE, "scoped_grant": null}))
             .expect_err("an explicit null must not select session authority");
         assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{tool}");
+        assert_eq!(
+            error.statement_outcome,
+            Some(oraclemcp_db::StatementOutcome::NotStarted),
+            "{tool} must report no statement started"
+        );
     }
     assert_eq!(counts.total(), 0);
 }
@@ -279,6 +294,30 @@ fn write_auth_grant_never_satisfies_ddl_or_admin() {
 }
 
 #[test]
+fn write_auth_forbidden_operator_statement_keeps_reason_and_not_started() {
+    let (dispatcher, counts) = dispatcher(SessionLevelState::new(OperatingLevel::Admin, false));
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({"sql": "ALTER DATABASE DEFAULT EDITION = next_ed", "commit": true}),
+        )
+        .expect_err("default-edition flip is operator-only");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+    assert_eq!(
+        error
+            .structured_reason
+            .as_ref()
+            .map(|reason| reason.category),
+        Some(ReasonCategory::OperatorOnlyStatement)
+    );
+    assert_eq!(
+        error.statement_outcome,
+        Some(oraclemcp_db::StatementOutcome::NotStarted)
+    );
+    assert_eq!(counts.total(), 0);
+}
+
+#[test]
 fn write_auth_grant_does_not_mutate_session_level() {
     let (dispatcher, counts) = dispatcher(SessionLevelState::new(OperatingLevel::ReadWrite, false));
     let (_, reference) = issue(&dispatcher, Duration::from_secs(60));
@@ -324,6 +363,10 @@ fn write_auth_policy_deny_precedes_grant_lookup() {
         .dispatch("oracle_execute", json!({"sql": UPDATE, "scoped_grant": "sgr1.never-issued.0000000000000000000000000000000000000000000000000000000000000000"}))
         .expect_err("policy deny must win before grant lookup");
     assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+    assert_eq!(
+        error.statement_outcome,
+        Some(oraclemcp_db::StatementOutcome::NotStarted)
+    );
     assert!(!error.message.contains("GRANT_UNKNOWN"));
     assert_eq!(counts.total(), 0);
 }
@@ -379,6 +422,10 @@ fn write_auth_execute_approved_forwards_explicit_scoped_grant() {
     assert!(
         error.message.contains("GRANT_ENFORCEMENT_UNAVAILABLE"),
         "{error:?}"
+    );
+    assert_eq!(
+        error.statement_outcome,
+        Some(oraclemcp_db::StatementOutcome::NotStarted)
     );
     assert_eq!(counts.total(), 0);
 }

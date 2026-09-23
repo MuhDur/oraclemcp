@@ -70,7 +70,7 @@ use oraclemcp_db::{
     search_source, semantic_search_query, semantic_search_query_with_filter,
     semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
 };
-use oraclemcp_db::{SearchDetailLevel, SourceText};
+use oraclemcp_db::{SearchDetailLevel, SourceText, StatementOutcome};
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
 };
@@ -6581,6 +6581,11 @@ fn write_auth_error(refusal: WriteAuthRefusal) -> ErrorEnvelope {
             refusal.code()
         ),
     )
+    .with_statement_outcome(StatementOutcome::NotStarted)
+}
+
+fn write_not_started(error: ErrorEnvelope) -> ErrorEnvelope {
+    error.with_statement_outcome(StatementOutcome::NotStarted)
 }
 
 fn scoped_lookup_refusal(error: ScopedGrantLookupError) -> WriteAuthRefusal {
@@ -8946,7 +8951,8 @@ async fn execute_sql_inner(
         &DEFAULT_CLASSIFIER,
         &base,
         &args.sql,
-    )?;
+    )
+    .map_err(write_not_started)?;
     let decision = policy.effective_decision.clone();
     // Two different levels, and conflating them is a bug:
     //   `statement_level` is what the statement IS — it decides what ORACLE does
@@ -8956,17 +8962,19 @@ async fn execute_sql_inner(
     //     single-use grant.
     // A policy floor of DDL on an UPDATE means "only a DDL-cleared caller may run
     // this UPDATE" — it does not make the UPDATE un-rollbackable.
-    let statement_level = decision.required_level.ok_or_else(|| {
-        ErrorEnvelope::new(
-            ErrorClass::ForbiddenStatement,
-            format!(
-                "statement is forbidden by the SQL classifier: {}",
-                decision.reason
-            ),
-        )
-    })?;
+    let Some(statement_level) = decision.required_level else {
+        // Keep the classifier's structured reason, including the operator-only
+        // default-edition refusal. No grant can turn a forbidden verdict into a
+        // level requirement.
+        return Err(write_not_started(execute_gate_error(
+            &decision,
+            decision.gate(session),
+            session,
+        )));
+    };
     let required_level = statement_level.max(policy.required_level);
-    let policy_level_floor = sql_policy_level_floor(ctx.sql_policy, &policy)?;
+    let policy_level_floor =
+        sql_policy_level_floor(ctx.sql_policy, &policy).map_err(write_not_started)?;
     if args
         .confirm
         .as_deref()
@@ -9001,7 +9009,9 @@ async fn execute_sql_inner(
         scoped_grant.as_deref(),
     )
     .map_err(|refusal| match refusal {
-        WriteAuthRefusal::SessionGate(gate) => execute_gate_error(&decision, gate, session),
+        WriteAuthRefusal::SessionGate(gate) => {
+            write_not_started(execute_gate_error(&decision, gate, session))
+        }
         other => write_auth_error(other),
     })?;
     if matches!(authorization, WriteAuthorization::ScopedGrant(_)) {
@@ -9013,13 +9023,18 @@ async fn execute_sql_inner(
     }
     let composed_gate = session.evaluate(Some(required_level));
     if !matches!(composed_gate, LevelDecision::Allow) {
-        return Err(execute_gate_error(&decision, composed_gate, session));
+        return Err(write_not_started(execute_gate_error(
+            &decision,
+            composed_gate,
+            session,
+        )));
     }
     if statement_level <= OperatingLevel::ReadOnly {
         return Err(invalid_args(
             "oracle_execute is for non-read statements; use oracle_query for SELECT/WITH",
         )
-        .with_suggested_tool("oracle_query"));
+        .with_suggested_tool("oracle_query")
+        .with_statement_outcome(StatementOutcome::NotStarted));
     }
     if decision.query_effect_requires_fetch {
         return Err(invalid_args(
@@ -9027,7 +9042,8 @@ async fn execute_sql_inner(
         )
         .with_next_step(
             "use NEXTVAL inside a governed DML or PL/SQL statement, then preview and confirm that exact statement",
-        ));
+        )
+        .with_statement_outcome(StatementOutcome::NotStarted));
     }
     // Arc I: hold = "leave this effect pending inside the reversible workspace".
     // It only means something with a checkpoint to undo to, it can never apply
@@ -9037,7 +9053,8 @@ async fn execute_sql_inner(
         if args.commit {
             return Err(invalid_args(
                 "hold and commit are mutually exclusive: hold leaves the statement pending in the reversible workspace, commit makes it durable",
-            ));
+            )
+            .with_statement_outcome(StatementOutcome::NotStarted));
         }
         if statement_level >= OperatingLevel::Ddl {
             return Err(invalid_args(
@@ -9045,7 +9062,8 @@ async fn execute_sql_inner(
             )
             .with_next_step(
                 "hold is for reversible DML; run DDL with commit=true on a closed workspace",
-            ));
+            )
+            .with_statement_outcome(StatementOutcome::NotStarted));
         }
         if decision.non_transactional_effect {
             return Err(invalid_args(
@@ -9053,14 +9071,16 @@ async fn execute_sql_inner(
             )
             .with_next_step(
                 "the reversible workspace only holds fully undoable DML; run this statement with commit=true and its confirmation on a closed workspace",
-            ));
+            )
+            .with_statement_outcome(StatementOutcome::NotStarted));
         }
         if !ctx.checkpoints.is_open() {
             return Err(invalid_args(
                 "hold requires an open reversible workspace: without a checkpoint there is nothing to undo the held statement back to",
             )
             .with_suggested_tool("oracle_checkpoint")
-            .with_next_step("call oracle_checkpoint to establish a checkpoint, then retry with hold=true"));
+            .with_next_step("call oracle_checkpoint to establish a checkpoint, then retry with hold=true")
+            .with_statement_outcome(StatementOutcome::NotStarted));
         }
     }
     if statement_level >= OperatingLevel::Ddl && !args.commit {
@@ -9069,7 +9089,8 @@ async fn execute_sql_inner(
             "DDL/Admin statements cannot be rollback-previewed by Oracle; commit=true and confirm are required",
         )
         .with_suggested_tool("oracle_preview_sql")
-        .with_next_step("call oracle_preview_sql and pass execute_confirmation.confirm to oracle_execute with commit=true"));
+        .with_next_step("call oracle_preview_sql and pass execute_confirmation.confirm to oracle_execute with commit=true")
+        .with_statement_outcome(StatementOutcome::NotStarted));
     }
     // A COMMIT is transaction-wide, and Oracle commits DDL/Admin implicitly:
     // either would durably persist every statement held in an open workspace,
@@ -9083,7 +9104,8 @@ async fn execute_sql_inner(
             } else {
                 "this DDL/Admin statement (Oracle commits it implicitly)"
             },
-        )?;
+        )
+        .map_err(write_not_started)?;
     }
 
     // D2: CREATE EDITION has a database-enforced one-child constraint
@@ -9102,7 +9124,11 @@ async fn execute_sql_inner(
         | EditionLifecycleParse::Invalid => None,
     };
     let _edition_creation_reservation = match edition_create_parent.as_ref() {
-        Some(parent) => Some(reserve_checked_edition_child_slot(&ctx, parent).await?),
+        Some(parent) => Some(
+            reserve_checked_edition_child_slot(&ctx, parent)
+                .await
+                .map_err(write_not_started)?,
+        ),
         None => None,
     };
     // A rollback-preview normally needs no per-statement confirmation because
@@ -9111,15 +9137,18 @@ async fn execute_sql_inner(
     // same exact-SQL, single-use grant as a commit even when `commit=false`.
     let confirmation_required = args.commit || decision.non_transactional_effect;
     let confirmation_idempotency_key = if confirmation_required {
-        Some(consume_execute_confirmation(
-            &args.sql,
-            required_level,
-            active_profile,
-            ctx.execute_grants,
-            ctx.grant_binding,
-            args.confirm.as_deref(),
-            decision.non_transactional_effect && !args.commit,
-        )?)
+        Some(
+            consume_execute_confirmation(
+                &args.sql,
+                required_level,
+                active_profile,
+                ctx.execute_grants,
+                ctx.grant_binding,
+                args.confirm.as_deref(),
+                decision.non_transactional_effect && !args.commit,
+            )
+            .map_err(write_not_started)?,
+        )
     } else {
         None
     };
@@ -9128,7 +9157,8 @@ async fn execute_sql_inner(
         .binds
         .iter()
         .map(json_to_bind)
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(write_not_started)?;
 
     // A3: prepend the per-statement audit marker. The gate/confirmation above ran
     // on the bare SQL (the text the agent previewed/confirmed); `with_audit_marker`
@@ -9147,7 +9177,8 @@ async fn execute_sql_inner(
         return Err(ErrorEnvelope::new(
             ErrorClass::Internal,
             "audit marker changed the classifier verdict; refusing to execute",
-        ));
+        )
+        .with_statement_outcome(StatementOutcome::NotStarted));
     }
 
     // The read-only backstop is transaction-scoped in Oracle. A prior read can
@@ -12324,8 +12355,9 @@ impl OracleDispatcher {
             return Ok(preview);
         }
         if tool == "execute_approved" {
-            let a: ExecuteApprovedArgs = parse_args(name, args)?;
-            let execute_args = execute_approved_args(&mut state, &scoped_level, a)?;
+            let a: ExecuteApprovedArgs = parse_args(name, args).map_err(write_not_started)?;
+            let execute_args =
+                execute_approved_args(&mut state, &scoped_level, a).map_err(write_not_started)?;
             let active_profile = state.active_profile.clone();
             let subject = request_subject.clone();
             let grant_binding = grant_binding_for_context(&state, context);
@@ -12603,7 +12635,7 @@ impl OracleDispatcher {
                     .await;
             }
             "oracle_execute" => {
-                let a: ExecuteArgs = parse_args(name, args)?;
+                let a: ExecuteArgs = parse_args(name, args).map_err(write_not_started)?;
                 let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {

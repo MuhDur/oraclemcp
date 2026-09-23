@@ -6,6 +6,7 @@
 
 use std::time::Duration;
 
+pub use oraclemcp_error::StatementOutcome;
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OracleRetryAction, envelope_from_oracle_message,
     oracle_retry_action_from_message, parse_ora_code,
@@ -111,37 +112,6 @@ pub enum QuarantineOutcome {
     UnknownDiscarded,
 }
 
-/// What happened to one statement, as far as the server can prove.
-///
-/// The single vocabulary recovery, cancellation, cursor discard and the
-/// governed-change paths use to report a statement's fate. Clients are never
-/// told a stronger outcome than the server can prove: an uncertain commit is
-/// [`StatementOutcome::CommitUnknown`], never `Committed` or `RolledBack`.
-/// Whether a failed statement may be replayed is decided only by
-/// [`retry_decision`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum StatementOutcome {
-    /// Nothing reached Oracle (refused, or failed before the round trip).
-    NotStarted,
-    /// A read finished and its result was delivered.
-    CompletedRead,
-    /// The statement's transactional work was rolled back.
-    RolledBack,
-    /// The work was committed and the commit was acknowledged.
-    Committed,
-    /// A commit was sent but its acknowledgement never arrived: Oracle may or
-    /// may not have applied it.
-    CommitUnknown,
-    /// DDL was sent but its completion was not observed. DDL auto-commits, so
-    /// the object may or may not have changed.
-    DdlOutcomeUnknown,
-    /// The wire protocol lost synchronisation mid-statement; the session was
-    /// discarded and its server-side effect is unknown.
-    ProtocolUnsynchronized,
-}
-
 impl From<QuarantineOutcome> for StatementOutcome {
     fn from(outcome: QuarantineOutcome) -> Self {
         match outcome {
@@ -208,6 +178,8 @@ pub fn retry_decision(outcome: StatementOutcome, class: StatementClass) -> Retry
         | StatementOutcome::Committed
         | StatementOutcome::CommitUnknown
         | StatementOutcome::DdlOutcomeUnknown => RetryDecision::ReturnTyped,
+        // A future outcome must not silently become an automatic mutation retry.
+        _ => RetryDecision::ReturnTyped,
     }
 }
 
@@ -963,6 +935,7 @@ mod tests {
             StatementOutcome::CommitUnknown => 4,
             StatementOutcome::DdlOutcomeUnknown => 5,
             StatementOutcome::ProtocolUnsynchronized => 6,
+            _ => panic!("new statement outcome needs an explicit matrix case"),
         }
     }
 

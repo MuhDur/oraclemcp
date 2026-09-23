@@ -22,6 +22,32 @@ use thiserror::Error;
 pub mod fuzzy;
 pub use fuzzy::{enrich_oracle_error, fuzzy_suggest, levenshtein};
 
+/// What happened to one statement, as far as the server can prove.
+///
+/// Clients are never told a stronger outcome than the server can prove: an
+/// uncertain commit is [`StatementOutcome::CommitUnknown`], never `Committed`
+/// or `RolledBack`. The DB retry policy consumes this same type.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatementOutcome {
+    /// The requested statement was not sent to Oracle (refused, or failed
+    /// during preflight). Metadata checks may have run before the refusal.
+    NotStarted,
+    /// A read finished and its result was delivered.
+    CompletedRead,
+    /// The statement's transactional work was rolled back.
+    RolledBack,
+    /// The work was committed and the commit was acknowledged.
+    Committed,
+    /// A commit was sent but its acknowledgement never arrived.
+    CommitUnknown,
+    /// DDL was sent but its completion was not observed.
+    DdlOutcomeUnknown,
+    /// The wire protocol lost synchronisation mid-statement.
+    ProtocolUnsynchronized,
+}
+
 /// Machine-stable classification of an agent-facing error.
 ///
 /// Serialized as `SCREAMING_SNAKE_CASE` so the wire value is a stable string
@@ -348,6 +374,9 @@ pub struct ErrorEnvelope {
     /// errors and for older readers.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub structured_reason: Option<StructuredReason>,
+    /// Proven fate of the statement, when the dispatch path can name it.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub statement_outcome: Option<StatementOutcome>,
 }
 
 impl ErrorEnvelope {
@@ -365,6 +394,7 @@ impl ErrorEnvelope {
             next_steps: Vec::new(),
             retry_after_ms: None,
             structured_reason: None,
+            statement_outcome: None,
         }
     }
 
@@ -407,6 +437,13 @@ impl ErrorEnvelope {
     #[must_use]
     pub fn with_structured_reason(mut self, reason: StructuredReason) -> Self {
         self.structured_reason = Some(reason);
+        self
+    }
+
+    /// Attach the typed fate proven for this statement.
+    #[must_use]
+    pub fn with_statement_outcome(mut self, outcome: StatementOutcome) -> Self {
+        self.statement_outcome = Some(outcome);
         self
     }
 
@@ -821,6 +858,23 @@ mod tests {
         // next_steps and retry_after_ms are omitted when empty.
         assert!(json.get("next_steps").is_none());
         assert!(json.get("retry_after_ms").is_none());
+        assert!(json.get("statement_outcome").is_none());
+    }
+
+    #[test]
+    fn not_started_outcome_round_trips_on_refusal_envelope() {
+        let envelope = ErrorEnvelope::new(
+            ErrorClass::OperatingLevelTooLow,
+            "write refused before database I/O",
+        )
+        .with_statement_outcome(StatementOutcome::NotStarted);
+        let wire = envelope.to_json();
+        assert_eq!(wire["statement_outcome"], "not_started");
+        let decoded: ErrorEnvelope = serde_json::from_value(wire).expect("typed envelope");
+        assert_eq!(
+            decoded.statement_outcome,
+            Some(StatementOutcome::NotStarted)
+        );
     }
 
     /// Every `OracleMcpError` variant besides `Busy` and `Oracle` (both covered
