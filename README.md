@@ -184,7 +184,7 @@ The tables below are generated from the server's tool registry — the same desc
 | `oracle_describe_view` | Oracle Describe View | Describe one view's definition metadata and columns. | `READ_ONLY` | no |
 | `oracle_get_ddl` | Oracle Get DDL | Fetch an object's DDL via DBMS_METADATA.GET_DDL (allowlisted object types). | `READ_ONLY` | no |
 | `oracle_get_source` | Oracle Get Source | Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. | `READ_ONLY` | no |
-| `oracle_sample_rows` | Oracle Sample Rows | Read the first rows of a table or view with a hard row cap. | `READ_ONLY` | no |
+| `oracle_sample_rows` | Oracle Sample Rows | Read arbitrary first rows of a table or view with a hard row cap. | `READ_ONLY` | no |
 | `oracle_read_clob` | Oracle Read CLOB | Read one CLOB/NCLOB/text value by key with a character cap. | `READ_ONLY` | no |
 | `oracle_compile_errors` | Oracle Compile Errors | Retrieve compile errors for the current schema, an owner, or one object (ALL_ERRORS). | `READ_ONLY` | no |
 | `oracle_search_source` | Oracle Search Source | Full-text search across ALL_SOURCE for a needle (row- and line-capped). | `READ_ONLY` | no |

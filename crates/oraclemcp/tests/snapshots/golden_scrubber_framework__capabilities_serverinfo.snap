@@ -140,6 +140,7 @@ expression: rendered
             "type": "boolean"
           },
           "as_of": {
+            "additionalProperties": false,
             "description": "Flashback / AS-OF read: run this SELECT against a PAST committed snapshot. Pass a NORMAL SELECT (never hand-written AS OF SQL); the base query is proven read-only first, then bounded in a DBMS_FLASHBACK window (the scn/timestamp is bound, never interpolated). Set exactly one of scn or timestamp. Requires the Oracle FLASHBACK privilege (a missing grant surfaces as ORA-01031).",
             "properties": {
               "scn": {
@@ -165,6 +166,22 @@ expression: rendered
           },
           "deep_decode": {
             "description": "Opt into larger capped ARRAY/JSON/VECTOR structured decode limits. Default false keeps safe caps.",
+            "type": "boolean"
+          },
+          "export": {
+            "description": "Materialize the bounded result as a principal-bound oracle-export resource.",
+            "type": "boolean"
+          },
+          "export_format": {
+            "description": "Export serialization when export=true: csv or json.",
+            "enum": [
+              "csv",
+              "json"
+            ],
+            "type": "string"
+          },
+          "export_to_resource": {
+            "description": "Legacy alias for export.",
             "type": "boolean"
           },
           "format": {
@@ -251,6 +268,10 @@ expression: rendered
           "sql": {
             "description": "A single read-only SELECT. Use :1, :2 … for binds.",
             "type": "string"
+          },
+          "stream": {
+            "description": "Legacy alias for streaming.",
+            "type": "boolean"
           },
           "streaming": {
             "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
@@ -1284,6 +1305,12 @@ expression: rendered
             "items": {},
             "type": "array"
           },
+          "limit": {
+            "description": "Compatibility alias for max_rows.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
           "max_rows": {
             "description": "Row cap for each witness read (default: the profile page size, ceiling 5000). A larger request is clamped to the ceiling and the response says so; when the witness hits the cap the response also flags witness_truncated, because the rows shown are then not the whole set.",
             "maximum": 5000,
@@ -1647,6 +1674,10 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "cursor": {
+            "description": "Opaque pagination cursor from a prior truncated page.",
+            "type": "string"
+          },
           "limit": {
             "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
             "maximum": 5000,
@@ -2040,7 +2071,7 @@ expression: rendered
       "name": "oracle_sample_rows",
       "title": "Oracle Sample Rows",
       "tier": "foundation_live_db",
-      "summary": "Read the first rows of a table or view with a hard row cap.",
+      "summary": "Read arbitrary first rows of a table or view with a hard row cap. Projection and filtering are not supported; use oracle_query for filtered reads.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -2585,6 +2616,14 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "check": {
+            "description": "Compatibility alias for health_type.",
+            "type": "string"
+          },
+          "checks": {
+            "description": "Compatibility alias for health_type.",
+            "type": "string"
+          },
           "health_type": {
             "description": "Either 'all' (default) or a comma-separated list of subcheck names: invalid_objects, unusable_indexes, tablespace_undo, sequence_ceiling, disabled_constraints, buffer_cache_hit_ratio. Unknown names are reported, not fatal.",
             "type": "string"
@@ -2740,6 +2779,24 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "allow_plan_table_write": {
+            "description": "Opt in to guarded PLAN_TABLE cost estimation when the active level permits it.",
+            "type": "boolean"
+          },
+          "as_of": {
+            "additionalProperties": false,
+            "description": "Structured flashback read target: set scn or timestamp.",
+            "properties": {
+              "scn": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
           "binds": {
             "description": "Positional bind values for :1, :2 ...",
             "items": {},
@@ -2765,6 +2822,18 @@ expression: rendered
             ],
             "type": "string"
           },
+          "export_to_resource": {
+            "description": "Legacy alias for export.",
+            "type": "boolean"
+          },
+          "format": {
+            "description": "Inline result format.",
+            "enum": [
+              "json",
+              "arrow"
+            ],
+            "type": "string"
+          },
           "limit": {
             "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows.",
             "maximum": 5000,
@@ -2786,6 +2855,11 @@ expression: rendered
           "max_lob_chars": {
             "description": "Maximum CLOB characters to inline per cell.",
             "maximum": 1000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_query_cost": {
+            "description": "Optional optimizer-cost ceiling for this read.",
             "minimum": 1,
             "type": "integer"
           },
@@ -2829,9 +2903,17 @@ expression: rendered
             "description": "Emit numeric values as JSON numbers where possible.",
             "type": "boolean"
           },
+          "read_only_standby": {
+            "description": "Refuse the PLAN_TABLE cost-estimation path on a standby.",
+            "type": "boolean"
+          },
           "sql": {
             "description": "A single read-only SELECT. Use :1, :2 ... for binds.",
             "type": "string"
+          },
+          "stream": {
+            "description": "Legacy alias for streaming.",
+            "type": "boolean"
           },
           "streaming": {
             "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier.",
