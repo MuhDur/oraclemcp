@@ -669,6 +669,10 @@ jobs:
       - run: bash scripts/oraclemcp_concurrency_lint.sh
       - run: bash scripts/oraclemcp_honesty_grep.sh
       - run: bash scripts/oraclemcp_fixture_lint.sh
+      - name: release 0.12 field case manifest
+        run: |
+          python3 scripts/e2e/cases/validate_manifest.py --selftest
+          python3 scripts/e2e/cases/validate_manifest.py scripts/e2e/cases/release_0_12.json
       # Constitution rules 13-17: the swarm-discipline mechanisms must keep
       # refusing what they were built to refuse, and committed shell must not
       # reintroduce a wait that cannot end (rule 16).

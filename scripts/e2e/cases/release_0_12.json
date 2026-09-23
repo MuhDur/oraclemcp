@@ -1,0 +1,1265 @@
+[
+  {
+    "case_id": "rel012_i28_order_alias",
+    "issue": 28,
+    "title": "ORDER BY select-list alias",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT grp, COUNT(*) AS n FROM W4_<run>_T GROUP BY grp ORDER BY n DESC"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 refused alias n as OBJECT_NOT_FOUND",
+    "post_fix_expected": "ordered grouped rows",
+    "assertions": [
+      "exact ordered grp/count rows; no missing-column refusal"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "SemanticValueVisitor",
+      "resolve_value"
+    ],
+    "test_id": "w4_query_order_alias",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i28_order_alias.jsonl"
+  },
+  {
+    "case_id": "rel012_i29_join_using",
+    "issue": 29,
+    "title": "USING merged column",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT id FROM W4_<run>_T JOIN W4_<run>_T2 USING (id) ORDER BY id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 refused id as ambiguous",
+    "post_fix_expected": "merged id rows in order",
+    "assertions": [
+      "exact ordered ids; no ambiguous-column refusal"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "resolve_value"
+    ],
+    "test_id": "w4_query_join_using",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i29_join_using.jsonl"
+  },
+  {
+    "case_id": "rel012_i29_natural_join",
+    "issue": 29,
+    "title": "NATURAL JOIN merged column",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT id FROM W4_<run>_T NATURAL JOIN W4_<run>_T2 ORDER BY id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 treated the shared id as ambiguous",
+    "post_fix_expected": "merged id rows in order",
+    "assertions": [
+      "exact ordered ids; no ambiguous-column refusal"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "resolve_value"
+    ],
+    "test_id": "w4_query_natural_join",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i29_natural_join.jsonl"
+  },
+  {
+    "case_id": "rel012_i30_hidden_virtual",
+    "issue": 30,
+    "title": "Hidden system virtual column",
+    "reproducible": "live",
+    "input": {
+      "setup": "function-based index on W4_<run>_T.grp",
+      "sql": "SELECT id FROM W4_<run>_T ORDER BY id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 refused the table due to hidden SYS_NC/SYS_STU virtual column",
+    "post_fix_expected": "real-column read succeeds",
+    "assertions": [
+      "exact ordered ids; catalog confirms hidden system column exists"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "VIRTUAL_COLUMN_SQL",
+      "resolved_relations_read_purity"
+    ],
+    "test_id": "w4_query_hidden_virtual",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i30_hidden_virtual.jsonl"
+  },
+  {
+    "case_id": "rel012_i31_qualified_column",
+    "issue": 31,
+    "title": "Owner.table.column with unqualified FROM",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT W4_<run>.W4_<run>_T.id FROM W4_<run>_T ORDER BY id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 refused qualified column as missing",
+    "post_fix_expected": "resolved owner-qualified id rows",
+    "assertions": [
+      "exact ordered ids under matching current schema"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "resolve_value"
+    ],
+    "test_id": "w4_query_qualified_column",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i31_qualified_column.jsonl"
+  },
+  {
+    "case_id": "rel012_i32_json_dot",
+    "issue": 32,
+    "title": "JSON dot notation",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT t.doc.customer.id FROM W4_<run>_JSON t ORDER BY t.id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 treated attribute path as owner.table.column and refused",
+    "post_fix_expected": "JSON path values returned",
+    "assertions": [
+      "exact ordered JSON path values; no missing-column refusal"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "resolve_value"
+    ],
+    "test_id": "w4_query_json_dot",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i32_json_dot.jsonl"
+  },
+  {
+    "case_id": "rel012_i33_pseudocolumn",
+    "issue": 33,
+    "title": "Oracle pseudocolumn recognition",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT ORA_ROWSCN FROM W4_<run>_T"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 omission from built-in list; refusal was inferred, not live-confirmed",
+    "post_fix_expected": "pseudocolumn accepted if Oracle supports the fixture",
+    "assertions": [
+      "Oracle execution succeeds; no missing-column refusal; record if parser tokenization differs"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "is_semantic_builtin_identifier"
+    ],
+    "test_id": "w4_query_pseudocolumn",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i33_pseudocolumn.jsonl"
+  },
+  {
+    "case_id": "rel012_i34_cte",
+    "issue": 34,
+    "title": "CTE query block",
+    "reproducible": "live",
+    "input": {
+      "sql": "WITH a AS (SELECT id FROM W4_<run>_T) SELECT id FROM a ORDER BY id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 FORBIDDEN_STATEMENT: query scope not exactly representable",
+    "post_fix_expected": "per-block proven read succeeds",
+    "assertions": [
+      "exact ordered ids; every base relation proved"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "semantic_read_plan"
+    ],
+    "test_id": "w4_query_cte",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i34_cte.jsonl"
+  },
+  {
+    "case_id": "rel012_i34_union_all",
+    "issue": 34,
+    "title": "UNION ALL branches",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT id FROM W4_<run>_T UNION ALL SELECT id FROM W4_<run>_T2 ORDER BY id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 FORBIDDEN_STATEMENT: query scope not exactly representable",
+    "post_fix_expected": "both branches proven and returned",
+    "assertions": [
+      "exact ordered rows including duplicates"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "semantic_read_plan"
+    ],
+    "test_id": "w4_query_union_all",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i34_union_all.jsonl"
+  },
+  {
+    "case_id": "rel012_i34_derived",
+    "issue": 34,
+    "title": "Derived table query block",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT x.id FROM (SELECT id FROM W4_<run>_T) x ORDER BY x.id"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 FORBIDDEN_STATEMENT: query scope not exactly representable",
+    "post_fix_expected": "derived block proven and returned",
+    "assertions": [
+      "exact ordered ids"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "semantic_read_plan"
+    ],
+    "test_id": "w4_query_derived",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i34_derived.jsonl"
+  },
+  {
+    "case_id": "rel012_i35_dictionary_view",
+    "issue": 35,
+    "title": "Proven dictionary view",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT object_name FROM USER_OBJECTS WHERE object_name = :1",
+      "binds": [
+        "W4_<run>_T"
+      ]
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 refused USER_OBJECTS as unproven view",
+    "post_fix_expected": "allowed only under a sound built-in dictionary proof",
+    "assertions": [
+      "exact fixture object row; untrusted application view still refused"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "resolved_relations_read_purity"
+    ],
+    "test_id": "w4_query_dictionary_view",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i35_dictionary_view.jsonl"
+  },
+  {
+    "case_id": "rel012_i36_sample_unknown_args",
+    "issue": 36,
+    "title": "Sample rows unknown arguments",
+    "reproducible": "unit",
+    "input": {
+      "arguments": {
+        "table": "W4_<run>_T",
+        "columns": [
+          "ID"
+        ],
+        "filter": "id = 2",
+        "limit": 1
+      }
+    },
+    "tool_or_path": "oracle_sample_rows",
+    "pre_fix_outcome": "0.11.0 silently ignored columns/filter and returned an arbitrary row",
+    "post_fix_expected": "InvalidArguments for unsupported keys",
+    "assertions": [
+      "typed InvalidArguments; no row returned"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "SampleRowsArgs"
+    ],
+    "test_id": "oraclemcp::dispatch::tests::sample_rows_rejects_filter_and_columns_issue_36",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i36_sample_unknown_args.jsonl"
+  },
+  {
+    "case_id": "rel012_i37_additional_properties",
+    "issue": 37,
+    "title": "Built-in schema additionalProperties",
+    "reproducible": "unit",
+    "input": {
+      "arguments": {
+        "__bogus__": 1
+      },
+      "selection": "each built-in tool with its required valid arguments"
+    },
+    "tool_or_path": "tool_registry",
+    "pre_fix_outcome": "0.11.0 silently ignored unknown properties",
+    "post_fix_expected": "each built-in rejects unknown property",
+    "assertions": [
+      "registry-wide typed InvalidArguments; no dispatch side effect"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "tool_registry",
+      "dispatch_builtin"
+    ],
+    "test_id": "oraclemcp::dispatch::tests::builtins_reject_unknown_properties_issue_37",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i37_additional_properties.jsonl"
+  },
+  {
+    "case_id": "rel012_i38_argument_class",
+    "issue": 38,
+    "title": "Argument validation error class",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "object_type": "VIEW",
+        "name": "W4_<run>_VIEW"
+      }
+    },
+    "tool_or_path": "oracle_get_source",
+    "pre_fix_outcome": "0.11.0 returned CONNECTION_FAILED with connection-info suggestion",
+    "post_fix_expected": "unsupported argument returns InvalidArguments or VIEW succeeds",
+    "assertions": [
+      "exact class and relevant suggested tool; no CONNECTION_FAILED"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "DbError::Query",
+      "into_envelope"
+    ],
+    "test_id": "w4_get_source_argument_class",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i38_argument_class.jsonl"
+  },
+  {
+    "case_id": "rel012_i38_snapshot_class",
+    "issue": 38,
+    "title": "ORA-01555 error class",
+    "reproducible": "unit",
+    "input": {
+      "fault": "DbError with ORA-01555",
+      "sql": "SELECT id FROM W4_<run>_T"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 mapped ORA-01555 to CONNECTION_FAILED",
+    "post_fix_expected": "typed snapshot-too-old, retryable read-consistency class",
+    "assertions": [
+      "exact ORA code 1555 and class; audit FAILED cause"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "classify_ora_code"
+    ],
+    "test_id": "oraclemcp_error::tests::snapshot_too_old_is_transient_issue_38",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i38_snapshot_class.jsonl"
+  },
+  {
+    "case_id": "rel012_i38_server_sql_class",
+    "issue": 38,
+    "title": "Server-owned SQL error class",
+    "reproducible": "unit",
+    "input": {
+      "fault": "server-owned SCN query returns ORA-00904",
+      "sql": "SELECT id FROM W4_<run>_T"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 blamed caller with SYNTAX_ERROR",
+    "post_fix_expected": "internal probe failure distinguished from caller SQL",
+    "assertions": [
+      "class is not caller SYNTAX_ERROR; exact ORA code; audit FAILED cause"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "CURRENT_SCN_SQL",
+      "classify_ora_code"
+    ],
+    "test_id": "oraclemcp::dispatch::tests::server_sql_error_not_caller_syntax_issue_38",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i38_server_sql_class.jsonl"
+  },
+  {
+    "case_id": "rel012_i39_get_source_view",
+    "issue": 39,
+    "title": "VIEW source contract",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "object_type": "VIEW",
+        "name": "W4_<run>_VIEW"
+      }
+    },
+    "tool_or_path": "oracle_get_source",
+    "pre_fix_outcome": "0.11.0 rejected VIEW though get_ddl accepted it and schema advertised free string",
+    "post_fix_expected": "VIEW source returned and object_type advertised as an enum",
+    "assertions": [
+      "source matches fixture definition; registry object_type enum includes VIEW"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "SOURCE_OBJECT_TYPES",
+      "tool_registry"
+    ],
+    "test_id": "w4_get_source_get_source_view",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i39_get_source_view.jsonl"
+  },
+  {
+    "case_id": "rel012_i40_common_name",
+    "issue": 40,
+    "title": "Common object name argument",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "name": "W4_<run>_T",
+        "limit": 1
+      }
+    },
+    "tool_or_path": "oracle_sample_rows",
+    "pre_fix_outcome": "0.11.0 ignored name and failed missing table",
+    "post_fix_expected": "name alias accepted like oracle_describe",
+    "assertions": [
+      "sample row has fixture id; registry advertises name alias"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "SampleRowsArgs",
+      "tool_registry"
+    ],
+    "test_id": "w4_sample_rows_common_name",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i40_common_name.jsonl"
+  },
+  {
+    "case_id": "rel012_i40_common_name_matrix",
+    "issue": 40,
+    "title": "Common name across describe and get tools",
+    "reproducible": "live",
+    "input": {
+      "steps": [
+        {
+          "tool": "oracle_describe",
+          "arguments": {
+            "name": "W4_<run>_T"
+          }
+        },
+        {
+          "tool": "oracle_describe_view",
+          "arguments": {
+            "name": "W4_<run>_VIEW"
+          }
+        },
+        {
+          "tool": "oracle_describe_index",
+          "arguments": {
+            "name": "W4_<run>_IDX"
+          }
+        },
+        {
+          "tool": "oracle_describe_trigger",
+          "arguments": {
+            "name": "W4_<run>_TRG"
+          }
+        },
+        {
+          "tool": "oracle_get_ddl",
+          "arguments": {
+            "name": "W4_<run>_VIEW",
+            "object_type": "VIEW"
+          }
+        },
+        {
+          "tool": "oracle_get_source",
+          "arguments": {
+            "name": "W4_<run>_SRC",
+            "object_type": "PROCEDURE"
+          }
+        },
+        {
+          "tool": "oracle_sample_rows",
+          "arguments": {
+            "name": "W4_<run>_T"
+          }
+        }
+      ]
+    },
+    "tool_or_path": "registry/dispatch",
+    "pre_fix_outcome": "0.11.0 used inconsistent object argument names",
+    "post_fix_expected": "same canonical name accepted across the matrix",
+    "assertions": [
+      "all seven tools accept name; legacy aliases remain documented and single-use"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "tool_registry",
+      "dispatch args"
+    ],
+    "test_id": "w4_describe_get_common_name_matrix",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i40_common_name_matrix.jsonl"
+  },
+  {
+    "case_id": "rel012_i41_object_types",
+    "issue": 41,
+    "title": "Object-types array filter",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "name_pattern": "W4_<run>%",
+        "object_types": [
+          "TABLE",
+          "VIEW"
+        ]
+      }
+    },
+    "tool_or_path": "oracle_search_objects",
+    "pre_fix_outcome": "0.11.0 ignored object_types and returned unfiltered objects",
+    "post_fix_expected": "object_types array filters returned objects",
+    "assertions": [
+      "only TABLE/VIEW returned; no silent unfiltered success"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "SearchObjectsArgs"
+    ],
+    "test_id": "w4_search_objects_object_types",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i41_object_types.jsonl"
+  },
+  {
+    "case_id": "rel012_i41_array_string",
+    "issue": 41,
+    "title": "Array-shaped JSON string",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "include": "[\"schema\"]"
+      }
+    },
+    "tool_or_path": "oracle_orient",
+    "pre_fix_outcome": "0.11.0 rejected string as sequence without a helpful shape hint",
+    "post_fix_expected": "coerced array or typed error naming expected JSON array",
+    "assertions": [
+      "exact outcome matches documented contract; no generic connection error"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "OrientArgs"
+    ],
+    "test_id": "w4_orient_array_string",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i41_array_string.jsonl"
+  },
+  {
+    "case_id": "rel012_i42_generated_refusal",
+    "issue": 42,
+    "title": "Generated-read refusal class",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "table": "W4_<run>_POLICY"
+      }
+    },
+    "tool_or_path": "oracle_sample_rows",
+    "pre_fix_outcome": "0.11.0 collapsed guard refusal into INTERNAL",
+    "post_fix_expected": "original PolicyDenied/ForbiddenStatement envelope preserved",
+    "assertions": [
+      "exact guard class and structured reason; audit zero executions"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "GuardedGeneratedReadConn::before_query",
+      "db_internal_from_envelope"
+    ],
+    "test_id": "w4_sample_rows_generated_refusal",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i42_generated_refusal.jsonl"
+  },
+  {
+    "case_id": "rel012_i43_missing_view",
+    "issue": 43,
+    "title": "Missing view is not success",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "name": "W4_<run>_ABSENT_VIEW"
+      }
+    },
+    "tool_or_path": "oracle_describe_view",
+    "pre_fix_outcome": "0.11.0 returned success with empty columns and null view",
+    "post_fix_expected": "typed ObjectNotFound",
+    "assertions": [
+      "exact not-found class; no success payload"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "describe_view"
+    ],
+    "test_id": "w4_describe_view_missing_view",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i43_missing_view.jsonl"
+  },
+  {
+    "case_id": "rel012_i44_effective_access",
+    "issue": 44,
+    "title": "Effective access in connection payload",
+    "reproducible": "live",
+    "input": {
+      "profile": "W4_<run>_READ_ONLY",
+      "arguments": {}
+    },
+    "tool_or_path": "oracle_connection_info",
+    "pre_fix_outcome": "0.11.0 reported DB READ WRITE next to read_only:false on protected READ_ONLY profile",
+    "post_fix_expected": "effective READ_ONLY access explicit",
+    "assertions": [
+      "effective access READ_ONLY; DB open mode separately labelled"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "connection_info",
+      "switch_profile"
+    ],
+    "test_id": "w4_connection_info_effective_access",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i44_effective_access.jsonl"
+  },
+  {
+    "case_id": "rel012_i45_audit_failure_cause",
+    "issue": 45,
+    "title": "FAILED audit cause",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT 1 / 0 FROM W4_<run>_T"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 FAILED audit entries omitted error class and ORA code",
+    "post_fix_expected": "redaction-safe error class and ORA code recorded",
+    "assertions": [
+      "verify hash chain; FAILED has class, ORA code 1476 and no SQL text"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "AuditEntry",
+      "record_audit"
+    ],
+    "test_id": "w4_query_audit_failure_cause",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i45_audit_failure_cause.jsonl"
+  },
+  {
+    "case_id": "rel012_i46_scn_cache",
+    "issue": 46,
+    "title": "SCN capability cached per session",
+    "reproducible": "live",
+    "input": {
+      "sequence": [
+        "SELECT id FROM W4_<run>_T",
+        "SELECT id FROM W4_<run>_T"
+      ],
+      "profile": "W4_<run>_NO_FLASHBACK"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 probed on every call and surfaced ungranted failure",
+    "post_fix_expected": "one negative capability probe per session generation; reads degrade cleanly",
+    "assertions": [
+      "audit count one probe across two reads; exact rows; no caller error"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "CURRENT_SCN_SQL",
+      "observed_scn_for_audit"
+    ],
+    "test_id": "w4_query_scn_cache",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i46_scn_cache.jsonl"
+  },
+  {
+    "case_id": "rel012_i47_idle_recycle",
+    "issue": 47,
+    "title": "Pinned session recovers after idle loss",
+    "reproducible": "live",
+    "input": {
+      "sequence": [
+        "SELECT id FROM W4_<run>_T",
+        "kill only this W4_<run> database session after first read",
+        "SELECT id FROM W4_<run>_T"
+      ]
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 retained desynchronized connection until switch_profile",
+    "post_fix_expected": "quarantine and recycle between statements",
+    "assertions": [
+      "second read succeeds on fresh session; audit records recycle; no unsafe replay"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "recycle_pinned_session_if_needed",
+      "is_uncertain_session_state"
+    ],
+    "test_id": "w4_query_idle_recycle",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i47_idle_recycle.jsonl"
+  },
+  {
+    "case_id": "rel012_i48_zero_timeout",
+    "issue": 48,
+    "title": "Zero timeout bounded or refused",
+    "reproducible": "unit",
+    "input": {
+      "config": {
+        "call_timeout_seconds": 0
+      },
+      "profile": "W4_<run>_TIMEOUT_ZERO"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 call_timeout_seconds=0 disabled call and request deadlines",
+    "post_fix_expected": "profile with call_timeout_seconds=0 refused at config load",
+    "assertions": [
+      "typed config refusal naming minimum 1; no unbounded request begins"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "RequestBudget::from_profile",
+      "profile_request_timeout"
+    ],
+    "test_id": "oraclemcp::config::tests::zero_call_timeout_refused_issue_48",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i48_zero_timeout.jsonl"
+  },
+  {
+    "case_id": "rel012_i49_cancel_progress",
+    "issue": 49,
+    "title": "Midflight progress and cancellation",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT id FROM W4_<run>_T",
+      "protocol_steps": [
+        "send progressToken",
+        "begin delayed fetch",
+        "send notifications/cancelled"
+      ]
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 emitted progress after response and ignored cancellation while audit said SUCCEEDED",
+    "post_fix_expected": "midflight progress; cancellation reaches driver; audit and client agree",
+    "assertions": [
+      "progress before response; cancelled class; audit not SUCCEEDED for cancelled operation"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "serve_stdio_with_io",
+      "handle_tool_call_outcome"
+    ],
+    "test_id": "w4_query_cancel_progress",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i49_cancel_progress.jsonl"
+  },
+  {
+    "case_id": "rel012_i50_queued_budget",
+    "issue": 50,
+    "title": "Queued request budget exhaustion",
+    "reproducible": "live",
+    "input": {
+      "sequence": [
+        "hold pinned session with W4_<run>_T read",
+        "queue second read past budget"
+      ]
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 second read reported call timeout of 0 ms",
+    "post_fix_expected": "typed session-busy or queued-budget-expired response",
+    "assertions": [
+      "class/message identify queue wait; no DB execution for expired call"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "QueryDeadline::from_budget",
+      "state.lock"
+    ],
+    "test_id": "w4_query_queued_budget",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i50_queued_budget.jsonl"
+  },
+  {
+    "case_id": "rel012_i51_second_instance",
+    "issue": 51,
+    "title": "Second serve instance audit lock",
+    "reproducible": "unit",
+    "input": {
+      "sequence": [
+        "start first serve with W4_<run>_AUDIT",
+        "start second serve against same audit path",
+        "send initialize to second"
+      ]
+    },
+    "tool_or_path": "serve",
+    "pre_fix_outcome": "0.11.0 exited pre-handshake; client saw Connection closed",
+    "post_fix_expected": "MCP handshake completes then typed lock refusal, or concurrent audit-safe serve",
+    "assertions": [
+      "no audit fork; exact client-visible lock reason; first instance remains healthy"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "build_auditor",
+      "AuditError::Locked"
+    ],
+    "test_id": "oraclemcp::tests::second_serve_instance_reports_audit_lock_issue_51",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i51_second_instance.jsonl"
+  },
+  {
+    "case_id": "rel012_i52_exists_view",
+    "issue": 52,
+    "title": "EXISTS view guard bypass",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT id FROM W4_<run>_T WHERE EXISTS (SELECT 1 FROM W4_<run>_VIEW) /* W4_ISSUE_52_EXISTS */"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 admitted inner view that top-level guard refused",
+    "post_fix_expected": "ForbiddenStatement before Oracle",
+    "assertions": [
+      "typed refusal; audit zero executions; V$SQL has no marker SQL_ID"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "semantic_read_plan",
+      "resolved_relations_read_purity"
+    ],
+    "test_id": "w4_query_exists_view",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i52_exists_view.jsonl"
+  },
+  {
+    "case_id": "rel012_i52_in_policy",
+    "issue": 52,
+    "title": "IN VPD guard bypass",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT id FROM W4_<run>_T WHERE id IN (SELECT id FROM W4_<run>_POLICY) /* W4_ISSUE_52_IN */"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 admitted inner VPD table",
+    "post_fix_expected": "ForbiddenStatement before Oracle",
+    "assertions": [
+      "typed refusal; audit zero executions; V$SQL has no marker SQL_ID"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "semantic_read_plan",
+      "resolved_relations_read_purity"
+    ],
+    "test_id": "w4_query_in_policy",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i52_in_policy.jsonl"
+  },
+  {
+    "case_id": "rel012_i52_scalar_view",
+    "issue": 52,
+    "title": "Scalar subquery view guard bypass",
+    "reproducible": "live",
+    "input": {
+      "sql": "SELECT (SELECT MAX(id) FROM W4_<run>_VIEW) FROM W4_<run>_T /* W4_ISSUE_52_SCALAR */"
+    },
+    "tool_or_path": "oracle_query",
+    "pre_fix_outcome": "0.11.0 omitted inner relation from purity proof",
+    "post_fix_expected": "ForbiddenStatement before Oracle",
+    "assertions": [
+      "typed refusal; audit zero executions; V$SQL has no marker SQL_ID"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "semantic_read_plan",
+      "resolved_relations_read_purity"
+    ],
+    "test_id": "w4_query_scalar_view",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i52_scalar_view.jsonl"
+  },
+  {
+    "case_id": "rel012_i53_sample_policy",
+    "issue": 53,
+    "title": "Sampler VPD purity bypass",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "table": "W4_<run>_POLICY"
+      },
+      "marker": "W4_<run>_POLICY"
+    },
+    "tool_or_path": "oracle_sample_rows",
+    "pre_fix_outcome": "0.11.0 sampled VPD table where oracle_query refused",
+    "post_fix_expected": "ForbiddenStatement before Oracle",
+    "assertions": [
+      "typed refusal; audit zero executions; V$SQL has no new generated sampler SQL_ID after baseline"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "GuardedReadExecutor",
+      "sample_rows"
+    ],
+    "test_id": "w4_sample_rows_sample_policy",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i53_sample_policy.jsonl"
+  },
+  {
+    "case_id": "rel012_i53_sample_view",
+    "issue": 53,
+    "title": "Sampler view purity bypass",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "table": "W4_<run>_VIEW"
+      },
+      "marker": "W4_<run>_VIEW"
+    },
+    "tool_or_path": "oracle_sample_rows",
+    "pre_fix_outcome": "0.11.0 sampled a view that oracle_query refused",
+    "post_fix_expected": "ForbiddenStatement before Oracle",
+    "assertions": [
+      "typed refusal; audit zero executions; V$SQL has no new generated sampler SQL_ID after baseline"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "GuardedReadExecutor",
+      "sample_rows"
+    ],
+    "test_id": "w4_sample_rows_sample_view",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i53_sample_view.jsonl"
+  },
+  {
+    "case_id": "rel012_i53_sample_mask",
+    "issue": 53,
+    "title": "Sampler result masking",
+    "reproducible": "live",
+    "input": {
+      "arguments": {
+        "table": "W4_<run>_MASKED"
+      },
+      "profile": "W4_<run>_MASK_ALL"
+    },
+    "tool_or_path": "oracle_sample_rows",
+    "pre_fix_outcome": "0.11.0 returned unmasked sample values",
+    "post_fix_expected": "masked values and mask certificate",
+    "assertions": [
+      "no raw canary value; certificate verifies against audit entry"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "SerializeOptions",
+      "result_masking"
+    ],
+    "test_id": "w4_sample_rows_sample_mask",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i53_sample_mask.jsonl"
+  },
+  {
+    "case_id": "rel012_i54_adb_post_accept",
+    "issue": 54,
+    "title": "ADB post-ACCEPT authentication",
+    "reproducible": "live",
+    "input": {
+      "profile": "W4_<run>_ADB_WALLET",
+      "action": "connect then SELECT 1 FROM DUAL"
+    },
+    "tool_or_path": "oracle_connection_info",
+    "pre_fix_outcome": "0.11.0 field report: driver failed after TNS ACCEPT; not re-confirmed in filing session",
+    "post_fix_expected": "driver-cx establishes ADB session and reads DUAL",
+    "assertions": [
+      "driver-cx selected; authenticated read succeeds; phase trace reaches ready"
+    ],
+    "versions": [
+      "version:23"
+    ],
+    "capabilities": [
+      "adb"
+    ],
+    "repo": "rust-oracledb",
+    "symbols": [
+      "TTC auth handshake"
+    ],
+    "test_id": "w4_connection_info_adb_post_accept",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i54_adb_post_accept.jsonl"
+  },
+  {
+    "case_id": "rel012_i55_adb_stock_wallet",
+    "issue": 55,
+    "title": "Stock wallet acceptance",
+    "reproducible": "live",
+    "input": {
+      "profile": "W4_<run>_ADB_STOCK_WALLET",
+      "action": "connect using unmodified wallet fixture"
+    },
+    "tool_or_path": "oracle_connection_info",
+    "pre_fix_outcome": "0.7.2 musl rejected cwallet.sso or legacy 3DES PKCS12; 0.11.0 cwallet path appeared improved, PEM path unconfirmed",
+    "post_fix_expected": "every stock wallet form loads and connects to ADB",
+    "assertions": [
+      "exercise cwallet and PEM-only paths separately; no wallet bytes in results"
+    ],
+    "versions": [
+      "version:23"
+    ],
+    "capabilities": [
+      "adb"
+    ],
+    "repo": "rust-oracledb",
+    "symbols": [
+      "wallet loader",
+      "PKCS12 parser"
+    ],
+    "test_id": "w4_connection_info_adb_stock_wallet",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i55_adb_stock_wallet.jsonl"
+  },
+  {
+    "case_id": "rel012_i56_connect_phase",
+    "issue": 56,
+    "title": "Connection failure phase diagnosis",
+    "reproducible": "live",
+    "input": {
+      "profile": "W4_<run>_ADB_FAULT",
+      "fault": "synthetic post-ACCEPT TTC failure"
+    },
+    "tool_or_path": "doctor --online",
+    "pre_fix_outcome": "0.11.0 hid driver detail and trace stopped at ACCEPT with misleading connect-string hint",
+    "post_fix_expected": "opt-in redacted detail and post-ACCEPT phase-aware hint",
+    "assertions": [
+      "no secret/identifier in output; phase identifies auth/TTC; default stays redacted"
+    ],
+    "versions": [
+      "version:23"
+    ],
+    "capabilities": [
+      "adb"
+    ],
+    "repo": "oraclemcp",
+    "symbols": [
+      "connect trace",
+      "doctor_online"
+    ],
+    "test_id": "w4_doctor_online_connect_phase",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i56_connect_phase.jsonl"
+  }
+]

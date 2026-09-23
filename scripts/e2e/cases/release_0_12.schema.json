@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "oraclemcp 0.12 release issue cases",
+  "type": "array",
+  "minItems": 29,
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+      "case_id", "issue", "title", "reproducible", "input", "tool_or_path",
+      "pre_fix_outcome", "post_fix_expected", "assertions", "versions",
+      "capabilities", "repo", "symbols", "test_id",
+      "confidentiality_reviewed", "evidence_path"
+    ],
+    "properties": {
+      "case_id": {"type": "string", "pattern": "^rel012_i(2[8-9]|[3-4][0-9]|5[0-6])_[a-z][a-z0-9_]*$"},
+      "issue": {"type": "integer", "minimum": 28, "maximum": 56},
+      "title": {"type": "string", "minLength": 1},
+      "reproducible": {"enum": ["live", "unit", "none"]},
+      "input": {"type": "object", "minProperties": 1},
+      "tool_or_path": {"type": "string", "minLength": 1},
+      "pre_fix_outcome": {"type": "string", "minLength": 1},
+      "post_fix_expected": {"type": "string", "minLength": 1},
+      "assertions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+      "versions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["version:18", "version:21", "version:23"]}},
+      "capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^(adb|priv:[A-Za-z0-9_$#]+|feature:[A-Za-z0-9_]+|licence:[A-Za-z0-9_]+)$"}},
+      "repo": {"enum": ["oraclemcp", "rust-oracledb", "plsql-intelligence"]},
+      "symbols": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+      "test_id": {"type": "string", "minLength": 1},
+      "confidentiality_reviewed": {"const": true},
+      "evidence_path": {"type": "string", "pattern": "^target/e2e/w4/\\{lane\\}/rel012_i[0-9]+_[a-z0-9_]+\\.jsonl$"}
+    }
+  }
+}
