@@ -9,11 +9,11 @@
       "crates/oraclemcp-core/src/edition_executor.rs",
       "crates/oraclemcp-core/src/http/operator.rs",
       "crates/oraclemcp-core/src/http/tests_operator.rs",
-      "crates/oraclemcp-guard/src/purity.rs",
       "crates/oraclemcp-guard/tests/default_edition_flip_guard.rs",
       "crates/oraclemcp/tests/edition_lifecycle_live_xe.rs"
     ],
     "out_of_scope": [
+      "crates/oraclemcp-guard/src/purity.rs (holds OperatorStatementClass::DefaultEditionFlip) was extended after the source commit by .10.7 (e640471a, +65 lines, RoutineRef); it is excluded from the clean-scope claim. Its .14.1 content is covered by the gate at 0c362118 and the default_edition_flip_guard tests.",
       "classifier.rs, dispatch/mod.rs, dispatch/tests.rs and core server.rs were changed by these commits but currently carry other agents' uncommitted edits; their committed state is covered by the gate at 0c362118.",
       "The W4 change-request refusal case (scripts/e2e/w4/cases/change-request.json) is committed and schema-valid; its external-client execution belongs to T12.9 and was not run here.",
       "Decisive W14 binding and change-request promotion preconditions (bead no-claim)."
