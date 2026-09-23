@@ -798,6 +798,17 @@
         "workflow_dispatch"
       ],
       "path_filtered": false
+    },
+    {
+      "check_name": "Windows audit native workspace",
+      "tier": "manual",
+      "workflow": "Windows audit native proof",
+      "workflow_file": "windows-audit-native.yml",
+      "job_id": "windows-audit-native",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
     }
   ],
   "workflows": {
@@ -964,6 +975,15 @@
         "verify MCP registry entry",
         "web bundle (npm ci + vite build)"
       ]
+    },
+    "windows-audit-native.yml": {
+      "name": "Windows audit native proof",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "jobs": [
+        "Windows audit native workspace"
+      ]
     }
   },
   "groups": {
@@ -978,6 +998,7 @@
     ],
     "manual": [
       "OCI ADB acceptance",
+      "Windows audit native workspace",
       "manual mutation shard",
       "npm/npx release channel is retired",
       "promote attested digest",
