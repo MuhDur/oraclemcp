@@ -1502,6 +1502,48 @@ export type EditionProposalInput = {
   objectCount: number;
 };
 
+export type EditionProposalWire = {
+  proposal_id: string;
+  profile?: string;
+  base_edition: string;
+  child_edition: string;
+  status: EditionStatus;
+  objects?: string[];
+  created_at?: string;
+  updated_at?: string;
+};
+
+export type EditionProposalsData = {
+  source?: string;
+  proposals: EditionProposalWire[];
+};
+
+const EDITION_STATUSES: readonly EditionStatus[] = ["requested", "reviewing", "withdrawn"];
+
+/** Project persisted proposal edges into the linear timeline builder's input. */
+export function parseEditionProposals(
+  data: EditionProposalsData | null
+): EditionProposalInput[] {
+  const proposals = Array.isArray(data?.proposals) ? data.proposals : [];
+  return proposals.flatMap((proposal) => {
+    const base = typeof proposal.base_edition === "string" ? proposal.base_edition : "";
+    const child = typeof proposal.child_edition === "string" ? proposal.child_edition : "";
+    if (!base || !child) {
+      return [];
+    }
+    const status = EDITION_STATUSES.includes(proposal.status) ? proposal.status : null;
+    return [
+      {
+        proposalId: typeof proposal.proposal_id === "string" ? proposal.proposal_id : "",
+        baseEdition: base,
+        childEdition: child,
+        status,
+        objectCount: Array.isArray(proposal.objects) ? proposal.objects.length : 0
+      }
+    ];
+  });
+}
+
 const EDITION_STATUS_TONE: Readonly<Record<EditionStatus, DashboardTone>> = {
   requested: "info",
   reviewing: "ok",

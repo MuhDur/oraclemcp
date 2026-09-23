@@ -982,6 +982,14 @@ fn ddl_level() -> SessionLevelState {
     level
 }
 
+fn admin_level() -> SessionLevelState {
+    let mut level = SessionLevelState::new(OperatingLevel::Admin, false);
+    level
+        .set_current_level(OperatingLevel::Admin)
+        .expect("admin is within ceiling");
+    level
+}
+
 fn preview_confirm(dispatcher: &OracleDispatcher, sql: &str) -> String {
     dispatcher
         .dispatch("oracle_preview_sql", json!({ "sql": sql }))
@@ -5108,6 +5116,30 @@ fn custom_read_only_tool_dispatches_with_named_binds() {
 }
 
 #[test]
+fn custom_tool_default_edition_flip_refused() {
+    let definitions = oraclemcp_core::parse_tools_file(
+        r#"
+            [[tool]]
+            name = "app_flip_default_edition"
+            description = "Attempt a database default edition flip"
+            sql = "ALTER DATABASE DEFAULT EDITION = NEXT_ED"
+            output_mode = "rows"
+            "#,
+    )
+    .expect("synthetic custom tool parses");
+    let error = oraclemcp_core::load_tools(
+        &definitions,
+        &Classifier::engine_free_baseline(ClassifierConfig::new()),
+        OperatingLevel::Admin,
+    )
+    .expect_err("operator-only SQL cannot be registered as an agent tool");
+    assert!(
+        error.to_string().contains("operator") || error.to_string().contains("forbidden"),
+        "custom tool refusal must explain the classifier decision: {error:?}"
+    );
+}
+
+#[test]
 fn custom_tool_write_uses_runtime_level_refusal_before_db() {
     let defs = oraclemcp_core::parse_tools_file(
         r#"
@@ -8745,6 +8777,79 @@ fn opaque_plsql_calls_are_refused_before_database_io() {
     assert!(state.executed.lock().expect("exec mutex").is_empty());
     assert_eq!(state.commits.load(Ordering::SeqCst), 0);
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn preview_sql_default_edition_flip_operator_only_no_token() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("admin".to_owned()),
+        admin_level(),
+    );
+    for sql in [
+        "ALTER DATABASE DEFAULT EDITION = next_ed",
+        "alter\ndatabase\ndefault\nedition = next_ed",
+        "ALTER /* gap */ DATABASE DEFAULT /* gap */ EDITION = \"Next Ed\"",
+        "ALTER DATABASE appdb DEFAULT EDITION = next_ed",
+        "ALTER PLUGGABLE DATABASE DEFAULT EDITION = next_ed;",
+    ] {
+        let preview = dispatcher
+            .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+            .expect("forbidden SQL remains inspectable in preview");
+        assert_eq!(preview["gate_decision"], json!("blocked"), "{sql:?}");
+        assert_eq!(
+            preview["reason_category"],
+            json!("OPERATOR_ONLY_STATEMENT"),
+            "{sql:?}"
+        );
+        assert!(preview["execute_confirmation"].is_null(), "{sql:?}");
+        assert!(
+            preview["next_actions"]
+                .as_array()
+                .is_some_and(|actions| actions
+                    .iter()
+                    .all(|action| action["tool"] != "oracle_execute")),
+            "no executable continuation may be offered for {sql:?}"
+        );
+    }
+    assert!(state.queried.lock().expect("query mutex").is_empty());
+    assert!(state.executed.lock().expect("execute mutex").is_empty());
+}
+
+#[test]
+fn execute_default_edition_flip_operator_only_at_admin_zero_db_io() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("admin".to_owned()),
+        admin_level(),
+    );
+    for sql in [
+        "ALTER DATABASE DEFAULT EDITION = next_ed",
+        "ALTER DATABASE \"DB One\" DEFAULT EDITION = \"Next Ed\"",
+        "ALTER PLUGGABLE DATABASE DEFAULT EDITION = next_ed",
+        "ALTER /* gap */ DATABASE DEFAULT /* gap */ EDITION = next_ed;",
+    ] {
+        let error = dispatcher
+            .dispatch(
+                "oracle_execute",
+                json!({ "sql": sql, "commit": true, "confirm": "irrelevant" }),
+            )
+            .expect_err("agent SQL cannot change the database default edition");
+        assert_eq!(error.error_class, ErrorClass::ForbiddenStatement, "{sql:?}");
+        assert_eq!(
+            error
+                .structured_reason
+                .as_ref()
+                .map(|reason| reason.category),
+            Some(ReasonCategory::OperatorOnlyStatement),
+            "{sql:?}"
+        );
+    }
+    assert!(state.queried.lock().expect("query mutex").is_empty());
+    assert!(state.executed.lock().expect("execute mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
 }
 
 #[test]

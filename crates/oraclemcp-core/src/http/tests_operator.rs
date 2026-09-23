@@ -3479,6 +3479,88 @@ fn operator_executor_not_registered_as_mcp_tool() {
 }
 
 #[test]
+fn edition_merge_and_rollback_use_executor_not_oracle_execute() {
+    let (auditor, _sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
+        calls: Arc::clone(&calls),
+        profile: "synthetic_stage",
+        deny: false,
+    }));
+    let dir = dashboard_test_dir("edition-executor-only-route");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let config = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        ..Default::default()
+    };
+    let draft = handle_http_request(
+        &server,
+        &config,
+        operator_json_post(
+            "/operator/v1/edition-proposals/draft",
+            &serde_json::json!({
+                "profile": "synthetic_stage",
+                "child_edition": "synthetic_child",
+                "base_edition": "synthetic_base",
+                "objects": ["SYNTHETIC_VIEW"]
+            }),
+        ),
+    );
+    assert_eq!(draft.status, 200);
+    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
+        .as_str()
+        .expect("proposal id")
+        .to_owned();
+    let reviewing = handle_http_request(
+        &server,
+        &config,
+        operator_json_post(
+            "/operator/v1/edition-proposals/transition",
+            &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
+        ),
+    );
+    assert_eq!(reviewing.status, 200);
+
+    for action in ["merge", "rollback"] {
+        let path = match action {
+            "merge" => "/operator/v1/edition-proposals/merge",
+            _ => "/operator/v1/edition-proposals/rollback",
+        };
+        let preview = handle_http_request(
+            &server,
+            &config,
+            operator_json_post(path, &serde_json::json!({ "proposal_id": proposal_id })),
+        );
+        assert_eq!(preview.status, 200, "{action} preview");
+        let token = response_json(&preview)["data"]["confirmation"]
+            .as_str()
+            .expect("operator-only confirmation")
+            .to_owned();
+        let applied = handle_http_request(
+            &server,
+            &config,
+            operator_json_post(
+                path,
+                &serde_json::json!({ "proposal_id": proposal_id, "confirm": token }),
+            ),
+        );
+        assert_eq!(applied.status, 200, "{action} apply");
+        assert_eq!(response_json(&applied)["data"]["status"], "applied");
+        assert!(
+            response_json(&applied)["data"]
+                .get("mcp_response")
+                .is_none(),
+            "{action} must not use oracle_execute"
+        );
+    }
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
+}
+
+#[test]
 fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));

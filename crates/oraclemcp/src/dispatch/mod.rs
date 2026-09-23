@@ -6526,9 +6526,13 @@ fn gate_error(
                         labels.subject, decision.reason
                     ),
                 )
-                .with_next_step(decision.safe_alternative.clone().unwrap_or_else(
-                    || "rewrite the statement as a simpler, single SQL statement".to_owned(),
+                .with_structured_reason(structured_reason_for(
+                    decision,
+                    ErrorClass::ForbiddenStatement,
                 ))
+                .with_next_step(decision.safe_alternative.clone().unwrap_or_else(|| {
+                    "rewrite the statement as a simpler, single SQL statement".to_owned()
+                }))
             }
             oraclemcp_guard::BlockReason::ExceedsCeiling { required, ceiling } => {
                 ErrorEnvelope::new(
@@ -11193,6 +11197,7 @@ fn preview_sql(
                     "the active profile's SQL policy denied this statement ({})",
                     denial.reason.as_str()
                 ),
+                "reason_category": base.reason_category,
                 "safe_alternative": Value::Null,
                 // No grant: previewing a statement the policy forbids must not
                 // hand out authority to run it.
@@ -11272,6 +11277,7 @@ fn preview_sql(
         "step_up_target": step_up_target,
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
+        "reason_category": decision.reason_category,
         "safe_alternative": decision.safe_alternative,
         "execute_confirmation": execute_confirmation_json(
             &decision,

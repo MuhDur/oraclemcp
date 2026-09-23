@@ -305,14 +305,14 @@ fn edition_lifecycle_is_linear_live_and_second_child_never_executes() {
     });
 }
 
-/// This case changes the default edition of the connected database. Run it
-/// only against a dedicated XE 21 test instance, never a shared release lane.
+/// This case changes the default edition of the connected database. It needs
+/// explicit opt-in and a local XE 21 test instance with an empty edition tree.
 #[test]
 fn operator_executor_flips_default_edition_and_back_live_xe() {
-    if std::env::var("ORACLEMCP_ISOLATED_EDITION_XE").as_deref() != Ok("1") {
+    if std::env::var("ORACLEMCP_LIVE_EDITION_FLIP").as_deref() != Ok("1") {
         eprintln!(
             "[live-xe] SKIP operator_executor_flips_default_edition_and_back_live_xe: \
-             ORACLEMCP_ISOLATED_EDITION_XE=1 requires a dedicated XE 21 test database"
+             ORACLEMCP_LIVE_EDITION_FLIP=1 requires an authorized local XE 21 test database"
         );
         return;
     }
@@ -320,40 +320,33 @@ fn operator_executor_flips_default_edition_and_back_live_xe() {
     run_with_cx(|cx| async move {
         let probe = RustOracleConnection::connect(&cx, test_opts())
             .await
-            .expect("isolated XE 21 must be reachable when the live gate is enabled");
+            .expect("local XE 21 must be reachable when the live gate is enabled");
         let (base_has_child, _) = probe_child_slot(&cx, &probe)
             .await
-            .expect("dedicated XE must expose ALL_EDITIONS");
+            .expect("local XE must expose ALL_EDITIONS");
         assert!(
             !base_has_child,
-            "dedicated XE must begin with an empty ORA$BASE child slot"
+            "local XE must begin with an empty ORA$BASE child slot"
         );
         assert_eq!(
             fresh_default_edition(&cx).await.as_deref(),
             Some(BASE_EDITION),
-            "dedicated XE must begin at ORA$BASE"
+            "local XE must begin at ORA$BASE"
         );
         assert_eq!(
             database_default_edition(&cx, &probe).await.as_deref(),
             Some(BASE_EDITION),
-            "dedicated XE database property must begin at ORA$BASE"
+            "local XE database property must begin at ORA$BASE"
         );
 
         let served = RustOracleConnection::connect(&cx, test_opts())
             .await
-            .expect("open dedicated operator execution session");
+            .expect("open local operator execution session");
         let dispatcher = Arc::new(OracleDispatcher::new_with_profile_level(
             Box::new(served),
             Some(OPERATOR_PROFILE.to_owned()),
             admin_level(),
         ));
-        let create =
-            format!("CREATE EDITION {OPERATOR_FIXTURE_EDITION} AS CHILD OF {BASE_EDITION}");
-        let created = confirmed_execute(&dispatcher, &cx, &create)
-            .await
-            .expect("dedicated XE user can create the synthetic operator edition");
-        assert_eq!(created["executed"], json!(true));
-
         let report = CapabilitiesReport::new(
             "live-edition-operator",
             Vec::new(),
@@ -433,6 +426,13 @@ fn operator_executor_flips_default_edition_and_back_live_xe() {
             operator_body(&reviewing)
         );
 
+        let create =
+            format!("CREATE EDITION {OPERATOR_FIXTURE_EDITION} AS CHILD OF {BASE_EDITION}");
+        let created = confirmed_execute(&dispatcher, &cx, &create)
+            .await
+            .expect("local XE user can create the synthetic operator edition");
+        assert_eq!(created["executed"], json!(true));
+
         let (_, merge) = operator_flip(
             &server,
             &config,
@@ -454,6 +454,15 @@ fn operator_executor_flips_default_edition_and_back_live_xe() {
         let rollback = rollback.expect("operator rollback preview must mint a confirmation");
         let after_rollback = fresh_default_edition(&cx).await;
         let property_after_rollback = database_default_edition(&cx, &probe).await;
+
+        // Retire the fixture before making observational assertions, so a
+        // failed merge observation does not leave an extra edition behind.
+        let retired = if property_after_rollback.as_deref() == Some(BASE_EDITION) {
+            let retire = format!("DROP EDITION {OPERATOR_FIXTURE_EDITION} CASCADE");
+            Some(confirmed_execute(&dispatcher, &cx, &retire).await)
+        } else {
+            None
+        };
 
         assert_eq!(merge.status, 200, "merge: {:?}", operator_body(&merge));
         assert_eq!(operator_body(&merge)["data"]["status"], json!("applied"));
@@ -484,9 +493,8 @@ fn operator_executor_flips_default_edition_and_back_live_xe() {
             "database property must record the rollback to ORA$BASE"
         );
 
-        let retire = format!("DROP EDITION {OPERATOR_FIXTURE_EDITION} CASCADE");
-        let retired = confirmed_execute(&dispatcher, &cx, &retire)
-            .await
+        let retired = retired
+            .expect("default edition must be restored before retiring the fixture")
             .expect("retire only the synthetic operator edition after rollback");
         assert_eq!(retired["executed"], json!(true));
         assert!(

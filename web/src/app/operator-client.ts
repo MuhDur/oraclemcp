@@ -3,8 +3,7 @@ import {
   isRegisteredDerivationStep,
   type VectorClusterInput,
   type VectorMetric,
-  type EditionProposalInput,
-  type EditionStatus,
+  type EditionProposalsData,
   type CqnChangeFeedInput,
   type ColumnLineageInput,
   type CostPlanRowViewModel,
@@ -50,6 +49,8 @@ export {
   type DashboardActionTicket,
   type DashboardSession
 } from "./operator-session";
+export { parseEditionProposals } from "./presentation-model";
+export type { EditionProposalWire, EditionProposalsData } from "./presentation-model";
 
 export type ProbeState = "loading" | "ok" | "warn" | "off";
 
@@ -1667,24 +1668,6 @@ export async function fetchChangeProposalDetail(
 // base_edition -> child_edition edge. The console orders them into the linear
 // timeline the Reviews board renders.
 
-export type EditionProposalWire = {
-  proposal_id: string;
-  profile?: string;
-  base_edition: string;
-  child_edition: string;
-  status: EditionStatus;
-  objects?: string[];
-  created_at?: string;
-  updated_at?: string;
-};
-
-export type EditionProposalsData = {
-  source?: string;
-  proposals: EditionProposalWire[];
-};
-
-const EDITION_STATUSES: readonly EditionStatus[] = ["requested", "reviewing", "withdrawn"];
-
 export async function fetchEditionProposals(
   context: OperatorQueryContext = {}
 ): Promise<OperatorResponse<EditionProposalsData>> {
@@ -1731,30 +1714,6 @@ export async function applyEditionDefaultFlip(
     ...operatorLanePayload(request.lane),
     confirm: confirmation,
     idempotency_key: requestId(`edition-default-${request.target}`)
-  });
-}
-
-/** Project the edition-proposal list into the timeline builder's input. */
-export function parseEditionProposals(
-  data: EditionProposalsData | null
-): EditionProposalInput[] {
-  const proposals = Array.isArray(data?.proposals) ? data.proposals : [];
-  return proposals.flatMap((proposal) => {
-    const base = typeof proposal.base_edition === "string" ? proposal.base_edition : "";
-    const child = typeof proposal.child_edition === "string" ? proposal.child_edition : "";
-    if (!base || !child) {
-      return [];
-    }
-    const status = EDITION_STATUSES.includes(proposal.status) ? proposal.status : null;
-    return [
-      {
-        proposalId: typeof proposal.proposal_id === "string" ? proposal.proposal_id : "",
-        baseEdition: base,
-        childEdition: child,
-        status,
-        objectCount: Array.isArray(proposal.objects) ? proposal.objects.length : 0
-      }
-    ];
   });
 }
 
