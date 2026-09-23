@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T00:05:00Z",
+  "bead_id": "oraclemcp-4vk43",
+  "scope": {
+    "summary": "OracleBind::TimestampTz wall-clock to UTC conversion before thin-driver encoding (06a32d07); positional-bind lint distinguishes clock/zone text from binds (34d7e623) with a negative proving a repeated real :n is still caught.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/tests/live_oracle.rs",
+      "crates/oraclemcp-db/tests/positional_bind_shape.rs",
+      "crates/oraclemcp-db/api/oraclemcp-db.txt"
+    ],
+    "out_of_scope": [
+      "Official-backend TSTZ bind support is refused (typed) and tracked as oraclemcp-7mgot."
+    ]
+  },
+  "source": {
+    "sha": "9f6d661ce50f08c96104a6ea0eda839ef3c48abf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "live bind round trip",
+        "kind": "cli",
+        "trace": "Orchestrator live run under the build lease at 9f6d661c: cargo test -p oraclemcp-db --features live-xe --test live_oracle tstz_live on free23, xe21, xe18: tstz_live_bind_fetch_preserves_numeric_offset ok (bind 2026-06-29T12:34:56.987654321-05:30 round-trips exactly) and tstz_live_official_bind_refuses_offset_loss ok (official backend refuses instead of silently dropping the offset; support tracked in oraclemcp-7mgot)."
+      },
+      {
+        "name": "live W4 TSTZ fidelity",
+        "kind": "cli",
+        "trace": "Orchestrator live run: release binary built from a clean detached worktree at 9f6d661c; ORACLEMCP_LIVE_XE=1 scripts/e2e/w4.sh on free23, xe21 and xe18: case w4_type_fidelity_tstz_offset verdict pass on stdio AND http on all three lanes (served value equals the independent DB reread of TIMESTAMP 2020-02-29 23:30:00 +05:45). Each lane exited 1 only because unrelated release-manifest cases are still red (owned by later beads)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live runs on local loopback lab containers; results read at run time, not committed as artifacts.",
+    "Unit table with independently computed expectations was run by the implementing pane and in the workspace gate; the orchestrator re-ran the live proofs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
