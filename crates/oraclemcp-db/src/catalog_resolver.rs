@@ -703,8 +703,8 @@ pub async fn fga_closure(
         }
     }
     // A successful empty probe establishes catalog readability even when no
-    // FGA policy is visible. Oracle grants ALL_AUDIT_POLICIES for accessible
-    // objects; a failed probe never proves absence.
+    // FGA policy is visible. ALL_AUDIT_POLICIES covers accessible objects only
+    // when the principal can query the view; a failed probe never proves absence.
     if run_catalog_query(cx, conn, CatalogQueryId::FgaCatalogProof, &[])
         .await
         .is_err()
