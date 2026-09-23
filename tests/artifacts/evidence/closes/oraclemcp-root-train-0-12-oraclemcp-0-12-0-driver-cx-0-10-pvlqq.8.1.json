@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T20:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.1",
+  "scope": {
+    "summary": "Strict runtime argument decoding: undeclared built-in tool arguments rejected at runtime (#36/#37); duplicate JSON members refused with -32700 + RFC6901 data.json_pointer on stdio and HTTP before dispatch; tool schemas and committed renders now advertise exactly the runtime-accepted arguments (f64e0d03, b67fdb99, 616398b9, 0c362118).",
+    "in_scope": [
+      "crates/oraclemcp-core/src/strict_json.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-core/proptest-regressions/strict_json.txt",
+      "tests/golden/stdio/main_tool_transcript.json",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "dispatch/args.rs, dispatch/mod.rs, dispatch/tests.rs, registry.rs and core server.rs were changed by these commits but currently carry other agents' uncommitted edits; their committed state is covered by the gate at 0c362118, not by the clean-scope claim.",
+      "Enum/value validation and alias deprecation notes (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "0c362118250ce60e694c917c2051a4af41fe2838",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 0c362118 (dirty=0, build lease held): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 114 suites, 3299 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "every_registered_tool_rejects_unknown_argument, schema_runtime_differential_every_tool, strict_decode_equals_serde_value_on_unique_input, stdio_duplicate_member_frame_is_refused_before_dispatch, http_duplicate_member_body_is_refused_before_dispatch, sample_rows_rejects_filter_and_columns_issue_36: ok by exact name in the gate log (10 of 12 extracted names; the other two are a tool name and a W3 case label, not tests)."
+      },
+      {
+        "name": "arch-fitness lint",
+        "kind": "cli",
+        "trace": "scripts/oraclemcp_arch_fitness_lint.sh --selftest exit 0 (planted println! in a served path caught); normal run OK at 0c362118."
+      },
+      {
+        "name": "golden review",
+        "kind": "cli",
+        "trace": "Render/golden deltas were reviewed by the orchestrator: README sample_rows description plus schema additions (oracle_query as_of/export/stream, schema_inspect cursor, db_health check/checks, query alias fields) all attributable to the intended .8.1 schema-truthfulness change; schema_runtime_differential_every_tool green on the same tree."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane.",
+    "Negatives verified as the bead named tests passing; no orchestrator-authored mutants."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

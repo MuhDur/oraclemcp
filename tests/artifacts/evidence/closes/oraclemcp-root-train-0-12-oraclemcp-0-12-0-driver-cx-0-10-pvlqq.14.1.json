@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T20:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.14.1",
+  "scope": {
+    "summary": "ALTER DATABASE DEFAULT EDITION is operator-only: classifier refuses default-edition flips at every level with OPERATOR_ONLY_STATEMENT; one exact-template OperatorStatementClass::DefaultEditionFlip; operator edition executor (server-minted one-use confirmation, ADMIN ceiling/level checks, audited) replaces the oracle_execute route (992dd9a4, ca100b7c, 7f05bb8f, 4582c029, 55a1e1ff).",
+    "in_scope": [
+      "crates/oraclemcp-core/src/edition_executor.rs",
+      "crates/oraclemcp-core/src/http/operator.rs",
+      "crates/oraclemcp-core/src/http/tests_operator.rs",
+      "crates/oraclemcp-guard/src/purity.rs",
+      "crates/oraclemcp-guard/tests/default_edition_flip_guard.rs",
+      "crates/oraclemcp/tests/edition_lifecycle_live_xe.rs"
+    ],
+    "out_of_scope": [
+      "classifier.rs, dispatch/mod.rs, dispatch/tests.rs and core server.rs were changed by these commits but currently carry other agents' uncommitted edits; their committed state is covered by the gate at 0c362118.",
+      "The W4 change-request refusal case (scripts/e2e/w4/cases/change-request.json) is committed and schema-valid; its external-client execution belongs to T12.9 and was not run here.",
+      "Decisive W14 binding and change-request promotion preconditions (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "0c362118250ce60e694c917c2051a4af41fe2838",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 0c362118 (dirty=0, build lease held): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 114 suites, 3299 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "17 named acceptance/test-plan tests ok by exact name in the gate log (default_edition_flip guard 5, core http edition_ 6, edition_executor 8 incl. one-use confirmation and max_level<ADMIN refusal)."
+      },
+      {
+        "name": "live XE re-run by orchestrator at 55a1e1ff under the build lease",
+        "kind": "cli",
+        "trace": "XE21 with ORACLEMCP_LIVE_EDITION_FLIP=1: operator_executor_flips_default_edition_and_back_live_xe ok; XE21 and XE18: edition_lifecycle_is_linear_live_and_second_child_never_executes ok; no SKIP line printed."
+      },
+      {
+        "name": "security review (second agent)",
+        "kind": "cli",
+        "trace": "Orchestrator reviewed the ca100b7c test rewrite for gate weakening: confirmation moved from a caller-supplied string to a server-minted one-use token (stricter); forged/replayed/stale/forked-state and below-ADMIN refusals are covered by dedicated tests; zero DB I/O before confirmation still asserted. The interim 992dd9a4 broke main until ca100b7c (known, fixed)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane.",
+    "Live proof ran on local lab XE containers; results were read at run time, no live artifact is committed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
