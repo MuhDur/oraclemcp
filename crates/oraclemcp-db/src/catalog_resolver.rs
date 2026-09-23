@@ -16,6 +16,13 @@ use oraclemcp_guard::{
     StatementScope, SynonymHop, SyntacticRole,
 };
 
+#[cfg(test)]
+use crate::catalog_query::{
+    ALL_POLICIES_VISIBILITY_SQL, COLUMN_CONFLICT_SQL, MEMBER_ARGUMENTS_SQL, OBJECTS_SQL,
+    POLICY_CATALOG_PROOF_SQL, RELATION_COLUMN_SQL, SELECT_POLICY_SQL, STANDALONE_ARGUMENTS_SQL,
+    SYNONYMS_SQL, TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL,
+};
+use crate::catalog_query::{CatalogQueryId, run_catalog_query};
 use crate::{DbError, OracleBind, OracleConnection, OracleRow};
 
 /// Maximum number of syntactic names loaded into one immutable resolver.
@@ -27,44 +34,6 @@ const MAX_CANDIDATES: usize = 32;
 const MAX_SYNONYM_HOPS: usize = 16;
 const MAX_ARGUMENT_ROWS: usize = 512;
 const MAX_SESSION_ROLES: usize = 256;
-
-const SESSION_CONTEXT_SQL: &str = "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user, \
-    SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema, \
-    SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME') AS edition_name FROM dual";
-
-const SESSION_ROLES_SQL: &str = "SELECT role FROM (SELECT role FROM session_roles ORDER BY role) \
-    WHERE ROWNUM <= :1";
-
-const OBJECTS_SQL: &str = "SELECT owner, object_name, object_type, object_id, status, edition_name \
-    FROM (SELECT owner, object_name, object_type, object_id, status, edition_name \
-          FROM all_objects WHERE owner = :1 AND object_name = :2 ORDER BY object_id) \
-    WHERE ROWNUM <= :3";
-
-const SYNONYMS_SQL: &str = "SELECT s.owner, s.synonym_name, s.table_owner, s.table_name, s.db_link, \
-    o.object_id, o.status, o.edition_name \
-    FROM all_synonyms s LEFT JOIN all_objects o \
-      ON o.owner = s.owner AND o.object_name = s.synonym_name AND o.object_type = 'SYNONYM' \
-    WHERE s.owner = :1 AND s.synonym_name = :2 AND ROWNUM <= :3";
-
-const STANDALONE_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted \
-    FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, sequence \
-          FROM all_arguments WHERE owner = :1 AND package_name IS NULL AND object_name = :2 \
-          ORDER BY subprogram_id, sequence) WHERE ROWNUM <= :3";
-
-const MEMBER_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted \
-    FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, sequence \
-          FROM all_arguments WHERE owner = :1 AND package_name = :2 AND object_name = :3 \
-          ORDER BY subprogram_id, sequence) WHERE ROWNUM <= :4";
-
-const COLUMN_CONFLICT_SQL: &str = "SELECT owner, table_name, column_name, column_id \
-    FROM all_tab_columns WHERE column_name = :1 AND ROWNUM <= :2";
-
-const RELATION_COLUMN_SQL: &str = "SELECT column_name, column_id FROM all_tab_columns \
-    WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
-
-const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM all_policies \
-    WHERE object_owner = :1 AND object_name = :2 \
-    AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= 1";
 
 const VPD_RLS_POLICY_BY_SCHEMA_SQL: &str = "SELECT object_owner, object_name, policy_name, \
     pf_owner, package, function, sel, ins, upd, del, enable \
@@ -81,18 +50,6 @@ const VPD_RLS_POLICY_BY_OBJECT_SQL: &str = "SELECT object_owner, object_name, po
           FROM all_policies WHERE object_owner = :1 AND object_name = :2 \
           ORDER BY object_owner, object_name, policy_name) \
     WHERE ROWNUM <= :3";
-
-const ALL_POLICIES_VISIBILITY_SQL: &str =
-    "SELECT COUNT(*) AS VISIBLE_POLICY_ROWS FROM (SELECT 1 FROM all_policies WHERE ROWNUM <= 1)";
-
-const POLICY_CATALOG_PROOF_SQL: &str = "SELECT policy_name FROM all_policies WHERE ROWNUM <= 1";
-
-const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
-    WHERE owner = :1 AND table_name = :2 \
-    AND virtual_column = 'YES' AND ROWNUM <= 1";
-
-const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM all_tab_cols \
-    WHERE owner = :1 AND table_name = :2 AND ROWNUM <= 1";
 
 /// Maximum VPD/RLS policy rows surfaced in one diagnostic observation.
 pub const MAX_VPD_RLS_POLICY_ROWS: usize = 64;
@@ -473,29 +430,29 @@ pub async fn resolved_relations_read_purity(
         {
             return Ok(oraclemcp_guard::Purity::Unknown);
         }
-        let policies = conn
-            .query_rows(
-                cx,
-                SELECT_POLICY_SQL,
-                &[
-                    OracleBind::from(relation.owner.as_str()),
-                    OracleBind::from(relation.name.as_str()),
-                ],
-            )
-            .await?;
+        let policies = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::SelectPolicy,
+            &[
+                OracleBind::from(relation.owner.as_str()),
+                OracleBind::from(relation.name.as_str()),
+            ],
+        )
+        .await?;
         if !policies.is_empty() {
             return Ok(oraclemcp_guard::Purity::Unknown);
         }
-        let virtual_columns = conn
-            .query_rows(
-                cx,
-                VIRTUAL_COLUMN_SQL,
-                &[
-                    OracleBind::from(relation.owner.as_str()),
-                    OracleBind::from(relation.name.as_str()),
-                ],
-            )
-            .await?;
+        let virtual_columns = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::VirtualColumn,
+            &[
+                OracleBind::from(relation.owner.as_str()),
+                OracleBind::from(relation.name.as_str()),
+            ],
+        )
+        .await?;
         if !virtual_columns.is_empty() {
             return Ok(oraclemcp_guard::Purity::Unknown);
         }
@@ -617,7 +574,7 @@ pub async fn read_session_security_context(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> Result<OracleSessionSecurityContext, DbError> {
-    let rows = conn.query_rows(cx, SESSION_CONTEXT_SQL, &[]).await?;
+    let rows = run_catalog_query(cx, conn, CatalogQueryId::SessionContext, &[]).await?;
     let [row] = rows.as_slice() else {
         return Err(DbError::Query(
             "catalog resolver session context query returned an incomplete answer".to_owned(),
@@ -639,13 +596,13 @@ pub async fn read_session_security_context(
         ));
     };
 
-    let role_rows = conn
-        .query_rows(
-            cx,
-            SESSION_ROLES_SQL,
-            &[OracleBind::from((MAX_SESSION_ROLES + 1) as i64)],
-        )
-        .await?;
+    let role_rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::SessionRoles,
+        &[OracleBind::from((MAX_SESSION_ROLES + 1) as i64)],
+    )
+    .await?;
     if role_rows.len() > MAX_SESSION_ROLES {
         return Err(DbError::Query(format!(
             "catalog resolver enabled-role cap exceeded: more than {MAX_SESSION_ROLES}"
@@ -848,18 +805,17 @@ impl DictionaryLookup<'_> {
         else {
             return Ok(None);
         };
-        let rows = self
-            .conn
-            .query_rows(
-                self.cx,
-                RELATION_COLUMN_SQL,
-                &[
-                    OracleBind::from(object.owner.as_str()),
-                    OracleBind::from(object.name.as_str()),
-                    OracleBind::from(column),
-                ],
-            )
-            .await?;
+        let rows = run_catalog_query(
+            self.cx,
+            self.conn,
+            CatalogQueryId::RelationColumn,
+            &[
+                OracleBind::from(object.owner.as_str()),
+                OracleBind::from(object.name.as_str()),
+                OracleBind::from(column),
+            ],
+        )
+        .await?;
         if rows.len() != 1 || rows[0].parse_i64("COLUMN_ID").is_none() {
             return Ok(None);
         }
@@ -1142,18 +1098,17 @@ impl DictionaryLookup<'_> {
     }
 
     async fn object_rows(&self, owner: &str, name: &str) -> Result<ObjectFacts, DbError> {
-        let rows = self
-            .conn
-            .query_rows(
-                self.cx,
-                OBJECTS_SQL,
-                &[
-                    OracleBind::from(owner),
-                    OracleBind::from(name),
-                    OracleBind::from((MAX_CANDIDATES + 1) as i64),
-                ],
-            )
-            .await?;
+        let rows = run_catalog_query(
+            self.cx,
+            self.conn,
+            CatalogQueryId::Objects,
+            &[
+                OracleBind::from(owner),
+                OracleBind::from(name),
+                OracleBind::from((MAX_CANDIDATES + 1) as i64),
+            ],
+        )
+        .await?;
         if rows.len() > MAX_CANDIDATES {
             return Ok(ObjectFacts {
                 objects: Vec::new(),
@@ -1179,18 +1134,17 @@ impl DictionaryLookup<'_> {
     }
 
     async fn synonym_row(&self, owner: &str, name: &str) -> Result<Option<SynonymFact>, DbError> {
-        let rows = self
-            .conn
-            .query_rows(
-                self.cx,
-                SYNONYMS_SQL,
-                &[
-                    OracleBind::from(owner),
-                    OracleBind::from(name),
-                    OracleBind::from(2_i64),
-                ],
-            )
-            .await?;
+        let rows = run_catalog_query(
+            self.cx,
+            self.conn,
+            CatalogQueryId::Synonyms,
+            &[
+                OracleBind::from(owner),
+                OracleBind::from(name),
+                OracleBind::from(2_i64),
+            ],
+        )
+        .await?;
         if rows.len() != 1 {
             return Ok(None);
         }
@@ -1203,9 +1157,9 @@ impl DictionaryLookup<'_> {
         package: Option<&str>,
         name: &str,
     ) -> Result<Option<Vec<ArgumentFact>>, DbError> {
-        let (sql, binds) = if let Some(package) = package {
+        let (id, binds) = if let Some(package) = package {
             (
-                MEMBER_ARGUMENTS_SQL,
+                CatalogQueryId::MemberArguments,
                 vec![
                     OracleBind::from(owner),
                     OracleBind::from(package),
@@ -1215,7 +1169,7 @@ impl DictionaryLookup<'_> {
             )
         } else {
             (
-                STANDALONE_ARGUMENTS_SQL,
+                CatalogQueryId::StandaloneArguments,
                 vec![
                     OracleBind::from(owner),
                     OracleBind::from(name),
@@ -1223,7 +1177,7 @@ impl DictionaryLookup<'_> {
                 ],
             )
         };
-        let rows = self.conn.query_rows(self.cx, sql, &binds).await?;
+        let rows = run_catalog_query(self.cx, self.conn, id, &binds).await?;
         if rows.len() > MAX_ARGUMENT_ROWS {
             return Ok(None);
         }
@@ -1238,17 +1192,16 @@ impl DictionaryLookup<'_> {
     }
 
     async fn has_column_conflict(&self, name: &str) -> Result<bool, DbError> {
-        let rows = self
-            .conn
-            .query_rows(
-                self.cx,
-                COLUMN_CONFLICT_SQL,
-                &[
-                    OracleBind::from(name),
-                    OracleBind::from((MAX_CANDIDATES + 1) as i64),
-                ],
-            )
-            .await?;
+        let rows = run_catalog_query(
+            self.cx,
+            self.conn,
+            CatalogQueryId::ColumnConflict,
+            &[
+                OracleBind::from(name),
+                OracleBind::from((MAX_CANDIDATES + 1) as i64),
+            ],
+        )
+        .await?;
         Ok(!rows.is_empty())
     }
 }
@@ -1595,7 +1548,7 @@ async fn prove_policy_catalog_readable(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> Result<(), DbError> {
-    conn.query_rows(cx, POLICY_CATALOG_PROOF_SQL, &[]).await?;
+    run_catalog_query(cx, conn, CatalogQueryId::PolicyCatalogProof, &[]).await?;
     Ok(())
 }
 
@@ -1610,9 +1563,10 @@ async fn prove_target_column_catalog_readable(
     conn: &dyn OracleConnection,
     relation: &ResolvedObject,
 ) -> Result<(), DbError> {
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        TARGET_COLUMN_CATALOG_PROOF_SQL,
+        conn,
+        CatalogQueryId::TargetColumnCatalogProof,
         &[
             OracleBind::from(relation.owner.as_str()),
             OracleBind::from(relation.name.as_str()),
@@ -1626,7 +1580,7 @@ async fn query_policy_catalog_probe(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> OraclePolicyCatalogProbe {
-    match conn.query_rows(cx, ALL_POLICIES_VISIBILITY_SQL, &[]).await {
+    match run_catalog_query(cx, conn, CatalogQueryId::AllPoliciesVisibility, &[]).await {
         Ok(rows) => {
             let visible = rows
                 .first()
@@ -1768,8 +1722,25 @@ mod tests {
     use crate::{OracleBackend, OracleCell, OracleConnectionInfo};
     use asupersync::runtime::RuntimeBuilder;
     use std::collections::VecDeque;
+    use std::path::PathBuf;
     use std::sync::{Arc, Barrier, Mutex};
     use std::thread;
+
+    fn write_catalog_test_artifact(name: &str, cases: &[serde_json::Value]) {
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+        let dir = target.join("test-artifacts/read_executor");
+        std::fs::create_dir_all(&dir).expect("create catalog test artifact dir");
+        let mut jsonl = cases
+            .iter()
+            .map(serde_json::Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        jsonl.push('\n');
+        std::fs::write(dir.join(format!("{name}.jsonl")), jsonl)
+            .expect("write catalog test artifact");
+    }
 
     fn run_with_cx<F, Fut, T>(body: F) -> T
     where
@@ -1897,6 +1868,52 @@ mod tests {
         ] {
             assert!(!sql.contains("{}"));
         }
+    }
+
+    #[test]
+    fn catalog_query_sql_is_const_for_every_variant() {
+        let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
+        assert_eq!(specs.len(), 13);
+        let mut cases = Vec::new();
+        for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
+            let _: &'static str = spec.sql;
+            assert!(spec.sql.starts_with("SELECT "));
+            assert!(!spec.sql.contains("{}"));
+            assert!(!spec.purpose.is_empty());
+            cases.push(serde_json::json!({"case_id": format!("catalog_sql_{id:?}"), "expected": {"is_select": true, "has_format_markers": false, "purpose_present": true}, "actual": {"is_select": spec.sql.starts_with("SELECT "), "has_format_markers": spec.sql.contains("{}"), "purpose_present": !spec.purpose.is_empty()}}));
+        }
+        write_catalog_test_artifact("catalog_sql", &cases);
+    }
+
+    #[test]
+    fn catalog_query_runner_refuses_bind_arity_mismatch_without_executing() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([]);
+            let err = run_catalog_query(&cx, &conn, CatalogQueryId::Objects, &[])
+                .await
+                .expect_err("missing binds must fail");
+            let arity_internal = matches!(err, DbError::Internal(_));
+            assert!(arity_internal);
+            let err = run_catalog_query(
+                &cx,
+                &conn,
+                CatalogQueryId::SessionRoles,
+                &[OracleBind::from("wrong type")],
+            )
+            .await
+            .expect_err("wrong bind type must fail");
+            let type_internal = matches!(err, DbError::Internal(_));
+            assert!(type_internal);
+            let query_count = conn.queries.lock().expect("queries lock").len();
+            assert_eq!(query_count, 0);
+            write_catalog_test_artifact(
+                "catalog_binds",
+                &[
+                    serde_json::json!({"case_id": "catalog_wrong_arity", "expected": {"internal": true, "query_count": 0}, "actual": {"internal": arity_internal, "query_count": query_count}}),
+                    serde_json::json!({"case_id": "catalog_wrong_type", "expected": {"internal": true, "query_count": 0}, "actual": {"internal": type_internal, "query_count": query_count}}),
+                ],
+            );
+        });
     }
 
     #[test]

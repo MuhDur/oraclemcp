@@ -91,6 +91,7 @@ struct SemanticGuardState {
     caller_queries: AtomicUsize,
     caller_sql: Mutex<Vec<String>>,
     caller_binds: Mutex<Vec<Vec<OracleBind>>>,
+    read_events: Mutex<Vec<String>>,
     compatible: Mutex<Option<String>>,
     embedding_models: Mutex<Vec<String>>,
 }
@@ -101,6 +102,7 @@ impl Default for SemanticGuardState {
             caller_queries: AtomicUsize::new(0),
             caller_sql: Mutex::new(Vec::new()),
             caller_binds: Mutex::new(Vec::new()),
+            read_events: Mutex::new(Vec::new()),
             compatible: Mutex::new(Some("23.4.0.0.0".to_owned())),
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
         }
@@ -255,6 +257,11 @@ impl OracleConnection for SemanticGuardMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        self.state
+            .read_events
+            .lock()
+            .expect("read events lock")
+            .push(format!("query:{sql}"));
         let normalized = sql.to_ascii_lowercase();
         if normalized.contains("sys_context('userenv', 'session_user')") {
             return Ok(vec![semantic_row(&[
@@ -365,7 +372,12 @@ impl OracleConnection for SemanticGuardMock {
         Ok(vec![semantic_row(&[("ID", Some("1"))])])
     }
 
-    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+    async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.state
+            .read_events
+            .lock()
+            .expect("read events lock")
+            .push(format!("execute:{sql}"));
         Ok(0)
     }
 
@@ -386,6 +398,167 @@ fn semantic_dispatcher() -> (OracleDispatcher, Arc<SemanticGuardState>) {
         })),
         state,
     )
+}
+
+fn write_executor_test_artifact(name: &str, cases: &[Value]) {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    let dir = target.join("test-artifacts/read_executor");
+    fs::create_dir_all(&dir).expect("create executor test artifact dir");
+    let mut jsonl = cases
+        .iter()
+        .map(Value::to_string)
+        .collect::<Vec<_>>()
+        .join("\n");
+    jsonl.push('\n');
+    fs::write(dir.join(format!("{name}.jsonl")), jsonl).expect("write executor test artifact");
+}
+
+#[test]
+fn executor_orders_parse_resolve_prove_mask_audit_execute() {
+    // This records the DB-I/O order of the unmasked, unaudited path. The
+    // existing masked_read_carries_audit_bound_certificate regression covers
+    // the masking and audit attachment inside the same executor method.
+    let (dispatcher, state) = semantic_dispatcher();
+    let response = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "SELECT o.id FROM app.orders o"}),
+        )
+        .expect("a proven table read succeeds");
+    assert_eq!(response["rows"][0]["ID"], json!("1"));
+    let events = state.read_events.lock().expect("read events lock");
+    use oraclemcp_db::CatalogQueryId as C;
+    let expected_proof = [
+        C::SessionContext,
+        C::SessionRoles,
+        C::SessionContext,
+        C::SessionRoles,
+        C::Objects,
+        C::Objects,
+        C::RelationColumn,
+        C::SelectPolicy,
+        C::VirtualColumn,
+        C::PolicyCatalogProof,
+        C::TargetColumnCatalogProof,
+    ];
+    assert_eq!(events.len(), 17, "the exact proof and observation sequence");
+    for (actual, id) in events.iter().zip(expected_proof) {
+        assert_eq!(actual, &format!("query:{}", id.spec().sql));
+    }
+    assert_eq!(events[11], format!("execute:{SET_TRANSACTION_READ_ONLY}"));
+    assert!(events[12].contains("tool=oracle_query */ SELECT o.id FROM app.orders o"));
+    assert_eq!(
+        events[13],
+        format!("query:{}", C::SessionContext.spec().sql)
+    );
+    assert_eq!(events[14], format!("query:{}", C::SessionRoles.spec().sql));
+    assert!(events[15].contains("FROM all_policies WHERE object_owner = :1 AND object_name = :2"));
+    assert_eq!(
+        events[16],
+        format!("query:{}", C::AllPoliciesVisibility.spec().sql)
+    );
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+    write_executor_test_artifact(
+        "pipeline_order",
+        &[
+            json!({"case_id": "executor_pipeline_order", "expected": {"events": 17, "caller_queries": 1}, "actual": {"events": events.len(), "caller_queries": state.caller_queries.load(Ordering::SeqCst)}}),
+        ],
+    );
+}
+
+/// Read the SQL literals from the guard's checked-in corpus rather than
+/// keeping a second, drifting statement list in dispatch tests.
+fn adversarial_corpus_sql() -> Vec<String> {
+    let source = include_str!("../../../oraclemcp-guard/tests/adversarial_corpus.rs");
+    let mut statements = Vec::new();
+    for marker in ["const STRICT_CORPUS:", "const CORPUS:"] {
+        let section = source
+            .split_once(marker)
+            .expect("guard corpus section exists")
+            .1
+            .split_once("\n];")
+            .expect("guard corpus section closes")
+            .0;
+        let bytes = section.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'"' {
+                index += 1;
+                continue;
+            }
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index += 2;
+                } else if bytes[index] == b'"' {
+                    break;
+                } else {
+                    index += 1;
+                }
+            }
+            assert!(index < bytes.len(), "unterminated corpus SQL literal");
+            let after = section[index + 1..].trim_start();
+            if after
+                .strip_prefix(',')
+                .is_some_and(|rest| rest.trim_start().starts_with("DangerLevel::"))
+            {
+                statements.push(
+                    serde_json::from_str::<String>(&section[start..=index])
+                        .expect("corpus SQL literal decodes"),
+                );
+            }
+            index += 1;
+        }
+    }
+    assert!(statements.len() >= 60, "corpus extraction lost statements");
+    statements
+}
+
+#[test]
+fn executor_seam_preserves_adversarial_corpus_verdicts() {
+    let mut cases = Vec::new();
+    for (index, sql) in adversarial_corpus_sql().into_iter().enumerate() {
+        // The pre-seam semantic proof is the reference. Both paths use a fresh
+        // live-session mock and the exact audit-marked bytes.
+        let baseline_state = Arc::new(SemanticGuardState::default());
+        let baseline_conn = SemanticGuardMock {
+            state: baseline_state,
+        };
+        let marked = with_audit_marker(&sql, None, "oracle_query");
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("asupersync test runtime builds");
+        let baseline = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs Cx");
+            resolve_read_only_relations(
+                &cx,
+                &baseline_conn,
+                &OracleCatalogResolverCache::new(),
+                &marked,
+            )
+            .await
+            .map(|_| ())
+        });
+        let (dispatcher, state) = semantic_dispatcher();
+        let actual = dispatcher.dispatch("oracle_query", json!({"sql": sql}));
+        let expected_class = baseline.as_ref().err().map(|error| error.error_class);
+        let actual_class = actual.as_ref().err().map(|error| error.error_class);
+        let actual_calls = state.caller_queries.load(Ordering::SeqCst);
+        cases.push(json!({"case_id": format!("adversarial_corpus_{index}"), "expected": {"error_class": expected_class, "caller_queries": usize::from(baseline.is_ok())}, "actual": {"error_class": actual_class, "caller_queries": actual_calls}}));
+        assert_eq!(
+            actual_class, expected_class,
+            "error class changed for {sql:?}: {actual:?} vs {baseline:?}"
+        );
+        assert_eq!(
+            actual_calls,
+            usize::from(baseline.is_ok()),
+            "caller query count changed for {sql:?}"
+        );
+    }
+    write_executor_test_artifact("adversarial_corpus", &cases);
 }
 
 #[test]

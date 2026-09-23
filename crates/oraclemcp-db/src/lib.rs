@@ -61,6 +61,7 @@
 mod auth_adapter;
 mod awr;
 mod catalog_extract;
+mod catalog_query;
 mod catalog_resolver;
 mod connection;
 mod doctor;
@@ -96,6 +97,10 @@ pub use awr::{
 pub use catalog_extract::{
     CatalogExtractReport, CatalogExtractRequest, CatalogExtractWarning, CatalogRowBatch,
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
+};
+pub use catalog_query::{
+    BindSchema, CatalogAuditClass, CatalogBindKind, CatalogOutputPolicy, CatalogQueryId,
+    CatalogReadSpec, run_catalog_query,
 };
 pub use catalog_resolver::{
     CatalogInvalidation, MAX_CATALOG_NAMES, MAX_VPD_RLS_POLICY_ROWS, OracleCatalogResolver,
