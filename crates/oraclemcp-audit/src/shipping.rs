@@ -860,6 +860,7 @@ mod tests {
         compute_entry_hash_v1,
     };
     use crate::sink::{Auditor, MemoryAuditSink};
+    use crate::test_tempfile as tempfile;
     use crate::verify::{VerifyOutcome, parse_jsonl, verify_records};
     use std::sync::Arc;
 

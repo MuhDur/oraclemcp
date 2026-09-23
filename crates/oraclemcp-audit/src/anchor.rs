@@ -665,6 +665,7 @@ pub fn check_anchor_reader<R: BufRead>(
 mod tests {
     use super::*;
     use crate::record::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditRecord, AuditSubject};
+    use crate::test_tempfile as tempfile;
 
     fn key() -> SigningKey {
         SigningKey::new("k1", b"0123456789abcdef0123456789abcdef".to_vec()).expect("valid test key")

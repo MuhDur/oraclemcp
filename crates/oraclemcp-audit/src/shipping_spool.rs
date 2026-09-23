@@ -2328,6 +2328,7 @@ fn transport(error: impl std::fmt::Display) -> ShippingError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_tempfile as tempfile;
     use crate::{
         AuditDecision, AuditEntryDraft, AuditError, AuditOutcome, AuditSink, AuditSubject, Auditor,
         AuthenticatedAuditTail, FileAuditSink, GENESIS_HASH, MemoryAuditSink, SigningKey,

@@ -3465,6 +3465,7 @@ mod tests {
     use super::*;
     use crate::load_anchor;
     use crate::record::{AuditDecision, AuditOutcome, AuditSubject};
+    use crate::test_tempfile as tempfile;
     use crate::verify::{parse_jsonl, verify_records};
     use std::sync::Arc;
     use std::thread;

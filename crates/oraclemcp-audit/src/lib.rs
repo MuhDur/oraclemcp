@@ -79,3 +79,16 @@ pub use verify::{
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
+
+#[cfg(test)]
+mod test_tempfile {
+    /// Test-owned roots are fresh and empty, so Windows can normalize their
+    /// owner before any audit fixture creates a child beneath them.
+    pub(crate) fn tempdir() -> std::io::Result<::tempfile::TempDir> {
+        let dir = ::tempfile::tempdir()?;
+        #[cfg(windows)]
+        crate::sink::harden_fresh_windows_private_directory(dir.path())
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        Ok(dir)
+    }
+}
