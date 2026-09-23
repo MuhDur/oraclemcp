@@ -1947,11 +1947,37 @@ fn duration_to_millis(duration: Duration) -> u32 {
     u32::try_from(millis).unwrap_or(u32::MAX)
 }
 
+/// The thin-driver TSTZ fields encode a UTC instant; Oracle carries the
+/// display offset separately. Convert before any scalar or nested projection.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn timestamp_tz_wall_clock(
+    year: i32,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+    nanosecond: u32,
+    offset_minutes: i32,
+) -> Option<chrono::NaiveDateTime> {
+    if !(-1439..=1439).contains(&offset_minutes) {
+        return None;
+    }
+    chrono::NaiveDate::from_ymd_opt(year, u32::from(month), u32::from(day))?
+        .and_hms_nano_opt(
+            u32::from(hour),
+            u32::from(minute),
+            u32::from(second),
+            nanosecond,
+        )?
+        .checked_add_signed(chrono::Duration::minutes(i64::from(offset_minutes)))
+}
+
 mod driver {
     use super::{
         CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver,
         CqnQueryRegistration, DbmsOutput, ExecuteOutcome, OracleRoutineArg, QueryRowStream,
-        QueryRowStreamStart, RustOracleConnection, oracle_bind_to_driver,
+        QueryRowStreamStart, RustOracleConnection, oracle_bind_to_driver, timestamp_tz_wall_clock,
     };
     use crate::auth_adapter::AuthAdapter;
     use crate::error::{ConnectFailureKind, DbError};
@@ -1964,6 +1990,7 @@ mod driver {
     use asupersync::Cx;
     use asupersync::combinator::try_commit_section;
     use asupersync::sync::Mutex as AsyncMutex;
+    use chrono::{Datelike, Timelike};
     use futures_core::Stream;
     use oraclemcp_driver_cx::protocol::thin::{CursorValue, LobValue, ObjectValue};
     use oraclemcp_driver_cx::protocol::{
@@ -3643,16 +3670,21 @@ mod driver {
                 offset_minutes,
             }) => OracleCell::new(
                 oracle_type,
-                Some(format_timestamp_tz(
-                    year,
-                    month,
-                    day,
-                    hour,
-                    minute,
-                    second,
-                    nanosecond,
-                    offset_minutes,
-                )),
+                Some(
+                    format_timestamp_tz(
+                        year,
+                        month,
+                        day,
+                        hour,
+                        minute,
+                        second,
+                        nanosecond,
+                        offset_minutes,
+                    )
+                    .ok_or_else(|| {
+                        DbError::Query("invalid TIMESTAMP WITH TIME ZONE value".to_owned())
+                    })?,
+                ),
             ),
             Some(QueryValue::IntervalDS {
                 days,
@@ -3879,16 +3911,21 @@ mod driver {
                     offset_minutes,
                 }) => OracleCell::new(
                     oracle_type,
-                    Some(format_timestamp_tz(
-                        year,
-                        month,
-                        day,
-                        hour,
-                        minute,
-                        second,
-                        nanosecond,
-                        offset_minutes,
-                    )),
+                    Some(
+                        format_timestamp_tz(
+                            year,
+                            month,
+                            day,
+                            hour,
+                            minute,
+                            second,
+                            nanosecond,
+                            offset_minutes,
+                        )
+                        .ok_or_else(|| {
+                            DbError::Query("invalid TIMESTAMP WITH TIME ZONE value".to_owned())
+                        })?,
+                    ),
                 ),
                 Some(QueryValue::IntervalDS {
                     days,
@@ -4282,27 +4319,39 @@ mod driver {
                 if let Err(marker) = budget.enter("TimestampTz", depth) {
                     return marker;
                 }
+                let Some(wall) = timestamp_tz_wall_clock(
+                    *year,
+                    *month,
+                    *day,
+                    *hour,
+                    *minute,
+                    *second,
+                    *nanosecond,
+                    *offset_minutes,
+                ) else {
+                    return budget.check_bytes(
+                        "TimestampTz",
+                        json!({
+                            "kind": "unsupported",
+                            "unsupported": "oracle_value",
+                            "oracle_value_kind": "TimestampTz",
+                            "value": null,
+                            "warning": "invalid TIMESTAMP WITH TIME ZONE components"
+                        }),
+                    );
+                };
                 budget.check_bytes(
                     "TimestampTz",
                     json!({
                         "kind": "timestamp_tz",
-                        "value": format_timestamp_tz(
-                            *year,
-                            *month,
-                            *day,
-                            *hour,
-                            *minute,
-                            *second,
-                            *nanosecond,
-                            *offset_minutes
-                        ),
-                        "year": year,
-                        "month": month,
-                        "day": day,
-                        "hour": hour,
-                        "minute": minute,
-                        "second": second,
-                        "nanosecond": nanosecond,
+                        "value": format_timestamp_tz_wall(wall, *offset_minutes),
+                        "year": wall.year(),
+                        "month": wall.month(),
+                        "day": wall.day(),
+                        "hour": wall.hour(),
+                        "minute": wall.minute(),
+                        "second": wall.second(),
+                        "nanosecond": wall.nanosecond(),
                         "offset_minutes": offset_minutes
                     }),
                 )
@@ -5260,12 +5309,12 @@ mod driver {
                     },
                     {
                         "kind": "timestamp_tz",
-                        "value": "2026-06-29 12:34:56.987654321 -05:30",
+                        "value": "2026-06-29 07:04:56.987654321 -05:30",
                         "year": 2026,
                         "month": 6,
                         "day": 29,
-                        "hour": 12,
-                        "minute": 34,
+                        "hour": 7,
+                        "minute": 4,
                         "second": 56,
                         "nanosecond": 987654321,
                         "offset_minutes": -330
@@ -5936,14 +5985,74 @@ mod driver {
         }
 
         #[test]
-        fn timestamp_tz_formatter_preserves_numeric_offset() {
+        fn timestamp_tz_projection_converts_utc_fields_to_display_wall_clock() {
+            // Every input is a UTC wire instant. Expected wall clocks were
+            // calculated independently, including the two America/New_York
+            // offsets around its 2020 spring DST transition. Named-region
+            // wire tags remain refused by driver-cx.
+            let cases = [
+                (
+                    "free23 +05:45",
+                    (2020, 2, 29, 17, 45, 0, 0),
+                    345,
+                    "2020-02-29 23:30:00 +05:45",
+                ),
+                (
+                    "leap-day -09:30",
+                    (2020, 3, 1, 8, 15, 0, 0),
+                    -570,
+                    "2020-02-29 22:45:00 -09:30",
+                ),
+                (
+                    "UTC",
+                    (2020, 2, 29, 23, 59, 0, 0),
+                    0,
+                    "2020-02-29 23:59:00 +00:00",
+                ),
+                (
+                    "+14:00 next day",
+                    (2020, 2, 29, 17, 0, 0, 0),
+                    840,
+                    "2020-03-01 07:00:00 +14:00",
+                ),
+                (
+                    "America/New_York before DST",
+                    (2020, 3, 8, 6, 59, 0, 0),
+                    -300,
+                    "2020-03-08 01:59:00 -05:00",
+                ),
+                (
+                    "America/New_York after DST",
+                    (2020, 3, 8, 7, 1, 0, 0),
+                    -240,
+                    "2020-03-08 03:01:00 -04:00",
+                ),
+                (
+                    "fraction",
+                    (2026, 6, 29, 12, 34, 56, 987_654_321),
+                    -330,
+                    "2026-06-29 07:04:56.987654321 -05:30",
+                ),
+            ];
+            for (label, (year, month, day, hour, minute, second, nanosecond), offset, expected) in
+                cases
+            {
+                assert_eq!(
+                    super::format_timestamp_tz(
+                        year, month, day, hour, minute, second, nanosecond, offset,
+                    )
+                    .as_deref(),
+                    Some(expected),
+                    "{label}",
+                );
+            }
             assert_eq!(
-                super::format_timestamp_tz(2026, 6, 29, 12, 34, 56, 987_654_321, -330),
-                "2026-06-29 12:34:56.987654321 -05:30"
+                super::format_timestamp_tz(2020, 2, 30, 17, 45, 0, 0, 345),
+                None,
             );
             assert_eq!(
-                super::format_timestamp_tz(2026, 6, 29, 12, 34, 56, 0, 345),
-                "2026-06-29 12:34:56 +05:45"
+                super::format_timestamp_tz(2020, 2, 29, 17, 45, 0, 0, 1440),
+                None,
             );
         }
     }
@@ -5976,14 +6085,36 @@ mod driver {
         second: u8,
         nanosecond: u32,
         offset_minutes: i32,
-    ) -> String {
+    ) -> Option<String> {
+        let wall = timestamp_tz_wall_clock(
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        )?;
+        Some(format_timestamp_tz_wall(wall, offset_minutes))
+    }
+
+    fn format_timestamp_tz_wall(wall: chrono::NaiveDateTime, offset_minutes: i32) -> String {
         let sign = if offset_minutes < 0 { '-' } else { '+' };
         let offset_abs = i64::from(offset_minutes).abs();
         let offset_hours = offset_abs / 60;
         let offset_mins = offset_abs % 60;
         format!(
             "{} {sign}{offset_hours:02}:{offset_mins:02}",
-            format_datetime(year, month, day, hour, minute, second, nanosecond)
+            format_datetime(
+                wall.year(),
+                wall.month() as u8,
+                wall.day() as u8,
+                wall.hour() as u8,
+                wall.minute() as u8,
+                wall.second() as u8,
+                wall.nanosecond(),
+            )
         )
     }
 

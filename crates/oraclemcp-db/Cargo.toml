@@ -26,6 +26,7 @@ test-utils = []
 [dependencies]
 asupersync.workspace = true
 async-trait.workspace = true
+chrono = { version = "0.4.44", default-features = false, features = ["std"] }
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.11.0" }
 oraclemcp-guard = { path = "../oraclemcp-guard", version = "0.11.0" }
 serde.workspace = true

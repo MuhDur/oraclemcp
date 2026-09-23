@@ -11,11 +11,13 @@ use std::time::Duration;
 use asupersync::Cx;
 use asupersync::combinator::try_commit_section;
 use asupersync::types::Time;
+use chrono::{Datelike, Timelike};
 use serde_json::{Number, Value, json};
 
 use crate::auth_adapter::AuthAdapter;
 use crate::connection::{
     DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart, WalletFileChoice,
+    timestamp_tz_wall_clock,
 };
 use crate::error::QuarantineOutcome;
 use crate::oracledb_actor::{
@@ -986,7 +988,8 @@ fn cell_from_official(
                 row.get::<Option<oracledb::OracleTimestamp>>(index)
                     .map_err(|error| official_error(error, OfficialOperation::Query))?
                     .as_ref()
-                    .map(|value| format_official_timestamp_for_type(value, db_type)),
+                    .map(|value| format_official_timestamp_for_type(value, db_type))
+                    .transpose()?,
             )
         }
         "DB_TYPE_VECTOR" => vector_cell(
@@ -1017,27 +1020,58 @@ fn number_cell(value: Option<oracledb::OracleNumber>, oracle_type: &'static str)
 /// become a fabricated UTC `Z`. LTZ/TSTZ retain an explicit offset. We also
 /// render the latter ourselves because the beta driver's Display implementation
 /// formats a negative minute component as "-05:-30".
-fn format_official_timestamp_for_type(value: &oracledb::OracleTimestamp, db_type: &str) -> String {
+fn format_official_timestamp_for_type(
+    value: &oracledb::OracleTimestamp,
+    db_type: &str,
+) -> Result<String, DbError> {
     match db_type {
-        "DB_TYPE_DATE" => format_official_date_components(value),
-        "DB_TYPE_TIMESTAMP" => format_official_timestamp_components(value),
+        "DB_TYPE_DATE" => Ok(format_official_date_components(value)),
+        "DB_TYPE_TIMESTAMP" => Ok(format_official_timestamp_components(value)),
         "DB_TYPE_TIMESTAMP_LTZ" | "DB_TYPE_TIMESTAMP_TZ" => {
-            let timestamp = format_official_timestamp_components(value);
             let offset_minutes =
                 i32::from(value.tz_hour_offset()) * 60 + i32::from(value.tz_minute_offset());
+            let wall = timestamp_tz_wall_clock(
+                i32::from(value.year()),
+                value.month(),
+                value.day(),
+                value.hour(),
+                value.minute(),
+                value.second(),
+                value.nanoseconds(),
+                offset_minutes,
+            )
+            .ok_or_else(|| DbError::Query("invalid TIMESTAMP WITH TIME ZONE value".to_owned()))?;
+            let timestamp = format_official_wall_clock_components(wall);
             if offset_minutes == 0 {
-                return format!("{timestamp}Z");
+                return Ok(format!("{timestamp}Z"));
             }
             let sign = if offset_minutes < 0 { '-' } else { '+' };
             let offset_abs = i64::from(offset_minutes).abs();
-            format!(
+            Ok(format!(
                 "{timestamp}{sign}{:02}:{:02}",
                 offset_abs / 60,
                 offset_abs % 60
-            )
+            ))
         }
         _ => unreachable!("only timestamp database types may use this formatter"),
     }
+}
+
+fn format_official_wall_clock_components(wall: chrono::NaiveDateTime) -> String {
+    let timestamp = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        wall.year(),
+        wall.month(),
+        wall.day(),
+        wall.hour(),
+        wall.minute(),
+        wall.second(),
+    );
+    if wall.nanosecond() == 0 {
+        return timestamp;
+    }
+    let fractional = format!("{:09}", wall.nanosecond());
+    format!("{timestamp}.{}", fractional.trim_end_matches('0'))
 }
 
 fn format_official_date_components(value: &oracledb::OracleTimestamp) -> String {
@@ -1778,14 +1812,17 @@ mod tests {
     fn timestamp_projection_obeys_column_timezone_metadata() {
         let date = oracledb::OracleTimestamp::new_timestamp(2026, 6, 1, 12, 0, 0, 0);
         assert_eq!(
-            format_official_timestamp_for_type(&date, "DB_TYPE_DATE"),
+            format_official_timestamp_for_type(&date, "DB_TYPE_DATE").expect("valid DATE"),
             "2026-06-01T12:00:00"
         );
         assert_eq!(
             serialize_cell(
                 &OracleCell::new(
                     "DATE",
-                    Some(format_official_timestamp_for_type(&date, "DB_TYPE_DATE")),
+                    Some(
+                        format_official_timestamp_for_type(&date, "DB_TYPE_DATE")
+                            .expect("valid DATE")
+                    ),
                 ),
                 &SerializeOptions::default(),
             ),
@@ -1795,17 +1832,18 @@ mod tests {
         let plain_timestamp =
             oracledb::OracleTimestamp::new_timestamp(2026, 6, 1, 12, 0, 0, 123_456_789);
         assert_eq!(
-            format_official_timestamp_for_type(&plain_timestamp, "DB_TYPE_TIMESTAMP"),
+            format_official_timestamp_for_type(&plain_timestamp, "DB_TYPE_TIMESTAMP")
+                .expect("valid TIMESTAMP"),
             "2026-06-01T12:00:00.123456789"
         );
         assert_eq!(
             serialize_cell(
                 &OracleCell::new(
                     "TIMESTAMP",
-                    Some(format_official_timestamp_for_type(
-                        &plain_timestamp,
-                        "DB_TYPE_TIMESTAMP",
-                    )),
+                    Some(
+                        format_official_timestamp_for_type(&plain_timestamp, "DB_TYPE_TIMESTAMP")
+                            .expect("valid TIMESTAMP")
+                    ),
                 ),
                 &SerializeOptions::default(),
             ),
@@ -1815,33 +1853,101 @@ mod tests {
         let fractional_timestamp =
             oracledb::OracleTimestamp::new_timestamp(2026, 6, 1, 12, 0, 0, 120_000_000);
         assert_eq!(
-            format_official_timestamp_for_type(&fractional_timestamp, "DB_TYPE_TIMESTAMP"),
+            format_official_timestamp_for_type(&fractional_timestamp, "DB_TYPE_TIMESTAMP")
+                .expect("valid TIMESTAMP"),
             "2026-06-01T12:00:00.12"
         );
     }
 
     #[test]
-    fn timestamp_tz_projection_uses_one_sign_for_a_negative_offset() {
-        for (hour_offset, minute_offset, expected) in [
-            (0, -30, "2026-09-16T12:34:56.123456789-00:30"),
-            (0, 30, "2026-09-16T12:34:56.123456789+00:30"),
-            (-5, -30, "2026-09-16T12:34:56.123456789-05:30"),
-            (14, 0, "2026-09-16T12:34:56.123456789+14:00"),
+    fn timestamp_tz_projection_converts_utc_fields_to_display_wall_clock() {
+        for (
+            label,
+            (year, month, day, hour, minute, second, nanos),
+            hour_offset,
+            minute_offset,
+            expected,
+        ) in [
+            (
+                "free23 +05:45",
+                (2020, 2, 29, 17, 45, 0, 0),
+                5,
+                45,
+                "2020-02-29T23:30:00+05:45",
+            ),
+            (
+                "leap-day -09:30",
+                (2020, 3, 1, 8, 15, 0, 0),
+                -9,
+                -30,
+                "2020-02-29T22:45:00-09:30",
+            ),
+            (
+                "UTC",
+                (2020, 2, 29, 23, 59, 0, 0),
+                0,
+                0,
+                "2020-02-29T23:59:00Z",
+            ),
+            (
+                "+14:00 next day",
+                (2020, 2, 29, 17, 0, 0, 0),
+                14,
+                0,
+                "2020-03-01T07:00:00+14:00",
+            ),
+            (
+                "negative minute only",
+                (2026, 9, 16, 12, 34, 56, 123_456_789),
+                0,
+                -30,
+                "2026-09-16T12:04:56.123456789-00:30",
+            ),
+            (
+                "positive minute only",
+                (2026, 9, 16, 12, 34, 56, 123_456_789),
+                0,
+                30,
+                "2026-09-16T13:04:56.123456789+00:30",
+            ),
+            (
+                "America/New_York before DST",
+                (2020, 3, 8, 6, 59, 0, 0),
+                -5,
+                0,
+                "2020-03-08T01:59:00-05:00",
+            ),
+            (
+                "America/New_York after DST",
+                (2020, 3, 8, 7, 1, 0, 0),
+                -4,
+                0,
+                "2020-03-08T03:01:00-04:00",
+            ),
+            (
+                "negative fraction",
+                (2026, 9, 16, 12, 34, 56, 123_456_789),
+                -5,
+                -30,
+                "2026-09-16T07:04:56.123456789-05:30",
+            ),
         ] {
             let timestamp = oracledb::OracleTimestamp::new_timestamp_tz(
-                2026,
-                9,
-                16,
-                12,
-                34,
-                56,
-                123_456_789,
+                year,
+                month,
+                day,
+                hour,
+                minute,
+                second,
+                nanos,
                 hour_offset,
                 minute_offset,
             );
             assert_eq!(
-                format_official_timestamp_for_type(&timestamp, "DB_TYPE_TIMESTAMP_TZ"),
-                expected
+                format_official_timestamp_for_type(&timestamp, "DB_TYPE_TIMESTAMP_TZ")
+                    .expect("valid TSTZ"),
+                expected,
+                "{label}"
             );
         }
     }

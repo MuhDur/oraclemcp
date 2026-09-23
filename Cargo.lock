@@ -2477,6 +2477,7 @@ version = "0.11.0"
 dependencies = [
  "asupersync",
  "async-trait",
+ "chrono",
  "criterion",
  "futures-core",
  "getrandom 0.2.17",
