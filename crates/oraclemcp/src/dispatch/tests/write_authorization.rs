@@ -106,6 +106,24 @@ fn refused(dispatcher: &OracleDispatcher, arguments: Value, code: &str) {
     assert_eq!(error.to_json()["statement_outcome"], "not_started");
 }
 
+/// Replace `reference`'s last hex tag digit with a *different* digit. The
+/// old `format!("{}0", ..)` was a no-op whenever the tag already ended in `0`
+/// (1 in 16 references), and so "tampered" the valid reference (.15.12).
+fn tamper_last_digit(reference: &str) -> String {
+    let (head, last) = reference.split_at(reference.len() - 1);
+    format!("{head}{}", if last == "0" { "1" } else { "0" })
+}
+
+/// Flip the tag digit at `index` (counted within the hex tag after the last
+/// `.`) to a different hex digit.
+fn tamper_tag_digit(reference: &str, index: usize) -> String {
+    let tag_start = reference.rfind('.').expect("signed reference has a tag") + 1;
+    let mut bytes = reference.as_bytes().to_vec();
+    let at = tag_start + index;
+    bytes[at] = if bytes[at] == b'0' { b'1' } else { b'0' };
+    String::from_utf8(bytes).expect("hex stays ASCII")
+}
+
 fn listed_execute_tools(level: SessionLevelState) -> Vec<String> {
     let dispatcher = Arc::new(OracleDispatcher::new_with_profile_level(
         Box::new(NoExecMock),
@@ -233,7 +251,7 @@ fn write_auth_invalid_grant_never_falls_back_to_elevated_session() {
         json!({"sql": UPDATE, "scoped_grant": unknown.as_str()}),
         "GRANT_UNKNOWN",
     );
-    let tampered = format!("{}0", &reference[..reference.len() - 1]);
+    let tampered = tamper_last_digit(&reference);
     refused(
         &dispatcher,
         json!({"sql": UPDATE, "scoped_grant": tampered}),
@@ -427,5 +445,47 @@ fn write_auth_execute_approved_forwards_explicit_scoped_grant() {
         error.statement_outcome,
         Some(oraclemcp_db::StatementOutcome::NotStarted)
     );
+    assert_eq!(counts.total(), 0);
+}
+
+/// .15.12 regression: the tamper helper can never hand back the valid
+/// reference. The pre-fix `format!("{}0", ..)` returned its input unchanged
+/// for a tag ending in `0`, which is what made the invalid-grant test flaky.
+#[test]
+fn write_auth_tamper_never_returns_the_valid_reference() {
+    for digit in "0123456789abcdef".chars() {
+        let reference = format!("sgr1.sgrant-1-0.{}{digit}", "a".repeat(63));
+        assert_ne!(
+            tamper_last_digit(&reference),
+            reference,
+            "last digit {digit}"
+        );
+    }
+    let ends_in_zero = format!("sgr1.sgrant-1-0.{}0", "a".repeat(63));
+    assert_eq!(
+        format!("{}0", &ends_in_zero[..ends_in_zero.len() - 1]),
+        ends_in_zero,
+        "the pre-fix tamper was a no-op on a tag ending in 0"
+    );
+}
+
+/// Every single-digit change anywhere in a valid reference's MAC tag is
+/// refused as GRANT_MISMATCH before any database touch. This is the
+/// deterministic form of the property the flaky run appeared to question.
+#[test]
+fn write_auth_every_tampered_tag_digit_is_refused_as_mismatch() {
+    let (dispatcher, counts) = dispatcher(read_write_level());
+    let (_, reference) = issue(&dispatcher, Duration::from_secs(60));
+    let tag_len = reference.len() - reference.rfind('.').expect("tag") - 1;
+    assert_eq!(tag_len, 64, "an HMAC-SHA256 hex tag: {reference}");
+    for index in 0..tag_len {
+        let tampered = tamper_tag_digit(&reference, index);
+        assert_ne!(tampered, reference);
+        refused(
+            &dispatcher,
+            json!({"sql": UPDATE, "scoped_grant": tampered}),
+            "GRANT_MISMATCH",
+        );
+    }
     assert_eq!(counts.total(), 0);
 }
