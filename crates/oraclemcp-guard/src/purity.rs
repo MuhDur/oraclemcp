@@ -21,7 +21,27 @@ use crate::levels::OperatingLevel;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum OperatorStatementClass {
     /// Changing the database's default edition is never an agent action.
-    AlterDatabaseDefaultEdition,
+    DefaultEditionFlip,
+}
+
+impl OperatorStatementClass {
+    /// Recognize only the operator executor's fixed rendering. This is not
+    /// agent SQL admission: the ordinary classifier refuses this statement at
+    /// every level, including ADMIN.
+    #[must_use]
+    pub fn from_exact_rendered_sql(sql: &str) -> Option<Self> {
+        let identifier = sql
+            .strip_prefix("ALTER DATABASE DEFAULT EDITION = \"")?
+            .strip_suffix('"')?;
+        if identifier.is_empty()
+            || identifier.len() > 128
+            || identifier.contains(['"', '\0'])
+            || identifier.chars().any(char::is_control)
+        {
+            return None;
+        }
+        Some(Self::DefaultEditionFlip)
+    }
 }
 
 /// A routine's proven effects. These form a set, not a privilege ladder.
@@ -487,13 +507,44 @@ mod tests {
     fn effects_literal_alter_database_default_edition_is_operator_only_on_admin_lane() {
         let effects = RoutineEffectsV1::new([
             RoutineEffect::Admin,
-            RoutineEffect::OperatorOnly(OperatorStatementClass::AlterDatabaseDefaultEdition),
+            RoutineEffect::OperatorOnly(OperatorStatementClass::DefaultEditionFlip),
         ]);
         assert_eq!(
             admit(&effects, AdmissionContext::CustomToolCall),
             Err(EffectRefusal::AlwaysRefused(RoutineEffect::OperatorOnly(
-                OperatorStatementClass::AlterDatabaseDefaultEdition
+                OperatorStatementClass::DefaultEditionFlip
             )))
+        );
+    }
+
+    #[test]
+    fn operator_statement_class_rejects_any_other_text() {
+        assert_eq!(
+            OperatorStatementClass::from_exact_rendered_sql(
+                "ALTER DATABASE DEFAULT EDITION = \"STAGE_V2\""
+            ),
+            Some(OperatorStatementClass::DefaultEditionFlip)
+        );
+        for sql in [
+            "alter database default edition = \"STAGE_V2\"",
+            "ALTER DATABASE DEFAULT EDITION = STAGE_V2",
+            "ALTER DATABASE DEFAULT EDITION = \"\"",
+            "ALTER DATABASE DEFAULT EDITION = \"STAGE_V2\";",
+            "ALTER DATABASE DEFAULT EDITION = \"STAGE_V2\" -- tail",
+            "ALTER DATABASE DEFAULT EDITION = \"STAGE\"; DROP TABLE T; --\"",
+            "ALTER DATABASE DEFAULT EDITION = \"STAGE\0V2\"",
+            "ALTER DATABASE DEFAULT EDITION = \"STAGE\nV2\"",
+        ] {
+            assert_eq!(
+                OperatorStatementClass::from_exact_rendered_sql(sql),
+                None,
+                "{sql:?}"
+            );
+        }
+        let too_long = format!("ALTER DATABASE DEFAULT EDITION = \"{}\"", "X".repeat(129));
+        assert_eq!(
+            OperatorStatementClass::from_exact_rendered_sql(&too_long),
+            None
         );
     }
 
@@ -566,8 +617,7 @@ mod tests {
 
     #[test]
     fn effects_ddl_trigger_context_refuses_operator_only() {
-        let effect =
-            RoutineEffect::OperatorOnly(OperatorStatementClass::AlterDatabaseDefaultEdition);
+        let effect = RoutineEffect::OperatorOnly(OperatorStatementClass::DefaultEditionFlip);
         assert_eq!(
             admit(&one(effect), AdmissionContext::DdlTrigger),
             Err(EffectRefusal::AlwaysRefused(effect))
@@ -597,7 +647,7 @@ mod tests {
             let all = [RoutineEffect::ReadDb, RoutineEffect::RowLock, RoutineEffect::SessionState,
                 RoutineEffect::Dml, RoutineEffect::Ddl, RoutineEffect::Admin,
                 RoutineEffect::SequenceAdvance,
-                RoutineEffect::OperatorOnly(OperatorStatementClass::AlterDatabaseDefaultEdition),
+                RoutineEffect::OperatorOnly(OperatorStatementClass::DefaultEditionFlip),
                 RoutineEffect::TxnControl, RoutineEffect::Autonomous, RoutineEffect::DynamicSql,
                 RoutineEffect::ExternalIo, RoutineEffect::Unknown];
             let a = RoutineEffectsV1::new(left.into_iter().map(|i| all[i]));
@@ -620,9 +670,9 @@ mod tests {
                 Err(EffectRefusal::AlwaysRefused(RoutineEffect::SequenceAdvance)),
             ),
             (
-                RoutineEffect::OperatorOnly(OperatorStatementClass::AlterDatabaseDefaultEdition),
+                RoutineEffect::OperatorOnly(OperatorStatementClass::DefaultEditionFlip),
                 Err(EffectRefusal::AlwaysRefused(RoutineEffect::OperatorOnly(
-                    OperatorStatementClass::AlterDatabaseDefaultEdition,
+                    OperatorStatementClass::DefaultEditionFlip,
                 ))),
             ),
             (

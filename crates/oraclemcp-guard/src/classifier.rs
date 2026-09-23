@@ -530,6 +530,61 @@ fn transaction_control_construct(sql: &str) -> Option<&'static str> {
     None
 }
 
+/// A database-wide default-edition flip belongs only to the dedicated
+/// operator executor. Detect the keywords as Oracle tokens, so comments and
+/// whitespace cannot hide them and literals/quoted identifiers cannot forge
+/// them. The syntax after `DATABASE` may include a database or PDB name; any
+/// such form is refused before an operator allow-list or level gate is read.
+fn is_operator_only_default_edition_flip(sql: &str) -> bool {
+    let candidate = [
+        b"ALTER".as_slice(),
+        b"DATABASE".as_slice(),
+        b"DEFAULT".as_slice(),
+        b"EDITION".as_slice(),
+    ]
+    .iter()
+    .all(|needle| {
+        sql.as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle))
+    });
+    if !candidate {
+        return false;
+    }
+
+    let Ok(tokens) = Tokenizer::new(&OracleDialect {}, sql).tokenize() else {
+        // Never let a tokenizer gap fall through to an exact operator allow-list.
+        // This may over-refuse an unlexable string containing these four words;
+        // the conservative direction is intentional for database-wide DDL.
+        return true;
+    };
+    let tokens: Vec<&Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect();
+    let word_is = |index: usize, expected: &str| matches!(tokens.get(index), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected));
+
+    for start in 0..tokens.len() {
+        if !word_is(start, "ALTER") {
+            continue;
+        }
+        let database = if word_is(start + 1, "PLUGGABLE") {
+            start + 2
+        } else {
+            start + 1
+        };
+        if !word_is(database, "DATABASE") {
+            continue;
+        }
+        for keyword in database + 1..tokens.len().saturating_sub(1) {
+            if word_is(keyword, "DEFAULT") && word_is(keyword + 1, "EDITION") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Stage A outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StageA {
@@ -3523,6 +3578,20 @@ impl Classifier {
                 verdict_certificate: None,
                 certificate_derivation: Vec::new(),
             };
+        }
+
+        // No agent path may preview, confirm, or execute a database-wide
+        // default-edition flip, even on an ADMIN-capable profile. The operator
+        // executor takes no caller SQL and is separate from this classifier.
+        if is_operator_only_default_edition_flip(sql) {
+            return forbidden_decision(
+                "ALTER DATABASE DEFAULT EDITION is reserved for the operator edition executor"
+                    .to_owned(),
+            )
+            .categorized(
+                ReasonCategory::OperatorOnlyStatement,
+                Some("ALTER DATABASE DEFAULT EDITION".to_owned()),
+            );
         }
 
         // ALTER SESSION persists independently of DML rollback and can change

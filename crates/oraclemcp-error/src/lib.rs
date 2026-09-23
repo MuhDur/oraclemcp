@@ -157,6 +157,9 @@ pub enum ReasonCategory {
     /// A `SELECT` (or a base object it reads) the engine could not prove
     /// side-effect-free.
     UnprovenSideEffect,
+    /// A database-wide default-edition flip reserved for the authenticated
+    /// operator executor, never an agent SQL or MCP action at any level.
+    OperatorOnlyStatement,
     /// A profile's Arc N SQL policy denied the statement (ADR 0009). The policy
     /// can only ever restrict: this is never the reason a statement was allowed.
     PolicyDenied,
@@ -678,6 +681,15 @@ pub type Result<T> = std::result::Result<T, OracleMcpError>;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operator_only_statement_reason_has_stable_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&ReasonCategory::OperatorOnlyStatement)
+                .expect("reason category serializes"),
+            "\"OPERATOR_ONLY_STATEMENT\""
+        );
+    }
 
     #[test]
     fn parse_ora_code_extracts_leading_code() {
