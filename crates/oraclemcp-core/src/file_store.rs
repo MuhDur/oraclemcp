@@ -229,6 +229,17 @@ impl FileStore {
     }
 
     /// Acquire the mandatory process-wide ownership capability for this store.
+    /// The pid the current service-owner lock holder recorded, if readable.
+    /// Best-effort and read-only (an operator hint for a `Locked` refusal);
+    /// it never takes or tests the lock.
+    #[must_use]
+    pub fn service_owner_holder_pid(&self) -> Option<u32> {
+        let text = fs::read_to_string(self.root.join(SERVICE_LOCK_FILE)).ok()?;
+        text.lines()
+            .find_map(|line| line.strip_prefix("pid="))
+            .and_then(|pid| pid.trim().parse().ok())
+    }
+
     pub fn acquire_service_owner(&self, owner: &str) -> Result<ServiceOwner> {
         self.acquire_service_owner_with_metadata(owner, write_service_lock_metadata)
     }

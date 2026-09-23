@@ -56,6 +56,7 @@ use clap::{CommandFactory, FromArgMatches};
 #[cfg(test)]
 use clap::Parser;
 use oraclemcp::cost_budget::QueryCostBudgetStore;
+use oraclemcp::deferred_startup::{DeferredDispatch, OpenRefusal, StartupLock};
 use oraclemcp::dispatch::{
     CustomToolSignatureFailure, McpExposurePolicy, OracleDispatcher, ProfileConnectionBundle,
     ProfileConnector, ProfileDrainState, ProfileGenerationAdmission, StatelessReadStrategy,
@@ -1511,18 +1512,58 @@ fn create_private_audit_dir(path: &Path) -> std::io::Result<()> {
     }
 }
 
+/// Why a startup lock or the audit sink could not be taken.
+#[derive(Debug)]
+enum StartupError {
+    /// Another instance holds the audit log's writer lock or the service-state
+    /// owner lock. `serve` over stdio defers this past the MCP handshake (#51);
+    /// every other caller still refuses to start.
+    Locked(StartupLock),
+    /// Any other refusal: `(status code, message)`.
+    Refused(&'static str, String),
+}
+
+impl StartupError {
+    fn into_pair(self) -> (&'static str, String) {
+        match self {
+            StartupError::Locked(lock) => (
+                lock.code(),
+                format!("refusing to start: {}", lock.describe()),
+            ),
+            StartupError::Refused(code, message) => (code, message),
+        }
+    }
+}
+
+impl From<(&'static str, String)> for StartupError {
+    fn from((code, message): (&'static str, String)) -> Self {
+        StartupError::Refused(code, message)
+    }
+}
+
 fn build_auditor(
     audit: &AuditConfig,
     level: &SessionLevelState,
     reachable_ceiling: OperatingLevel,
     secret_resolver: &dyn SecretResolver,
 ) -> Result<Option<Arc<Auditor>>, (&'static str, String)> {
+    open_auditor(audit, level, reachable_ceiling, secret_resolver).map_err(StartupError::into_pair)
+}
+
+/// Arm the signed audit chain; the lock case stays typed so `serve` can defer
+/// it past the handshake.
+fn open_auditor(
+    audit: &AuditConfig,
+    level: &SessionLevelState,
+    reachable_ceiling: OperatingLevel,
+    secret_resolver: &dyn SecretResolver,
+) -> Result<Option<Arc<Auditor>>, StartupError> {
     let write_reachable = reachable_ceiling > OperatingLevel::ReadOnly;
     let keyring = resolve_audit_keyring(audit, level.is_protected(), secret_resolver)?;
 
     let Some(keyring) = keyring else {
         if write_reachable {
-            return Err((
+            return Err(StartupError::Refused(
                 "ORACLEMCP_AUDIT_KEY_REQUIRED",
                 format!(
                     "a servable profile can reach operating level {} (above READ_ONLY) but no \
@@ -1556,7 +1597,7 @@ fn build_auditor(
             )
         })?;
         if primary == mirror {
-            return Err((
+            return Err(StartupError::Refused(
                 "ORACLEMCP_AUDIT_SHIPPING_INVALID",
                 "WORM mirror must be a filesystem object distinct from the primary audit log"
                     .to_owned(),
@@ -1578,13 +1619,12 @@ fn build_auditor(
     }
     let sink = FileAuditSink::open(&path).map_err(|e| match e {
         // A concurrent oraclemcp instance already holds the writer lock on this
-        // log (bead oraclemcp-mbu1). Fail closed at startup with a distinct,
-        // actionable code rather than letting both instances fork the chain.
-        AuditError::Locked { .. } => (
-            "ORACLEMCP_AUDIT_LOG_LOCKED",
-            format!("refusing to start: {e}"),
-        ),
-        other => (
+        // log (bead oraclemcp-mbu1): never fork the chain. The lock stays typed
+        // (holder pid, path) so `serve` can answer the handshake first (#51).
+        AuditError::Locked { path, holder_pid } => {
+            StartupError::Locked(StartupLock::AuditLog { path, holder_pid })
+        }
+        other => StartupError::Refused(
             "ORACLEMCP_AUDIT_PATH_INVALID",
             format!("failed to open audit log {}: {other}", path.display()),
         ),
@@ -1683,21 +1723,44 @@ fn normalized_destination_path(path: &Path) -> std::io::Result<PathBuf> {
     Ok(normalized)
 }
 
-fn build_service_owner(required: bool) -> Result<Option<ServiceOwner>, (&'static str, String)> {
+impl StartupError {
+    /// The deferred opener's view: a held lock is retryable, anything else is
+    /// a permanent refusal carrying `CODE: message`.
+    fn into_refusal(self) -> OpenRefusal {
+        match self {
+            StartupError::Locked(lock) => OpenRefusal::Locked(lock),
+            StartupError::Refused(code, message) => fatal_refusal((code, message)),
+        }
+    }
+}
+
+fn fatal_refusal((code, message): (&'static str, String)) -> OpenRefusal {
+    OpenRefusal::Fatal(Box::new(ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!("{code}: {message}"),
+    )))
+}
+
+fn build_service_owner(required: bool) -> Result<Option<ServiceOwner>, StartupError> {
     if !required {
         return Ok(None);
     }
     let store = FileStore::open_default().map_err(|e| {
-        (
+        StartupError::Refused(
             "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
             format!("failed to open service state root: {e}"),
         )
     })?;
-    let owner = store.acquire_service_owner("serve").map_err(|e| {
-        (
+    let owner = store.acquire_service_owner("serve").map_err(|e| match e {
+        oraclemcp_core::file_store::FileStoreError::Locked => {
+            StartupError::Locked(StartupLock::ServiceOwner {
+                holder_pid: store.service_owner_holder_pid(),
+            })
+        }
+        other => StartupError::Refused(
             "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
-            format!("failed to acquire exclusive service state ownership: {e}"),
-        )
+            format!("failed to acquire exclusive service state ownership: {other}"),
+        ),
     })?;
     Ok(Some(owner))
 }
@@ -2928,6 +2991,9 @@ struct BuiltServer {
 }
 
 /// Build the server from the registry + capabilities + dispatcher over `conn`.
+/// Test-only: `serve` over stdio builds its dispatcher through the deferred
+/// opener (#51), and HTTP uses `build_server_with_lifecycle`.
+#[cfg(test)]
 fn build_server(
     conn: Box<dyn OracleConnection>,
     stateless_conn: Option<Box<dyn OracleConnection>>,
@@ -2945,6 +3011,69 @@ fn build_server_with_lifecycle(
     level: SessionLevelState,
     options: ServerBuildOptions,
 ) -> BuiltServer {
+    let transport = options.transport;
+    let metrics = options.metrics.clone();
+    let max_level = level.max_level();
+    let skipped_custom_tools = options.skipped_custom_tools.clone();
+    // E3/E3b: the dispatcher (which mints exports for oversized oracle_query
+    // results) and the server (which serves them over resources/read) share the
+    // SAME export registry.
+    let exports = Arc::new(ExportRegistry::new());
+    let wiring = dispatcher_wiring(active_profile, level, options, &exports);
+    let mut session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>> = None;
+    let dispatcher: Arc<dyn ToolDispatch> = if transport.is_http() {
+        if matches!(transport, ServerTransportMode::HttpStateful) {
+            let stateful = Arc::new(
+                StatefulLaneDispatch::with_dispatch_factory_builder(
+                    stateful_lane_factory_builder(wiring.clone(), metrics.clone()),
+                    wiring.auditor.clone(),
+                )
+                .with_admission_controller(Arc::new(AdmissionController::n4_stateful_defaults())),
+            );
+            session_lifecycle = Some(stateful.clone());
+            stateful
+        } else {
+            let dispatcher = build_oracle_dispatcher(conn, None, &wiring);
+            let dispatcher = maybe_wrap_metrics_dispatch(Arc::new(dispatcher), metrics.as_ref());
+            let control_lane = LaneRuntime::spawn_default_with_panic_auditor(
+                "served-http-stateless-control",
+                dispatcher,
+                wiring.auditor.clone(),
+            );
+            let read_dispatch = HttpStatelessReadDispatch::new(
+                control_lane,
+                wiring.active_profile.clone(),
+                DEFAULT_READ_PER_PROFILE_CAP,
+                stateless_read_worker_factory_builder(wiring.clone(), metrics.clone()),
+            );
+            drop(stateless_conn);
+            Arc::new(read_dispatch)
+        }
+    } else {
+        stdio_lane_dispatcher(conn, stateless_conn, &wiring)
+    };
+    BuiltServer {
+        server: server_shell(
+            max_level,
+            transport,
+            skipped_custom_tools,
+            dispatcher,
+            exports,
+        ),
+        session_lifecycle,
+    }
+}
+
+/// The MCP server around `dispatcher`: registry, capabilities and the export
+/// registry the dispatcher shares. Answers `initialize`/`tools/list` without
+/// touching the dispatcher's database or audit state.
+fn server_shell(
+    max_level: OperatingLevel,
+    transport: ServerTransportMode,
+    skipped_custom_tools: Vec<SkippedCustomTool>,
+    dispatcher: Arc<dyn ToolDispatch>,
+    exports: Arc<ExportRegistry>,
+) -> OracleMcpServer {
     let version = env!("CARGO_PKG_VERSION");
     // Keep the server registry immutable and built-in-only. Profile-scoped
     // custom descriptors come from the dispatcher's active catalog snapshot,
@@ -2953,14 +3082,23 @@ fn build_server_with_lifecycle(
     let caps = CapabilitiesReport::new(
         version,
         registry.tools.clone(),
-        level.max_level(),
+        max_level,
         FeatureTiers {
             live_db: BUILT_WITH_LIVE_DB,
             engine: cfg!(feature = "plsql-intelligence"),
-            http_transport: options.transport.is_http(),
+            http_transport: transport.is_http(),
         },
     )
-    .with_skipped_custom_tools(options.skipped_custom_tools.clone());
+    .with_skipped_custom_tools(skipped_custom_tools);
+    OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports)
+}
+
+fn dispatcher_wiring(
+    active_profile: Option<String>,
+    level: SessionLevelState,
+    options: ServerBuildOptions,
+    exports: &Arc<ExportRegistry>,
+) -> DispatcherWiring {
     // E5 connection-scope isolation: derive the immutable startup policy from
     // the same accepted snapshot used for generation admission. Missing or
     // poisoned lifecycle state fails closed; serving paths never re-read disk.
@@ -2972,11 +3110,7 @@ fn build_server_with_lifecycle(
         }
         None => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
     };
-    // E3/E3b: the dispatcher (which mints exports for oversized oracle_query
-    // results) and the server (which serves them over resources/read) share the
-    // SAME export registry.
-    let exports = Arc::new(ExportRegistry::new());
-    let wiring = DispatcherWiring {
+    DispatcherWiring {
         active_profile,
         level,
         request_timeout: options.request_timeout,
@@ -2992,53 +3126,25 @@ fn build_server_with_lifecycle(
         profile_drain: options.profile_drain,
         auditor: options.auditor,
         write_intents: options.write_intents,
-        exports: Arc::clone(&exports),
+        exports: Arc::clone(exports),
         unsigned_refusal_log: options.unsigned_refusal_log,
-    };
-    let mut session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>> = None;
-    let dispatcher: Arc<dyn ToolDispatch> = if options.transport.is_http() {
-        if matches!(options.transport, ServerTransportMode::HttpStateful) {
-            let stateful = Arc::new(
-                StatefulLaneDispatch::with_dispatch_factory_builder(
-                    stateful_lane_factory_builder(wiring.clone(), options.metrics.clone()),
-                    wiring.auditor.clone(),
-                )
-                .with_admission_controller(Arc::new(AdmissionController::n4_stateful_defaults())),
-            );
-            session_lifecycle = Some(stateful.clone());
-            stateful
-        } else {
-            let dispatcher = build_oracle_dispatcher(conn, None, &wiring);
-            let dispatcher =
-                maybe_wrap_metrics_dispatch(Arc::new(dispatcher), options.metrics.as_ref());
-            let control_lane = LaneRuntime::spawn_default_with_panic_auditor(
-                "served-http-stateless-control",
-                dispatcher,
-                wiring.auditor.clone(),
-            );
-            let read_dispatch = HttpStatelessReadDispatch::new(
-                control_lane,
-                wiring.active_profile.clone(),
-                DEFAULT_READ_PER_PROFILE_CAP,
-                stateless_read_worker_factory_builder(wiring.clone(), options.metrics.clone()),
-            );
-            drop(stateless_conn);
-            Arc::new(read_dispatch)
-        }
-    } else {
-        let dispatcher = build_oracle_dispatcher(conn, stateless_conn, &wiring);
-        let dispatcher: Arc<dyn ToolDispatch> = Arc::new(dispatcher);
-        Arc::new(LaneRuntime::spawn_default_with_panic_auditor(
-            "served-stdio",
-            dispatcher,
-            wiring.auditor.clone(),
-        ))
-    };
-    let server = OracleMcpServer::with_exports(version, registry, caps, dispatcher, exports);
-    BuiltServer {
-        server,
-        session_lifecycle,
     }
+}
+
+/// The stdio dispatcher: the Oracle dispatcher on its own lane, with the
+/// lane's panic auditor bound to the same audit chain.
+fn stdio_lane_dispatcher(
+    conn: Box<dyn OracleConnection>,
+    stateless_conn: Option<Box<dyn OracleConnection>>,
+    wiring: &DispatcherWiring,
+) -> Arc<dyn ToolDispatch> {
+    let dispatcher: Arc<dyn ToolDispatch> =
+        Arc::new(build_oracle_dispatcher(conn, stateless_conn, wiring));
+    Arc::new(LaneRuntime::spawn_default_with_panic_auditor(
+        "served-stdio",
+        dispatcher,
+        wiring.auditor.clone(),
+    ))
 }
 
 fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> HttpConfig {
@@ -3498,50 +3604,7 @@ fn run_serve(
     // writable `mcp_exposed` profile and run writes/DDL there, so the signing
     // key must be required if ANY reachable profile can exceed READ_ONLY.
     let reachable_ceiling = max_reachable_write_ceiling(&full_config, &level);
-    let auditor = match build_auditor(
-        &full_config.audit,
-        &level,
-        reachable_ceiling,
-        secret_resolver.as_ref(),
-    ) {
-        Ok(auditor) => auditor,
-        Err((code, message)) => {
-            emit_status_error(robot_json, code, &message);
-            return ExitCode::from(2);
-        }
-    };
-    // The redacted refusal trail is the unsigned floor only when no signed
-    // chain is active. An operator may disable that floor explicitly.
-    let unsigned_refusal_log =
-        unsigned_refusal_trail_enabled(auditor.is_some(), full_config.audit.unsigned_refusal_log);
     let query_cost_budget_enabled = has_cumulative_query_cost_budget(&full_config);
-    let service_owner = match build_service_owner(
-        listen.is_some()
-            || reachable_ceiling > OperatingLevel::ReadOnly
-            || query_cost_budget_enabled,
-    ) {
-        Ok(owner) => owner,
-        Err((code, message)) => {
-            emit_status_error(robot_json, code, &message);
-            return ExitCode::from(2);
-        }
-    };
-    let write_intents = match build_write_intent_log(reachable_ceiling, service_owner.as_ref()) {
-        Ok(write_intents) => write_intents,
-        Err((code, message)) => {
-            emit_status_error(robot_json, code, &message);
-            return ExitCode::from(2);
-        }
-    };
-    let query_cost_budgets =
-        match build_query_cost_budget_store(query_cost_budget_enabled, service_owner.as_ref()) {
-            Ok(store) => store,
-            Err((code, message)) => {
-                emit_status_error(robot_json, code, &message);
-                return ExitCode::from(2);
-            }
-        };
-
     match listen {
         // ── stdio transport (default) ──────────────────────────────────────
         None => {
@@ -3555,35 +3618,116 @@ fn run_serve(
                     return ExitCode::from(2);
                 }
             };
-            let connections = open_runtime_connection_plan(
+            // #51: the transport answers `initialize` and `tools/list` before
+            // the audit sink and service-owner lock are taken. The opener takes
+            // both locks FIRST; only then does it consume the single-use
+            // connection plan, connect and build the audited lane dispatcher.
+            // Uncontended this all happens right here, exactly as before;
+            // while another instance holds a lock, every tools/call returns
+            // the typed Locked error and nothing reaches Oracle.
+            let exports = Arc::new(ExportRegistry::new());
+            let max_level = level.max_level();
+            let owner_required =
+                reachable_ceiling > OperatingLevel::ReadOnly || query_cost_budget_enabled;
+            let opener_config = full_config.clone();
+            let opener_resolver = Arc::clone(&secret_resolver);
+            let opener_level = level.clone();
+            let opener_exports = Arc::clone(&exports);
+            let mut held_owners: Vec<ServiceOwner> = Vec::new();
+            let mut single_use = Some((
                 connection_plan,
-                &full_config,
-                true,
-                secret_resolver.as_ref(),
-            );
-            let server = build_server(
-                connections.session,
-                connections.stateless,
+                custom_catalog,
+                skipped_custom_tools.clone(),
                 active_profile,
-                level,
-                ServerBuildOptions {
-                    transport: ServerTransportMode::Stdio,
-                    custom_catalog,
-                    skipped_custom_tools,
-                    strict_custom_tools,
-                    auditor,
-                    write_intents,
-                    secret_resolver: Arc::clone(&secret_resolver),
-                    request_timeout,
-                    max_query_cost,
-                    cumulative_query_cost_budget: cumulative_query_cost_budget.clone(),
-                    query_cost_budgets: query_cost_budgets.clone(),
-                    result_masking: result_masking.clone(),
-                    sql_policy: sql_policy.clone(),
-                    metrics: None,
-                    profile_drain: ProfileDrainState::from_config(full_config.clone()),
-                    unsigned_refusal_log,
-                },
+            ));
+            let opener: oraclemcp::deferred_startup::Opener = Box::new(move || {
+                let auditor = open_auditor(
+                    &opener_config.audit,
+                    &opener_level,
+                    reachable_ceiling,
+                    opener_resolver.as_ref(),
+                )
+                .map_err(StartupError::into_refusal)?;
+                let owner =
+                    build_service_owner(owner_required).map_err(StartupError::into_refusal)?;
+                let write_intents = build_write_intent_log(reachable_ceiling, owner.as_ref())
+                    .map_err(fatal_refusal)?;
+                let query_cost_budgets =
+                    build_query_cost_budget_store(query_cost_budget_enabled, owner.as_ref())
+                        .map_err(fatal_refusal)?;
+                let (plan, catalog, skipped, profile) = single_use.take().ok_or_else(|| {
+                    fatal_refusal((
+                        "ORACLEMCP_SERVE_STATE_INVALID",
+                        "the stdio dispatcher was already built".to_owned(),
+                    ))
+                })?;
+                held_owners.extend(owner);
+                let unsigned_refusal_log = unsigned_refusal_trail_enabled(
+                    auditor.is_some(),
+                    opener_config.audit.unsigned_refusal_log,
+                );
+                let connections = open_runtime_connection_plan(
+                    plan,
+                    &opener_config,
+                    true,
+                    opener_resolver.as_ref(),
+                );
+                let wiring = dispatcher_wiring(
+                    profile,
+                    opener_level.clone(),
+                    ServerBuildOptions {
+                        transport: ServerTransportMode::Stdio,
+                        custom_catalog: catalog,
+                        skipped_custom_tools: skipped,
+                        strict_custom_tools,
+                        auditor,
+                        write_intents,
+                        secret_resolver: Arc::clone(&opener_resolver),
+                        request_timeout,
+                        max_query_cost,
+                        cumulative_query_cost_budget: cumulative_query_cost_budget.clone(),
+                        query_cost_budgets,
+                        result_masking: result_masking.clone(),
+                        sql_policy: sql_policy.clone(),
+                        metrics: None,
+                        profile_drain: ProfileDrainState::from_config(opener_config.clone()),
+                        unsigned_refusal_log,
+                    },
+                    &opener_exports,
+                );
+                Ok(stdio_lane_dispatcher(
+                    connections.session,
+                    connections.stateless,
+                    &wiring,
+                ))
+            });
+            let dispatch = match DeferredDispatch::start(opener) {
+                Ok((dispatch, None)) => dispatch,
+                Ok((dispatch, Some(lock))) => {
+                    // Kept for operators; the client sees the typed error per call.
+                    eprintln!(
+                        "oraclemcp serve: {}: {}; answering the MCP handshake and refusing \
+                         tool calls until it is released",
+                        lock.code(),
+                        lock.describe()
+                    );
+                    dispatch
+                }
+                Err(envelope) => {
+                    let (code, message) = envelope
+                        .message
+                        .split_once(": ")
+                        .unwrap_or(("ORACLEMCP_SERVE_STARTUP_REFUSED", envelope.message.as_str()));
+                    emit_status_error(robot_json, code, message);
+                    return ExitCode::from(2);
+                }
+            };
+            let server = server_shell(
+                max_level,
+                ServerTransportMode::Stdio,
+                skipped_custom_tools,
+                Arc::new(dispatch),
+                exports,
             );
             install_stdio_signal_close(server.clone());
             emit_serve_status(robot_json, "stdio", None, &advertised_tools);
@@ -3612,6 +3756,52 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
+            let auditor = match build_auditor(
+                &full_config.audit,
+                &level,
+                reachable_ceiling,
+                secret_resolver.as_ref(),
+            ) {
+                Ok(auditor) => auditor,
+                Err((code, message)) => {
+                    emit_status_error(robot_json, code, &message);
+                    return ExitCode::from(2);
+                }
+            };
+            // The redacted refusal trail is the unsigned floor only when no signed
+            // chain is active. An operator may disable that floor explicitly.
+            let unsigned_refusal_log = unsigned_refusal_trail_enabled(
+                auditor.is_some(),
+                full_config.audit.unsigned_refusal_log,
+            );
+            // HTTP always needs the service-state owner (its session store).
+            let service_owner = match build_service_owner(true) {
+                Ok(owner) => owner,
+                Err(error) => {
+                    let (code, message) = error.into_pair();
+                    emit_status_error(robot_json, code, &message);
+                    return ExitCode::from(2);
+                }
+            };
+            let write_intents =
+                match build_write_intent_log(reachable_ceiling, service_owner.as_ref()) {
+                    Ok(write_intents) => write_intents,
+                    Err((code, message)) => {
+                        emit_status_error(robot_json, code, &message);
+                        return ExitCode::from(2);
+                    }
+                };
+            let query_cost_budgets = match build_query_cost_budget_store(
+                query_cost_budget_enabled,
+                service_owner.as_ref(),
+            ) {
+                Ok(store) => store,
+                Err((code, message)) => {
+                    emit_status_error(robot_json, code, &message);
+                    return ExitCode::from(2);
+                }
+            };
+
             let Some(http_service_owner) = service_owner.as_ref() else {
                 emit_status_error(
                     robot_json,

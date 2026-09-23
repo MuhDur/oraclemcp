@@ -13,6 +13,7 @@
 //! integration suite drive the real server surface.
 
 pub mod cost_budget;
+pub mod deferred_startup;
 pub mod dispatch;
 pub mod masking_salts;
 #[cfg(feature = "plsql-intelligence")]
