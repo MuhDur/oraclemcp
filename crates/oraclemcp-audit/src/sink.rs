@@ -1706,6 +1706,7 @@ pub fn create_windows_private_audit_directory(path: &Path) -> Result<(), AuditEr
     let normalized = lexically_normalize_windows_audit_directory(path)?;
     let mut current = PathBuf::new();
     let mut hardened_final = false;
+    let mut inside_private_subtree = false;
     for component in normalized.components() {
         match component {
             Component::Prefix(prefix) => current.push(prefix.as_os_str()),
@@ -1716,13 +1717,14 @@ pub fn create_windows_private_audit_directory(path: &Path) -> Result<(), AuditEr
                 match std::fs::create_dir(&current) {
                     Ok(()) => {
                         harden_fresh_windows_private_directory(&current)?;
+                        inside_private_subtree = true;
                         hardened_final = current == normalized;
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                         open_windows_audit_directory_nofollow(&current)?;
-                        if current == normalized {
+                        if current == normalized || inside_private_subtree {
                             harden_windows_private_directory(&current)?;
-                            hardened_final = true;
+                            hardened_final = current == normalized;
                         }
                     }
                     Err(error) => {
