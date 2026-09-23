@@ -66,7 +66,8 @@ pub use shipping_spool::{
     DurableSpoolConfig,
 };
 pub use sink::{
-    AuditError, AuditSink, Auditor, AuthenticatedAuditTail, FileAuditSink, MemoryAuditSink,
+    AuditError, AuditLockProbe, AuditSink, Auditor, AuthenticatedAuditTail, FileAuditSink,
+    MemoryAuditSink, probe_audit_writer_lock,
 };
 #[cfg(windows)]
 pub use sink::{create_windows_private_audit_directory, harden_windows_private_directory};

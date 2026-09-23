@@ -335,6 +335,61 @@ impl Drop for AuditLogLock {
     }
 }
 
+/// What a read-only probe of an audit log's writer lock found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AuditLockProbe {
+    /// No lock sidecar exists: no instance has opened this log for writing.
+    Absent,
+    /// The sidecar exists and no instance holds the writer lock.
+    Free,
+    /// Another instance holds the writer lock; a writable open would fail
+    /// with [`AuditError::Locked`].
+    Held {
+        /// The holder's pid, when the sidecar records a readable one.
+        holder_pid: Option<u32>,
+    },
+}
+
+/// Report whether another oraclemcp instance holds `audit_path`'s writer
+/// lock, for `doctor` (#51). Never creates, writes or truncates anything: it
+/// opens an existing lock sidecar read-only and no-follow (refusing a
+/// non-regular one, so a FIFO cannot block it), and a successful shared
+/// try-lock is released at once.
+///
+/// # Errors
+/// [`AuditError::Io`] when the sidecar is not a private regular file or
+/// cannot be inspected.
+pub fn probe_audit_writer_lock(audit_path: &Path) -> Result<AuditLockProbe, AuditError> {
+    let lock_path = lock_path_for(audit_path);
+    reject_unsafe_existing(&lock_path)?;
+    let mut options = OpenOptions::new();
+    options.read(true);
+    configure_no_follow(&mut options);
+    let mut file = match options.open(&lock_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(AuditLockProbe::Absent),
+        Err(e) => {
+            return Err(AuditError::Io(format!(
+                "cannot inspect audit lock {}: {e}",
+                lock_path.display()
+            )));
+        }
+    };
+    match file.try_lock_shared() {
+        Ok(()) => {
+            let _ = file.unlock();
+            Ok(AuditLockProbe::Free)
+        }
+        Err(TryLockError::WouldBlock) => Ok(AuditLockProbe::Held {
+            holder_pid: read_holder_pid(&mut file),
+        }),
+        Err(TryLockError::Error(e)) => Err(AuditError::Io(format!(
+            "cannot probe audit lock {}: {e}",
+            lock_path.display()
+        ))),
+    }
+}
+
 /// Read a PID previously written to an already-open lock sidecar descriptor.
 /// Best-effort: any I/O or parse failure yields `None` (the contention message
 /// just omits the PID). On Windows the holder's exclusive `LockFileEx` lock is
@@ -3687,6 +3742,60 @@ mod tests {
             "oversized PID hint must not prevent the second writer from failing closed"
         );
         drop(first);
+    }
+
+    #[test]
+    fn writer_lock_probe_reports_absent_held_and_free_without_creating_anything() {
+        // #51 doctor: the probe names a live holder and never takes the
+        // writer role itself (no sidecar or log is created, a free lock is
+        // left free).
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        assert_eq!(
+            probe_audit_writer_lock(&path).expect("probe"),
+            AuditLockProbe::Absent
+        );
+        assert!(
+            !lock_path_for(&path).exists(),
+            "the probe created no sidecar"
+        );
+        assert!(!path.exists(), "the probe created no log");
+
+        let holder = FileAuditSink::open(&path).expect("holder opens");
+        match probe_audit_writer_lock(&path).expect("probe") {
+            AuditLockProbe::Held { holder_pid } => {
+                #[cfg(unix)]
+                assert_eq!(holder_pid, Some(std::process::id()));
+                #[cfg(not(unix))]
+                let _ = holder_pid;
+            }
+            other => panic!("expected Held, got {other:?}"),
+        }
+        drop(holder);
+
+        assert_eq!(
+            probe_audit_writer_lock(&path).expect("probe"),
+            AuditLockProbe::Free
+        );
+        // The probe released its shared lock: a writer still opens.
+        drop(FileAuditSink::open(&path).expect("writer reopens after the probe"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writer_lock_probe_refuses_a_fifo_sidecar_instead_of_blocking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("audit.jsonl");
+        rustix::fs::mkfifoat(
+            rustix::fs::CWD,
+            lock_path_for(&path),
+            rustix::fs::Mode::from_raw_mode(0o600),
+        )
+        .expect("mkfifo");
+        assert!(matches!(
+            probe_audit_writer_lock(&path),
+            Err(AuditError::Io(_))
+        ));
     }
 
     #[test]

@@ -23,6 +23,7 @@ use asupersync::Cx;
 use cap_fs_ext::{DirExt as _, FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as CapOpenOptions};
+use oraclemcp_audit::AuditLockProbe;
 use oraclemcp_db::{
     DRIVER_VERSION, DiagnosticsSource, OracleConnection, OracleVpdRlsObservation,
     OracleVpdRlsObservationStatus, canonical_nls_statements, detect_oracle_driver, detect_standby,
@@ -2884,14 +2885,19 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
     const AUDIT_CONFIG_REFERENCE: &str =
         " See README.md#signed-audit-and-unsigned-refusal-trail for the configuration reference.";
 
+    let mut audit_log_locked = false;
     let (audit_status, audit_detail) = match ctx.audit_posture.as_ref() {
-        Some(DoctorAuditPosture::SigningKeyConfigured { path }) => (
-            CheckStatus::Pass,
-            format!(
-                "audit configuration observation: signing-key source configured at {}; unsigned refusal trail: INACTIVE (signed audit is the configured tier); this offline check does not resolve the key or construct an auditor.{}",
-                path.display(), AUDIT_CONFIG_REFERENCE
-            ),
-        ),
+        Some(DoctorAuditPosture::SigningKeyConfigured { path }) => {
+            let (lock_status, lock_detail, locked) = audit_writer_lock_observation(path);
+            audit_log_locked = locked;
+            (
+                lock_status,
+                format!(
+                    "audit configuration observation: signing-key source configured at {}; unsigned refusal trail: INACTIVE (signed audit is the configured tier); this offline check does not resolve the key or construct an auditor; {lock_detail}.{}",
+                    path.display(), AUDIT_CONFIG_REFERENCE
+                ),
+            )
+        }
         Some(DoctorAuditPosture::DisabledReadOnly {
             unsigned_refusal_trail_path: Some(path),
         }) => (
@@ -2927,13 +2933,23 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         ),
     };
 
+    let lock_fix = audit_log_locked.then_some(
+        "stop the oraclemcp instance holding the audit log, or give this client its own state \
+         directory (XDG_STATE_HOME); until then `serve` answers the MCP handshake and refuses \
+         tool calls with ORACLEMCP_AUDIT_LOG_LOCKED",
+    );
+
     let Some(layout) = ctx.state_layout.as_ref() else {
-        return CheckResult::new(
+        let result = CheckResult::new(
             ID,
             NAME,
             audit_status,
             format!("{audit_detail}; state directory could not be resolved in this environment"),
         );
+        return match lock_fix {
+            Some(fix) => result.with_fix(fix),
+            None => result,
+        };
     };
 
     let (layout_status, layout_detail, fix) = match inspect_legacy_state_layout(layout) {
@@ -2989,7 +3005,7 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
     };
     let status = if audit_status == CheckStatus::Fail {
         CheckStatus::Fail
-    } else if layout_status == CheckStatus::Warn {
+    } else if audit_status == CheckStatus::Warn || layout_status == CheckStatus::Warn {
         CheckStatus::Warn
     } else if audit_status == CheckStatus::Skip || layout_status == CheckStatus::Skip {
         CheckStatus::Skip
@@ -2997,9 +3013,37 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
         CheckStatus::Pass
     };
     let result = CheckResult::new(ID, NAME, status, format!("{audit_detail}; {layout_detail}"));
+    let fix = fix.or(lock_fix);
     match fix {
         Some(fix) => result.with_fix(fix),
         None => result,
+    }
+}
+
+/// #51: whether another instance holds the signed audit log's writer lock,
+/// which would make `serve` refuse tool calls. Read-only: the probe creates
+/// and writes nothing (see `probe_audit_writer_lock`).
+fn audit_writer_lock_observation(path: &Path) -> (CheckStatus, String, bool) {
+    match oraclemcp_audit::probe_audit_writer_lock(path) {
+        Ok(AuditLockProbe::Held { holder_pid }) => (
+            CheckStatus::Warn,
+            format!(
+                "audit_log_locked: audit log {} is locked by another oraclemcp instance{}",
+                path.display(),
+                holder_pid.map_or_else(String::new, |pid| format!(" (pid {pid})"))
+            ),
+            true,
+        ),
+        Ok(AuditLockProbe::Free | AuditLockProbe::Absent) => (
+            CheckStatus::Pass,
+            "audit writer lock: free".to_owned(),
+            false,
+        ),
+        Err(error) => (
+            CheckStatus::Warn,
+            format!("audit writer lock: could not be inspected ({error})"),
+            false,
+        ),
     }
 }
 
@@ -5094,6 +5138,66 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn doctor_reports_audit_log_locked_with_holder_and_path() {
+        let root = doctor_tmp_dir("audit-log-locked");
+        let audit_dir = root.join("state").join("audit");
+        #[cfg(windows)]
+        oraclemcp_audit::create_windows_private_audit_directory(&audit_dir)
+            .expect("private audit directory");
+        #[cfg(not(windows))]
+        fs::create_dir_all(&audit_dir).expect("audit directory");
+        let path = audit_dir.join("audit.jsonl");
+        let context = || DoctorContext {
+            audit_posture: Some(DoctorAuditPosture::SigningKeyConfigured { path: path.clone() }),
+            ..DoctorContext::default()
+        };
+
+        let holder = oraclemcp_audit::FileAuditSink::open(&path).expect("holder takes the lock");
+        let report = doctor(&context());
+        let check = check_by_id(&report, 13);
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
+        assert!(
+            check.detail.contains(&format!(
+                "audit_log_locked: audit log {} is locked by another oraclemcp instance",
+                path.display()
+            )),
+            "{}",
+            check.detail
+        );
+        #[cfg(unix)]
+        assert!(
+            check
+                .detail
+                .contains(&format!("(pid {})", std::process::id())),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check
+                .fix
+                .as_deref()
+                .is_some_and(|fix| fix.contains("ORACLEMCP_AUDIT_LOG_LOCKED")),
+            "{:?}",
+            check.fix
+        );
+        drop(holder);
+
+        let report = doctor(&context());
+        let check = check_by_id(&report, 13);
+        assert!(
+            !check.detail.contains("audit_log_locked"),
+            "{}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("audit writer lock: free"),
+            "{}",
+            check.detail
+        );
+        assert_ne!(check.status, CheckStatus::Warn, "{}", check.detail);
     }
 
     #[test]
