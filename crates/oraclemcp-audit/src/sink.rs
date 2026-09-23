@@ -2045,6 +2045,9 @@ pub(crate) fn create_new_private_file(path: &Path) -> Result<File, AuditError> {
             path.display()
         ))
     })?;
+    #[cfg(windows)]
+    harden_windows_private_acl(&file, path, false, true, false)?;
+    #[cfg(not(windows))]
     harden_open_regular_file(&file, path)?;
     Ok(file)
 }
@@ -5581,6 +5584,24 @@ mod tests {
                 "dacl_sddl": [redacted_windows_dacl_sddl(&parent), redacted_windows_dacl_sddl(&file_path)]
             })
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_audit_fresh_anchor_temporary_owner_is_token_user() {
+        let root = tempfile::tempdir().expect("fresh test root");
+        let parent = root.path().join("private");
+        create_windows_private_audit_directory(&parent).expect("create private audit parent");
+        let temporary = parent.join(".audit.jsonl.anchor.tmp.test");
+        let file = create_new_private_file(&temporary).expect("create private anchor temporary");
+        let current_sid = windows_permissions::utilities::current_process_sid()
+            .expect("resolve current TokenUser SID");
+        let handle = windows_security_handle(&temporary, false, false, false)
+            .expect("open temporary ACL handle");
+        verify_windows_private_acl(&handle, &temporary, false, &current_sid)
+            .expect("fresh temporary owner and DACL are exact");
+        drop(handle);
+        drop(file);
     }
 
     #[cfg(windows)]
