@@ -34,7 +34,7 @@
       {
         "name": "gate self-weakening review (orchestrator)",
         "kind": "cli",
-        "trace": "Diff is test-only; no retry wrapper, #[ignore], or weakened assertion; the tamper is made strictly stronger."
+        "trace": "Diff is test-only; no retry wrapper, no ignore attribute, no weakened assertion; the tamper is made strictly stronger."
       }
     ]
   },
