@@ -3,7 +3,7 @@
 //! This target is compiled only when both the feature-gated official adapter and
 //! the local Oracle lab lane are requested. The test itself is ignored unless
 //! explicitly selected because it connects to the local Free23 fixture and
-//! creates short-lived, uniquely named tables. It is not a self-skipping live
+//! creates short-lived tables inside an exact run-owned W4 fixture schema. It is not a self-skipping live
 //! claim: missing opt-in environment is an error when the ignored test is run.
 //!
 //! Run after `scripts/rig/oracle_l1.sh run --log` with:
@@ -13,6 +13,7 @@
 //! ORACLEMCP_TEST_DSN=//localhost:1522/FREEPDB1 \
 //! ORACLEMCP_TEST_USER=pythontest \
 //! ORACLEMCP_TEST_PASSWORD=<local-lab-password> \
+//! ORACLEMCP_PARITY_RUN_ID=<registered W4 run id> \
 //! cargo test -p oraclemcp-db --features oracledb,live-xe \
 //!   --test cross_backend_parity -- --ignored --exact
 //! ```
@@ -33,9 +34,8 @@
 //!
 //! The deterministic, feature-on VECTOR projection test remains next to the
 //! official adapter. This target is the live proof for behavior requiring a
-//! real Oracle: independent backend connections, NUMBER/TSTZ/VECTOR decoding,
-//! DML rollback/commit, DDL execution after classifier admission, and Oracle
-//! error-envelope equivalence.
+//! real Oracle: independent backend connections, DATE/TIMESTAMP/TSLTZ/INTERVAL,
+//! LOB/NULL and the existing NUMBER/TSTZ/VECTOR cases, plus DML and errors.
 
 #![cfg(all(feature = "oracledb", feature = "live-xe"))]
 #![forbid(unsafe_code)]
@@ -48,7 +48,8 @@ use oraclemcp_db::{
     serialize_row,
 };
 use oraclemcp_guard::{Classifier, DangerLevel, OperatingLevel};
-use serde_json::Value;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 
 const NUMBER_AND_TSTZ_SQL: &str = "SELECT \
@@ -340,6 +341,246 @@ fn transaction_count_value(
     Ok(serialize_row(&rows[0], &SerializeOptions::default()).to_string())
 }
 
+fn parity_table(run_id: &str, family: &str) -> String {
+    assert!(
+        run_id.len() == 12
+            && run_id.starts_with("W4")
+            && run_id[2..6].bytes().all(|byte| byte.is_ascii_digit())
+            && run_id[6..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()),
+        "parity needs the exact W4 run id of a registered, disposable fixture"
+    );
+    format!("W4O_{run_id}.ORACLEMCP_PARITY_{family}_{run_id}")
+}
+
+fn parity_record(
+    case_id: &str,
+    column_type: &str,
+    backend: &str,
+    expected: &Value,
+    actual: &Value,
+) {
+    println!(
+        "{}",
+        json!({
+            "case_id": case_id, "column_type": column_type,
+            "backend": backend, "expected": expected, "actual": actual,
+        })
+    );
+}
+
+async fn assert_parity_cell(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    case: (&str, &str),
+    sql: &str,
+    expected: Value,
+    serialize_opts: &SerializeOptions,
+) {
+    let (case_id, column_type) = case;
+    let driver_row = serialized_single_row_with_options(
+        driver
+            .query_rows(cx, sql, &[])
+            .await
+            .unwrap_or_else(|error| panic!("{case_id} driver-cx query: {error}")),
+        case_id,
+        serialize_opts,
+    );
+    let official_row = serialized_single_row_with_options(
+        official
+            .query_rows(cx, sql, &[])
+            .await
+            .unwrap_or_else(|error| panic!("{case_id} official query: {error}")),
+        case_id,
+        serialize_opts,
+    );
+    let driver_value = &driver_row["V"];
+    let official_value = &official_row["V"];
+    parity_record(case_id, column_type, "driver-cx", &expected, driver_value);
+    parity_record(case_id, column_type, "official", &expected, official_value);
+    assert_eq!(
+        *driver_value, expected,
+        "{case_id}: driver-cx independent expectation"
+    );
+    assert_eq!(
+        *official_value, expected,
+        "{case_id}: official independent expectation"
+    );
+}
+
+fn serialized_single_row_with_options(
+    rows: Vec<oraclemcp_db::OracleRow>,
+    label: &str,
+    options: &SerializeOptions,
+) -> Value {
+    assert_eq!(rows.len(), 1, "{label} must return one row");
+    serialize_row(&rows[0], options)
+}
+
+async fn run_datetime_interval_scenario(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    run_id: &str,
+) {
+    let table = parity_table(run_id, "DT");
+    let create = format!(
+        "CREATE TABLE {table} (ID NUMBER PRIMARY KEY, D_VAL DATE, TS_VAL TIMESTAMP(9), TSLTZ_VAL TIMESTAMP(9) WITH LOCAL TIME ZONE, IYM_VAL INTERVAL YEAR(4) TO MONTH, IDS_VAL INTERVAL DAY(4) TO SECOND(9))"
+    );
+    assert_write_and_ddl_classification(&create, &format!("INSERT INTO {table} (ID) VALUES (0)"));
+    driver
+        .execute(cx, &create, &[])
+        .await
+        .expect("create run-owned datetime parity table");
+    let result = async {
+        for connection in [driver, official] {
+            connection.execute(cx, "ALTER SESSION SET TIME_ZONE = '+05:45'", &[]).await.expect("pin session zone");
+            for statement in oraclemcp_db::canonical_nls_statements() {
+                connection.execute(cx, statement, &[]).await.expect("pin parity NLS");
+            }
+        }
+        let rows = [
+            (1, "DATE '0001-01-01'", "TIMESTAMP '2026-01-01 00:00:00'", "INTERVAL '2-3' YEAR TO MONTH", "INTERVAL '3 04:05:06.123456789' DAY(4) TO SECOND(9)"),
+            (2, "DATE '9999-12-31'", "TIMESTAMP '2020-02-29 12:34:56.123456789'", "INTERVAL '-2-3' YEAR TO MONTH", "INTERVAL '-3 04:05:06.123456789' DAY(4) TO SECOND(9)"),
+        ];
+        for (id, date, timestamp, ym, ds) in rows {
+            let insert = format!("INSERT INTO {table} VALUES ({id}, {date}, {timestamp}, TO_TIMESTAMP_TZ('2026-01-01 00:00:00 +00:00','YYYY-MM-DD HH24:MI:SS TZH:TZM'), {ym}, {ds})");
+            driver.execute(cx, &insert, &[]).await.expect("seed datetime parity row");
+        }
+        driver.execute(cx, &format!("INSERT INTO {table} (ID) VALUES (3)"), &[]).await.expect("seed typed NULL row");
+        for digits in 0..=9 {
+            let fraction = "123456789"[..digits].to_owned();
+            let timestamp = if digits == 0 { "TIMESTAMP '2026-01-01 00:00:00'".to_owned() } else { format!("TIMESTAMP '2026-01-01 00:00:00.{fraction}'") };
+            driver.execute(cx, &format!("INSERT INTO {table} (ID, TS_VAL) VALUES ({}, {timestamp})", digits + 10), &[]).await.expect("seed fractional TIMESTAMP");
+        }
+        driver.commit(cx).await.expect("commit datetime parity fixture");
+        let defaults = SerializeOptions::default();
+        for (id, expected) in [(1, "0001-01-01T00:00:00"), (2, "9999-12-31T00:00:00")] {
+            assert_parity_cell(cx, driver, official, ("parity_date_min_max", "DATE"), &format!("SELECT D_VAL AS V FROM {table} WHERE ID={id}"), json!(expected), &defaults).await;
+        }
+        for digits in 0..=9 {
+            let fraction = &"123456789"[..digits];
+            let expected = if digits == 0 { "2026-01-01T00:00:00".to_owned() } else { format!("2026-01-01T00:00:00.{fraction:0<9}") };
+            assert_parity_cell(cx, driver, official, ("parity_timestamp_fractional_0_to_9", "TIMESTAMP"), &format!("SELECT TS_VAL AS V FROM {table} WHERE ID={}", digits + 10), json!(expected), &defaults).await;
+        }
+        assert_parity_cell(cx, driver, official, ("parity_timestamp_no_utc_suffix", "TIMESTAMP"), &format!("SELECT TS_VAL AS V FROM {table} WHERE ID=2"), json!("2020-02-29T12:34:56.123456789"), &defaults).await;
+        assert_parity_cell(cx, driver, official, ("parity_tsltz_session_zone", "SESSIONTIMEZONE"), "SELECT SESSIONTIMEZONE AS V FROM dual", json!("+05:45"), &defaults).await;
+        assert_parity_cell(cx, driver, official, ("parity_tsltz_session_zone", "TO_CHAR(TSLTZ)"), &format!("SELECT TO_CHAR(TSLTZ_VAL,'YYYY-MM-DD HH24:MI:SS.FF9') AS V FROM {table} WHERE ID=1"), json!("2026-01-01 05:45:00.000000000"), &defaults).await;
+        assert_parity_cell(cx, driver, official, ("parity_tsltz_session_zone", "TIMESTAMP WITH LOCAL TIME ZONE"), &format!("SELECT TSLTZ_VAL AS V FROM {table} WHERE ID=1"), json!("2026-01-01T05:45:00+05:45"), &defaults).await;
+        for (id, expected) in [(1, "2-3"), (2, "-2--3")] {
+            assert_parity_cell(cx, driver, official, ("parity_interval_ym_signed", "INTERVAL YEAR TO MONTH"), &format!("SELECT IYM_VAL AS V FROM {table} WHERE ID={id}"), json!(expected), &defaults).await;
+        }
+        for (id, expected) in [(1, "3 04:05:06.123456789"), (2, "-3 04:05:06.123456789")] {
+            assert_parity_cell(cx, driver, official, ("parity_interval_ds_signed", "INTERVAL DAY TO SECOND"), &format!("SELECT IDS_VAL AS V FROM {table} WHERE ID={id}"), json!(expected), &defaults).await;
+        }
+        for (column, kind) in [("D_VAL", "DATE"), ("TS_VAL", "TIMESTAMP"), ("TSLTZ_VAL", "TIMESTAMP WITH LOCAL TIME ZONE"), ("IYM_VAL", "INTERVAL YEAR TO MONTH"), ("IDS_VAL", "INTERVAL DAY TO SECOND")] {
+            assert_parity_cell(cx, driver, official, ("parity_typed_null_every_type", kind), &format!("SELECT {column} AS V FROM {table} WHERE ID=3"), Value::Null, &defaults).await;
+        }
+    }.await;
+    driver
+        .execute(cx, &format!("DROP TABLE {table} PURGE"), &[])
+        .await
+        .expect("drop run-owned datetime parity table");
+    result
+}
+
+fn cell_digest(cell: &oraclemcp_db::OracleCell) -> Value {
+    let bytes = cell
+        .bytes
+        .as_deref()
+        .unwrap_or_else(|| cell.value.as_deref().unwrap_or("").as_bytes());
+    digest_bytes(bytes)
+}
+
+fn digest_bytes(bytes: &[u8]) -> Value {
+    let digest: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    json!({ "length": bytes.len(), "sha256": digest })
+}
+
+async fn run_lob_null_scenario(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    run_id: &str,
+) {
+    let table = parity_table(run_id, "LOB");
+    let source = format!("W4O_{run_id}.T_TYPES_{run_id}");
+    let create = format!("CREATE TABLE {table} (ID NUMBER PRIMARY KEY, C_VAL CLOB, B_VAL BLOB)");
+    driver
+        .execute(cx, &create, &[])
+        .await
+        .expect("create run-owned LOB parity table");
+    let result = async {
+        for (id, clob, blob) in [
+            (1, "EMPTY_CLOB()", "EMPTY_BLOB()"),
+            (2, "TO_CLOB('ascii')", "TO_BLOB(HEXTORAW('00FF7F'))"),
+            (3, "TO_CLOB(UNISTR('\\0646\\4EEE'))", "TO_BLOB(HEXTORAW('C3A9'))"),
+        ] {
+            driver.execute(cx, &format!("INSERT INTO {table} VALUES ({id}, {clob}, {blob})"), &[]).await.expect("seed LOB row");
+        }
+        driver.execute(cx, &format!("INSERT INTO {table} SELECT 4, C_VAL, B_VAL FROM {source} WHERE ID=1"), &[]).await.expect("copy run-owned large LOB seed");
+        driver.execute(cx, &format!("INSERT INTO {table} (ID) VALUES (5)"), &[]).await.expect("seed LOB typed NULLs");
+        driver.commit(cx).await.expect("commit LOB parity fixture");
+        let opts = SerializeOptions { max_lob_chars: 1024, max_blob_bytes: 1024, ..Default::default() };
+        let read_opts = SerializeOptions { max_lob_chars: 40_000, max_blob_bytes: 40_000, ..Default::default() };
+        for (column, kind, id, expected) in [
+            ("C_VAL", "CLOB", 1, json!("")),
+            ("C_VAL", "CLOB", 2, json!("ascii")),
+            ("C_VAL", "CLOB", 3, json!("ن仮")),
+            ("C_VAL", "CLOB", 4, json!({"value": "c".repeat(1024), "truncated": true, "char_length": 33000})),
+            ("B_VAL", "BLOB", 1, json!({"encoding":"base64","data":"","byte_length":0,"truncated":false})),
+            ("B_VAL", "BLOB", 2, json!({"encoding":"base64","data":"AP9/","byte_length":3,"truncated":false})),
+            ("B_VAL", "BLOB", 3, json!({"encoding":"base64","data":"w6k=","byte_length":2,"truncated":false})),
+            ("B_VAL", "BLOB", 4, json!({"encoding":"base64","data":oraclemcp_db::base64_encode(&vec![b'b';1024]),"byte_length":33000,"truncated":true})),
+        ] {
+            let case_id = if kind == "CLOB" { "parity_clob_empty_ascii_multibyte_large" } else { "parity_blob_empty_small_large" };
+            let sql = format!("SELECT {column} AS V FROM {table} WHERE ID={id}");
+            let driver_rows = driver.query_rows_with_serialize_options(cx, &sql, &[], &read_opts).await.expect("driver LOB query");
+            let official_rows = official.query_rows_with_serialize_options(cx, &sql, &[], &read_opts).await.expect("official LOB query");
+            assert_eq!(driver_rows.len(), 1);
+            assert_eq!(official_rows.len(), 1);
+            let d_cell = &driver_rows[0].columns[0].1;
+            let o_cell = &official_rows[0].columns[0].1;
+            let d_digest = cell_digest(d_cell);
+            let o_digest = cell_digest(o_cell);
+            let expected_content = match (kind, id) {
+                (_, 1) => Vec::new(),
+                ("CLOB", 2) => b"ascii".to_vec(),
+                ("CLOB", 3) => "ن仮".as_bytes().to_vec(),
+                ("CLOB", 4) => vec![b'c'; 33_000],
+                ("BLOB", 2) => vec![0, 255, 127],
+                ("BLOB", 3) => vec![0xC3, 0xA9],
+                ("BLOB", 4) => vec![b'b'; 33_000],
+                _ => unreachable!("only seeded LOB cases are covered"),
+            };
+            let expected_digest = digest_bytes(&expected_content);
+            parity_record(case_id, &format!("{kind} content digest"), "driver-cx", &expected_digest, &d_digest);
+            parity_record(case_id, &format!("{kind} content digest"), "official", &expected_digest, &o_digest);
+            assert_eq!(d_digest, expected_digest, "{case_id}: driver full content digest");
+            assert_eq!(o_digest, expected_digest, "{case_id}: official full content digest");
+            let d_value = serialize_row(&driver_rows[0], &opts)["V"].clone();
+            let o_value = serialize_row(&official_rows[0], &opts)["V"].clone();
+            parity_record(case_id, kind, "driver-cx", &expected, &d_value);
+            parity_record(case_id, kind, "official", &expected, &o_value);
+            assert_eq!(d_value, expected, "{case_id}: driver preview");
+            assert_eq!(o_value, expected, "{case_id}: official preview");
+        }
+        for (column, kind) in [("C_VAL", "CLOB"), ("B_VAL", "BLOB")] {
+            assert_parity_cell(cx, driver, official, ("parity_typed_null_every_type", kind), &format!("SELECT {column} AS V FROM {table} WHERE ID=5"), Value::Null, &opts).await;
+        }
+    }.await;
+    driver
+        .execute(cx, &format!("DROP TABLE {table} PURGE"), &[])
+        .await
+        .expect("drop run-owned LOB parity table");
+    result
+}
+
 /// The feature-on, local-Free23 proof for the shared `OracleConnection`
 /// observations. This is intentionally ignored in ordinary test lanes rather
 /// than self-skipping: an operator must opt into the lab and capture its output.
@@ -421,9 +662,12 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
             "plain TIMESTAMP must not gain a UTC suffix"
         );
 
-        let suffix = std::process::id();
-        let driver_vector_table = format!("ORACLEMCP_PARITY_VEC_CX_{suffix}");
-        let official_vector_table = format!("ORACLEMCP_PARITY_VEC_OFFICIAL_{suffix}");
+        let run_id = required_lab_env("ORACLEMCP_PARITY_RUN_ID");
+        run_datetime_interval_scenario(&cx, &driver_cx, &official, &run_id).await;
+        run_lob_null_scenario(&cx, &driver_cx, &official, &run_id).await;
+        let suffix = run_id;
+        let driver_vector_table = format!("W4O_{suffix}.ORACLEMCP_PARITY_VEC_CX_{suffix}");
+        let official_vector_table = format!("W4O_{suffix}.ORACLEMCP_PARITY_VEC_OFFICIAL_{suffix}");
         let driver_dense_vector =
             run_dense_vector_scenario(&cx, &driver_cx, &driver_vector_table).await;
         let official_dense_vector =
@@ -466,14 +710,28 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
             "missing-object error envelope"
         );
 
-        let driver_table = format!("ORACLEMCP_PARITY_CX_{suffix}");
-        let official_table = format!("ORACLEMCP_PARITY_OFFICIAL_{suffix}");
+        let driver_table = format!("W4O_{suffix}.ORACLEMCP_PARITY_CX_{suffix}");
+        let official_table = format!("W4O_{suffix}.ORACLEMCP_PARITY_OFFICIAL_{suffix}");
         let driver_transaction = run_transaction_scenario(&cx, &driver_cx, &driver_table).await;
         let official_transaction = run_transaction_scenario(&cx, &official, &official_table).await;
         assert_eq!(
             driver_transaction, official_transaction,
             "DDL execution plus DML rollback/commit observations"
         );
+
+        // Oracle's DATE lower boundary is BC, beyond driver-cx's current
+        // 1..=9999 wire decoder. Keep this live assertion red until the
+        // discovered driver bug rust-oracledb-dhgs is fixed and pinned.
+        assert_parity_cell(
+            &cx,
+            &driver_cx,
+            &official,
+            ("parity_date_min_max", "DATE"),
+            "SELECT TO_DATE('4712-01-01 BC','YYYY-MM-DD BC') AS V FROM dual",
+            json!("-4712-01-01T00:00:00"),
+            &SerializeOptions::default(),
+        )
+        .await;
 
         driver_cx.close(&cx).await.expect("driver-cx close");
         official.close(&cx).await.expect("official close");

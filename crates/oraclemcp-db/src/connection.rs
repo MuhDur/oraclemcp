@@ -2018,11 +2018,132 @@ fn timestamp_tz_utc_clock(
     (1..=9999).contains(&utc.year()).then_some(utc)
 }
 
+/// Both thin drivers expose LTZ wire fields in UTC. Oracle renders them in the
+/// session zone, so project only a numeric session offset we can prove here.
+/// Region zones need date-specific DST rules and are refused rather than
+/// silently returning UTC as a local wall clock.
+pub(crate) fn project_tsltz_rows(
+    rows: &mut [OracleRow],
+    session_zone: &str,
+) -> Result<(), DbError> {
+    let zone = session_zone.as_bytes();
+    let valid = zone.len() == 6
+        && matches!(zone[0], b'+' | b'-')
+        && zone[1].is_ascii_digit()
+        && zone[2].is_ascii_digit()
+        && zone[3] == b':'
+        && zone[4].is_ascii_digit()
+        && zone[5].is_ascii_digit();
+    if !valid {
+        return Err(DbError::UnsupportedFeature(
+            "TIMESTAMP WITH LOCAL TIME ZONE requires a numeric session time zone offset".to_owned(),
+        ));
+    }
+    let hours = i64::from((zone[1] - b'0') * 10 + zone[2] - b'0');
+    let minutes = i64::from((zone[4] - b'0') * 10 + zone[5] - b'0');
+    if hours > 14 || minutes > 59 || (hours == 14 && minutes != 0) {
+        return Err(DbError::Query(
+            "invalid numeric session time zone offset".to_owned(),
+        ));
+    }
+    let sign = if zone[0] == b'-' { -1 } else { 1 };
+    let delta = chrono::Duration::minutes(sign * (hours * 60 + minutes));
+    for row in rows {
+        for (_, cell) in &mut row.columns {
+            if cell.oracle_type != "TIMESTAMP WITH LOCAL TIME ZONE" {
+                continue;
+            }
+            let Some(raw) = &cell.value else { continue };
+            let utc = chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S%.f")
+                .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S%.f"))
+                .map_err(|_| {
+                    DbError::Query("invalid TIMESTAMP WITH LOCAL TIME ZONE wire value".to_owned())
+                })?;
+            let wall = utc.checked_add_signed(delta).ok_or_else(|| {
+                DbError::Query(
+                    "TIMESTAMP WITH LOCAL TIME ZONE outside supported date range".to_owned(),
+                )
+            })?;
+            let mut value = format!(
+                "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+                wall.year(),
+                wall.month(),
+                wall.day(),
+                wall.hour(),
+                wall.minute(),
+                wall.second()
+            );
+            if wall.nanosecond() != 0 {
+                value.push_str(&format!(".{:09}", wall.nanosecond()));
+            }
+            value.push(' ');
+            value.push_str(session_zone);
+            cell.value = Some(value);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tsltz_projection_tests {
+    use super::{DbError, OracleCell, OracleRow, project_tsltz_rows};
+
+    #[test]
+    fn numeric_session_offsets_project_utc_wire_fields_and_preserve_null() {
+        for (utc, zone, expected) in [
+            (
+                "2026-01-01 00:00:00",
+                "+05:45",
+                "2026-01-01 05:45:00 +05:45",
+            ),
+            (
+                "2020-03-08 07:01:00.123456789",
+                "-04:00",
+                "2020-03-08 03:01:00.123456789 -04:00",
+            ),
+        ] {
+            let mut rows = vec![OracleRow {
+                columns: vec![
+                    (
+                        "VALUE".to_owned(),
+                        OracleCell::new("TIMESTAMP WITH LOCAL TIME ZONE", Some(utc.to_owned())),
+                    ),
+                    (
+                        "EMPTY".to_owned(),
+                        OracleCell::new("TIMESTAMP WITH LOCAL TIME ZONE", None),
+                    ),
+                ],
+            }];
+            project_tsltz_rows(&mut rows, zone).expect("valid numeric session zone");
+            assert_eq!(rows[0].columns[0].1.value.as_deref(), Some(expected));
+            assert_eq!(rows[0].columns[1].1.value, None);
+        }
+    }
+
+    #[test]
+    fn region_zone_is_typed_refusal() {
+        let mut rows = vec![OracleRow {
+            columns: vec![(
+                "VALUE".to_owned(),
+                OracleCell::new(
+                    "TIMESTAMP WITH LOCAL TIME ZONE",
+                    Some("2020-03-08 07:01:00".to_owned()),
+                ),
+            )],
+        }];
+        assert!(matches!(
+            project_tsltz_rows(&mut rows, "America/New_York"),
+            Err(DbError::UnsupportedFeature(reason)) if reason == "TIMESTAMP WITH LOCAL TIME ZONE requires a numeric session time zone offset"
+        ));
+    }
+}
+
 mod driver {
     use super::{
         CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver,
         CqnQueryRegistration, DbmsOutput, ExecuteOutcome, OracleRoutineArg, QueryRowStream,
-        QueryRowStreamStart, RustOracleConnection, oracle_bind_to_driver, timestamp_tz_wall_clock,
+        QueryRowStreamStart, RustOracleConnection, oracle_bind_to_driver, project_tsltz_rows,
+        timestamp_tz_wall_clock,
     };
     use crate::auth_adapter::AuthAdapter;
     use crate::error::{ConnectFailureKind, DbError};
@@ -6801,8 +6922,48 @@ mod driver {
                 "query",
             )
             .await?;
-            let rows = collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, limits)
+            let mut rows = collect_all_rows(
+                cx,
+                &mut inner,
+                result,
+                &self.opts,
+                serialize_opts,
+                limits.clone(),
+            )
+            .await?;
+            if rows.iter().any(|row| {
+                row.columns.iter().any(|(_, cell)| {
+                    cell.oracle_type == "TIMESTAMP WITH LOCAL TIME ZONE" && cell.value.is_some()
+                })
+            }) {
+                let zone_result = execute_with_timeout(
+                    cx,
+                    &mut inner,
+                    "SELECT SESSIONTIMEZONE AS SESSION_ZONE FROM dual",
+                    1,
+                    &[],
+                    limits.clone(),
+                    &self.opts,
+                    "LTZ session time zone",
+                )
                 .await?;
+                let zone_rows = collect_all_rows(
+                    cx,
+                    &mut inner,
+                    zone_result,
+                    &self.opts,
+                    serialize_opts,
+                    limits,
+                )
+                .await?;
+                let session_zone = zone_rows
+                    .first()
+                    .and_then(|row| row.text("SESSION_ZONE"))
+                    .ok_or_else(|| {
+                        DbError::Query("Oracle did not return SESSIONTIMEZONE".to_owned())
+                    })?;
+                project_tsltz_rows(&mut rows, session_zone)?;
+            }
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.query_rows.after")?;
             Ok(rows)

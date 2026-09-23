@@ -4,6 +4,7 @@
 //! actor thread. This module passes only owned, backend-neutral requests and
 //! serialized rows through [`super::oracledb_actor::BlockingConnectionActor`].
 
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -17,7 +18,7 @@ use serde_json::{Number, Value, json};
 use crate::auth_adapter::AuthAdapter;
 use crate::connection::{
     DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart, WalletFileChoice,
-    timestamp_tz_wall_clock,
+    project_tsltz_rows, timestamp_tz_wall_clock,
 };
 use crate::error::QuarantineOutcome;
 use crate::oracledb_actor::{
@@ -335,6 +336,7 @@ enum OfficialCommand {
     Query {
         sql: String,
         binds: OfficialBinds,
+        lob_limits: OfficialLobLimits,
         timeout: Option<Duration>,
     },
     StartStream {
@@ -386,9 +388,15 @@ impl OfficialCommand {
             Self::Connect { options, .. } => Self::Connect { options, timeout },
             Self::Ping { .. } => Self::Ping { timeout },
             Self::Describe { .. } => Self::Describe { timeout },
-            Self::Query { sql, binds, .. } => Self::Query {
+            Self::Query {
                 sql,
                 binds,
+                lob_limits,
+                ..
+            } => Self::Query {
+                sql,
+                binds,
+                lob_limits,
                 timeout,
             },
             Self::StartStream { sql, binds, .. } => Self::StartStream {
@@ -428,6 +436,21 @@ enum OfficialReply {
     StreamStarted { columns: Vec<String> },
     NextRow(Option<OracleRow>),
     RowsAffected(u64),
+}
+
+#[derive(Clone, Copy)]
+struct OfficialLobLimits {
+    max_lob_chars: usize,
+    max_blob_bytes: usize,
+}
+
+impl From<&SerializeOptions> for OfficialLobLimits {
+    fn from(options: &SerializeOptions) -> Self {
+        Self {
+            max_lob_chars: options.max_lob_chars,
+            max_blob_bytes: options.max_blob_bytes,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -608,19 +631,37 @@ fn execute_actor_command(
         OfficialCommand::Query {
             sql,
             binds,
+            lob_limits,
             timeout,
         } => {
             let connection = ready_connection(resource)?;
             set_driver_timeout(connection, timeout, OfficialOperation::Query)?;
             let params = binds.params();
             let mut cursor = connection
-                .query(&sql, &params)
+                .statement(&sql)
+                .map_err(|error| official_error(error, OfficialOperation::Query))?
+                .fetch_lobs()
+                .query(&params)
                 .map_err(|error| official_error(error, OfficialOperation::Query))?;
             let metadata = cursor.columns().clone();
             let mut rows = Vec::new();
             for next in &mut cursor {
-                let row = next.map_err(|error| official_error(error, OfficialOperation::Query))?;
-                rows.push(row_from_official(&row, &metadata)?);
+                let mut row =
+                    next.map_err(|error| official_error(error, OfficialOperation::Query))?;
+                rows.push(row_from_official(&mut row, &metadata, lob_limits)?);
+            }
+            if rows.iter().any(|row| {
+                row.columns.iter().any(|(_, cell)| {
+                    cell.oracle_type == "TIMESTAMP WITH LOCAL TIME ZONE" && cell.value.is_some()
+                })
+            }) {
+                drop(cursor);
+                let zone = connection
+                    .query_row("SELECT SESSIONTIMEZONE FROM dual", &[])
+                    .map_err(|error| official_error(error, OfficialOperation::Query))?
+                    .get::<String>(0)
+                    .map_err(|error| official_error(error, OfficialOperation::Query))?;
+                project_tsltz_rows(&mut rows, &zone)?;
             }
             Ok(OfficialReply::Rows(rows))
         }
@@ -636,7 +677,10 @@ fn execute_actor_command(
             set_driver_timeout(connection, timeout, OfficialOperation::Query)?;
             let params = binds.params();
             let cursor = connection
-                .query(&sql, &params)
+                .statement(&sql)
+                .map_err(|error| official_error(error, OfficialOperation::Query))?
+                .fetch_lobs()
+                .query(&params)
                 .map_err(|error| official_error(error, OfficialOperation::Query))?;
             let metadata = cursor.columns().clone();
             let columns = metadata
@@ -651,7 +695,11 @@ fn execute_actor_command(
             let connection = resource.connection.as_ref().ok_or_else(closed_connection)?;
             set_driver_timeout(connection, timeout, OfficialOperation::Query)?;
             let row = match stream.cursor.next() {
-                Some(Ok(row)) => Some(row_from_official(&row, &stream.metadata)?),
+                Some(Ok(mut row)) => Some(row_from_official(
+                    &mut row,
+                    &stream.metadata,
+                    OfficialLobLimits::from(&SerializeOptions::default()),
+                )?),
                 Some(Err(error)) => return Err(official_error(error, OfficialOperation::Query)),
                 None => None,
             };
@@ -880,21 +928,23 @@ fn validate_supported_connect_options(options: &OracleConnectOptions) -> Result<
 }
 
 fn row_from_official(
-    row: &oracledb::Row,
+    row: &mut oracledb::Row,
     metadata: &[oracledb::Metadata],
+    lob_limits: OfficialLobLimits,
 ) -> Result<OracleRow, DbError> {
     let mut columns = Vec::with_capacity(metadata.len());
     for (index, metadata) in metadata.iter().enumerate() {
         let name = metadata.name().to_owned();
-        columns.push((name, cell_from_official(row, index, metadata)?));
+        columns.push((name, cell_from_official(row, index, metadata, lob_limits)?));
     }
     Ok(OracleRow { columns })
 }
 
 fn cell_from_official(
-    row: &oracledb::Row,
+    row: &mut oracledb::Row,
     index: usize,
     metadata: &oracledb::Metadata,
+    lob_limits: OfficialLobLimits,
 ) -> Result<OracleCell, DbError> {
     let oracle_type = oracle_type_name(metadata);
     let db_type = metadata.db_type().name();
@@ -951,6 +1001,59 @@ fn cell_from_official(
                     .transpose()?,
             )
         }
+        "DB_TYPE_INTERVAL_YM" => OracleCell::new(
+            "INTERVAL YEAR TO MONTH",
+            row.get::<Option<oracledb::OracleIntervalYM>>(index)
+                .map_err(|error| official_error(error, OfficialOperation::Query))?
+                .map(|value| format!("{}-{}", value.years(), value.months())),
+        ),
+        "DB_TYPE_INTERVAL_DS" => OracleCell::new(
+            "INTERVAL DAY TO SECOND",
+            row.get::<Option<oracledb::OracleIntervalDS>>(index)
+                .map_err(|error| official_error(error, OfficialOperation::Query))?
+                .map(|value| {
+                    let fields = [
+                        value.days(),
+                        i32::from(value.hours()),
+                        i32::from(value.minutes()),
+                        i32::from(value.seconds()),
+                        value.nanoseconds(),
+                    ];
+                    let negative = fields.iter().any(|part| *part < 0);
+                    let positive = fields.iter().any(|part| *part > 0);
+                    if negative && positive {
+                        return Err(DbError::Query(
+                            "mixed-sign INTERVAL DAY TO SECOND value".to_owned(),
+                        ));
+                    }
+                    Ok(format!(
+                        "{}{} {:02}:{:02}:{:02}.{:09}",
+                        if negative { "-" } else { "" },
+                        value.days().unsigned_abs(),
+                        value.hours().unsigned_abs(),
+                        value.minutes().unsigned_abs(),
+                        value.seconds().unsigned_abs(),
+                        value.nanoseconds().unsigned_abs()
+                    ))
+                })
+                .transpose()?,
+        ),
+        "DB_TYPE_CLOB" | "DB_TYPE_NCLOB" | "DB_TYPE_BLOB" => {
+            match row
+                .take::<Option<oracledb::Lob>>(index)
+                .map_err(|error| official_error(error, OfficialOperation::Query))?
+            {
+                Some(lob) => official_lob_cell(lob, db_type, lob_limits)?,
+                None => OracleCell::new(
+                    match db_type {
+                        "DB_TYPE_BLOB" => "BLOB",
+                        "DB_TYPE_NCLOB" => "NCLOB",
+                        _ => "CLOB",
+                    },
+                    None,
+                ),
+            }
+        }
         "DB_TYPE_VECTOR" => vector_cell(
             row.get::<Option<oracledb::Vector>>(index)
                 .map_err(|error| official_error(error, OfficialOperation::Query))?,
@@ -963,6 +1066,56 @@ fn cell_from_official(
         }
     };
     Ok(cell)
+}
+
+fn official_lob_cell(
+    mut lob: oracledb::Lob,
+    db_type: &str,
+    limits: OfficialLobLimits,
+) -> Result<OracleCell, DbError> {
+    let source_length = lob
+        .get_size()
+        .map_err(|error| official_error(error, OfficialOperation::Query))?;
+    let binary = db_type == "DB_TYPE_BLOB";
+    let cap = if binary {
+        limits.max_blob_bytes
+    } else {
+        limits.max_lob_chars.saturating_mul(4)
+    };
+    let mut bytes = Vec::new();
+    lob.take(u64::try_from(cap.saturating_add(1)).unwrap_or(u64::MAX))
+        .read_to_end(&mut bytes)
+        .map_err(|error| DbError::Query(format!("official Oracle LOB read failed: {error}")))?;
+    if binary {
+        Ok(OracleCell::binary(
+            "BLOB",
+            bytes.into_iter().take(limits.max_blob_bytes).collect(),
+        )
+        .with_source_length(source_length))
+    } else {
+        let valid_bytes = match std::str::from_utf8(&bytes) {
+            Ok(_) => bytes.len(),
+            Err(error) if error.error_len().is_none() => error.valid_up_to(),
+            Err(error) => {
+                return Err(DbError::Query(format!(
+                    "official Oracle CLOB decode failed: {error}"
+                )));
+            }
+        };
+        let text = std::str::from_utf8(&bytes[..valid_bytes]).map_err(|error| {
+            DbError::Query(format!("official Oracle CLOB decode failed: {error}"))
+        })?;
+        let preview: String = text.chars().take(limits.max_lob_chars).collect();
+        Ok(OracleCell::new(
+            if db_type == "DB_TYPE_NCLOB" {
+                "NCLOB"
+            } else {
+                "CLOB"
+            },
+            Some(preview),
+        )
+        .with_source_length(source_length))
+    }
 }
 
 fn number_cell(value: Option<oracledb::OracleNumber>, oracle_type: &'static str) -> OracleCell {
@@ -985,8 +1138,10 @@ fn format_official_timestamp_for_type(
 ) -> Result<String, DbError> {
     match db_type {
         "DB_TYPE_DATE" => Ok(format_official_date_components(value)),
-        "DB_TYPE_TIMESTAMP" => Ok(format_official_timestamp_components(value)),
-        "DB_TYPE_TIMESTAMP_LTZ" | "DB_TYPE_TIMESTAMP_TZ" => {
+        "DB_TYPE_TIMESTAMP" | "DB_TYPE_TIMESTAMP_LTZ" => {
+            Ok(format_official_timestamp_components(value))
+        }
+        "DB_TYPE_TIMESTAMP_TZ" => {
             let offset_minutes =
                 i32::from(value.tz_hour_offset()) * 60 + i32::from(value.tz_minute_offset());
             let wall = timestamp_tz_wall_clock(
@@ -1029,8 +1184,7 @@ fn format_official_wall_clock_components(wall: chrono::NaiveDateTime) -> String 
     if wall.nanosecond() == 0 {
         return timestamp;
     }
-    let fractional = format!("{:09}", wall.nanosecond());
-    format!("{timestamp}.{}", fractional.trim_end_matches('0'))
+    format!("{timestamp}.{:09}", wall.nanosecond())
 }
 
 fn format_official_date_components(value: &oracledb::OracleTimestamp) -> String {
@@ -1050,8 +1204,7 @@ fn format_official_timestamp_components(value: &oracledb::OracleTimestamp) -> St
     if value.nanoseconds() == 0 {
         return timestamp;
     }
-    let fractional = format!("{:09}", value.nanoseconds());
-    format!("{timestamp}.{}", fractional.trim_end_matches('0'))
+    format!("{timestamp}.{:09}", value.nanoseconds())
 }
 
 fn vector_cell(value: Option<oracledb::Vector>, oracle_type: &'static str) -> OracleCell {
@@ -1144,6 +1297,11 @@ fn oracle_type_name(metadata: &oracledb::Metadata) -> &'static str {
         "DB_TYPE_TIMESTAMP" => "TIMESTAMP",
         "DB_TYPE_TIMESTAMP_LTZ" => "TIMESTAMP WITH LOCAL TIME ZONE",
         "DB_TYPE_TIMESTAMP_TZ" => "TIMESTAMP WITH TIME ZONE",
+        "DB_TYPE_INTERVAL_YM" => "INTERVAL YEAR TO MONTH",
+        "DB_TYPE_INTERVAL_DS" => "INTERVAL DAY TO SECOND",
+        "DB_TYPE_CLOB" => "CLOB",
+        "DB_TYPE_NCLOB" => "NCLOB",
+        "DB_TYPE_BLOB" => "BLOB",
         "DB_TYPE_VECTOR" => "VECTOR",
         _ => "UNSUPPORTED",
     }
@@ -1324,6 +1482,17 @@ impl OracleConnection for OfficialOracleConnection {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        self.query_rows_with_serialize_options(cx, sql, binds, &SerializeOptions::default())
+            .await
+    }
+
+    async fn query_rows_with_serialize_options(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
         let binds = OfficialBinds::from_oracle_binds(binds)?;
         match self
             .call(
@@ -1331,6 +1500,7 @@ impl OracleConnection for OfficialOracleConnection {
                 OfficialCommand::Query {
                     sql: sql.to_owned(),
                     binds,
+                    lob_limits: OfficialLobLimits::from(serialize_opts),
                     timeout: None,
                 },
                 "official Oracle query before",
@@ -1811,7 +1981,7 @@ mod tests {
         assert_eq!(
             format_official_timestamp_for_type(&fractional_timestamp, "DB_TYPE_TIMESTAMP")
                 .expect("valid TIMESTAMP"),
-            "2026-06-01T12:00:00.12"
+            "2026-06-01T12:00:00.120000000"
         );
     }
 
