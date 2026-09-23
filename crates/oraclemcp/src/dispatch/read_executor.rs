@@ -6,7 +6,6 @@
 
 use super::*;
 
-#[path = "read_only_backstop.rs"]
 mod read_only_backstop;
 pub(super) use read_only_backstop::ReadOnlyBackstop;
 
