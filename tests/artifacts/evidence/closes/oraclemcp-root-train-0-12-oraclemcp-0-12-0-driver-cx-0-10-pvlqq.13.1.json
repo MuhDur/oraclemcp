@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T21:10:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.13.1",
+  "scope": {
+    "summary": "T9.1 tier-C Always-Free ADB harness: per-version free discovery, run-tag ownership, zero-cost pre/post control, python-oracledb thin control connect, isolated per-run schema hook, guaranteed destroy incl. fail-after-apply, deny-value scan before upload (6c93f023).",
+    "in_scope": [
+      ".github/workflows/oci-adb.yml",
+      "infra/oci-adb/main.tf",
+      "scripts/e2e/oci_adb_terraform.sh",
+      "scripts/e2e/oci_adb_control.py",
+      "scripts/e2e/fixtures/oci",
+      "scripts/secret_scan.sh"
+    ],
+    "out_of_scope": [
+      "oraclemcp/driver-cx connectivity to ADB (bead no-claim; T9.2/T9.3).",
+      "The repo-wide secret_scan red caused by a bead description quoting a certificate pattern is tracked separately as oraclemcp-lc1l4."
+    ]
+  },
+  "source": {
+    "sha": "d483452812eebb3dfb9704d2bd8de9d8ca38a8ae",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "GitHub Actions oci-adb.yml operation=tier-c, run 35913410526 at 6c93f023 (conclusion success)",
+        "kind": "cli",
+        "trace": "Read by the orchestrator from the run log: pre-run ZERO_COST_PASS; for each free version OCI returned (19c, 23ai, 26ai): adb_version recorded, python-oracledb thin control_connect pass, terraform_destroy pass (throwaway Always Free ADB destroyed); post-run ZERO_COST_PASS."
+      },
+      {
+        "name": "scripts/e2e/oci_adb_terraform.sh --selftest (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "OK: oci_harness_version_filter, oci_harness_ownership (pre-existing ids never selected/destroyed, count 0 refused), oci_harness_zero_cost / zero_cost_empty_list (foreign or unowned live ADBs fail; terminated ignored)."
+      },
+      {
+        "name": "scripts/secret_scan.sh --self-test (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "OK incl. oci_confidentiality_deny_values (planted deny-value trips the scan, not echoed)."
+      },
+      {
+        "name": "confidentiality spot-check",
+        "kind": "cli",
+        "trace": "No real-looking OCIDs, ADB hostnames or region identifiers in the committed fixtures, Terraform, workflow or operator doc."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The fail-after-apply negative (ADB destroyed, run red) was executed live by the implementing pane locally and confirmed by its separate compartment check (all ADBs TERMINATED); the orchestrator did not re-run it.",
+    "The CI run log is the live evidence; it is referenced by run id, not committed as an artifact."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
