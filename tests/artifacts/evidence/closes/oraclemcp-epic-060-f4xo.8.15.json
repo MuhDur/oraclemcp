@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T17:00:00Z",
+  "bead_id": "oraclemcp-epic-060-f4xo.8.15",
+  "scope": {
+    "summary": "RETIRED: operator ruling 2026-09-23: feature, not in the release train; not cheap (WD-Orrery - full 3D Orrery renderer (three.js/r3f + GSAP))",
+    "in_scope": [
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "f0ff72b5f729aded473c0a90736d7c666ad983ed",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Retired, not implemented: WD-Orrery - full 3D Orrery renderer (three.js/r3f + GSAP). operator ruling 2026-09-23: feature, not in the release train; not cheap. Listed in PLAN_0_12_0 plan v3 (R29/R30): only cheap features are kept; this one is not in the release train."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T17:00:00Z",
+  "bead_id": "oraclemcp-multiagent-orchestration-controls-3748",
+  "scope": {
+    "summary": "RETIRED: operator ruling 2026-09-23: process-only (R18/R24) (Multi-agent orchestration controls: capacity admission, durable worker contract, clean-HEAD landing gate, hot-file ledger, watchdog)",
+    "in_scope": [
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "f0ff72b5f729aded473c0a90736d7c666ad983ed",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Retired, not implemented: Multi-agent orchestration controls: capacity admission, durable worker contract, clean-HEAD landing gate, hot-file ledger, watchdog. operator ruling 2026-09-23: process-only (R18/R24). Listed in PLAN_0_12_0 plan v3 (R29/R30): process-only deferred beads retired."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
