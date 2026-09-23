@@ -481,4 +481,27 @@ mod tests {
             "ALTER DATABASE DEFAULT EDITION = \"CHILD_V2\""
         );
     }
+
+    #[test]
+    fn operator_statement_class_rejects_any_other_text() {
+        let exact = "ALTER DATABASE DEFAULT EDITION = \"CHILD_V2\"";
+        assert_eq!(
+            OperatorStatementClass::from_exact_rendered_sql(exact),
+            Some(OperatorStatementClass::DefaultEditionFlip)
+        );
+        for sql in [
+            "ALTER DATABASE DEFAULT EDITION = CHILD_V2",
+            "ALTER PLUGGABLE DATABASE DEFAULT EDITION = \"CHILD_V2\"",
+            "ALTER DATABASE DEFAULT EDITION = \"CHILD_V2\";",
+            "ALTER DATABASE DEFAULT EDITION = \"CHILD_V2\" /* extra */",
+            "alter database default edition = \"CHILD_V2\"",
+            "ALTER DATABASE DEFAULT EDITION = \"CHILD_V2\"\nDROP TABLE T",
+        ] {
+            assert_eq!(
+                OperatorStatementClass::from_exact_rendered_sql(sql),
+                None,
+                "operator executor must reject {sql:?}"
+            );
+        }
+    }
 }
