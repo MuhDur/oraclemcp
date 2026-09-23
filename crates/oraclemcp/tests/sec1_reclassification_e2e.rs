@@ -55,6 +55,14 @@ fn catalog_row(columns: &[(&str, Option<&str>)]) -> OracleRow {
 }
 
 fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    if sql
+        == oraclemcp_db::CatalogQueryId::FgaPoliciesForRelations32
+            .spec()
+            .sql
+        || sql == oraclemcp_db::CatalogQueryId::FgaCatalogProof.spec().sql
+    {
+        return Some(Vec::new());
+    }
     let normalized = sql.to_ascii_lowercase();
     if normalized.contains("sys_context('userenv', 'session_user')") {
         return Some(vec![catalog_row(&[
@@ -237,8 +245,11 @@ impl OracleConnection for RecycledReadOnlyConnection {
         &self,
         _cx: &Cx,
         sql: &str,
-        _binds: &[OracleBind],
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        if let Some(rows) = sample_rows_catalog(sql, binds) {
+            return Ok(rows);
+        }
         self.query_calls.fetch_add(1, Ordering::SeqCst);
         let normalized = sql.to_ascii_lowercase();
         if normalized.contains("get_system_change_number")

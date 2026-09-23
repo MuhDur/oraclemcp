@@ -16,8 +16,8 @@ use oraclemcp_core::OracleMcpServer;
 use oraclemcp_core::init_token::StdioAuthPolicy;
 use oraclemcp_core::server::INIT_TOKEN_META_KEY;
 use oraclemcp_db::{
-    DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
-    OracleRow,
+    CatalogQueryId, DbError, OracleBackend, OracleBind, OracleCell, OracleConnection,
+    OracleConnectionInfo, OracleRow,
 };
 use serde_json::{Value, json};
 
@@ -36,6 +36,11 @@ mod golden_support;
 /// name resolves. Returns `None` for the caller's own statement so the mock's
 /// fixed result rows are returned unchanged.
 fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    if sql == CatalogQueryId::FgaPoliciesForRelations32.spec().sql
+        || sql == CatalogQueryId::FgaCatalogProof.spec().sql
+    {
+        return Some(Vec::new());
+    }
     if sql.contains("policy_name FROM all_policies WHERE ROWNUM <= 1") {
         return Some(vec![OracleRow {
             columns: vec![("POLICY_NAME".to_owned(), resolver_text("SYNTHETIC"))],

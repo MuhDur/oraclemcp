@@ -21,8 +21,8 @@ use oraclemcp_core::{
     CAPABILITIES_TOOL, DispatchContext, OracleMcpServer, ScopeGrant, StdioAuthPolicy,
 };
 use oraclemcp_db::{
-    DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
-    OracleRow,
+    CatalogQueryId, DbError, OracleBackend, OracleBind, OracleCell, OracleConnection,
+    OracleConnectionInfo, OracleRow,
 };
 use oraclemcp_guard::{OperatingLevel, SessionLevelState};
 use serde_json::{Value, json};
@@ -38,6 +38,13 @@ use serde_json::{Value, json};
 /// echoed so any object/column name resolves. Returns `None` for the caller's
 /// own statement so the mock's fixed result rows are returned unchanged.
 fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    if sql == CatalogQueryId::FgaPoliciesForRelations32.spec().sql
+        || sql == CatalogQueryId::FgaCatalogProof.spec().sql
+    {
+        // This fixture's ordinary tables have no FGA policy, and the view is
+        // readable. An error from either query remains a production refusal.
+        return Some(Vec::new());
+    }
     if sql.contains("SYS_CONTEXT('USERENV', 'SESSION_USER')") {
         return Some(vec![OracleRow {
             columns: vec![

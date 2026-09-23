@@ -3,8 +3,8 @@
 use asupersync::Cx;
 use oraclemcp::dispatch::OracleDispatcher;
 use oraclemcp_db::{
-    DbError, OracleBackend, OracleBind, OracleCell, OracleConnection, OracleConnectionInfo,
-    OracleRow,
+    CatalogQueryId, DbError, OracleBackend, OracleBind, OracleCell, OracleConnection,
+    OracleConnectionInfo, OracleRow,
 };
 use serde_json::json;
 
@@ -60,6 +60,13 @@ impl OracleConnection for VisibleCatalogQueryMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
+        // The synthetic table has no FGA policy; both the bounded lookup and
+        // the separate catalog-readability probe succeed with no rows.
+        if sql == CatalogQueryId::FgaPoliciesForRelations32.spec().sql
+            || sql == CatalogQueryId::FgaCatalogProof.spec().sql
+        {
+            return Ok(Vec::new());
+        }
         let normalized = sql.to_ascii_lowercase();
         if normalized.contains("sys_context('userenv', 'session_user')") {
             return Ok(vec![row(&[

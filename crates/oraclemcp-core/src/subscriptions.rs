@@ -1240,7 +1240,9 @@ mod tests {
 
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
     use oraclemcp_config::OracleMcpConfig;
-    use oraclemcp_db::{DbError, OracleBackend, OracleCell, OracleConnectionInfo, OracleRow};
+    use oraclemcp_db::{
+        CatalogQueryId, DbError, OracleBackend, OracleCell, OracleConnectionInfo, OracleRow,
+    };
 
     const URI: &str = "oracle://object/HR/PACKAGE/EMP_API";
 
@@ -1462,6 +1464,13 @@ mod tests {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if sql == CatalogQueryId::FgaPoliciesForRelations32.spec().sql
+                || sql == CatalogQueryId::FgaCatalogProof.spec().sql
+            {
+                // Every synthetic CQN relation here is free of FGA policies;
+                // the catalog view itself remains readable.
+                return Ok(Vec::new());
+            }
             if sql.contains("SYS_CONTEXT('USERENV', 'SESSION_USER')") {
                 return Ok(vec![catalog_row(&[
                     ("SESSION_USER", Some("TEST")),
