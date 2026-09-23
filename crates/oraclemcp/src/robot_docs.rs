@@ -953,12 +953,13 @@ mod tests {
                 tool.name
             );
         }
-        // A representative governance tool must be visible with its level gate.
+        // The write tool is discoverable at READ_ONLY when the effective
+        // ceiling permits READ_WRITE; visibility itself grants no authority.
         let execute = rows
             .iter()
             .find(|row| row["name"] == "oracle_execute")
             .expect("oracle_execute row");
-        assert_eq!(execute["visible_from"], serde_json::json!("READ_WRITE"));
+        assert_eq!(execute["visible_from"], serde_json::json!("READ_ONLY"));
         assert_eq!(execute["destructive"], serde_json::json!(true));
     }
 }
