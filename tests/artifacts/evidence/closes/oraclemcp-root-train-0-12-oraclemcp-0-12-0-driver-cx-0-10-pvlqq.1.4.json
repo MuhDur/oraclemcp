@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T19:25:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.1.4",
+  "scope": {
+    "summary": "T0.4 engine bootstrap: plsql-intelligence revision a7cae173d75984a834a49a69dde5376c3665c3e7 (= origin refs/heads/main) recorded as the pinnable engine revision; the 13 crates oraclemcp consumes build from a git-only tree at that SHA at version 0.7.0.",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "oraclemcp does not consume this revision yet: switching the workspace pins/[patch.crates-io] to it is T0.6/T0.7.",
+      "Engine CI health and engine completeness (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "3ebb39510e497447652ac5a46c3bc71502fcddcb",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "git ls-remote origin main (MuhDur/plsql-intelligence)",
+        "kind": "cli",
+        "trace": "a7cae173d75984a834a49a69dde5376c3665c3e7 refs/heads/main; git merge-base --is-ancestor confirms it is on origin/main."
+      },
+      {
+        "name": "cargo build --locked -p <13 crates> in a fresh detached git worktree at a7cae173 (orchestrator re-execution, independent of the implementing pane's fresh clone)",
+        "kind": "cli",
+        "trace": "exit 0 (plsql-catalog, cicd, core, depgraph, doc, engine, ir, lineage, output, parser-antlr, project, sast, symbols). Worktree contained no untracked/ignored files before the build, so generated sources absent from git cannot have helped (bead negative). Tree clean after build."
+      },
+      {
+        "name": "cargo metadata --no-deps",
+        "kind": "cli",
+        "trace": "all 13 required crates report version 0.7.0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class offline (fresh git-only tree build), as the bead requires; no tests of the engine were run.",
+    "The implementing pane (DarkShore) additionally built a fresh clone; this close cites the orchestrator's own re-execution."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
