@@ -306,6 +306,14 @@ zero rows is acceptable, while `ORA-00942` means the guard will refuse
 relation reads with `fga_evidence_unknown`. A failed catalog query cannot prove
 that an FGA handler is absent.
 
+This is a hard requirement for any account that reads tables or views: without
+it every relation read is refused, while relationless reads such as
+`SELECT 1 FROM dual` still work. `oraclemcp doctor --online` checks it up front
+by running the guard's own probe. Check 18, "FGA catalog visibility", fails
+with `fga_catalog_unreadable` (naming the ORA code) and prints this grant as
+its fix. The `fga_evidence_unknown` refusal carries the same remediation hint.
+There is no override that admits reads without this evidence.
+
 Grant **no** write-implying system privileges. Specifically avoid:
 `CREATE TABLE`, `CREATE ANY TABLE`, `INSERT/UPDATE/DELETE ANY TABLE`,
 `CREATE/ALTER ANY PROCEDURE`, `CREATE/DROP ANY ...`, `ALTER SYSTEM`,

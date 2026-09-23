@@ -55,15 +55,28 @@ pub(super) async fn resolve_query_block_read(
 }
 
 fn fga_refusal(code: &'static str) -> ErrorEnvelope {
+    // An autonomous handler is a property of the table; unknown evidence is
+    // most often an account that cannot read ALL_AUDIT_POLICIES, which doctor
+    // reports as fga_catalog_unreadable (.6.11). The refusal itself is the
+    // same either way: the admission rule does not change.
+    let next_step = match code {
+        "fga_evidence_unknown" => format!(
+            "FGA evidence could not be proven. If `oraclemcp doctor --online` reports \
+             fga_catalog_unreadable, the account cannot read ALL_AUDIT_POLICIES: {}",
+            oraclemcp_core::doctor::FGA_CATALOG_REMEDIATION
+        ),
+        _ => "remove the FGA handler or use a different ordinary table without user-code \
+              audit conditions"
+            .to_owned(),
+    };
     ErrorEnvelope::new(
         ErrorClass::ForbiddenStatement,
         format!("read-only server refused FGA read dependency: {code}"),
     )
     .with_structured_reason(
-        StructuredReason::new(ReasonCategory::UnprovenSideEffect)
-            .with_offending_construct(code),
+        StructuredReason::new(ReasonCategory::UnprovenSideEffect).with_offending_construct(code),
     )
-    .with_next_step("remove the FGA handler or use a different ordinary table without user-code audit conditions")
+    .with_next_step(next_step)
 }
 
 /// `oracle_query` request, parsed and classified ONCE up front (A3/perf).
@@ -1040,6 +1053,25 @@ pub(super) async fn ensure_read_only_backstop_bounded(
 #[cfg(test)]
 mod fga_shape_tests {
     use super::*;
+
+    #[test]
+    fn fga_evidence_unknown_refusal_points_to_doctor_and_the_grant() {
+        let unknown = fga_refusal("fga_evidence_unknown");
+        // Still the same fail-closed refusal (.6.9); only the hint is new.
+        assert_eq!(unknown.error_class, ErrorClass::ForbiddenStatement);
+        assert!(unknown.message.ends_with("fga_evidence_unknown"));
+        let hint = unknown.next_steps.join(" ");
+        assert!(hint.contains("fga_catalog_unreadable"), "{hint}");
+        assert!(hint.contains("oraclemcp doctor --online"), "{hint}");
+        assert!(hint.contains("GRANT SELECT ANY DICTIONARY"), "{hint}");
+        assert!(hint.contains("docs/operations.md §3.1"), "{hint}");
+
+        let handler = fga_refusal("fga_handler_autonomous");
+        assert_eq!(handler.error_class, ErrorClass::ForbiddenStatement);
+        let hint = handler.next_steps.join(" ");
+        assert!(hint.contains("remove the FGA handler"), "{hint}");
+        assert!(!hint.contains("SELECT ANY DICTIONARY"), "{hint}");
+    }
 
     #[test]
     fn generated_sample_shape_is_eligible_for_semantic_read_proof() {
