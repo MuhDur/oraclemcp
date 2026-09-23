@@ -4410,9 +4410,7 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
         None,
         default_read_only_level(),
         ServerBuildOptions {
-            transport: ServerTransportMode::Stdio,
             custom_catalog,
-            skipped_custom_tools: Vec::new(),
             strict_custom_tools: false,
             auditor: None,
             write_intents: None,
@@ -4423,7 +4421,6 @@ fn build_server_advertises_the_active_custom_catalog_plus_capabilities() {
             query_cost_budgets: None,
             result_masking: None,
             sql_policy: None,
-            metrics: None,
             profile_drain: ProfileDrainState::default(),
             unsigned_refusal_log: true,
         },
@@ -4670,5 +4667,136 @@ fn custom_tool_loader_still_skips_a_malformed_definition_without_refusing() {
     assert!(
         !loaded.skipped.is_empty(),
         "the malformed definition must be reported as skipped, not silently dropped"
+    );
+}
+
+/// #51: a profile that can reach a write level never executes a tool without
+/// the audit sink it requires. Neither a missing key (fatal, before the
+/// transport) nor another instance's writer lock (typed, per call) lets the
+/// stdio opener connect or build a dispatcher.
+#[test]
+fn writable_profile_never_runs_without_audit_sink() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("audit tempdir");
+    let audit_path = root.path().join("audit/audit.jsonl");
+    let config_with = |audit: &str| {
+        OracleMcpConfig::from_toml_str(&format!(
+            r#"
+                {audit}
+
+                [[profiles]]
+                name = "writable"
+                connect_string = "localhost:1521/FREEPDB1"
+                max_level = "READ_WRITE"
+                mcp_exposed = true
+            "#
+        ))
+        .expect("config parses")
+    };
+    let resolver: Arc<dyn SecretResolver> = Arc::new(oraclemcp_auth::EnvLookupSecretResolver::new(
+        |name: &str| (name == "T77_AUDIT_KEY").then(|| "K".repeat(32)),
+    ));
+    let level = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+    let connects = Arc::new(AtomicUsize::new(0));
+    let opener_for = |config: OracleMcpConfig| {
+        let reachable_ceiling = max_reachable_write_ceiling(&config, &level);
+        assert_eq!(reachable_ceiling, OperatingLevel::ReadWrite);
+        let counted = Arc::clone(&connects);
+        stdio_opener(
+            StdioOpenerInputs {
+                config,
+                secret_resolver: Arc::clone(&resolver),
+                level: level.clone(),
+                reachable_ceiling,
+                query_cost_budget_enabled: false,
+                connection_plan: RuntimeConnectionPlan::Profile("writable".to_owned()),
+                custom_catalog: CustomToolCatalog::default(),
+                active_profile: Some("writable".to_owned()),
+                strict_custom_tools: false,
+                request_timeout: None,
+                max_query_cost: None,
+                cumulative_query_cost_budget: None,
+                result_masking: None,
+                sql_policy: None,
+                exports: Arc::new(ExportRegistry::new()),
+            },
+            Box::new(move |_plan, _config, _resolver| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                stub_runtime_connections(DbError::Connect("test never connects".to_owned()))
+            }),
+        )
+    };
+
+    // No signing key: a fatal refusal before the transport, nothing connected.
+    let error = DeferredDispatch::start(opener_for(config_with(&format!(
+        "[audit]\npath = {:?}",
+        audit_path.display().to_string()
+    ))))
+    .map(|_| ())
+    .expect_err("a write-reachable profile without an audit key must not start");
+    assert!(
+        error.message.starts_with("ORACLEMCP_AUDIT_KEY_REQUIRED: "),
+        "{}",
+        error.message
+    );
+    assert_eq!(connects.load(Ordering::SeqCst), 0);
+
+    // Keyed, but another writer holds the sink: every tools/call is refused
+    // typed with the holder's pid, and nothing connects.
+    create_private_audit_dir(audit_path.parent().expect("parent")).expect("private audit dir");
+    let _holder = oraclemcp_audit::FileAuditSink::open(&audit_path).expect("holder takes lock");
+    let keyed = config_with(&format!(
+        "[audit]\npath = {:?}\nkey_ref = \"env:T77_AUDIT_KEY\"",
+        audit_path.display().to_string()
+    ));
+    let (dispatch, lock) = DeferredDispatch::start(opener_for(keyed)).expect("not fatal");
+    let lock = lock.expect("the held audit lock defers the open");
+    assert_eq!(lock.code(), "ORACLEMCP_AUDIT_LOG_LOCKED");
+    let server = server_shell(
+        OperatingLevel::ReadWrite,
+        ServerTransportMode::Stdio,
+        Vec::new(),
+        Arc::new(dispatch),
+        Arc::new(ExportRegistry::new()),
+    );
+    let listed = server
+        .handle_jsonrpc_request(
+            serde_json::json!({"jsonrpc":"2.0", "id":1, "method":"tools/list"}),
+            None,
+        )
+        .expect("tools/list response");
+    assert!(
+        listed["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty()),
+        "discovery answers from the static registry while locked: {listed}"
+    );
+    for id in 2..4 {
+        let called = server
+            .handle_jsonrpc_request(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "oracle_execute",
+                        "arguments": {"sql": "delete from t77 where id = 1"}
+                    }
+                }),
+                None,
+            )
+            .expect("tools/call response");
+        let text = called.to_string();
+        assert!(text.contains("ORACLEMCP_AUDIT_LOG_LOCKED"), "{text}");
+        assert!(
+            text.contains(&format!("(pid {})", std::process::id())),
+            "names the holder pid: {text}"
+        );
+    }
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        0,
+        "no connection while the audit sink is unavailable"
     );
 }

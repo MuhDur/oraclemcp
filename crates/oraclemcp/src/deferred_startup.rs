@@ -21,7 +21,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use asupersync::{Cx, Outcome};
+use oraclemcp_core::admission::CapacitySnapshot;
 use oraclemcp_core::edition_executor::ValidatedEditionIdent;
+use oraclemcp_core::http::{
+    HttpLaneBinding, HttpLaneCloseResult, HttpLaneSnapshot, HttpResultStore, HttpSessionLifecycle,
+    HttpSessionStore,
+};
 use oraclemcp_core::{
     DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture,
     DispatchStreamStartFuture, McpSurfaceDetail, McpSurfaceFuture, ToolDispatch, ToolStreamSender,
@@ -319,6 +324,121 @@ impl ToolDispatch for DeferredDispatch {
     }
 }
 
+/// The stateful HTTP transport takes its session lifecycle at startup, but
+/// under #51 the stateful lane dispatcher that implements it is built by the
+/// deferred opener. This forwards to it once attached. Until then there are
+/// no lanes, so closes find nothing; a principal revocation floor recorded in
+/// the meantime is replayed on attach, so a credential revoked while the
+/// locks were held still binds the lanes built afterwards.
+#[derive(Debug, Default)]
+pub struct DeferredSessionLifecycle {
+    state: Mutex<LifecycleState>,
+}
+
+#[derive(Debug, Default)]
+struct LifecycleState {
+    inner: Option<Arc<dyn HttpSessionLifecycle>>,
+    pending_floors: Vec<(String, DispatchCloseReason, Option<u64>)>,
+}
+
+impl DeferredSessionLifecycle {
+    /// Attach the real lifecycle and replay the floors recorded while pending.
+    pub fn attach(&self, inner: Arc<dyn HttpSessionLifecycle>) {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        for (principal_key, reason, min_generation) in state.pending_floors.drain(..) {
+            inner.close_principal_sessions(&principal_key, reason, min_generation);
+        }
+        state.inner = Some(inner);
+    }
+
+    fn inner(&self) -> Option<Arc<dyn HttpSessionLifecycle>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .inner
+            .clone()
+    }
+}
+
+impl HttpSessionLifecycle for DeferredSessionLifecycle {
+    fn close_session(&self, session_id: &str, principal_key: &str) -> bool {
+        self.inner()
+            .is_some_and(|inner| inner.close_session(session_id, principal_key))
+    }
+
+    fn close_session_with_reason(
+        &self,
+        session_id: &str,
+        principal_key: &str,
+        reason: DispatchCloseReason,
+    ) -> bool {
+        self.inner()
+            .is_some_and(|inner| inner.close_session_with_reason(session_id, principal_key, reason))
+    }
+
+    fn close_all_sessions(&self) {
+        if let Some(inner) = self.inner() {
+            inner.close_all_sessions();
+        }
+    }
+
+    fn close_principal_sessions(
+        &self,
+        principal_key: &str,
+        reason: DispatchCloseReason,
+        min_generation: Option<u64>,
+    ) -> usize {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        match state.inner.clone() {
+            Some(inner) => {
+                drop(state);
+                inner.close_principal_sessions(principal_key, reason, min_generation)
+            }
+            None => {
+                state
+                    .pending_floors
+                    .push((principal_key.to_owned(), reason, min_generation));
+                0
+            }
+        }
+    }
+
+    fn active_lanes(&self) -> Vec<HttpLaneSnapshot> {
+        self.inner()
+            .map(|inner| inner.active_lanes())
+            .unwrap_or_default()
+    }
+
+    fn capacity_snapshot(&self, scope: &str, subject: &str) -> Option<CapacitySnapshot> {
+        self.inner()
+            .and_then(|inner| inner.capacity_snapshot(scope, subject))
+    }
+
+    fn lane_binding(&self, lane_id: &str) -> Option<HttpLaneBinding> {
+        self.inner().and_then(|inner| inner.lane_binding(lane_id))
+    }
+
+    fn close_lane_with_reason(
+        &self,
+        lane_id: &str,
+        expected_generation: u64,
+        reason: DispatchCloseReason,
+        session_store: Option<&HttpSessionStore>,
+        result_store: Option<&HttpResultStore>,
+    ) -> HttpLaneCloseResult {
+        match self.inner() {
+            Some(inner) => inner.close_lane_with_reason(
+                lane_id,
+                expected_generation,
+                reason,
+                session_store,
+                result_store,
+            ),
+            None => HttpLaneCloseResult::NotFound,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::Path;
@@ -526,5 +646,67 @@ mod tests {
                 .starts_with("ORACLEMCP_SERVICE_OWNER_LOCKED:")
         );
         assert!(envelope.message.contains("(pid 4242)"));
+    }
+
+    /// Records the principal floors the real stateful lifecycle receives.
+    #[derive(Debug, Default)]
+    struct FloorRecorder {
+        floors: Mutex<Vec<(String, Option<u64>)>>,
+    }
+
+    impl HttpSessionLifecycle for FloorRecorder {
+        fn close_session(&self, _session_id: &str, _principal_key: &str) -> bool {
+            true
+        }
+
+        fn close_principal_sessions(
+            &self,
+            principal_key: &str,
+            _reason: DispatchCloseReason,
+            min_generation: Option<u64>,
+        ) -> usize {
+            self.floors
+                .lock()
+                .unwrap()
+                .push((principal_key.to_owned(), min_generation));
+            1
+        }
+    }
+
+    #[test]
+    fn deferred_lifecycle_replays_revocation_floors_recorded_while_locked() {
+        let lifecycle = DeferredSessionLifecycle::default();
+        // Pending: no lanes exist, so nothing closes; the floor is recorded.
+        assert!(!lifecycle.close_session("s1", "p1"));
+        assert_eq!(
+            lifecycle.close_principal_sessions("p1", DispatchCloseReason::SessionDelete, Some(7)),
+            0
+        );
+        assert!(lifecycle.active_lanes().is_empty());
+        assert_eq!(
+            lifecycle.close_lane_with_reason(
+                "lane-1",
+                1,
+                DispatchCloseReason::SessionDelete,
+                None,
+                None
+            ),
+            HttpLaneCloseResult::NotFound
+        );
+
+        let recorder = Arc::new(FloorRecorder::default());
+        lifecycle.attach(recorder.clone());
+        assert_eq!(
+            *recorder.floors.lock().unwrap(),
+            vec![("p1".to_owned(), Some(7))],
+            "the floor recorded while pending binds the lanes built afterwards"
+        );
+        // Open: calls forward.
+        assert!(lifecycle.close_session("s1", "p1"));
+        assert_eq!(
+            lifecycle.close_principal_sessions("p2", DispatchCloseReason::SessionDelete, None),
+            1
+        );
+        assert_eq!(recorder.floors.lock().unwrap().len(), 2);
     }
 }

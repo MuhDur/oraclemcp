@@ -49,19 +49,26 @@ pub struct DbReadinessPinger {
 }
 
 impl DbReadinessPinger {
-    /// Start a pinger that probes `connection` every [`PROBE_INTERVAL`].
+    /// Start a pinger that probes, every [`PROBE_INTERVAL`], the connection
+    /// `open` supplies. Until it returns one, every probe reports
+    /// not-reachable and nothing is connected. It is polled once per interval
+    /// on the pinger thread, so a serve instance waiting on another
+    /// instance's locks (#51) opens its probe connection only after it has
+    /// them.
     ///
-    /// The connection is moved onto the pinger thread (it is `Send`; only its
+    /// The connection lives on the pinger thread (it is `Send`; only its
     /// `ping` future is `!Send`, and that future never leaves the thread).
     #[must_use]
-    pub fn start(connection: Box<dyn OracleConnection>) -> Self {
+    pub fn start_deferred(
+        mut open: impl FnMut() -> Option<Box<dyn OracleConnection>> + Send + 'static,
+    ) -> Self {
         let state = Arc::new(ProbeState::default());
         let stop = Arc::new(AtomicBool::new(false));
         let worker_state = Arc::clone(&state);
         let worker_stop = Arc::clone(&stop);
         let worker = std::thread::Builder::new()
             .name("oraclemcp-readyz-probe".to_owned())
-            .spawn(move || run_pinger(&*connection, &worker_state, &worker_stop))
+            .spawn(move || run_pinger(&mut open, &worker_state, &worker_stop))
             .ok();
         Self {
             state,
@@ -91,7 +98,11 @@ impl Drop for DbReadinessPinger {
     }
 }
 
-fn run_pinger(connection: &dyn OracleConnection, state: &Arc<ProbeState>, stop: &Arc<AtomicBool>) {
+fn run_pinger(
+    open: &mut dyn FnMut() -> Option<Box<dyn OracleConnection>>,
+    state: &Arc<ProbeState>,
+    stop: &Arc<AtomicBool>,
+) {
     // Each probe is its own short-lived `block_on`, and the inter-probe wait is a
     // sequence of small `std::thread::sleep`s that re-check `stop`. This keeps
     // shutdown PROMPT (≤ SHUTDOWN_POLL) and avoids relying on the runtime's timer
@@ -99,8 +110,12 @@ fn run_pinger(connection: &dyn OracleConnection, state: &Arc<ProbeState>, stop: 
     // worker join on shutdown).
     const SHUTDOWN_POLL: Duration = Duration::from_millis(100);
 
+    let mut connection: Option<Box<dyn OracleConnection>> = None;
     while !stop.load(Ordering::Relaxed) {
-        let reachable = probe_once(connection);
+        if connection.is_none() {
+            connection = open();
+        }
+        let reachable = connection.as_deref().is_some_and(probe_once);
         state.reachable.store(reachable, Ordering::Relaxed);
 
         // Sleep the probe interval in small increments, bailing out fast on stop.
@@ -214,12 +229,53 @@ mod tests {
         let conn: Box<dyn OracleConnection> = Box::new(StubConnection::new(DbError::Connect(
             "no driver".to_owned(),
         )));
-        let mut pinger = DbReadinessPinger::start(conn);
+        let mut conn = Some(conn);
+        let mut pinger = DbReadinessPinger::start_deferred(move || conn.take());
         let probe = pinger.probe();
         // Give the background pinger a moment to run its first probe.
         std::thread::sleep(Duration::from_millis(200));
         assert!(!probe.is_db_reachable(), "stub DB never reachable");
         pinger.shutdown();
+    }
+
+    #[test]
+    fn deferred_pinger_connects_once_only_after_the_gate_opens() {
+        use std::sync::atomic::AtomicUsize;
+        let gate = Arc::new(AtomicBool::new(false));
+        let opened = Arc::new(AtomicUsize::new(0));
+        let (worker_gate, worker_opened) = (Arc::clone(&gate), Arc::clone(&opened));
+        let mut pinger = DbReadinessPinger::start_deferred(move || {
+            if !worker_gate.load(Ordering::SeqCst) {
+                return None;
+            }
+            worker_opened.fetch_add(1, Ordering::SeqCst);
+            Some(Box::new(StubConnection::new(DbError::Connect(
+                "no driver".to_owned(),
+            ))) as Box<dyn OracleConnection>)
+        });
+        let probe = pinger.probe();
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            opened.load(Ordering::SeqCst),
+            0,
+            "no connection before the gate"
+        );
+        assert!(!probe.is_db_reachable());
+        gate.store(true, Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + PROBE_INTERVAL * 3;
+        while opened.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        pinger.shutdown();
+        assert_eq!(
+            opened.load(Ordering::SeqCst),
+            1,
+            "opened exactly once after the gate"
+        );
+        assert!(
+            !probe.is_db_reachable(),
+            "a stub connection is never reachable"
+        );
     }
 
     #[cfg(all(unix, target_os = "linux"))]
