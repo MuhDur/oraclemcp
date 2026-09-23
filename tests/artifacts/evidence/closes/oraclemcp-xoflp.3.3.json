@@ -1,0 +1,42 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.3.3",
+  "scope": {
+    "summary": "Service instance records the bound ephemeral listener for dashboard discovery.",
+    "in_scope": [
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/tests/dashboard_listener_discovery.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp serve --listen 127.0.0.1:0",
+        "kind": "cli",
+        "trace": "71cc14bd; regression in crates/oraclemcp/tests/dashboard_listener_discovery.rs. main push CI run 35315236578 at 73973b20 concluded success."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

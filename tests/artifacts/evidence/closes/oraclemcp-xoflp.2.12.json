@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.2.12",
+  "scope": {
+    "summary": "Dashboard dev dependency vitest/@vitest/mocker updated past GHSA-82fw-gwwq-j7x9.",
+    "in_scope": [
+      "web/package.json",
+      "web/package-lock.json"
+    ],
+    "out_of_scope": [
+      "Shipped dashboard runtime dependencies were not affected (dev/test dependency only)."
+    ]
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard dev/test toolchain",
+        "kind": "cli",
+        "trace": "Fix 31ac3fe3; web/package.json vitest ^5.0.1 and web/package-lock.json resolves node_modules/vitest and node_modules/@vitest/mocker to 5.0.1 (outside the advisory range 2.1.0-4.1.10). main push CI run 35315236578 at 73973b20 concluded success."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

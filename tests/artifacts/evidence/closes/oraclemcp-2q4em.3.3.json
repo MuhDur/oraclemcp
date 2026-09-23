@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-2q4em.3.3",
+  "scope": {
+    "summary": "README Governed dimensions section and corrected completions statement.",
+    "in_scope": [
+      "README.md"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "README",
+        "kind": "cli",
+        "trace": "b7a8b678 adds '## Governed dimensions' (README.md:134, 12 dimension rows grouping the 14 arcs, each with a proof pointer) and fixes the completions statement; survived README revert 83e35948 (verified present at source.sha). Generated tables from 2q4em.3.1 present."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The 14 arcs are presented as 12 grouped dimension rows (e.g. Living DB groups CQN/freshness/Arrow)."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

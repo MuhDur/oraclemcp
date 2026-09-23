@@ -1,0 +1,42 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.5.6",
+  "scope": {
+    "summary": "Scheduled mutation shard planner derives N from exact-SHA population with zero-based cargo-mutants k/N.",
+    "in_scope": [
+      "scripts/mutation_safety_gate.sh",
+      ".github/workflows/mutation-safety.yml"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Mutation Safety scheduled lane",
+        "kind": "cli",
+        "trace": "3542ab29; self-test in scripts/mutation_safety_gate.sh:616-633 covers populations 1..4103 and the 4,103 -> 129-shard case. Hosted runs at 3542ab29: 30516228444 and 30425301335 success; scheduled runs on main through 35833323076 (73973b20) all success; neither file changed after 3542ab29."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

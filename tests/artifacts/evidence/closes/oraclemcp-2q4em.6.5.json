@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-2q4em.6.5",
+  "scope": {
+    "summary": "Uncommitted attestation-verifier e2e spec edit committed with its test green.",
+    "in_scope": [
+      "web/e2e/test-attestation-verifier.spec.ts"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard attestation-verifier e2e",
+        "kind": "route",
+        "trace": "2cb27e54 commits the action-ticket stub (commit subject records the Playwright run green); `git status -- web/e2e/test-attestation-verifier.spec.ts` is clean at source.sha."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.4.1",
+  "scope": {
+    "summary": "Official adapter describe returns session identity fields.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/oracledb_backend.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "official adapter describe",
+        "kind": "api",
+        "trace": "1def5410 adds SYS_CONTEXT USERENV CURRENT_SCHEMA/SESSION_USER identity projection to OfficialCommand::Describe, aligned with driver-cx."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

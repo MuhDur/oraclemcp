@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.1.3",
+  "scope": {
+    "summary": "Official backend maps DB_TYPE_VECTOR to the structured VECTOR cell.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/oracledb_backend.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "official adapter row projection",
+        "kind": "api",
+        "trace": "1def5410 adds the DB_TYPE_VECTOR arm (oracledb_backend.rs:992 vector_cell, structured_official_vector for dense/sparse float32/float64)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

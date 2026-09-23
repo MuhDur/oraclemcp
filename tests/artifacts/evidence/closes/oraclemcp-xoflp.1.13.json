@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.1.13",
+  "scope": {
+    "summary": "driver-cx post-session setup failures never fall back to the official alternate.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "backend acquisition router",
+        "kind": "api",
+        "trace": "babde688; test driver_cx_post_session_setup_failures_never_attempt_the_official_alternate plus complementary driver_cx_connect_error_tries_guarded_official_alternate_for_capable_auth."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

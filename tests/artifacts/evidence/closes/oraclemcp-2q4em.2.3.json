@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-2q4em.2.3",
+  "scope": {
+    "summary": "Contract tests for the changelog-pace lint.",
+    "in_scope": [
+      "scripts/test_changelog_pace_lint.sh",
+      "scripts/e2e/COVERAGE.md"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "changelog pace lint tests",
+        "kind": "cli",
+        "trace": "233a3a3e adds scripts/test_changelog_pace_lint.sh (fixture git repo, no network) and a scripts/e2e/COVERAGE.md row; case set updated with the relaxed lint in e0e8efd3. Runs in CI at .github/workflows/ci.yml:727; main push CI run 35315236578 at 73973b20 concluded success."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The test file was reshaped by e0e8efd3 alongside the relaxed lint; the five original cases are not all preserved verbatim.",
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

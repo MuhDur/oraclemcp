@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.2.10",
+  "scope": {
+    "summary": "Workbench outcome is derived from the guard verdict (blocked/require_step_up).",
+    "in_scope": [
+      "web/src/app/App.tsx",
+      "web/src/app/workbench-verdict.test.ts"
+    ],
+    "out_of_scope": [
+      "Server-side ticket, CSRF, classifier, and lane-generation gates were unchanged by this fix."
+    ]
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "dashboard operator UI",
+        "kind": "route",
+        "trace": "Fix d2761c12 (ancestor of source.sha); regression in web/src/app/workbench-verdict.test.ts. main push CI run 35315236578 at 73973b20 concluded success including 'web bundle (npm ci + vite build)'."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

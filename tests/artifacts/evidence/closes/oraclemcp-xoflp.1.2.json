@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.1.2",
+  "scope": {
+    "summary": "Generated-docs gate refuses a feature-enabled renderer and uses a default-feature binary.",
+    "in_scope": [
+      "scripts/docs_generate.sh"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/docs_generate.sh --check",
+        "kind": "cli",
+        "trace": "f9c04393 requires a default-feature renderer; CI runs it at .github/workflows/ci.yml:664. main push CI run 35315236578 at 73973b20 concluded success."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

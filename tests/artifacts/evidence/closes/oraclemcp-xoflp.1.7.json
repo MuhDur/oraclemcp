@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.1.7",
+  "scope": {
+    "summary": "ADR-0014 describes the shipped bounded pull cursor streaming model.",
+    "in_scope": [
+      "docs/adr/0014-blocking-driver-backend-execution-model.md"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "ADR-0014",
+        "kind": "api",
+        "trace": "1def5410 rewrote the decision text; docs/adr/0014-blocking-driver-backend-execution-model.md:36-39 now states streaming uses a bounded pull cursor (one next_row per bounded-mailbox request, oneshot reply, caller-controlled backpressure)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

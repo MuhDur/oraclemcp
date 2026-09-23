@@ -1,0 +1,42 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.1.15",
+  "scope": {
+    "summary": "docs/comparison.md describes the shipped official-driver alternate accurately.",
+    "in_scope": [
+      "docs/comparison.md",
+      "scripts/release_surface_sync_check.sh"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "docs/comparison.md",
+        "kind": "cli",
+        "trace": "0340f0c6 corrects the wording and adds the release_surface_sync_check.sh assertion; 5aad87bb updates it to 'compiled into shipped artifacts as an experimental, reduced-capability, bounded acquisition-only alternate'."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

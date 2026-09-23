@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-ge6xe.7.1",
+  "scope": {
+    "summary": "VPD readability proof queries are exercised under catalog blindness.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "catalog resolver readability proofs",
+        "kind": "api",
+        "trace": "48747a40 extends the test so the ALL_POLICIES and ALL_TAB_COLS readability proof queries (POLICY_CATALOG_PROOF_SQL, TARGET_COLUMN_CATALOG_PROOF_SQL) must be reached and their errors must abort the proof."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

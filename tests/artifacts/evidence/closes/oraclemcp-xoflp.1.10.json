@@ -1,0 +1,42 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.1.10",
+  "scope": {
+    "summary": "Actor OS-thread spawn failure maps to a redacted DbError instead of panicking.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/oracledb_actor.rs",
+      "crates/oraclemcp-db/src/oracledb_backend.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "official actor spawn",
+        "kind": "api",
+        "trace": "0ddec0a4; test actor_spawn_failure_is_redacted_and_never_starts_a_resource."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

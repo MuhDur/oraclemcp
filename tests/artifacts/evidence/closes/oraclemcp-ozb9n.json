@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-ozb9n",
+  "scope": {
+    "summary": "Blocking Free23 CI lane gates a PL/SQL create/compile/patch/source/drop lifecycle round-trip.",
+    "in_scope": [
+      "scripts/e2e/oracle_ladder_session.py",
+      "crates/oraclemcp/tests/e2e_harness.rs"
+    ],
+    "out_of_scope": [
+      "Invoking a stored routine via oracle_execute is refused by design (procedural invocation without catalog-aware routine analysis fails closed; oraclemcp-ge6xe.2); the lifecycle proof substitutes for invoke-and-verify."
+    ]
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Oracle FREE 23ai matrix lane",
+        "kind": "tool",
+        "trace": "a8364c44 adds the PL/SQL round-trip to the required lane; 3cabbd64 replaces the invoke step with the governed DDL lifecycle proof plus the negative proof source_routine_invocation_via_oracle_execute_refused. Job 'Oracle FREE 23ai matrix + VECTOR smoke' concluded success in main CI run 35315236578 at 73973b20."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

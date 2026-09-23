@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-xoflp.1.9",
+  "scope": {
+    "summary": "Negative sub-hour TSTZ offsets render with one combined sign.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/oracledb_backend.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "official adapter TSTZ projection",
+        "kind": "api",
+        "trace": "1def5410 renders offsets from combined minutes (oracledb_backend.rs:1024-1036); test timestamp_tz_projection_uses_one_sign_for_a_negative_offset covers -00:30, +00:30, -05:30, +14:00."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

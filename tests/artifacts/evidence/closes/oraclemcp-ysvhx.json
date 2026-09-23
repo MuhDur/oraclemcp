@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-ysvhx",
+  "scope": {
+    "summary": "Release signing migrated to cosign v3 Sigstore bundles with the verify path updated.",
+    "in_scope": [
+      ".github/workflows/release.yml",
+      "crates/oraclemcp/install.sh",
+      "crates/oraclemcp/install.ps1",
+      "scripts/verify_release_exact_sha.py"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release signing",
+        "kind": "cli",
+        "trace": "e725cc70 moves release.yml to cosign-release v3.1.2 (release.yml:510) with --bundle *.sigstore.json output (release.yml:558,574) and updates install.sh/install.ps1/verify_release_exact_sha.py to consume .sigstore.json. GitHub release v0.11.0 (tag -> 0c647d36, published 2026-09-17T21:13:39Z) carries 35 assets including *.sigstore.json bundles."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

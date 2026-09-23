@@ -1,0 +1,43 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-ft0ti.3",
+  "scope": {
+    "summary": "Package-scoped CDLA-Permissive-2.0 exception for webpki-roots with the license text shipped.",
+    "in_scope": [
+      "deny.toml",
+      ".dockerignore",
+      "tests/container_supply_chain_contract_test.sh"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo deny check",
+        "kind": "cli",
+        "trace": "30894ed7 adds the webpki-roots-only exception (deny.toml:71-78); 66a6140f and c78948ca ship LICENSE-CDLA-Permissive-2.0 in the Docker context and assert it. Job 'cargo deny (advisories, licenses, bans, sources)' concluded success in main CI run 35315236578; v0.11.0 released from 0c647d36."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
