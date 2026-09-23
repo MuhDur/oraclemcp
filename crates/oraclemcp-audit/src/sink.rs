@@ -1858,6 +1858,17 @@ pub(crate) fn harden_windows_private_file_handle(
     harden_windows_private_acl(file, display_path, false, false, false)
 }
 
+/// Normalize a spool file created by this process with `create_new(true)`
+/// beneath an authenticated private directory. A pre-existing file must use
+/// [`harden_windows_private_file_handle`] and keep its strict owner check.
+#[cfg(windows)]
+pub(crate) fn harden_fresh_windows_private_file_handle(
+    file: &File,
+    display_path: &Path,
+) -> Result<(), AuditError> {
+    harden_windows_private_acl(file, display_path, false, true, false)
+}
+
 /// After opening, confirm the OPEN handle is a regular file — catching a TOCTOU
 /// swap between [`reject_unsafe_existing`] and the open — and harden it to its
 /// platform's owner-only policy. Unix applies `0600` to the descriptor. Windows

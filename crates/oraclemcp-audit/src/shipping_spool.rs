@@ -1970,6 +1970,7 @@ fn read_spooled_record_at(
     Ok(record)
 }
 
+#[derive(Clone, Copy)]
 enum SpoolFileOpen {
     Read,
     Lock,
@@ -2021,7 +2022,10 @@ fn open_spool_file(
             options.write(true);
         }
         SpoolFileOpen::Lock => {
-            options.read(true).write(true).create(true).truncate(false);
+            // A successful create-new is the only proof that the default
+            // Windows TokenOwner on this lock may be normalized. A raced or
+            // pre-existing lock takes the strict existing-file path below.
+            options.read(true).write(true).create_new(true);
         }
         SpoolFileOpen::CreateNew => {
             options.write(true).create_new(true);
@@ -2030,21 +2034,39 @@ fn open_spool_file(
     #[cfg(unix)]
     options.mode(0o600);
     options.follow(FollowSymlinks::No);
-    let file = directory.open_with(name, &options).map_err(|error| {
-        ShippingError::Transport(format!(
-            "cannot open private audit shipping spool entry {}: {error}",
-            display_directory.join(name).display()
-        ))
-    })?;
+    let (file, freshly_created) = match directory.open_with(name, &options) {
+        Ok(file) => (file, !matches!(mode, SpoolFileOpen::Read)),
+        Err(error)
+            if matches!(mode, SpoolFileOpen::Lock)
+                && error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            let mut existing = CapOpenOptions::new();
+            existing.read(true).write(true).follow(FollowSymlinks::No);
+            (
+                directory.open_with(name, &existing).map_err(transport)?,
+                false,
+            )
+        }
+        Err(error) => {
+            return Err(ShippingError::Transport(format!(
+                "cannot open private audit shipping spool entry {}: {error}",
+                display_directory.join(name).display()
+            )));
+        }
+    };
     let file = file.into_std();
-    harden_opened_spool_file(&file, &display_directory.join(name))?;
+    harden_opened_spool_file(&file, &display_directory.join(name), freshly_created)?;
     Ok(file)
 }
 
 /// Authenticate and harden the already-open descriptor. Deliberately do not
 /// inspect `display_path`: after `DurableShippingForwarder::open` it is merely
 /// a diagnostic label and may have been replaced by another local process.
-fn harden_opened_spool_file(file: &File, display_path: &Path) -> Result<(), ShippingError> {
+fn harden_opened_spool_file(
+    file: &File,
+    display_path: &Path,
+    freshly_created: bool,
+) -> Result<(), ShippingError> {
     let metadata = file.metadata().map_err(transport)?;
     if !metadata.file_type().is_file() {
         return Err(ShippingError::Transport(format!(
@@ -2078,7 +2100,14 @@ fn harden_opened_spool_file(file: &File, display_path: &Path) -> Result<(), Ship
         }
     }
     #[cfg(windows)]
-    crate::sink::harden_windows_private_file_handle(file, display_path).map_err(transport)?;
+    if freshly_created {
+        crate::sink::harden_fresh_windows_private_file_handle(file, display_path)
+            .map_err(transport)?;
+    } else {
+        crate::sink::harden_windows_private_file_handle(file, display_path).map_err(transport)?;
+    }
+    #[cfg(not(windows))]
+    let _ = freshly_created;
     Ok(())
 }
 
@@ -2318,6 +2347,10 @@ mod tests {
         assert!(held.dir_metadata().expect("held spool metadata").is_dir());
         crate::sink::harden_windows_private_directory(&spool)
             .expect("fresh spool retains the strict existing-object owner policy");
+        let lock = open_spool_file(&held, &spool, "spool.lock", SpoolFileOpen::Lock)
+            .expect("fresh lock owner and DACL");
+        crate::sink::harden_windows_private_file_handle(&lock, &spool.join("spool.lock"))
+            .expect("fresh lock retains the strict existing-file owner policy");
     }
 
     fn key() -> SigningKey {
