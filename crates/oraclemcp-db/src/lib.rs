@@ -134,7 +134,7 @@ pub use health::{
     tablespace_usage_sql, unusable_indexes_sql,
 };
 pub use intelligence::{
-    DdlText, DependentObject, DependentsProbe, IndexDescription, LobText, OrientForeignKey,
+    DdlText, DependentObject, DependentsProbe, IndexDescription, OrientForeignKey,
     OrientForeignKeyColumn, OrientHotObject, OrientRecentDdlObject, OrientSchemaObject,
     PLAN_COST_ESTIMATE_NOTE, PlanCostEstimate, PlanCostRow, PlanCostSummary, QueryDiff,
     QueryDiffChange, QueryDiffError, QueryDiffSource, SearchColumn, SearchDetailLevel, SearchIndex,
@@ -146,9 +146,8 @@ pub use intelligence::{
     list_schemas, list_source_types, normalize_source_object_type, orient_fks, orient_fks_page,
     orient_hot_objects, orient_hot_objects_page, orient_recent_ddl, orient_recent_ddl_page,
     orient_schema, orient_schema_page, plan_cost_estimate, primary_key_columns, probe_dependents,
-    read_lob, sample_rows, search_objects, search_source, semantic_search_query,
-    semantic_search_query_with_filter, semantic_search_text_query,
-    semantic_search_text_query_with_filter,
+    search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
+    semantic_search_text_query, semantic_search_text_query_with_filter,
 };
 pub use masking::{
     IncomparableMaskedColumn, MASKED_RESULT_VALUE, MIN_PROFILE_MASKING_SALT_BYTES,

@@ -17,7 +17,7 @@ use asupersync::Cx;
 
 use crate::connection::OracleConnection;
 use crate::error::DbError;
-use crate::query::{QueryResponse, read_lob_sql, sample_rows_sql};
+use crate::query::QueryResponse;
 use crate::types::{OracleBind, OracleCell, OracleRow};
 use serde::{Deserialize, Serialize};
 
@@ -288,25 +288,6 @@ pub struct DdlText {
     /// Character length of the full Oracle CLOB.
     pub char_count: usize,
     /// Whether `text` is only a prefix of the full DDL CLOB.
-    pub truncated: bool,
-}
-
-/// A single CLOB/NCLOB/text value read by key, with truncation metadata.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LobText {
-    /// Schema owner.
-    pub owner: String,
-    /// Table or view name.
-    pub table: String,
-    /// CLOB/NCLOB/text column name.
-    pub column: String,
-    /// Key column used to locate the row.
-    pub pk_column: String,
-    /// The text value, or `None` when the matched column is SQL NULL.
-    pub value: Option<String>,
-    /// Characters in the untruncated value. Zero for SQL NULL.
-    pub char_count: usize,
-    /// Whether `value` was truncated to the requested cap.
     pub truncated: bool,
 }
 
@@ -1907,20 +1888,6 @@ pub async fn get_sources_by_name(
     Ok(out)
 }
 
-/// Safe data sampling: the first `n` rows of a table. Schema/table are validated
-/// identifiers (they cannot be bound); `n` is bound.
-pub async fn sample_rows(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: &str,
-    table: &str,
-    n: usize,
-) -> Result<Vec<OracleRow>, DbError> {
-    let sql = sample_rows_sql(owner, table)?;
-    conn.query_rows(cx, &sql, &[OracleBind::from(n as i64)])
-        .await
-}
-
 /// Ordered primary-key column names for one visible table, or an empty list
 /// when the relation has no primary key visible to the current user. This is a
 /// dictionary read only; owner/table are bound and normalized before lookup.
@@ -2247,53 +2214,6 @@ pub fn diff_query_responses(
         source_a: QueryDiffSource::default(),
         source_b: QueryDiffSource::default(),
     })
-}
-
-/// Read one CLOB/NCLOB/text value using the exact SQL from [`read_lob_sql`].
-#[allow(clippy::too_many_arguments)]
-pub async fn read_lob(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    owner: &str,
-    table: &str,
-    clob_column: &str,
-    pk_column: &str,
-    pk_value: &str,
-    max_chars: usize,
-) -> Result<Option<LobText>, DbError> {
-    let sql = read_lob_sql(owner, table, clob_column, pk_column)?;
-    let owner = owner.to_ascii_uppercase();
-    let table = table.to_ascii_uppercase();
-    let clob_column = clob_column.to_ascii_uppercase();
-    let pk_column = pk_column.to_ascii_uppercase();
-    let rows = conn
-        .query_rows(cx, &sql, &[OracleBind::from(pk_value)])
-        .await?;
-    let Some(row) = rows.first() else {
-        return Ok(None);
-    };
-
-    let cap = max_chars.max(1);
-    let full_value = row.text("LOB_VALUE");
-    let char_count = full_value.map(|s| s.chars().count()).unwrap_or(0);
-    let truncated = char_count > cap;
-    let value = full_value.map(|s| {
-        if truncated {
-            s.chars().take(cap).collect()
-        } else {
-            s.to_owned()
-        }
-    });
-
-    Ok(Some(LobText {
-        owner,
-        table,
-        column: clob_column,
-        pk_column,
-        value,
-        char_count,
-        truncated,
-    }))
 }
 
 /// `explain_plan`: on a primary, `EXPLAIN PLAN FOR <sql>` writes `PLAN_TABLE`
@@ -2783,58 +2703,6 @@ mod tests {
                 columns: vec![(
                     "TEXT".to_owned(),
                     OracleCell::new("VARCHAR2", Some("BEGIN NULL; END;\n".to_owned())),
-                )],
-            }])
-        }
-
-        async fn execute(
-            &self,
-            _cx: &Cx,
-            _sql: &str,
-            _binds: &[OracleBind],
-        ) -> Result<u64, DbError> {
-            Ok(0)
-        }
-
-        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-    }
-
-    struct LobMock;
-
-    #[async_trait::async_trait(?Send)]
-    impl OracleConnection for LobMock {
-        fn backend(&self) -> OracleBackend {
-            OracleBackend::RustOracle
-        }
-
-        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-            Ok(OracleConnectionInfo::default())
-        }
-
-        async fn query_rows(
-            &self,
-            _cx: &Cx,
-            _sql: &str,
-            _binds: &[OracleBind],
-        ) -> Result<Vec<OracleRow>, DbError> {
-            Ok(vec![OracleRow {
-                columns: vec![(
-                    "LOB_VALUE".to_owned(),
-                    OracleCell::new("CLOB", Some("abcdefgh".to_owned())),
                 )],
             }])
         }
@@ -3351,31 +3219,29 @@ mod tests {
     }
 
     #[test]
-    fn read_lob_caps_text_and_validates_identifiers() {
-        let lob = run_with_cx(|cx| async move {
-            read_lob(&cx, &LobMock, "hr", "docs", "body", "id", "42", 4)
-                .await
-                .unwrap()
-                .expect("matched row")
-        });
-        assert_eq!(lob.owner, "HR");
-        assert_eq!(lob.table, "DOCS");
-        assert_eq!(lob.column, "BODY");
-        assert_eq!(lob.pk_column, "ID");
-        assert_eq!(lob.value.as_deref(), Some("abcd"));
-        assert_eq!(lob.char_count, 8);
-        assert!(lob.truncated);
+    fn server_read_sql_builders_validate_every_identifier_and_bind_values() {
+        let sample = crate::query::sample_rows_sql("hr", "docs").expect("valid relation");
+        assert_eq!(
+            sample,
+            "SELECT * FROM (SELECT * FROM HR.DOCS) WHERE ROWNUM <= :1"
+        );
+        assert!(crate::query::sample_rows_sql("hr", "docs;drop").is_err());
 
-        let err = run_with_cx(|cx| async move {
-            read_lob(&cx, &LobMock, "hr", "docs;drop", "body", "id", "42", 4)
-                .await
-                .expect_err("bad identifier refused")
-        });
-        assert!(matches!(err, DbError::Query(_)));
+        let lob =
+            crate::query::read_lob_sql("hr", "docs", "body", "id").expect("valid column and key");
+        assert_eq!(
+            lob,
+            "SELECT BODY AS LOB_VALUE FROM HR.DOCS WHERE ID = :1 FETCH FIRST 1 ROW ONLY"
+        );
+        for names in [
+            ["hr;drop", "docs", "body", "id"],
+            ["hr", "docs;drop", "body", "id"],
+            ["hr", "docs", "body;drop", "id"],
+            ["hr", "docs", "body", "id;drop"],
+        ] {
+            assert!(crate::query::read_lob_sql(names[0], names[1], names[2], names[3]).is_err());
+        }
     }
-
-    // The query-builder shapes are exercised by the live tests; the validation
-    // above is the injection-safety gate for the few interpolated positions.
 
     /// A scripted mock for [`search_objects`] (E4): returns SQL-shape-dependent
     /// rows and records every SQL it sees, so the test can prove the summary
