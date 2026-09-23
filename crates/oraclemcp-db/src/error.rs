@@ -111,6 +111,106 @@ pub enum QuarantineOutcome {
     UnknownDiscarded,
 }
 
+/// What happened to one statement, as far as the server can prove.
+///
+/// The single vocabulary recovery, cancellation, cursor discard and the
+/// governed-change paths use to report a statement's fate. Clients are never
+/// told a stronger outcome than the server can prove: an uncertain commit is
+/// [`StatementOutcome::CommitUnknown`], never `Committed` or `RolledBack`.
+/// Whether a failed statement may be replayed is decided only by
+/// [`retry_decision`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatementOutcome {
+    /// Nothing reached Oracle (refused, or failed before the round trip).
+    NotStarted,
+    /// A read finished and its result was delivered.
+    CompletedRead,
+    /// The statement's transactional work was rolled back.
+    RolledBack,
+    /// The work was committed and the commit was acknowledged.
+    Committed,
+    /// A commit was sent but its acknowledgement never arrived: Oracle may or
+    /// may not have applied it.
+    CommitUnknown,
+    /// DDL was sent but its completion was not observed. DDL auto-commits, so
+    /// the object may or may not have changed.
+    DdlOutcomeUnknown,
+    /// The wire protocol lost synchronisation mid-statement; the session was
+    /// discarded and its server-side effect is unknown.
+    ProtocolUnsynchronized,
+}
+
+impl From<QuarantineOutcome> for StatementOutcome {
+    fn from(outcome: QuarantineOutcome) -> Self {
+        match outcome {
+            QuarantineOutcome::RolledBack => StatementOutcome::RolledBack,
+            // No commit was sent, and Oracle rolls back a terminated session's
+            // uncommitted work.
+            QuarantineOutcome::DiscardedUncommitted => StatementOutcome::RolledBack,
+            QuarantineOutcome::CommitInDoubt => StatementOutcome::CommitUnknown,
+            QuarantineOutcome::UnknownDiscarded => StatementOutcome::ProtocolUnsynchronized,
+        }
+    }
+}
+
+/// What kind of statement an outcome belongs to, for the replay decision.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum StatementClass {
+    /// A read the guarded read executor admitted as provably read-only.
+    /// Only that executor may produce this class; every other call site
+    /// classifies as `Unknown` at best.
+    ProvenIdempotentRead,
+    /// DML or anything else that may change data.
+    Mutation,
+    /// DDL (auto-commits).
+    Ddl,
+    /// Session or transaction control (`ALTER SESSION`, `SET ROLE`, …).
+    SessionControl,
+    /// Not proven to be any of the above.
+    Unknown,
+}
+
+/// Whether a failed statement may be retried automatically.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetryDecision {
+    /// Safe to run again automatically, on a fresh lease.
+    AutoRetry,
+    /// Never replay: return the typed outcome to the client.
+    ReturnTyped,
+}
+
+/// The one place that decides automatic replay.
+///
+/// `NotStarted` is retried for every class because nothing reached Oracle.
+/// Beyond that, only a proven idempotent read whose session desynchronised or
+/// which already completed may run again (on a fresh lease). Every mutation,
+/// DDL, session-control or unknown statement that may have reached Oracle
+/// returns its typed outcome and is never replayed. Both matches are
+/// exhaustive without a wildcard arm, so a new outcome or class does not
+/// compile until it is classified here.
+#[must_use]
+pub fn retry_decision(outcome: StatementOutcome, class: StatementClass) -> RetryDecision {
+    match outcome {
+        StatementOutcome::NotStarted => RetryDecision::AutoRetry,
+        StatementOutcome::CompletedRead | StatementOutcome::ProtocolUnsynchronized => match class {
+            StatementClass::ProvenIdempotentRead => RetryDecision::AutoRetry,
+            StatementClass::Mutation
+            | StatementClass::Ddl
+            | StatementClass::SessionControl
+            | StatementClass::Unknown => RetryDecision::ReturnTyped,
+        },
+        StatementOutcome::RolledBack
+        | StatementOutcome::Committed
+        | StatementOutcome::CommitUnknown
+        | StatementOutcome::DdlOutcomeUnknown => RetryDecision::ReturnTyped,
+    }
+}
+
 /// Machine-stable category for a flashback/AS-OF read refusal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -833,6 +933,187 @@ fn transport_lost_envelope(message: &str) -> ErrorEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ALL_OUTCOMES: [StatementOutcome; 7] = [
+        StatementOutcome::NotStarted,
+        StatementOutcome::CompletedRead,
+        StatementOutcome::RolledBack,
+        StatementOutcome::Committed,
+        StatementOutcome::CommitUnknown,
+        StatementOutcome::DdlOutcomeUnknown,
+        StatementOutcome::ProtocolUnsynchronized,
+    ];
+
+    const ALL_CLASSES: [StatementClass; 5] = [
+        StatementClass::ProvenIdempotentRead,
+        StatementClass::Mutation,
+        StatementClass::Ddl,
+        StatementClass::SessionControl,
+        StatementClass::Unknown,
+    ];
+
+    /// Compile-time completeness: adding a variant breaks these matches, so the
+    /// `ALL_*` tables above must be extended with it.
+    fn outcome_index(outcome: StatementOutcome) -> usize {
+        match outcome {
+            StatementOutcome::NotStarted => 0,
+            StatementOutcome::CompletedRead => 1,
+            StatementOutcome::RolledBack => 2,
+            StatementOutcome::Committed => 3,
+            StatementOutcome::CommitUnknown => 4,
+            StatementOutcome::DdlOutcomeUnknown => 5,
+            StatementOutcome::ProtocolUnsynchronized => 6,
+        }
+    }
+
+    fn class_index(class: StatementClass) -> usize {
+        match class {
+            StatementClass::ProvenIdempotentRead => 0,
+            StatementClass::Mutation => 1,
+            StatementClass::Ddl => 2,
+            StatementClass::SessionControl => 3,
+            StatementClass::Unknown => 4,
+        }
+    }
+
+    #[test]
+    fn statement_outcome_serializes_to_plan_names() {
+        let expected = [
+            "not_started",
+            "completed_read",
+            "rolled_back",
+            "committed",
+            "commit_unknown",
+            "ddl_outcome_unknown",
+            "protocol_unsynchronized",
+        ];
+        for (outcome, name) in ALL_OUTCOMES.iter().zip(expected) {
+            assert_eq!(
+                outcome_index(*outcome),
+                ALL_OUTCOMES.iter().position(|o| o == outcome).unwrap()
+            );
+            let wire = serde_json::to_string(outcome).unwrap();
+            assert_eq!(wire, format!("\"{name}\""));
+            let back: StatementOutcome = serde_json::from_str(&wire).unwrap();
+            assert_eq!(back, *outcome);
+        }
+    }
+
+    /// The expected policy, written as an explicit table (not derived from the
+    /// implementation): AutoRetry only for NotStarted (any class) and for a
+    /// proven idempotent read after CompletedRead / ProtocolUnsynchronized.
+    fn expected_matrix(outcome: StatementOutcome, class: StatementClass) -> RetryDecision {
+        let auto = RetryDecision::AutoRetry;
+        let typed = RetryDecision::ReturnTyped;
+        //                         read   mut    ddl    sess   unknown
+        const T: [[bool; 5]; 7] = [
+            /* not_started      */ [true, true, true, true, true],
+            /* completed_read   */ [true, false, false, false, false],
+            /* rolled_back      */ [false, false, false, false, false],
+            /* committed        */ [false, false, false, false, false],
+            /* commit_unknown   */ [false, false, false, false, false],
+            /* ddl_unknown      */ [false, false, false, false, false],
+            /* protocol_unsync  */ [true, false, false, false, false],
+        ];
+        if T[outcome_index(outcome)][class_index(class)] {
+            auto
+        } else {
+            typed
+        }
+    }
+
+    fn assert_policy_matrix(policy: impl Fn(StatementOutcome, StatementClass) -> RetryDecision) {
+        for outcome in ALL_OUTCOMES {
+            for class in ALL_CLASSES {
+                assert_eq!(
+                    policy(outcome, class),
+                    expected_matrix(outcome, class),
+                    "{outcome:?} x {class:?}"
+                );
+                if class == StatementClass::Mutation && outcome != StatementOutcome::NotStarted {
+                    assert_eq!(
+                        policy(outcome, class),
+                        RetryDecision::ReturnTyped,
+                        "a mutation that may have reached Oracle is never replayed: {outcome:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn retry_decision_matrix_is_exhaustive_and_never_retries_mutation() {
+        assert_eq!(ALL_OUTCOMES.len() * ALL_CLASSES.len(), 35);
+        assert_policy_matrix(retry_decision);
+        for (i, outcome) in ALL_OUTCOMES.iter().enumerate() {
+            assert_eq!(outcome_index(*outcome), i);
+        }
+        for (i, class) in ALL_CLASSES.iter().enumerate() {
+            assert_eq!(class_index(*class), i);
+        }
+    }
+
+    #[test]
+    fn planted_mutant_retrying_commit_unknown_mutation_fails_the_matrix() {
+        let mutant = |outcome: StatementOutcome, class: StatementClass| {
+            if outcome == StatementOutcome::CommitUnknown && class == StatementClass::Mutation {
+                RetryDecision::AutoRetry
+            } else {
+                retry_decision(outcome, class)
+            }
+        };
+        let caught = std::panic::catch_unwind(|| assert_policy_matrix(mutant));
+        assert!(
+            caught.is_err(),
+            "the matrix test must reject the planted mutant"
+        );
+    }
+
+    #[test]
+    fn quarantine_outcome_maps_totally() {
+        let cases = [
+            (QuarantineOutcome::RolledBack, StatementOutcome::RolledBack),
+            (
+                QuarantineOutcome::DiscardedUncommitted,
+                StatementOutcome::RolledBack,
+            ),
+            (
+                QuarantineOutcome::CommitInDoubt,
+                StatementOutcome::CommitUnknown,
+            ),
+            (
+                QuarantineOutcome::UnknownDiscarded,
+                StatementOutcome::ProtocolUnsynchronized,
+            ),
+        ];
+        for (quarantine, expected) in cases {
+            // Exhaustive: a new QuarantineOutcome variant fails to compile here.
+            match quarantine {
+                QuarantineOutcome::RolledBack
+                | QuarantineOutcome::DiscardedUncommitted
+                | QuarantineOutcome::CommitInDoubt
+                | QuarantineOutcome::UnknownDiscarded => {}
+            }
+            assert_eq!(StatementOutcome::from(quarantine), expected);
+        }
+        // An in-doubt commit is never reported as a definite outcome.
+        assert_ne!(
+            StatementOutcome::from(QuarantineOutcome::CommitInDoubt),
+            StatementOutcome::Committed
+        );
+    }
+
+    #[test]
+    fn unknown_class_never_auto_retries_after_start() {
+        for outcome in ALL_OUTCOMES {
+            let decision = retry_decision(outcome, StatementClass::Unknown);
+            if outcome == StatementOutcome::NotStarted {
+                assert_eq!(decision, RetryDecision::AutoRetry);
+            } else {
+                assert_eq!(decision, RetryDecision::ReturnTyped, "{outcome:?}");
+            }
+        }
+    }
 
     #[test]
     fn query_error_with_ora_code_classifies() {

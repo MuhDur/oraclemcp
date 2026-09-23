@@ -122,7 +122,8 @@ pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compil
 pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::{
     CONNECT_TRACE_NEXT_STEP, ConnectFailureKind, DbError, FlashbackRefusalKind, QuarantineOutcome,
-    RetryPolicy, is_transient_error,
+    RetryDecision, RetryPolicy, StatementClass, StatementOutcome, is_transient_error,
+    retry_decision,
 };
 pub use health::{
     Finding, HealthSubcheck, ParsedHealthRequest, PreflightReport, Severity, SubcheckPreflight,
