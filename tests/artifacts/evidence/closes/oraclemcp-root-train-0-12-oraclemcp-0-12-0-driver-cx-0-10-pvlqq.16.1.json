@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T00:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.16.1",
+  "scope": {
+    "summary": "ActionEnvelopeV1 + keyed canonical bind codec: every confirmation-minting preview binds the exact execution envelope (statement digest, bind arity/types, keyed HMAC of bind values, commit/hold/output modes); swapped SQL or binds are refused at apply (b4293abf). CustomToolCall kind defined and bound through the generic preview path; dedicated custom-tool preview is .10.13.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/action_envelope.rs",
+      "crates/oraclemcp-guard/tests/action_envelope.rs",
+      "crates/oraclemcp/src/dispatch/tests/action_envelope.rs",
+      "crates/oraclemcp/src/dispatch/args.rs"
+    ],
+    "out_of_scope": [
+      "dispatch/mod.rs currently carries another agent's uncommitted edits and is excluded from the clean-scope claim; its committed state is covered by the gate.",
+      "External-client proof (w4_impact_*) is T14.9 per the bead proof split."
+    ]
+  },
+  "source": {
+    "sha": "11e6b1c9c5c9b676ee03a9c6ab7cfddf7dfdc91d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 11e6b1c9 (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 116 suites, 3404 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests in gate",
+        "kind": "cli",
+        "trace": "16 named acceptance/test-plan tests ok by exact name (guard action_envelope + dispatch action_envelope suites); remaining extracted names are field/tool identifiers or external W4 case ids."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane.",
+    "No orchestrator-authored mutants for this bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

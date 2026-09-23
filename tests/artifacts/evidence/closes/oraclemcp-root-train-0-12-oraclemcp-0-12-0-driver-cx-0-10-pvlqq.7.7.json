@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T00:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.7",
+  "scope": {
+    "summary": "#51: a second oraclemcp instance completes the MCP handshake over stdio and HTTP behind a held audit/service-owner lock; every tools/call returns typed ORACLEMCP_AUDIT_LOG_LOCKED (HTTP 429 + Retry-After) naming the holder pid (Unix); no DB connection while locked; recovers without restart after the holder exits; doctor reports audit_log_locked (0610eddb, 47ee1015, 67e42870, dd28855a, fc6dd3ee, 32504f70).",
+    "in_scope": [
+      "crates/oraclemcp/src/deferred_startup.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-core/src/file_store.rs",
+      "crates/oraclemcp/tests/w4_runtime_issue51.rs"
+    ],
+    "out_of_scope": [
+      "crates/oraclemcp-audit/src/sink.rs was changed afterwards by .12.1 (a21b555b) and is excluded from the clean-scope claim.",
+      "Windows lock semantics and shared-chain concurrency (bead no-claim); the Windows holder-pid assertion is Unix-only by design (32504f70)."
+    ]
+  },
+  "source": {
+    "sha": "11e6b1c9c5c9b676ee03a9c6ab7cfddf7dfdc91d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 11e6b1c9 (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 116 suites, 3404 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests in gate",
+        "kind": "cli",
+        "trace": "deferred_auditor_locked_refuses_tool_calls_without_db_work, deferred_auditor_reopens_after_holder_exits, writable_profile_never_runs_without_audit_sink, w4_runtime_issue51_second_instance_typed_locked (stdio), w4_runtime_issue51_http_service_owner_typed_locked, doctor_reports_audit_log_locked_with_holder_and_path: all ok."
+      },
+      {
+        "name": "live recovery (implementer, clean release build)",
+        "kind": "cli",
+        "trace": "FREE 23ai (rust-oracledb-free), XE21, XE18: while locked 0 sessions for instance 2 and typed lock error naming instance 1 pid; after holder exit 1 session and the query succeeds without restart; negative control against the pre-fix binary fails (instance 2 exits before handshake)."
+      },
+      {
+        "name": "sec second-agent review (orchestrator)",
+        "kind": "cli",
+        "trace": "Both judgment calls err toward refusal: an HTTP server with per-client credentials refuses to start while another instance owns service state (nothing to authenticate against); a locked HTTP instance keeps operator audit writes and operator stores off until restart (they refuse; tool calls recover). Lock order identical on both transports (no deadlock); no DB work while locked."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane.",
+    "Live recovery runs were executed by the implementing pane; the orchestrator verified the process-level and unit tests in the clean gate."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
