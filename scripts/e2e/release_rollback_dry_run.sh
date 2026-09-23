@@ -114,7 +114,7 @@ cd "$ROOT"
 e2e_log_event "scenario_start" "setup" "running" 0 \
   "rollback dry-run for broken=$TAG previous_good=v$PREVIOUS_VERSION"
 e2e_log_event "channel_inventory" "assert" "pass" 0 \
-  "tag pipeline channels: crates.io, GitHub release, signed artifacts, GHCR, MCP registry; pending registry promotion: Homebrew, winget"
+  "tag pipeline channels: crates.io, GitHub release, signed artifacts, GHCR, MCP registry; no other channel is published"
 e2e_log_event "workflow_topology" "assert" "pass" 0 \
   "release.yml owns tag publication; docker.yml and publish-mcp.yml are manual recovery auxiliaries"
 
@@ -152,8 +152,6 @@ plan_check ghcr docker buildx imagetools inspect "ghcr.io/muhdur/oraclemcp:$BROK
 plan_check ghcr docker buildx imagetools inspect ghcr.io/muhdur/oraclemcp:latest
 plan_check mcp-registry bash -c \
   "curl -fsS 'https://registry.modelcontextprotocol.io/v0/servers?search=oraclemcp&limit=20' | jq -e --arg version '$BROKEN_VERSION' '.servers[] | select(.server.name == \"io.github.MuhDur/oraclemcp\" and .server.version == \$version)'"
-plan_check homebrew brew info MuhDur/oraclemcp/oraclemcp
-plan_check winget winget show --id MuhDur.oraclemcp --exact
 
 # Every public mutation is conditional on the checks above and separately
 # approval-gated. The script still skips every command because it is dry-run-only.
@@ -169,10 +167,6 @@ plan_action ghcr outward "versioned previous-good image exists, is signed, and r
   gh workflow run docker.yml -f "version=$PREVIOUS_VERSION" -f variant=core -f operation=rollback
 e2e_log_event "manual_channel" "assert" "pass" 0 \
   "MCP registry: published versions are immutable and cannot be unpublished; record $BROKEN_VERSION and cut a fixed higher version through release.yml because republishing $PREVIOUS_VERSION cannot become latest"
-e2e_log_event "manual_channel" "assert" "pass" 0 \
-  "Homebrew: only submit a rollback formula update if brew info resolves $BROKEN_VERSION; record PR and propagation state"
-e2e_log_event "manual_channel" "assert" "pass" 0 \
-  "winget: only submit a rollback manifest update if winget show resolves $BROKEN_VERSION; record PR and propagation state"
 e2e_log_event "scenario_assert" "assert" "pass" 0 \
-  "rollback plan is non-mutating and covers the current tag pipeline, published channels, signed release evidence, and pending registry promotions"
+  "rollback plan is non-mutating and covers the current tag pipeline, published channels, and signed release evidence"
 e2e_finish_pass

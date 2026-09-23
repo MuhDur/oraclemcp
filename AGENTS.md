@@ -265,8 +265,8 @@ pipeline, `.github/workflows/release.yml`: release gates, crates.io packages,
 signed multi-platform GitHub assets, `ghcr.io/muhdur/oraclemcp`, and the MCP
 registry entry from `server.json` (GitHub OIDC). `.github/workflows/docker.yml`
 and `.github/workflows/publish-mcp.yml` are manual recovery/repair auxiliaries,
-not additional tag pipelines. Homebrew and winget manifests ship as GitHub
-release assets for separate registry promotion. No npm/npx channel is offered.
+not additional tag pipelines. No third-party package-manager manifests are
+shipped, and no npm/npx channel is offered.
 
 ## Issue tracking
 

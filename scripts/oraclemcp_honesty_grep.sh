@@ -38,9 +38,29 @@ for f in "${FILES[@]}"; do
   done < <(grep -niE "$PATTERN" "$f" 2>/dev/null || true)
 done
 
+# Retired distribution channels (plan R11/R17/R32): Homebrew, winget and npm
+# are not offered, so no install surface, release step or script may offer
+# them again.  honesty-allow: pattern definition
+CHANNEL_PATTERN='brew install|winget install|MuhDur\.oraclemcp|homebrew-oraclemcp|npx oraclemcp'  # honesty-allow: pattern definition
+mapfile -t CHANNEL_FILES < <(
+  git ls-files README.md 'docs/*.md' packaging .github/workflows scripts \
+    | grep -vE '^docs/plan/'
+)
+for f in "${CHANNEL_FILES[@]}"; do
+  [ -n "$f" ] || continue
+  while IFS=: read -r line text; do
+    case "$text" in
+      *honesty-allow*) continue ;;
+    esac
+    printf 'RETIRED channel    %s:%s:%s\n' "$f" "$line" "${text#"${text%%[![:space:]]*}"}"
+    violations=$((violations + 1))
+  done < <(grep -niE "$CHANNEL_PATTERN" "$f" 2>/dev/null || true)
+done
+
 if [ "$violations" -gt 0 ]; then
   echo "oraclemcp-honesty-grep: FAIL — $violations over-claiming occurrence(s)."
-  echo "Reframe to governed/least-privilege, or add a 'honesty-allow: <reason>' marker."
+  echo "Reframe to governed/least-privilege (and offer only the supported install"
+  echo "channels), or add a 'honesty-allow: <reason>' marker."
   exit 1
 fi
 echo "oraclemcp-honesty-grep: OK — no over-claiming framing in release-visible text."

@@ -87,7 +87,7 @@ gates a tag push, not a merge).
 | `scripts/e2e/oci_adb_terraform.sh`, `real_adb_tcps_signoff.sh`, `oci_adb_iam_bootstrap/` (real OCI Always-Free ADB) | `oci-adb.yml:acceptance` | `workflow_dispatch` only | 3 | manual |
 | `scripts/local_release_gate.sh` (D3.2: synthetic TCPS proof, optional real-ADB delegation) | local, pre-tag | on demand before a release tag | 3 | n/a (local, not a CI job) |
 | full release pipeline (cross-platform build, sign, publish crates.io/GHCR/MCP registry) | `release.yml` | push tag `v*` | 3 | release |
-| `docker.yml`, `publish-mcp.yml`, `publish-npm.yml` | manual recovery/repair auxiliaries (AGENTS.md "Release flow") | `workflow_dispatch` only | 3 | manual |
+| `docker.yml`, `publish-mcp.yml` | manual recovery/repair auxiliaries (AGENTS.md "Release flow") | `workflow_dispatch` only | 3 | manual |
 
 Live-Oracle Rust test suites (`crates/*/tests/live_*`, `oci_tcps_e2e.rs`) are
 gated behind the `live-xe` Cargo feature **and** a runtime reachability probe:

@@ -141,9 +141,8 @@ signal even though this scheduled workflow is not a per-commit required check.
    `release.yml` is the single normal tag pipeline: it publishes crates.io,
    signed multi-platform GitHub assets, GHCR, and then the MCP registry entry.
    `docker.yml` and `publish-mcp.yml` are dispatch-only recovery/repair tools;
-   do not dispatch them during a healthy tag release. Homebrew and winget
-   manifests are attached to the GitHub release for separate registry
-   promotion. There is no npm/npx release channel.
+   do not dispatch them during a healthy tag release. No third-party
+   package-manager manifests are shipped. There is no npm/npx release channel.
 
 > **Honesty note.** This checklist documents the gates that exist today and the
 > procedure for proving them green on the RC. The "green on the frozen RC +
@@ -176,7 +175,7 @@ shipped the broken version:
    dispatched a recovery action.
 2. **Reconcile every channel.** Record the `release.yml` run, crates.io package
    versions, GitHub release assets/signatures/attestations, immutable and
-   rolling GHCR tags, MCP registry entry, and Homebrew/winget resolution. A
+   rolling GHCR tags, and MCP registry entry. A
    failed or skipped downstream job means that channel may need no rollback.
 3. **Yank crates.io packages only when present.** Each `cargo yank` is an
    irreversible, separately approved action. Use the metadata-derived list in
@@ -210,15 +209,11 @@ shipped the broken version:
    it cannot roll a published version back. See the registry's
    [unpublish/immutability FAQ](https://modelcontextprotocol.io/registry/faq)
    and [version ordering contract](https://modelcontextprotocol.io/registry/versioning).
-7. **Handle Homebrew and winget conditionally.** The tag pipeline attaches
-   manifests, but their registries are promoted separately and can lag. Submit
-   rollback PRs/manifest updates only when the registry actually resolves the
-   broken version, and record propagation state. npm is absent because it is
-   not a supported or published channel.
 
 Do not call this rollback complete until the incident notes record the state or
 explicit non-publication of crates.io, the GitHub release and signed artifacts,
-GHCR immutable/rolling tags, the MCP registry, and Homebrew/winget.
+GHCR immutable/rolling tags, and the MCP registry. No other channel exists:
+third-party package managers and npm are not published.
 
 ---
 

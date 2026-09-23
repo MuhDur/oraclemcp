@@ -582,11 +582,6 @@ jobs:
           EXPECTED_OIDC_ISSUER: https://token.actions.githubusercontent.com
         run: bash scripts/verify_release_artifacts.sh artifacts
 
-      - name: Generate Homebrew and winget manifests
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: bash scripts/render_distribution_manifests.sh artifacts
-
       - name: Publish release with checksums, SBOM, and signatures
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3
         with:
@@ -603,8 +598,6 @@ jobs:
             artifacts/*.cdx.json
             artifacts/*.cdx.json.sigstore.json
             artifacts/*.cdx.json.attestation.sigstore.json
-            artifacts/distribution-manifests/homebrew/Formula/oraclemcp.rb
-            artifacts/distribution-manifests/winget/**/*.yaml
           generate_release_notes: true
           prerelease: ${{ contains(github.ref_name, '-') }}
 

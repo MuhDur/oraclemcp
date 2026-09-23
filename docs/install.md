@@ -201,30 +201,16 @@ connection, operating level, grants, cancellation, and audit context. Intentiona
 `--allow-no-auth` HTTP development uses one anonymous lane; stdio remains the
 single local client path.
 
-Other release channels come from the same signed archive matrix. These channels
-can lag the GitHub release tag, so use the check command first and install only
-after it resolves the target version.
+Other release channels come from the same signed archive matrix and are
+published by the same tag pipeline:
 
 ```sh
 cargo binstall oraclemcp
 docker run -i --rm ghcr.io/muhdur/oraclemcp:latest
 ```
 
-Pending registry-backed channels:
-
-```sh
-brew info MuhDur/oraclemcp/oraclemcp
-winget search --id MuhDur.oraclemcp --exact
-```
-
-After the relevant check resolves the target version, these commands are
-copy-pasteable:
-
-```sh
-brew install MuhDur/oraclemcp/oraclemcp
-winget install --id MuhDur.oraclemcp --exact
-```
-
-An npm/npx channel is not offered. Install with the one-line installer above, or
-`cargo binstall oraclemcp`, the GHCR Docker image, or the Homebrew/winget
-channels once they resolve.
+No third-party package-manager channel is offered.
+An npm/npx channel is not offered.
+Install with the one-line installer above (`install.sh` or `install.ps1`),
+`cargo binstall oraclemcp`, crates.io, the GHCR Docker image, or the MCP
+registry entry.

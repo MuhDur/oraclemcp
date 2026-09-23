@@ -1,7 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
 
@@ -173,15 +172,36 @@ fn install_manual_preserves_detailed_contract_and_readme_stays_install_first() {
         "om dashboard",
         "database Subject",
         "isolated per-principal lanes",
-        "Pending registry-backed channels",
-        "brew info MuhDur/oraclemcp/oraclemcp",
-        "winget search --id MuhDur.oraclemcp --exact",
+        "No third-party package-manager channel is offered",
         "An npm/npx channel is not offered",
     ] {
         assert!(
             install_section.contains(needle),
             "installation manual must contain {needle}"
         );
+    }
+    // Third-party package-manager and npm channels are retired (plan
+    // R11/R17/R32): no install surface may offer them again.
+    for retired in [
+        "brew install",
+        "brew info",
+        "winget install",
+        "winget search",
+        "MuhDur.oraclemcp",
+        "homebrew-oraclemcp",
+        "npx oraclemcp",
+    ] {
+        for (surface, text) in [
+            ("docs/install.md", manual.as_str()),
+            ("README.md", readme.as_str()),
+        ] {
+            assert!(
+                !text
+                    .to_ascii_lowercase()
+                    .contains(&retired.to_ascii_lowercase()),
+                "{surface} must not offer the retired channel command {retired}"
+            );
+        }
     }
 }
 
@@ -557,30 +577,20 @@ fn npm_release_channel_is_retired() {
     let install_manual = read("docs/install.md");
     let release_checklist = read("docs/release-checklist.md");
     let release_workflow = read(".github/workflows/release.yml");
-    let npm_workflow = read(".github/workflows/publish-npm.yml");
     let release_surfaces = read("docs/release-surfaces.md");
     let surface_sync = read("scripts/release_surface_sync_check.sh");
     let preflight = read("scripts/release_preflight.sh");
-    let publish_input_validator = read("scripts/validate_npm_publish_input.sh");
 
     assert!(install_manual.contains("An npm/npx channel is not offered"));
     assert!(release_checklist.contains("There is no npm/npx release channel."));
-    assert!(
-        npm_workflow.contains("npm/npx release channel is retired"),
-        "manual workflow must explain that npm publication is retired"
-    );
-
-    for forbidden in [
-        "npm publish",
-        "NPM_TOKEN",
-        "id-token: write",
-        "registry-url: https://registry.npmjs.org",
-        "npm install -g npm",
-        "npm whoami",
+    for retired in [
+        ".github/workflows/publish-npm.yml",
+        "scripts/validate_npm_publish_input.sh",
+        "npm/oraclemcp/package.json",
     ] {
         assert!(
-            !npm_workflow.contains(forbidden),
-            "retired npm workflow must not retain publication authority or auth path: {forbidden}"
+            !root.join(retired).exists(),
+            "retired npm channel file must not exist: {retired}"
         );
     }
     for forbidden in [
@@ -600,15 +610,6 @@ fn npm_release_channel_is_retired() {
             "retired npm wrapper package must not be a release-version surface"
         );
     }
-    assert!(
-        publish_input_validator.contains("npm/npx release channel is retired"),
-        "legacy npm input validator must reject instead of accepting publication inputs"
-    );
-    assert!(
-        !publish_input_validator.contains("auth_mode")
-            && !publish_input_validator.contains("dist_tag="),
-        "legacy npm input validator must not retain publish-mode outputs"
-    );
 }
 
 #[test]
@@ -671,171 +672,39 @@ fn cargo_binstall_metadata_matches_release_assets() {
 }
 
 #[test]
-// Runs the bash render_distribution_manifests.sh (same Linux release-distribution
-// tooling scoped in e2e_harness). Runs on the Linux CI release lane; scoped to Unix.
-#[cfg_attr(
-    windows,
-    ignore = "linux release-distribution renderer; runs on the linux ci lane"
-)]
-fn binstall_brew_winget_metadata_valid() {
+fn binstall_metadata_valid_and_no_distribution_manifests_ship() {
     let root = repo_root();
     let manifest =
         fs::read_to_string(root.join("crates/oraclemcp/Cargo.toml")).expect("read Cargo.toml");
     assert!(manifest.contains("[package.metadata.binstall]"));
     assert!(manifest.contains("[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]"));
 
-    let homebrew_template =
-        fs::read_to_string(root.join("packaging/homebrew/Formula/oraclemcp.rb.in"))
-            .expect("read Homebrew formula template");
-    for needle in [
-        "class Oraclemcp < Formula",
-        "license any_of: [\"Apache-2.0\", \"MIT\"]",
-        "oraclemcp-aarch64-apple-darwin.tar.gz",
-        "oraclemcp-x86_64-apple-darwin.tar.gz",
-        "bin.install \"oraclemcp\"",
-        "bin.install \"om\"",
+    // Package-manager manifests are retired (plan R17): no template, renderer or
+    // release step may come back, and the release uploads no manifests.
+    for retired in [
+        "packaging/homebrew",
+        "packaging/winget",
+        "scripts/render_distribution_manifests.sh",
     ] {
         assert!(
-            homebrew_template.contains(needle),
-            "Homebrew template must contain {needle}"
+            !root.join(retired).exists(),
+            "retired distribution-manifest path must not exist: {retired}"
         );
     }
-
-    let winget_installer =
-        fs::read_to_string(root.join("packaging/winget/MuhDur.oraclemcp.installer.yaml.in"))
-            .expect("read winget installer template");
-    for needle in [
-        "PackageIdentifier: MuhDur.oraclemcp",
-        "InstallerType: zip",
-        "NestedInstallerType: portable",
-        "Architecture: x64",
-        "oraclemcp-x86_64-pc-windows-msvc.zip",
-        "RelativeFilePath: oraclemcp-x86_64-pc-windows-msvc\\oraclemcp.exe",
-        "PortableCommandAlias: oraclemcp",
-        "RelativeFilePath: oraclemcp-x86_64-pc-windows-msvc\\om.exe",
-        "PortableCommandAlias: om",
-        "ManifestVersion: 1.12.0",
-    ] {
-        assert!(
-            winget_installer.contains(needle),
-            "winget installer template must contain {needle}"
-        );
-    }
-
     let workflow =
         fs::read_to_string(root.join(".github/workflows/release.yml")).expect("read release.yml");
-    assert!(workflow.contains("scripts/render_distribution_manifests.sh artifacts"));
-    assert!(workflow.contains("artifacts/distribution-manifests/homebrew/Formula/oraclemcp.rb"));
-    assert!(workflow.contains("artifacts/distribution-manifests/winget/**/*.yaml"));
-
-    // CARGO_TARGET_DIR may be RELATIVE — CI's coverage lane sets exactly that
-    // (`CARGO_TARGET_DIR: target/coverage-ratchet`). Cargo reads it relative to
-    // where cargo was invoked (the workspace root); this test process runs with
-    // its cwd at the PACKAGE root, and spawns the renderer with cwd at the
-    // workspace root. Passing the relative path through unresolved meant the
-    // fixtures were written under crates/oraclemcp/ and looked for one level
-    // up, so the renderer correctly reported a checksum file that genuinely was
-    // not there. The test passed on every machine where CARGO_TARGET_DIR was
-    // unset or absolute, and failed only on the runner.
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .map(|dir| {
-            if dir.is_absolute() {
-                dir
-            } else {
-                root.join(dir)
-            }
-        })
-        .unwrap_or_else(|| root.join("target"));
-    assert!(
-        target_dir.is_absolute(),
-        "fixture root must be absolute before it crosses a process boundary: {}",
-        target_dir.display(),
-    );
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is after the Unix epoch")
-        .as_nanos();
-    let test_root = target_dir.join(format!("dist-metadata-test-{}-{nonce}", std::process::id()));
-    let artifacts = test_root.join("artifacts");
-    let out = test_root.join("out");
-    fs::create_dir_all(&artifacts).expect("create artifact fixture dir");
-    let darwin_x64_sha = write_archive_checksum_fixture(
-        &artifacts,
-        "oraclemcp-x86_64-apple-darwin.tar.gz",
-        b"deterministic darwin x86_64 release archive fixture",
-    );
-    let darwin_arm64_sha = write_archive_checksum_fixture(
-        &artifacts,
-        "oraclemcp-aarch64-apple-darwin.tar.gz",
-        b"deterministic darwin aarch64 release archive fixture",
-    );
-    let windows_x64_sha = write_archive_checksum_fixture(
-        &artifacts,
-        "oraclemcp-x86_64-pc-windows-msvc.zip",
-        b"deterministic windows x86_64 release archive fixture",
-    );
-
-    let output = Command::new(common::bash_bin())
-        .arg(root.join("scripts/render_distribution_manifests.sh"))
-        .env("VERSION", "9.9.9-test.1")
-        .env("ARTIFACT_DIR", &artifacts)
-        .env("OUT_DIR", &out)
-        .current_dir(&root)
-        .output()
-        .expect("run distribution metadata renderer");
-    assert!(
-        output.status.success(),
-        "distribution renderer failed\nstdout:\n{}\nstderr:\n{}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    let formula = fs::read_to_string(out.join("homebrew/Formula/oraclemcp.rb"))
-        .expect("read rendered Homebrew formula");
-    assert!(!formula.contains("__"));
-    assert!(formula.contains("version \"9.9.9-test.1\""));
-    assert!(formula.contains(&format!("sha256 \"{darwin_x64_sha}\"")));
-    assert!(formula.contains(&format!("sha256 \"{darwin_arm64_sha}\"")));
-
-    let winget_dir = out.join("winget/manifests/m/MuhDur/oraclemcp/9.9.9-test.1");
-    let winget_version = fs::read_to_string(winget_dir.join("MuhDur.oraclemcp.yaml"))
-        .expect("read rendered winget version manifest");
-    let winget_locale = fs::read_to_string(winget_dir.join("MuhDur.oraclemcp.locale.en-US.yaml"))
-        .expect("read rendered winget locale manifest");
-    let winget_installer = fs::read_to_string(winget_dir.join("MuhDur.oraclemcp.installer.yaml"))
-        .expect("read rendered winget installer manifest");
-    for rendered in [&winget_version, &winget_locale, &winget_installer] {
-        assert!(!rendered.contains("__"));
-        assert!(rendered.contains("PackageVersion: 9.9.9-test.1"));
-        assert!(rendered.contains("PackageIdentifier: MuhDur.oraclemcp"));
+    for forbidden in [
+        "distribution-manifests",
+        "render_distribution_manifests",
+        "Homebrew",
+        "homebrew",
+        "winget",
+    ] {
+        assert!(
+            !workflow.contains(forbidden),
+            "release.yml must not render or upload package-manager manifests: {forbidden}"
+        );
     }
-    assert!(winget_version.contains("ManifestType: version"));
-    assert!(winget_locale.contains("ManifestType: defaultLocale"));
-    assert!(winget_installer.contains("ManifestType: installer"));
-    assert!(winget_installer.contains(&format!(
-        "InstallerSha256: {}",
-        windows_x64_sha.to_ascii_uppercase()
-    )));
-}
-
-fn write_archive_checksum_fixture(dir: &Path, asset: &str, bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-
-    use sha2::Digest as _;
-
-    fs::write(dir.join(asset), bytes).expect("write archive fixture");
-    let hash = sha2::Sha256::digest(bytes);
-    let mut digest = String::with_capacity(hash.len() * 2);
-    for byte in hash {
-        write!(&mut digest, "{byte:02x}").expect("writing to a String cannot fail");
-    }
-    fs::write(
-        dir.join(format!("{asset}.sha256")),
-        format!("{digest}  {asset}\n"),
-    )
-    .expect("write checksum fixture");
-    digest
 }
 
 fn expand_binstall_template(

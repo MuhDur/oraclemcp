@@ -222,6 +222,15 @@ expect_fail "tampered checksum" run_artifact_verify
 write_archive_checksum
 printf '%s  %s\n' "$(sha256sum "$archive" | awk '{print $1}')" wrong-name.tar.gz >"$archive.sha256"
 expect_fail "checksum for wrong basename" run_artifact_verify
+# Checksum binding the retired distribution-manifest renderer also re-checked
+# (plan R17): the upload gate itself refuses these.
+write_archive_checksum
+printf '%s  %s\n' "$(sha256sum "$archive" | awk '{print $1}')" extra-archive.tar.gz >>"$archive.sha256"
+expect_fail "extra checksum record" run_artifact_verify
+printf 'prefix=%s suffix\n' "$(sha256sum "$archive" | awk '{print $1}')" >"$archive.sha256"
+expect_fail "checksum record with prefix/suffix junk" run_artifact_verify
+: >"$archive.sha256"
+expect_fail "empty checksum sidecar" run_artifact_verify
 write_archive_checksum
 printf 'tampered\n' >"$archive.sigstore.json"
 expect_fail "tampered signature bundle" run_artifact_verify

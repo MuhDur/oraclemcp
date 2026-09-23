@@ -316,11 +316,6 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/render_distribution_manifests.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/resource_budget.sh",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -402,11 +397,6 @@
     },
     {
       "path": "scripts/validate_evidence.py",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
-      "path": "scripts/validate_npm_publish_input.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },

@@ -50,7 +50,7 @@ One line installs or updates on macOS and Linux (works pasted in a terminal or i
 curl -fsSL "https://raw.githubusercontent.com/MuhDur/oraclemcp/main/install.sh?$(date +%s)" | bash
 ```
 
-It verifies a SHA-256 digest (plus cosign signature/provenance when cosign is present) and installs `oraclemcp` and the short `om` alias into `$HOME/.local`. Also available: **Windows** (`install.ps1`), **Docker** (`ghcr.io/muhdur/oraclemcp:latest`), `cargo binstall oraclemcp`, and Homebrew/winget once those channels resolve. Air-gapped offline install, verification postures, and service install are documented via `bash install.sh --help` and [`docs/`](docs/). No npm/npx channel is offered.
+It verifies a SHA-256 digest (plus cosign signature/provenance when cosign is present) and installs `oraclemcp` and the short `om` alias into `$HOME/.local`. Also available: **Windows** (`install.ps1`), **Docker** (`ghcr.io/muhdur/oraclemcp:latest`), and `cargo binstall oraclemcp`. Air-gapped offline install, verification postures, and service install are documented via `bash install.sh --help` and [`docs/`](docs/). No npm/npx channel is offered.
 
 Onboard and connect a client:
 

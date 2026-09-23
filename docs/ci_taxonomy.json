@@ -597,17 +597,6 @@
       "path_filtered": false
     },
     {
-      "check_name": "npm/npx release channel is retired",
-      "tier": "manual",
-      "workflow": "Retired npm wrapper guard",
-      "workflow_file": "publish-npm.yml",
-      "job_id": "retired",
-      "triggers": [
-        "workflow_dispatch"
-      ],
-      "path_filtered": false
-    },
-    {
       "check_name": "Publish to crates.io",
       "tier": "release",
       "workflow": "Release",
@@ -942,15 +931,6 @@
         "verify registry listing"
       ]
     },
-    "publish-npm.yml": {
-      "name": "Retired npm wrapper guard",
-      "triggers": [
-        "workflow_dispatch"
-      ],
-      "jobs": [
-        "npm/npx release channel is retired"
-      ]
-    },
     "release.yml": {
       "name": "Release",
       "triggers": [
@@ -1000,7 +980,6 @@
       "OCI ADB acceptance",
       "Windows audit native workspace",
       "manual mutation shard",
-      "npm/npx release channel is retired",
       "promote attested digest",
       "publish server.json",
       "validate immutable release",

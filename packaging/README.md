@@ -1,15 +1,13 @@
-# Distribution Manifests
+# Packaging
 
-This directory contains release-time templates for package-manager metadata that
-needs the final archive checksums.
+No third-party package-manager manifests are shipped. oraclemcp is distributed
+only through the channels its tag pipeline (`.github/workflows/release.yml`)
+publishes:
 
-`scripts/render_distribution_manifests.sh` reads the release archive `.sha256`
-files from the GitHub release artifact directory and writes:
+- the one-line installers `install.sh` (Linux, macOS) and `install.ps1`
+  (Windows), which verify the signed GitHub release archives;
+- `cargo binstall oraclemcp` against the same archives, and crates.io;
+- the GHCR image `ghcr.io/muhdur/oraclemcp`;
+- the MCP registry entry from `server.json`.
 
-- `homebrew/Formula/oraclemcp.rb`
-- `winget/manifests/m/MuhDur/oraclemcp/<version>/MuhDur.oraclemcp*.yaml`
-
-The Homebrew formula targets the macOS release archives. The winget manifest
-targets the Windows zip as a portable package and may be submitted after the tag
-is published because community repository validation and review can lag the
-release.
+There is no npm/npx channel.
