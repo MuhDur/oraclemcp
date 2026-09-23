@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-2q4em.2.5",
+  "scope": {
+    "summary": "RETIRED: Dependabot PR #24 was closed unmerged by Dependabot on 2026-09-07; superseded by open Dependabot PR #27 (github-actions weekly group, 10 updates, opened 2026-09-21)",
+    "in_scope": [
+      ".github/workflows/release.yml"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Retired, not implemented: the PR this bead targets no longer exists as a mergeable PR (gh pr view 24: state CLOSED, mergedAt null, closedAt 2026-09-07T03:11:00Z). Its successor is open PR #27; the cosign pin decision from oraclemcp-ysvhx still applies to it and the W5 CI work owns that bump."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

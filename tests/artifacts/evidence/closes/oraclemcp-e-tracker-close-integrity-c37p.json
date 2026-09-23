@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-e-tracker-close-integrity-c37p",
+  "scope": {
+    "summary": "RETIRED (superseded): T1-T4 shipped in scripts/bead_tracker_guard.sh (67bc446d; eng-program bp8ia.6.5 closed): landed-commit/clean-path proof, live run identity, serialized release-claim + close-reason binding, correct-false-close",
+    "in_scope": [
+      "scripts/bead_tracker_guard.sh"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded: duplicate of oraclemcp-eng-program-bp8ia.6.5 (E5 tracker discipline T1-T4), closed. docs/bead-close-evidence.md documents CLOSE_EVIDENCE_NOT_LANDED / SCOPE_DIRTY_AT_CLOSE (T1), LIVE_RUN_ID_MISSING (T2), release-claim + CLOSE_REASON_UNBOUND (T3), correct-false-close (T4)."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

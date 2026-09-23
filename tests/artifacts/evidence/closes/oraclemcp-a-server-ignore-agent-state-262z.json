@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-a-server-ignore-agent-state-262z",
+  "scope": {
+    "summary": "RETIRED (superseded): .codex/ and codex.mcp.json are ignored (9aadf6ca) and the tests/artifacts log allowlist exists (.gitignore '!tests/artifacts/**/*.log'; eng-program C5 bp8ia.4.5 closed)",
+    "in_scope": [
+      ".gitignore"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded: .gitignore ignores .codex/ and codex.mcp.json since 9aadf6ca and re-includes tests/artifacts/**/*.log; the tracked-content C5 bead oraclemcp-eng-program-bp8ia.4.5 is closed. The .ruff_cache item was conditional on recurrence and none is claimed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

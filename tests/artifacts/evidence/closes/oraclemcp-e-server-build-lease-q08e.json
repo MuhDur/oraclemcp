@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-e-server-build-lease-q08e",
+  "scope": {
+    "summary": "RETIRED (superseded): physical build lease shipped (d56196ac; eng-program bp8ia.6.1 closed): flock lease, compiler-wrapper interception, dedicated target enforcement",
+    "in_scope": [
+      "scripts/build_lease.sh"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded: duplicate of oraclemcp-eng-program-bp8ia.6.1 (E1), closed as fully implemented (scripts/build_lease.sh, scripts/check_build_lease.sh, .cargo/config.toml wrapper). Blocked-by edge from deferred e-server-worktree-lifecycle-3lqe unlinked; 3lqe keeps its own status."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

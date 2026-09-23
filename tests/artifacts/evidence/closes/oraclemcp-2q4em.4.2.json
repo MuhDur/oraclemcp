@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-2q4em.4.2",
+  "scope": {
+    "summary": "RETIRED: operator ruling 2026-09-23 D2/R11/R17: Homebrew and winget retired fully; removal of docs/pipeline/templates tracked in PLAN_0_12_0 W6 (winget)",
+    "in_scope": [
+      "README.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Retired, not implemented: winget submission. operator ruling 2026-09-23 D2/R11/R17: Homebrew and winget retired fully; removal of docs/pipeline/templates tracked in PLAN_0_12_0 W6."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

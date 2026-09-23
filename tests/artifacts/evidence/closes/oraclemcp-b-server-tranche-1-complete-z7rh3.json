@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-b-server-tranche-1-complete-z7rh3",
+  "scope": {
+    "summary": "RETIRED (superseded): umbrella duplicate of eng-program Cluster B CI Tranche 1 (bp8ia.3 closed)",
+    "in_scope": [
+      ".github/workflows/release.yml"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded: duplicate umbrella of oraclemcp-eng-program-bp8ia.3 (Cluster B), closed. Remaining deltas t8rs and gkcz stay as their own beads (W5); edges to them unlinked."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-b-server-release-surface-runbook-t8rs",
+    "oraclemcp-b-server-acceptance-dedupe-gkcz"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-i-oci-evidence-and-cleanup-ledger-1dfz",
+  "scope": {
+    "summary": "RETIRED (merged): duplicate of open oraclemcp-eng-program-bp8ia.10.3 (confidentiality-clean evidence + cleanup ledger); scope carried by comment there (W9)",
+    "in_scope": [
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Merged, not dropped: open oraclemcp-eng-program-bp8ia.10.3 is the owner (bp8ia.10.1 itself asks to absorb-or-dedup ilr4); this bead's scope is copied onto it by comment and it feeds PLAN_0_12_0 W9."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.10.3"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

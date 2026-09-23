@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-d-server-coverage-ratchet-m6ym",
+  "scope": {
+    "summary": "RETIRED (superseded): coverage baseline + changed-line ratchet with mutation floor shipped (eng-program bp8ia.5.1 and 5.2 closed)",
+    "in_scope": [
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Superseded: duplicate of oraclemcp-eng-program-bp8ia.5.1 (D1 coverage baseline, scripts/coverage_baseline.sh) and bp8ia.5.2 (D2 changed-line + mutation-floor ratchet), both closed with evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

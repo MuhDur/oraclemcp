@@ -1,0 +1,40 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T15:00:00Z",
+  "bead_id": "oraclemcp-5k7zi",
+  "scope": {
+    "summary": "RETIRED: merged into oraclemcp-2q4em.5.2 (18c/21c live matrix scope carried by comment); operator ruling 2026-09-23 D-PROC",
+    "in_scope": [
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "041045290321fb01b3a000e74343adfc2e1249f2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Merged, not dropped: the 18c/21c live version-matrix scope (xe18/xe21 lanes of scripts/e2e/oracle_version_matrix.sh; read-only, write, DDL, PL/SQL round-trips) is carried by a comment on oraclemcp-2q4em.5.2 and by the W4/W5 local gate (XE 18/21/FREE 23ai)."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-2q4em.5.2"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
