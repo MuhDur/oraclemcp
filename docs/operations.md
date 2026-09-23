@@ -296,6 +296,16 @@ GRANT SELECT ON app.orders    TO mcp_ro;
 -- ...one GRANT SELECT per object (or use a read-only role, §3.3).
 ```
 
+The read guard checks `ALL_AUDIT_POLICIES` for fine-grained audit handlers
+before it runs a query over a table or view. The `SELECT ANY DICTIONARY` grant
+above makes that view readable on the FREE 23ai lab. If you use narrower
+dictionary grants, a DBA with authority over the SYS view must also grant
+`SELECT ON SYS.ALL_AUDIT_POLICIES` to the served account. Verify with that
+account using `SELECT policy_name FROM all_audit_policies WHERE ROWNUM <= 1`;
+zero rows is acceptable, while `ORA-00942` means the guard will refuse
+relation reads with `fga_evidence_unknown`. A failed catalog query cannot prove
+that an FGA handler is absent.
+
 Grant **no** write-implying system privileges. Specifically avoid:
 `CREATE TABLE`, `CREATE ANY TABLE`, `INSERT/UPDATE/DELETE ANY TABLE`,
 `CREATE/ALTER ANY PROCEDURE`, `CREATE/DROP ANY ...`, `ALTER SYSTEM`,
