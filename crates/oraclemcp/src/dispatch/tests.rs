@@ -400,6 +400,62 @@ fn semantic_dispatcher() -> (OracleDispatcher, Arc<SemanticGuardState>) {
     )
 }
 
+#[test]
+fn sample_rows_rejects_filter_and_columns_issue_36() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let error = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({
+                "table": "T",
+                "columns": ["PK", "A"],
+                "filter": "pk = 123",
+                "limit": 1
+            }),
+        )
+        .expect_err("unsupported projection and filter must be refused");
+    assert_eq!(error.error_class, ErrorClass::InvalidArguments);
+    assert!(error.message.contains("columns"), "{error:?}");
+    assert!(error.message.contains("filter"), "{error:?}");
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+    assert!(
+        state
+            .read_events
+            .lock()
+            .expect("read events lock")
+            .is_empty()
+    );
+}
+
+#[test]
+fn builtins_reject_unknown_properties_issue_37() {
+    let (dispatcher, state) = semantic_dispatcher();
+    for tool in crate::registry::tool_registry().tools {
+        let error = dispatcher
+            .dispatch(&tool.name, json!({"__bogus__": 1}))
+            .expect_err("an undeclared property must be refused before dispatch");
+        assert_eq!(
+            error.error_class,
+            ErrorClass::InvalidArguments,
+            "{}: {error:?}",
+            tool.name
+        );
+        assert!(
+            error.message.contains("__bogus__"),
+            "{}: {error:?}",
+            tool.name
+        );
+    }
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+    assert!(
+        state
+            .read_events
+            .lock()
+            .expect("read events lock")
+            .is_empty()
+    );
+}
+
 fn write_executor_test_artifact(name: &str, cases: &[Value]) {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
@@ -9419,10 +9475,8 @@ fn cumulative_query_cost_budget_refuses_at_limit_and_ignores_agent_reset_fields(
     assert_eq!(first["row_count"], json!(1));
     assert_eq!(state.actual_reads.load(Ordering::SeqCst), 1);
 
-    // QueryArgs deliberately has no principal or reset control. Even unknown
-    // request fields must not influence the server-derived accounting key or
-    // turn an exhausted principal into an unmetered request.
-    let err = dispatcher
+    // Caller-supplied accounting controls are rejected before cost estimation.
+    let spoofed = dispatcher
         .dispatch_with_context(
             "oracle_query",
             json!({
@@ -9433,7 +9487,23 @@ fn cumulative_query_cost_budget_refuses_at_limit_and_ignores_agent_reset_fields(
             }),
             context,
         )
-        .expect_err("at-budget principal remains refused despite forged reset fields");
+        .expect_err("forged reset fields are undeclared");
+    assert_eq!(spoofed.error_class, ErrorClass::InvalidArguments);
+    assert!(spoofed.message.contains("principal"), "{spoofed:?}");
+    assert!(spoofed.message.contains("reset_budget"), "{spoofed:?}");
+    assert_eq!(state.explain_writes.load(Ordering::SeqCst), 1);
+
+    // The server-derived principal remains exhausted for a clean retry.
+    let err = dispatcher
+        .dispatch_with_context(
+            "oracle_query",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true,
+            }),
+            context,
+        )
+        .expect_err("at-budget principal remains refused");
 
     assert_eq!(err.error_class, ErrorClass::PolicyDenied);
     assert!(

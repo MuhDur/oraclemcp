@@ -4758,6 +4758,18 @@ fn source_range_metadata(
 
 /// Deserialize a tool's args struct, mapping a serde error to a structured
 /// `InvalidArguments` envelope (never a panic).
+fn validate_declared_args(tool: &str, args: &Value) -> Result<(), ErrorEnvelope> {
+    if let Some((unknown, accepted)) = crate::registry::undeclared_arguments(tool, args) {
+        return Err(invalid_args(format!(
+            "invalid arguments for {tool}: unknown argument(s) {}; accepted arguments: {}",
+            unknown.join(", "),
+            accepted.join(", ")
+        ))
+        .with_next_step("call tools/list and inspect this tool's inputSchema.properties"));
+    }
+    Ok(())
+}
+
 fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T, ErrorEnvelope> {
     // An MCP client may legally omit `arguments`; the transport maps that to
     // `Value::Null`, which `from_value` rejects even for all-optional structs.
@@ -4765,11 +4777,15 @@ fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T
         Value::Null => Value::Object(serde_json::Map::new()),
         other => other,
     };
-    serde_json::from_value(args)
-        .map_err(|e| invalid_args(format!("invalid arguments for {tool}: {e}")))
+    validate_declared_args(tool, &args)?;
+    serde_json::from_value(args).map_err(|e| {
+        invalid_args(format!("invalid arguments for {tool}: {e}"))
+            .with_next_step("call tools/list and inspect this tool's inputSchema.properties")
+    })
 }
 
 fn ensure_no_args(tool: &str, args: Value) -> Result<(), ErrorEnvelope> {
+    validate_declared_args(tool, &args)?;
     match args {
         Value::Object(map) if map.is_empty() => Ok(()),
         Value::Null => Ok(()),
@@ -11757,6 +11773,9 @@ impl OracleDispatcher {
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
+        // Reject schema-forbidden keys before connection metadata, audit, or
+        // any generated SQL can observe an ambiguously shaped request.
+        validate_declared_args(name, &args)?;
         let mut request_budget = self.dispatch_request_budget(cx, context)?;
         if let Some(timeout) = explicit_timeout_duration(&args)? {
             request_budget = request_budget.tighten_timeout(timeout);

@@ -102,7 +102,7 @@ pub fn register_tools(registry: &mut ToolRegistry) {
         )
         .with_input_schema(object_schema(
             json!({
-                "changeset": { "type": "object", "description": "plsql-cicd ChangeSet JSON." },
+                "changeset": change_set_schema(),
                 "mode": { "type": "string", "enum": ["source_only", "catalog_aware", "live_snapshot"], "description": "Prediction completeness mode. Defaults to catalog_aware." }
             }),
             &["changeset"],
@@ -170,7 +170,13 @@ pub fn register_tools(registry: &mut ToolRegistry) {
         .with_input_schema(object_schema(
             json!({
                 "source": { "type": "string", "description": "Optional PL/SQL source text to scan for doc comments." },
-                "docset": { "type": "object", "description": "Optional plsql-doc DocSet JSON to render." },
+                "docset": {
+                    "type": "object",
+                    "description": "Optional plsql-doc DocSet JSON to render.",
+                    "properties": { "objects": { "type": "array" } },
+                    "required": ["objects"],
+                    "additionalProperties": false
+                },
                 "query": { "type": "string", "description": "Case-insensitive doc-comment filter." },
                 "format": { "type": "string", "enum": ["json", "markdown", "html", "doctor"], "description": "DocSet render format. Defaults to json." },
                 "project_label": { "type": "string", "description": "Label used by bundle/index renderers." }
@@ -239,6 +245,19 @@ fn object_schema(props: Value, required: &[&str]) -> Value {
     })
 }
 
+fn change_set_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "plsql-cicd ChangeSet JSON.",
+        "properties": {
+            "objects": { "type": "array", "description": "Changed objects; an empty array is valid." },
+            "unclassified_files": { "type": "array", "description": "Project-relative files not classified as objects." }
+        },
+        "required": ["objects", "unclassified_files"],
+        "additionalProperties": true
+    })
+}
+
 fn live_schema(include_changeset: bool) -> Value {
     let mut props = json!({
         "schemas": { "type": "array", "items": { "type": "string" }, "description": "Schema owners to extract. Omit to use the current schema." },
@@ -248,10 +267,7 @@ fn live_schema(include_changeset: bool) -> Value {
     let mut required = Vec::new();
     if include_changeset {
         if let Value::Object(map) = &mut props {
-            map.insert(
-                "changeset".to_owned(),
-                json!({ "type": "object", "description": "plsql-cicd ChangeSet JSON." }),
-            );
+            map.insert("changeset".to_owned(), change_set_schema());
             map.insert(
                 "mode".to_owned(),
                 json!({ "type": "string", "enum": ["source_only", "catalog_aware", "live_snapshot"], "description": "Prediction completeness mode. Defaults to live_snapshot." }),
@@ -679,31 +695,68 @@ fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T
         Value::Null => Value::Object(serde_json::Map::new()),
         other => other,
     };
+    if let Some((unknown, accepted)) = crate::registry::undeclared_arguments(tool, &args) {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!(
+                "invalid arguments for {tool}: unknown argument(s) {}; accepted arguments: {}",
+                unknown.join(", "),
+                accepted.join(", ")
+            ),
+        )
+        .with_next_step("call tools/list and inspect this tool's inputSchema.properties"));
+    }
     serde_json::from_value(args).map_err(|error| {
         ErrorEnvelope::new(
             ErrorClass::InvalidArguments,
             format!("invalid arguments for {tool}: {error}"),
         )
+        .with_next_step("call tools/list and inspect this tool's inputSchema.properties")
     })
 }
 
+#[cfg(test)]
+pub(crate) fn decode_args_for_contract(tool: &str, args: Value) -> Result<(), ErrorEnvelope> {
+    macro_rules! typed {
+        ($ty:ty) => {
+            parse_args::<$ty>(tool, args).map(|_| ())
+        };
+    }
+    match tool {
+        "oracle_plsql_parse" => typed!(ParseArgs),
+        "oracle_plsql_analyze" => typed!(AnalyzeArgs),
+        "oracle_plsql_what_breaks" => typed!(WhatBreaksArgs),
+        "oracle_plsql_lineage" => typed!(LineageArgs),
+        "oracle_lineage" => typed!(ColumnLineageArgs),
+        "oracle_plsql_sast" => typed!(SastArgs),
+        "oracle_plsql_doc" => typed!(DocArgs),
+        "oracle_plsql_live_snapshot" => typed!(LiveSnapshotArgs),
+        "oracle_plsql_blast_radius" => typed!(BlastRadiusArgs),
+        other => panic!("registered PL/SQL tool {other} has no decoder contract"),
+    }
+}
+
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ParseArgs {
     source: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AnalyzeArgs {
     project_root: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WhatBreaksArgs {
     changeset: ChangeSet,
     mode: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LineageArgs {
     project_root: String,
     target: String,
@@ -712,6 +765,7 @@ struct LineageArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ColumnLineageArgs {
     project_root: String,
     owner: Option<String>,
@@ -720,6 +774,7 @@ struct ColumnLineageArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SastArgs {
     project_root: String,
     format: Option<String>,
@@ -729,6 +784,7 @@ struct SastArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocArgs {
     source: Option<String>,
     docset: Option<DocSet>,
@@ -738,6 +794,7 @@ struct DocArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LiveSnapshotArgs {
     schemas: Option<Vec<String>>,
     include_plscope: Option<bool>,
@@ -745,6 +802,7 @@ struct LiveSnapshotArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct BlastRadiusArgs {
     schemas: Option<Vec<String>>,
     include_plscope: Option<bool>,

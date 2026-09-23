@@ -81,16 +81,7 @@ fn preview_confirm_with_context(
     sql: &str,
 ) -> String {
     dispatcher
-        .dispatch_with_context(
-            "oracle_preview_sql",
-            json!({
-                "sql": sql,
-                "agent_identity": "attacker",
-                "operator_name": "HumanOperator",
-                "label": "spoofed",
-            }),
-            context,
-        )
+        .dispatch_with_context("oracle_preview_sql", json!({ "sql": sql }), context)
         .expect("preview")
         .pointer("/execute_confirmation/confirm")
         .and_then(Value::as_str)
@@ -145,13 +136,21 @@ fn caller_supplied_identity_cannot_change_audit_subject_or_db_evidence() {
         .with_principal_key("oauth:subject-hash")
         .with_lane_identity("lane-1", 7);
     let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+    let preview_spoof = dispatcher
+        .dispatch_with_context(
+            "oracle_preview_sql",
+            json!({ "sql": sql, "agent_identity": "attacker" }),
+            context,
+        )
+        .expect_err("preview rejects caller-supplied identity");
+    assert_eq!(preview_spoof.error_class, ErrorClass::InvalidArguments);
     let confirm = preview_confirm_with_context(&dispatcher, context, sql);
 
-    dispatcher
+    let rejected = dispatcher
         .dispatch_with_context(
             "execute_approved",
             json!({
-                "token": confirm,
+                "token": confirm.clone(),
                 "commit": true,
                 "agent_identity": "attacker",
                 "operator_name": "HumanOperator",
@@ -159,7 +158,23 @@ fn caller_supplied_identity_cannot_change_audit_subject_or_db_evidence() {
             }),
             context,
         )
-        .expect("write dispatches");
+        .expect_err("caller-supplied identity fields are undeclared");
+    assert_eq!(rejected.error_class, ErrorClass::InvalidArguments);
+    assert!(rejected.message.contains("agent_identity"), "{rejected:?}");
+    assert!(rejected.message.contains("operator_name"), "{rejected:?}");
+    assert!(rejected.message.contains("label"), "{rejected:?}");
+    assert!(
+        sink.records().is_empty(),
+        "rejected arguments cannot reach the audit or DB write path"
+    );
+
+    dispatcher
+        .dispatch_with_context(
+            "execute_approved",
+            json!({ "token": confirm, "commit": true }),
+            context,
+        )
+        .expect("clean write dispatches");
 
     let recs = sink.records();
     assert_eq!(recs.len(), 2);

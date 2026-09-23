@@ -12,6 +12,7 @@ use oraclemcp_core::capabilities::{CapabilitiesReport, FeatureTiers};
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_guard::OperatingLevel;
 use serde_json::{Value, json};
+use std::sync::OnceLock;
 
 /// The tool names this server dispatches, in registration order.
 /// Kept as a constant so the dispatcher and the unit tests pin the exact set.
@@ -136,6 +137,42 @@ pub fn tool_names() -> Vec<&'static str> {
     {
         TOOL_NAMES.to_vec()
     }
+}
+
+/// Return every undeclared top-level argument and the declared property names.
+/// The same registry drives `tools/list`, so runtime admission cannot silently
+/// accept a property that the tool schema says is forbidden.
+pub(crate) fn undeclared_arguments(
+    tool_name: &str,
+    args: &Value,
+) -> Option<(Vec<String>, Vec<String>)> {
+    let Value::Object(arguments) = args else {
+        return None;
+    };
+    static PROPERTIES: OnceLock<Vec<(String, Vec<String>)>> = OnceLock::new();
+    let properties = PROPERTIES.get_or_init(|| {
+        tool_registry()
+            .tools
+            .into_iter()
+            .map(|tool| {
+                let names = tool
+                    .input_schema
+                    .as_ref()
+                    .and_then(|schema| schema.get("properties"))
+                    .and_then(Value::as_object)
+                    .map(|properties| properties.keys().cloned().collect())
+                    .unwrap_or_default();
+                (tool.name, names)
+            })
+            .collect()
+    });
+    let (_, accepted) = properties.iter().find(|(name, _)| name == tool_name)?;
+    let unknown = arguments
+        .keys()
+        .filter(|name| !accepted.contains(name))
+        .cloned()
+        .collect::<Vec<_>>();
+    (!unknown.is_empty()).then(|| (unknown, accepted.clone()))
 }
 
 /// A JSON-Schema `object` with the given required string properties (plus any
@@ -544,6 +581,10 @@ pub fn tool_registry() -> ToolRegistry {
                     "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page (incremental fetch). Resuming with it yields the next page byte-identically." },
                     "format": { "type": "string", "enum": ["json", "arrow"], "description": "Inline result format. json (default) returns rows; arrow returns base64 Arrow IPC in arrow_ipc_b64 after the identical masking and audit path. Arrow and export/streaming are mutually exclusive." },
                     "streaming": { "type": "boolean", "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier." },
+                    "stream": { "type": "boolean", "description": "Legacy alias for streaming." },
+                    "export": { "type": "boolean", "description": "Materialize the bounded result as a principal-bound oracle-export resource." },
+                    "export_to_resource": { "type": "boolean", "description": "Legacy alias for export." },
+                    "export_format": { "type": "string", "enum": ["csv", "json"], "description": "Export serialization when export=true: csv or json." },
                     "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page / streamed chunk (default 200, hard cap 5000)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
                     "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum compact JSON bytes across row objects in this page (default 10485760, hard cap 26214400; excludes columns, pagination metadata, and the outer MCP envelope)." },
@@ -562,7 +603,8 @@ pub fn tool_registry() -> ToolRegistry {
                         "properties": {
                             "scn": { "type": "integer", "minimum": 1, "description": "System change number to read as of (the deterministic form)." },
                             "timestamp": { "type": "string", "description": "Wall-clock time to read as of, \"YYYY-MM-DD HH24:MI:SS\" (a T date/time separator is also accepted). Oracle resolves it to the nearest SCN (~3s granularity)." }
-                        }
+                        },
+                        "additionalProperties": false
                     }
                 }),
                 &[timeout_seconds_prop()],
@@ -1071,7 +1113,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_sample_rows",
             ToolTier::FoundationLiveDb,
-            "Read the first rows of a table or view with a hard row cap.",
+            "Read arbitrary first rows of a table or view with a hard row cap. Projection and filtering are not supported; use oracle_query for filtered reads.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -1310,6 +1352,11 @@ pub fn tool_registry() -> ToolRegistry {
                     "binds": { "type": "array", "description": "Positional bind values for :1, :2 ...", "items": {} },
                     "cursor": { "type": "string", "description": "Opaque pagination cursor from a prior truncated page (incremental fetch)." },
                     "streaming": { "type": "boolean", "description": "Deliver the result incrementally instead of one inline page. Over HTTP/SSE, scalar/self-contained rowsets emit one `event: row` frame per row; LOB, BFILE, and REF CURSOR values fall back to ordered cursor `event: chunk` frames. Mutually exclusive with export and as_of. Never affects the read-only classifier." },
+                    "stream": { "type": "boolean", "description": "Legacy alias for streaming." },
+                    "format": { "type": "string", "enum": ["json", "arrow"], "description": "Inline result format." },
+                    "max_query_cost": { "type": "integer", "minimum": 1, "description": "Optional optimizer-cost ceiling for this read." },
+                    "read_only_standby": { "type": "boolean", "description": "Refuse the PLAN_TABLE cost-estimation path on a standby." },
+                    "allow_plan_table_write": { "type": "boolean", "description": "Opt in to guarded PLAN_TABLE cost estimation when the active level permits it." },
                     "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum rows in this page (default 200, hard cap 5000)." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
                     "max_result_bytes": { "type": "integer", "minimum": 1, "maximum": 26214400, "description": "Maximum compact JSON bytes across row objects in this page; excludes columns, pagination metadata, and the outer MCP envelope." },
@@ -1323,7 +1370,9 @@ pub fn tool_registry() -> ToolRegistry {
                     "max_structured_depth": { "type": "integer", "minimum": 1, "maximum": 32, "description": "Maximum ARRAY/JSON recursion depth decoded inside one structured cell. Values above the safe default require deep_decode=true." },
                     "numbers_as_float": { "type": "boolean", "description": "Emit numeric values as JSON numbers where possible." },
                     "export": { "type": "boolean", "description": "When true, materialize the bounded full result as an oracle-export://{id} resource and return a resource_link instead of inlining rows. The resource is bound to the originating principal and exact scope grant." },
-                    "export_format": { "type": "string", "enum": ["csv", "json"], "description": "Export serialization when export=true: csv (default) or json." }
+                    "export_to_resource": { "type": "boolean", "description": "Legacy alias for export." },
+                    "export_format": { "type": "string", "enum": ["csv", "json"], "description": "Export serialization when export=true: csv (default) or json." },
+                    "as_of": { "type": "object", "description": "Structured flashback read target: set scn or timestamp.", "properties": { "scn": { "type": "integer", "minimum": 1 }, "timestamp": { "type": "string" } }, "additionalProperties": false }
                 }),
                 &[timeout_seconds_prop()],
             ),

@@ -95,11 +95,49 @@ check_max_file_size_ratchet() {
   echo "OK[file-size]: tracked Rust/TS source files are within measured max-file-size ratchets."
 }
 
+scan_served_stdout_source() {
+  local path="$1" match_path line source
+  while IFS=: read -r match_path line source; do
+    # The stdio adapter's one protocol-writer handle is necessary. Request
+    # handlers must write only through that handle, never directly to stdout.
+    if [ "$path" = crates/oraclemcp-core/src/server.rs ] &&
+      [[ "$source" =~ ^[[:space:]]*let[[:space:]]stdout[[:space:]]=[[:space:]]std::io::stdout\(\)\;[[:space:]]*$ ]]; then
+      continue
+    fi
+    echo "ARCH-FITNESS VIOLATION[served-path-no-stdout]: $path:$line: $source" >&2
+    violations=$((violations + 1))
+  done < <(rg --with-filename -n --no-heading \
+    -e 'println![[:space:]]*\(' -e 'print![[:space:]]*\(' \
+    -e 'std::io::stdout[[:space:]]*\(' -- "$path" || true)
+}
+
+check_served_path_no_stdout() {
+  local path
+  while IFS= read -r path; do
+    scan_served_stdout_source "$path"
+  done < <(rg --files crates/oraclemcp-core/src/http crates/oraclemcp/src/dispatch \
+    | rg '\.rs$' | rg -v '(^|/)(tests|tests_[^/]*)\.rs$')
+  scan_served_stdout_source crates/oraclemcp-core/src/server.rs
+  scan_served_stdout_source crates/oraclemcp/src/plsql_tools.rs
+  echo "OK[served-path-no-stdout]: served request paths use no direct stdout writes."
+}
+
 need cargo
 need jq
+need rg
+
+violations=0
+if [ "${1:-}" = --selftest ]; then
+  scan_served_stdout_source - <<<'fn served_path() { println!("noise"); }'
+  if [ "$violations" -ne 1 ]; then
+    echo "oraclemcp-arch-fitness-lint: selftest failed to catch planted stdout write" >&2
+    exit 1
+  fi
+  echo "oraclemcp-arch-fitness-lint: selftest caught planted stdout write."
+  exit 0
+fi
 
 metadata="$(cargo metadata --locked --no-deps --format-version 1)"
-violations=0
 
 expected_packages=(
   oraclemcp-error
@@ -186,6 +224,7 @@ for crate in "${domain_crates[@]}"; do
 done
 
 check_max_file_size_ratchet
+check_served_path_no_stdout
 
 if [ "$violations" -ne 0 ]; then
   echo "" >&2

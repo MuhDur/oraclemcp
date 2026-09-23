@@ -18,6 +18,7 @@ pub(super) enum QueryFormat {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct QueryArgs {
     pub(super) sql: String,
     #[serde(default)]
@@ -96,6 +97,7 @@ pub(super) struct QueryArgs {
 
 /// Arguments for the governed 23ai vector-semantic search surface.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SemanticSearchArgs {
     pub(super) over: SemanticSearchOverArgs,
     #[serde(default)]
@@ -127,6 +129,7 @@ pub(super) struct SemanticSearchFilterArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SemanticSearchOverArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -138,6 +141,7 @@ pub(super) struct SemanticSearchOverArgs {
 /// or `timestamp` must be set (both-set / neither-set is a typed refusal in the
 /// dispatcher, before any flashback is applied).
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct AsOfArg {
     /// Read as of this system change number (the deterministic form).
     #[serde(default)]
@@ -150,6 +154,7 @@ pub(super) struct AsOfArg {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DiffArgs {
     /// A normal SELECT/WITH statement. It is classified as a read against each
     /// database it runs on, before any read runs; SCNs are bound through
@@ -196,6 +201,7 @@ pub(super) struct DiffArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PreviewSqlArgs {
     pub(super) sql: String,
 }
@@ -203,6 +209,7 @@ pub(super) struct PreviewSqlArgs {
 /// Arc I: `oracle_checkpoint` — establish a named savepoint on the pinned
 /// session, opening (or extending) the reversible workspace.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CheckpointArgs {
     pub(super) name: String,
 }
@@ -210,6 +217,7 @@ pub(super) struct CheckpointArgs {
 /// Arc I: `oracle_undo_to` — `ROLLBACK TO SAVEPOINT <name>`, or a full rollback
 /// that discards the whole workspace when `name` is omitted.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct UndoToArgs {
     #[serde(default, alias = "checkpoint")]
     pub(super) name: Option<String>,
@@ -218,6 +226,7 @@ pub(super) struct UndoToArgs {
 /// Arc I: `oracle_preview_dml` — run the DML inside a savepoint sandbox, capture
 /// what it did, roll it back, and present the result.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PreviewDmlArgs {
     /// The DML to dry-run. Classified and gated exactly like `oracle_execute`'s.
     pub(super) sql: String,
@@ -237,6 +246,7 @@ pub(super) struct PreviewDmlArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ExecuteArgs {
     pub(super) sql: String,
     #[serde(default)]
@@ -262,6 +272,7 @@ pub(super) struct ExecuteArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ExecuteApprovedArgs {
     #[serde(default, alias = "confirm", alias = "confirmation_token")]
     pub(super) token: Option<String>,
@@ -282,7 +293,14 @@ pub(super) struct ExecuteApprovedArgs {
 }
 
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SetSessionLevelArgs {
+    /// Historical alias inputs were accepted and ignored; retain that
+    /// documented contract until T3.3 replaces the alias decoder.
+    #[serde(default, rename = "db")]
+    pub(super) _db: Option<String>,
+    #[serde(default, rename = "profile")]
+    pub(super) _profile: Option<String>,
     #[serde(default, alias = "target_level")]
     pub(super) level: Option<String>,
     #[serde(default)]
@@ -296,6 +314,7 @@ pub(super) struct SetSessionLevelArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CompileObjectArgs {
     pub(super) object_type: String,
     #[serde(default)]
@@ -315,6 +334,7 @@ pub(super) struct CompileObjectArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CreateOrReplaceArgs {
     #[serde(default, alias = "sql", alias = "ddl")]
     pub(super) source_code: Option<String>,
@@ -329,6 +349,7 @@ pub(super) struct CreateOrReplaceArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PatchSourceArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -353,6 +374,7 @@ pub(super) struct PatchSourceArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ReadPatchPreviewArgs {
     #[serde(default, alias = "object_name")]
     pub(super) name: Option<String>,
@@ -361,6 +383,7 @@ pub(super) struct ReadPatchPreviewArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DeployDdlArgs {
     #[serde(default)]
     pub(super) name: Option<String>,
@@ -379,6 +402,7 @@ pub(super) struct DeployDdlArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SchemaInspectArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -393,6 +417,7 @@ pub(super) struct SchemaInspectArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SearchObjectsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -414,6 +439,7 @@ pub(super) struct SearchObjectsArgs {
 /// C2/H1: select stable sections of the bounded `oracle_orient` snapshot and,
 /// when requested, lift it across every MCP-visible profile.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct OrientArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -428,6 +454,7 @@ pub(super) struct OrientArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ListSchemasArgs {
     #[serde(default)]
     pub(super) name_like: Option<String>,
@@ -436,6 +463,7 @@ pub(super) struct ListSchemasArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DescribeArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -446,6 +474,7 @@ pub(super) struct DescribeArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DescribeIndexArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -454,6 +483,7 @@ pub(super) struct DescribeIndexArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DescribeTriggerArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -462,6 +492,7 @@ pub(super) struct DescribeTriggerArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DescribeViewArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -470,6 +501,7 @@ pub(super) struct DescribeViewArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GetDdlArgs {
     pub(super) object_type: String,
     #[serde(default)]
@@ -479,6 +511,7 @@ pub(super) struct GetDdlArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GetSourceArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -495,6 +528,7 @@ pub(super) struct GetSourceArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SampleRowsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -505,6 +539,7 @@ pub(super) struct SampleRowsArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct TopQueriesArgs {
     /// Ranking metric (`elapsed`/`cpu`/`buffer_gets`/`disk_reads`); defaults to elapsed.
     #[serde(default)]
@@ -524,6 +559,7 @@ pub(super) struct TopQueriesArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PlanTimelineArgs {
     /// The 13-character Oracle SQL ID whose AWR plan history is requested.
     pub(super) sql_id: String,
@@ -535,6 +571,7 @@ pub(super) struct PlanTimelineArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct DbHealthArgs {
     /// `"all"` (default) or a comma-separated list of subcheck names
     /// (`invalid_objects`, `unusable_indexes`, `tablespace_undo`,
@@ -546,6 +583,7 @@ pub(super) struct DbHealthArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ReadClobArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -562,12 +600,14 @@ pub(super) struct ReadClobArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SwitchProfileArgs {
     #[serde(default, alias = "db")]
     pub(super) profile: Option<String>,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CompileErrorsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -578,6 +618,7 @@ pub(super) struct CompileErrorsArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct SearchSourceArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -593,6 +634,7 @@ pub(super) struct SearchSourceArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PlscopeInspectArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
@@ -604,10 +646,264 @@ pub(super) struct PlscopeInspectArgs {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ExplainPlanArgs {
     pub(super) sql: String,
     #[serde(default)]
     pub(super) read_only_standby: bool,
     #[serde(default)]
     pub(super) allow_plan_table_write: bool,
+}
+
+#[cfg(test)]
+mod strict_contract_tests {
+    use super::*;
+    use crate::dispatch::{canonical_tool_name, ensure_no_args, parse_args};
+    use oraclemcp_error::ErrorEnvelope;
+    use serde_json::{Map, Value, json};
+
+    // Use the dispatcher's actual typed decoder, including each compatibility
+    // wrapper's distinct DTO, without opening a database lane.
+    fn decode(name: &str, args: Value) -> Result<(), ErrorEnvelope> {
+        macro_rules! typed {
+            ($ty:ty) => {
+                parse_args::<$ty>(name, args).map(|_| ())
+            };
+        }
+        match canonical_tool_name(name) {
+            "oracle_list_profiles" | "oracle_connection_info" => ensure_no_args(name, args),
+            "oracle_switch_profile" => typed!(SwitchProfileArgs),
+            "oracle_set_session_level" => typed!(SetSessionLevelArgs),
+            "oracle_query" => typed!(QueryArgs),
+            "oracle_semantic_search" => typed!(SemanticSearchArgs),
+            "oracle_diff" => typed!(DiffArgs),
+            "oracle_preview_sql" => typed!(PreviewSqlArgs),
+            "oracle_execute" => typed!(ExecuteArgs),
+            "oracle_checkpoint" => typed!(CheckpointArgs),
+            "oracle_undo_to" => typed!(UndoToArgs),
+            "oracle_preview_dml" => typed!(PreviewDmlArgs),
+            "oracle_compile_object" => typed!(CompileObjectArgs),
+            "oracle_create_or_replace" => typed!(CreateOrReplaceArgs),
+            "oracle_patch_source" => typed!(PatchSourceArgs),
+            "oracle_list_schemas" => typed!(ListSchemasArgs),
+            "oracle_schema_inspect" => typed!(SchemaInspectArgs),
+            "oracle_search_objects" => typed!(SearchObjectsArgs),
+            "oracle_orient" => typed!(OrientArgs),
+            "oracle_describe" => typed!(DescribeArgs),
+            "oracle_describe_index" => typed!(DescribeIndexArgs),
+            "oracle_describe_trigger" => typed!(DescribeTriggerArgs),
+            "oracle_describe_view" => typed!(DescribeViewArgs),
+            "oracle_get_ddl" => typed!(GetDdlArgs),
+            "oracle_get_source" => typed!(GetSourceArgs),
+            "oracle_sample_rows" => typed!(SampleRowsArgs),
+            "oracle_read_clob" => typed!(ReadClobArgs),
+            "oracle_compile_errors" => typed!(CompileErrorsArgs),
+            "oracle_search_source" => typed!(SearchSourceArgs),
+            "oracle_plscope_inspect" => typed!(PlscopeInspectArgs),
+            "oracle_explain_plan" => typed!(ExplainPlanArgs),
+            "oracle_top_queries" => typed!(TopQueriesArgs),
+            "oracle_plan_timeline" => typed!(PlanTimelineArgs),
+            "oracle_db_health" => typed!(DbHealthArgs),
+            "execute_approved" => typed!(ExecuteApprovedArgs),
+            "deploy_ddl" => typed!(DeployDdlArgs),
+            "read_patch_preview" => typed!(ReadPatchPreviewArgs),
+            #[cfg(feature = "plsql-intelligence")]
+            name if crate::plsql_tools::TOOL_NAMES.contains(&name) => {
+                crate::plsql_tools::decode_args_for_contract(name, args)
+            }
+            other => panic!("registered tool {other} has no decoder contract"),
+        }
+    }
+
+    fn placeholder(schema: &Value) -> Value {
+        if let Some(choice) = schema
+            .get("enum")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+        {
+            return choice.clone();
+        }
+        match schema.get("type").and_then(Value::as_str) {
+            Some("string") => json!("X"),
+            Some("integer" | "number") => json!(1),
+            Some("boolean") => json!(false),
+            Some("array") => json!([]),
+            Some("object") => {
+                let mut object = Map::new();
+                if let Some(required) = schema.get("required").and_then(Value::as_array) {
+                    for name in required.iter().filter_map(Value::as_str) {
+                        object.insert(name.to_owned(), placeholder(&schema["properties"][name]));
+                    }
+                }
+                Value::Object(object)
+            }
+            _ => Value::Null,
+        }
+    }
+
+    fn minimal(schema: &Value) -> Value {
+        placeholder(schema)
+    }
+
+    fn minimal_for_tool(name: &str, schema: &Value) -> Value {
+        let mut value = minimal(schema);
+        let args = value.as_object_mut().expect("object schema");
+        // Function adapters reject a top-level anyOf. These schemas describe
+        // "name or old alias" in property text, so choose the canonical arm
+        // to construct an actually valid minimal request for the DTO test.
+        match canonical_tool_name(name) {
+            "oracle_describe_index"
+            | "oracle_describe_trigger"
+            | "oracle_describe_view"
+            | "oracle_get_ddl"
+            | "oracle_get_source" => {
+                args.insert("name".to_owned(), json!("X"));
+            }
+            "oracle_sample_rows" | "oracle_read_clob" => {
+                args.insert("table".to_owned(), json!("X"));
+            }
+            _ => {}
+        }
+        if canonical_tool_name(name) == "oracle_read_clob" {
+            for field in ["clob_column", "pk_column", "pk_value"] {
+                args.insert(field.to_owned(), json!("X"));
+            }
+        }
+        value
+    }
+
+    fn log_case(case_id: &str, tool: &str, expected: &Value, actual: &Value) {
+        use std::io::Write;
+        use std::sync::{Mutex, OnceLock};
+        static LOCK: OnceLock<Mutex<bool>> = OnceLock::new();
+        let mut started = LOCK
+            .get_or_init(|| Mutex::new(false))
+            .lock()
+            .expect("test log lock");
+        let target = std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "target".to_owned());
+        let path = std::path::Path::new(&target).join("test-logs/w3_strict_decode.jsonl");
+        std::fs::create_dir_all(path.parent().expect("test log parent")).expect("test log dir");
+        if !*started {
+            std::fs::write(&path, b"").expect("test log reset");
+            *started = true;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("test log open");
+        writeln!(file, "{}", json!({"case_id": case_id, "tool": tool, "expected": expected, "actual": actual, "verdict": expected == actual})).expect("test log write");
+    }
+
+    #[test]
+    fn every_registered_tool_rejects_unknown_argument() {
+        for tool in crate::registry::tool_registry().tools {
+            let schema = tool.input_schema.as_ref().expect("input schema");
+            let mut args = minimal_for_tool(&tool.name, schema);
+            args.as_object_mut()
+                .expect("object schema")
+                .insert("__bogus__".to_owned(), json!(1));
+            let result = decode(&tool.name, args);
+            let actual = json!({"invalid_arguments": result.as_ref().is_err_and(|e| e.error_class == oraclemcp_error::ErrorClass::InvalidArguments), "names_bogus": result.as_ref().err().is_some_and(|e| e.message.contains("__bogus__"))});
+            let expected = json!({"invalid_arguments": true, "names_bogus": true});
+            log_case("unknown_argument", &tool.name, &expected, &actual);
+            assert_eq!(actual, expected, "{} must reject __bogus__", tool.name);
+        }
+    }
+
+    #[test]
+    fn existing_argument_aliases_still_decode() {
+        for (tool, args) in [
+            ("oracle_describe_index", json!({"index_name": "I"})),
+            ("oracle_describe_trigger", json!({"trigger_name": "T"})),
+            ("oracle_describe_view", json!({"view_name": "V"})),
+            (
+                "oracle_get_ddl",
+                json!({"object_type": "TABLE", "object_name": "T"}),
+            ),
+            ("oracle_get_source", json!({"object_name": "P"})),
+            ("oracle_sample_rows", json!({"table_name": "T", "limit": 1})),
+            (
+                "oracle_read_clob",
+                json!({"table_name": "T", "clob_col": "C", "pk_col": "ID", "pk_val": "1"}),
+            ),
+            ("enable_writes", json!({"db": "old", "profile": "old"})),
+            ("disable_writes", json!({"db": "old", "profile": "old"})),
+        ] {
+            let result = decode(tool, args);
+            assert!(result.is_ok(), "{tool} old alias must decode: {result:?}");
+        }
+    }
+
+    #[test]
+    fn nested_argument_object_rejects_unknown_fields() {
+        let error = decode(
+            "oracle_query",
+            json!({"sql": "SELECT 1 FROM dual", "as_of": {"scn": 1, "typo": 2}}),
+        )
+        .expect_err("unknown nested as_of field must be rejected");
+        assert_eq!(
+            error.error_class,
+            oraclemcp_error::ErrorClass::InvalidArguments
+        );
+        assert!(error.message.contains("typo"), "{error:?}");
+    }
+
+    #[test]
+    fn schema_runtime_differential_every_tool() {
+        let mut mismatches = Vec::new();
+        for tool in crate::registry::tool_registry().tools {
+            let schema = tool.input_schema.as_ref().expect("input schema");
+            let minimal = minimal_for_tool(&tool.name, schema);
+            let base = decode(&tool.name, minimal.clone());
+            let accepted = schema["properties"].as_object().expect("properties");
+            let minimal_decodes = base.is_ok();
+            if !minimal_decodes {
+                mismatches.push(format!(
+                    "{} minimal schema args disagree with DTO: {base:?}",
+                    tool.name
+                ));
+            }
+            let mut rejected_properties = Vec::new();
+            for (property, property_schema) in accepted {
+                let mut args = minimal.clone();
+                let fields = args.as_object_mut().expect("object schema");
+                // Test a legacy alias in place of its canonical field. Sending
+                // both is a duplicate-field conflict, which T3.3 handles.
+                let canonical = match property.as_str() {
+                    "index_name" | "trigger_name" | "view_name" | "object_name" => Some("name"),
+                    "table_name" => Some("table"),
+                    "clob_col" => Some("clob_column"),
+                    "pk_col" => Some("pk_column"),
+                    "pk_val" => Some("pk_value"),
+                    _ => None,
+                };
+                if let Some(canonical) = canonical {
+                    fields.remove(canonical);
+                }
+                fields.insert(property.clone(), placeholder(property_schema));
+                let result = decode(&tool.name, args);
+                if let Err(error) = result {
+                    rejected_properties.push(format!(
+                        "{} advertises {property} but DTO rejects it: {error:?}",
+                        tool.name
+                    ));
+                }
+            }
+            let actual = json!({"minimal_decodes": minimal_decodes, "declared_properties_accepted": rejected_properties.is_empty()});
+            let expected = json!({"minimal_decodes": true, "declared_properties_accepted": true});
+            log_case(
+                "schema_runtime_differential",
+                &tool.name,
+                &expected,
+                &actual,
+            );
+            mismatches.extend(rejected_properties);
+        }
+        assert!(
+            mismatches.is_empty(),
+            "schema/runtime mismatches:\n{}",
+            mismatches.join("\n")
+        );
+    }
 }
