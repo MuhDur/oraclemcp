@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T20:58:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.3",
+  "scope": {
+    "summary": "T4.3 external-client W4 tool-matrix driver (stdio + Streamable HTTP): tool set read from tools/list, generic contract family per tool, cases.jsonl + results.json, audit-chain checks, manifest enforcement, TSTZ/VECTOR fidelity cases with independent DB reread (20b0a2cd, 2148ffc5).",
+    "in_scope": [
+      "scripts/e2e/w4.sh",
+      "scripts/e2e/w4/driver.py",
+      "scripts/e2e/w4/scrub.py",
+      "scripts/e2e/w4/capabilities.json",
+      "scripts/e2e/w4/cases/schema.json",
+      "crates/oraclemcp/tests/e2e_harness.rs"
+    ],
+    "out_of_scope": [
+      "Individual tool behaviour (bead no-claim). The live run reports 192 failing contract rows; these are product defects owned by the later W4/field-issue beads, not by this driver.",
+      "A green W4 lane: the lane correctly exits 1 naming the release-manifest cases that are still missing or red."
+    ]
+  },
+  "source": {
+    "sha": "d483452812eebb3dfb9704d2bd8de9d8ca38a8ae",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "driver.py --selftest (orchestrator re-execution at d4834528)",
+        "kind": "cli",
+        "trace": "exit 0; rejects missing/extra/wrong-order audit record, broken audit chain, missing positive case; unsupported case is not silently skipped; manifest_enforcement_integration rejects a results set missing rel012_i28_order_alias."
+      },
+      {
+        "name": "ORACLEMCP_LIVE_XE=1 scripts/e2e/w4.sh --lane free23 --binary <release build of d4834528> (orchestrator live run, clean worktree)",
+        "kind": "cli",
+        "trace": "External client over real stdio and Streamable HTTP against FREE 23ai: cases.jsonl 272 rows (stdio 133, http 139) over 63 distinct tools from tools/list; results.json records binary_sha256, binary_source_sha, checkout_sha, fixture_runs; verdicts pass 80 / fail 192; lane exit 1 naming the missing/red manifest cases (the bead's required negative). Fixture setup/teardown ran through the T4.4 run-owned fixture."
+      },
+      {
+        "name": "cargo test -p oraclemcp --test e2e_harness w4_driver_is_registered_and_dry_runs",
+        "kind": "cli",
+        "trace": "part of the workspace gate green at 0c362118 (3299 passed, 0 failed)."
+      },
+      {
+        "name": "hard-coded tool list check",
+        "kind": "cli",
+        "trace": "grep of driver.py for literal oracle_* tool names finds only oracle_set_session_level used to change session level; the tool set under test comes from tools/list."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live run artifacts (cases.jsonl/results.json/crashpack) are in the gitignored gate worktree target/e2e and are not committed; live execution is described, not claimed as a committed artifact.",
+    "An earlier implementer run reported one generic contract call stalling; the orchestrator's full run completed without a stall (audit log advancing throughout).",
+    "Verified by the orchestrator by re-execution, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
