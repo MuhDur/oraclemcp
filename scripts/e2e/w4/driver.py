@@ -40,6 +40,7 @@ CASES = HERE / "cases"
 MANIFEST = ROOT / "scripts/e2e/cases/validate_manifest.py"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
+OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant"}
 EXPECT_KINDS = {"rows", "error_class", "json_subset", "golden"}
 CURRENT_SESSION = object()
 
@@ -196,10 +197,16 @@ def coverage_status(tools, cases):
 
 def validate_case(case, filename):
     require(isinstance(case, dict), f"{filename}: case must be an object")
-    require(case.keys() == CASE_FIELDS, f"{filename}: case fields mismatch: {sorted(case.keys() ^ CASE_FIELDS)}")
+    require(CASE_FIELDS <= case.keys() and case.keys() <= CASE_FIELDS | OPTIONAL_CASE_FIELDS,
+            f"{filename}: case fields mismatch: {sorted(case.keys() ^ CASE_FIELDS)}")
     require(re.fullmatch(r"(?:w4|rel012)_[a-z0-9_]+", case["case_id"]), "invalid case_id")
     require(isinstance(case["tool"], str) and case["tool"], "missing tool name")
     require(case["level"] in {"READ_ONLY", "READ_WRITE", "DDL", "ADMIN"}, "invalid level")
+    require(case.get("profile_variant", "masked") in {"masked", "synthetic_raw"},
+            "profile_variant must be masked or synthetic_raw")
+    if case.get("profile_variant") == "synthetic_raw":
+        require(case["level"] == "READ_ONLY" and case.get("setup_phase") == "before_server",
+                "synthetic_raw profile is reserved for precreated READ_ONLY fixtures")
     require(isinstance(case["transports"], list) and case["transports"]
             and set(case["transports"]) <= {"stdio", "http"}
             and len(case["transports"]) == len(set(case["transports"])), "invalid transports")
@@ -207,6 +214,13 @@ def validate_case(case, filename):
             "invalid requires")
     require(len(case["requires"]) == len(set(case["requires"])), "duplicate capability requirement")
     require(isinstance(case["setup"], list), "setup must be an array")
+    require(case.get("setup_phase", "before_call") in {"before_call", "before_server"},
+            "setup_phase must be before_call or before_server")
+    if "setup_ready_sql" in case:
+        require(case.get("setup_phase") == "before_server"
+                and isinstance(case["setup_ready_sql"], str)
+                and case["setup_ready_sql"].lstrip().upper().startswith("SELECT "),
+                "setup_ready_sql needs a before_server case and a SELECT")
     for action in case["setup"]:
         require(isinstance(action, dict) and set(action) == {"sql"}
                 and isinstance(action["sql"], str) and action["sql"],
@@ -642,6 +656,15 @@ mask_unknown_default = true
 column_match = {{ column = "SECRET_TEXT" }}
 action = "mask"
 tag = "w4.synthetic.mask"
+
+[[profiles]]
+name = "{lane}_raw"
+description = "synthetic W4 type-fidelity fixtures only"
+connect_string = "{dsn}"
+username = "system"
+credential_ref = "env:W4_DB_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
 '''
     path.write_text(content)
     return audience
@@ -744,6 +767,30 @@ def apply_setup(connection, actions):
                 "case setup SQL must target a run-owned W4 schema")
         connection.cursor().execute(action["sql"])
         connection.commit()
+
+
+def wait_for_setup_ready(settings, password, sql):
+    """Wait for Oracle's post-DDL definition SCN using fresh-session reads."""
+    import oracledb
+    deadline = time.monotonic() + 20
+    consecutive = 0
+    while time.monotonic() < deadline:
+        probe = oracledb.connect(user="system", password=password, dsn=settings["dsn"])
+        try:
+            cursor = probe.cursor()
+            cursor.execute("SET TRANSACTION READ ONLY")
+            cursor.execute(sql).fetchone()
+            consecutive += 1
+            if consecutive == 2:
+                return
+        except oracledb.DatabaseError as exc:
+            if exc.args[0].code != 1466:
+                raise
+            consecutive = 0
+        finally:
+            probe.close()
+        time.sleep(0.1)
+    raise DriverError("post-DDL fresh-session readiness deadline expired")
 
 
 def schema_placeholder(rule, field="", lane=""):
@@ -924,12 +971,25 @@ def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
     return result["reply"]
 
 
+def verify_case_rereads(connection, case, row):
+    actual_rows = []
+    for reread in case["db_reread"]:
+        require(set(reread) == {"sql", "rows"}, "db_reread needs sql and rows")
+        actual_rows.append(db_rows(connection, reread["sql"]))
+    if actual_rows:
+        row["db_reread_actual"] = scrub(actual_rows)
+    for reread, actual in zip(case["db_reread"], actual_rows):
+        require(actual == reread["rows"],
+                f"{case['case_id']}: independent DB re-read differed")
+
+
 def run_case(client, case, transport, lane, capabilities, connection, barriers,
              binary, audit_path, env, descriptor=None):
     start = time.monotonic()
     supported = set(case["requires"]) <= capabilities
     expected = case["expect"] if supported else case["on_unsupported"]
     input_value = {"tool": case["tool"], "arguments": case["call"]["arguments"]}
+    input_value["profile_variant"] = case.get("profile_variant", "masked")
     if "raw_arguments" in case["call"]:
         input_value["raw_arguments"] = case["call"]["raw_arguments"]
     if case["call"].get("retry"):
@@ -949,7 +1009,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
            "transport": transport, "input_sha256": sha256(input_value),
            "expected": scrub(expected), "actual": None, "verdict": "fail", "duration_ms": 0}
     try:
-        apply_setup(connection, case["setup"])
+        if case.get("setup_phase", "before_call") == "before_call":
+            apply_setup(connection, case["setup"])
         if "baseline_arguments" in case["call"]:
             baseline = client.rpc("tools/call", {
                 "name": case["tool"], "arguments": case["call"]["baseline_arguments"]})
@@ -975,6 +1036,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                                raw_arguments=case["call"].get("raw_arguments"))
         verify_envelope(reply, descriptor)
         row["actual"] = scrub(tool_payload(reply))
+        if supported and not case["call"].get("retry"):
+            verify_case_rereads(connection, case, row)
         verify_expect(expected, reply, ROOT / "tests/golden/w4")
         if marker and supported:
             require(vsql_marker_count(connection, marker) == 0,
@@ -987,10 +1050,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             row["actual"] = {"first": row["actual"], "retry": scrub(tool_payload(repeated))}
             verify_expect(case["call"].get("retry_expect", expected), repeated,
                           ROOT / "tests/golden/w4")
-        for reread in case["db_reread"]:
-            require(set(reread) == {"sql", "rows"}, "db_reread needs sql and rows")
-            require(db_rows(connection, reread["sql"]) == reread["rows"],
-                    f"{case['case_id']}: independent DB re-read differed")
+            if supported:
+                verify_case_rereads(connection, case, row)
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env))
@@ -1158,6 +1219,27 @@ def enforce_manifest(results_path, lane, transport, capabilities):
     require(result.returncode == 0, f"manifest check-results failed: {result.stderr.strip()[-240:]}")
 
 
+def manifest_enforcement_integration():
+    required = manifest_required("free23", "stdio", {"version:23"})
+    require(required, "manifest integration has no required live cases")
+    missing = sorted(required)[0]
+    path = ROOT / "target/e2e/w4/selftest/missing-one-manifest-case.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"cases": [
+        {"case_id": case_id, "transport": "stdio", "verdict": "pass"}
+        for case_id in sorted(required - {missing})],
+        "cargo_test_logs": []}, sort_keys=True) + "\n")
+    try:
+        enforce_manifest(path, "free23", "stdio", {"version:23"})
+    except DriverError as exc:
+        require(missing in str(exc),
+                "missing manifest failure did not name the single omitted case")
+        print(compact({"integration": "manifest_enforcement_integration",
+                       "missing_case": missing, "verdict": "rejected"}))
+    else:
+        raise DriverError("manifest integration accepted one omitted required case")
+
+
 def summary_table(rows):
     table = collections.defaultdict(lambda: collections.defaultdict(lambda: {"pass": 0, "fail": 0}))
     for row in rows:
@@ -1221,6 +1303,15 @@ def run_lane(args):
                         with contextlib.redirect_stdout(fixture_log):
                             fixture_setup(args.lane, settings, fixture_id)
                     fixture_runs[transport] = fixture_id
+                expanded_family = ([] if args.contract_only else [
+                    expand_case(case, fixture_id, transport) for case in family_cases
+                    if transport in case["transports"]])
+                for case in expanded_family:
+                    if (case.get("setup_phase") == "before_server"
+                            and set(case["requires"]) <= capabilities):
+                        apply_setup(connection, case["setup"])
+                        if "setup_ready_sql" in case:
+                            wait_for_setup_ready(settings, password, case["setup_ready_sql"])
                 client = (StdioClient(binary, args.lane, client_env) if transport == "stdio"
                           else HttpClient(binary, args.lane, client_env, port, secret, audience))
                 initialize(client)
@@ -1242,14 +1333,26 @@ def run_lane(args):
                     "name": "oracle_set_session_level", "arguments": {"action": "drop"}}))
                 require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
                         "could not return to READ_ONLY after discovery")
-                expanded_family = ([] if args.contract_only else [
-                    expand_case(case, fixture_id, transport) for case in family_cases
-                    if transport in case["transports"]])
                 cases = list(expanded_family)
                 cases += list(generic_contract_cases(
                     discovered, args.lane, contract_baselines(expanded_family)))
                 current_level = "READ_ONLY"
+                current_profile = args.lane
                 for case in cases:
+                    desired_profile = (args.lane + "_raw" if case.get("profile_variant") == "synthetic_raw"
+                                       else args.lane)
+                    if desired_profile != current_profile:
+                        if current_level != "READ_ONLY":
+                            dropped = tool_payload(client.rpc("tools/call", {
+                                "name": "oracle_set_session_level", "arguments": {"action": "drop"}}))
+                            require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
+                                    "failed to drop before profile switch")
+                        switched = tool_payload(client.rpc("tools/call", {
+                            "name": "oracle_switch_profile", "arguments": {"profile": desired_profile}}))
+                        require(switched.get("isError") is not True,
+                                f"could not switch to W4 profile {desired_profile}")
+                        current_profile = desired_profile
+                        current_level = "READ_ONLY"
                     if case["level"] != current_level:
                         if current_level != "READ_ONLY":
                             dropped = tool_payload(client.rpc("tools/call", {
@@ -1433,18 +1536,7 @@ def selftest():
                                             "reason": "synthetic W4 cancellation"}),
             "cancellation did not wait for marker and send bound request id")
     rejected("missing_positive_case", lambda: verify_coverage({"oracle_query": {}}, []))
-    required = manifest_required("free23", "stdio", {"version:23"})
-    require(required, "manifest integration has no required live cases")
-    manifest_test = ROOT / "target/e2e/w4/selftest/missing-manifest.json"
-    manifest_test.parent.mkdir(parents=True, exist_ok=True)
-    manifest_test.write_text('{"cases": [], "cargo_test_logs": []}\n')
-    try:
-        enforce_manifest(manifest_test, "free23", "stdio", {"version:23"})
-    except DriverError as exc:
-        require(sorted(required)[0] in str(exc), "missing manifest failure did not name the case")
-        print(compact({"selftest": "missing_manifest_case", "verdict": "rejected"}))
-    else:
-        raise DriverError("selftest accepted missing manifest result")
+    manifest_enforcement_integration()
     left, right = [], []
     pool = BarrierPool()
     one = threading.Thread(target=lambda: left.append(pool.wait("ordered", 2)))
@@ -1458,6 +1550,7 @@ def selftest():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--manifest-enforcement-integration", action="store_true")
     parser.add_argument("--lane", choices=("free23", "xe18", "xe21"))
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--binary-source-sha", help="verified source revision of an external binary")
@@ -1471,6 +1564,8 @@ def main():
                 "--binary-source-sha needs a full Git SHA")
         if args.selftest:
             selftest()
+        elif args.manifest_enforcement_integration:
+            manifest_enforcement_integration()
         else:
             require(args.lane, "--lane is required for a live run")
             run_lane(args)

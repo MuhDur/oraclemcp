@@ -11,10 +11,13 @@
       "case_id": {"type": "string", "pattern": "^(w4|rel012)_([a-z0-9_]+)$"},
       "tool": {"type": "string", "minLength": 1},
       "level": {"enum": ["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"]},
+      "profile_variant": {"enum": ["masked", "synthetic_raw"]},
       "transports": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["stdio", "http"]}},
       "requires": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
       "setup": {"type": "array", "items": {"type": "object", "additionalProperties": false,
         "required": ["sql"], "properties": {"sql": {"type": "string", "minLength": 1}}}},
+      "setup_phase": {"enum": ["before_call", "before_server"]},
+      "setup_ready_sql": {"type": "string", "minLength": 1},
       "call": {"type": "object", "required": ["arguments"], "additionalProperties": false, "properties": {
         "arguments": {"type": "object"}, "raw_arguments": {"type": "string"},
         "baseline_arguments": {"type": "object"},

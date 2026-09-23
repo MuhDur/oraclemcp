@@ -1,0 +1,56 @@
+[
+  {
+    "case_id": "w4_type_fidelity_tstz_offset",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup_ready_sql": "SELECT TSTZ_VAL FROM ${owner}.T_TSTZ_${run_id} WHERE ID = 1",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_TSTZ_${run_id} (ID NUMBER PRIMARY KEY, TSTZ_VAL TIMESTAMP(6) WITH TIME ZONE)"},
+      {"sql": "INSERT INTO ${owner}.T_TSTZ_${run_id}(ID,TSTZ_VAL) VALUES (1,TO_TIMESTAMP_TZ('2020-02-29 23:30:00 +05:45','YYYY-MM-DD HH24:MI:SS TZH:TZM'))"}
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT t.TSTZ_VAL FROM ${owner}.T_TSTZ_${run_id} t WHERE t.ID = 1",
+        "max_rows": 1
+      }
+    },
+    "expect": {"rows": [{"TSTZ_VAL": "2020-02-29T23:30:00+05:45"}]},
+    "db_reread": [{
+      "sql": "SELECT TO_CHAR(TSTZ_VAL,'YYYY-MM-DD\"T\"HH24:MI:SSTZH:TZM') FROM ${owner}.T_TSTZ_${run_id} WHERE ID = 1",
+      "rows": [["2020-02-29T23:30:00+05:45"]]
+    }],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+  },
+  {
+    "case_id": "w4_type_fidelity_vector_float32",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"],
+    "requires": ["feature:VECTOR"],
+    "setup_phase": "before_server",
+    "setup_ready_sql": "SELECT VEC_VAL FROM ${owner}.T_VECTOR_${run_id} WHERE ID = 1",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_VECTOR_${run_id} (ID NUMBER PRIMARY KEY, VEC_VAL VECTOR(3, FLOAT32))"},
+      {"sql": "INSERT INTO ${owner}.T_VECTOR_${run_id}(ID,VEC_VAL) VALUES (1,'[1,0,0]')"}
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT t.VEC_VAL FROM ${owner}.T_VECTOR_${run_id} t WHERE t.ID = 1",
+        "max_rows": 1
+      }
+    },
+    "expect": {"rows": [{"VEC_VAL": {"kind": "vector", "storage": "dense", "format": "float32", "values": [1.0, 0.0, 0.0]}}]},
+    "db_reread": [{
+      "sql": "SELECT VEC_VAL FROM ${owner}.T_VECTOR_${run_id} WHERE ID = 1",
+      "rows": [[[1.0, 0.0, 0.0]]]
+    }],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  }
+]

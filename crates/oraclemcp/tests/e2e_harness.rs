@@ -59,6 +59,27 @@ fn w4_driver_is_registered_and_dry_runs() {
     );
 }
 
+#[test]
+fn manifest_enforcement_integration() {
+    let root = repo_root();
+    let output = Command::new("python3")
+        .arg(root.join("scripts/e2e/w4/driver.py"))
+        .arg("--manifest-enforcement-integration")
+        .current_dir(&root)
+        .output()
+        .expect("run W4 manifest integration test");
+    assert!(
+        output.status.success(),
+        "W4 manifest integration failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let verdict: Value =
+        serde_json::from_slice(&output.stdout).expect("manifest integration emits a JSON verdict");
+    assert_eq!(verdict["integration"], "manifest_enforcement_integration");
+    assert_eq!(verdict["verdict"], "rejected");
+    assert_eq!(verdict["missing_case"], "rel012_i28_order_alias");
+}
+
 /// The swarm cargo wrapper `omcpb` (lane-locked, shared-target builds) exists
 /// only in the developer/swarm environment, never in plain CI. The dry-run
 /// scenario scripts shell out through it, so when it is absent we skip these
