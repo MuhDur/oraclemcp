@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T23:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.15.12",
+  "scope": {
+    "summary": "Flaky write_auth_invalid_grant_never_falls_back_to_elevated_session root-caused as a test defect, not a fail-open: the tamper step replaced the last hex digit with 0, a no-op for ~1/16 references, so a valid grant was submitted; even then the failure mode was a refusal before any DB I/O. Test-only fix (452742b3): tamper always changes the digit; new deterministic tests.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests/write_authorization.rs"
+    ],
+    "out_of_scope": [
+      "No production change was needed or made.",
+      "External-client grant behaviour (T13.8)."
+    ]
+  },
+  "source": {
+    "sha": "32504f70d0b0d5ead008c795f37347646cf5fbd2",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate at 32504f70 (clean worktree, lease)",
+        "kind": "cli",
+        "trace": "write_auth_invalid_grant_never_falls_back_to_elevated_session ok; write_auth_tamper_never_returns_the_valid_reference ok (reproduces the old no-op tamper deterministically); write_auth_every_tampered_tag_digit_is_refused_as_mismatch ok (all 64 signature digits refused as GRANT_MISMATCH before DB access). The gate had 9 unrelated failures on read/query/CQN paths from b3f3f360 (FGA evidence), routed to their owners."
+      },
+      {
+        "name": "implementer loop proof",
+        "kind": "cli",
+        "trace": "Pre-fix: 14/200 failures, all at the tampered-grant step with GRANT_ENFORCEMENT_UNAVAILABLE / NotStarted / zero DB I/O. Post-fix: 0/200 for the test and its module at default threads and --test-threads=1."
+      },
+      {
+        "name": "gate self-weakening review (orchestrator)",
+        "kind": "cli",
+        "trace": "Diff is test-only; no retry wrapper, #[ignore], or weakened assertion; the tamper is made strictly stronger."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The 200-iteration loop was run by the implementing pane; the orchestrator re-ran the suite once in the clean gate, not the loop."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
