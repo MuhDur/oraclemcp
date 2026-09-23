@@ -15,6 +15,7 @@ use std::fmt;
 
 use asupersync::Cx;
 
+use crate::catalog_query::{CatalogQueryId, run_catalog_query};
 use crate::connection::OracleConnection;
 use crate::error::DbError;
 use crate::query::QueryResponse;
@@ -568,14 +569,15 @@ async fn table_stats(
     // NUM_ROWS is the optimizer's gathered-statistics estimate. We deliberately
     // read it from ALL_TABLES instead of running COUNT(*) so a search never
     // triggers a full table scan on a large table.
-    let row = conn
-        .query_optional_row(
-            cx,
-            "SELECT num_rows, TO_CHAR(last_analyzed, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_analyzed \
-             FROM all_tables WHERE owner = :1 AND table_name = :2",
-            &[OracleBind::from(owner), OracleBind::from(table)],
-        )
-        .await?;
+    let row = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::TableStats,
+        &[OracleBind::from(owner), OracleBind::from(table)],
+    )
+    .await?
+    .into_iter()
+    .next();
     Ok(row.map(|row| TableStats {
         num_rows: row.parse_i64("NUM_ROWS"),
         last_analyzed: row.text("LAST_ANALYZED").map(str::to_owned),
@@ -590,15 +592,15 @@ async fn table_stats_stale(
     owner: &str,
     table: &str,
 ) -> Result<bool, DbError> {
-    let row = conn
-        .query_optional_row(
-            cx,
-            "SELECT stale_stats FROM all_tab_statistics \
-             WHERE owner = :1 AND table_name = :2 AND object_type = 'TABLE' \
-               AND partition_name IS NULL",
-            &[OracleBind::from(owner), OracleBind::from(table)],
-        )
-        .await?;
+    let row = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::TableStatsStale,
+        &[OracleBind::from(owner), OracleBind::from(table)],
+    )
+    .await?
+    .into_iter()
+    .next();
     Ok(row
         .and_then(|row| {
             row.text("STALE_STATS")
@@ -615,14 +617,15 @@ async fn column_count(
     owner: &str,
     table: &str,
 ) -> Result<i64, DbError> {
-    let row = conn
-        .query_optional_row(
-            cx,
-            "SELECT COUNT(*) AS column_count FROM all_tab_columns \
-             WHERE owner = :1 AND table_name = :2",
-            &[OracleBind::from(owner), OracleBind::from(table)],
-        )
-        .await?;
+    let row = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::TableColumnCount,
+        &[OracleBind::from(owner), OracleBind::from(table)],
+    )
+    .await?
+    .into_iter()
+    .next();
     Ok(row
         .and_then(|row| row.parse_i64("COLUMN_COUNT"))
         .unwrap_or(0))
@@ -635,14 +638,15 @@ async fn object_comment(
     owner: &str,
     object_name: &str,
 ) -> Result<Option<String>, DbError> {
-    let row = conn
-        .query_optional_row(
-            cx,
-            "SELECT comments FROM all_tab_comments \
-             WHERE owner = :1 AND table_name = :2",
-            &[OracleBind::from(owner), OracleBind::from(object_name)],
-        )
-        .await?;
+    let row = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::ObjectComment,
+        &[OracleBind::from(owner), OracleBind::from(object_name)],
+    )
+    .await?
+    .into_iter()
+    .next();
     Ok(row.and_then(|row| row.text("COMMENTS").map(str::to_owned)))
 }
 
@@ -654,19 +658,13 @@ async fn search_columns(
     owner: &str,
     table: &str,
 ) -> Result<Vec<SearchColumn>, DbError> {
-    let rows = conn
-        .query_rows(
-            cx,
-            "SELECT c.column_name, c.data_type, c.nullable, cc.comments \
-             FROM all_tab_columns c \
-             LEFT JOIN all_col_comments cc \
-               ON cc.owner = c.owner AND cc.table_name = c.table_name \
-              AND cc.column_name = c.column_name \
-             WHERE c.owner = :1 AND c.table_name = :2 \
-             ORDER BY c.column_id",
-            &[OracleBind::from(owner), OracleBind::from(table)],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::SearchColumns,
+        &[OracleBind::from(owner), OracleBind::from(table)],
+    )
+    .await?;
     Ok(rows
         .iter()
         .map(|row| SearchColumn {
@@ -685,28 +683,24 @@ async fn search_indexes(
     owner: &str,
     table: &str,
 ) -> Result<Vec<SearchIndex>, DbError> {
-    let index_rows = conn
-        .query_rows(
-            cx,
-            "SELECT index_name, uniqueness FROM all_indexes \
-             WHERE table_owner = :1 AND table_name = :2 \
-             ORDER BY index_name",
-            &[OracleBind::from(owner), OracleBind::from(table)],
-        )
-        .await?;
+    let index_rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::SearchIndexes,
+        &[OracleBind::from(owner), OracleBind::from(table)],
+    )
+    .await?;
     let mut indexes = Vec::with_capacity(index_rows.len());
     for row in &index_rows {
         let name = row.text("INDEX_NAME").unwrap_or_default().to_owned();
         let uniqueness = row.text("UNIQUENESS").map(str::to_owned);
-        let column_rows = conn
-            .query_rows(
-                cx,
-                "SELECT column_name FROM all_ind_columns \
-                 WHERE index_owner = :1 AND index_name = :2 \
-                 ORDER BY column_position",
-                &[OracleBind::from(owner), OracleBind::from(name.as_str())],
-            )
-            .await?;
+        let column_rows = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::SearchIndexColumns,
+            &[OracleBind::from(owner), OracleBind::from(name.as_str())],
+        )
+        .await?;
         let columns = column_rows
             .iter()
             .filter_map(|row| row.text("COLUMN_NAME").map(str::to_owned))
@@ -3666,6 +3660,19 @@ mod tests {
                     ("COMMENTS", "primary key"),
                 ])]);
             }
+            if sql.contains("FROM all_tables") {
+                return Ok(vec![cell_row(&[
+                    ("NUM_ROWS", "1234"),
+                    ("LAST_ANALYZED", "2026-01-01T00:00:00"),
+                ])]);
+            }
+            if sql.contains("all_tab_statistics") {
+                return Ok(self
+                    .stale
+                    .map(|value| cell_row(&[("STALE_STATS", value)]))
+                    .into_iter()
+                    .collect());
+            }
             if sql.contains("FROM all_tab_columns") {
                 // Column count query.
                 return Ok(vec![cell_row(&[("COLUMN_COUNT", "3")])]);
@@ -3683,30 +3690,6 @@ mod tests {
                 ])]);
             }
             Ok(Vec::new())
-        }
-        async fn query_optional_row(
-            &self,
-            _cx: &Cx,
-            sql: &str,
-            _binds: &[OracleBind],
-        ) -> Result<Option<OracleRow>, DbError> {
-            self.seen_sql.lock().unwrap().push(sql.to_owned());
-            if sql.contains("FROM all_tables") {
-                return Ok(Some(cell_row(&[
-                    ("NUM_ROWS", "1234"),
-                    ("LAST_ANALYZED", "2026-01-01T00:00:00"),
-                ])));
-            }
-            if sql.contains("all_tab_statistics") {
-                return Ok(self.stale.map(|value| cell_row(&[("STALE_STATS", value)])));
-            }
-            if sql.contains("all_tab_comments") {
-                return Ok(Some(cell_row(&[("COMMENTS", "the employees table")])));
-            }
-            if sql.contains("COUNT(*) AS column_count") {
-                return Ok(Some(cell_row(&[("COLUMN_COUNT", "3")])));
-            }
-            Ok(None)
         }
         async fn execute(
             &self,

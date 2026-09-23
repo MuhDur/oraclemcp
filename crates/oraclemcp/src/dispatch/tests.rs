@@ -880,6 +880,37 @@ fn served_read_gate_refuses_view_policy_and_zero_arg_function_before_evaluation(
     }
 }
 
+#[test]
+fn owner_qualified_column_requires_exact_catalog_proof_before_read() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let admitted = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "SELECT APP.ORDERS.ID FROM APP.ORDERS"}),
+        )
+        .expect("the live catalog proves this exact owner-qualified column");
+    assert_eq!(admitted["rows"][0]["ID"], json!("1"));
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+
+    for (sql, expected_class) in [
+        (
+            "SELECT OTHER.ORDERS.ID FROM APP.ORDERS",
+            ErrorClass::ObjectNotFound,
+        ),
+        (
+            "SELECT APP.DANGEROUS_FN FROM APP.ORDERS",
+            ErrorClass::ForbiddenStatement,
+        ),
+    ] {
+        let (dispatcher, state) = semantic_dispatcher();
+        let refused = dispatcher
+            .dispatch("oracle_query", json!({"sql": sql}))
+            .expect_err("an unproved qualifier or paren-less callable must refuse");
+        assert_eq!(refused.error_class, expected_class, "{sql}: {refused:?}");
+        assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{sql}");
+    }
+}
+
 fn assert_issue53_sample_refused(case_id: &str, table: &str) {
     let (dispatcher, state) = semantic_dispatcher();
     let error = dispatcher
@@ -4378,6 +4409,18 @@ impl OracleConnection for SearchObjectsDispatchMock {
                 ("NULLABLE", "N"),
             ])]);
         }
+        if sql.contains("FROM all_tables") {
+            return Ok(vec![row(&[
+                ("NUM_ROWS", "999"),
+                ("LAST_ANALYZED", "2026-06-01T00:00:00"),
+            ])]);
+        }
+        if sql.contains("COUNT(*) AS column_count") {
+            return Ok(vec![row(&[("COLUMN_COUNT", "1")])]);
+        }
+        if sql.contains("all_tab_comments") {
+            return Ok(vec![row(&[("COMMENTS", "emp table")])]);
+        }
         if sql.contains("FROM all_indexes") {
             return Ok(vec![row(&[
                 ("INDEX_NAME", "EMP_PK"),
@@ -4388,39 +4431,6 @@ impl OracleConnection for SearchObjectsDispatchMock {
             return Ok(vec![row(&[("COLUMN_NAME", "ID")])]);
         }
         Ok(Vec::new())
-    }
-    async fn query_optional_row(
-        &self,
-        _cx: &Cx,
-        sql: &str,
-        _b: &[OracleBind],
-    ) -> Result<Option<OracleRow>, DbError> {
-        let row = |pairs: &[(&str, &str)]| {
-            Some(OracleRow {
-                columns: pairs
-                    .iter()
-                    .map(|(n, v)| {
-                        (
-                            (*n).to_owned(),
-                            OracleCell::new("VARCHAR2", Some((*v).to_owned())),
-                        )
-                    })
-                    .collect(),
-            })
-        };
-        if sql.contains("FROM all_tables") {
-            return Ok(row(&[
-                ("NUM_ROWS", "999"),
-                ("LAST_ANALYZED", "2026-06-01T00:00:00"),
-            ]));
-        }
-        if sql.contains("COUNT(*) AS column_count") {
-            return Ok(row(&[("COLUMN_COUNT", "1")]));
-        }
-        if sql.contains("all_tab_comments") {
-            return Ok(row(&[("COMMENTS", "emp table")]));
-        }
-        Ok(None)
     }
     async fn execute(&self, _cx: &Cx, s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         // Generated dictionary reads may assert the transaction-level read-only

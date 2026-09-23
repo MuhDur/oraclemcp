@@ -1672,6 +1672,14 @@ static READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
     )
 });
 
+/// Syntax-only first pass for reads that immediately enter the exact catalog
+/// proof. An owner-qualified column is indistinguishable from a paren-less
+/// callable at this point. The final classifier in `resolve_query_block_read`
+/// retains the qualified-call guard and admits only columns proved by the
+/// live catalog for every lexical occurrence.
+static SEMANTIC_READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> =
+    LazyLock::new(|| Classifier::engine_free_baseline(ClassifierConfig::new()));
+
 /// Classifier used for server-generated read SQL. It is deliberately separate
 /// from [`DEFAULT_CLASSIFIER`] so only this internal surface gets a tiny purity
 /// oracle for Oracle-owned read-only package routines used by dictionary tools.

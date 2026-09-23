@@ -121,11 +121,25 @@ pub enum CatalogQueryId {
     PlscopeIdentifiers,
     /// Bounded PL/Scope statement map.
     PlscopeStatements,
+    /// Gathered optimizer statistics for one table.
+    TableStats,
+    /// Staleness of gathered table statistics.
+    TableStatsStale,
+    /// Dictionary column count for one table.
+    TableColumnCount,
+    /// Dictionary comment for one object.
+    ObjectComment,
+    /// Columns and comments for search results.
+    SearchColumns,
+    /// Index identities on a table.
+    SearchIndexes,
+    /// Column identities within one index.
+    SearchIndexColumns,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 36] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -155,6 +169,13 @@ impl CatalogQueryId {
         Self::PlanCostTimeline,
         Self::PlscopeIdentifiers,
         Self::PlscopeStatements,
+        Self::TableStats,
+        Self::TableStatsStale,
+        Self::TableColumnCount,
+        Self::ObjectComment,
+        Self::SearchColumns,
+        Self::SearchIndexes,
+        Self::SearchIndexColumns,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -380,6 +401,70 @@ impl CatalogQueryId {
              ) WHERE ROWNUM <= :3",
                 TTI,
                 "read bounded PL/Scope statement map",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TableStats => (
+                "SELECT num_rows, TO_CHAR(last_analyzed, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_analyzed \
+                 FROM all_tables WHERE owner = :1 AND table_name = :2",
+                TT,
+                "read gathered table statistics",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TableStatsStale => (
+                "SELECT stale_stats FROM all_tab_statistics \
+                 WHERE owner = :1 AND table_name = :2 AND object_type = 'TABLE' \
+                   AND partition_name IS NULL",
+                TT,
+                "read gathered-statistics staleness",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TableColumnCount => (
+                "SELECT COUNT(*) AS column_count FROM all_tab_columns \
+                 WHERE owner = :1 AND table_name = :2",
+                TT,
+                "count visible table columns",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ObjectComment => (
+                "SELECT comments FROM all_tab_comments \
+                 WHERE owner = :1 AND table_name = :2",
+                TT,
+                "read object comment",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::SearchColumns => (
+                "SELECT c.column_name, c.data_type, c.nullable, cc.comments \
+                 FROM all_tab_columns c \
+                 LEFT JOIN all_col_comments cc \
+                   ON cc.owner = c.owner AND cc.table_name = c.table_name \
+                  AND cc.column_name = c.column_name \
+                 WHERE c.owner = :1 AND c.table_name = :2 \
+                 ORDER BY c.column_id",
+                TT,
+                "read columns and comments for search",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::SearchIndexes => (
+                "SELECT index_name, uniqueness FROM all_indexes \
+                 WHERE table_owner = :1 AND table_name = :2 \
+                 ORDER BY index_name",
+                TT,
+                "read table index identities",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::SearchIndexColumns => (
+                "SELECT column_name FROM all_ind_columns \
+                 WHERE index_owner = :1 AND index_name = :2 \
+                 ORDER BY column_position",
+                TT,
+                "read index column identities",
                 DictionaryMetadata,
                 Diagnostic,
             ),

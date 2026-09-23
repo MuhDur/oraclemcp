@@ -22,9 +22,9 @@ pub(super) async fn resolve_query_block_read(
     verified_local_vector_embedding: bool,
 ) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
     let initial = if verified_local_vector_embedding {
-        READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
+        SEMANTIC_READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
     } else {
-        READ_PRECHECK_CLASSIFIER.classify(sql)
+        SEMANTIC_READ_PRECHECK_CLASSIFIER.classify(sql)
     };
     ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
     let plan = semantic_read_plan_checked(sql)
@@ -301,15 +301,16 @@ impl<'a> GuardedReadExecutor<'a> {
             // through the SAME semantic read gate as any other statement, so a
             // rewrite can never widen what the read path admits.
             let base_decision = if verified_local_vector_embedding {
-                READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(&parsed.sql)
+                SEMANTIC_READ_PRECHECK_CLASSIFIER
+                    .classify_verified_local_vector_embedding(&parsed.sql)
             } else {
-                READ_PRECHECK_CLASSIFIER.classify(&parsed.sql)
+                SEMANTIC_READ_PRECHECK_CLASSIFIER.classify(&parsed.sql)
             };
             let policy = apply_sql_policy(
                 sql_policy.as_ref(),
                 current_schema.as_deref(),
                 context.principal_key(),
-                &READ_PRECHECK_CLASSIFIER,
+                &SEMANTIC_READ_PRECHECK_CLASSIFIER,
                 &base_decision,
                 &parsed.sql,
             )?;
@@ -572,8 +573,8 @@ impl<'a> GuardedReadExecutor<'a> {
                     sql_policy.as_ref(),
                     current_schema.as_deref(),
                     context.principal_key(),
-                    &READ_PRECHECK_CLASSIFIER,
-                    &READ_PRECHECK_CLASSIFIER.classify(&parsed.sql),
+                    &SEMANTIC_READ_PRECHECK_CLASSIFIER,
+                    &SEMANTIC_READ_PRECHECK_CLASSIFIER.classify(&parsed.sql),
                     &parsed.sql,
                 )?;
                 let policy_sql = policy
