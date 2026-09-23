@@ -66,9 +66,9 @@ use oraclemcp_db::{
     get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
     list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, paginated_sql,
     plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
-    probe_dependents, read_lob, read_query, read_query_as_of, sample_rows, search_objects,
-    search_source, semantic_search_query, semantic_search_query_with_filter,
-    semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
+    probe_dependents, read_query, read_query_as_of, search_objects, search_source,
+    semantic_search_query, semantic_search_query_with_filter, semantic_search_text_query,
+    semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{SearchDetailLevel, SourceText, StatementOutcome};
 use oraclemcp_error::{
@@ -12664,6 +12664,105 @@ impl OracleDispatcher {
                 )
                 .await;
         }
+        if tool == "oracle_sample_rows" {
+            let a: SampleRowsArgs = parse_args(name, args)?;
+            let max_rows = a
+                .max_rows
+                .unwrap_or(DEFAULT_SAMPLE_MAX_ROWS)
+                .clamp(1, MAX_SAMPLE_MAX_ROWS);
+            let (owner, table) =
+                owner_and_name_arg(cx, state.conn.as_ref(), a.owner, a.table, "table").await?;
+            let sql =
+                oraclemcp_db::sample_rows_sql(&owner, &table).map_err(DbError::into_envelope)?;
+            let mut response = GuardedReadExecutor::new(self)
+                .run_server_read(
+                    cx,
+                    &mut state,
+                    context,
+                    "oracle_sample_rows",
+                    json!({ "binds": [max_rows], "max_rows": max_rows }),
+                    ServerSql::new(sql, Vec::new()),
+                    request_budget,
+                    &request_subject,
+                    sql_policy,
+                    current_schema,
+                    &scoped_level,
+                )
+                .await?;
+            if let Value::Object(ref mut fields) = response {
+                fields.insert("owner".to_owned(), json!(owner));
+                fields.insert("table".to_owned(), json!(table));
+            }
+            return Ok(response);
+        }
+        if tool == "oracle_read_clob" {
+            let a: ReadClobArgs = parse_args(name, args)?;
+            let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS).max(1);
+            let (owner, table) =
+                owner_and_name_arg(cx, state.conn.as_ref(), a.owner, a.table, "table").await?;
+            let sql = oraclemcp_db::read_lob_sql(&owner, &table, &a.clob_column, &a.pk_column)
+                .map_err(DbError::into_envelope)?;
+            let mut response = GuardedReadExecutor::new(self)
+                .run_server_read(
+                    cx,
+                    &mut state,
+                    context,
+                    "oracle_read_clob",
+                    json!({
+                        "binds": [a.pk_value],
+                        "max_rows": 1,
+                        "max_lob_chars": max_chars,
+                        "max_col_width": max_chars,
+                    }),
+                    ServerSql::new(sql, Vec::new()),
+                    request_budget,
+                    &request_subject,
+                    sql_policy,
+                    current_schema,
+                    &scoped_level,
+                )
+                .await?;
+            let clob = response["rows"]
+                .as_array()
+                .and_then(|rows| rows.first())
+                .map(|row| {
+                    let cell = &row["LOB_VALUE"];
+                    let (value, char_count, truncated) = match cell {
+                        Value::String(text) => (Some(text.clone()), text.chars().count(), false),
+                        Value::Object(fields) => {
+                            let value = fields
+                                .get("value")
+                                .and_then(Value::as_str)
+                                .map(str::to_owned);
+                            let char_count = fields
+                                .get("char_length")
+                                .and_then(Value::as_u64)
+                                .and_then(|length| usize::try_from(length).ok())
+                                .or_else(|| value.as_ref().map(|text| text.chars().count()))
+                                .unwrap_or(0);
+                            let truncated = fields
+                                .get("truncated")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            (value, char_count, truncated)
+                        }
+                        _ => (None, 0, false),
+                    };
+                    json!({
+                        "owner": owner,
+                        "table": table,
+                        "column": a.clob_column.to_ascii_uppercase(),
+                        "pk_column": a.pk_column.to_ascii_uppercase(),
+                        "value": value,
+                        "char_count": char_count,
+                        "truncated": truncated,
+                    })
+                });
+            if let Value::Object(ref mut fields) = response {
+                fields.insert("clob".to_owned(), clob.unwrap_or(Value::Null));
+            }
+            return Ok(response);
+        }
         let generated_read = generated_read_tool(tool);
         if generated_read
             && (generated_read_uses_primary_session(tool) || state.stateless_conn.is_none())
@@ -13944,23 +14043,6 @@ impl OracleDispatcher {
                     }
                 }
             }
-            "oracle_sample_rows" => {
-                let a: SampleRowsArgs = parse_args(name, args)?;
-                let max_rows = a
-                    .max_rows
-                    .unwrap_or(DEFAULT_SAMPLE_MAX_ROWS)
-                    .clamp(1, MAX_SAMPLE_MAX_ROWS);
-                let (owner, table) =
-                    owner_and_name_arg(cx, conn, a.owner, a.table, "table").await?;
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.sample_rows.before")?;
-                let rows = sample_rows(cx, &guarded_conn, &owner, &table, max_rows)
-                    .await
-                    .map_err(DbError::into_envelope)?;
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.sample_rows.after")?;
-                Ok(
-                    json!({ "owner": owner, "table": table, "rows": rows_to_json(&rows), "row_count": rows.len() }),
-                )
-            }
             "oracle_top_queries" => {
                 let a: TopQueriesArgs = parse_args(name, args)?;
                 let metric = match a.metric.as_deref() {
@@ -14105,27 +14187,6 @@ impl OracleDispatcher {
                     },
                 )
                 .await;
-            }
-            "oracle_read_clob" => {
-                let a: ReadClobArgs = parse_args(name, args)?;
-                let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS);
-                let (owner, table) =
-                    owner_and_name_arg(cx, conn, a.owner, a.table, "table").await?;
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.read_lob.before")?;
-                let clob = read_lob(
-                    cx,
-                    &guarded_conn,
-                    &owner,
-                    &table,
-                    &a.clob_column,
-                    &a.pk_column,
-                    &a.pk_value,
-                    max_chars,
-                )
-                .await
-                .map_err(DbError::into_envelope)?;
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.read_lob.after")?;
-                Ok(json!({ "clob": clob }))
             }
             "oracle_compile_errors" => {
                 let a: CompileErrorsArgs = parse_args(name, args)?;

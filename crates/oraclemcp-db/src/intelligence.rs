@@ -17,7 +17,7 @@ use asupersync::Cx;
 
 use crate::connection::OracleConnection;
 use crate::error::DbError;
-use crate::query::QueryResponse;
+use crate::query::{QueryResponse, read_lob_sql, sample_rows_sql};
 use crate::types::{OracleBind, OracleCell, OracleRow};
 use serde::{Deserialize, Serialize};
 
@@ -1916,16 +1916,7 @@ pub async fn sample_rows(
     table: &str,
     n: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    if !is_simple_identifier(owner) || !is_simple_identifier(table) {
-        return Err(DbError::Query(format!(
-            "invalid object name: {owner}.{table}"
-        )));
-    }
-    let sql = format!(
-        "SELECT * FROM (SELECT * FROM {}.{}) WHERE ROWNUM <= :1",
-        owner.to_ascii_uppercase(),
-        table.to_ascii_uppercase()
-    );
+    let sql = sample_rows_sql(owner, table)?;
     conn.query_rows(cx, &sql, &[OracleBind::from(n as i64)])
         .await
 }
@@ -2258,11 +2249,7 @@ pub fn diff_query_responses(
     })
 }
 
-/// Read one CLOB/NCLOB/text value by an equality key, capped by characters.
-///
-/// The identifiers cannot be bound in Oracle SQL, so each identifier is
-/// restricted to a simple unquoted Oracle identifier before interpolation. The
-/// key value is always bound.
+/// Read one CLOB/NCLOB/text value using the exact SQL from [`read_lob_sql`].
 #[allow(clippy::too_many_arguments)]
 pub async fn read_lob(
     cx: &Cx,
@@ -2274,29 +2261,11 @@ pub async fn read_lob(
     pk_value: &str,
     max_chars: usize,
 ) -> Result<Option<LobText>, DbError> {
-    for (label, value) in [
-        ("owner", owner),
-        ("table", table),
-        ("clob_column", clob_column),
-        ("pk_column", pk_column),
-    ] {
-        if !is_simple_identifier(value) {
-            return Err(DbError::Query(format!(
-                "invalid {label} identifier: {value:?}"
-            )));
-        }
-    }
-
+    let sql = read_lob_sql(owner, table, clob_column, pk_column)?;
     let owner = owner.to_ascii_uppercase();
     let table = table.to_ascii_uppercase();
     let clob_column = clob_column.to_ascii_uppercase();
     let pk_column = pk_column.to_ascii_uppercase();
-    let sql = format!(
-        "SELECT {clob_column} AS LOB_VALUE \
-         FROM {owner}.{table} \
-         WHERE {pk_column} = :1 \
-         FETCH FIRST 1 ROW ONLY"
-    );
     let rows = conn
         .query_rows(cx, &sql, &[OracleBind::from(pk_value)])
         .await?;

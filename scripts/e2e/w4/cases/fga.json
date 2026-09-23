@@ -1,0 +1,38 @@
+[
+  {
+    "case_id": "w4_query_fga_handler_canary_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_FGA_${run_id} WHERE ID = 1 /* W4MARK_FGAHANDLER000001 */",
+        "max_rows": 1
+      },
+      "vsql_absent_marker": "W4MARK_FGAHANDLER000001"
+    },
+    "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "fga_handler_autonomous"},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_FGA_CANARY_${run_id}", "rows": [[0]]}],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+  },
+  {
+    "case_id": "w4_sample_rows_fga_handler_canary_refused",
+    "tool": "oracle_sample_rows",
+    "level": "READ_ONLY",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {"owner": "${owner}", "table": "T_FGA_${run_id}", "max_rows": 1}
+    },
+    "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "fga_handler_autonomous"},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_FGA_CANARY_${run_id}", "rows": [[0]]}],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+  }
+]

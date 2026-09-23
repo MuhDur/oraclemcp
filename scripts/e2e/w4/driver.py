@@ -40,7 +40,7 @@ CASES = HERE / "cases"
 MANIFEST = ROOT / "scripts/e2e/cases/validate_manifest.py"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
-OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant"}
+OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions"}
 EXPECT_KINDS = {"rows", "error_class", "json_subset", "golden"}
 CURRENT_SESSION = object()
 
@@ -143,6 +143,9 @@ def verify_expect(expect, reply, golden_root=None):
     elif "error_class" in expect:
         require(payload.get("isError") is True, "expected typed tool refusal")
         require(structured.get("error_class") == expect["error_class"], "wrong error class")
+        if "reason_code" in expect:
+            require(structured.get("structured_reason", {}).get("offending_construct") == expect["reason_code"],
+                    "wrong structured refusal reason")
         if "ora_code" in expect:
             require(structured.get("ora_code") == expect["ora_code"], "wrong ORA code")
     elif "json_subset" in expect:
@@ -216,6 +219,8 @@ def validate_case(case, filename):
     require(isinstance(case["setup"], list), "setup must be an array")
     require(case.get("setup_phase", "before_call") in {"before_call", "before_server"},
             "setup_phase must be before_call or before_server")
+    require("audit_zero_executions" not in case or type(case["audit_zero_executions"]) is bool,
+            "audit_zero_executions must be boolean")
     if "setup_ready_sql" in case:
         require(case.get("setup_phase") == "before_server"
                 and isinstance(case["setup_ready_sql"], str)
@@ -297,8 +302,10 @@ def validate_case(case, filename):
 def verify_expect_shape(expect):
     require(isinstance(expect, dict) and len(EXPECT_KINDS & expect.keys()) == 1,
             "expect must select one verification mode")
-    require(set(expect) <= EXPECT_KINDS | {"ora_code"}, "unknown expect key")
+    require(set(expect) <= EXPECT_KINDS | {"ora_code", "reason_code"}, "unknown expect key")
     require("ora_code" not in expect or "error_class" in expect, "ora_code needs error_class")
+    require("reason_code" not in expect or ("error_class" in expect and isinstance(expect["reason_code"], str)),
+            "reason_code needs error_class and a string value")
     if "ora_code" in expect:
         require(type(expect["ora_code"]) is int and expect["ora_code"] > 0,
                 "ora_code must be a positive integer")
@@ -1055,6 +1062,12 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env))
+        if case.get("audit_zero_executions"):
+            records = audit_records(audit_path)[before:]
+            require(not any(record.get("decision") == "ALLOWED" or record.get("outcome") == "SUCCEEDED"
+                            for record in records),
+                    "FGA refusal produced an allowed or succeeded audit record")
+            row["audit_zero_executions"] = True
         row["verdict"] = "pass"
     except Exception as exc:
         row["verification_failure"] = {"class": type(exc).__name__, "detail": str(exc)[:240]}
@@ -1281,6 +1294,12 @@ def run_lane(args):
             "checkout revision changed while preparing the binary")
     binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     family_cases = load_cases()
+    if args.case:
+        selected = set(args.case)
+        available = {case["case_id"] for case in family_cases}
+        require(selected <= available,
+                f"unknown scoped W4 case(s): {', '.join(sorted(selected - available))}")
+        family_cases = [case for case in family_cases if case["case_id"] in selected]
     release_ids = {case["case_id"]: case["test_id"] for case in json.loads(
         (ROOT / "scripts/e2e/cases/release_0_12.json").read_text())}
     for case in family_cases:
@@ -1315,8 +1334,9 @@ def run_lane(args):
                 client = (StdioClient(binary, args.lane, client_env) if transport == "stdio"
                           else HttpClient(binary, args.lane, client_env, port, secret, audience))
                 initialize(client)
-                rows.append(run_malformed_frame(client, args.lane, transport))
-                if transport == "http":
+                if not args.case:
+                    rows.append(run_malformed_frame(client, args.lane, transport))
+                if transport == "http" and not args.case:
                     rows.extend(run_http_auth_family(client, args.lane))
                     rows.append(run_http_parallel_discovery(client, args.lane, barriers))
                 elevate(client, "ADMIN")
@@ -1334,8 +1354,9 @@ def run_lane(args):
                 require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
                         "could not return to READ_ONLY after discovery")
                 cases = list(expanded_family)
-                cases += list(generic_contract_cases(
-                    discovered, args.lane, contract_baselines(expanded_family)))
+                if not args.case:
+                    cases += list(generic_contract_cases(
+                        discovered, args.lane, contract_baselines(expanded_family)))
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
@@ -1364,12 +1385,13 @@ def run_lane(args):
                     rows.append(run_case(client, case, transport, args.lane, capabilities, connection,
                                          barriers, binary, audit_path, client_env,
                                          discovered.get(case["tool"])))
-                restart_row, replacement = run_restart_recovery(
-                    client, binary, args.lane, client_env, transport, port,
-                    secret, audience, discovered)
-                rows.append(restart_row)
-                if replacement is not None:
-                    client = replacement
+                if not args.case:
+                    restart_row, replacement = run_restart_recovery(
+                        client, binary, args.lane, client_env, transport, port,
+                        secret, audience, discovered)
+                    rows.append(restart_row)
+                    if replacement is not None:
+                        client = replacement
                 require(audit_path.exists() and audit_verify(binary, audit_path, client_env),
                         f"{transport}: final audit chain verification failed")
             finally:
@@ -1392,10 +1414,10 @@ def run_lane(args):
         if args.coverage_report:
             (base / "coverage.json").write_text(json.dumps(
                 coverage_status(descriptors, family_cases), indent=2, sort_keys=True) + "\n")
-        if not args.contract_only:
+        if not args.contract_only and not args.case:
             for transport in ("stdio", "http"):
                 enforce_manifest(results_path, args.lane, transport, capabilities)
-        if not args.contract_only or args.coverage_report:
+        if (not args.contract_only and not args.case) or args.coverage_report:
             verify_coverage(descriptors, family_cases)
         failed = [row["case_id"] for row in rows if row["verdict"] != "pass"]
         require(not failed, f"red W4 cases: {', '.join(failed[:12])} ({len(failed)} total)")
@@ -1556,10 +1578,13 @@ def main():
     parser.add_argument("--binary-source-sha", help="verified source revision of an external binary")
     parser.add_argument("--contract-only", action="store_true",
                         help="run generated W3 contracts without the release manifest")
+    parser.add_argument("--case", action="append",
+                        help="run one named live case (repeatable); scoped run skips broad manifest and contract gates")
     parser.add_argument("--coverage-report", action="store_true")
     parser.add_argument("--cargo-test-log", type=Path, action="append", default=[])
     args = parser.parse_args()
     try:
+        require(not (args.case and args.contract_only), "--case and --contract-only cannot be combined")
         require(not args.binary_source_sha or re.fullmatch(r"[0-9a-f]{40}", args.binary_source_sha),
                 "--binary-source-sha needs a full Git SHA")
         if args.selftest:

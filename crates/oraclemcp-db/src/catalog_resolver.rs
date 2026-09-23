@@ -20,10 +20,11 @@ use oraclemcp_guard::{
 
 #[cfg(test)]
 use crate::catalog_query::{
-    ALL_POLICIES_VISIBILITY_SQL, COLUMN_CONFLICT_SQL, MEMBER_ARGUMENTS_SQL, MEMBER_PROCEDURES_SQL,
-    OBJECTS_SQL, POLICY_CATALOG_PROOF_SQL, POLICY_ROWS_FOR_RELATIONS_32_SQL, RELATION_COLUMN_SQL,
-    SELECT_POLICY_SQL, STANDALONE_ARGUMENTS_SQL, STANDALONE_PROCEDURES_SQL, SYNONYMS_SQL,
-    TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL, VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
+    ALL_POLICIES_VISIBILITY_SQL, COLUMN_CONFLICT_SQL, FGA_CATALOG_PROOF_SQL, MEMBER_ARGUMENTS_SQL,
+    MEMBER_PROCEDURES_SQL, OBJECTS_SQL, POLICY_CATALOG_PROOF_SQL, POLICY_ROWS_FOR_RELATIONS_32_SQL,
+    RELATION_COLUMN_SQL, SELECT_POLICY_SQL, STANDALONE_ARGUMENTS_SQL, STANDALONE_PROCEDURES_SQL,
+    SYNONYMS_SQL, TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL,
+    VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
 };
 use crate::catalog_query::{CatalogQueryId, run_catalog_query};
 use crate::{DbError, OracleBind, OracleConnection, OracleRow};
@@ -468,6 +469,247 @@ pub async fn resolved_relations_read_purity(
     Ok(oraclemcp_guard::Purity::ProvenReadOnly)
 }
 
+/// Statement class used to match Oracle FGA policy flags. The mutation effect
+/// collector uses the same catalog proof for its three DML classes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FgaStatementKind {
+    /// SELECT, including a query nested in another statement.
+    Select,
+    /// INSERT.
+    Insert,
+    /// UPDATE.
+    Update,
+    /// DELETE.
+    Delete,
+}
+
+/// The four statement classes named by one FGA policy row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FgaAppliesTo {
+    /// SELECT applicability.
+    pub select: bool,
+    /// INSERT applicability.
+    pub insert: bool,
+    /// UPDATE applicability.
+    pub update: bool,
+    /// DELETE applicability.
+    pub delete: bool,
+}
+
+impl FgaAppliesTo {
+    fn includes(self, kind: FgaStatementKind) -> bool {
+        match kind {
+            FgaStatementKind::Select => self.select,
+            FgaStatementKind::Insert => self.insert,
+            FgaStatementKind::Update => self.update,
+            FgaStatementKind::Delete => self.delete,
+        }
+    }
+}
+
+/// Exact catalog evidence for one fine-grained auditing policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FgaPolicyEvidence {
+    /// Target owner and object name.
+    pub object: (String, String),
+    /// Oracle policy name.
+    pub policy_name: String,
+    /// Whether Oracle reports the policy enabled.
+    pub enabled: bool,
+    /// Statement classes to which the policy applies.
+    pub applies_to: FgaAppliesTo,
+    /// Handler owner, optional package, and function.
+    pub handler: Option<(String, Option<String>, String)>,
+    /// Condition evaluated by Oracle as the statement runs.
+    pub audit_condition: Option<String>,
+}
+
+/// A complete FGA closure or the specific evidence that refuses admission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FgaClosure {
+    /// Catalog was readable, complete, and no matching policy invokes user code.
+    ProvenReadOnly,
+    /// A matching enabled policy can run an autonomous handler.
+    Autonomous {
+        /// Exact policy that can call an autonomous handler.
+        policy: FgaPolicyEvidence,
+    },
+    /// Catalog evidence was unavailable, truncated, or ambiguous.
+    Unknown {
+        /// Stable internal evidence-gap reason.
+        reason: &'static str,
+    },
+}
+
+impl FgaClosure {
+    /// Project the FGA verdict onto the common purity lattice.
+    #[must_use]
+    pub fn purity(&self) -> Purity {
+        match self {
+            Self::ProvenReadOnly => Purity::ProvenReadOnly,
+            Self::Autonomous { .. } => Purity::ProvenSideEffecting,
+            Self::Unknown { .. } => Purity::Unknown,
+        }
+    }
+}
+
+fn fga_flag(row: &OracleRow, name: &str) -> Option<bool> {
+    match row.text(name)? {
+        "YES" => Some(true),
+        "NO" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_fga_policy(row: &OracleRow) -> Result<FgaPolicyEvidence, &'static str> {
+    let object = (
+        required_text(row, "OBJECT_SCHEMA").ok_or("fga_object_identity_unknown")?,
+        required_text(row, "OBJECT_NAME").ok_or("fga_object_identity_unknown")?,
+    );
+    let policy_name = required_text(row, "POLICY_NAME").ok_or("fga_policy_identity_unknown")?;
+    let enabled = fga_flag(row, "ENABLED").ok_or("fga_enabled_flag_unknown")?;
+    let applies_to = FgaAppliesTo {
+        select: fga_flag(row, "SEL").ok_or("fga_statement_flag_unknown")?,
+        insert: fga_flag(row, "INS").ok_or("fga_statement_flag_unknown")?,
+        update: fga_flag(row, "UPD").ok_or("fga_statement_flag_unknown")?,
+        delete: fga_flag(row, "DEL").ok_or("fga_statement_flag_unknown")?,
+    };
+    if ["PF_SCHEMA", "PF_PACKAGE", "PF_FUNCTION", "POLICY_TEXT"]
+        .iter()
+        .any(|name| row.cell(name).is_none())
+    {
+        return Err("fga_catalog_columns_unknown");
+    }
+    let schema = optional_text(row, "PF_SCHEMA");
+    let package = optional_text(row, "PF_PACKAGE");
+    let function = optional_text(row, "PF_FUNCTION");
+    let handler = match (schema, package, function) {
+        (Some(schema), package, Some(function)) => Some((schema, package, function)),
+        (None, None, None) => None,
+        _ => return Err("fga_handler_identity_unknown"),
+    };
+    Ok(FgaPolicyEvidence {
+        object,
+        policy_name,
+        enabled,
+        applies_to,
+        handler,
+        audit_condition: optional_text(row, "POLICY_TEXT"),
+    })
+}
+
+fn fga_condition_proven_builtin(condition: Option<&str>) -> bool {
+    // A null condition is Oracle's unconditional policy. These exact constant
+    // forms contain no callable expression. All other text stays unproven:
+    // Oracle's audit condition grammar can invoke a user function.
+    condition.is_none_or(|text| matches!(text.trim(), "1=1" | "1 = 1"))
+}
+
+/// Prove FGA policies cannot invoke user code for the exact resolved objects.
+/// An unreadable catalog, malformed row, or a saturated batch is uncertainty.
+pub async fn fga_closure(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+    kind: FgaStatementKind,
+) -> FgaClosure {
+    if relations.len() > 256 {
+        return FgaClosure::Unknown {
+            reason: "fga_relation_cap_exceeded",
+        };
+    }
+    if relations
+        .iter()
+        .any(|relation| relation.db_link.is_some() || relation.identity.object_id == 0)
+    {
+        return FgaClosure::Unknown {
+            reason: "fga_relation_identity_unknown",
+        };
+    }
+    for chunk in relations.chunks(32) {
+        let mut binds = Vec::with_capacity(64);
+        for relation in chunk {
+            binds.push(OracleBind::from(relation.owner.as_str()));
+            binds.push(OracleBind::from(relation.name.as_str()));
+        }
+        while binds.len() < 64 {
+            binds.push(OracleBind::from(""));
+        }
+        let rows =
+            match run_catalog_query(cx, conn, CatalogQueryId::FgaPoliciesForRelations32, &binds)
+                .await
+            {
+                Ok(rows) => rows,
+                Err(_) => {
+                    return FgaClosure::Unknown {
+                        reason: "fga_catalog_unavailable",
+                    };
+                }
+            };
+        if rows.len() >= 257 {
+            return FgaClosure::Unknown {
+                reason: "fga_evidence_truncated",
+            };
+        }
+        for row in &rows {
+            // Oracle cannot run a disabled policy or a policy for a different
+            // statement class. Its handler metadata is immaterial in those
+            // cases, including a partially populated legacy row.
+            let Some(enabled) = fga_flag(row, "ENABLED") else {
+                return FgaClosure::Unknown {
+                    reason: "fga_enabled_flag_unknown",
+                };
+            };
+            let column = match kind {
+                FgaStatementKind::Select => "SEL",
+                FgaStatementKind::Insert => "INS",
+                FgaStatementKind::Update => "UPD",
+                FgaStatementKind::Delete => "DEL",
+            };
+            let Some(applies) = fga_flag(row, column) else {
+                return FgaClosure::Unknown {
+                    reason: "fga_statement_flag_unknown",
+                };
+            };
+            if !enabled || !applies {
+                continue;
+            }
+            let policy = match parse_fga_policy(row) {
+                Ok(policy) => policy,
+                Err(reason) => return FgaClosure::Unknown { reason },
+            };
+            if !chunk.iter().any(|relation| {
+                relation.owner == policy.object.0 && relation.name == policy.object.1
+            }) {
+                return FgaClosure::Unknown {
+                    reason: "fga_object_identity_mismatch",
+                };
+            }
+            debug_assert!(policy.enabled && policy.applies_to.includes(kind));
+            if policy.handler.is_some() {
+                return FgaClosure::Autonomous { policy };
+            }
+            if !fga_condition_proven_builtin(policy.audit_condition.as_deref()) {
+                return FgaClosure::Unknown {
+                    reason: "fga_audit_condition_unknown",
+                };
+            }
+        }
+    }
+    // A successful empty probe establishes catalog readability even when no
+    // FGA policy is visible. Oracle grants ALL_AUDIT_POLICIES for accessible
+    // objects; a failed probe never proves absence.
+    if run_catalog_query(cx, conn, CatalogQueryId::FgaCatalogProof, &[])
+        .await
+        .is_err()
+    {
+        return FgaClosure::Unknown {
+            reason: "fga_catalog_unavailable",
+        };
+    }
+    FgaClosure::ProvenReadOnly
+}
+
 /// Why a lexical read plan failed before caller SQL could reach Oracle.
 #[derive(Debug)]
 pub enum ReadPlanProofError {
@@ -479,6 +721,10 @@ pub enum ReadPlanProofError {
     MissingColumn(RawName),
     /// A structural or effect dependency remains unproven.
     Unproven(&'static str),
+    /// An enabled FGA handler can execute autonomously on this read.
+    FgaHandlerAutonomous,
+    /// FGA catalog evidence did not establish absence of user code.
+    FgaEvidenceUnknown,
 }
 
 /// The full local identity of a catalog relation, including its edition.
@@ -702,6 +948,11 @@ pub async fn prove_semantic_read_plan(
                 .push(ReadObjectIdentity::from(object.as_ref()));
             relations.push(*object);
         }
+    }
+    match fga_closure(cx, conn, &relations, FgaStatementKind::Select).await {
+        FgaClosure::ProvenReadOnly => {}
+        FgaClosure::Autonomous { .. } => return Err(ReadPlanProofError::FgaHandlerAutonomous),
+        FgaClosure::Unknown { .. } => return Err(ReadPlanProofError::FgaEvidenceUnknown),
     }
     let purity = resolved_relations_read_purity(cx, conn, &relations)
         .await
@@ -2626,6 +2877,229 @@ mod tests {
         }
     }
 
+    fn fga_row(
+        enabled: &str,
+        flags: [&str; 4],
+        handler: Option<&str>,
+        condition: Option<&str>,
+    ) -> OracleRow {
+        row(&[
+            ("OBJECT_SCHEMA", Some("APP")),
+            ("OBJECT_NAME", Some("ORDERS")),
+            ("POLICY_NAME", Some("AUDIT_ORDERS")),
+            ("POLICY_TEXT", condition),
+            ("PF_SCHEMA", handler.map(|_| "APP")),
+            ("PF_PACKAGE", None),
+            ("PF_FUNCTION", handler),
+            ("ENABLED", Some(enabled)),
+            ("SEL", Some(flags[0])),
+            ("INS", Some(flags[1])),
+            ("UPD", Some(flags[2])),
+            ("DEL", Some(flags[3])),
+        ])
+    }
+
+    fn fga_test_connection(rows: Vec<OracleRow>) -> ScriptedRows {
+        ScriptedRows::new([rows, Vec::new()])
+    }
+
+    #[test]
+    fn fga_enabled_select_policy_with_handler_is_autonomous() {
+        run_with_cx(|cx| async move {
+            let conn = fga_test_connection(vec![fga_row(
+                "YES",
+                ["YES", "NO", "NO", "NO"],
+                Some("AUDIT_HANDLER"),
+                None,
+            )]);
+            let result = fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await;
+            assert_eq!(result.purity(), Purity::ProvenSideEffecting);
+            let FgaClosure::Autonomous { policy } = result else {
+                panic!("enabled handler must refuse")
+            };
+            assert_eq!(policy.policy_name, "AUDIT_ORDERS");
+            assert_eq!(
+                policy.handler,
+                Some(("APP".to_owned(), None, "AUDIT_HANDLER".to_owned()))
+            );
+            assert_eq!(conn.queries.lock().unwrap().len(), 1);
+        });
+    }
+
+    #[test]
+    fn fga_disabled_policy_does_not_refuse() {
+        run_with_cx(|cx| async move {
+            let conn = fga_test_connection(vec![fga_row(
+                "NO",
+                ["YES", "NO", "NO", "NO"],
+                Some("AUDIT_HANDLER"),
+                None,
+            )]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await,
+                FgaClosure::ProvenReadOnly
+            );
+        });
+    }
+
+    #[test]
+    fn fga_insert_only_policy_does_not_refuse_select() {
+        run_with_cx(|cx| async move {
+            let conn = fga_test_connection(vec![fga_row(
+                "YES",
+                ["NO", "YES", "NO", "NO"],
+                Some("AUDIT_HANDLER"),
+                None,
+            )]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await,
+                FgaClosure::ProvenReadOnly
+            );
+        });
+    }
+
+    #[test]
+    fn fga_policy_on_view_in_closure_refuses() {
+        run_with_cx(|cx| async move {
+            let conn = fga_test_connection(vec![fga_row(
+                "YES",
+                ["YES", "NO", "NO", "NO"],
+                Some("AUDIT_HANDLER"),
+                None,
+            )]);
+            let view = ResolvedObject {
+                kind: CatalogObjectKind::View,
+                ..table_object()
+            };
+            assert!(matches!(
+                fga_closure(&cx, &conn, &[view], FgaStatementKind::Select).await,
+                FgaClosure::Autonomous { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn fga_ambiguous_handler_identity_is_unknown() {
+        run_with_cx(|cx| async move {
+            let mut ambiguous = fga_row(
+                "YES",
+                ["YES", "NO", "NO", "NO"],
+                Some("AUDIT_HANDLER"),
+                None,
+            );
+            let (_, function) = ambiguous
+                .columns
+                .iter_mut()
+                .find(|(name, _)| name == "PF_FUNCTION")
+                .expect("handler function column");
+            *function = OracleCell::new("VARCHAR2", None);
+            let conn = fga_test_connection(vec![ambiguous]);
+            assert!(matches!(
+                fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await,
+                FgaClosure::Unknown { .. }
+            ));
+        });
+    }
+
+    #[test]
+    fn fga_audit_condition_with_user_function_is_unknown() {
+        run_with_cx(|cx| async move {
+            let conn = fga_test_connection(vec![fga_row(
+                "YES",
+                ["YES", "NO", "NO", "NO"],
+                None,
+                Some("APP.CANARY_FN(id) = 1"),
+            )]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await,
+                FgaClosure::Unknown {
+                    reason: "fga_audit_condition_unknown"
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn fga_catalog_invisible_is_unknown() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::results([
+                Ok(Vec::new()),
+                Err(DbError::Query("ORA-00942".to_owned())),
+            ]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await,
+                FgaClosure::Unknown {
+                    reason: "fga_catalog_unavailable"
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn fga_truncated_evidence_is_unknown() {
+        run_with_cx(|cx| async move {
+            let row = fga_row("NO", ["YES", "NO", "NO", "NO"], None, None);
+            let conn = fga_test_connection(vec![row; 257]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await,
+                FgaClosure::Unknown {
+                    reason: "fga_evidence_truncated"
+                }
+            );
+        });
+    }
+
+    #[test]
+    fn fga_statement_kind_keying_serves_dml_kinds() {
+        run_with_cx(|cx| async move {
+            for kind in [
+                FgaStatementKind::Insert,
+                FgaStatementKind::Update,
+                FgaStatementKind::Delete,
+            ] {
+                let conn = fga_test_connection(vec![fga_row(
+                    "YES",
+                    ["NO", "YES", "YES", "YES"],
+                    Some("AUDIT_HANDLER"),
+                    None,
+                )]);
+                assert!(matches!(
+                    fga_closure(&cx, &conn, &[table_object()], kind).await,
+                    FgaClosure::Autonomous { .. }
+                ));
+            }
+        });
+    }
+
+    #[test]
+    fn fga_catalog_batches_1_10_100_relations_with_one_visibility_probe() {
+        run_with_cx(|cx| async move {
+            for count in [1_usize, 10, 100] {
+                let chunks = count.div_ceil(32);
+                let conn = ScriptedRows::new(vec![Vec::new(); chunks + 1]);
+                let relations = (0..count)
+                    .map(|index| ResolvedObject {
+                        name: format!("T{index}"),
+                        ..table_object()
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    fga_closure(&cx, &conn, &relations, FgaStatementKind::Select).await,
+                    FgaClosure::ProvenReadOnly
+                );
+                let queries = conn.queries.lock().unwrap();
+                assert_eq!(queries.len(), chunks + 1);
+                assert!(
+                    queries
+                        .iter()
+                        .take(chunks)
+                        .all(|(_, binds)| binds.len() == 64)
+                );
+                assert_eq!(queries.last().unwrap().0, FGA_CATALOG_PROOF_SQL);
+            }
+        });
+    }
+
     #[test]
     fn dictionary_queries_bind_every_dynamic_identifier_and_bound_every_result() {
         assert!(OBJECTS_SQL.contains("owner = :1 AND object_name = :2"));
@@ -2662,7 +3136,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 17);
+        assert_eq!(specs.len(), 19);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;

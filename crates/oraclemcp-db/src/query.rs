@@ -18,9 +18,55 @@ use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::{
     DbError, FlashbackRefusalKind, QuarantineOutcome, classify_flashback_refusal_message,
 };
+use crate::intelligence::is_simple_identifier;
 use crate::masking::ResultMaskingCertificate;
 use crate::serialize::{PageColumnCache, SerializeOptions, checked_byte_budget_add};
 use crate::types::OracleBind;
+
+/// Exact server-owned SQL for bounded table sampling.
+pub fn sample_rows_sql(owner: &str, table: &str) -> Result<String, DbError> {
+    if !is_simple_identifier(owner) || !is_simple_identifier(table) {
+        return Err(DbError::Query(format!(
+            "invalid object name: {owner}.{table}"
+        )));
+    }
+    Ok(format!(
+        "SELECT * FROM (SELECT * FROM {}.{}) WHERE ROWNUM <= :1",
+        owner.to_ascii_uppercase(),
+        table.to_ascii_uppercase()
+    ))
+}
+
+/// Exact server-owned SQL for a bounded CLOB/NCLOB/text lookup.
+pub fn read_lob_sql(
+    owner: &str,
+    table: &str,
+    clob_column: &str,
+    pk_column: &str,
+) -> Result<String, DbError> {
+    for (label, value) in [
+        ("owner", owner),
+        ("table", table),
+        ("clob_column", clob_column),
+        ("pk_column", pk_column),
+    ] {
+        if !is_simple_identifier(value) {
+            return Err(DbError::Query(format!(
+                "invalid {label} identifier: {value:?}"
+            )));
+        }
+    }
+    let owner = owner.to_ascii_uppercase();
+    let table = table.to_ascii_uppercase();
+    let clob_column = clob_column.to_ascii_uppercase();
+    let pk_column = pk_column.to_ascii_uppercase();
+    Ok(format!(
+        "SELECT {clob_column} AS LOB_VALUE \
+         FROM {owner}.{table} \
+         WHERE {pk_column} = :1 \
+         FETCH FIRST 1 ROW ONLY"
+    ))
+}
 
 #[cfg(test)]
 use crate::serialize::json_byte_len;

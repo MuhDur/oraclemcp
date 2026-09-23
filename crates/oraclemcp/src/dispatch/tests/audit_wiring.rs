@@ -429,6 +429,89 @@ fn masked_read_carries_audit_bound_certificate() {
 }
 
 #[test]
+fn issue53_sample_rows_masked_and_certified() {
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher =
+        dispatcher_with(ddl_level(), auditor).with_result_masking_policy(Some(mask_all_policy()));
+
+    let sampled = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({"owner": "APP", "table": "EMPLOYEES", "max_rows": 1}),
+        )
+        .expect("ordinary table sample passes the same governed read path");
+    assert_eq!(sampled["owner"], json!("APP"));
+    assert_eq!(sampled["table"], json!("EMPLOYEES"));
+    assert_eq!(sampled["row_count"], json!(1));
+    assert!(!sampled["rows"].to_string().contains("EMPLOYEES"));
+    let certificate = sampled["mask_certificate"]
+        .as_object()
+        .expect("masked sample carries a certificate");
+    let records = sink.records();
+    let completed = records.last().expect("sample has a completed audit record");
+    assert_eq!(completed.tool, "oracle_sample_rows");
+    assert_eq!(completed.outcome, AuditOutcome::Succeeded);
+    assert_eq!(certificate["audit_entry_hash"], json!(completed.entry_hash));
+    assert!(completed.result_masking.is_some());
+    write_executor_test_artifact(
+        "issue53_sample_rows_masked_and_certified",
+        &[json!({
+            "case_id": "issue53_sample_rows_masked_and_certified",
+            "expected": {"row_count": 1, "unmasked_value_visible": false, "certificate_bound": true},
+            "actual": {
+                "row_count": sampled["row_count"],
+                "unmasked_value_visible": sampled["rows"].to_string().contains("EMPLOYEES"),
+                "certificate_bound": certificate["audit_entry_hash"] == json!(completed.entry_hash),
+            },
+        })],
+    );
+}
+
+#[test]
+fn read_clob_masked_and_certified() {
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher =
+        dispatcher_with(ddl_level(), auditor).with_result_masking_policy(Some(mask_all_policy()));
+
+    let read = dispatcher
+        .dispatch(
+            "oracle_read_clob",
+            json!({
+                "owner": "APP",
+                "table": "EMPLOYEES",
+                "clob_column": "BODY",
+                "pk_column": "ID",
+                "pk_value": "1",
+            }),
+        )
+        .expect("ordinary table LOB read passes the governed read path");
+    assert_eq!(read["clob"]["owner"], json!("APP"));
+    assert!(!read["clob"].to_string().contains("sensitive document"));
+    let certificate = read["mask_certificate"]
+        .as_object()
+        .expect("masked LOB read carries a certificate");
+    let records = sink.records();
+    let completed = records
+        .last()
+        .expect("LOB read has a completed audit record");
+    assert_eq!(completed.tool, "oracle_read_clob");
+    assert_eq!(completed.outcome, AuditOutcome::Succeeded);
+    assert_eq!(certificate["audit_entry_hash"], json!(completed.entry_hash));
+    assert!(completed.result_masking.is_some());
+    write_executor_test_artifact(
+        "read_clob_masked_and_certified",
+        &[json!({
+            "case_id": "read_clob_masked_and_certified",
+            "expected": {"unmasked_value_visible": false, "certificate_bound": true},
+            "actual": {
+                "unmasked_value_visible": read["clob"].to_string().contains("sensitive document"),
+                "certificate_bound": certificate["audit_entry_hash"] == json!(completed.entry_hash),
+            },
+        })],
+    );
+}
+
+#[test]
 fn masked_arrow_read_contains_only_audit_bound_masked_values() {
     let (auditor, sink) = auditor_with_sink();
     let dispatcher =

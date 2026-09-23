@@ -36,6 +36,8 @@ pub(super) async fn resolve_query_block_read(
             ReadPlanProofError::MissingRelation(name) => missing_semantic_relation(&name),
             ReadPlanProofError::MissingColumn(name) => missing_semantic_column(&name),
             ReadPlanProofError::Unproven(reason) => unresolved_semantic_read(reason),
+            ReadPlanProofError::FgaHandlerAutonomous => fga_refusal("fga_handler_autonomous"),
+            ReadPlanProofError::FgaEvidenceUnknown => fga_refusal("fga_evidence_unknown"),
         })?;
     let relations = proof.relations.clone();
     let classifier =
@@ -50,6 +52,18 @@ pub(super) async fn resolve_query_block_read(
     ensure_read_only_decision(decision.clone())
         .map_err(|error| attach_parameterization_hint(error, sql))?;
     Ok((relations, decision))
+}
+
+fn fga_refusal(code: &'static str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::ForbiddenStatement,
+        format!("read-only server refused FGA read dependency: {code}"),
+    )
+    .with_structured_reason(
+        StructuredReason::new(ReasonCategory::UnprovenSideEffect)
+            .with_offending_construct(code),
+    )
+    .with_next_step("remove the FGA handler or use a different ordinary table without user-code audit conditions")
 }
 
 /// `oracle_query` request, parsed and classified ONCE up front (A3/perf).
@@ -154,15 +168,14 @@ impl<'a> GuardedReadExecutor<'a> {
     }
 
     /// Admit server-generated application SQL through the same proof as a
-    /// caller query. T1.2b will route the first generated tool through here.
-    #[expect(dead_code, reason = "T1.2b routes sample_rows through this seam")]
+    /// caller query, retaining the generated tool's audit identity.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn run_server_read(
         &self,
         cx: &Cx,
         state: &mut DispatcherState,
         context: DispatchContext<'_>,
-        name: &str,
+        audit_tool: &'static str,
         mut args: Value,
         server_sql: ServerSql,
         request_budget: RequestBudget,
@@ -179,14 +192,14 @@ impl<'a> GuardedReadExecutor<'a> {
             cx,
             state,
             context,
-            name,
+            "oracle_query",
             args,
             request_budget,
             request_subject,
             sql_policy,
             current_schema,
             scoped_level,
-            "oracle_query",
+            audit_tool,
         )
         .await
     }
@@ -219,10 +232,11 @@ impl<'a> GuardedReadExecutor<'a> {
         tool: &str,
     ) -> Result<Value, ErrorEnvelope> {
         let (prepared, semantic_metadata) = {
-            let audit_tool = if tool == "oracle_semantic_search" {
-                "oracle_semantic_search"
-            } else {
-                "oracle_query"
+            let audit_tool = match tool {
+                "oracle_semantic_search" => "oracle_semantic_search",
+                "oracle_sample_rows" => "oracle_sample_rows",
+                "oracle_read_clob" => "oracle_read_clob",
+                _ => "oracle_query",
             };
             let (parsed, semantic_metadata) = if tool == "oracle_semantic_search" {
                 let result_masking = self.result_masking_policy()?;
@@ -1026,4 +1040,26 @@ pub(super) async fn ensure_read_only_backstop_bounded(
         return Err(limit_restore_failure(quarantine, false, restore_err));
     }
     budget_after
+}
+
+#[cfg(test)]
+mod fga_shape_tests {
+    use super::*;
+
+    #[test]
+    fn generated_sample_shape_is_eligible_for_semantic_read_proof() {
+        let sql = "SELECT * FROM (SELECT * FROM APP.ORDERS) WHERE ROWNUM <= :1";
+        let preliminary = READ_PRECHECK_CLASSIFIER.classify(sql);
+        ensure_read_only_decision(preliminary).expect("sample shape must pass read precheck");
+        semantic_read_plan_checked(sql).expect("sample shape must have a semantic read plan");
+    }
+
+    #[test]
+    fn generated_lob_shape_is_eligible_for_semantic_read_proof() {
+        let sql = oraclemcp_db::read_lob_sql("APP", "ORDERS", "NOTE", "ID")
+            .expect("fixed identifiers form a read query");
+        let preliminary = READ_PRECHECK_CLASSIFIER.classify(&sql);
+        ensure_read_only_decision(preliminary).expect("LOB shape must pass read precheck");
+        semantic_read_plan_checked(&sql).expect("LOB shape must have a semantic read plan");
+    }
 }

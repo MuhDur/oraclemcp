@@ -34,6 +34,7 @@ OWNER_OBJECTS = (
     ("TABLE", "T_PARENT_"), ("TABLE", "T_CHILD_"),
     ("TABLE", "T_CHILD_AUD_"), ("TABLE", "T_SECURE_"),
     ("TABLE", "T_AUTO_"), ("VIEW", "V_TYPES_"),
+    ("TABLE", "T_FGA_"), ("TABLE", "T_FGA_CANARY_"),
     ("INDEX", "IX_TYPES_"), ("SEQUENCE", "SEQ_W4_"),
     ("TRIGGER", "TRG_CHILD_AUDIT_"), ("TYPE", "TY_POINT_"),
     ("TYPE BODY", "TY_POINT_"), ("PACKAGE", "PKG_W4_"),
@@ -287,12 +288,33 @@ def seed_fixture(owner, cross, run_id, version):
         o.execute(f"INSERT INTO T_PARENT_{run_id}(ID,LABEL) VALUES (:1,:2)", (parent_id, f"parent-{parent_id}"))
     o.execute(f"INSERT INTO T_CHILD_{run_id}(ID,PARENT_ID) VALUES (1,1)")
     o.execute(f"INSERT INTO T_SECURE_{run_id}(ID,SECRET_TEXT) VALUES (1,:1)", (f"W4_MASK_CANARY_{run_id}",))
+    o.execute(f"INSERT INTO T_FGA_{run_id}(ID) VALUES (1)")
     cross.cursor().execute(f"INSERT INTO T_CROSS_{run_id}(ID,LABEL) VALUES (1,'cross-owner')")
     for table_name in ("T_TYPES_", "T_PARENT_", "T_CHILD_", "T_SECURE_"):
         o.execute(f"COMMENT ON TABLE {table_name}{run_id} IS 'W4 run {run_id}'")
     cross.cursor().execute(f"COMMENT ON TABLE T_CROSS_{run_id} IS 'W4 run {run_id}'")
     owner.commit()
     cross.commit()
+
+
+def prove_fga_handler_canary(owner, run_id):
+    """Execute one independent positive control, then restore an empty canary."""
+    started = time.monotonic()
+    cursor = owner.cursor()
+    canary = f"T_FGA_CANARY_{run_id}"
+    target = f"T_FGA_{run_id}"
+    before = cursor.execute(f"SELECT COUNT(*) FROM {canary}").fetchone()[0]
+    if before != 0:
+        refuse(f"{run_id}: FGA canary must start empty")
+    rows = cursor.execute(f"SELECT ID FROM {target} WHERE ID=1").fetchall()
+    fired = cursor.execute(f"SELECT COUNT(*) FROM {canary}").fetchone()[0]
+    if rows != [(1,)] or fired != 1:
+        refuse(f"{run_id}: FGA handler positive control did not fire exactly once")
+    cursor.execute(f"DELETE FROM {canary}")
+    owner.commit()
+    if cursor.execute(f"SELECT COUNT(*) FROM {canary}").fetchone()[0] != 0:
+        refuse(f"{run_id}: FGA canary did not return to empty")
+    event(run_id, target, "fga_positive_control", True, started)
 
 
 def recorded_run(connection, run_id):
@@ -398,6 +420,7 @@ def setup(lane, settings, requested_id=None):
         for filename in ADMIN_FILES:
             execute_sql_file(admin, filename, run_id, version)
         seed_fixture(owner, cross, run_id, version)
+        prove_fga_handler_canary(owner, run_id)
         run = recorded_run(admin, run_id)
         inventory = inventory_status(admin, run, version)
         if inventory["missing"]:
@@ -437,6 +460,15 @@ def drop_policy_if_present(connection, run):
         started = time.monotonic()
         connection.cursor().execute("BEGIN DBMS_RLS.DROP_POLICY(:1,:2,:3); END;", (owner, table, policy))
         event(run["run_id"], policy, "drop_policy", True, started)
+    fga_table = "T_FGA_" + run["run_id"]
+    fga_policy = "P_FGA_" + run["run_id"]
+    fga_found = connection.cursor().execute(
+        "SELECT COUNT(*) FROM DBA_AUDIT_POLICIES WHERE OBJECT_SCHEMA=:1 AND OBJECT_NAME=:2 AND POLICY_NAME=:3",
+        (owner, fga_table, fga_policy)).fetchone()[0]
+    if fga_found:
+        started = time.monotonic()
+        connection.cursor().execute("BEGIN DBMS_FGA.DROP_POLICY(:1,:2,:3); END;", (owner, fga_table, fga_policy))
+        event(run["run_id"], fga_policy, "drop_policy", True, started)
 
 
 def verdict_path(lane, run_id):

@@ -33,6 +33,7 @@
       "expect": {"type": "object", "minProperties": 1},
       "db_reread": {"type": "array", "items": {"type": "object", "required": ["sql", "rows"]}},
       "audit_expect": {"type": "array", "items": {"type": "object", "required": ["tool", "decision", "outcome"]}},
+      "audit_zero_executions": {"type": "boolean"},
       "on_unsupported": {"type": "object", "required": ["error_class"]}
     }
   }

@@ -94,6 +94,7 @@ struct SemanticGuardState {
     read_events: Mutex<Vec<String>>,
     compatible: Mutex<Option<String>>,
     embedding_models: Mutex<Vec<String>>,
+    fga_handler_table: Mutex<Option<String>>,
 }
 
 impl Default for SemanticGuardState {
@@ -105,6 +106,7 @@ impl Default for SemanticGuardState {
             read_events: Mutex::new(Vec::new()),
             compatible: Mutex::new(Some("23.4.0.0.0".to_owned())),
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
+            fga_handler_table: Mutex::new(None),
         }
     }
 }
@@ -202,6 +204,9 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             "POLICY_NAME",
             Some("VISIBLE_POLICY"),
         )])]);
+    }
+    if normalized.contains("from all_audit_policies") {
+        return Some(Vec::new());
     }
     if normalized.contains("from all_tab_cols") && normalized.contains("rownum") {
         if normalized.contains("virtual_column = 'yes'") {
@@ -361,6 +366,36 @@ impl OracleConnection for SemanticGuardMock {
         if normalized.contains("from all_policies") {
             return Ok(semantic_policy_rows_for(sql, binds));
         }
+        if normalized.contains("from all_audit_policies") {
+            if normalized.contains("(object_schema, object_name) in") {
+                let target = self
+                    .state
+                    .fga_handler_table
+                    .lock()
+                    .expect("FGA fixture lock");
+                if let Some(table) = target.as_deref()
+                    && binds
+                        .chunks_exact(2)
+                        .any(|pair| string_bind(pair, 1) == Some(table))
+                {
+                    return Ok(vec![semantic_row(&[
+                        ("OBJECT_SCHEMA", Some("APP")),
+                        ("OBJECT_NAME", Some(table)),
+                        ("POLICY_NAME", Some("AUDIT_HANDLER_POLICY")),
+                        ("POLICY_TEXT", None),
+                        ("PF_SCHEMA", Some("APP")),
+                        ("PF_PACKAGE", None),
+                        ("PF_FUNCTION", Some("AUDIT_HANDLER")),
+                        ("ENABLED", Some("YES")),
+                        ("SEL", Some("YES")),
+                        ("INS", Some("NO")),
+                        ("UPD", Some("NO")),
+                        ("DEL", Some("NO")),
+                    ])]);
+                }
+            }
+            return Ok(Vec::new());
+        }
         if normalized.contains("from all_tab_cols") {
             return Ok(semantic_tab_col_rows_for(sql));
         }
@@ -500,32 +535,34 @@ fn executor_orders_parse_resolve_prove_mask_audit_execute() {
         C::Objects,
         C::Objects,
         C::RelationColumn,
+        C::FgaPoliciesForRelations32,
+        C::FgaCatalogProof,
         C::PolicyRowsForRelations32,
         C::VirtualColumnsForRelations32,
         C::PolicyCatalogProof,
         C::TargetColumnCatalogProof,
     ];
-    assert_eq!(events.len(), 17, "the exact proof and observation sequence");
+    assert_eq!(events.len(), 19, "the exact proof and observation sequence");
     for (actual, id) in events.iter().zip(expected_proof) {
         assert_eq!(actual, &format!("query:{}", id.spec().sql));
     }
-    assert_eq!(events[11], format!("execute:{SET_TRANSACTION_READ_ONLY}"));
-    assert!(events[12].contains("tool=oracle_query */ SELECT o.id FROM app.orders o"));
+    assert_eq!(events[13], format!("execute:{SET_TRANSACTION_READ_ONLY}"));
+    assert!(events[14].contains("tool=oracle_query */ SELECT o.id FROM app.orders o"));
     assert_eq!(
-        events[13],
+        events[15],
         format!("query:{}", C::SessionContext.spec().sql)
     );
-    assert_eq!(events[14], format!("query:{}", C::SessionRoles.spec().sql));
-    assert!(events[15].contains("FROM all_policies WHERE object_owner = :1 AND object_name = :2"));
+    assert_eq!(events[16], format!("query:{}", C::SessionRoles.spec().sql));
+    assert!(events[17].contains("FROM all_policies WHERE object_owner = :1 AND object_name = :2"));
     assert_eq!(
-        events[16],
+        events[18],
         format!("query:{}", C::AllPoliciesVisibility.spec().sql)
     );
     assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
     write_executor_test_artifact(
         "pipeline_order",
         &[
-            json!({"case_id": "executor_pipeline_order", "expected": {"events": 17, "caller_queries": 1}, "actual": {"events": events.len(), "caller_queries": state.caller_queries.load(Ordering::SeqCst)}}),
+            json!({"case_id": "executor_pipeline_order", "expected": {"events": 19, "caller_queries": 1}, "actual": {"events": events.len(), "caller_queries": state.caller_queries.load(Ordering::SeqCst)}}),
         ],
     );
 }
@@ -841,6 +878,94 @@ fn served_read_gate_refuses_view_policy_and_zero_arg_function_before_evaluation(
         );
         assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{sql}");
     }
+}
+
+fn assert_issue53_sample_refused(case_id: &str, table: &str) {
+    let (dispatcher, state) = semantic_dispatcher();
+    let error = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({"owner": "APP", "table": table, "max_rows": 2}),
+        )
+        .expect_err("sampling a protected relation must refuse before caller SQL");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+    let caller_queries = state.caller_queries.load(Ordering::SeqCst);
+    assert_eq!(caller_queries, 0);
+    write_executor_test_artifact(
+        case_id,
+        &[json!({
+            "case_id": case_id,
+            "expected": {"error_class": "ForbiddenStatement", "caller_queries": 0},
+            "actual": {"error_class": format!("{:?}", error.error_class), "caller_queries": caller_queries},
+        })],
+    );
+}
+
+#[test]
+fn issue53_sample_rows_refuses_vpd_table_before_execution() {
+    assert_issue53_sample_refused(
+        "issue53_sample_rows_refuses_vpd_table_before_execution",
+        "POLICY_TABLE",
+    );
+}
+
+#[test]
+fn issue53_sample_rows_refuses_view_before_execution() {
+    assert_issue53_sample_refused(
+        "issue53_sample_rows_refuses_view_before_execution",
+        "SIDE_VIEW",
+    );
+}
+
+#[test]
+fn fga_handler_table_refused_for_sample_rows_and_server_reads() {
+    let (dispatcher, state) = semantic_dispatcher();
+    *state.fga_handler_table.lock().expect("FGA fixture lock") = Some("ORDERS".to_owned());
+    let mut cases = Vec::new();
+    for (tool, args) in [
+        ("oracle_query", json!({"sql": "SELECT id FROM APP.ORDERS"})),
+        (
+            "oracle_sample_rows",
+            json!({"owner": "APP", "table": "ORDERS", "max_rows": 1}),
+        ),
+        (
+            "oracle_read_clob",
+            json!({
+                "owner": "APP",
+                "table": "ORDERS",
+                "clob_column": "LABEL",
+                "pk_column": "ID",
+                "pk_value": "1",
+            }),
+        ),
+    ] {
+        let error = dispatcher
+            .dispatch(tool, args)
+            .expect_err("an FGA handler must refuse before application SQL");
+        assert_eq!(error.error_class, ErrorClass::ForbiddenStatement, "{tool}");
+        assert_eq!(
+            error
+                .structured_reason
+                .as_ref()
+                .and_then(|reason| reason.offending_construct.as_deref()),
+            Some("fga_handler_autonomous"),
+            "{tool}: {error:?}"
+        );
+        assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{tool}");
+        cases.push(json!({
+            "case_id": format!("fga_handler_{tool}_refused"),
+            "expected": {"error_class": "ForbiddenStatement", "reason": "fga_handler_autonomous", "caller_queries": 0},
+            "actual": {
+                "error_class": format!("{:?}", error.error_class),
+                "reason": error.structured_reason.as_ref().and_then(|reason| reason.offending_construct.as_deref()),
+                "caller_queries": state.caller_queries.load(Ordering::SeqCst),
+            },
+        }));
+    }
+    write_executor_test_artifact(
+        "fga_handler_table_refused_for_sample_rows_and_server_reads",
+        &cases,
+    );
 }
 
 fn assert_issue52_refused(case_id: &str, sql: &str, expected_reason: &str) {
@@ -1257,6 +1382,14 @@ impl OracleConnection for OneRowMock {
         }
         if catalog_extract_empty_rowset(&sql_lower) {
             return Ok(Vec::new());
+        }
+        if sql_lower.contains("as lob_value") {
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "LOB_VALUE".to_owned(),
+                    OracleCell::new("CLOB", Some("sensitive document".to_owned())),
+                )],
+            }]);
         }
         Ok(vec![OracleRow {
                 columns: vec![
@@ -3063,6 +3196,14 @@ fn recoverable_pinned_quarantine_recycles_switchable_session_on_retry() {
             self.0.append(record)
         }
 
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
+
         fn flush(&self) -> Result<(), AuditError> {
             self.0.flush()
         }
@@ -3152,7 +3293,11 @@ fn recoverable_pinned_quarantine_recycles_switchable_session_on_retry() {
         2,
         "the replacement handles the generated read's SCN probe and row query"
     );
-    assert_eq!(catalog_generation(&dispatcher), before_generation + 1);
+    assert_eq!(
+        catalog_generation(&dispatcher),
+        before_generation + 2,
+        "reconnect and the sample's semantic proof each refresh catalog evidence"
+    );
     assert!(
         dispatcher
             .connection_quarantine()

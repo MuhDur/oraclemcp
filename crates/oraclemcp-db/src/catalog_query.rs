@@ -79,6 +79,8 @@ pub enum CatalogQueryId {
     MemberProcedures,
     /// Enabled SELECT policies for up to 32 exact relations.
     PolicyRowsForRelations32,
+    /// Fine-grained audit policies for up to 32 exact relations.
+    FgaPoliciesForRelations32,
     /// Virtual columns for up to 32 exact relations.
     VirtualColumnsForRelations32,
     /// Ambiguous unqualified column candidates.
@@ -93,13 +95,15 @@ pub enum CatalogQueryId {
     AllPoliciesVisibility,
     /// Readability of the policy catalog.
     PolicyCatalogProof,
+    /// Readability of the fine-grained audit policy catalog.
+    FgaCatalogProof,
     /// Readability of the target column catalog.
     TargetColumnCatalogProof,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 19] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -109,6 +113,7 @@ impl CatalogQueryId {
         Self::StandaloneProcedures,
         Self::MemberProcedures,
         Self::PolicyRowsForRelations32,
+        Self::FgaPoliciesForRelations32,
         Self::VirtualColumnsForRelations32,
         Self::ColumnConflict,
         Self::RelationColumn,
@@ -116,6 +121,7 @@ impl CatalogQueryId {
         Self::VirtualColumn,
         Self::AllPoliciesVisibility,
         Self::PolicyCatalogProof,
+        Self::FgaCatalogProof,
         Self::TargetColumnCatalogProof,
     ];
 
@@ -197,6 +203,13 @@ impl CatalogQueryId {
                 InternalProof,
                 ReadPurity,
             ),
+            Self::FgaPoliciesForRelations32 => (
+                FGA_POLICIES_FOR_RELATIONS_32_SQL,
+                T32,
+                "prove fine-grained audit handlers cannot run for bounded relations",
+                InternalProof,
+                ReadPurity,
+            ),
             Self::VirtualColumnsForRelations32 => (
                 VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
                 T32,
@@ -243,6 +256,13 @@ impl CatalogQueryId {
                 POLICY_CATALOG_PROOF_SQL,
                 EMPTY,
                 "prove policy catalog is readable",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::FgaCatalogProof => (
+                FGA_CATALOG_PROOF_SQL,
+                EMPTY,
+                "prove fine-grained audit policy catalog is readable",
                 InternalProof,
                 ReadPurity,
             ),
@@ -329,6 +349,8 @@ pub(crate) const ALL_POLICIES_VISIBILITY_SQL: &str =
     "SELECT COUNT(*) AS VISIBLE_POLICY_ROWS FROM (SELECT 1 FROM all_policies WHERE ROWNUM <= 1)";
 pub(crate) const POLICY_CATALOG_PROOF_SQL: &str =
     "SELECT policy_name FROM all_policies WHERE ROWNUM <= 1";
+pub(crate) const FGA_CATALOG_PROOF_SQL: &str =
+    "SELECT policy_name FROM all_audit_policies WHERE ROWNUM <= 1";
 pub(crate) const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
     WHERE owner = :1 AND table_name = :2 \
     AND virtual_column = 'YES' AND ROWNUM <= 1";
@@ -337,6 +359,11 @@ pub(crate) const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FRO
 pub(crate) const POLICY_ROWS_FOR_RELATIONS_32_SQL: &str = "SELECT object_owner, object_name FROM all_policies \
     WHERE enable = 'YES' AND sel = 'YES' \
     AND (object_owner, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";
+pub(crate) const FGA_POLICIES_FOR_RELATIONS_32_SQL: &str = "SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \
+    FROM (SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \
+          FROM all_audit_policies \
+          WHERE (object_schema, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) \
+          ORDER BY object_schema, object_name, policy_name) WHERE ROWNUM <= 257";
 pub(crate) const VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL: &str = "SELECT owner, table_name, column_name FROM all_tab_cols \
     WHERE virtual_column = 'YES' \
     AND (owner, table_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";

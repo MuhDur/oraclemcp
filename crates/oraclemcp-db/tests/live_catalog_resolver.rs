@@ -5,9 +5,9 @@
 
 use asupersync::{Cx, runtime::RuntimeBuilder};
 use oraclemcp_db::{
-    AuthAdapter, CatalogInvalidation, OracleCatalogResolver, OracleCatalogResolverCache,
-    OracleConnectOptions, OracleConnection, RustOracleConnection, read_catalog_resolve_context,
-    resolved_relations_read_purity,
+    AuthAdapter, CatalogInvalidation, CatalogQueryId, OracleBind, OracleCatalogResolver,
+    OracleCatalogResolverCache, OracleConnectOptions, OracleConnection, RustOracleConnection,
+    read_catalog_resolve_context, resolved_relations_read_purity, run_catalog_query,
 };
 use oraclemcp_guard::{
     CatalogGeneration, CatalogObjectKind, CatalogResolver, Purity, RawName, RawNamePart,
@@ -28,6 +28,106 @@ where
         let cx = Cx::current().expect("runtime installs Cx");
         body(cx).await
     })
+}
+
+#[test]
+fn fga_catalog_columns_match_on_every_version() {
+    if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
+        eprintln!(
+            "[live-xe] SKIP fga_catalog_columns_match_on_every_version: opt in with ORACLEMCP_LIVE_XE=1 and matrix credentials"
+        );
+        return;
+    }
+    run_with_cx(|cx| async move {
+        for (lane, default_dsn) in [
+            ("XE18", "localhost:1518/XEPDB1"),
+            ("XE21", "localhost:1520/XEPDB1"),
+            ("FREE23", "localhost:1522/FREEPDB1"),
+        ] {
+            let user = std::env::var(format!("ORACLE_MATRIX_{lane}_USER"))
+                .unwrap_or_else(|_| panic!("{lane} live catalog user missing"));
+            let password = std::env::var(format!("ORACLE_MATRIX_{lane}_PASSWORD"))
+                .unwrap_or_else(|_| panic!("{lane} live catalog password missing"));
+            let dsn = std::env::var(format!("ORACLE_MATRIX_{lane}_DSN"))
+                .unwrap_or_else(|_| default_dsn.to_owned());
+            assert!(
+                dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"),
+                "FGA catalog matrix runs only on local lab lanes"
+            );
+            let options = OracleConnectOptions {
+                connect_string: dsn,
+                username: Some(user.clone()),
+                password: Some(password),
+                auth_adapter: AuthAdapter::Password,
+                ..Default::default()
+            };
+            let conn = RustOracleConnection::connect(&cx, options)
+                .await
+                .unwrap_or_else(|error| panic!("{lane} live catalog connection failed: {error}"));
+            let suffix = format!(
+                "{:X}{:X}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .expect("clock")
+                    .as_nanos()
+                    & 0xFFFFF
+            );
+            let table = format!("OMCP_FGA_T_{suffix}");
+            let handler = format!("OMCP_FGA_H_{suffix}");
+            let policy = format!("OMCP_FGA_P_{suffix}");
+            assert!(table.len() <= 30 && handler.len() <= 30 && policy.len() <= 30);
+            execute_ddl(&cx, &conn, &format!("CREATE TABLE {table} (ID NUMBER)")).await;
+            execute_ddl(&cx, &conn, &format!("CREATE OR REPLACE PROCEDURE {handler} (OBJECT_SCHEMA VARCHAR2, OBJECT_NAME VARCHAR2, POLICY_NAME VARCHAR2) AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN NULL; END;")).await;
+            execute_ddl(&cx, &conn, &format!("BEGIN DBMS_FGA.ADD_POLICY(OBJECT_SCHEMA => USER, OBJECT_NAME => '{table}', POLICY_NAME => '{policy}', HANDLER_SCHEMA => USER, HANDLER_MODULE => '{handler}', STATEMENT_TYPES => 'SELECT'); END;")).await;
+            let mut binds = vec![
+                OracleBind::from(user.to_uppercase()),
+                OracleBind::from(table.as_str()),
+            ];
+            while binds.len() < 64 {
+                binds.push(OracleBind::from(""));
+            }
+            let rows = run_catalog_query(
+                &cx,
+                &conn,
+                CatalogQueryId::FgaPoliciesForRelations32,
+                &binds,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{lane} FGA catalog query failed: {error}"));
+            let row = rows
+                .iter()
+                .find(|row| row.text("POLICY_NAME") == Some(policy.as_str()))
+                .unwrap_or_else(|| panic!("{lane} FGA policy evidence row missing"));
+            for column in [
+                "OBJECT_SCHEMA",
+                "OBJECT_NAME",
+                "POLICY_NAME",
+                "POLICY_TEXT",
+                "PF_SCHEMA",
+                "PF_PACKAGE",
+                "PF_FUNCTION",
+                "ENABLED",
+                "SEL",
+                "INS",
+                "UPD",
+                "DEL",
+            ] {
+                assert!(
+                    row.cell(column).is_some(),
+                    "{lane} FGA catalog omitted {column}"
+                );
+            }
+            assert_eq!(row.text("OBJECT_NAME"), Some(table.as_str()), "{lane}");
+            assert_eq!(row.text("PF_FUNCTION"), Some(handler.as_str()), "{lane}");
+            assert_eq!(row.text("ENABLED"), Some("YES"), "{lane}");
+            assert_eq!(row.text("SEL"), Some("YES"), "{lane}");
+            execute_ddl(&cx, &conn, &format!("BEGIN DBMS_FGA.DROP_POLICY(OBJECT_SCHEMA => USER, OBJECT_NAME => '{table}', POLICY_NAME => '{policy}'); END;")).await;
+            execute_ddl(&cx, &conn, &format!("DROP PROCEDURE {handler}")).await;
+            execute_ddl(&cx, &conn, &format!("DROP TABLE {table} PURGE")).await;
+            eprintln!("[live-xe] {lane}: FGA catalog columns and handler identity verified");
+        }
+    });
 }
 
 #[test]
