@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-091-train-root-jp5k9",
+  "scope": {
+    "summary": "RETIRED (not implemented as written): 0.10.0/0.9.0 field-hardening train root epic.",
+    "in_scope": [
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Retirement by operator-approved tracker cleanup 2026-09-23; v0.10.0 shipped 2026-07-27 and v0.11.0 on 2026-09-17; all train children except the retired WS-G epic were already closed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

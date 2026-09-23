@@ -1,0 +1,38 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-driver-cx-oracle-dual-backend-nhteq.5",
+  "scope": {
+    "summary": "RETIRED (not implemented as written): Explicit backend selection with no automatic fallback.",
+    "in_scope": [
+      "docs/adr/0014-blocking-driver-backend-execution-model.md"
+    ],
+    "out_of_scope": [
+      "No implementation work is claimed by this close."
+    ]
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [],
+    "entry_points_excluded_reason": "retired-no-runtime-surface"
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Retirement by operator-approved tracker cleanup 2026-09-23; Its no-automatic-fallback premise was overridden by operator decisions 2026-09-16/17: driver-cx primary with a bounded, acquisition-only official fallback compiled into every build (ADR-0014). Open blocker edges to 2q4em.1.4, 2q4em.1.7 and nhteq.4 were unlinked."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

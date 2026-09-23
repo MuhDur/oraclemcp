@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-eng-program-bp8ia.13",
+  "scope": {
+    "summary": "oraclemcp 0.11.0 published on all channels (terminal sink).",
+    "in_scope": [
+      "Cargo.toml",
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": [
+      "bp8ia.5 (CI velocity tranche 2) and bp8ia.10 (OCI ADB e2e) remain open and did not ship in 0.11.0."
+    ]
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "release v0.11.0",
+        "kind": "cli",
+        "trace": "Tag v0.11.0 -> 0c647d36; GitHub release published 2026-09-17T21:13:39Z with 35 signed assets; crates.io, GHCR and MCP registry per release.yml at that tag. Remaining open blockers bp8ia.5/bp8ia.10 unlinked as not 0.11.0 blockers; dapll and 97sut retired."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-eng-program-bp8ia.5",
+    "oraclemcp-eng-program-bp8ia.10"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}

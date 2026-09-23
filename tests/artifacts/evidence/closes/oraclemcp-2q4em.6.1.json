@@ -1,0 +1,41 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T14:00:00Z",
+  "bead_id": "oraclemcp-2q4em.6.1",
+  "scope": {
+    "summary": "The three false-open release beads are closed/retired by the 2026-09-23 cleanup.",
+    "in_scope": [
+      "CHANGELOG.md"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "561ba6685846692d7c2aefcb49c9ad2ef5e0c8bf",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "tracker",
+        "kind": "cli",
+        "trace": "bp8ia.13 closed with v0.11.0 evidence; 091-train-root-jp5k9 and 091-ws-g-backlog-drain-97sut retired citing v0.10.0 (2026-07-27) and v0.11.0 (0c647d36)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Synthetic fixtures only; no live OCI or customer identifiers were used."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "manual-review"
+  }
+}
