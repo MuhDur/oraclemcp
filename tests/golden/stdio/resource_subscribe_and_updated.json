@@ -1067,13 +1067,68 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Classify a SQL statement and report whether it would pass the active profile/session gate without executing it.",
+            "description": "Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "sql": {
-                  "description": "SQL statement to classify. It is never executed.",
+                "binds": {
+                  "description": "Positional bind values to bind into the confirmation without exposing them in the preview result.",
+                  "items": {},
+                  "type": "array"
+                },
+                "capture_dbms_output": {
+                  "description": "Exact DBMS_OUTPUT capture mode intended for oracle_execute; default false.",
+                  "type": "boolean"
+                },
+                "commit": {
+                  "description": "The exact commit mode intended for oracle_execute. Default false; a later commit=true requires a new preview.",
+                  "type": "boolean"
+                },
+                "dbms_output": {
+                  "description": "Alias for capture_dbms_output.",
+                  "type": "boolean"
+                },
+                "dbms_output_max_chars": {
+                  "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000).",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "dbms_output_max_lines": {
+                  "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200).",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "hold": {
+                  "description": "The exact reversible-workspace hold mode intended for oracle_execute. Default false.",
+                  "type": "boolean"
+                },
+                "max_dbms_output_chars": {
+                  "description": "Alias for dbms_output_max_chars.",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_dbms_output_lines": {
+                  "description": "Alias for dbms_output_max_lines.",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "scoped_grant": {
+                  "description": "Explicit scoped-grant reference intended for execution; its identity is bound into this preview.",
                   "type": "string"
+                },
+                "sql": {
+                  "description": "SQL statement to classify. It is never executed by this preview.",
+                  "type": "string"
+                },
+                "timeout_seconds": {
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+                  "maximum": 3600,
+                  "minimum": 1,
+                  "type": "integer"
                 }
               },
               "required": [
@@ -2191,9 +2246,64 @@
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
-                "sql": {
-                  "description": "SQL statement to classify. It is never executed.",
+                "binds": {
+                  "description": "Positional bind values to bind into the confirmation without exposing them in the preview result.",
+                  "items": {},
+                  "type": "array"
+                },
+                "capture_dbms_output": {
+                  "description": "Exact DBMS_OUTPUT capture mode intended for oracle_execute; default false.",
+                  "type": "boolean"
+                },
+                "commit": {
+                  "description": "The exact commit mode intended for oracle_execute. Default false; a later commit=true requires a new preview.",
+                  "type": "boolean"
+                },
+                "dbms_output": {
+                  "description": "Alias for capture_dbms_output.",
+                  "type": "boolean"
+                },
+                "dbms_output_max_chars": {
+                  "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000).",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "dbms_output_max_lines": {
+                  "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200).",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "hold": {
+                  "description": "The exact reversible-workspace hold mode intended for oracle_execute. Default false.",
+                  "type": "boolean"
+                },
+                "max_dbms_output_chars": {
+                  "description": "Alias for dbms_output_max_chars.",
+                  "maximum": 1000000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "max_dbms_output_lines": {
+                  "description": "Alias for dbms_output_max_lines.",
+                  "maximum": 5000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "scoped_grant": {
+                  "description": "Explicit scoped-grant reference intended for execution; its identity is bound into this preview.",
                   "type": "string"
+                },
+                "sql": {
+                  "description": "SQL statement to classify. It is never executed by this preview.",
+                  "type": "string"
+                },
+                "timeout_seconds": {
+                  "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+                  "maximum": 3600,
+                  "minimum": 1,
+                  "type": "integer"
                 }
               },
               "required": [

@@ -79,12 +79,13 @@ use oraclemcp_guard::scoped_grant::{
     authorize_level,
 };
 use oraclemcp_guard::{
-    CatalogObjectKind, Classifier, ClassifierConfig, DangerLevel, EditionIdentifier,
-    EditionLifecycleParse, EditionLifecycleSql, EscalationError, ExecGrantBinding, ExecGrantError,
-    ExecGrantStore, GuardDecision, LevelDecision, ObjectRef, OperatingLevel,
-    OperatorStatementClass, PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest,
-    Purity, QuoteSemantics, RawName, ResolvedObject, SessionLevelState, SideEffectOracle,
-    SqlPolicyConfig, VerdictCertificate, enforce_sql_policy, parse_edition_lifecycle_sql,
+    ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, CatalogObjectKind, Classifier,
+    ClassifierConfig, DangerLevel, EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql,
+    EscalationError, ExecGrantBinding, ExecGrantError, ExecGrantStore, ExecLimits, GuardDecision,
+    LevelDecision, ObjectRef, OperatingLevel, OperatorStatementClass, OutputCapture, PolicyGate,
+    PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity, QuoteSemantics, RawName,
+    ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig, VerdictCertificate,
+    enforce_sql_policy, is_allowed_alter_session, parse_edition_lifecycle_sql,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -101,6 +102,14 @@ static EDITION_CREATION_RESERVATIONS: LazyLock<SyncMutex<HashSet<String>>> =
 static SCOPED_GRANT_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
     let mut key = [0u8; 32];
     getrandom::getrandom(&mut key).expect("OS randomness required for scoped grants");
+    key
+});
+
+/// Independent per-process key for canonical bind values. The grant store
+/// retains only the resulting HMAC, never the canonical bind bytes.
+static ACTION_BIND_HMAC_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
+    let mut key = [0u8; 32];
+    getrandom::getrandom(&mut key).expect("OS randomness required for action bindings");
     key
 });
 
@@ -4696,6 +4705,116 @@ fn json_to_bind(v: &Value) -> Result<OracleBind, ErrorEnvelope> {
     }
 }
 
+fn canonical_bind_view(bind: &OracleBind) -> CanonicalBind<'_> {
+    match bind {
+        OracleBind::Null => CanonicalBind::Null,
+        OracleBind::String(value) => CanonicalBind::String(value),
+        OracleBind::I64(value) => CanonicalBind::I64(*value),
+        OracleBind::F64(value) => CanonicalBind::F64(*value),
+        OracleBind::Bool(value) => CanonicalBind::Bool(*value),
+        OracleBind::TimestampTz {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+            nanosecond,
+            offset_minutes,
+        } => CanonicalBind::TimestampTz {
+            year: *year,
+            month: *month,
+            day: *day,
+            hour: *hour,
+            minute: *minute,
+            second: *second,
+            nanosecond: *nanosecond,
+            offset_minutes: *offset_minutes,
+        },
+    }
+}
+
+struct ActionEnvelopeInput<'a> {
+    sql: &'a str,
+    binds: &'a [OracleBind],
+    kind: ActionKind,
+    commit: bool,
+    hold: bool,
+    capture_dbms_output: bool,
+    max_lines: Option<usize>,
+    max_chars: Option<usize>,
+    timeout_seconds: Option<u64>,
+    scoped_grant: Option<&'a str>,
+}
+
+fn action_envelope_material(input: ActionEnvelopeInput<'_>) -> String {
+    let bind_views = input
+        .binds
+        .iter()
+        .map(canonical_bind_view)
+        .collect::<Vec<_>>();
+    let envelope = ActionEnvelopeV1 {
+        version: 1,
+        action_kind: input.kind,
+        statement_digest: ActionEnvelopeV1::statement_digest(input.sql),
+        binds: BindEnvelope::from_binds(&ACTION_BIND_HMAC_KEY, &bind_views),
+        commit: input.commit,
+        hold: input.hold,
+        output: OutputCapture {
+            capture_dbms_output: input.capture_dbms_output,
+            max_lines: input
+                .max_lines
+                .unwrap_or(DEFAULT_DBMS_OUTPUT_MAX_LINES)
+                .clamp(1, MAX_DBMS_OUTPUT_MAX_LINES),
+            max_chars: input
+                .max_chars
+                .unwrap_or(DEFAULT_DBMS_OUTPUT_MAX_CHARS)
+                .clamp(1, MAX_DBMS_OUTPUT_MAX_CHARS),
+        },
+        limits: ExecLimits {
+            timeout_seconds: input.timeout_seconds,
+        },
+        scoped_grant_ref: input.scoped_grant.map(ActionEnvelopeV1::reference_digest),
+    };
+    let digest = envelope.digest();
+    let mut material = String::from("action-envelope/v1:");
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(material, "{byte:02x}").expect("formatting into String cannot fail");
+    }
+    material
+}
+
+fn execute_action_kind(required_level: OperatingLevel) -> ActionKind {
+    if required_level >= OperatingLevel::Ddl {
+        ActionKind::ExecuteDdlAdmin
+    } else {
+        ActionKind::ExecuteDml
+    }
+}
+
+fn action_kind_for_tool(tool: &str, required_level: OperatingLevel) -> ActionKind {
+    match canonical_tool_name(tool) {
+        "oracle_create_or_replace" => ActionKind::CreateOrReplace,
+        _ => execute_action_kind(required_level),
+    }
+}
+
+fn ddl_action_material(sql: &str, kind: ActionKind, timeout_seconds: Option<u64>) -> String {
+    action_envelope_material(ActionEnvelopeInput {
+        sql,
+        binds: &[],
+        kind,
+        commit: true,
+        hold: false,
+        capture_dbms_output: false,
+        max_lines: None,
+        max_chars: None,
+        timeout_seconds,
+        scoped_grant: None,
+    })
+}
+
 /// Build an `InvalidArguments` envelope (malformed args / unknown tool).
 fn invalid_args(message: impl Into<String>) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::InvalidArguments, message)
@@ -5672,8 +5791,8 @@ fn confirmation_grant_error(
         .with_suggested_tool(suggested_tool)
         .with_next_step(next_step),
         ExecGrantError::DigestMismatch => ErrorEnvelope::new(
-            ErrorClass::ChallengeRequired,
-            "confirmation grant belongs to a different statement or action",
+            ErrorClass::RepreviewRequired,
+            "REPREVIEW_REQUIRED: confirmation grant belongs to a different SQL or execution envelope",
         )
         .with_suggested_tool(suggested_tool)
         .with_next_step(next_step),
@@ -5755,7 +5874,15 @@ fn normalized_session_level_action(invoked_as: &str, args: &SetSessionLevelArgs)
 }
 
 fn session_level_grant_material(target: OperatingLevel, ttl_seconds: u64) -> String {
-    format!("session-level:{}:{ttl_seconds}", target.as_str())
+    let statement = format!("session-level:{}:{ttl_seconds}", target.as_str());
+    ddl_action_material(
+        &statement,
+        ActionKind::SetSessionLevel {
+            level: target,
+            ttl: ttl_seconds,
+        },
+        None,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6174,6 +6301,7 @@ fn execute_confirmation_json(
     gate: &LevelDecision,
     required_level: Option<OperatingLevel>,
     confirm: Option<&str>,
+    commit: bool,
 ) -> Value {
     if decision.query_effect_requires_fetch {
         return Value::Null;
@@ -6190,13 +6318,13 @@ fn execute_confirmation_json(
     if required_level <= OperatingLevel::ReadOnly || !matches!(gate, LevelDecision::Allow) {
         return Value::Null;
     }
-    if decision.non_transactional_effect && required_level < OperatingLevel::Ddl {
+    if !commit {
         json!({
             "tool": "oracle_execute",
             "confirm": confirm,
             "commit": false,
             "required_level": required_level,
-            "note": "This statement has a permanent or session-persistent effect even though the surrounding transaction is rolled back; pass confirm only when you intend that effect.",
+            "note": "This confirmation is bound to commit=false. Re-preview with commit=true before committing. A non-transactional effect may still persist despite rollback.",
         })
     } else {
         json!({
@@ -6242,11 +6370,12 @@ fn push_exceeds_ceiling_action(
 }
 
 fn preview_next_actions(
-    sql: &str,
+    args: &PreviewSqlArgs,
     decision: &GuardDecision,
     gate: &LevelDecision,
     confirm: Option<&str>,
 ) -> Value {
+    let sql = args.sql.as_str();
     let mut actions: Vec<Value> = Vec::new();
     match gate {
         LevelDecision::Allow if decision.query_effect_requires_fetch => {
@@ -6265,7 +6394,8 @@ fn preview_next_actions(
             }
             Some(level) if level < OperatingLevel::Ddl => {
                 if decision.non_transactional_effect {
-                    if let Some(confirm) = confirm {
+                    if let Some(confirm) = confirm.filter(|_| !args.commit && args.binds.is_empty())
+                    {
                         actions.push(json!({
                             "intent": "execute_non_transactional_effect",
                             "tool": "oracle_execute",
@@ -6278,27 +6408,39 @@ fn preview_next_actions(
                             "note": "The surrounding transaction rolls back, but this statement's non-transactional effect persists.",
                         }));
                     }
-                } else {
+                } else if args.binds.is_empty() {
                     actions.push(json!({
                         "intent": "rollback_preview",
                         "tool": "oracle_execute",
                         "args": { "sql": sql, "binds": [], "commit": false },
                     }));
                 }
-                if let Some(confirm) = confirm {
+                if let Some(confirm) = confirm.filter(|_| args.commit && args.binds.is_empty()) {
                     actions.push(json!({
                         "intent": "commit",
                         "tool": "oracle_execute",
                         "args": { "sql": sql, "binds": [], "commit": true, "confirm": confirm },
                     }));
+                } else if !args.commit && args.binds.is_empty() {
+                    actions.push(json!({
+                        "intent": "preview_for_commit",
+                        "tool": "oracle_preview_sql",
+                        "args": { "sql": sql, "commit": true },
+                    }));
                 }
             }
             Some(_) => {
-                if let Some(confirm) = confirm {
+                if let Some(confirm) = confirm.filter(|_| args.commit && args.binds.is_empty()) {
                     actions.push(json!({
                         "intent": "commit_ddl_or_admin",
                         "tool": "oracle_execute",
                         "args": { "sql": sql, "binds": [], "commit": true, "confirm": confirm },
+                    }));
+                } else if !args.commit && args.binds.is_empty() {
+                    actions.push(json!({
+                        "intent": "preview_for_commit",
+                        "tool": "oracle_preview_sql",
+                        "args": { "sql": sql, "commit": true },
                     }));
                 }
             }
@@ -6629,7 +6771,7 @@ fn resolve_scoped_grant(
 }
 
 fn consume_execute_confirmation(
-    sql: &str,
+    material: &str,
     required_level: OperatingLevel,
     active_profile: Option<&str>,
     grants: &ExecGrantStore,
@@ -6644,12 +6786,12 @@ fn consume_execute_confirmation(
         )
     } else {
         (
-            "commit requires the execution grant from oracle_preview_sql for this exact statement, lane, principal, and active profile",
-            "call oracle_preview_sql with the exact sql, then pass execute_confirmation.confirm as confirm",
+            "commit or hold requires the execution grant from oracle_preview_sql for this exact statement and execution envelope, lane, principal, and active profile",
+            "call oracle_preview_sql with the exact sql, binds, commit/hold and output options, then pass execute_confirmation.confirm as confirm",
         )
     };
     consume_confirmation_grant(ConfirmationGrantRequest {
-        material: sql,
+        material,
         required_level,
         active_profile,
         grants,
@@ -6799,7 +6941,7 @@ fn execute_approved_args(
         }
         return Ok(ExecuteArgs {
             sql,
-            binds: Vec::new(),
+            binds: args.binds,
             commit,
             // The compat alias replays a previewed statement; the reversible
             // workspace is offered on oracle_execute only.
@@ -6850,7 +6992,7 @@ fn execute_approved_args(
 
     Ok(ExecuteArgs {
         sql: grant.sql,
-        binds: Vec::new(),
+        binds: args.binds,
         commit,
         hold: false,
         confirm: Some(token),
@@ -8680,6 +8822,18 @@ async fn preview_dml_inner(
         .iter()
         .map(json_to_bind)
         .collect::<Result<Vec<_>, _>>()?;
+    let sandbox_envelope = action_envelope_material(ActionEnvelopeInput {
+        sql: &args.sql,
+        binds: &binds,
+        kind: ActionKind::PreviewDmlSandbox,
+        commit: args.commit,
+        hold: args.hold,
+        capture_dbms_output: args.capture_dbms_output,
+        max_lines: args.dbms_output_max_lines,
+        max_chars: args.dbms_output_max_chars,
+        timeout_seconds: args.timeout_seconds,
+        scoped_grant: args.scoped_grant.as_deref(),
+    });
     let executed_sql = with_audit_marker(&args.sql, ctx.active_profile, "oracle_preview_dml");
     if READ_PRECHECK_CLASSIFIER.classify(&executed_sql) != decision {
         return Err(ErrorEnvelope::new(
@@ -8848,6 +9002,7 @@ async fn preview_dml_inner(
         "objects_affected": decision.objects_affected,
         "reason": decision.reason,
         "sandbox": sandbox,
+        "action_envelope_digest": sandbox_envelope,
         "next_step": "nothing was committed. To apply this exact change: oracle_preview_sql for its confirmation, then oracle_execute with commit=true — which re-classifies and re-gates the statement rather than trusting this preview",
         "caveat": "a trigger or an autonomous transaction fired by the target objects can commit independently of this rollback; the classifier flags only what it can prove from the statement text",
     });
@@ -9132,14 +9287,32 @@ async fn execute_sql_inner(
         None => None,
     };
     // A rollback-preview normally needs no per-statement confirmation because
-    // Oracle can undo its effects. Sequence NEXTVAL is the exception: it
-    // advances independently of transaction rollback, so it must consume the
-    // same exact-SQL, single-use grant as a commit even when `commit=false`.
-    let confirmation_required = args.commit || decision.non_transactional_effect;
+    // Oracle can undo its effects. A held statement persists in the reversible
+    // workspace, and sequence NEXTVAL advances independently of rollback, so
+    // both must consume a preview-bound single-use grant.
+    let binds = args
+        .binds
+        .iter()
+        .map(json_to_bind)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(write_not_started)?;
+    let action_material = action_envelope_material(ActionEnvelopeInput {
+        sql: &args.sql,
+        binds: &binds,
+        kind: action_kind_for_tool(audit_tool, statement_level),
+        commit: args.commit,
+        hold: args.hold,
+        capture_dbms_output: args.capture_dbms_output,
+        max_lines: args.dbms_output_max_lines,
+        max_chars: args.dbms_output_max_chars,
+        timeout_seconds: args.timeout_seconds,
+        scoped_grant: args.scoped_grant.as_deref(),
+    });
+    let confirmation_required = args.commit || args.hold || decision.non_transactional_effect;
     let confirmation_idempotency_key = if confirmation_required {
         Some(
             consume_execute_confirmation(
-                &args.sql,
+                &action_material,
                 required_level,
                 active_profile,
                 ctx.execute_grants,
@@ -9152,13 +9325,6 @@ async fn execute_sql_inner(
     } else {
         None
     };
-
-    let binds = args
-        .binds
-        .iter()
-        .map(json_to_bind)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(write_not_started)?;
 
     // A3: prepend the per-statement audit marker. The gate/confirmation above ran
     // on the bare SQL (the text the agent previewed/confirmed); `with_audit_marker`
@@ -9740,12 +9906,17 @@ async fn compile_object_inner(
     let gate = session.evaluate(Some(OperatingLevel::Ddl));
     let (gate_decision, blocked_reason, step_up_target) = gate_decision_json(&gate);
     let audited_sql = statements.join(";\n");
+    let action_material = ddl_action_material(
+        &audited_sql,
+        ActionKind::CompileObject,
+        args.timeout_seconds,
+    );
     let confirm = matches!(gate, LevelDecision::Allow).then(|| {
         issue_confirmation_grant(
             ctx.execute_grants,
             ctx.grant_binding,
             active_profile,
-            &audited_sql,
+            &action_material,
             OperatingLevel::Ddl,
         )
     });
@@ -9793,7 +9964,7 @@ async fn compile_object_inner(
         "this compile (Oracle commits DDL implicitly)",
     )?;
     let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
-        material: &audited_sql,
+        material: &action_material,
         required_level: OperatingLevel::Ddl,
         active_profile,
         grants: ctx.execute_grants,
@@ -10640,6 +10811,8 @@ async fn patch_source_inner(
         create_or_replace_ddl_from_source(&patched_source)
     };
     let patched_ddl = create_or_replace_source_arg(tool_name, Some(patched_ddl))?;
+    let action_material =
+        ddl_action_material(&patched_ddl, ActionKind::PatchSource, args.timeout_seconds);
     let decision = DEFAULT_CLASSIFIER.classify(&patched_ddl);
     // Source patches and direct CREATE OR REPLACE now share the guard's
     // token-aware stored-unit shape analysis. There is no patch-only
@@ -10654,7 +10827,7 @@ async fn patch_source_inner(
             ctx.execute_grants,
             ctx.grant_binding,
             active_profile,
-            &patched_ddl,
+            &action_material,
             level,
         )),
         _ => None,
@@ -10736,7 +10909,7 @@ async fn patch_source_inner(
         "this source patch (Oracle commits DDL implicitly)",
     )?;
     let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
-        material: &patched_ddl,
+        material: &action_material,
         required_level,
         active_profile,
         grants: ctx.execute_grants,
@@ -10997,10 +11170,12 @@ async fn create_or_replace_inner(
         return Err(not_editionable_error("TABLE"));
     }
     let detected = detect_create_or_replace_object(cx, conn, &source).await;
+    let action_material =
+        ddl_action_material(&source, ActionKind::CreateOrReplace, args.timeout_seconds);
     let confirm = match (args.execute, decision.required_level, &gate) {
         (false, Some(level), LevelDecision::Allow) if level >= OperatingLevel::Ddl => {
             let raw = ctx.execute_grants.issue(
-                &source,
+                &action_material,
                 ctx.grant_binding.clone(),
                 level,
                 Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
@@ -11220,14 +11395,24 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
 
     if !args.execute {
         let mut preview = preview_sql(
-            &ddl,
+            &PreviewSqlArgs {
+                sql: ddl.clone(),
+                binds: Vec::new(),
+                commit: true,
+                hold: false,
+                scoped_grant: None,
+                capture_dbms_output: false,
+                dbms_output_max_lines: None,
+                dbms_output_max_chars: None,
+                timeout_seconds: args.timeout_seconds,
+            },
             session,
             active_profile,
             ctx.execute_grants,
             ctx.grant_binding,
             ctx.sql_policy,
             ctx.current_schema,
-        );
+        )?;
         if let Value::Object(map) = &mut preview {
             map.insert("preview".to_owned(), json!(true));
             map.insert("applied".to_owned(), json!(false));
@@ -11283,14 +11468,15 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
 }
 
 fn preview_sql(
-    sql: &str,
+    args: &PreviewSqlArgs,
     session: &SessionLevelState,
     active_profile: Option<&str>,
     grants: &ExecGrantStore,
     binding: &ExecGrantBinding,
     sql_policy: Option<&SqlPolicyConfig>,
     current_schema: Option<&str>,
-) -> Value {
+) -> Result<Value, ErrorEnvelope> {
+    let sql = args.sql.as_str();
     // Previewing never admits or executes SQL. Mirror the read path's explicit
     // text precheck so an ordinary read remains previewable; any later execute
     // still re-enters the strict execution gate, and oracle_query still binds
@@ -11309,7 +11495,7 @@ fn preview_sql(
         sql,
     ) {
         PolicyGate::Denied(denial) => {
-            return json!({
+            return Ok(json!({
                 "danger": base.danger,
                 "required_level": base.required_level,
                 "allowed_on_read_only": false,
@@ -11335,7 +11521,7 @@ fn preview_sql(
                 "execute_confirmation": Value::Null,
                 "next_actions": Value::Array(Vec::new()),
                 "policy": denial.attachment(),
-            });
+            }));
         }
         PolicyGate::Admitted(admission) => *admission,
     };
@@ -11370,14 +11556,31 @@ fn preview_sql(
         }
         _ => ("unknown", Value::Null, Value::Null),
     };
+    let typed_binds = args
+        .binds
+        .iter()
+        .map(json_to_bind)
+        .collect::<Result<Vec<_>, _>>()?;
     let execute_confirm = match (required_level, &gate) {
         (Some(level), LevelDecision::Allow) if level > OperatingLevel::ReadOnly => {
             if decision.query_effect_requires_fetch {
                 None
             } else {
                 grants.purge_expired();
-                let raw = grants.issue(
+                let material = action_envelope_material(ActionEnvelopeInput {
                     sql,
+                    binds: &typed_binds,
+                    kind: execute_action_kind(decision.required_level.unwrap_or(level)),
+                    commit: args.commit,
+                    hold: args.hold,
+                    capture_dbms_output: args.capture_dbms_output,
+                    max_lines: args.dbms_output_max_lines,
+                    max_chars: args.dbms_output_max_chars,
+                    timeout_seconds: args.timeout_seconds,
+                    scoped_grant: args.scoped_grant.as_deref(),
+                });
+                let raw = grants.issue(
+                    &material,
                     binding.clone(),
                     level,
                     Duration::from_secs(EXECUTE_APPROVED_TOKEN_TTL_SECONDS),
@@ -11415,13 +11618,14 @@ fn preview_sql(
             &gate,
             required_level,
             execute_confirm.as_deref(),
+            args.commit,
         ),
-        "next_actions": preview_next_actions(sql, &decision, &gate, execute_confirm.as_deref()),
+        "next_actions": preview_next_actions(args, &decision, &gate, execute_confirm.as_deref()),
     });
     if let Some(tightening) = policy_attachment {
         preview["policy"] = tightening;
     }
-    preview
+    Ok(preview)
 }
 
 fn connection_info_json(
@@ -12343,14 +12547,14 @@ impl OracleDispatcher {
             let a: PreviewSqlArgs = parse_args(name, args)?;
             let binding = grant_binding_for_context(&state, context);
             let preview = preview_sql(
-                &a.sql,
+                &a,
                 &scoped_level,
                 state.active_profile.as_deref(),
                 &state.execute_grants,
                 &binding,
                 sql_policy.as_ref(),
                 current_schema.as_deref(),
-            );
+            )?;
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
         }
@@ -12358,6 +12562,7 @@ impl OracleDispatcher {
             let a: ExecuteApprovedArgs = parse_args(name, args).map_err(write_not_started)?;
             let execute_args =
                 execute_approved_args(&mut state, &scoped_level, a).map_err(write_not_started)?;
+            let changes_session_context = is_allowed_alter_session(&execute_args.sql);
             let active_profile = state.active_profile.clone();
             let subject = request_subject.clone();
             let grant_binding = grant_binding_for_context(&state, context);
@@ -12384,7 +12589,16 @@ impl OracleDispatcher {
                 audit,
                 quarantine: &self.quarantine,
             };
-            return execute_sql(tool_ctx, "oracle_execute", execute_args).await;
+            let result = execute_sql(tool_ctx, "oracle_execute", execute_args).await;
+            if changes_session_context {
+                // An error after Oracle accepted the statement can still leave
+                // its session settings changed. Invalidate conservatively.
+                state.grant_generation = state.grant_generation.saturating_add(1);
+                state.execute_grants.clear();
+                state.scoped_grants.revoke_all();
+                state.execute_approved_tokens.clear();
+            }
+            return result;
         }
         if tool == "deploy_ddl" {
             let a: DeployDdlArgs = parse_args(name, args)?;
@@ -12538,6 +12752,7 @@ impl OracleDispatcher {
         };
 
         let mut patch_preview_to_remember = None;
+        let mut alter_session_attempted = false;
         let result: Result<Value, ErrorEnvelope> = async {
             if let Some(error) = generated_read_evidence_error {
                 return Err(error);
@@ -12636,6 +12851,7 @@ impl OracleDispatcher {
             }
             "oracle_execute" => {
                 let a: ExecuteArgs = parse_args(name, args).map_err(write_not_started)?;
+                let changes_session_context = is_allowed_alter_session(&a.sql);
                 let subject = request_subject.clone();
                 let grant_binding = grant_binding_for_context(&state, context);
                 let audit = AuditCtx {
@@ -12660,7 +12876,11 @@ impl OracleDispatcher {
                     audit,
                     quarantine: &self.quarantine,
                 };
-                return execute_sql(tool_ctx, "oracle_execute", a).await;
+                let result = execute_sql(tool_ctx, "oracle_execute", a).await;
+                if changes_session_context {
+                    alter_session_attempted = true;
+                }
+                result
             }
             "oracle_checkpoint" => {
                 let a: CheckpointArgs = parse_args(name, args)?;
@@ -14215,6 +14435,14 @@ impl OracleDispatcher {
         let budget_after = final_budget.enforce(cx).map_err(DbError::into_envelope);
         let metadata_restore_error = metadata_limits.and_then(|limits| limits.restore().err());
         let primary_restore_error = primary_limits.restore().err();
+        if alter_session_attempted {
+            // An error after Oracle accepted ALTER SESSION can leave its
+            // settings changed. Invalidate even on an uncertain result.
+            state.grant_generation = state.grant_generation.saturating_add(1);
+            state.execute_grants.clear();
+            state.scoped_grants.revoke_all();
+            state.execute_approved_tokens.clear();
+        }
         match result {
             Err(primary) => {
                 if let Some(restore_err) = primary_restore_error {

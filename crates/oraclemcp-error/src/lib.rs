@@ -74,6 +74,9 @@ pub enum ErrorClass {
     /// The operation requires a human step-up confirmation that has not yet
     /// been granted; the agent should poll the issued task (§7.2).
     ChallengeRequired,
+    /// The previewed action envelope differs from the action now requested.
+    /// Preview the exact SQL, binds, and execution modes again.
+    RepreviewRequired,
     /// A stateful operation (transaction, savepoint, DBMS_OUTPUT) was attempted
     /// without an active session lease (§5.1).
     LeaseRequired,

@@ -234,6 +234,24 @@ fn dbms_output_props(capture_description: &str) -> Value {
     })
 }
 
+fn preview_sql_properties() -> Value {
+    props_with(
+        json!({
+            "sql": { "type": "string", "description": "SQL statement to classify. It is never executed by this preview." },
+            "binds": { "type": "array", "items": {}, "description": "Positional bind values to bind into the confirmation without exposing them in the preview result." },
+            "commit": { "type": "boolean", "description": "The exact commit mode intended for oracle_execute. Default false; a later commit=true requires a new preview." },
+            "hold": { "type": "boolean", "description": "The exact reversible-workspace hold mode intended for oracle_execute. Default false." },
+            "scoped_grant": { "type": "string", "description": "Explicit scoped-grant reference intended for execution; its identity is bound into this preview." }
+        }),
+        &[
+            dbms_output_props(
+                "Exact DBMS_OUTPUT capture mode intended for oracle_execute; default false.",
+            ),
+            timeout_seconds_prop(),
+        ],
+    )
+}
+
 /// Canonical JSON cell value emitted by the row serializer. Oracle NUMBER is a
 /// string by default for lossless precision; JSON numbers appear only for
 /// binary float/double or explicit `numbers_as_float=true`.
@@ -718,21 +736,16 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_preview_sql",
             ToolTier::FoundationStatic,
-            "Classify a SQL statement and report whether it would pass the active profile/session gate without executing it.",
+            "Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview.",
         )
-        .with_input_schema(object_schema(
-            json!({
-                "sql": { "type": "string", "description": "SQL statement to classify. It is never executed." }
-            }),
-            &["sql"],
-        )),
+        .with_input_schema(object_schema(preview_sql_properties(), &["sql"])),
     );
 
     registry.register(
         ToolDescriptor::new(
             "oracle_execute",
             ToolTier::FoundationLiveDb,
-            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
+            "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default. Commits, held DML and non-transactional effects such as sequence NEXTVAL require a confirmation from oracle_preview_sql for the exact SQL, typed binds, commit/hold mode, output caps and timeout; a change requires re-preview. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -744,11 +757,11 @@ pub fn tool_registry() -> ToolRegistry {
                         "items": {}
                     },
                     "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require confirm from oracle_preview_sql. Set true only to commit; DDL/Admin statements require true because Oracle cannot rollback them." },
-                    "hold": { "type": "boolean", "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused." },
+                    "hold": { "type": "boolean", "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint and a matching oracle_preview_sql confirmation, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused." },
                     "scoped_grant": { "type": "string", "description": "Explicit signed reference to one scoped grant. Its presence selects grant authorization; an invalid grant never falls back to the session level. Grant execution is unavailable until scoped enforcement is installed." }
                 }),
                 &[
-                    confirm_trio("Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true and whenever the statement has a non-transactional effect such as sequence NEXTVAL, even with commit=false."),
+                    confirm_trio("Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true, hold=true, or the statement has a non-transactional effect such as sequence NEXTVAL even with commit=false."),
                     dbms_output_props("Default false. When true, enables DBMS_OUTPUT before execution and returns bounded captured lines after commit/rollback. Caller PL/SQL must use literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements."),
                     timeout_seconds_prop(),
                 ],
@@ -762,7 +775,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_checkpoint",
             ToolTier::FoundationLiveDb,
-            "Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true then leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. Requires READ_WRITE. While the workspace is open the server refuses every operation that would end the transaction — commits, implicitly-committing DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads — so held work can only ever be undone, never committed by another statement.",
+            "Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true and a matching preview confirmation leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. Requires READ_WRITE. While the workspace is open the server refuses every operation that would end the transaction — commits, implicitly-committing DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads — so held work can only ever be undone, never committed by another statement.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -814,6 +827,9 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                         "items": {}
                     },
+                    "commit": { "type": "boolean", "description": "Execution intent recorded in the action envelope; this sandbox always rolls back." },
+                    "hold": { "type": "boolean", "description": "Execution intent recorded in the action envelope; this sandbox never holds work." },
+                    "scoped_grant": { "type": "string", "description": "Explicit grant reference bound into the action envelope; the sandbox never uses it for authority." },
                     "witness": { "type": "string", "description": "Optional read-only SELECT run inside the sandbox before and after the DML, so the response can show the rows it changed. Proven read-only by the same classifier as oracle_query." },
                     "witness_sql": { "type": "string", "description": "Alias for witness." },
                     "witness_binds": {
@@ -824,7 +840,10 @@ pub fn tool_registry() -> ToolRegistry {
                     "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Row cap for each witness read (default: the profile page size, ceiling 5000). A larger request is clamped to the ceiling and the response says so; when the witness hits the cap the response also flags witness_truncated, because the rows shown are then not the whole set." },
                     "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Compatibility alias for max_rows." }
                 }),
-                &[timeout_seconds_prop()],
+                &[
+                    dbms_output_props("Output-capture intent recorded in the action envelope; the sandbox does not return DBMS_OUTPUT."),
+                    timeout_seconds_prop(),
+                ],
             ),
             &["sql"],
         ))
@@ -1392,12 +1411,7 @@ pub fn tool_registry() -> ToolRegistry {
             ToolTier::FoundationStatic,
             "Compatibility alias for oracle_preview_sql.",
         )
-        .with_input_schema(object_schema(
-            json!({
-                "sql": { "type": "string", "description": "SQL statement to classify. It is never executed." }
-            }),
-            &["sql"],
-        )),
+        .with_input_schema(object_schema(preview_sql_properties(), &["sql"])),
     );
 
     registry.register(
@@ -1413,6 +1427,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "confirm": { "type": "string", "description": "Alias for token." },
                     "confirmation_token": { "type": "string", "description": "Alias for token." },
                     "sql": { "type": "string", "description": "Optional SQL statement. If omitted, the token must still be cached from preview_sql in this server process." },
+                    "binds": { "type": "array", "items": {}, "description": "Exact positional bind values supplied to preview_sql." },
                     "commit": { "type": "boolean", "description": "Default false rolls back transactional DML, but non-transactional effects such as sequence NEXTVAL persist and still require the preview grant. Set true only when the grant represents deliberate commit intent; DDL/Admin statements require true." },
                     "save_output": { "type": "string", "description": "Unsupported in the generic core. Use capture_dbms_output=true and read dbms_output.lines instead." },
                     "scoped_grant": { "type": "string", "description": "Explicit signed scoped-grant reference, forwarded to oracle_execute without a session-level fallback." }

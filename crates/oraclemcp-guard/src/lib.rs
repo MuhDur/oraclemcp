@@ -14,6 +14,7 @@
 
 mod classifier_grammar;
 
+pub mod action_envelope;
 pub mod classifier;
 pub mod clock;
 pub mod corpus;
@@ -31,6 +32,10 @@ pub mod scoped_grant;
 pub mod stepup;
 pub mod token;
 
+pub use action_envelope::{
+    ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, ExecLimits, OracleBindType,
+    OutputCapture, bind_value_hmac, canonical_binds,
+};
 pub use edition_lifecycle::{
     EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, parse_edition_lifecycle_sql,
 };

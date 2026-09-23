@@ -28,6 +28,7 @@ use asupersync::sync::OnceCell;
 use asupersync::{Budget, CancelReason, Cx, Outcome, PanicPayload, Time};
 use oraclemcp_audit::{AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, Auditor};
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use oraclemcp_guard::is_allowed_alter_session;
 use parking_lot::{Condvar, Mutex};
 use serde_json::Value;
 
@@ -441,7 +442,7 @@ impl LaneCloseState {
 
 struct LaneRuntimeInner {
     name: String,
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
     status: Arc<AtomicU8>,
     close_state: Arc<LaneCloseState>,
     sender: Mutex<Option<mpsc::Sender<LaneCommand>>>,
@@ -624,6 +625,7 @@ impl LaneRuntime {
         let thread_status = Arc::clone(&status);
         let close_state = Arc::new(LaneCloseState::new());
         let thread_close_state = Arc::clone(&close_state);
+        let generation = Arc::new(AtomicU64::new(1));
         let thread_name = format!("oraclemcp-lane-{name}");
         let thread_auditor = panic_auditor.clone();
         let thread_config = LaneThreadConfig {
@@ -634,6 +636,7 @@ impl LaneRuntime {
             factory_error_is_terminal,
             status: thread_status,
             close_state: thread_close_state,
+            generation: Arc::clone(&generation),
             panic_auditor: thread_auditor,
         };
         let join = thread::Builder::new()
@@ -646,7 +649,7 @@ impl LaneRuntime {
         Self {
             inner: Arc::new(LaneRuntimeInner {
                 name,
-                generation: AtomicU64::new(1),
+                generation,
                 status,
                 close_state,
                 sender: Mutex::new(Some(sender)),
@@ -2014,6 +2017,7 @@ struct LaneThreadConfig {
     factory_error_is_terminal: bool,
     status: Arc<AtomicU8>,
     close_state: Arc<LaneCloseState>,
+    generation: Arc<AtomicU64>,
     panic_auditor: Option<Arc<Auditor>>,
 }
 
@@ -2231,6 +2235,13 @@ fn run_lane_loop_with_factory(
                     let borrowed_context = context
                         .as_dispatch_context()
                         .with_request_budget(&dispatch_budget);
+                    let may_change_session_context =
+                        (name == "oracle_execute"
+                            && args
+                                .get("sql")
+                                .and_then(Value::as_str)
+                                .is_some_and(is_allowed_alter_session))
+                            || name == "execute_approved";
                     let result = match run_with_caller_signal(
                         &cx,
                         &caller,
@@ -2247,6 +2258,11 @@ fn run_lane_loop_with_factory(
                             panic_auditor,
                         ),
                     };
+                    if may_change_session_context
+                        && matches!(&result, Outcome::Ok(value) if value.get("executed") == Some(&Value::Bool(true)))
+                    {
+                        config.generation.fetch_add(1, Ordering::AcqRel);
+                    }
                     let _ = reply.send_blocking(result);
                 });
             }
@@ -5488,6 +5504,38 @@ mod tests {
         assert_eq!(lane.generation(), 2);
         assert_eq!(lane.bump_generation(), 3);
         assert_eq!(lane.generation(), 3);
+    }
+
+    #[test]
+    fn successful_allowlisted_alter_session_bumps_lane_generation() {
+        struct ExecutedResult;
+
+        impl ToolDispatch for ExecutedResult {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: DispatchContext<'a>,
+                _name: &'a str,
+                _args: Value,
+            ) -> DispatchFuture<'a> {
+                Box::pin(async { Outcome::Ok(json!({ "executed": true })) })
+            }
+        }
+
+        let lane = LaneRuntime::spawn("alter-session-generation", Arc::new(ExecutedResult), 4);
+        let initial = lane.generation();
+        let result = block_on_lane_bridge(async {
+            let cx = Cx::current().expect("bridge installs Cx");
+            lane.dispatch(
+                &cx,
+                DispatchContext::default(),
+                "oracle_execute",
+                json!({ "sql": "ALTER SESSION SET NLS_DATE_FORMAT = 'YYYY-MM-DD'" }),
+            )
+            .await
+        });
+        assert!(matches!(result, Outcome::Ok(_)));
+        assert_eq!(lane.generation(), initial + 1);
     }
 
     #[test]

@@ -1096,13 +1096,24 @@ fn admin_level() -> SessionLevelState {
 }
 
 fn preview_confirm(dispatcher: &OracleDispatcher, sql: &str) -> String {
+    preview_confirm_with_args(dispatcher, json!({ "sql": sql, "commit": true }))
+}
+
+fn preview_confirm_with_args(dispatcher: &OracleDispatcher, args: Value) -> String {
     dispatcher
-        .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+        .dispatch("oracle_preview_sql", args)
         .expect("preview")
         .pointer("/execute_confirmation/confirm")
         .and_then(Value::as_str)
         .expect("preview minted execute grant")
         .to_owned()
+}
+
+fn preview_hold_confirm(dispatcher: &OracleDispatcher, sql: &str, binds: Value) -> String {
+    preview_confirm_with_args(
+        dispatcher,
+        json!({"sql": sql, "binds": binds, "hold": true}),
+    )
 }
 
 fn catalog_generation(dispatcher: &OracleDispatcher) -> u64 {
@@ -5388,6 +5399,8 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
             "oracle_preview_sql",
             json!({
                 "sql": "UPDATE app_customers SET name = :name WHERE id = :id",
+                "commit": true,
+                "binds": ["Acme", 7],
             }),
         )
         .expect("custom tool SQL should preview");
@@ -5408,6 +5421,20 @@ fn custom_tool_write_runs_with_confirmation_on_writable_profile() {
         )
         .expect_err("custom tool should require execute confirmation for commit");
     assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+
+    let swapped_bind = dispatcher
+        .dispatch(
+            "app_customer_set_name",
+            json!({
+                "id": 7,
+                "name": "Other",
+                "commit": true,
+                "confirm": token,
+            }),
+        )
+        .expect_err("generic SQL preview must bind the custom tool's typed values");
+    assert_eq!(swapped_bind.error_class, ErrorClass::RepreviewRequired);
+    assert!(state.executed.lock().expect("executed mutex").is_empty());
 
     let out = dispatcher
         .dispatch(
@@ -7436,7 +7463,7 @@ fn sequence_nextval_rollback_default_rejects_wrong_confirmation_before_database_
             }),
         )
         .expect_err("a confirmation for different SQL must not authorize NEXTVAL");
-    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(err.error_class, ErrorClass::RepreviewRequired);
     assert!(state.executed.lock().expect("exec mutex").is_empty());
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
 }
@@ -8628,7 +8655,7 @@ fn preview_sql_includes_execute_confirmation_for_allowed_write() {
         preview["execute_confirmation"]["tool"],
         json!("oracle_execute")
     );
-    assert_eq!(preview["execute_confirmation"]["commit"], json!(true));
+    assert_eq!(preview["execute_confirmation"]["commit"], json!(false));
     assert_eq!(
         preview["execute_confirmation"]["required_level"],
         json!("READ_WRITE")
@@ -8646,11 +8673,12 @@ fn preview_sql_includes_execute_confirmation_for_allowed_write() {
     );
     assert_eq!(preview["next_actions"][0]["tool"], json!("oracle_execute"));
     assert_eq!(preview["next_actions"][0]["args"]["commit"], json!(false));
-    assert_eq!(preview["next_actions"][1]["intent"], json!("commit"));
     assert_eq!(
-        preview["next_actions"][1]["args"]["confirm"],
-        preview["execute_confirmation"]["confirm"]
+        preview["next_actions"][1]["intent"],
+        json!("preview_for_commit")
     );
+    assert_eq!(preview["next_actions"][1]["args"]["commit"], json!(true));
+    assert!(preview["next_actions"][1]["args"].get("confirm").is_none());
 }
 
 #[test]
@@ -8702,8 +8730,8 @@ fn execute_confirmation_preserves_semantic_whitespace_before_database_io() {
             }),
         )
         .expect_err("grant for a two-space identifier cannot authorize a one-space identifier");
-    assert_eq!(err.error_class, ErrorClass::ChallengeRequired);
-    assert!(err.message.contains("different statement"));
+    assert_eq!(err.error_class, ErrorClass::RepreviewRequired);
+    assert!(err.message.contains("different SQL or execution envelope"));
     assert!(
         state.executed.lock().expect("exec mutex").is_empty(),
         "digest mismatch must fail before Oracle execution"
@@ -9018,7 +9046,7 @@ fn allowlisted_alter_session_requires_confirmation_even_with_rollback_default() 
     assert!(err.message.contains("non-transactional effect"), "{err:?}");
     assert!(state.executed.lock().expect("exec mutex").is_empty());
 
-    let confirm = preview_confirm(&dispatcher, sql);
+    let confirm = preview_confirm_with_args(&dispatcher, json!({ "sql": sql, "commit": false }));
     let before_generation = catalog_generation(&dispatcher);
     let out = dispatcher
         .dispatch("oracle_execute", json!({ "sql": sql, "confirm": confirm }))
@@ -9944,7 +9972,7 @@ fn execute_commit_with_preview_confirmation_commits() {
     );
     let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
     let preview = dispatcher
-        .dispatch("oracle_preview_sql", json!({ "sql": sql }))
+        .dispatch("oracle_preview_sql", json!({ "sql": sql, "commit": true }))
         .expect("preview");
     let confirm = preview["execute_confirmation"]["confirm"]
         .as_str()
@@ -10033,7 +10061,11 @@ fn execute_grant_is_lane_bound_and_not_consumed_by_wrong_lane() {
         .with_principal_key("oauth:user-a")
         .with_lane_identity("lane-b", 1);
     let preview = dispatcher
-        .dispatch_with_context("oracle_preview_sql", json!({ "sql": sql }), lane_a)
+        .dispatch_with_context(
+            "oracle_preview_sql",
+            json!({ "sql": sql, "commit": true }),
+            lane_a,
+        )
         .expect("preview on lane a");
     let confirm = preview["execute_confirmation"]["confirm"]
         .as_str()
@@ -10233,7 +10265,7 @@ fn execute_approved_explicit_commit_token_race_allows_exactly_one_success() {
     ));
     let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
     let preview = dispatcher
-        .dispatch("preview_sql", json!({ "sql": sql }))
+        .dispatch("preview_sql", json!({ "sql": sql, "commit": true }))
         .expect("preview stores one-shot token");
     let token = preview["execute_confirmation"]["confirm"]
         .as_str()
@@ -11274,7 +11306,10 @@ mod qa85_terminal_boundaries {
         .with_auditor(auditor)
         .with_write_intent_log(Arc::clone(&intents));
         let sql = "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('never-ran'); END;";
-        let confirm = preview_confirm(&dispatcher, sql);
+        let confirm = preview_confirm_with_args(
+            &dispatcher,
+            json!({ "sql": sql, "commit": true, "dbms_output": true }),
+        );
 
         let error = dispatcher
             .dispatch(
@@ -11404,6 +11439,9 @@ mod qa85_terminal_boundaries {
             .dispatch("oracle_checkpoint", json!({ "name": "before_change" }))
             .expect("checkpoint opens the workspace");
 
+        let held_sql = "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1";
+        let held_confirm = preview_hold_confirm(&dispatcher, held_sql, json!([100]));
+
         // Only the held DML's execute (not the checkpoint's SAVEPOINT) should
         // observe a late cancellation.
         state.cancel_on_execute.store(1, Ordering::SeqCst);
@@ -11422,6 +11460,7 @@ mod qa85_terminal_boundaries {
                     "sql": "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1",
                     "binds": [100],
                     "hold": true,
+                    "confirm": held_confirm,
                 }),
             )
             .await
@@ -11512,6 +11551,9 @@ mod qa85_terminal_boundaries {
             .dispatch("oracle_checkpoint", json!({ "name": "before_change" }))
             .expect("checkpoint opens the workspace");
 
+        let held_sql = "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1";
+        let held_confirm = preview_hold_confirm(&dispatcher, held_sql, json!([100]));
+
         // From here every execute reports success on the wire and THEN trips the
         // request deadline — the finalization-window race the fix addresses.
         state.cancel_on_execute.store(1, Ordering::SeqCst);
@@ -11529,6 +11571,7 @@ mod qa85_terminal_boundaries {
                     "sql": "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1",
                     "binds": [100],
                     "hold": true,
+                    "confirm": held_confirm,
                 }),
             )
             .await
@@ -11770,7 +11813,10 @@ mod qa85_terminal_boundaries {
             read_write_level(),
         );
         let sql = "BEGIN SYS.DBMS_OUTPUT.PUT_LINE('done'); END;";
-        let confirm = preview_confirm(&dispatcher, sql);
+        let confirm = preview_confirm_with_args(
+            &dispatcher,
+            json!({ "sql": sql, "commit": true, "dbms_output": true }),
+        );
 
         let out = dispatcher
             .dispatch(
@@ -11813,6 +11859,9 @@ mod gate_refusal_reasons;
 mod audit_wiring;
 
 mod write_authorization;
+
+#[path = "tests/action_envelope.rs"]
+mod action_envelope;
 
 /// C8: `oracle_top_queries` surfaces the existing awr.rs builder as a served,
 /// read-only tool. The free live cursor cache (V$SQLSTATS) is the default; the
@@ -14417,6 +14466,9 @@ fn checkpoint_then_held_dml_then_undo_walks_the_transaction_back() {
     assert_eq!(checkpoint["workspace"]["open"], json!(true));
     assert_eq!(checkpoint["workspace"]["held_statements"], json!(0));
 
+    let held_sql = "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1";
+    let held_confirm = preview_hold_confirm(&dispatcher, held_sql, json!([100]));
+
     let held = dispatcher
         .dispatch(
             "oracle_execute",
@@ -14424,6 +14476,7 @@ fn checkpoint_then_held_dml_then_undo_walks_the_transaction_back() {
                 "sql": "UPDATE employees SET salary = salary * 2 WHERE employee_id = :1",
                 "binds": [100],
                 "hold": true,
+                "confirm": held_confirm,
             }),
         )
         .expect("reversible DML is held inside the workspace");
@@ -14502,10 +14555,11 @@ fn undo_releases_the_checkpoints_oracle_erases() {
         dispatcher
             .dispatch("oracle_checkpoint", json!({ "name": name }))
             .expect("checkpoint opens");
+        let confirm = preview_hold_confirm(&dispatcher, dml, json!([1]));
         dispatcher
             .dispatch(
                 "oracle_execute",
-                json!({ "sql": dml, "binds": [1], "hold": true }),
+                json!({ "sql": dml, "binds": [1], "hold": true, "confirm": confirm }),
             )
             .expect("held DML");
     }
@@ -14528,10 +14582,11 @@ fn reads_coexist_with_held_work_without_ending_the_transaction() {
     dispatcher
         .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
         .expect("checkpoint");
+    let confirm = preview_hold_confirm(&dispatcher, "UPDATE t SET c = 1", json!([]));
     dispatcher
         .dispatch(
             "oracle_execute",
-            json!({ "sql": "UPDATE t SET c = 1", "hold": true }),
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true, "confirm": confirm }),
         )
         .expect("held DML");
 
@@ -14566,10 +14621,11 @@ fn an_open_workspace_refuses_every_committing_path() {
     dispatcher
         .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
         .expect("checkpoint");
+    let held_confirm = preview_hold_confirm(&dispatcher, "DELETE FROM audit_log", json!([]));
     dispatcher
         .dispatch(
             "oracle_execute",
-            json!({ "sql": "DELETE FROM audit_log", "hold": true }),
+            json!({ "sql": "DELETE FROM audit_log", "hold": true, "confirm": held_confirm }),
         )
         .expect("held DML");
     let baseline = executed_statements(&state).len();
@@ -14814,10 +14870,11 @@ fn returning_to_read_only_discards_the_workspace_with_the_transaction() {
     dispatcher
         .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
         .expect("checkpoint");
+    let confirm = preview_hold_confirm(&dispatcher, "UPDATE t SET c = 1", json!([]));
     dispatcher
         .dispatch(
             "oracle_execute",
-            json!({ "sql": "UPDATE t SET c = 1", "hold": true }),
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true, "confirm": confirm }),
         )
         .expect("held DML");
 
@@ -15728,10 +15785,11 @@ fn preview_dml_nests_inside_an_open_workspace_without_disturbing_it() {
     dispatcher
         .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
         .expect("checkpoint");
+    let confirm = preview_hold_confirm(&dispatcher, "UPDATE t SET c = 1", json!([]));
     dispatcher
         .dispatch(
             "oracle_execute",
-            json!({ "sql": "UPDATE t SET c = 1", "hold": true }),
+            json!({ "sql": "UPDATE t SET c = 1", "hold": true, "confirm": confirm }),
         )
         .expect("held DML");
 
@@ -15860,7 +15918,7 @@ fn commit_re_classifies_and_refuses_a_statement_that_changed_since_preview() {
             }),
         )
         .expect_err("a confirmation cannot be moved onto another statement");
-    assert_eq!(tampered.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(tampered.error_class, ErrorClass::RepreviewRequired);
     assert_eq!(
         state.commits.load(Ordering::SeqCst),
         0,
@@ -15883,7 +15941,7 @@ fn commit_re_classifies_and_refuses_a_statement_that_changed_since_preview() {
             }),
         )
         .expect_err("the grant is digest-bound to the exact previewed text");
-    assert_eq!(respaced.error_class, ErrorClass::ChallengeRequired);
+    assert_eq!(respaced.error_class, ErrorClass::RepreviewRequired);
 
     // The exact previewed statement still commits — the refusals above consumed
     // nothing, because a mismatched digest is not a spent grant.
@@ -15967,7 +16025,7 @@ fn a_rolled_back_statement_that_escapes_rollback_is_labeled_cannot_undo() {
     let state = Arc::new(ExecState::default());
     let dispatcher = workspace_dispatcher(&state);
     let sql = "INSERT INTO orders (id) VALUES (app_seq.NEXTVAL)";
-    let confirm = preview_confirm(&dispatcher, sql);
+    let confirm = preview_confirm_with_args(&dispatcher, json!({ "sql": sql, "commit": false }));
 
     let out = dispatcher
         .dispatch(

@@ -81,7 +81,11 @@ fn preview_confirm_with_context(
     sql: &str,
 ) -> String {
     dispatcher
-        .dispatch_with_context("oracle_preview_sql", json!({ "sql": sql }), context)
+        .dispatch_with_context(
+            "oracle_preview_sql",
+            json!({ "sql": sql, "commit": true }),
+            context,
+        )
         .expect("preview")
         .pointer("/execute_confirmation/confirm")
         .and_then(Value::as_str)

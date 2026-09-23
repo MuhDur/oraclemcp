@@ -1,5 +1,6 @@
 ---
 source: crates/oraclemcp/tests/golden_scrubber_framework.rs
+assertion_line: 155
 expression: rendered
 ---
 {
@@ -1016,13 +1017,68 @@ expression: rendered
       "name": "oracle_preview_sql",
       "title": "Oracle Preview SQL",
       "tier": "foundation_static",
-      "summary": "Classify a SQL statement and report whether it would pass the active profile/session gate without executing it.",
+      "summary": "Classify SQL without executing it and bind the exact SQL, typed binds, commit/hold mode, output caps and timeout into any confirmation. Changing one requires a new preview.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
-          "sql": {
-            "description": "SQL statement to classify. It is never executed.",
+          "binds": {
+            "description": "Positional bind values to bind into the confirmation without exposing them in the preview result.",
+            "items": {},
+            "type": "array"
+          },
+          "capture_dbms_output": {
+            "description": "Exact DBMS_OUTPUT capture mode intended for oracle_execute; default false.",
+            "type": "boolean"
+          },
+          "commit": {
+            "description": "The exact commit mode intended for oracle_execute. Default false; a later commit=true requires a new preview.",
+            "type": "boolean"
+          },
+          "dbms_output": {
+            "description": "Alias for capture_dbms_output.",
+            "type": "boolean"
+          },
+          "dbms_output_max_chars": {
+            "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000).",
+            "maximum": 1000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "dbms_output_max_lines": {
+            "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200).",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "hold": {
+            "description": "The exact reversible-workspace hold mode intended for oracle_execute. Default false.",
+            "type": "boolean"
+          },
+          "max_dbms_output_chars": {
+            "description": "Alias for dbms_output_max_chars.",
+            "maximum": 1000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_dbms_output_lines": {
+            "description": "Alias for dbms_output_max_lines.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "scoped_grant": {
+            "description": "Explicit scoped-grant reference intended for execution; its identity is bound into this preview.",
             "type": "string"
+          },
+          "sql": {
+            "description": "SQL statement to classify. It is never executed by this preview.",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
@@ -1042,7 +1098,7 @@ expression: rendered
       "name": "oracle_execute",
       "title": "Oracle Execute",
       "tier": "foundation_live_db",
-      "summary": "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default, while commits and non-transactional effects such as sequence NEXTVAL require the confirmation token from oracle_preview_sql. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
+      "summary": "Execute one non-read SQL statement through the classifier and active profile gate; DML rolls back by default. Commits, held DML and non-transactional effects such as sequence NEXTVAL require a confirmation from oracle_preview_sql for the exact SQL, typed binds, commit/hold mode, output caps and timeout; a change requires re-preview. Visible at READ_ONLY only when the effective profile/OAuth ceiling permits READ_WRITE; visibility grants no authority. An explicit scoped_grant selects the scoped-grant path with no session-level fallback. Query-shaped NEXTVAL is refused because this path does not fetch rows. Engine-free caller PL/SQL is limited to NULL and literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements; explicit CALL remains refused until its runtime target can be resolved exactly.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1060,7 +1116,7 @@ expression: rendered
             "type": "boolean"
           },
           "confirm": {
-            "description": "Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true and whenever the statement has a non-transactional effect such as sequence NEXTVAL, even with commit=false.",
+            "description": "Execution confirmation token from oracle_preview_sql.execute_confirmation.confirm. Required when commit=true, hold=true, or the statement has a non-transactional effect such as sequence NEXTVAL even with commit=false.",
             "type": "string"
           },
           "confirmation_token": {
@@ -1084,7 +1140,7 @@ expression: rendered
             "type": "integer"
           },
           "hold": {
-            "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused.",
+            "description": "Default false. Set true to leave this statement's effect pending inside the open reversible workspace instead of rolling it back, so oracle_undo_to can walk it back to a checkpoint. Requires a live oracle_checkpoint and a matching oracle_preview_sql confirmation, refuses DDL/Admin (Oracle commits those implicitly), and is mutually exclusive with commit. Held work is uncommitted and can only be undone: while the workspace is open every committing operation is refused.",
             "type": "boolean"
           },
           "max_dbms_output_chars": {
@@ -1135,7 +1191,7 @@ expression: rendered
       "name": "oracle_checkpoint",
       "title": "Oracle Checkpoint",
       "tier": "foundation_live_db",
-      "summary": "Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true then leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. Requires READ_WRITE. While the workspace is open the server refuses every operation that would end the transaction — commits, implicitly-committing DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads — so held work can only ever be undone, never committed by another statement.",
+      "summary": "Establish a named checkpoint (a native Oracle SAVEPOINT) on this session, opening the reversible workspace: oracle_execute with hold=true and a matching preview confirmation leaves DML pending instead of rolling it back, and oracle_undo_to walks it back. Requires READ_WRITE. While the workspace is open the server refuses every operation that would end the transaction — commits, implicitly-committing DDL/Admin, EXPLAIN PLAN cost estimation, and flashback reads — so held work can only ever be undone, never committed by another statement.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -1309,8 +1365,48 @@ expression: rendered
             "items": {},
             "type": "array"
           },
+          "capture_dbms_output": {
+            "description": "Output-capture intent recorded in the action envelope; the sandbox does not return DBMS_OUTPUT.",
+            "type": "boolean"
+          },
+          "commit": {
+            "description": "Execution intent recorded in the action envelope; this sandbox always rolls back.",
+            "type": "boolean"
+          },
+          "dbms_output": {
+            "description": "Alias for capture_dbms_output.",
+            "type": "boolean"
+          },
+          "dbms_output_max_chars": {
+            "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000).",
+            "maximum": 1000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "dbms_output_max_lines": {
+            "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200).",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "hold": {
+            "description": "Execution intent recorded in the action envelope; this sandbox never holds work.",
+            "type": "boolean"
+          },
           "limit": {
             "description": "Compatibility alias for max_rows.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_dbms_output_chars": {
+            "description": "Alias for dbms_output_max_chars.",
+            "maximum": 1000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_dbms_output_lines": {
+            "description": "Alias for dbms_output_max_lines.",
             "maximum": 5000,
             "minimum": 1,
             "type": "integer"
@@ -1320,6 +1416,10 @@ expression: rendered
             "maximum": 5000,
             "minimum": 1,
             "type": "integer"
+          },
+          "scoped_grant": {
+            "description": "Explicit grant reference bound into the action envelope; the sandbox never uses it for authority.",
+            "type": "string"
           },
           "sql": {
             "description": "A single reversible DML statement (INSERT/UPDATE/DELETE/MERGE). Use :1, :2 … for binds. DDL cannot be dry-run: Oracle commits it implicitly.",
@@ -3058,9 +3158,64 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
-          "sql": {
-            "description": "SQL statement to classify. It is never executed.",
+          "binds": {
+            "description": "Positional bind values to bind into the confirmation without exposing them in the preview result.",
+            "items": {},
+            "type": "array"
+          },
+          "capture_dbms_output": {
+            "description": "Exact DBMS_OUTPUT capture mode intended for oracle_execute; default false.",
+            "type": "boolean"
+          },
+          "commit": {
+            "description": "The exact commit mode intended for oracle_execute. Default false; a later commit=true requires a new preview.",
+            "type": "boolean"
+          },
+          "dbms_output": {
+            "description": "Alias for capture_dbms_output.",
+            "type": "boolean"
+          },
+          "dbms_output_max_chars": {
+            "description": "Maximum DBMS_OUTPUT characters to return when capture_dbms_output=true (default 200000).",
+            "maximum": 1000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "dbms_output_max_lines": {
+            "description": "Maximum DBMS_OUTPUT lines to return when capture_dbms_output=true (default 200).",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "hold": {
+            "description": "The exact reversible-workspace hold mode intended for oracle_execute. Default false.",
+            "type": "boolean"
+          },
+          "max_dbms_output_chars": {
+            "description": "Alias for dbms_output_max_chars.",
+            "maximum": 1000000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "max_dbms_output_lines": {
+            "description": "Alias for dbms_output_max_lines.",
+            "maximum": 5000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "scoped_grant": {
+            "description": "Explicit scoped-grant reference intended for execution; its identity is bound into this preview.",
             "type": "string"
+          },
+          "sql": {
+            "description": "SQL statement to classify. It is never executed by this preview.",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
+            "maximum": 3600,
+            "minimum": 1,
+            "type": "integer"
           }
         },
         "required": [
@@ -3084,6 +3239,11 @@ expression: rendered
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "binds": {
+            "description": "Exact positional bind values supplied to preview_sql.",
+            "items": {},
+            "type": "array"
+          },
           "capture_dbms_output": {
             "description": "Default false. When true, returns bounded DBMS_OUTPUT lines. Caller PL/SQL must use literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements.",
             "type": "boolean"

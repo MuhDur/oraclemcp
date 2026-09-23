@@ -204,6 +204,22 @@ pub(super) struct DiffArgs {
 #[serde(deny_unknown_fields)]
 pub(super) struct PreviewSqlArgs {
     pub(super) sql: String,
+    #[serde(default)]
+    pub(super) binds: Vec<Value>,
+    #[serde(default)]
+    pub(super) commit: bool,
+    #[serde(default)]
+    pub(super) hold: bool,
+    #[serde(default, deserialize_with = "explicit_grant_string")]
+    pub(super) scoped_grant: Option<String>,
+    #[serde(default, alias = "dbms_output")]
+    pub(super) capture_dbms_output: bool,
+    #[serde(default, alias = "max_dbms_output_lines")]
+    pub(super) dbms_output_max_lines: Option<usize>,
+    #[serde(default, alias = "max_dbms_output_chars")]
+    pub(super) dbms_output_max_chars: Option<usize>,
+    #[serde(default)]
+    pub(super) timeout_seconds: Option<u64>,
 }
 
 /// Arc I: `oracle_checkpoint` — establish a named savepoint on the pinned
@@ -232,6 +248,18 @@ pub(super) struct PreviewDmlArgs {
     pub(super) sql: String,
     #[serde(default)]
     pub(super) binds: Vec<Value>,
+    #[serde(default)]
+    pub(super) commit: bool,
+    #[serde(default)]
+    pub(super) hold: bool,
+    #[serde(default, deserialize_with = "explicit_grant_string")]
+    pub(super) scoped_grant: Option<String>,
+    #[serde(default, alias = "dbms_output")]
+    pub(super) capture_dbms_output: bool,
+    #[serde(default, alias = "max_dbms_output_lines")]
+    pub(super) dbms_output_max_lines: Option<usize>,
+    #[serde(default, alias = "max_dbms_output_chars")]
+    pub(super) dbms_output_max_chars: Option<usize>,
     /// An optional read the server runs *inside the sandbox*, once before the DML
     /// and once after, to show the rows it changed. It is proven read-only by the
     /// unchanged classifier, like any other read.
@@ -292,6 +320,8 @@ pub(super) struct ExecuteApprovedArgs {
     pub(super) scoped_grant: Option<String>,
     #[serde(default)]
     pub(super) sql: Option<String>,
+    #[serde(default)]
+    pub(super) binds: Vec<Value>,
     #[serde(default)]
     pub(super) commit: Option<bool>,
     #[serde(default)]
