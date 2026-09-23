@@ -141,6 +141,7 @@ fn live_relation_column_and_hidden_effect_proof_use_exact_dictionary_identity() 
         let scope = StatementScope {
             aliases: vec![RawNamePart::unquoted("d")],
             common_table_expressions: Vec::new(),
+            merged_joins: Vec::new(),
             relations: vec![StatementRelation {
                 name: relation.clone(),
                 alias: Some(RawNamePart::unquoted("d")),
@@ -752,6 +753,7 @@ fn live_statement_scope_shadows_dictionary_objects() {
         let scope = StatementScope {
             aliases: vec![RawNamePart::unquoted("dual")],
             common_table_expressions: Vec::new(),
+            merged_joins: Vec::new(),
             relations: Vec::new(),
         };
         let context = read_catalog_resolve_context(&cx, &conn, CatalogGeneration(19), scope)
