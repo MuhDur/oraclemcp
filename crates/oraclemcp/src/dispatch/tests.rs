@@ -193,7 +193,9 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
     // ROWNUM) must fall through to `catalog_extract_empty_rowset` so they yield an
     // empty rowset with the extraction's own column shape, not this probe shape.
     if normalized.contains("from all_policies") && normalized.contains("rownum") {
-        if normalized.contains("object_owner = :1") {
+        if normalized.contains("object_owner = :1")
+            || normalized.contains("(object_owner, object_name) in")
+        {
             return Some(Vec::new());
         }
         return Some(vec![semantic_row(&[(
@@ -212,8 +214,12 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
 
 fn semantic_policy_rows_for(sql: &str, binds: &[OracleBind]) -> Vec<OracleRow> {
     let normalized = sql.to_ascii_lowercase();
-    if normalized.contains("object_owner = :1") {
-        return (string_bind(binds, 1) == Some("POLICY_TABLE"))
+    if normalized.contains("object_owner = :1")
+        || normalized.contains("(object_owner, object_name) in")
+    {
+        return binds
+            .chunks_exact(2)
+            .any(|pair| string_bind(pair, 1) == Some("POLICY_TABLE"))
             .then(|| semantic_row(&[("POLICY_NAME", Some("P"))]))
             .into_iter()
             .collect();
@@ -494,8 +500,8 @@ fn executor_orders_parse_resolve_prove_mask_audit_execute() {
         C::Objects,
         C::Objects,
         C::RelationColumn,
-        C::SelectPolicy,
-        C::VirtualColumn,
+        C::PolicyRowsForRelations32,
+        C::VirtualColumnsForRelations32,
         C::PolicyCatalogProof,
         C::TargetColumnCatalogProof,
     ];
@@ -835,6 +841,105 @@ fn served_read_gate_refuses_view_policy_and_zero_arg_function_before_evaluation(
         );
         assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0, "{sql}");
     }
+}
+
+fn assert_issue52_refused(case_id: &str, sql: &str, expected_reason: &str) {
+    let (dispatcher, state) = semantic_dispatcher();
+    let error = dispatcher
+        .dispatch("oracle_query", json!({"sql": sql}))
+        .expect_err("nested hidden dependency must refuse before caller SQL");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement, "{sql}");
+    assert!(error.message.contains(expected_reason), "{error:?}");
+    let caller_queries = state.caller_queries.load(Ordering::SeqCst);
+    assert_eq!(caller_queries, 0, "{sql}");
+    write_executor_test_artifact(
+        case_id,
+        &[json!({
+            "case_id": case_id,
+            "expected": {"error_class": "ForbiddenStatement", "caller_queries": 0, "reason_contains": true},
+            "actual": {"error_class": format!("{:?}", error.error_class), "caller_queries": caller_queries, "reason_contains": error.message.contains(expected_reason)},
+        })],
+    );
+}
+
+#[test]
+fn issue52_exists_view_refused_before_execution() {
+    assert_issue52_refused(
+        "issue52_exists_view_refused_before_execution",
+        "SELECT o.id FROM app.orders o WHERE EXISTS (SELECT 1 FROM app.side_view)",
+        "a relation can invoke",
+    );
+}
+
+#[test]
+fn issue52_in_policy_table_refused_before_execution() {
+    assert_issue52_refused(
+        "issue52_in_policy_table_refused_before_execution",
+        "SELECT o.id FROM app.orders o WHERE o.id IN (SELECT id FROM app.policy_table)",
+        "a relation can invoke",
+    );
+}
+
+#[test]
+fn issue52_in_view_refused_before_execution() {
+    assert_issue52_refused(
+        "issue52_in_view_refused_before_execution",
+        "SELECT o.id FROM app.orders o WHERE o.id IN (SELECT id FROM app.side_view)",
+        "a relation can invoke",
+    );
+}
+
+#[test]
+fn issue52_qualified_inner_reference_refused_by_proof_not_by_resolution_accident() {
+    assert_issue52_refused(
+        "issue52_qualified_inner_reference_refused_by_proof_not_by_resolution_accident",
+        "SELECT o.id FROM app.orders o WHERE EXISTS (SELECT 1 FROM app.side_view v WHERE v.id = o.id)",
+        "a relation can invoke",
+    );
+}
+
+#[test]
+fn issue34_cte_union_all_derived_admitted_when_every_block_proven() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let sql = "WITH q AS (SELECT id FROM app.orders UNION ALL SELECT id FROM app.orders) SELECT d.id FROM (SELECT id FROM q) d";
+    let response = dispatcher
+        .dispatch("oracle_query", json!({"sql": sql}))
+        .expect("every block over a proven ordinary table is admitted");
+    assert_eq!(response["rows"][0]["ID"], json!("1"));
+    let caller_queries = state.caller_queries.load(Ordering::SeqCst);
+    assert_eq!(caller_queries, 1);
+    write_executor_test_artifact(
+        "issue34_cte_union_all_derived_admitted_when_every_block_proven",
+        &[
+            json!({"case_id": "issue34_cte_union_all_derived_admitted_when_every_block_proven", "expected": {"caller_queries": 1, "first_id": "1"}, "actual": {"caller_queries": caller_queries, "first_id": response["rows"][0]["ID"]}}),
+        ],
+    );
+}
+
+#[test]
+fn cte_shadow_of_vpd_relation_stays_local_to_its_lexical_scope() {
+    let (dispatcher, state) = semantic_dispatcher();
+    dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "WITH policy_table AS (SELECT id FROM app.orders) SELECT id FROM policy_table"}),
+        )
+        .expect("CTE shadow over a proven table must be admitted");
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+    let refusal = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "WITH policy_table AS (SELECT id FROM app.orders) SELECT id FROM app.policy_table"}),
+        )
+        .expect_err("qualified real VPD table outside CTE scope must refuse");
+    assert_eq!(refusal.error_class, ErrorClass::ForbiddenStatement);
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+    write_executor_test_artifact(
+        "cte_shadow_of_vpd_relation_stays_local_to_its_lexical_scope",
+        &[
+            json!({"case_id": "cte_shadow_of_vpd_relation_stays_local_to_its_lexical_scope", "expected": {"admitted_queries": 1, "real_vpd_refused": true}, "actual": {"admitted_queries": state.caller_queries.load(Ordering::SeqCst), "real_vpd_refused": refusal.error_class == ErrorClass::ForbiddenStatement}}),
+        ],
+    );
 }
 
 #[test]

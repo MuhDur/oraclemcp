@@ -92,6 +92,45 @@ pub struct StatementRelation {
     pub alias: Option<RawNamePart>,
 }
 
+/// Stable index into one statement's bounded lexical query-block plan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct QueryBlockId(pub usize);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueryBlockKind {
+    Root,
+    ExistsSubquery,
+    InSubquery,
+    ScalarSubquery,
+    CteDefinition(RawNamePart),
+    SetOperationBranch,
+    DerivedTable,
+    Lateral,
+    TableFunction,
+}
+
+/// One lexical scope. Only `relations` are sent to the catalog as base
+/// objects; CTE references are resolved to their definition inside the plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryBlock {
+    pub id: QueryBlockId,
+    pub parent: Option<QueryBlockId>,
+    pub kind: QueryBlockKind,
+    pub relations: Vec<RawName>,
+    pub cte_refs: Vec<RawNamePart>,
+    /// A CTE source name and the qualifier introduced by its local alias.
+    pub cte_source_aliases: Vec<(RawNamePart, RawNamePart)>,
+    pub correlated_outer_refs: Vec<RawName>,
+    pub values: Vec<RawName>,
+    pub statement_scope: StatementScope,
+    /// Columns the block explicitly projects for enclosing CTE/derived reads.
+    pub projected_columns: Vec<RawNamePart>,
+    /// CTE definitions visible from this lexical query scope.
+    pub cte_definitions: Vec<(RawNamePart, QueryBlockId)>,
+    /// Derived-table alias and the query block that produces its columns.
+    pub derived_sources: Vec<(RawNamePart, QueryBlockId)>,
+}
+
 /// Fully parsed resolution work for one conservatively supported read query.
 ///
 /// Complex query shapes that cannot be represented without per-block scope do
@@ -107,6 +146,8 @@ pub struct SemanticReadPlan {
     pub values: Vec<RawName>,
     /// Exact statement-local relation/alias scope used for value resolution.
     pub statement_scope: StatementScope,
+    /// Every lexical query scope, including CTE definitions and subqueries.
+    pub blocks: Vec<QueryBlock>,
 }
 
 /// Monotonic catalog-cache generation owned by the database-facing consumer.

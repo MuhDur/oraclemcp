@@ -63,6 +63,13 @@ use crate::resolver::{
     SyntacticRole,
 };
 
+#[path = "classifier_query_blocks.rs"]
+mod query_blocks;
+pub use query_blocks::{
+    MAX_BLOCK_DEPTH, MAX_PLANNED_RELATIONS, MAX_QUERY_BLOCKS, PlanMismatch,
+    planned_relations_match_base_objects,
+};
+
 /// One redacted, immutable rule application recorded in a verdict certificate.
 ///
 /// `construct` is selected solely from the certificate registry's fixed
@@ -2862,53 +2869,31 @@ fn simple_statement_relation(factor: &TableFactor) -> Option<StatementRelation> 
 /// resolver can represent them without alias leakage.
 #[must_use]
 pub fn semantic_read_plan(sql: &str) -> Option<SemanticReadPlan> {
-    let parser_sql = normalize_vector_embedding_for_parser(sql);
-    let statements = Parser::parse_sql(&OracleDialect {}, &parser_sql).ok()?;
-    let [sqlparser::ast::Statement::Query(query)] = statements.as_slice() else {
-        return None;
-    };
-    if query.with.is_some() {
-        return None;
-    }
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return None;
-    };
+    semantic_read_plan_checked(sql).ok()
+}
 
-    let mut relations = Vec::new();
-    for table in &select.from {
-        relations.push(simple_statement_relation(&table.relation)?);
-        for join in &table.joins {
-            relations.push(simple_statement_relation(&join.relation)?);
-        }
-    }
-    let mut visitor = SemanticValueVisitor {
+/// Build and independently cross-check every lexical query block.
+pub fn semantic_read_plan_checked(sql: &str) -> Result<SemanticReadPlan, PlanMismatch> {
+    let parser_sql = normalize_vector_embedding_for_parser(sql);
+    let statements = Parser::parse_sql(&OracleDialect {}, &parser_sql)
+        .map_err(|_| PlanMismatch::UnsupportedShape)?;
+    let [sqlparser::ast::Statement::Query(query)] = statements.as_slice() else {
+        return Err(PlanMismatch::UnsupportedShape);
+    };
+    let plan = query_blocks::build(query)?;
+    planned_relations_match_base_objects(&plan, &query_base_objects(query))?;
+    let mut value_check = SemanticValueVisitor {
         values: Vec::new(),
         vector_metric_expressions: Vec::new(),
         vector_embedding_model_expressions: Vec::new(),
     };
-    let _ = query.visit(&mut visitor);
-    let mut seen_values = HashSet::new();
-    visitor
-        .values
-        .retain(|value| seen_values.insert(value.clone()));
-
-    let relation_names = relations
-        .iter()
-        .map(|relation| relation.name.clone())
-        .collect();
-    let aliases = relations
-        .iter()
-        .filter_map(|relation| relation.alias.clone())
-        .collect();
-    Some(SemanticReadPlan {
-        relations: relation_names,
-        values: visitor.values,
-        statement_scope: StatementScope {
-            aliases,
-            common_table_expressions: Vec::new(),
-            relations,
-        },
-    })
+    let _ = query.visit(&mut value_check);
+    let planned_values: HashSet<_> = plan.values.iter().cloned().collect();
+    let checked_values: HashSet<_> = value_check.values.into_iter().collect();
+    if planned_values != checked_values {
+        return Err(PlanMismatch::UnsupportedShape);
+    }
+    Ok(plan)
 }
 
 /// Convert a parsed `ObjectName` (the `schema.table` of a `FROM`/`JOIN` factor)
@@ -2967,7 +2952,9 @@ impl Visitor for QueryBaseObjectCollector {
     }
 
     fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<Self::Break> {
-        if let TableFactor::Table { name, .. } = factor
+        if let TableFactor::Table {
+            name, args: None, ..
+        } = factor
             && let Some(object) = object_name_to_ref(name)
         {
             let is_cte_reference = object.schema.is_none()
@@ -4242,6 +4229,26 @@ mod tests {
     use crate::levels::BlockReason;
     use crate::purity::{RoutineEffect, RoutineEffectsV1};
 
+    // The batch verifier consumes these case records for the #52/#34 proof;
+    // target artifacts can be discarded after that verification run.
+    fn write_query_block_case(
+        case_id: &str,
+        expected: serde_json::Value,
+        actual: serde_json::Value,
+    ) {
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            });
+        let dir = target.join("test-artifacts/query_blocks");
+        std::fs::create_dir_all(&dir).expect("create query-block artifact directory");
+        let record =
+            serde_json::json!({"case_id": case_id, "expected": expected, "actual": actual});
+        std::fs::write(dir.join(format!("{case_id}.jsonl")), format!("{record}\n"))
+            .expect("write query-block case");
+    }
+
     struct ExactRoutineOracle(RoutineEffect);
 
     impl SideEffectOracle for ExactRoutineOracle {
@@ -4520,17 +4527,212 @@ mod tests {
     }
 
     #[test]
-    fn semantic_read_plan_refuses_unrepresented_query_scopes() {
+    fn semantic_read_plan_represents_nested_query_scopes() {
+        let mut block_counts = Vec::new();
         for sql in [
             "WITH q AS (SELECT id FROM t) SELECT id FROM q",
             "SELECT x.id FROM (SELECT id FROM t) x",
             "SELECT id FROM a UNION ALL SELECT id FROM b",
         ] {
-            assert!(
-                semantic_read_plan(sql).is_none(),
-                "scope-bearing query must fail closed until represented: {sql}"
-            );
+            let plan = semantic_read_plan(sql).expect("bounded scope-bearing query plan");
+            block_counts.push(plan.blocks.len());
         }
+        write_query_block_case(
+            "semantic_read_plan_represents_nested_query_scopes",
+            serde_json::json!({"min_blocks_per_query": 2}),
+            serde_json::json!({"block_counts": block_counts}),
+        );
+    }
+
+    #[test]
+    fn semantic_read_plan_collects_expression_subquery_relations() {
+        let mut observed = Vec::new();
+        for (sql, inner) in [
+            (
+                "SELECT o.id FROM app.orders o WHERE EXISTS (SELECT 1 FROM app.side_view)",
+                "side_view",
+            ),
+            (
+                "SELECT o.id FROM app.orders o WHERE o.id IN (SELECT id FROM app.policy_table)",
+                "policy_table",
+            ),
+            (
+                "SELECT (SELECT id FROM app.side_view) FROM app.orders o",
+                "side_view",
+            ),
+        ] {
+            let plan = semantic_read_plan(sql).expect("nested query plan");
+            assert!(
+                plan.relations
+                    .iter()
+                    .any(|name| name.parts.last().is_some_and(|p| p.text == inner)),
+                "missing inner relation: {sql}"
+            );
+            assert!(plan.blocks.iter().any(|block| {
+                block.parent.is_some()
+                    && block
+                        .relations
+                        .iter()
+                        .any(|name| name.parts.last().is_some_and(|p| p.text == inner))
+            }));
+            observed.push(inner);
+        }
+        write_query_block_case(
+            "semantic_read_plan_collects_expression_subquery_relations",
+            serde_json::json!({"inner_relations": ["side_view", "policy_table", "side_view"]}),
+            serde_json::json!({"inner_relations": observed}),
+        );
+    }
+
+    #[test]
+    fn semantic_read_plan_collects_cte_set_operation_derived_and_lateral_relations() {
+        let mut block_counts = Vec::new();
+        for sql in [
+            "WITH q AS (SELECT id FROM app.orders) SELECT * FROM q",
+            "SELECT id FROM app.orders UNION ALL SELECT id FROM app.customers",
+            "SELECT * FROM (SELECT id FROM app.orders) x",
+            "SELECT * FROM app.orders o CROSS APPLY (SELECT id FROM app.customers) c",
+        ] {
+            let plan = semantic_read_plan(sql).expect("covered block shape");
+            assert!(!plan.relations.is_empty());
+            assert!(plan.blocks.len() >= 2, "{sql}");
+            block_counts.push(plan.blocks.len());
+        }
+        write_query_block_case(
+            "semantic_read_plan_collects_cte_set_operation_derived_and_lateral_relations",
+            serde_json::json!({"minimum_blocks": [2, 2, 2, 2]}),
+            serde_json::json!({"block_counts": block_counts}),
+        );
+    }
+
+    #[test]
+    fn semantic_read_plan_resolves_cte_name_before_catalog_and_refuses_recursive_cte() {
+        let plan = semantic_read_plan(
+            "WITH policy_table AS (SELECT id FROM app.orders) SELECT * FROM policy_table",
+        )
+        .unwrap();
+        assert_eq!(plan.relations.len(), 1);
+        assert_eq!(plan.relations[0].parts.last().unwrap().text, "orders");
+        assert!(
+            plan.blocks[0]
+                .cte_refs
+                .iter()
+                .any(|part| part.text == "policy_table")
+        );
+        let aliased =
+            semantic_read_plan("WITH q AS (SELECT id FROM app.orders) SELECT x.id FROM q x")
+                .unwrap();
+        assert!(
+            aliased.blocks[0]
+                .cte_source_aliases
+                .iter()
+                .any(|(source, alias)| { source.text == "q" && alias.text == "x" })
+        );
+        assert!(semantic_read_plan("WITH q AS (SELECT id FROM q) SELECT * FROM q").is_none());
+        assert!(
+            semantic_read_plan(
+                "WITH a AS (SELECT * FROM b), b AS (SELECT * FROM a) SELECT * FROM a"
+            )
+            .is_none(),
+            "forward CTE dependencies can form an unproven cycle"
+        );
+        assert!(
+            semantic_read_plan("WITH RECURSIVE q AS (SELECT id FROM app.orders) SELECT * FROM q")
+                .is_none()
+        );
+        write_query_block_case(
+            "semantic_read_plan_resolves_cte_name_before_catalog_and_refuses_recursive_cte",
+            serde_json::json!({"catalog_relations": ["orders"], "recursive_refused": true}),
+            serde_json::json!({"catalog_relations": plan.relations.iter().map(|relation| relation.parts.last().unwrap().text.as_str()).collect::<Vec<_>>(), "recursive_refused": semantic_read_plan("WITH q AS (SELECT id FROM q) SELECT * FROM q").is_none()}),
+        );
+    }
+
+    #[test]
+    fn semantic_read_plan_scopes_correlated_references_to_the_outer_block() {
+        let plan = semantic_read_plan("SELECT o.id FROM app.orders o WHERE EXISTS (SELECT 1 FROM app.customers c WHERE c.id = o.id)").unwrap();
+        let inner = plan
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, crate::resolver::QueryBlockKind::ExistsSubquery))
+            .unwrap();
+        assert!(
+            inner
+                .correlated_outer_refs
+                .iter()
+                .any(|name| name.parts.len() == 2
+                    && name.parts[0].text == "o"
+                    && name.parts[1].text == "id")
+        );
+        assert!(
+            !inner
+                .correlated_outer_refs
+                .iter()
+                .any(|name| name.parts.first().is_some_and(|part| part.text == "c"))
+        );
+        write_query_block_case(
+            "semantic_read_plan_scopes_correlated_references_to_the_outer_block",
+            serde_json::json!({"outer_qualifier": "o", "inner_qualifier_absent": "c"}),
+            serde_json::json!({"correlated_qualifiers": inner.correlated_outer_refs.iter().filter_map(|name| name.parts.first().map(|part| part.text.as_str())).collect::<Vec<_>>()}),
+        );
+    }
+
+    #[test]
+    fn semantic_read_plan_refuses_cap_exhaustion() {
+        let mut sql = String::from("SELECT * FROM app.t0");
+        for index in 1..=MAX_PLANNED_RELATIONS {
+            sql.push_str(&format!(" JOIN app.t{index} ON 1=1"));
+        }
+        assert_eq!(
+            semantic_read_plan_checked(&sql),
+            Err(PlanMismatch::RelationPlanCapExceeded)
+        );
+        let many_branches = std::iter::repeat_n("SELECT 1", MAX_QUERY_BLOCKS + 1)
+            .collect::<Vec<_>>()
+            .join(" UNION ALL ");
+        assert_eq!(
+            semantic_read_plan_checked(&many_branches),
+            Err(PlanMismatch::RelationPlanCapExceeded)
+        );
+        write_query_block_case(
+            "semantic_read_plan_refuses_cap_exhaustion",
+            serde_json::json!({"relation_reason": "relation_plan_cap_exceeded", "block_reason": "relation_plan_cap_exceeded"}),
+            serde_json::json!({"relation_reason": semantic_read_plan_checked(&sql).unwrap_err().as_str(), "block_reason": semantic_read_plan_checked(&many_branches).unwrap_err().as_str()}),
+        );
+    }
+
+    #[test]
+    fn semantic_read_plan_refuses_unsupported_hierarchical_scope() {
+        assert!(
+            semantic_read_plan(
+                "SELECT id FROM (SELECT id FROM app.orders) x CONNECT BY PRIOR id = id"
+            )
+            .is_none()
+        );
+        write_query_block_case(
+            "semantic_read_plan_refuses_unsupported_hierarchical_scope",
+            serde_json::json!({"represented": false}),
+            serde_json::json!({"represented": semantic_read_plan("SELECT id FROM (SELECT id FROM app.orders) x CONNECT BY PRIOR id = id").is_some()}),
+        );
+    }
+
+    #[test]
+    fn planned_relations_cross_check_refuses_mismatch() {
+        let sql = "SELECT o.id FROM app.orders o WHERE EXISTS (SELECT 1 FROM app.side_view)";
+        let mut plan = semantic_read_plan(sql).unwrap();
+        plan.relations.pop();
+        let parsed = Parser::parse_sql(&OracleDialect {}, sql).unwrap();
+        let sqlparser::ast::Statement::Query(query) = &parsed[0] else {
+            panic!("query");
+        };
+        assert_eq!(
+            planned_relations_match_base_objects(&plan, &query_base_objects(query)),
+            Err(PlanMismatch::RelationPlanMismatch)
+        );
+        write_query_block_case(
+            "planned_relations_cross_check_refuses_mismatch",
+            serde_json::json!({"reason": "relation_plan_mismatch"}),
+            serde_json::json!({"reason": planned_relations_match_base_objects(&plan, &query_base_objects(query)).unwrap_err().as_str()}),
+        );
     }
 
     #[test]

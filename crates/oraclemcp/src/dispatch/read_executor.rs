@@ -5,9 +5,52 @@
 //! giving a served tool a raw query capability.
 
 use super::*;
+use oraclemcp_db::{ReadPlanProofError, prove_semantic_read_plan};
+use oraclemcp_guard::semantic_read_plan_checked;
 
 mod read_only_backstop;
 pub(super) use read_only_backstop::ReadOnlyBackstop;
+
+/// Resolve each lexical read block under its own live catalog scope. The
+/// classifier receives the exact per-object proof, so an inner view or VPD
+/// table cannot borrow a clean outer table's verdict.
+pub(super) async fn resolve_query_block_read(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+    verified_local_vector_embedding: bool,
+) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
+    let initial = if verified_local_vector_embedding {
+        READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
+    } else {
+        READ_PRECHECK_CLASSIFIER.classify(sql)
+    };
+    ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
+    let plan = semantic_read_plan_checked(sql)
+        .map_err(|error| unresolved_semantic_read(error.as_str()))?;
+    let proof = prove_semantic_read_plan(cx, conn, cache, &plan)
+        .await
+        .map_err(|error| match error {
+            ReadPlanProofError::Database(error) => error.into_envelope(),
+            ReadPlanProofError::MissingRelation(name) => missing_semantic_relation(&name),
+            ReadPlanProofError::MissingColumn(name) => missing_semantic_column(&name),
+            ReadPlanProofError::Unproven(reason) => unresolved_semantic_read(reason),
+        })?;
+    let relations = proof.relations.clone();
+    let classifier =
+        Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
+            .with_oracle(Arc::new(proof))
+            .with_statement_unknown_guarded();
+    let decision = if verified_local_vector_embedding {
+        classifier.classify_verified_local_vector_embedding(sql)
+    } else {
+        classifier.classify(sql)
+    };
+    ensure_read_only_decision(decision.clone())
+        .map_err(|error| attach_parameterization_hint(error, sql))?;
+    Ok((relations, decision))
+}
 
 /// `oracle_query` request, parsed and classified ONCE up front (A3/perf).
 ///

@@ -77,6 +77,10 @@ pub enum CatalogQueryId {
     StandaloneProcedures,
     /// Packaged member identities, including zero-argument routines.
     MemberProcedures,
+    /// Enabled SELECT policies for up to 32 exact relations.
+    PolicyRowsForRelations32,
+    /// Virtual columns for up to 32 exact relations.
+    VirtualColumnsForRelations32,
     /// Ambiguous unqualified column candidates.
     ColumnConflict,
     /// One relation's column identity.
@@ -95,7 +99,7 @@ pub enum CatalogQueryId {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 17] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -104,6 +108,8 @@ impl CatalogQueryId {
         Self::MemberArguments,
         Self::StandaloneProcedures,
         Self::MemberProcedures,
+        Self::PolicyRowsForRelations32,
+        Self::VirtualColumnsForRelations32,
         Self::ColumnConflict,
         Self::RelationColumn,
         Self::SelectPolicy,
@@ -126,6 +132,7 @@ impl CatalogQueryId {
         const TTI: BindSchema = BindSchema(&[Text, Text, Integer]);
         const TTTI: BindSchema = BindSchema(&[Text, Text, Text, Integer]);
         const TTT: BindSchema = BindSchema(&[Text, Text, Text]);
+        const T32: BindSchema = BindSchema(&[Text; 64]);
         let (sql, binds, purpose, output_policy, audit_class) = match self {
             Self::SessionContext => (
                 SESSION_CONTEXT_SQL,
@@ -182,6 +189,20 @@ impl CatalogQueryId {
                 "resolve packaged subprogram identities",
                 InternalProof,
                 NameResolution,
+            ),
+            Self::PolicyRowsForRelations32 => (
+                POLICY_ROWS_FOR_RELATIONS_32_SQL,
+                T32,
+                "prove no enabled SELECT policy across bounded relations",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::VirtualColumnsForRelations32 => (
+                VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
+                T32,
+                "prove no virtual column across bounded relations",
+                InternalProof,
+                ReadPurity,
             ),
             Self::ColumnConflict => (
                 COLUMN_CONFLICT_SQL,
@@ -313,3 +334,9 @@ pub(crate) const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_col
     AND virtual_column = 'YES' AND ROWNUM <= 1";
 pub(crate) const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM all_tab_cols \
     WHERE owner = :1 AND table_name = :2 AND ROWNUM <= 1";
+pub(crate) const POLICY_ROWS_FOR_RELATIONS_32_SQL: &str = "SELECT object_owner, object_name FROM all_policies \
+    WHERE enable = 'YES' AND sel = 'YES' \
+    AND (object_owner, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";
+pub(crate) const VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL: &str = "SELECT owner, table_name, column_name FROM all_tab_cols \
+    WHERE virtual_column = 'YES' \
+    AND (owner, table_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";

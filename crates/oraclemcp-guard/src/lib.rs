@@ -39,10 +39,10 @@ pub use enforcement::{
 };
 
 pub use classifier::{
-    BatchShape, Classifier, ClassifierConfig, GuardDecision, StageA,
+    BatchShape, Classifier, ClassifierConfig, GuardDecision, PlanMismatch, StageA,
     VERDICT_CERTIFICATE_CLASSIFIER_VERSION, VERDICT_CERTIFICATE_REGISTRY_GENERATION,
     VerdictCertificate, VerdictCertificateBindingError, VerdictDerivationStep, analyze_batch,
-    named_bind_placeholders, semantic_read_plan, stage_a,
+    named_bind_placeholders, semantic_read_plan, semantic_read_plan_checked, stage_a,
 };
 pub use clock::MonotonicDeadline;
 pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
@@ -70,10 +70,10 @@ pub use purity::{
     RoutineEffectsV1, RoutineIdentifier, RoutineRef, SideEffectOracle, UnknownOracle, admit,
 };
 pub use resolver::{
-    CatalogGeneration, CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart,
-    Resolution, ResolveCtx, ResolvedContainer, ResolvedIdentity, ResolvedObject, ResolvedOverload,
-    SemanticReadPlan, StatementRelation, StatementScope, SynonymHop, SyntacticRole,
-    UnresolvedCatalogResolver,
+    CatalogGeneration, CatalogObjectKind, CatalogResolver, QueryBlock, QueryBlockId,
+    QueryBlockKind, QuoteSemantics, RawName, RawNamePart, Resolution, ResolveCtx,
+    ResolvedContainer, ResolvedIdentity, ResolvedObject, ResolvedOverload, SemanticReadPlan,
+    StatementRelation, StatementScope, SynonymHop, SyntacticRole, UnresolvedCatalogResolver,
 };
 pub use rewrite::suggest_parameterized_form;
 pub use scoped_grant::{

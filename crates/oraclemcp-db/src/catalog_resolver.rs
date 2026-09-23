@@ -11,18 +11,19 @@ use std::sync::RwLock;
 
 use asupersync::Cx;
 use oraclemcp_guard::{
-    CatalogObjectKind, CatalogResolver, QuoteSemantics, RawName, RawNamePart, Resolution,
-    ResolveCtx, ResolvedContainer, ResolvedIdentity, ResolvedObject, ResolvedOverload,
-    RoutineArgument, RoutineArgumentValue, RoutineIdentifier, RoutineRef, StatementScope,
-    SynonymHop, SyntacticRole,
+    CatalogObjectKind, CatalogResolver, ObjectRef, Purity, QueryBlock, QueryBlockKind,
+    QuoteSemantics, RawName, RawNamePart, Resolution, ResolveCtx, ResolvedContainer,
+    ResolvedIdentity, ResolvedObject, ResolvedOverload, RoutineArgument, RoutineArgumentValue,
+    RoutineIdentifier, RoutineRef, SemanticReadPlan, SideEffectOracle, StatementScope, SynonymHop,
+    SyntacticRole,
 };
 
 #[cfg(test)]
 use crate::catalog_query::{
     ALL_POLICIES_VISIBILITY_SQL, COLUMN_CONFLICT_SQL, MEMBER_ARGUMENTS_SQL, MEMBER_PROCEDURES_SQL,
-    OBJECTS_SQL, POLICY_CATALOG_PROOF_SQL, RELATION_COLUMN_SQL, SELECT_POLICY_SQL,
-    STANDALONE_ARGUMENTS_SQL, STANDALONE_PROCEDURES_SQL, SYNONYMS_SQL,
-    TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL,
+    OBJECTS_SQL, POLICY_CATALOG_PROOF_SQL, POLICY_ROWS_FOR_RELATIONS_32_SQL, RELATION_COLUMN_SQL,
+    SELECT_POLICY_SQL, STANDALONE_ARGUMENTS_SQL, STANDALONE_PROCEDURES_SQL, SYNONYMS_SQL,
+    TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL, VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
 };
 use crate::catalog_query::{CatalogQueryId, run_catalog_query};
 use crate::{DbError, OracleBind, OracleConnection, OracleRow};
@@ -425,6 +426,9 @@ pub async fn resolved_relations_read_purity(
     if relations.is_empty() {
         return Ok(oraclemcp_guard::Purity::ProvenReadOnly);
     }
+    if relations.len() > 256 {
+        return Ok(oraclemcp_guard::Purity::Unknown);
+    }
     for relation in relations {
         if relation.db_link.is_some()
             || !matches!(relation.kind, CatalogObjectKind::Table)
@@ -432,47 +436,347 @@ pub async fn resolved_relations_read_purity(
         {
             return Ok(oraclemcp_guard::Purity::Unknown);
         }
-        let policies = run_catalog_query(
-            cx,
-            conn,
-            CatalogQueryId::SelectPolicy,
-            &[
-                OracleBind::from(relation.owner.as_str()),
-                OracleBind::from(relation.name.as_str()),
-            ],
-        )
-        .await?;
-        if !policies.is_empty() {
-            return Ok(oraclemcp_guard::Purity::Unknown);
-        }
-        let virtual_columns = run_catalog_query(
-            cx,
-            conn,
-            CatalogQueryId::VirtualColumn,
-            &[
-                OracleBind::from(relation.owner.as_str()),
-                OracleBind::from(relation.name.as_str()),
-            ],
-        )
-        .await?;
-        if !virtual_columns.is_empty() {
-            return Ok(oraclemcp_guard::Purity::Unknown);
-        }
-        // Prove the principal can READ these dictionary views at all. On the
-        // PUBLIC `ALL_POLICIES` / `ALL_TAB_COLS` views the determinant is
-        // Ok-vs-error, not row count: a genuinely blind principal cannot read
-        // them and errors (ORA-00942 / insufficient privilege), and that error
-        // propagates via `?` to a fail-closed refusal. A *successful* probe —
-        // even one returning zero rows — proves visibility. `ALL_POLICIES`
-        // lists every VPD policy on objects the current user can access, so a
-        // successful empty read is positive proof there is no VPD policy on any
-        // readable relation (0 policies = nothing to prove around). This means
-        // the empty `SELECT_POLICY_SQL` / `VIRTUAL_COLUMN_SQL` results above are
-        // proven absence, not blindness — the read-purity proof is satisfied.
-        prove_policy_catalog_readable(cx, conn).await?;
-        prove_target_column_catalog_readable(cx, conn, relation).await?;
     }
+    for chunk in relations.chunks(32) {
+        let mut binds = Vec::with_capacity(64);
+        for relation in chunk {
+            binds.push(OracleBind::from(relation.owner.as_str()));
+            binds.push(OracleBind::from(relation.name.as_str()));
+        }
+        while binds.len() < 64 {
+            binds.push(OracleBind::from(""));
+        }
+        if !run_catalog_query(cx, conn, CatalogQueryId::PolicyRowsForRelations32, &binds)
+            .await?
+            .is_empty()
+            || !run_catalog_query(
+                cx,
+                conn,
+                CatalogQueryId::VirtualColumnsForRelations32,
+                &binds,
+            )
+            .await?
+            .is_empty()
+        {
+            return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+    }
+    // Once per statement, prove both catalog surfaces are readable. Successful
+    // empty probes are visibility evidence; a failed probe aborts the proof.
+    prove_policy_catalog_readable(cx, conn).await?;
+    prove_target_column_catalog_readable(cx, conn, &relations[0]).await?;
     Ok(oraclemcp_guard::Purity::ProvenReadOnly)
+}
+
+/// Why a lexical read plan failed before caller SQL could reach Oracle.
+#[derive(Debug)]
+pub enum ReadPlanProofError {
+    /// A required dictionary read failed.
+    Database(DbError),
+    /// A base relation had no unique local catalog identity.
+    MissingRelation(RawName),
+    /// A value was neither a column nor a proven local projection.
+    MissingColumn(RawName),
+    /// A structural or effect dependency remains unproven.
+    Unproven(&'static str),
+}
+
+/// The full local identity of a catalog relation, including its edition.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ReadObjectIdentity {
+    owner: String,
+    name: String,
+    identity: ResolvedIdentity,
+}
+
+impl From<&ResolvedObject> for ReadObjectIdentity {
+    fn from(object: &ResolvedObject) -> Self {
+        Self {
+            owner: object.owner.clone(),
+            name: object.name.clone(),
+            identity: object.identity.clone(),
+        }
+    }
+}
+
+/// A statement-purity oracle bound to the exact syntactic base-object set and
+/// every catalog identity proved for each member of that set.
+pub struct ReadPlanProof {
+    /// Every resolved base relation, retained for consumers that need its identity.
+    pub relations: Vec<ResolvedObject>,
+    by_source: HashMap<ObjectRef, Vec<ReadObjectIdentity>>,
+    by_identity: HashMap<ReadObjectIdentity, Purity>,
+}
+
+impl SideEffectOracle for ReadPlanProof {
+    fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
+        let asked: HashSet<_> = base_objects.iter().collect();
+        if asked.len() != self.by_source.len()
+            || !asked
+                .iter()
+                .all(|source| self.by_source.contains_key(*source))
+        {
+            return Purity::Unknown;
+        }
+        if self
+            .by_source
+            .values()
+            .flatten()
+            .all(|identity| self.by_identity.get(identity) == Some(&Purity::ProvenReadOnly))
+        {
+            Purity::ProvenReadOnly
+        } else {
+            Purity::Unknown
+        }
+    }
+}
+
+fn source_object(name: &RawName) -> Option<ObjectRef> {
+    let last = name.parts.last()?;
+    let schema = (name.parts.len() > 1).then(|| name.parts[name.parts.len() - 2].text.clone());
+    Some(ObjectRef::new(schema, last.text.clone()))
+}
+
+fn same_session(left: &ResolveCtx, right: &ResolveCtx) -> bool {
+    left.connected_schema == right.connected_schema
+        && left.current_schema == right.current_schema
+        && left.edition == right.edition
+        && left.enabled_roles == right.enabled_roles
+        && left.generation == right.generation
+}
+
+fn same_part(left: &RawNamePart, right: &RawNamePart) -> bool {
+    match (left.quoting, right.quoting) {
+        (QuoteSemantics::Quoted, QuoteSemantics::Quoted) => left.text == right.text,
+        (QuoteSemantics::Unquoted, QuoteSemantics::Unquoted) => {
+            left.text.eq_ignore_ascii_case(&right.text)
+        }
+        _ => false,
+    }
+}
+
+fn projected_from_local_source(
+    plan: &SemanticReadPlan,
+    block: &QueryBlock,
+    name: &RawName,
+) -> bool {
+    let (qualifier, column) = match name.parts.as_slice() {
+        [column] => (None, column),
+        [qualifier, column] => (Some(qualifier), column),
+        _ => return false,
+    };
+    let mut sources = Vec::new();
+    let mut visited_ctes = HashSet::new();
+    for cte in &block.cte_refs {
+        if !visited_ctes.insert((cte.text.clone(), cte.quoting)) {
+            continue;
+        }
+        let mut scope = Some(block.id);
+        while let Some(id) = scope {
+            if let Some((_, definition)) = plan.blocks[id.0]
+                .cte_definitions
+                .iter()
+                .find(|(alias, _)| same_part(alias, cte))
+            {
+                let aliases = block
+                    .cte_source_aliases
+                    .iter()
+                    .filter(|(source, _)| same_part(source, cte))
+                    .map(|(_, alias)| alias)
+                    .collect::<Vec<_>>();
+                for alias in &aliases {
+                    sources.push((*alias, *definition));
+                }
+                let references = block
+                    .cte_refs
+                    .iter()
+                    .filter(|source| same_part(source, cte))
+                    .count();
+                if references > aliases.len() {
+                    sources.push((cte, *definition));
+                }
+                break;
+            }
+            scope = plan.blocks[id.0].parent;
+        }
+    }
+    sources.extend(block.derived_sources.iter().map(|(alias, id)| (alias, *id)));
+    let matching = sources
+        .into_iter()
+        .filter(|(alias, id)| {
+            qualifier.is_none_or(|part| same_part(part, alias))
+                && plan.blocks[id.0]
+                    .projected_columns
+                    .iter()
+                    .any(|part| same_part(part, column))
+        })
+        .count();
+    matching == 1 && (qualifier.is_some() || block.statement_scope.relations.is_empty())
+}
+
+/// Resolve every lexical block in its own scope, then bind the recursive
+/// classifier's base-object consult to the exact identities just proved.
+pub async fn prove_semantic_read_plan(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    plan: &SemanticReadPlan,
+) -> Result<ReadPlanProof, ReadPlanProofError> {
+    if plan.blocks.len() > 128 || plan.relations.len() > 256 {
+        return Err(ReadPlanProofError::Unproven("relation_plan_cap_exceeded"));
+    }
+    if plan
+        .blocks
+        .iter()
+        .any(|block| block.kind == QueryBlockKind::TableFunction)
+    {
+        return Err(ReadPlanProofError::Unproven(
+            "table-function callee has no complete routine effect proof",
+        ));
+    }
+    cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
+    let mut session: Option<ResolveCtx> = None;
+    let mut contexts = Vec::with_capacity(plan.blocks.len());
+    for block in &plan.blocks {
+        let mut names = block.relations.clone();
+        names.extend(
+            block
+                .values
+                .iter()
+                .filter(|name| {
+                    !projected_from_local_source(plan, block, name)
+                        && !block.correlated_outer_refs.contains(name)
+                })
+                .cloned(),
+        );
+        let mut context = None;
+        for chunk in names.chunks(MAX_CATALOG_NAMES) {
+            let loaded = cache
+                .preload(cx, conn, chunk, block.statement_scope.clone())
+                .await
+                .map_err(ReadPlanProofError::Database)?;
+            if session
+                .as_ref()
+                .is_some_and(|first| !same_session(first, &loaded))
+                || context
+                    .as_ref()
+                    .is_some_and(|first| !same_session(first, &loaded))
+            {
+                return Err(ReadPlanProofError::Unproven(
+                    "session context changed during proof",
+                ));
+            }
+            session.get_or_insert_with(|| loaded.clone());
+            context = Some(loaded);
+        }
+        if context.is_none() {
+            let loaded = cache
+                .preload(cx, conn, &[], block.statement_scope.clone())
+                .await
+                .map_err(ReadPlanProofError::Database)?;
+            if session
+                .as_ref()
+                .is_some_and(|first| !same_session(first, &loaded))
+            {
+                return Err(ReadPlanProofError::Unproven(
+                    "session context changed during proof",
+                ));
+            }
+            session.get_or_insert_with(|| loaded.clone());
+            context = Some(loaded);
+        }
+        contexts.push(context.expect("every block has a context"));
+    }
+    let mut relations = Vec::new();
+    let mut by_source: HashMap<ObjectRef, Vec<ReadObjectIdentity>> = HashMap::new();
+    for (block, context) in plan.blocks.iter().zip(&contexts) {
+        for name in &block.relations {
+            let Resolution::Resolved(object) = cache.resolve(name, context) else {
+                return Err(ReadPlanProofError::MissingRelation(name.clone()));
+            };
+            let source =
+                source_object(name).ok_or(ReadPlanProofError::Unproven("empty relation name"))?;
+            by_source
+                .entry(source)
+                .or_default()
+                .push(ReadObjectIdentity::from(object.as_ref()));
+            relations.push(*object);
+        }
+    }
+    let purity = resolved_relations_read_purity(cx, conn, &relations)
+        .await
+        .map_err(ReadPlanProofError::Database)?;
+    if !purity.permits_safe() {
+        return Err(ReadPlanProofError::Unproven(
+            "a relation can invoke an unproven view, policy, or virtual-column dependency",
+        ));
+    }
+    for (block, context) in plan.blocks.iter().zip(&contexts) {
+        for name in &block.values {
+            if projected_from_local_source(plan, block, name) {
+                continue;
+            }
+            let known_outer = block.correlated_outer_refs.contains(name);
+            if !known_outer {
+                let current = cache.resolve(name, context);
+                if let Resolution::Resolved(object) = current {
+                    if object.kind == CatalogObjectKind::Column {
+                        continue;
+                    }
+                    return Err(ReadPlanProofError::Unproven(
+                        "a value identifier resolves to executable code rather than a column",
+                    ));
+                }
+                if !matches!(current, Resolution::Unresolved) {
+                    return Err(ReadPlanProofError::Unproven(
+                        "ambiguous or remote value identifier",
+                    ));
+                }
+            }
+            if block.parent.is_some() {
+                let mut ancestor = block.parent;
+                while let Some(id) = ancestor {
+                    let outer = &plan.blocks[id.0];
+                    if projected_from_local_source(plan, outer, name) {
+                        break;
+                    }
+                    let outer_context = cache
+                        .preload(
+                            cx,
+                            conn,
+                            std::slice::from_ref(name),
+                            outer.statement_scope.clone(),
+                        )
+                        .await
+                        .map_err(ReadPlanProofError::Database)?;
+                    if !same_session(&contexts[id.0], &outer_context) {
+                        return Err(ReadPlanProofError::Unproven(
+                            "session context changed during proof",
+                        ));
+                    }
+                    if let Resolution::Resolved(object) = cache.resolve(name, &outer_context)
+                        && object.kind == CatalogObjectKind::Column
+                    {
+                        break;
+                    }
+                    ancestor = outer.parent;
+                }
+                if ancestor.is_some() {
+                    continue;
+                }
+            }
+            return Err(ReadPlanProofError::MissingColumn(name.clone()));
+        }
+    }
+    let by_identity = relations
+        .iter()
+        .map(|object| (ReadObjectIdentity::from(object), Purity::ProvenReadOnly))
+        .collect();
+    Ok(ReadPlanProof {
+        relations,
+        by_source,
+        by_identity,
+    })
 }
 
 impl OracleCatalogResolver {
@@ -2358,7 +2662,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 15);
+        assert_eq!(specs.len(), 17);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -2525,6 +2829,76 @@ mod tests {
     }
 
     #[test]
+    fn resolved_relation_purity_answers_unknown_for_unproven_object() {
+        let object = table_object();
+        let source = ObjectRef::new(Some("app".to_owned()), "orders");
+        let proof = ReadPlanProof {
+            relations: vec![object.clone()],
+            by_source: HashMap::from([(source.clone(), vec![ReadObjectIdentity::from(&object)])]),
+            by_identity: HashMap::from([(
+                ReadObjectIdentity::from(&object),
+                Purity::ProvenReadOnly,
+            )]),
+        };
+        assert_eq!(
+            proof.statement_purity(std::slice::from_ref(&source)),
+            Purity::ProvenReadOnly
+        );
+        assert_eq!(proof.statement_purity(&[]), Purity::Unknown);
+        assert_eq!(
+            proof.statement_purity(&[source, ObjectRef::new(Some("app".to_owned()), "secret")]),
+            Purity::Unknown
+        );
+        let substituted = ReadPlanProof {
+            by_identity: HashMap::new(),
+            ..proof
+        };
+        assert_eq!(
+            substituted.statement_purity(&[ObjectRef::new(Some("app".to_owned()), "orders")]),
+            Purity::Unknown
+        );
+    }
+
+    #[test]
+    fn batched_proof_query_count_at_1_10_100_relations() {
+        run_with_cx(|cx| async move {
+            let mut cases = Vec::new();
+            for count in [1_usize, 10, 100] {
+                let chunks = count.div_ceil(32);
+                let conn = ScriptedRows::new(vec![Vec::new(); 2 * chunks + 2]);
+                let relations = (0..count)
+                    .map(|index| ResolvedObject {
+                        name: format!("T{index}"),
+                        identity: ResolvedIdentity {
+                            object_id: 1_000 + index as u64,
+                            edition: None,
+                        },
+                        ..table_object()
+                    })
+                    .collect::<Vec<_>>();
+                let started = std::time::Instant::now();
+                assert_eq!(
+                    resolved_relations_read_purity(&cx, &conn, &relations)
+                        .await
+                        .expect("clean batched proof"),
+                    Purity::ProvenReadOnly
+                );
+                let queries = conn.queries.lock().expect("queries lock");
+                assert_eq!(queries.len(), 2 + 2 * chunks);
+                for (_, binds) in queries.iter().take(2 * chunks) {
+                    assert_eq!(binds.len(), 64, "fixed-width padded batch binds");
+                }
+                cases.push(serde_json::json!({
+                    "relations": count,
+                    "queries": queries.len(),
+                    "elapsed_ms": started.elapsed().as_millis(),
+                }));
+            }
+            write_catalog_test_artifact("batched_purity_1_10_100", &cases);
+        });
+    }
+
+    #[test]
     fn relation_purity_requires_plain_policy_free_non_virtual_tables() {
         run_with_cx(|cx| async move {
             // Every catalog probe SUCCEEDS with zero rows: no object-scoped VPD
@@ -2542,8 +2916,8 @@ mod tests {
             {
                 let queries = clean.queries.lock().expect("queries lock");
                 assert_eq!(queries.len(), 4);
-                assert_eq!(queries[0].0, SELECT_POLICY_SQL);
-                assert_eq!(queries[1].0, VIRTUAL_COLUMN_SQL);
+                assert_eq!(queries[0].0, POLICY_ROWS_FOR_RELATIONS_32_SQL);
+                assert_eq!(queries[1].0, VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL);
                 assert_eq!(queries[2].0, POLICY_CATALOG_PROOF_SQL);
                 assert_eq!(queries[3].0, TARGET_COLUMN_CATALOG_PROOF_SQL);
             }
@@ -2626,7 +3000,7 @@ mod tests {
                     vec![Err(DbError::Query(
                         "ORA-00942: ALL_POLICIES unavailable".to_owned(),
                     ))],
-                    SELECT_POLICY_SQL,
+                    POLICY_ROWS_FOR_RELATIONS_32_SQL,
                 ),
                 (
                     "column catalog",
@@ -2636,7 +3010,7 @@ mod tests {
                             "ORA-00942: ALL_TAB_COLS unavailable".to_owned(),
                         )),
                     ],
-                    VIRTUAL_COLUMN_SQL,
+                    VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
                 ),
             ] {
                 let blind = ScriptedRows::results(responses);
@@ -3268,11 +3642,15 @@ mod tests {
             // them and not merely the first one short-circuiting.
             let asked = sighted.queries.lock().expect("queries lock");
             assert!(
-                asked.iter().any(|sql| sql == SELECT_POLICY_SQL),
+                asked
+                    .iter()
+                    .any(|sql| sql == POLICY_ROWS_FOR_RELATIONS_32_SQL),
                 "the SELECT VPD policy probe must run: {asked:?}"
             );
             assert!(
-                asked.iter().any(|sql| sql == VIRTUAL_COLUMN_SQL),
+                asked
+                    .iter()
+                    .any(|sql| sql == VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL),
                 "the virtual-column probe must run: {asked:?}"
             );
         });

@@ -66,10 +66,9 @@ use oraclemcp_db::{
     get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
     list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, paginated_sql,
     plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
-    probe_dependents, read_lob, read_query, read_query_as_of, resolved_relations_read_purity,
-    sample_rows, search_objects, search_source, semantic_search_query,
-    semantic_search_query_with_filter, semantic_search_text_query,
-    semantic_search_text_query_with_filter, serialize_row,
+    probe_dependents, read_lob, read_query, read_query_as_of, sample_rows, search_objects,
+    search_source, semantic_search_query, semantic_search_query_with_filter,
+    semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{SearchDetailLevel, SourceText};
 use oraclemcp_error::{
@@ -80,13 +79,12 @@ use oraclemcp_guard::scoped_grant::{
     authorize_level,
 };
 use oraclemcp_guard::{
-    CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel,
-    EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, EscalationError,
-    ExecGrantBinding, ExecGrantError, ExecGrantStore, GuardDecision, LevelDecision, ObjectRef,
-    OperatingLevel, OperatorStatementClass, PolicyGate, PolicyGateAdmission, PolicyGateDenial,
-    PolicyGateRequest, Purity, QuoteSemantics, RawName, Resolution, ResolvedObject,
-    SessionLevelState, SideEffectOracle, SqlPolicyConfig, VerdictCertificate, enforce_sql_policy,
-    parse_edition_lifecycle_sql, semantic_read_plan,
+    CatalogObjectKind, Classifier, ClassifierConfig, DangerLevel, EditionIdentifier,
+    EditionLifecycleParse, EditionLifecycleSql, EscalationError, ExecGrantBinding, ExecGrantError,
+    ExecGrantStore, GuardDecision, LevelDecision, ObjectRef, OperatingLevel,
+    OperatorStatementClass, PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest,
+    Purity, QuoteSemantics, RawName, ResolvedObject, SessionLevelState, SideEffectOracle,
+    SqlPolicyConfig, VerdictCertificate, enforce_sql_policy, parse_edition_lifecycle_sql,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -4991,14 +4989,6 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
         .map_err(|envelope| attach_parameterization_hint(envelope, sql))
 }
 
-struct ResolvedStatementPurity(Purity);
-
-impl SideEffectOracle for ResolvedStatementPurity {
-    fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
-        self.0
-    }
-}
-
 fn unresolved_semantic_read(reason: &'static str) -> ErrorEnvelope {
     ErrorEnvelope::new(
         ErrorClass::ForbiddenStatement,
@@ -5100,72 +5090,8 @@ async fn resolve_read_only_relations_inner(
     sql: &str,
     verified_local_vector_embedding: bool,
 ) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
-    let initial = if verified_local_vector_embedding {
-        READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
-    } else {
-        READ_PRECHECK_CLASSIFIER.classify(sql)
-    };
-    ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
-    let plan = semantic_read_plan(sql)
-        .ok_or_else(|| unresolved_semantic_read("query scope is not exactly representable"))?;
-    cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
-    let mut names = plan.relations.clone();
-    names.extend(plan.values.iter().cloned());
-    let context = cache
-        .preload(cx, conn, &names, plan.statement_scope)
+    read_executor::resolve_query_block_read(cx, conn, cache, sql, verified_local_vector_embedding)
         .await
-        .map_err(DbError::into_envelope)?;
-
-    let mut relations = Vec::with_capacity(plan.relations.len());
-    for name in &plan.relations {
-        let object = match cache.resolve(name, &context) {
-            Resolution::Resolved(object) => object,
-            Resolution::Unresolved => return Err(missing_semantic_relation(name)),
-            Resolution::Ambiguous { .. } | Resolution::Remote { .. } => {
-                return Err(unresolved_semantic_read(
-                    "a relation has no unique local catalog identity",
-                ));
-            }
-        };
-        relations.push(*object);
-    }
-    for name in &plan.values {
-        let object = match cache.resolve(name, &context) {
-            Resolution::Resolved(object) => object,
-            Resolution::Unresolved => return Err(missing_semantic_column(name)),
-            Resolution::Ambiguous { .. } | Resolution::Remote { .. } => {
-                return Err(unresolved_semantic_read(
-                    "a value identifier is not a unique column",
-                ));
-            }
-        };
-        if object.kind != CatalogObjectKind::Column {
-            return Err(unresolved_semantic_read(
-                "a value identifier resolves to executable code rather than a column",
-            ));
-        }
-    }
-
-    let purity = resolved_relations_read_purity(cx, conn, &relations)
-        .await
-        .map_err(DbError::into_envelope)?;
-    if !purity.permits_safe() {
-        return Err(unresolved_semantic_read(
-            "a relation can invoke an unproven view, policy, or virtual-column dependency",
-        ));
-    }
-    let classifier =
-        Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
-            .with_oracle(Arc::new(ResolvedStatementPurity(purity)))
-            .with_statement_unknown_guarded();
-    let decision = if verified_local_vector_embedding {
-        classifier.classify_verified_local_vector_embedding(sql)
-    } else {
-        classifier.classify(sql)
-    };
-    ensure_read_only_decision(decision.clone())
-        .map_err(|error| attach_parameterization_hint(error, sql))?;
-    Ok((relations, decision))
 }
 
 fn normalize_diff_key_columns(raw: Vec<String>) -> Result<Vec<String>, ErrorEnvelope> {

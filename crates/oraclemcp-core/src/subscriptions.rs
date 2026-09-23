@@ -30,13 +30,11 @@ use oraclemcp_audit::{
 };
 use oraclemcp_config::{ConnectionProfile, DEFAULT_MAX_SUBSCRIPTIONS};
 use oraclemcp_db::{
-    CatalogInvalidation, CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver,
-    CqnQueryRegistration, OracleBind, OracleCatalogResolverCache, OracleConnection,
-    resolved_relations_read_purity,
+    CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,
+    OracleBind, OracleCatalogResolverCache, OracleConnection, prove_semantic_read_plan,
 };
 use oraclemcp_guard::{
-    CatalogObjectKind, CatalogResolver, Classifier, ClassifierConfig, DangerLevel, LevelDecision,
-    ObjectRef, OperatingLevel, Purity, Resolution, SessionLevelState, SideEffectOracle,
+    Classifier, ClassifierConfig, DangerLevel, LevelDecision, OperatingLevel, SessionLevelState,
     semantic_read_plan,
 };
 use parking_lot::Mutex;
@@ -440,19 +438,6 @@ impl CqnRegistrationGate {
     }
 }
 
-/// Bind the strict classifier's statement-purity question to the fresh live
-/// relation proof obtained immediately before a CQN driver registration.
-///
-/// CQN is a standing side channel: it must meet the same bar as a one-shot
-/// guarded read rather than relying on earlier syntactic admission evidence.
-struct CqnResolvedStatementPurity(Purity);
-
-impl SideEffectOracle for CqnResolvedStatementPurity {
-    fn statement_purity(&self, _base_objects: &[ObjectRef]) -> Purity {
-        self.0
-    }
-}
-
 /// Re-run the guarded read path's live semantic proof for a CQN target.
 ///
 /// Every dependency is resolved through the exact driver session, then the
@@ -467,40 +452,12 @@ async fn prove_cqn_live_read_only(
     query: &str,
 ) -> Result<(), CqnRegistrationError> {
     let plan = semantic_read_plan(query).ok_or(CqnRegistrationError::QueryScopeNotRepresentable)?;
-    cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
-    let mut names = plan.relations.clone();
-    names.extend(plan.values.iter().cloned());
-    let context = cache
-        .preload(cx, connection, &names, plan.statement_scope)
+    let proof = prove_semantic_read_plan(cx, connection, cache, &plan)
         .await
         .map_err(|_| CqnRegistrationError::LiveReadProofUnavailable)?;
-
-    let mut relations = Vec::with_capacity(plan.relations.len());
-    for name in &plan.relations {
-        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
-            return Err(CqnRegistrationError::LiveReadProofUnavailable);
-        };
-        relations.push(*object);
-    }
-    for name in &plan.values {
-        let Resolution::Resolved(object) = cache.resolve(name, &context) else {
-            return Err(CqnRegistrationError::LiveReadProofUnavailable);
-        };
-        if object.kind != CatalogObjectKind::Column {
-            return Err(CqnRegistrationError::LiveReadProofUnavailable);
-        }
-    }
-
-    let purity = resolved_relations_read_purity(cx, connection, &relations)
-        .await
-        .map_err(|_| CqnRegistrationError::LiveReadProofUnavailable)?;
-    if !purity.permits_safe() {
-        return Err(CqnRegistrationError::LiveReadProofUnavailable);
-    }
-
     let strict_classifier =
         Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
-            .with_oracle(Arc::new(CqnResolvedStatementPurity(purity)))
+            .with_oracle(Arc::new(proof))
             .with_statement_unknown_guarded();
     let decision = strict_classifier.classify(query);
     if decision.danger != DangerLevel::Safe
@@ -1370,6 +1327,22 @@ mod tests {
         AuditSubject::new("test", "cqn-client")
     }
 
+    // The batch verifier consumes these #52/#34 cases; target output can be
+    // discarded after that verification run.
+    fn write_cqn_block_case(case_id: &str, expected: serde_json::Value, actual: serde_json::Value) {
+        let target = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            });
+        let dir = target.join("test-artifacts/query_blocks");
+        std::fs::create_dir_all(&dir).expect("create CQN case artifact directory");
+        let record =
+            serde_json::json!({"case_id": case_id, "expected": expected, "actual": actual});
+        std::fs::write(dir.join(format!("{case_id}.jsonl")), format!("{record}\n"))
+            .expect("write CQN block case");
+    }
+
     /// CQN's static phase performs only a text-local precheck; `register_query`
     /// immediately follows it with a fresh live relation/VPD proof before the
     /// driver registration effect. Keep that narrow baseline explicit now that
@@ -1380,12 +1353,19 @@ mod tests {
 
     const PROVEN_QUERY: &str = "SELECT id FROM app.cqn_target";
     const UNPROVEN_VIEW_QUERY: &str = "SELECT id FROM app.unproven_view";
+    const SUBQUERY_VIEW_QUERY: &str =
+        "SELECT id FROM app.cqn_target WHERE id IN (SELECT id FROM app.unproven_view)";
+    const CLEAN_CTE_QUERY: &str = "WITH q AS (SELECT id FROM app.cqn_target) SELECT id FROM q";
+    const CLEAN_COMPLEX_QUERY: &str = "WITH q AS (SELECT id FROM app.cqn_target UNION ALL SELECT id FROM app.cqn_target) SELECT d.id FROM (SELECT id FROM q) d";
+    const CLEAN_LATERAL_QUERY: &str =
+        "SELECT d.id FROM app.cqn_target t CROSS APPLY (SELECT t.id AS id) d";
 
-    #[derive(Clone, Copy, Default)]
+    #[derive(Clone, Copy, Default, PartialEq, Eq)]
     enum CqnCatalogFixture {
         #[default]
         CleanTable,
         UnprovenView,
+        OuterTableInnerView,
         SelectVpdPolicy,
         VirtualColumn,
     }
@@ -1394,13 +1374,13 @@ mod tests {
         fn object_type(self) -> &'static str {
             match self {
                 Self::CleanTable | Self::SelectVpdPolicy | Self::VirtualColumn => "TABLE",
-                Self::UnprovenView => "VIEW",
+                Self::UnprovenView | Self::OuterTableInnerView => "VIEW",
             }
         }
 
         fn object_name(self) -> &'static str {
             match self {
-                Self::UnprovenView => "UNPROVEN_VIEW",
+                Self::UnprovenView | Self::OuterTableInnerView => "UNPROVEN_VIEW",
                 Self::CleanTable | Self::SelectVpdPolicy | Self::VirtualColumn => "CQN_TARGET",
             }
         }
@@ -1480,7 +1460,7 @@ mod tests {
             &self,
             _cx: &Cx,
             sql: &str,
-            _binds: &[OracleBind],
+            binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
             if sql.contains("SYS_CONTEXT('USERENV', 'SESSION_USER')") {
                 return Ok(vec![catalog_row(&[
@@ -1493,10 +1473,23 @@ mod tests {
                 return Ok(Vec::new());
             }
             if sql.contains("FROM all_objects WHERE") {
+                let target = if self.catalog_fixture == CqnCatalogFixture::OuterTableInnerView {
+                    match binds.get(1) {
+                        Some(OracleBind::String(name)) if name == "CQN_TARGET" => "CQN_TARGET",
+                        _ => "UNPROVEN_VIEW",
+                    }
+                } else {
+                    self.catalog_fixture.object_name()
+                };
+                let kind = if target == "CQN_TARGET" {
+                    "TABLE"
+                } else {
+                    self.catalog_fixture.object_type()
+                };
                 return Ok(vec![catalog_row(&[
                     ("OWNER", Some("APP")),
-                    ("OBJECT_NAME", Some(self.catalog_fixture.object_name())),
-                    ("OBJECT_TYPE", Some(self.catalog_fixture.object_type())),
+                    ("OBJECT_NAME", Some(target)),
+                    ("OBJECT_TYPE", Some(kind)),
                     ("OBJECT_ID", Some("42")),
                     ("STATUS", Some("VALID")),
                     ("EDITION_NAME", Some("ORA$BASE")),
@@ -1779,6 +1772,11 @@ mod tests {
         for (fixture, query, label) in [
             (CqnCatalogFixture::UnprovenView, UNPROVEN_VIEW_QUERY, "view"),
             (
+                CqnCatalogFixture::OuterTableInnerView,
+                SUBQUERY_VIEW_QUERY,
+                "subquery view",
+            ),
+            (
                 CqnCatalogFixture::SelectVpdPolicy,
                 PROVEN_QUERY,
                 "SELECT VPD policy",
@@ -1831,6 +1829,100 @@ mod tests {
                 "{label} refusal must occur before an allowed audit record"
             );
         }
+    }
+
+    #[test]
+    fn cqn_registration_refuses_subquery_view() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, sink) = cqn_auditor();
+        let connection =
+            RecordingCqnConnection::with_catalog_fixture(CqnCatalogFixture::OuterTableInnerView);
+        let catalog_cache = OracleCatalogResolverCache::new();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            gate.register_query(
+                &cx,
+                &connection,
+                CqnQueryRegistrationRequest::new(
+                    CqnRegistrationScope::Query,
+                    SUBQUERY_VIEW_QUERY,
+                    &[],
+                    &cqn_preflight_classifier(),
+                    &stepped_up_session(),
+                    Some(&auditor),
+                    subject(),
+                )
+                .with_catalog_cache(&catalog_cache)
+                .with_resource_uri(URI),
+            )
+            .await
+        });
+        assert!(matches!(
+            result,
+            Err(CqnRegistrationError::LiveReadProofUnavailable)
+        ));
+        assert!(connection.registrations.lock().is_empty());
+        assert!(sink.records().is_empty());
+        write_cqn_block_case(
+            "cqn_registration_refuses_subquery_view",
+            serde_json::json!({"refused": true, "registrations": 0, "audit_records": 0}),
+            serde_json::json!({"refused": matches!(result, Err(CqnRegistrationError::LiveReadProofUnavailable)), "registrations": connection.registrations.lock().len(), "audit_records": sink.records().len()}),
+        );
+    }
+
+    #[test]
+    fn cqn_registration_admits_proven_cte_scope() {
+        let profile = cqn_profile(true);
+        let gate = CqnRegistrationGate::from_profile(&profile);
+        let (auditor, _sink) = cqn_auditor();
+        let connection = RecordingCqnConnection::default();
+        let catalog_cache = OracleCatalogResolverCache::new();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        let result = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            gate.register_query(
+                &cx,
+                &connection,
+                CqnQueryRegistrationRequest::new(
+                    CqnRegistrationScope::Query,
+                    CLEAN_CTE_QUERY,
+                    &[],
+                    &cqn_preflight_classifier(),
+                    &stepped_up_session(),
+                    Some(&auditor),
+                    subject(),
+                )
+                .with_catalog_cache(&catalog_cache)
+                .with_resource_uri(URI),
+            )
+            .await
+        });
+        assert!(result.is_ok(), "proven CTE should register: {result:?}");
+        assert_eq!(connection.registrations.lock().len(), 1);
+        let complex = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            prove_cqn_live_read_only(&cx, &connection, &catalog_cache, CLEAN_COMPLEX_QUERY).await
+        });
+        assert!(
+            complex.is_ok(),
+            "proven CTE/UNION/derived blocks: {complex:?}"
+        );
+        let lateral = runtime.block_on(async {
+            let cx = Cx::current().expect("runtime installs a current Cx");
+            prove_cqn_live_read_only(&cx, &connection, &catalog_cache, CLEAN_LATERAL_QUERY).await
+        });
+        assert!(lateral.is_ok(), "proven lateral block: {lateral:?}");
+        write_cqn_block_case(
+            "cqn_registration_admits_proven_cte_scope",
+            serde_json::json!({"registrations": 1, "complex_proven": true, "lateral_proven": true}),
+            serde_json::json!({"registrations": connection.registrations.lock().len(), "complex_proven": complex.is_ok(), "lateral_proven": lateral.is_ok()}),
+        );
     }
 
     #[test]
