@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T22:10:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.7",
+  "scope": {
+    "summary": "Exact routine identity RoutineRef; strict CALL/one-statement BEGIN parse; synonym and unique-overload resolution via ALL_PROCEDURES + ALL_ARGUMENTS; CALL admitted only when effects are proven; unresolved/ambiguous/remote calls refused (e640471a).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/purity.rs",
+      "crates/oraclemcp-guard/src/classifier.rs",
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "crates/oraclemcp-db/src/catalog_query.rs"
+    ],
+    "out_of_scope": [
+      "guard lib.rs is excluded from the clean-scope claim because they currently carry other agents' uncommitted edits; their committed state is covered by the gate.",
+      "Live catalog resolution on Oracle (bead no-claim; T7.13/T4.9a)."
+    ]
+  },
+  "source": {
+    "sha": "463fd6304bc6924c6e2b7370e9e05c4676cb5321",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 463fd630 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3345 passed, 1 failed; cargo deny OK. The single failure is http::tests::crate_local_ci_taxonomy_matches_repo_root (crates/oraclemcp-core/ci_taxonomy.json not re-copied after docs/ci_taxonomy.json was regenerated in 3cab187d, bead .12.1) - unrelated to this bead's code; routed to its owner."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "all 8 named tests ok by exact name in the gate log."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit/in-process per the bead; verified by the orchestrator by re-execution, independent of the implementing pane; no orchestrator-authored mutants for this bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

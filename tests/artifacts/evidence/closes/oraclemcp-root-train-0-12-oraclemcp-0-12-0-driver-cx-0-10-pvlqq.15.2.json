@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-23T22:10:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.15.2",
+  "scope": {
+    "summary": "WriteAuthorization seam: explicit scoped_grant argument, no fallback, policy floor; typed StatementOutcome::NotStarted write refusals; oracle_execute/execute_approved discoverable at READ_ONLY when the effective ceiling admits READ_WRITE while visibility grants no authority (245bcf61, 6043e880, 463fd630).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/scoped_grant/authorization.rs",
+      "crates/oraclemcp/src/dispatch/tests/write_authorization.rs",
+      "crates/oraclemcp-db/src/error.rs",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp/src/robot_docs.rs"
+    ],
+    "out_of_scope": [
+      "oraclemcp-error lib.rs and dispatch/mod.rs are excluded from the clean-scope claim because they currently carry other agents' uncommitted edits; their committed state is covered by the gate.",
+      "External-client proof is T13.8 (bead proof split); W4 cases w4_execute_read_only_visible_without_grant_refused / w4_request_grant_* were not run here."
+    ]
+  },
+  "source": {
+    "sha": "463fd6304bc6924c6e2b7370e9e05c4676cb5321",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 463fd630 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3345 passed, 1 failed; cargo deny OK. The single failure is http::tests::crate_local_ci_taxonomy_matches_repo_root (crates/oraclemcp-core/ci_taxonomy.json not re-copied after docs/ci_taxonomy.json was regenerated in 3cab187d, bead .12.1) - unrelated to this bead's code; routed to its owner."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "13 named tests ok by exact name in the gate log incl. the write_authorization suite."
+      },
+      {
+        "name": "regression fixed inside the bead",
+        "kind": "cli",
+        "trace": "The interim 245bcf61 dropped the structured OPERATOR_ONLY reason for default-edition flips; the implementer bisected it (0c362118 pass, e640471a pass, 245bcf61 fail) and restored it in 463fd630; execute_default_edition_flip_operator_only_at_admin_zero_db_io passes at 463fd630 without any test change."
+      },
+      {
+        "name": "visibility change review",
+        "kind": "cli",
+        "trace": "oracle_execute visible_from READ_ONLY (6043e880 test update) is specified by the bead: visible when ceiling >= READ_WRITE, calls without level or grant refused with zero DB I/O."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit/in-process per the bead; verified by the orchestrator by re-execution, independent of the implementing pane; no orchestrator-authored mutants for this bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
