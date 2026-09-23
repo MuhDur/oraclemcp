@@ -1,0 +1,446 @@
+[
+  {
+    "case_id": "w4_query_issue28_order_by_alias",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT LABEL, COUNT(*) AS N FROM ${owner}.T_PARENT_${run_id} GROUP BY LABEL ORDER BY N DESC, LABEL ASC",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "LABEL": "parent-1",
+          "N": "1"
+        },
+        {
+          "LABEL": "parent-2",
+          "N": "1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT LABEL, COUNT(*) FROM ${owner}.T_PARENT_${run_id} GROUP BY LABEL ORDER BY COUNT(*) DESC, LABEL ASC",
+        "rows": [
+          [
+            "parent-1",
+            1
+          ],
+          [
+            "parent-2",
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_issue29_join_using",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} JOIN ${owner}.T_CHILD_${run_id} USING (ID) ORDER BY ID",
+        "max_rows": 1
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} JOIN ${owner}.T_CHILD_${run_id} USING (ID) ORDER BY ID",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_issue29_natural_join",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} NATURAL JOIN ${owner}.T_CHILD_${run_id} ORDER BY ID",
+        "max_rows": 1
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} NATURAL JOIN ${owner}.T_CHILD_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_issue31_owner_table_column",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ${owner}.T_PARENT_${run_id}.ID FROM T_PARENT_${run_id} ORDER BY ID",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        },
+        {
+          "ID": "2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_issue33_pseudocolumns",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ORA_ROWSCN > 0 ORDER BY ID",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        },
+        {
+          "ID": "2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ORA_ROWSCN > 0 ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i28_order_alias",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT LABEL, COUNT(*) AS N FROM ${owner}.T_PARENT_${run_id} GROUP BY LABEL ORDER BY N DESC, LABEL ASC",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "LABEL": "parent-1",
+          "N": "1"
+        },
+        {
+          "LABEL": "parent-2",
+          "N": "1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT LABEL, COUNT(*) FROM ${owner}.T_PARENT_${run_id} GROUP BY LABEL ORDER BY COUNT(*) DESC, LABEL ASC",
+        "rows": [
+          [
+            "parent-1",
+            1
+          ],
+          [
+            "parent-2",
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i29_join_using",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} JOIN ${owner}.T_CHILD_${run_id} USING (ID) ORDER BY ID",
+        "max_rows": 1
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} JOIN ${owner}.T_CHILD_${run_id} USING (ID) ORDER BY ID",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i29_natural_join",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} NATURAL JOIN ${owner}.T_CHILD_${run_id} ORDER BY ID",
+        "max_rows": 1
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} NATURAL JOIN ${owner}.T_CHILD_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i31_qualified_column",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ${owner}.T_PARENT_${run_id}.ID FROM T_PARENT_${run_id} ORDER BY ID",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        },
+        {
+          "ID": "2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i33_pseudocolumn",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ORA_ROWSCN > 0 ORDER BY ID",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        },
+        {
+          "ID": "2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ORA_ROWSCN > 0 ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  }
+]

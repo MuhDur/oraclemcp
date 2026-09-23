@@ -205,11 +205,11 @@ def validate_case(case, filename):
     require(re.fullmatch(r"(?:w4|rel012)_[a-z0-9_]+", case["case_id"]), "invalid case_id")
     require(isinstance(case["tool"], str) and case["tool"], "missing tool name")
     require(case["level"] in {"READ_ONLY", "READ_WRITE", "DDL", "ADMIN"}, "invalid level")
-    require(case.get("profile_variant", "masked") in {"masked", "synthetic_raw"},
-            "profile_variant must be masked or synthetic_raw")
-    if case.get("profile_variant") == "synthetic_raw":
+    require(case.get("profile_variant", "masked") in {"masked", "synthetic_raw", "synthetic_owner"},
+            "profile_variant must be masked, synthetic_raw, or synthetic_owner")
+    if case.get("profile_variant") in {"synthetic_raw", "synthetic_owner"}:
         require(case["level"] == "READ_ONLY" and case.get("setup_phase") == "before_server",
-                "synthetic_raw profile is reserved for precreated READ_ONLY fixtures")
+                "synthetic fixture profiles require precreated READ_ONLY fixtures")
     require(isinstance(case["transports"], list) and case["transports"]
             and set(case["transports"]) <= {"stdio", "http"}
             and len(case["transports"]) == len(set(case["transports"])), "invalid transports")
@@ -635,7 +635,7 @@ def pick_port():
         return sock.getsockname()[1]
 
 
-def write_lab_config(path, lane, dsn, port):
+def write_lab_config(path, lane, dsn, port, owner=None):
     audience = f"http://127.0.0.1:{port}/mcp"
     content = f'''schema_version = 2
 default_profile = "{lane}"
@@ -670,6 +670,19 @@ description = "synthetic W4 type-fidelity fixtures only"
 connect_string = "{dsn}"
 username = "system"
 credential_ref = "env:W4_DB_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+'''
+    if owner is not None:
+        require(re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", owner) is not None,
+                "owner profile must name the exact W4 fixture")
+        content += f'''
+[[profiles]]
+name = "{lane}_owner"
+description = "synthetic W4 disposable owner fixture"
+connect_string = "{dsn}"
+username = "{owner}"
+credential_ref = "env:W4_OWNER_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 '''
@@ -1311,7 +1324,6 @@ def run_lane(args):
         for transport in ("stdio", "http"):
             state = work / transport / "state"
             state.mkdir(parents=True, exist_ok=True)
-            client_env = {**env, "XDG_STATE_HOME": str(state)}
             audit_path = state / "oraclemcp/audit/audit.jsonl"
             fixture_id = None
             client = None
@@ -1320,8 +1332,19 @@ def run_lane(args):
                     fixture_id = new_run_id()
                     with (work / "fixture.jsonl").open("a") as fixture_log:
                         with contextlib.redirect_stdout(fixture_log):
-                            fixture_setup(args.lane, settings, fixture_id)
+                            fixture_setup(args.lane, settings, fixture_id,
+                                          owner_password_sink=lambda value: env.__setitem__(
+                                              "W4_OWNER_PASSWORD", value))
                     fixture_runs[transport] = fixture_id
+                    owner = "W4O_" + fixture_id
+                    if any(case.get("profile_variant") == "synthetic_owner"
+                           for case in family_cases if transport in case["transports"]):
+                        # The disposable owner needs the same FGA catalog proof
+                        # that every served relation read requires.
+                        connection.cursor().execute(f"GRANT SELECT ANY DICTIONARY TO {owner}")
+                    write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
+                                     owner=owner)
+                client_env = {**env, "XDG_STATE_HOME": str(state)}
                 expanded_family = ([] if args.contract_only else [
                     expand_case(case, fixture_id, transport) for case in family_cases
                     if transport in case["transports"]])
@@ -1360,7 +1383,9 @@ def run_lane(args):
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
-                    desired_profile = (args.lane + "_raw" if case.get("profile_variant") == "synthetic_raw"
+                    variant = case.get("profile_variant")
+                    desired_profile = (args.lane + "_raw" if variant == "synthetic_raw"
+                                       else args.lane + "_owner" if variant == "synthetic_owner"
                                        else args.lane)
                     if desired_profile != current_profile:
                         if current_level != "READ_ONLY":
@@ -1401,6 +1426,7 @@ def run_lane(args):
                     with (work / "fixture.jsonl").open("a") as fixture_log:
                         with contextlib.redirect_stdout(fixture_log):
                             fixture_teardown(args.lane, settings, fixture_id)
+                env.pop("W4_OWNER_PASSWORD", None)
         output = {"lane": args.lane, "checkout_sha": checkout_sha,
                   "binary_source_sha": args.binary_source_sha or (checkout_sha if built_here else None),
                   "binary_sha256": binary_sha256,

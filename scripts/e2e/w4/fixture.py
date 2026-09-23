@@ -395,7 +395,7 @@ def inventory_status(connection, run, version):
             "missing": missing, "objects": sorted(expected & actual)}
 
 
-def setup(lane, settings, requested_id=None):
+def setup(lane, settings, requested_id=None, owner_password_sink=None):
     run_id = run_id_or_refuse(requested_id or new_run_id())
     admin, version = connect_admin(lane, settings)
     owner = cross = None
@@ -406,6 +406,8 @@ def setup(lane, settings, requested_id=None):
         register_run(admin, run_id, token)
         registered = True
         owner_password = create_fixture_user(admin, owner_name(run_id))
+        if owner_password_sink is not None:
+            owner_password_sink(owner_password)
         cross_password = create_fixture_user(admin, cross_name(run_id))
         import oracledb
         owner = oracledb.connect(user=owner_name(run_id), password=owner_password, dsn=settings["dsn"])
