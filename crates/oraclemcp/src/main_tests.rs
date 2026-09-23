@@ -4800,3 +4800,121 @@ fn writable_profile_never_runs_without_audit_sink() {
         "no connection while the audit sink is unavailable"
     );
 }
+
+/// Release manifest case `rel012_i51_second_instance` (#51): a second serve
+/// sharing a held audit log completes the handshake, answers every tool call
+/// with the typed lock refusal naming the holder, and leaves the holder's log
+/// untouched (no fork). Once the holder releases, the next call opens the
+/// sink and connects. The process-level proof with two real executables is
+/// `tests/w4_runtime_issue51.rs`.
+#[test]
+fn second_serve_instance_reports_audit_lock_issue_51() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let root = tempfile::tempdir().expect("audit tempdir");
+    let audit_path = root.path().join("audit/audit.jsonl");
+    create_private_audit_dir(audit_path.parent().expect("parent")).expect("private audit dir");
+    let holder = oraclemcp_audit::FileAuditSink::open(&audit_path).expect("instance 1 holds");
+    let held_log = std::fs::read(&audit_path).expect("holder's log");
+
+    let config = OracleMcpConfig::from_toml_str(&format!(
+        "[audit]\npath = {:?}\nkey_ref = \"env:I51_AUDIT_KEY\"",
+        audit_path.display().to_string()
+    ))
+    .expect("config parses");
+    let resolver: Arc<dyn SecretResolver> = Arc::new(oraclemcp_auth::EnvLookupSecretResolver::new(
+        |name: &str| (name == "I51_AUDIT_KEY").then(|| "I".repeat(32)),
+    ));
+    let level = default_read_only_level();
+    let connects = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&connects);
+    let exports = Arc::new(ExportRegistry::new());
+    let opener = stdio_opener(
+        StdioOpenerInputs {
+            reachable_ceiling: max_reachable_write_ceiling(&config, &level),
+            config,
+            secret_resolver: resolver,
+            level,
+            query_cost_budget_enabled: false,
+            connection_plan: RuntimeConnectionPlan::Stub(DbError::Connect(
+                "offline unit test".to_owned(),
+            )),
+            custom_catalog: CustomToolCatalog::default(),
+            active_profile: None,
+            strict_custom_tools: false,
+            request_timeout: None,
+            max_query_cost: None,
+            cumulative_query_cost_budget: None,
+            result_masking: None,
+            sql_policy: None,
+            exports: Arc::clone(&exports),
+        },
+        Box::new(move |plan, config, resolver| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            open_runtime_connection_plan(plan, config, true, resolver)
+        }),
+    );
+    let (dispatch, lock) = DeferredDispatch::start(opener).expect("a held lock is not fatal");
+    assert_eq!(
+        lock.as_ref().map(StartupLock::code),
+        Some("ORACLEMCP_AUDIT_LOG_LOCKED")
+    );
+    let server = server_shell(
+        OperatingLevel::ReadOnly,
+        ServerTransportMode::Stdio,
+        Vec::new(),
+        Arc::new(dispatch),
+        exports,
+    );
+    let rpc = |request: serde_json::Value| {
+        server
+            .handle_jsonrpc_request(request, None)
+            .expect("a response")
+    };
+    let initialize = rpc(serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": {"protocolVersion": "2025-11-25", "capabilities": {},
+                   "clientInfo": {"name": "i51", "version": "0"}}
+    }));
+    assert_eq!(
+        initialize["result"]["serverInfo"]["name"], "oraclemcp",
+        "{initialize}"
+    );
+    let tools = rpc(serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
+    assert!(
+        tools["result"]["tools"]
+            .as_array()
+            .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "oracle_query")),
+        "{tools}"
+    );
+    let query = |id: u64| {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": "oracle_query", "arguments": {"sql": "SELECT 1 FROM dual"}}
+        })
+    };
+    let locked = rpc(query(3)).to_string();
+    assert!(locked.contains("ORACLEMCP_AUDIT_LOG_LOCKED"), "{locked}");
+    assert!(
+        locked.contains(&format!("(pid {})", std::process::id())),
+        "the refusal names the holder: {locked}"
+    );
+    assert_eq!(connects.load(Ordering::SeqCst), 0, "nothing connected");
+    assert_eq!(
+        std::fs::read(&audit_path).expect("holder's log"),
+        held_log,
+        "the second instance never wrote the held log (no fork)"
+    );
+
+    drop(holder);
+    let recovered = rpc(query(4)).to_string();
+    assert!(
+        !recovered.contains("ORACLEMCP_AUDIT_LOG_LOCKED"),
+        "the next call opens the released sink: {recovered}"
+    );
+    assert_eq!(
+        connects.load(Ordering::SeqCst),
+        1,
+        "connected once, after the lock"
+    );
+}
