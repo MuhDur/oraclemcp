@@ -48,6 +48,7 @@ scenarios=(
   scripts/e2e/load_soak.sh
   scripts/e2e/live_xe_headline.sh
   scripts/e2e/oracle_version_matrix.sh
+  scripts/e2e/w4.sh
   scripts/e2e/living_db.sh
   scripts/e2e/live_lineage.sh
   scripts/e2e/editions.sh

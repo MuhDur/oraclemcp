@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "vocabulary": [
+    "version:18", "version:21", "version:23", "edition:XE", "edition:FREE", "adb",
+    "feature:JSON_TYPE", "feature:VECTOR", "feature:VPD",
+    "licence:AWR", "priv:CREATE_TABLE", "priv:CREATE_PROCEDURE",
+    "priv:CREATE_TYPE", "priv:SELECT_V_SQL"
+  ],
+  "lanes": {
+    "xe18": {"version": 18, "edition": "XE", "adb": false, "features": ["VPD"], "licences": [], "privileges": ["CREATE_TABLE", "CREATE_PROCEDURE", "CREATE_TYPE", "SELECT_V_SQL"]},
+    "xe21": {"version": 21, "edition": "XE", "adb": false, "features": ["VPD"], "licences": [], "privileges": ["CREATE_TABLE", "CREATE_PROCEDURE", "CREATE_TYPE", "SELECT_V_SQL"]},
+    "free23": {"version": 23, "edition": "FREE", "adb": false, "features": ["JSON_TYPE", "VECTOR", "VPD"], "licences": [], "privileges": ["CREATE_TABLE", "CREATE_PROCEDURE", "CREATE_TYPE", "SELECT_V_SQL"]}
+  }
+}

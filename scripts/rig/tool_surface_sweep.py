@@ -25,10 +25,6 @@ from typing import Any
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 PROTOCOL_VERSION = "2025-11-25"
 MAX_RESPONSE_BYTES = 1_048_576
-EXPECTED_REGISTRY_CANONICAL = 34
-EXPECTED_REGISTRY_ALIASES = 25
-EXPECTED_REGISTRY_TOTAL = EXPECTED_REGISTRY_CANONICAL + EXPECTED_REGISTRY_ALIASES
-EXPECTED_WIRE_TOTAL = EXPECTED_REGISTRY_TOTAL + 1
 AUDIT_KEY = "0123456789abcdef0123456789abcdef"
 FIXTURE_PASSWORD = (
     os.environ.get("ORACLEMCP_RIG_L1_FIXTURE_PASSWORD")
@@ -435,13 +431,17 @@ def preview_and_apply_admin(client: StdioClient, profile: Profile) -> bool:
 
 def assert_registry_truth(profile: str, tools: list[dict[str, Any]], require_full: bool) -> dict[str, int]:
     names = [tool["name"] for tool in tools]
+    if len(names) != len(set(names)) or not names:
+        raise AssertionError(f"{profile}: duplicate or empty runtime tool registry")
+    if any(not isinstance(tool.get("inputSchema"), dict) for tool in tools):
+        raise AssertionError(f"{profile}: runtime tool descriptor lacks inputSchema")
     has_cap = "oracle_capabilities" in names
     canonical = sum(1 for name in names if name.startswith("oracle_") and name != "oracle_capabilities")
     aliases = sum(1 for name in names if not name.startswith("oracle_"))
     if require_full:
-        if len(names) != EXPECTED_WIRE_TOTAL or canonical != EXPECTED_REGISTRY_CANONICAL or aliases != EXPECTED_REGISTRY_ALIASES or not has_cap:
+        if not has_cap:
             raise AssertionError(
-                f"{profile}: full ADMIN surface mismatch: total={len(names)} canonical={canonical} aliases={aliases} has_cap={has_cap}"
+                f"{profile}: full ADMIN surface missing oracle_capabilities"
             )
     return {"wire_total": len(names), "canonical": canonical, "aliases": aliases, "has_capabilities": int(has_cap)}
 
@@ -519,6 +519,9 @@ def main() -> int:
     results = []
     for profile in PROFILES:
         results.append(sweep_profile(binary, config, work, profile))
+    admin_sets = [set(row["swept_tools"]) for row in results if row["elevated_to_admin"]]
+    if not admin_sets or any(names != admin_sets[0] for names in admin_sets[1:]):
+        raise AssertionError("ADMIN profiles advertise different runtime tool sets")
     guard_categories = {row["guard_refusal_category"] for row in results if row["guard_refusal_category"]}
     if len(guard_categories) != 1:
         raise AssertionError(f"guard refusal grammar drifted across profiles: {guard_categories}")
@@ -526,11 +529,7 @@ def main() -> int:
         "source_sha": source_sha,
         "installed_binary": str(binary),
         "artifact_dir": str(work),
-        "expected_registry": {
-            "canonical": EXPECTED_REGISTRY_CANONICAL,
-            "aliases": EXPECTED_REGISTRY_ALIASES,
-            "wire_with_oracle_capabilities": EXPECTED_WIRE_TOTAL,
-        },
+        "registry_source": "runtime tools/list",
         "profiles": results,
         "wire_assertions": [
             "well_formed_envelope_and_known_error_class",

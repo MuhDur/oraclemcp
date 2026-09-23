@@ -31,6 +31,34 @@ fn run_script(script: &str, args: &[&str]) -> Output {
         .unwrap_or_else(|e| panic!("run {script}: {e}"))
 }
 
+#[test]
+fn w4_driver_is_registered_and_dry_runs() {
+    let root = repo_root();
+    let runner =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        runner.contains("scripts/e2e/w4.sh"),
+        "W4 driver absent from run_all.sh"
+    );
+    let output = run_script("scripts/e2e/w4.sh", &["--lane", "free23", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "W4 dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let selftest = Command::new("python3")
+        .arg(root.join("scripts/e2e/w4/driver.py"))
+        .arg("--selftest")
+        .current_dir(&root)
+        .output()
+        .expect("run W4 driver selftest");
+    assert!(
+        selftest.status.success(),
+        "W4 selftest failed: {}",
+        String::from_utf8_lossy(&selftest.stderr)
+    );
+}
+
 /// The swarm cargo wrapper `omcpb` (lane-locked, shared-target builds) exists
 /// only in the developer/swarm environment, never in plain CI. The dry-run
 /// scenario scripts shell out through it, so when it is absent we skip these
