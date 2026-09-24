@@ -1010,6 +1010,24 @@ impl OracleConnection for SearchMock {
                 ("STATUS", "VALID"),
             ])]);
         }
+        // CatalogQueryId executes these fixed dictionary probes through
+        // query_rows. OracleConnection's optional-row default also delegates
+        // here, so both call shapes use the same truthful catalog result.
+        if sql.contains("FROM all_tables") {
+            return Ok(vec![row(&[
+                ("NUM_ROWS", "1234"),
+                ("LAST_ANALYZED", "2026-06-01T08:00:00"),
+            ])]);
+        }
+        if sql.contains("all_tab_statistics") {
+            return Ok(vec![row(&[("STALE_STATS", "YES")])]);
+        }
+        if sql.contains("COUNT(*) AS column_count") {
+            return Ok(vec![row(&[("COLUMN_COUNT", "2")])]);
+        }
+        if sql.contains("all_tab_comments") {
+            return Ok(vec![row(&[("COMMENTS", "company employees")])]);
+        }
         if sql.contains("all_col_comments") {
             return Ok(vec![
                 row(&[
@@ -1035,42 +1053,6 @@ impl OracleConnection for SearchMock {
             return Ok(vec![row(&[("COLUMN_NAME", "EMPLOYEE_ID")])]);
         }
         Ok(Vec::new())
-    }
-    async fn query_optional_row(
-        &self,
-        _cx: &Cx,
-        sql: &str,
-        _binds: &[OracleBind],
-    ) -> Result<Option<OracleRow>, DbError> {
-        let row = |pairs: &[(&str, &str)]| {
-            Some(OracleRow {
-                columns: pairs
-                    .iter()
-                    .map(|(n, v)| {
-                        (
-                            (*n).to_owned(),
-                            OracleCell::new("VARCHAR2", Some((*v).to_owned())),
-                        )
-                    })
-                    .collect(),
-            })
-        };
-        if sql.contains("FROM all_tables") {
-            return Ok(row(&[
-                ("NUM_ROWS", "1234"),
-                ("LAST_ANALYZED", "2026-06-01T08:00:00"),
-            ]));
-        }
-        if sql.contains("all_tab_statistics") {
-            return Ok(row(&[("STALE_STATS", "YES")]));
-        }
-        if sql.contains("COUNT(*) AS column_count") {
-            return Ok(row(&[("COLUMN_COUNT", "2")]));
-        }
-        if sql.contains("all_tab_comments") {
-            return Ok(row(&[("COMMENTS", "company employees")]));
-        }
-        Ok(None)
     }
     async fn execute(&self, _cx: &Cx, _s: &str, _b: &[OracleBind]) -> Result<u64, DbError> {
         Ok(0)

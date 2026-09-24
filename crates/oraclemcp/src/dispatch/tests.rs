@@ -4592,6 +4592,9 @@ impl OracleConnection for SearchObjectsDispatchMock {
                 ("LAST_ANALYZED", "2026-06-01T00:00:00"),
             ])]);
         }
+        if sql.contains("all_tab_statistics") {
+            return Ok(vec![row(&[("STALE_STATS", "YES")])]);
+        }
         if sql.contains("COUNT(*) AS column_count") {
             return Ok(vec![row(&[("COLUMN_COUNT", "1")])]);
         }
@@ -4691,6 +4694,24 @@ fn search_objects_detail_levels_and_truncation_through_dispatch() {
         )
         .expect_err("unknown detail level rejected");
     assert_eq!(bad.error_class, ErrorClass::InvalidArguments);
+}
+
+#[test]
+fn search_objects_catalog_gated_stats_comment_and_count_are_preserved() {
+    let dispatcher = OracleDispatcher::new(Box::new(SearchObjectsDispatchMock));
+    let summary = dispatcher
+        .dispatch(
+            "oracle_search_objects",
+            json!({"owner": "APP", "detail_level": "summary"}),
+        )
+        .expect("catalog-gated summary search");
+    let table = &summary["results"][0];
+    assert_eq!(table["column_count"], json!(1));
+    assert_eq!(table["comment"], json!("emp table"));
+    assert_eq!(table["num_rows"], json!(999));
+    assert_eq!(table["last_analyzed"], json!("2026-06-01T00:00:00"));
+    assert_eq!(table["row_count_is_estimate"], json!(true));
+    assert_eq!(table["stats_stale"], json!(true));
 }
 
 #[derive(Default)]
