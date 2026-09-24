@@ -4373,7 +4373,7 @@ mod tests {
             match error {
                 WalletError::FileMissing(_) => DoctorWalletErrorKind::FileMissing,
                 WalletError::Io { .. } => DoctorWalletErrorKind::Io,
-                WalletError::NotRegularFile => DoctorWalletErrorKind::NotRegularFile,
+                WalletError::NotRegularFile { .. } => DoctorWalletErrorKind::NotRegularFile,
                 WalletError::TooLarge { .. } => DoctorWalletErrorKind::TooLarge,
                 WalletError::Pem(_) => DoctorWalletErrorKind::Pem,
                 WalletError::NoCertificates => DoctorWalletErrorKind::NoCertificates,

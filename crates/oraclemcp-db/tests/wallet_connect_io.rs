@@ -77,10 +77,14 @@ mod unix {
         let pem = dir.path().join(WalletFileChoice::Pem.file_name());
         create_fifo(&pem);
 
-        let mut options = OracleConnectOptions::default();
-        options.connect_string = "tcps://127.0.0.1:1/XEPDB1".to_owned();
-        options.wallet_location = Some(dir.path().to_owned());
-        options.connect_timeout = Some(Duration::from_millis(250));
+        let options = OracleConnectOptions {
+            connect_string: "tcps://127.0.0.1:1/XEPDB1".to_owned(),
+            username: Some("synthetic-user".to_owned()),
+            password: Some("synthetic-password".to_owned()),
+            wallet_location: Some(dir.path().to_owned()),
+            connect_timeout: Some(Duration::from_millis(250)),
+            ..OracleConnectOptions::default()
+        };
 
         let (sender, receiver) = mpsc::sync_channel(1);
         let worker = std::thread::spawn(move || {

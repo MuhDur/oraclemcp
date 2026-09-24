@@ -366,20 +366,31 @@ pub fn wallet_certificate_validity(
 pub enum WalletFileReadError {
     /// The wallet path resolved to a symlink, directory, device, FIFO, or socket.
     #[error("wallet file is not a regular file: {path}")]
-    NotRegularFile { path: String },
+    NotRegularFile {
+        /// The refused wallet path (redacted in `Debug`).
+        path: String,
+    },
     /// The wallet file does not exist.
     #[error("wallet file is missing: {path}")]
-    FileMissing { path: String },
+    FileMissing {
+        /// The missing wallet path (redacted in `Debug`).
+        path: String,
+    },
     /// The wallet file could not be opened or read.
     #[error("failed to read wallet file {path}: {source}")]
     Io {
+        /// The wallet path (redacted in `Debug`).
         path: String,
+        /// The underlying filesystem error.
         #[source]
         source: std::io::Error,
     },
     /// The wallet file exceeded its existing 16 MiB bound.
     #[error("wallet file exceeds the maximum size of {maximum_bytes} bytes")]
-    TooLarge { maximum_bytes: usize },
+    TooLarge {
+        /// The inclusive maximum accepted wallet size in bytes.
+        maximum_bytes: usize,
+    },
 }
 
 impl fmt::Debug for WalletFileReadError {
