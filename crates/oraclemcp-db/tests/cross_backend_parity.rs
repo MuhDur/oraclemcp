@@ -746,6 +746,35 @@ fn parity_record(
     );
 }
 
+fn assert_parity_value(case_id: &str, backend: &str, expected: &Value, actual: &Value) {
+    assert_eq!(
+        actual, expected,
+        "{case_id}: {backend} independent expectation"
+    );
+}
+
+#[test]
+#[should_panic(expected = "parity_timestamp_no_utc_suffix: official independent expectation")]
+fn parity_timestamp_no_utc_suffix_rejects_planted_utc_suffix() {
+    assert_parity_value(
+        "parity_timestamp_no_utc_suffix",
+        "official",
+        &json!("2020-02-29T12:34:56.123456789"),
+        &json!("2020-02-29T12:34:56.123456789Z"),
+    );
+}
+
+#[test]
+#[should_panic(expected = "parity_typed_null_every_type: official independent expectation")]
+fn parity_typed_null_every_type_rejects_planted_empty_string() {
+    assert_parity_value(
+        "parity_typed_null_every_type",
+        "official",
+        &Value::Null,
+        &json!(""),
+    );
+}
+
 async fn assert_parity_cell(
     cx: &Cx,
     driver: &dyn OracleConnection,
@@ -776,14 +805,8 @@ async fn assert_parity_cell(
     let official_value = &official_row["V"];
     parity_record(case_id, column_type, "driver-cx", &expected, driver_value);
     parity_record(case_id, column_type, "official", &expected, official_value);
-    assert_eq!(
-        *driver_value, expected,
-        "{case_id}: driver-cx independent expectation"
-    );
-    assert_eq!(
-        *official_value, expected,
-        "{case_id}: official independent expectation"
-    );
+    assert_parity_value(case_id, "driver-cx", &expected, driver_value);
+    assert_parity_value(case_id, "official", &expected, official_value);
 }
 
 async fn number_value_and_oracle_text(
