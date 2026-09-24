@@ -26,6 +26,7 @@ crates/**
 !crates/*/
 crates/*/**
 !crates/*/Cargo.toml
+!crates/oraclemcp/build.rs
 !crates/*/README.md
 !crates/*/src/
 crates/*/src/**
