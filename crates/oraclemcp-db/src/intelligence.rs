@@ -94,6 +94,7 @@ pub struct VerifiedPlanTable {
     owner: String,
     name: String,
     object_id: i64,
+    verification_observation: Option<&'static str>,
 }
 
 impl VerifiedPlanTable {
@@ -102,6 +103,18 @@ impl VerifiedPlanTable {
             owner: owner.into(),
             name: name.into(),
             object_id,
+            verification_observation: None,
+        }
+    }
+
+    fn safe_fallback() -> Self {
+        Self {
+            owner: "SYS".to_owned(),
+            name: "PLAN_TABLE$".to_owned(),
+            // The fixed SYS-qualified identity bypasses caller synonyms. Its
+            // object id is unknown when the account cannot read the catalog.
+            object_id: 0,
+            verification_observation: Some("plan_table_verification_no_privilege"),
         }
     }
 
@@ -121,6 +134,13 @@ impl VerifiedPlanTable {
     #[must_use]
     pub const fn object_id(&self) -> i64 {
         self.object_id
+    }
+
+    /// Audit observation required when a privilege-limited account forced
+    /// use of the fixed server-owned fallback.
+    #[must_use]
+    pub const fn verification_observation(&self) -> Option<&'static str> {
+        self.verification_observation
     }
 
     fn qualified_name(&self) -> String {
@@ -164,9 +184,10 @@ pub async fn resolve_plan_table(
     conn: &dyn OracleConnection,
     configured: Option<&str>,
 ) -> Result<VerifiedPlanTable, PlanTableUnavailable> {
-    let info = conn.describe(cx).await.map_err(|_| PlanTableUnavailable {
-        reason: "no_privilege",
-    })?;
+    let info = match conn.describe(cx).await {
+        Ok(info) => info,
+        Err(error) => return safe_plan_table_fallback(error),
+    };
     let current_schema = info
         .current_schema
         .as_deref()
@@ -186,7 +207,7 @@ pub async fn resolve_plan_table(
                 reason: "callback_unprovable",
             });
         }
-        let rows = run_catalog_query(
+        let rows = match run_catalog_query(
             cx,
             conn,
             CatalogQueryId::PlanTableConfigured,
@@ -196,7 +217,10 @@ pub async fn resolve_plan_table(
             ],
         )
         .await
-        .map_err(|error| plan_table_catalog_error(&error))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => return safe_plan_table_fallback(error),
+        };
         if rows.len() != 1
             || rows[0].text("TEMPORARY") != Some("Y")
             || rows[0].text("DURATION") != Some("SYS$SESSION")
@@ -208,7 +232,7 @@ pub async fn resolve_plan_table(
         let object_id = rows[0].parse_i64("OBJECT_ID").ok_or(PlanTableUnavailable {
             reason: "callback_unprovable",
         })?;
-        let triggers = run_catalog_query(
+        let triggers = match run_catalog_query(
             cx,
             conn,
             CatalogQueryId::PlanTableTriggers,
@@ -218,7 +242,10 @@ pub async fn resolve_plan_table(
             ],
         )
         .await
-        .map_err(|error| plan_table_catalog_error(&error))?;
+        {
+            Ok(rows) => rows,
+            Err(error) => return safe_plan_table_fallback(error),
+        };
         if !triggers.is_empty() {
             return Err(PlanTableUnavailable {
                 reason: "callback_unprovable",
@@ -235,30 +262,38 @@ pub async fn resolve_plan_table(
         return Ok(VerifiedPlanTable::new(owner, name, object_id));
     }
 
-    let local_objects = run_catalog_query(
+    let local_objects = match run_catalog_query(
         cx,
         conn,
         CatalogQueryId::PlanTableCurrentObjects,
         &[OracleBind::String(current_schema.clone())],
     )
     .await
-    .map_err(|error| plan_table_catalog_error(&error))?;
-    let private_synonyms = run_catalog_query(
+    {
+        Ok(rows) => rows,
+        Err(error) => return safe_plan_table_fallback(error),
+    };
+    let private_synonyms = match run_catalog_query(
         cx,
         conn,
         CatalogQueryId::PlanTablePrivateSynonym,
         &[OracleBind::String(current_schema)],
     )
     .await
-    .map_err(|error| plan_table_catalog_error(&error))?;
+    {
+        Ok(rows) => rows,
+        Err(error) => return safe_plan_table_fallback(error),
+    };
     if !local_objects.is_empty() || !private_synonyms.is_empty() {
         return Err(PlanTableUnavailable {
             reason: "callback_unprovable",
         });
     }
-    let synonym = run_catalog_query(cx, conn, CatalogQueryId::PlanTablePublicSynonym, &[])
-        .await
-        .map_err(|error| plan_table_catalog_error(&error))?;
+    let synonym =
+        match run_catalog_query(cx, conn, CatalogQueryId::PlanTablePublicSynonym, &[]).await {
+            Ok(rows) => rows,
+            Err(error) => return safe_plan_table_fallback(error),
+        };
     if synonym.len() != 1
         || synonym[0].text("TABLE_OWNER") != Some("SYS")
         || synonym[0].text("TABLE_NAME") != Some("PLAN_TABLE$")
@@ -268,9 +303,11 @@ pub async fn resolve_plan_table(
             reason: "callback_unprovable",
         });
     }
-    let table = run_catalog_query(cx, conn, CatalogQueryId::PlanTableSysTemporary, &[])
-        .await
-        .map_err(|error| plan_table_catalog_error(&error))?;
+    let table = match run_catalog_query(cx, conn, CatalogQueryId::PlanTableSysTemporary, &[]).await
+    {
+        Ok(rows) => rows,
+        Err(error) => return safe_plan_table_fallback(error),
+    };
     if table.len() != 1
         || table[0].text("TEMPORARY") != Some("Y")
         || table[0].text("DURATION") != Some("SYS$SESSION")
@@ -285,6 +322,13 @@ pub async fn resolve_plan_table(
             reason: "callback_unprovable",
         })?;
     Ok(VerifiedPlanTable::new("SYS", "PLAN_TABLE$", object_id))
+}
+
+fn safe_plan_table_fallback(error: DbError) -> Result<VerifiedPlanTable, PlanTableUnavailable> {
+    match plan_table_catalog_error(&error).reason() {
+        "no_privilege" => Ok(VerifiedPlanTable::safe_fallback()),
+        reason => Err(PlanTableUnavailable { reason }),
+    }
 }
 
 fn parse_plan_table_name(value: &str) -> Result<(String, String), PlanTableUnavailable> {
@@ -2556,6 +2600,8 @@ mod tests {
         info: OracleConnectionInfo,
         local_object: bool,
         private_synonym: bool,
+        describe_denied: bool,
+        denied_query_fragment: Option<&'static str>,
         configured_object_id: i64,
         duration: &'static str,
         configured_enabled_trigger: bool,
@@ -2573,6 +2619,8 @@ mod tests {
                 },
                 local_object: false,
                 private_synonym: false,
+                describe_denied: false,
+                denied_query_fragment: None,
                 configured_object_id: 9001,
                 duration: "SYS$SESSION",
                 configured_enabled_trigger: false,
@@ -2594,6 +2642,11 @@ mod tests {
         }
 
         async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            if self.describe_denied {
+                return Err(DbError::ServerQuery(
+                    "ORA-01031: insufficient privileges".into(),
+                ));
+            }
             Ok(self.info.clone())
         }
 
@@ -2603,6 +2656,14 @@ mod tests {
             sql: &str,
             _binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if self
+                .denied_query_fragment
+                .is_some_and(|fragment| sql.contains(fragment))
+            {
+                return Err(DbError::ServerQuery(
+                    "ORA-01031: insufficient privileges".into(),
+                ));
+            }
             if sql.contains("FROM all_objects WHERE owner = :1") && self.local_object {
                 return Ok(vec![cell_row(&[("OBJECT_TYPE", "TABLE")])]);
             }
@@ -2806,6 +2867,41 @@ mod tests {
         });
         assert!(table.is_standard_plan_table());
         assert_eq!(table.object_id(), 42);
+    }
+
+    #[test]
+    fn plan_table_catalog_privilege_gap_uses_fixed_sys_table_with_observation() {
+        let mut mock = PlanResolverMock::new(unique_plan_service());
+        mock.denied_query_fragment = Some("FROM all_synonyms WHERE owner = 'PUBLIC'");
+        let table = run_with_cx(|cx| async move {
+            resolve_plan_table(&cx, &mock, None)
+                .await
+                .expect("safe fixed SYS table fallback")
+        });
+        assert!(table.is_standard_plan_table());
+        assert_eq!(table.owner(), "SYS");
+        assert_eq!(table.name(), "PLAN_TABLE$");
+        assert_eq!(table.object_id(), 0);
+        assert_eq!(
+            table.verification_observation(),
+            Some("plan_table_verification_no_privilege")
+        );
+    }
+
+    #[test]
+    fn plan_table_describe_privilege_gap_uses_fixed_sys_table_with_observation() {
+        let mut mock = PlanResolverMock::new(unique_plan_service());
+        mock.describe_denied = true;
+        let table = run_with_cx(|cx| async move {
+            resolve_plan_table(&cx, &mock, None)
+                .await
+                .expect("safe fixed SYS table fallback")
+        });
+        assert!(table.is_standard_plan_table());
+        assert_eq!(
+            table.verification_observation(),
+            Some("plan_table_verification_no_privilege")
+        );
     }
 
     #[test]

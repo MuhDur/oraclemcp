@@ -15,6 +15,12 @@ const PROBE_LIMIT: i64 = ROW_CAP + 1;
 pub enum HardParseEffectClosureV1 {
     /// Every enumerated callback source was readable and absent.
     Proven,
+    /// No callback was positively detected, but an Oracle catalog probe was
+    /// denied. Callers may proceed only while recording this limitation.
+    AdmittedWithObservation {
+        /// Stable reason describing the missing evidence.
+        reason: &'static str,
+    },
     /// Catalog evidence proves that hard parse can invoke user code.
     Refused {
         /// Stable refusal reason for a detected callback source.
@@ -33,7 +39,9 @@ impl HardParseEffectClosureV1 {
     pub const fn reason(&self) -> Option<&'static str> {
         match self {
             Self::Proven => None,
-            Self::Refused { reason } | Self::Unavailable { reason } => Some(reason),
+            Self::AdmittedWithObservation { reason }
+            | Self::Refused { reason }
+            | Self::Unavailable { reason } => Some(reason),
         }
     }
 
@@ -41,6 +49,19 @@ impl HardParseEffectClosureV1 {
     #[must_use]
     pub const fn is_proven(&self) -> bool {
         matches!(self, Self::Proven)
+    }
+
+    /// Whether EXPLAIN may proceed. Observed admissions must be included in
+    /// the caller's audit transcript.
+    #[must_use]
+    pub const fn is_admitted(&self) -> bool {
+        matches!(self, Self::Proven | Self::AdmittedWithObservation { .. })
+    }
+
+    /// Whether the audit record must disclose incomplete catalog evidence.
+    #[must_use]
+    pub const fn requires_observation(&self) -> bool {
+        matches!(self, Self::AdmittedWithObservation { .. })
     }
 }
 
@@ -234,7 +255,9 @@ fn association_has_statistics_type(row: &OracleRow) -> bool {
 fn catalog_unavailable(error: DbError) -> HardParseEffectClosureV1 {
     let message = error.to_string();
     if message.contains("ORA-00942") || message.contains("ORA-01031") {
-        unavailable("no_privilege")
+        HardParseEffectClosureV1::AdmittedWithObservation {
+            reason: "no_privilege",
+        }
     } else {
         unavailable("callback_unprovable")
     }
@@ -577,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn hard_parse_closure_missing_privilege_is_unavailable() {
+    fn hard_parse_closure_missing_privilege_is_admitted_with_observation() {
         let mock = ClosureMock {
             association_denied: true,
             ..ClosureMock::default()
@@ -588,9 +611,11 @@ mod tests {
         });
         assert_eq!(
             result,
-            HardParseEffectClosureV1::Unavailable {
+            HardParseEffectClosureV1::AdmittedWithObservation {
                 reason: "no_privilege"
             }
         );
+        assert!(result.is_admitted());
+        assert!(result.requires_observation());
     }
 }

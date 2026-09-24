@@ -3229,7 +3229,8 @@ fn explain_plan_unavailable(reason: &str) -> ErrorEnvelope {
 
 fn hard_parse_closure_error(closure: HardParseEffectClosureV1) -> Option<ErrorEnvelope> {
     match closure {
-        HardParseEffectClosureV1::Proven => None,
+        HardParseEffectClosureV1::Proven
+        | HardParseEffectClosureV1::AdmittedWithObservation { .. } => None,
         HardParseEffectClosureV1::Refused { reason } => Some(
             ErrorEnvelope::new(
                 ErrorClass::ForbiddenStatement,
@@ -3444,13 +3445,34 @@ fn explain_plan_audit_transcript(
     sql: &str,
     table: &VerifiedPlanTable,
     statement_id: &PlanStatementId,
+    hard_parse_observation: bool,
 ) -> String {
+    let observation =
+        explain_plan_audit_observation(hard_parse_observation, table.verification_observation());
     format!(
-        "{EXPLAIN_SAVEPOINT_SQL}; EXPLAIN PLAN SET STATEMENT_ID = '{}' INTO {}.{} FOR {sql}; {EXPLAIN_ROLLBACK_SQL}",
+        "{EXPLAIN_SAVEPOINT_SQL}; EXPLAIN PLAN SET STATEMENT_ID = '{}' INTO {}.{} FOR {sql}; {EXPLAIN_ROLLBACK_SQL}{observation}",
         statement_id.as_str(),
         table.owner(),
         table.name(),
     )
+}
+
+fn explain_plan_audit_observation(
+    hard_parse_observation: bool,
+    plan_table_observation: Option<&'static str>,
+) -> String {
+    let mut observations = Vec::new();
+    if hard_parse_observation {
+        observations.push("hard_parse_evidence_no_privilege");
+    }
+    if let Some(observation) = plan_table_observation {
+        observations.push(observation);
+    }
+    if observations.is_empty() {
+        String::new()
+    } else {
+        format!("; AUDIT OBSERVATION: {}", observations.join(","))
+    }
 }
 
 fn append_explain_plan_audit(
@@ -3466,6 +3488,23 @@ fn append_explain_plan_audit(
         None,
         outcome,
     )
+}
+
+#[cfg(test)]
+mod explain_plan_audit_transcript_tests {
+    use super::*;
+
+    #[test]
+    fn privilege_limited_hard_parse_evidence_is_in_the_audit_transcript() {
+        assert_eq!(
+            explain_plan_audit_observation(true, None),
+            "; AUDIT OBSERVATION: hard_parse_evidence_no_privilege"
+        );
+        assert_eq!(
+            explain_plan_audit_observation(false, Some("plan_table_verification_no_privilege")),
+            "; AUDIT OBSERVATION: plan_table_verification_no_privilege"
+        );
+    }
 }
 
 async fn rollback_explain_savepoint(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
@@ -3501,7 +3540,7 @@ async fn enforce_query_cost_gate(
         .enforce(ctx.cx)
         .map_err(DbError::into_envelope)?;
     let closure = prove_hard_parse_effect_closure(ctx.cx, ctx.conn, executed_sql, relations).await;
-    if !closure.is_proven() {
+    if !closure.is_admitted() {
         return Err(query_cost_unavailable(
             closure.reason().unwrap_or("callback_unprovable"),
         ));
@@ -3516,7 +3555,12 @@ async fn enforce_query_cost_gate(
         subject: ctx.subject,
         db_evidence: audit_db_evidence.as_ref(),
     };
-    let audit_transcript = explain_plan_audit_transcript(executed_sql, &table, &statement_id);
+    let audit_transcript = explain_plan_audit_transcript(
+        executed_sql,
+        &table,
+        &statement_id,
+        closure.requires_observation(),
+    );
     append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Pending)?;
     if let Err(error) = ctx.conn.execute(ctx.cx, EXPLAIN_SAVEPOINT_SQL, &[]).await {
         append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Failed)?;
@@ -14221,6 +14265,7 @@ impl OracleDispatcher {
                     &relations,
                 )
                 .await;
+                let hard_parse_observation = closure.requires_observation();
                 if let Some(error) = hard_parse_closure_error(closure) {
                     return Err(error);
                 }
@@ -14273,7 +14318,12 @@ impl OracleDispatcher {
                     subject: &request_subject,
                     db_evidence: audit_db_evidence.as_ref(),
                 };
-                let audit_transcript = explain_plan_audit_transcript(&a.sql, &table, &statement_id);
+                let audit_transcript = explain_plan_audit_transcript(
+                    &a.sql,
+                    &table,
+                    &statement_id,
+                    hard_parse_observation,
+                );
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
                 append_explain_plan_audit(
                     audit_entry,
@@ -14313,6 +14363,16 @@ impl OracleDispatcher {
                             "rolled_back": true,
                         },
                     });
+                    let mut verification_observations = Vec::new();
+                    if hard_parse_observation {
+                        verification_observations.push("hard_parse_evidence_no_privilege");
+                    }
+                    if let Some(observation) = table.verification_observation() {
+                        verification_observations.push(observation);
+                    }
+                    if !verification_observations.is_empty() {
+                        response["verification_observations"] = json!(verification_observations);
+                    }
                     match plan_cost_estimate(cx, conn, &table, &statement_id).await {
                         Ok(Some(estimate)) => {
                             if let Ok(value) = serde_json::to_value(&estimate) {

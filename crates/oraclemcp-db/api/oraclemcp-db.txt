@@ -923,6 +923,75 @@ pub type oraclemcp_db::ConnectFailureKind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ConnectFailureKind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ConnectFailureKind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ConnectFailureKind::vzip(self) -> V
+pub enum oraclemcp_db::ConnectPhaseReached
+pub oraclemcp_db::ConnectPhaseReached::Accept
+pub oraclemcp_db::ConnectPhaseReached::AuthTtc
+pub oraclemcp_db::ConnectPhaseReached::Dns
+pub oraclemcp_db::ConnectPhaseReached::Session
+pub oraclemcp_db::ConnectPhaseReached::Tcp
+pub oraclemcp_db::ConnectPhaseReached::Tls
+pub oraclemcp_db::ConnectPhaseReached::Unknown
+pub oraclemcp_db::ConnectPhaseReached::Wallet
+impl oraclemcp_db::ConnectPhaseReached
+pub const fn oraclemcp_db::ConnectPhaseReached::hint(self) -> &'static str
+impl core::clone::Clone for oraclemcp_db::ConnectPhaseReached
+pub fn oraclemcp_db::ConnectPhaseReached::clone(&self) -> oraclemcp_db::ConnectPhaseReached
+impl core::cmp::Eq for oraclemcp_db::ConnectPhaseReached
+impl core::cmp::PartialEq for oraclemcp_db::ConnectPhaseReached
+pub fn oraclemcp_db::ConnectPhaseReached::eq(&self, &oraclemcp_db::ConnectPhaseReached) -> bool
+impl core::fmt::Debug for oraclemcp_db::ConnectPhaseReached
+pub fn oraclemcp_db::ConnectPhaseReached::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::ConnectPhaseReached
+impl core::marker::StructuralPartialEq for oraclemcp_db::ConnectPhaseReached
+impl serde_core::ser::Serialize for oraclemcp_db::ConnectPhaseReached
+pub fn oraclemcp_db::ConnectPhaseReached::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_db::ConnectPhaseReached
+pub fn oraclemcp_db::ConnectPhaseReached::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_db::ConnectPhaseReached
+impl core::marker::Send for oraclemcp_db::ConnectPhaseReached
+impl core::marker::Sync for oraclemcp_db::ConnectPhaseReached
+impl core::marker::Unpin for oraclemcp_db::ConnectPhaseReached
+impl core::marker::UnsafeUnpin for oraclemcp_db::ConnectPhaseReached
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ConnectPhaseReached
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ConnectPhaseReached
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ConnectPhaseReached where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ConnectPhaseReached where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ConnectPhaseReached where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ConnectPhaseReached::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ConnectPhaseReached where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ConnectPhaseReached where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ConnectPhaseReached where U: core::convert::From<T>
+pub fn oraclemcp_db::ConnectPhaseReached::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ConnectPhaseReached where U: core::convert::Into<T>
+pub type oraclemcp_db::ConnectPhaseReached::Error = core::convert::Infallible
+pub fn oraclemcp_db::ConnectPhaseReached::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ConnectPhaseReached where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ConnectPhaseReached::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ConnectPhaseReached::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ConnectPhaseReached where T: core::clone::Clone
+pub type oraclemcp_db::ConnectPhaseReached::Owned = T
+pub fn oraclemcp_db::ConnectPhaseReached::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ConnectPhaseReached::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ConnectPhaseReached
+impl<T> core::any::Any for oraclemcp_db::ConnectPhaseReached where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ConnectPhaseReached::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ConnectPhaseReached where T: ?core::marker::Sized
+pub fn oraclemcp_db::ConnectPhaseReached::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ConnectPhaseReached where T: ?core::marker::Sized
+pub fn oraclemcp_db::ConnectPhaseReached::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ConnectPhaseReached where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ConnectPhaseReached::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ConnectPhaseReached
+pub fn oraclemcp_db::ConnectPhaseReached::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ConnectPhaseReached
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_db::ConnectPhaseReached where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ConnectPhaseReached
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ConnectPhaseReached
+impl<T> typenum::type_operators::Same for oraclemcp_db::ConnectPhaseReached
+pub type oraclemcp_db::ConnectPhaseReached::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ConnectPhaseReached where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ConnectPhaseReached where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ConnectPhaseReached::vzip(self) -> V
 pub enum oraclemcp_db::CqnNotificationOutcome
 pub oraclemcp_db::CqnNotificationOutcome::Closed
 pub oraclemcp_db::CqnNotificationOutcome::Event(oraclemcp_db::CqnDriverNotification)
@@ -1017,6 +1086,8 @@ pub oraclemcp_db::DbError::ServerQuery(alloc::string::String)
 pub oraclemcp_db::DbError::UnsupportedAuth(alloc::string::String)
 pub oraclemcp_db::DbError::UnsupportedFeature(alloc::string::String)
 impl oraclemcp_db::DbError
+pub fn oraclemcp_db::DbError::connect_detail_redacted(&self) -> core::option::Option<alloc::string::String>
+pub fn oraclemcp_db::DbError::connect_phase_reached(&self) -> oraclemcp_db::ConnectPhaseReached
 pub fn oraclemcp_db::DbError::into_envelope(self) -> oraclemcp_error::ErrorEnvelope
 pub fn oraclemcp_db::DbError::is_connection_lost(&self) -> bool
 pub fn oraclemcp_db::DbError::is_uncertain_session_state(&self) -> bool
@@ -1565,14 +1636,18 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::FlashbackRefusalKind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::FlashbackRefusalKind::vzip(self) -> V
 pub enum oraclemcp_db::HardParseEffectClosureV1
+pub oraclemcp_db::HardParseEffectClosureV1::AdmittedWithObservation
+pub oraclemcp_db::HardParseEffectClosureV1::AdmittedWithObservation::reason: &'static str
 pub oraclemcp_db::HardParseEffectClosureV1::Proven
 pub oraclemcp_db::HardParseEffectClosureV1::Refused
 pub oraclemcp_db::HardParseEffectClosureV1::Refused::reason: &'static str
 pub oraclemcp_db::HardParseEffectClosureV1::Unavailable
 pub oraclemcp_db::HardParseEffectClosureV1::Unavailable::reason: &'static str
 impl oraclemcp_db::HardParseEffectClosureV1
+pub const fn oraclemcp_db::HardParseEffectClosureV1::is_admitted(&self) -> bool
 pub const fn oraclemcp_db::HardParseEffectClosureV1::is_proven(&self) -> bool
 pub const fn oraclemcp_db::HardParseEffectClosureV1::reason(&self) -> core::option::Option<&'static str>
+pub const fn oraclemcp_db::HardParseEffectClosureV1::requires_observation(&self) -> bool
 impl core::clone::Clone for oraclemcp_db::HardParseEffectClosureV1
 pub fn oraclemcp_db::HardParseEffectClosureV1::clone(&self) -> oraclemcp_db::HardParseEffectClosureV1
 impl core::cmp::Eq for oraclemcp_db::HardParseEffectClosureV1
@@ -3892,6 +3967,60 @@ pub type oraclemcp_db::WalletFileChoice::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletFileChoice where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WalletFileChoice where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::WalletFileChoice::vzip(self) -> V
+pub enum oraclemcp_db::WalletFileReadError
+pub oraclemcp_db::WalletFileReadError::FileMissing
+pub oraclemcp_db::WalletFileReadError::FileMissing::path: alloc::string::String
+pub oraclemcp_db::WalletFileReadError::Io
+pub oraclemcp_db::WalletFileReadError::Io::path: alloc::string::String
+pub oraclemcp_db::WalletFileReadError::Io::source: std::io::error::Error
+pub oraclemcp_db::WalletFileReadError::NotRegularFile
+pub oraclemcp_db::WalletFileReadError::NotRegularFile::path: alloc::string::String
+pub oraclemcp_db::WalletFileReadError::TooLarge
+pub oraclemcp_db::WalletFileReadError::TooLarge::maximum_bytes: usize
+impl core::error::Error for oraclemcp_db::WalletFileReadError
+pub fn oraclemcp_db::WalletFileReadError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for oraclemcp_db::WalletFileReadError
+pub fn oraclemcp_db::WalletFileReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_db::WalletFileReadError
+pub fn oraclemcp_db::WalletFileReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_db::WalletFileReadError
+impl core::marker::Send for oraclemcp_db::WalletFileReadError
+impl core::marker::Sync for oraclemcp_db::WalletFileReadError
+impl core::marker::Unpin for oraclemcp_db::WalletFileReadError
+impl core::marker::UnsafeUnpin for oraclemcp_db::WalletFileReadError
+impl !core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::WalletFileReadError
+impl !core::panic::unwind_safe::UnwindSafe for oraclemcp_db::WalletFileReadError
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::WalletFileReadError where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::WalletFileReadError where T: 'a
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::WalletFileReadError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::WalletFileReadError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::WalletFileReadError where U: core::convert::From<T>
+pub fn oraclemcp_db::WalletFileReadError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::WalletFileReadError where U: core::convert::Into<T>
+pub type oraclemcp_db::WalletFileReadError::Error = core::convert::Infallible
+pub fn oraclemcp_db::WalletFileReadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::WalletFileReadError where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::WalletFileReadError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::WalletFileReadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for oraclemcp_db::WalletFileReadError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileReadError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::WalletFileReadError
+impl<T> core::any::Any for oraclemcp_db::WalletFileReadError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileReadError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::WalletFileReadError where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileReadError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::WalletFileReadError where T: ?core::marker::Sized
+pub fn oraclemcp_db::WalletFileReadError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for oraclemcp_db::WalletFileReadError
+pub fn oraclemcp_db::WalletFileReadError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::WalletFileReadError
+impl<T> tracing::instrument::Instrument for oraclemcp_db::WalletFileReadError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::WalletFileReadError
+impl<T> typenum::type_operators::Same for oraclemcp_db::WalletFileReadError
+pub type oraclemcp_db::WalletFileReadError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::WalletFileReadError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::WalletFileReadError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::WalletFileReadError::vzip(self) -> V
 pub enum oraclemcp_db::WalletResolveError
 pub oraclemcp_db::WalletResolveError::FileMissing
 pub oraclemcp_db::WalletResolveError::Io
@@ -10284,6 +10413,7 @@ impl oraclemcp_db::VerifiedPlanTable
 pub fn oraclemcp_db::VerifiedPlanTable::name(&self) -> &str
 pub const fn oraclemcp_db::VerifiedPlanTable::object_id(&self) -> i64
 pub fn oraclemcp_db::VerifiedPlanTable::owner(&self) -> &str
+pub const fn oraclemcp_db::VerifiedPlanTable::verification_observation(&self) -> core::option::Option<&'static str>
 impl core::clone::Clone for oraclemcp_db::VerifiedPlanTable
 pub fn oraclemcp_db::VerifiedPlanTable::clone(&self) -> oraclemcp_db::VerifiedPlanTable
 impl core::cmp::Eq for oraclemcp_db::VerifiedPlanTable
@@ -10854,6 +10984,7 @@ pub fn oraclemcp_db::classify_wallet(&std::path::Path, &[alloc::string::String],
 pub fn oraclemcp_db::compare_schemas(&oraclemcp_db::SchemaSnapshot, &oraclemcp_db::SchemaSnapshot) -> core::result::Result<oraclemcp_db::SchemaDiff, oraclemcp_db::SchemaDiffError>
 pub async fn oraclemcp_db::compile_errors(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, core::option::Option<&str>, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub fn oraclemcp_db::compile_object_statements(&str, &str, &str, bool, bool) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
+pub const fn oraclemcp_db::connect_hint_for(oraclemcp_db::ConnectPhaseReached) -> &'static str
 pub async fn oraclemcp_db::connect_oracle(&asupersync::cx::cx::Cx, oraclemcp_db::OracleConnectOptions) -> core::result::Result<alloc::boxed::Box<dyn oraclemcp_db::OracleConnection>, oraclemcp_db::DbError>
 pub const fn oraclemcp_db::connection_backend_registry() -> &'static [oraclemcp_db::OracleBackendRegistration]
 pub fn oraclemcp_db::cursor_to_offset(core::option::Option<&str>) -> usize
@@ -10927,6 +11058,7 @@ pub async fn oraclemcp_db::read_query(&asupersync::cx::cx::Cx, &dyn oraclemcp_db
 pub async fn oraclemcp_db::read_query_as_of(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions, &oraclemcp_db::AsOf) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_query_named(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[(alloc::string::String, oraclemcp_db::OracleBind)], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_session_security_context(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::OracleSessionSecurityContext, oraclemcp_db::DbError>
+pub fn oraclemcp_db::read_wallet_file_bounded(&std::path::Path) -> core::result::Result<alloc::vec::Vec<u8>, oraclemcp_db::WalletFileReadError>
 pub fn oraclemcp_db::recompile_with_plscope_statements(&str, &str, &str) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, oraclemcp_db::DbError>
 pub const fn oraclemcp_db::redacted_named_oracle_binds(&[(alloc::string::String, oraclemcp_db::OracleBind)]) -> oraclemcp_db::RedactedNamedOracleBinds<'_>
 pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) -> oraclemcp_db::RedactedOracleBinds<'_>
@@ -10957,5 +11089,5 @@ pub fn oraclemcp_db::tablespace_usage_sql() -> (&'static str, alloc::string::Str
 pub fn oraclemcp_db::top_sql_query(oraclemcp_db::DiagnosticsSource, oraclemcp_db::TopSqlMetric, u32, core::option::Option<u8>) -> core::result::Result<(oraclemcp_db::CatalogQueryId, alloc::vec::Vec<oraclemcp_db::OracleBind>), oraclemcp_error::ErrorEnvelope>
 pub fn oraclemcp_db::unusable_indexes_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::validate_adb_connect_string(&str) -> core::result::Result<oraclemcp_db::AdbConnectInfo, oraclemcp_db::OciError>
-pub fn oraclemcp_db::wallet_certificate_validity(&std::path::Path, core::option::Option<&str>) -> alloc::vec::Vec<oraclemcp_db::WalletCertValidity>
+pub fn oraclemcp_db::wallet_certificate_validity(&std::path::Path, core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::WalletCertValidity>, oraclemcp_db::WalletFileReadError>
 pub type oraclemcp_db::IamTokenFuture<'a> = core::pin::Pin<alloc::boxed::Box<(dyn core::future::future::Future<Output = core::result::Result<alloc::string::String, oraclemcp_db::IamTokenRefreshError>> + core::marker::Send + 'a)>>
