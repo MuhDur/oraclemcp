@@ -21,8 +21,14 @@ import sys
 
 real = json.load(open(sys.argv[1], encoding="utf-8"))
 fuzz = [job for job in real["jobs"] if job["workflow_file"] == "fuzz.yml" and job["tier"] == "scheduled"]
-if len(fuzz) != 8:
-    raise SystemExit(f"expected the 8 fuzz.yml tier-B jobs in docs/ci_taxonomy.json, found {len(fuzz)}")
+if len(fuzz) != 11:
+    raise SystemExit(f"expected the 11 fuzz.yml tier-B jobs in docs/ci_taxonomy.json, found {len(fuzz)}")
+api_lock = [
+    job for job in real["jobs"]
+    if job["workflow_file"] == "ci.yml" and job["job_id"] == "api-lock"
+]
+if len(api_lock) != 1:
+    raise SystemExit(f"expected exactly one api-lock job in docs/ci_taxonomy.json, found {len(api_lock)}")
 required = {
     "check_name": "required gate",
     "tier": "required",
@@ -155,8 +161,8 @@ run_case() {
 }
 
 run_case scheduled_red_exits_nonzero 1 1 0
-run_case scheduled_setup_failure_exits_nonzero 1 8 0
-run_case scheduled_unknown_exits_nonzero 1 8 0
+run_case scheduled_setup_failure_exits_nonzero 1 11 0
+run_case scheduled_unknown_exits_nonzero 1 11 0
 run_case scheduled_green_required_green_exits_zero 0 0 0
 run_case driver_advisory_red_still_exits_zero 0 0 1
 
@@ -165,7 +171,7 @@ run_case driver_advisory_red_still_exits_zero 0 0 1
 jq -e '[.lanes[] | select(.state == "not_green" and .conclusion == "failure"
   and .run_url == "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781")] | length == 8' \
   "$workdir/scheduled_setup_failure_exits_nonzero.json" >/dev/null || {
-  echo "ci-heartbeat test: the replayed setup failure did not record all 8 fuzz jobs red" >&2
+  echo "ci-heartbeat test: the recorded run should still identify its 8 historical fuzz jobs as red" >&2
   failures=$((failures + 1))
 }
 jq -e '.watched_red == true and .blocked == false and

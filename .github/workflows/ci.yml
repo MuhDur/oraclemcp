@@ -668,14 +668,14 @@ jobs:
   #     by the version bump.
   # Both tools render rustdoc JSON, so they run on the pinned nightly. The tools
   # are not workspace dependencies (installed as standalone binaries), so they do
-  # not enter the dependency graph or affect cargo deny.
+  # not enter the dependency graph or affect cargo deny. semver-checks uses the
+  # previous in-repository release tag and its committed lockfile, independent of
+  # registry yanks; fetch full history so the baseline tag is available.
   api-lock:
     name: public-API lock (cargo public-api + semver-checks)
     # Advisory lane: runs on pull requests, not direct pushes to main, so the
     # main badge reflects the required lanes only. It still catches public-API
-    # drift pre-merge on every PR. (Its current red is a tooling artifact: the
-    # published v0.10.0 baseline transitively pins the now-yanked oracledb
-    # =0.9.1, which cargo-semver-checks cannot resolve — not a real API break.)
+    # drift pre-merge on every PR.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     # The 0.11.0 candidate intentionally exposes its public additions relative
@@ -688,6 +688,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
@@ -700,11 +701,10 @@ jobs:
       - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
         with:
           tool: cargo-public-api,cargo-semver-checks
+      # Prove the yanked historical lock and planted API break cases.
+      - run: bash scripts/oraclemcp_api_lock.sh --selftest
       # Exact public-API surface lock against the committed baselines.
       - run: bash scripts/oraclemcp_api_lock.sh
-      # SemVer contract for each locked crate (working tree vs last published
-      # release). Skipped automatically for a crate with no published baseline.
-      - run: cargo semver-checks check-release -p oraclemcp-error -p oraclemcp-guard -p oraclemcp-db -p oraclemcp-verifier
 
   supply-chain:
     name: cargo deny (advisories, licenses, bans, sources)
