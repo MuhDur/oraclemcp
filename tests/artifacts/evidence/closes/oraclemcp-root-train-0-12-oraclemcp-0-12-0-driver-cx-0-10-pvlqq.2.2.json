@@ -1,0 +1,80 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T03:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.2.2",
+  "scope": {
+    "summary": "CI honest and lightweight: permanently red lanes removed or moved to tier C with each signal re-homed (coverage-ratchet retired under R34; release-metadata in release.yml preflight + tier A version-sync; thin-db covered by the tier-A pinned-nightly build); fail-closed lane verdicts; fixed a fail-open where ci.yml and release.yml shared check names so a failed per-push pinned-nightly build never blocked ci_green (5b5b93f7); orphaned mutation/coverage files removed under R35 (8f020391).",
+    "in_scope": [
+      ".github/workflows/ci.yml",
+      ".github/workflows/kani-safety.yml",
+      ".github/workflows/loom.yml",
+      ".github/workflows/release.yml",
+      "crates/oraclemcp-core/ci_taxonomy.json",
+      "crates/oraclemcp-core/src/http/tests_ci_lanes.rs",
+      "docs/ci_taxonomy.json",
+      "docs/operations.md",
+      "docs/release-checklist.md",
+      "docs/severity-policy.md",
+      "docs/test-tiers.md",
+      "docs/threat-model.md",
+      "docs/toolchain.md",
+      "scripts/ci_taxonomy.py",
+      "scripts/e2e/COVERAGE.md",
+      "scripts/entry_trace_contract.json",
+      "tests/ci_taxonomy/advisory-green-required-red-run.json",
+      "tests/ci_taxonomy/cancelled-required-run.json",
+      "tests/ci_taxonomy/crash-startup-failure-run.json",
+      "tests/ci_taxonomy/setup-job-failure-run.json",
+      "tests/ci_taxonomy/skipped-required-run.json",
+      "tests/ci_taxonomy/unexpanded-expression-run.json",
+      "tests/conformance/PROVENANCE.md"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "c89f05ec3ebc233eedfa07285177a339e2d2a32d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator Linux batch gate at d46d8c03 (clean worktree, lease): fmt/clippy/deny OK; 3447 passed, 1 failed (unrelated ImpactBindingV1 proptest counterexample tracked as .16.12)."
+      },
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "workspace gate green except the unrelated .16.12 proptest; taxonomy/workflow lints included."
+      },
+      {
+        "name": "verdict fixtures (implementer)",
+        "kind": "cli",
+        "trace": "ten verdict fixtures give their expected results; five deliberately broken script variants each caught."
+      },
+      {
+        "name": "sec second-agent review (orchestrator)",
+        "kind": "cli",
+        "trace": "Kani moves from per-push to per release candidate (tier C): guard/audit invariants still gate every release; per-push coverage stays in tier-A tests; consistent with the operator ruling for honest, lightweight CI."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

@@ -1,0 +1,70 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T03:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.2",
+  "scope": {
+    "summary": "Rig owns XE18, XE21 and FREE 23ai lab lanes (digest-pinned lanes.toml; up creates/starts/adopts, down stops only rig-labelled containers; rig-owned oraclemcp-free23-rel on :1523; passwords only via env; tier_c.sh per-SHA summary) (73eb33f0, 9341d606, ddd17cf2).",
+    "in_scope": [
+      "crates/oraclemcp/tests/e2e_harness.rs",
+      "scripts/e2e/fleet.sh",
+      "scripts/e2e/run_all.sh",
+      "scripts/e2e/w4/fixture.py",
+      "scripts/e2e/w4/rig.toml",
+      "scripts/rig/bootstrap/01_fixture_principals.sql",
+      "scripts/rig/failure_injection_lanes.py",
+      "scripts/rig/failure_recovery_e2e.py",
+      "scripts/rig/lanes.toml",
+      "scripts/rig/oracle_l1.sh",
+      "scripts/rig/oracle_l2_sample_schemas.sh",
+      "scripts/rig/rig.sh",
+      "scripts/rig/rig_doctor.sh",
+      "scripts/rig/rig_idle_kill.sh",
+      "scripts/rig/tier_c.sh",
+      "scripts/rig/tool_surface_sweep.py",
+      "scripts/rig/verify_logoff_lane.sh",
+      "scripts/rig/verify_vpd_fixture.sh"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "c89f05ec3ebc233eedfa07285177a339e2d2a32d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator Linux batch gate at d46d8c03 (clean worktree, lease): fmt/clippy/deny OK; 3447 passed, 1 failed (unrelated ImpactBindingV1 proptest counterexample tracked as .16.12)."
+      },
+      {
+        "name": "rig tests in gate",
+        "kind": "cli",
+        "trace": "rig_l1_dry_run_lists_owned_lanes_with_digests ok; e2e_harness suite green in the gate."
+      },
+      {
+        "name": "live (implementer)",
+        "kind": "cli",
+        "trace": "rig.sh doctor 17 checks 0 refusals with real DB versions 18/21/23; tier_c.sh run on FREE 23ai; no passwords in logs; containers the rig does not own left running."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

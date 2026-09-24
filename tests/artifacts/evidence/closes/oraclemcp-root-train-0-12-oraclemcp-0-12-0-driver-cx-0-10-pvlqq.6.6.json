@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T03:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.6",
+  "scope": {
+    "summary": "Over-refusals fixed for #30 (hidden system virtual columns: extended stats and builtin function-based-index columns admitted; user-function FBI refused) and #32 (JSON dot paths on IS JSON-constrained columns and object attributes admitted; disabled/absent JSON constraint and object methods refused) (b398f77b, 8c68a1be).",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/live_catalog_resolver.rs",
+      "crates/oraclemcp-db/tests/privilege_matrix_live.rs",
+      "crates/oraclemcp-guard/api/oraclemcp-guard.txt",
+      "crates/oraclemcp-guard/src/classifier.rs",
+      "scripts/e2e/w4/cases/over_refusals.json"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "c89f05ec3ebc233eedfa07285177a339e2d2a32d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator Linux batch gate at d46d8c03 (clean worktree, lease): fmt/clippy/deny OK; 3447 passed, 1 failed (unrelated ImpactBindingV1 proptest counterexample tracked as .16.12)."
+      },
+      {
+        "name": "live W4 #30/#32",
+        "kind": "cli",
+        "trace": "Orchestrator live W4 at c89f05ec (release build, clean worktree), external client on free23 over stdio AND http: 322 rows, 130 pass. w4_query_issue30_fbi_builtin_admitted, issue30_extended_stats_admitted, issue30_fbi_user_function_refused, issue32_json_dot_path, issue32_object_attribute, issue32_clob_is_json_dot_path, issue32_disabled_json_constraint_refused, issue32_json_without_constraint_refused, issue32_object_method_refused: pass on both transports (admitted shapes admitted, unsafe neighbours refused)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
