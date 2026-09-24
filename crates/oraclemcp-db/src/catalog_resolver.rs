@@ -595,10 +595,13 @@ impl FgaClosure {
 /// principal; any other failure (cancellation, lost session, adapter error)
 /// stays unknown evidence and refuses.
 fn fga_catalog_failure(error: &DbError) -> FgaClosure {
-    let DbError::Query(message) = error else {
-        return FgaClosure::Unknown {
-            reason: "fga_catalog_query_failed",
-        };
+    let message = match error {
+        DbError::Query(message) | DbError::ServerQuery(message) => message,
+        _ => {
+            return FgaClosure::Unknown {
+                reason: "fga_catalog_query_failed",
+            };
+        }
     };
     if oraclemcp_error::parse_ora_code(message).is_some_and(|code| matches!(code, 942 | 1031)) {
         FgaClosure::Unavailable
@@ -3495,32 +3498,38 @@ mod tests {
     fn fga_catalog_invisible_is_unavailable() {
         run_with_cx(|cx| async move {
             for code in ["ORA-00942", "ORA-01031"] {
-                let message = format!("{code}: table or view does not exist");
-                let proof_fails =
-                    ScriptedRows::results([Ok(Vec::new()), Err(DbError::Query(message.clone()))]);
-                assert_eq!(
-                    fga_closure(
-                        &cx,
-                        &proof_fails,
-                        &[table_object()],
-                        FgaStatementKind::Select
-                    )
-                    .await,
-                    FgaClosure::Unavailable,
-                    "{code} on the catalog proof"
-                );
-                let policies_fail = ScriptedRows::results([Err(DbError::Query(message))]);
-                assert_eq!(
-                    fga_closure(
-                        &cx,
-                        &policies_fail,
-                        &[table_object()],
-                        FgaStatementKind::Select
-                    )
-                    .await,
-                    FgaClosure::Unavailable,
-                    "{code} on the policy rows"
-                );
+                for server_owned in [false, true] {
+                    let message = format!("{code}: table or view does not exist");
+                    let error = if server_owned {
+                        DbError::ServerQuery(message.clone())
+                    } else {
+                        DbError::Query(message.clone())
+                    };
+                    let proof_fails = ScriptedRows::results([Ok(Vec::new()), Err(error.clone())]);
+                    assert_eq!(
+                        fga_closure(
+                            &cx,
+                            &proof_fails,
+                            &[table_object()],
+                            FgaStatementKind::Select
+                        )
+                        .await,
+                        FgaClosure::Unavailable,
+                        "{code} on the catalog proof, server_owned={server_owned}"
+                    );
+                    let policies_fail = ScriptedRows::results([Err(error)]);
+                    assert_eq!(
+                        fga_closure(
+                            &cx,
+                            &policies_fail,
+                            &[table_object()],
+                            FgaStatementKind::Select
+                        )
+                        .await,
+                        FgaClosure::Unavailable,
+                        "{code} on the policy rows, server_owned={server_owned}"
+                    );
+                }
             }
         });
     }

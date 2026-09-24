@@ -13060,10 +13060,68 @@ mod action_envelope;
 /// licensed AWR path is opt-in and gated (proven in awr.rs unit tests).
 mod top_queries {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     struct CancelledLicenseProbeMock {
         queries: Arc<AtomicUsize>,
+    }
+
+    struct MissingHistoricalCatalogMock {
+        queries: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for MissingHistoricalCatalogMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..Default::default()
+            })
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            self.queries
+                .lock()
+                .expect("historical probe query log")
+                .push(sql.to_owned());
+            Err(DbError::Query(
+                "ORA-00942: table or view does not exist".to_owned(),
+            ))
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait(?Send)]
@@ -13187,6 +13245,31 @@ mod top_queries {
             .expect_err("quarantined pinned session cannot be reused");
         assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
         assert_eq!(queries.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn guarded_ora_00942_historical_probes_degrade_without_internal_error() {
+        let queries = Arc::new(Mutex::new(Vec::new()));
+        let dispatcher = OracleDispatcher::new_with_profile(
+            Box::new(MissingHistoricalCatalogMock {
+                queries: Arc::clone(&queries),
+            }),
+            Some("dev".to_owned()),
+        );
+
+        let error = dispatcher
+            .dispatch("oracle_top_queries", json!({ "historical": true }))
+            .expect_err("missing licensed and Statspack catalogs report unavailable history");
+
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{error:?}");
+        let queries = queries.lock().expect("historical probe query log");
+        assert_eq!(queries.len(), 2, "both guarded probes should degrade");
+        assert!(queries[0].to_ascii_lowercase().contains("v$parameter"));
+        assert!(
+            queries[1]
+                .to_ascii_lowercase()
+                .contains("perfstat.stats$snapshot")
+        );
     }
 }
 

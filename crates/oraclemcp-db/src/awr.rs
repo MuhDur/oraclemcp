@@ -97,8 +97,11 @@ pub async fn detect_statspack(
 /// that the catalog object is absent or unreadable by this principal. Arbitrary
 /// SQL/adapter failures are not evidence that the feature is unavailable.
 fn is_probe_absence_or_privilege(error: &crate::error::DbError) -> bool {
-    let crate::error::DbError::Query(message) = error else {
-        return false;
+    let message = match error {
+        crate::error::DbError::Query(message) | crate::error::DbError::ServerQuery(message) => {
+            message
+        }
+        _ => return false,
     };
     parse_ora_code(message).is_some_and(|code| matches!(code, 942 | 1031))
 }
