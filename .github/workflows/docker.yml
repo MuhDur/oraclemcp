@@ -103,6 +103,9 @@ jobs:
         env:
           VERSION: ${{ steps.release.outputs.version }}
           VARIANT: ${{ steps.release.outputs.variant }}
+          # Re-validates an already-published release: today's tier-B lane
+          # state says nothing about that tag, so it must not block a rollback.
+          RELEASE_PREFLIGHT_EXISTING_RELEASE: "1"
         run: |
           set -euo pipefail
           tag="refs/tags/v$VERSION"

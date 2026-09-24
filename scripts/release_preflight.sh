@@ -94,16 +94,46 @@ check_driver_registry() {
   fi
 }
 
+# Plan §7 tier B (bead .2.1): a red or unknown scheduled lane blocks a tag.
+# The heartbeat reads the real GitHub Actions state; any scheduled server lane
+# it lists in `scheduled_not_green` refuses the release, and a heartbeat that
+# could not produce a snapshot refuses too (unknown is not green).
+check_scheduled_lanes() {
+  local snapshot status=0
+  need jq
+  snapshot="$(mktemp)"
+  CI_HEARTBEAT_OUTPUT="$snapshot" bash "$ROOT/scripts/ci_heartbeat.sh" --no-driver --quiet \
+    >/dev/null || status=$?
+  if [ "$status" -gt 1 ] || ! jq -e '.scheduled_not_green | type == "array"' "$snapshot" >/dev/null 2>&1; then
+    rm -f "$snapshot"
+    fail "could not read scheduled lane state from scripts/ci_heartbeat.sh (exit $status); a tag needs every tier-B lane green"
+  fi
+  if jq -e '.scheduled_not_green | length > 0' "$snapshot" >/dev/null; then
+    echo "release-preflight: scheduled (tier B) lanes are not green:" >&2
+    jq -r '.lanes[] | select(.tier == "scheduled" and .state != "success") |
+      "  \(.check_name) -> \(.conclusion // .state) -> expected success (\(.run_url // "no run observed"))"' \
+      "$snapshot" >&2
+    rm -f "$snapshot"
+    fail "a red or unknown scheduled lane blocks the release tag"
+  fi
+  rm -f "$snapshot"
+  echo "release-preflight: scheduled lanes green"
+}
+
 need python3
 validate_registry_limits
 
 mode="${1:-}"
-[ "$#" -le 1 ] || fail "usage: scripts/release_preflight.sh [--check-driver-registry]"
+[ "$#" -le 1 ] || fail "usage: scripts/release_preflight.sh [--check-driver-registry|--check-scheduled-lanes]"
 case "$mode" in
   --check-driver-registry)
     need "$curl_bin"
     check_driver_registry
     echo "release-preflight: driver registry contract OK"
+    exit 0
+    ;;
+  --check-scheduled-lanes)
+    check_scheduled_lanes
     exit 0
     ;;
   "") ;;
@@ -174,6 +204,14 @@ if [ -n "$tag" ]; then
     fail "tag '$tag' is not a supported semver tag (expected vX.Y.Z or vX.Y.Z-prerelease)"
   [ "$tag" = "v$version" ] ||
     fail "tag '$tag' does not match workspace version '$version' (expected v$version)"
+  # docker.yml / publish-mcp.yml re-validate an already-published release; the
+  # current tier-B state says nothing about that tag, so only a new tag
+  # (release.yml) is gated on it.
+  if [ "${RELEASE_PREFLIGHT_EXISTING_RELEASE:-0}" = "1" ]; then
+    echo "release-preflight: existing release $tag; tier-B scheduled lanes not re-checked"
+  else
+    check_scheduled_lanes
+  fi
 fi
 
 server_version="$(jq -r '.version' server.json)"

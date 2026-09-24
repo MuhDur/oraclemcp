@@ -25,26 +25,28 @@
 #   - Scheduled server workflows are resolved to exact job names from the
 #     generated taxonomy. A workflow-level success is never copied across a
 #     matrix or onto a job that did not run for the observed event.
-#   - The exit code IS the notification path for the REQUIRED lanes: a non-zero
-#     exit turns THIS script's own scheduled workflow run red, which rides
-#     GitHub's existing scheduled-workflow-failure notification — no bespoke
-#     webhook, no new secret, no new always-on service (AGENTS.md: no surprise
-#     costs, don't invent a heavyweight service). Local/cron use gets the same
-#     signal via the process exit code and the stderr banner.
-#   - Scheduled/nightly lanes are ADVISORY: recorded in the snapshot for
-#     visibility but they do NOT drive the exit code. Nightlies are
-#     infra-dependent and intermittently red (the driver Live nightly, e.g.,
-#     self-skips its operator-only wallet secrets), and each already rides its
-#     own repo's scheduled-workflow-failure notification. Letting a flaky nightly
-#     fail this heartbeat would perpetually redden the repo and train the operator
-#     to ignore it — the opposite of this bead's operator-trust goal.
+#   - The exit code IS the notification path for this repo's REQUIRED (tier A)
+#     and SCHEDULED (tier B) lanes: a non-zero exit turns THIS script's own
+#     scheduled workflow run red, which rides GitHub's existing
+#     scheduled-workflow-failure notification — no bespoke webhook, no new
+#     secret, no new always-on service (AGENTS.md: no surprise costs, don't
+#     invent a heavyweight service). Local/cron use gets the same signal via
+#     the process exit code and the stderr banner.
+#   - Tier-B lanes gate too (plan §7, bead .2.1): the Fuzz Campaign failed at
+#     "Set up job" every night for six days while each run's own failure
+#     notification went unnoticed. A red or unknown scheduled server lane is
+#     listed in `scheduled_not_green`, fails this heartbeat, and makes
+#     scripts/release_preflight.sh refuse a release tag.
+#   - The sibling driver repo's lanes stay ADVISORY (R1): recorded in the
+#     snapshot for visibility, never part of the exit code.
 #
 # Usage:
 #   scripts/ci_heartbeat.sh [--out PATH] [--no-driver] [--quiet]
 #
-# Exit codes: 0 = every REQUIRED lane confirmed green (advisory scheduled reds
-# or unknowns are reported honestly but never fail the heartbeat); 1 = at least
-# one required lane is red or unknown (see the printed report for which); 2 =
+# Exit codes: 0 = every required and scheduled server lane confirmed green
+# (driver advisory reds or unknowns are reported honestly but never fail the
+# heartbeat); 1 = at least one required or scheduled server lane is red or
+# unknown (see the printed report and `scheduled_not_green`); 2 =
 # the harness itself could not run (missing `gh`/`jq`/`python3`, or the local
 # taxonomy is broken).
 set -euo pipefail
@@ -84,7 +86,7 @@ while [ $# -gt 0 ]; do
     --no-driver) INCLUDE_DRIVER=0; shift ;;
     --quiet) QUIET=1; shift ;;
     -h|--help)
-      sed -n '2,33p' "$0"
+      sed -n '2,39p' "$0"
       exit 0
       ;;
     *) echo "ci-heartbeat: unknown argument: $1" >&2; exit 2 ;;
@@ -113,10 +115,13 @@ fi
 tmp_lanes="$(mktemp)"
 trap 'rm -f "$tmp_lanes"' EXIT
 
-# Required lanes drive this script's exit code and preserve the original
-# ci-heartbeat/v1 `blocked` / `any_*` semantics consumed by existing readers.
+# Required and scheduled server lanes drive this script's exit code; `blocked`
+# / `any_*` (the ci-heartbeat/v1 fields existing readers consume) cover both,
+# while `required_*` and `scheduled_*` name which tier caused it.
 required_red=0
 required_unknown=0
+scheduled_red=0
+scheduled_unknown=0
 # Watched lanes include advisory scheduled lanes. These fields prevent the
 # report from saying the watched set is green when advisory evidence is red,
 # missing, or otherwise unknown.
@@ -125,19 +130,21 @@ watched_unknown=0
 declare -a report_errors=()
 
 note_lane_state() {
-  # state notify_required
+  # state gate: 0 = advisory (watched only), 1 = required, 2 = scheduled
   case "$1" in
     not_green)
       watched_red=1
-      if [ "$2" = "1" ]; then
-        required_red=1
-      fi
+      case "$2" in
+        1) required_red=1 ;;
+        2) scheduled_red=1 ;;
+      esac
       ;;
     unknown)
       watched_unknown=1
-      if [ "$2" = "1" ]; then
-        required_unknown=1
-      fi
+      case "$2" in
+        1) required_unknown=1 ;;
+        2) scheduled_unknown=1 ;;
+      esac
       ;;
   esac
 }
@@ -251,7 +258,7 @@ record_unknown_server_scheduled_jobs() {
     record_job_lane \
       "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
       "schedule" "unknown" "" "" "" ""
-    note_lane_state "unknown" 0
+    note_lane_state "unknown" 2
   done < <(
     jq -r --arg workflow_file "$workflow_file" \
       '.jobs[] | select(.tier == "scheduled" and .workflow_file == $workflow_file) |
@@ -292,7 +299,7 @@ watch_server_scheduled_jobs() {
       record_job_lane \
         "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
         "schedule" "unknown" "" "" "" ""
-      note_lane_state "unknown" 0
+      note_lane_state "unknown" 2
       report_errors+=(
         "${SERVER_REPO} ${workflow_file}: expected one ${check_name} job, found ${count}"
       )
@@ -316,7 +323,7 @@ watch_server_scheduled_jobs() {
     record_job_lane \
       "$SERVER_REPO" "$check_name" "scheduled" "$workflow_file" "$job_id" \
       "schedule" "$state" "$conclusion" "$run_url" "$head_sha" "$completed_at"
-    note_lane_state "$state" 0
+    note_lane_state "$state" 2
   done < <(
     jq -r --arg workflow_file "$workflow_file" \
       '.jobs[] | select(.tier == "scheduled" and .workflow_file == $workflow_file) |
@@ -350,12 +357,8 @@ mapfile -t server_scheduled_files < <(
     '[.jobs[] | select(.tier == "scheduled") | .workflow_file] | unique | .[] | select(. != $self)' \
     "$TAXONOMY"
 )
-# Scheduled/nightly lanes are ADVISORY: still recorded in the snapshot
-# so the operator can see them, but a red nightly does NOT fail this heartbeat.
-# Nightlies are infra-dependent and intermittently red (e.g. the driver Live
-# nightly needs operator-only wallet secrets), and each already rides its OWN
-# repo's scheduled-workflow-failure notification. Only the required gates hard-fail
-# this heartbeat, so a flaky/pre-fix nightly never falsely reddens the repo.
+# Tier-B server lanes gate this heartbeat: a red or unknown scheduled job is
+# listed in `scheduled_not_green` and fails the run (see the header).
 for file in "${server_scheduled_files[@]}"; do
   watch_server_scheduled_jobs "$file"
 done
@@ -388,6 +391,25 @@ required_blocked=false
 if [ "$required_red" = "1" ] || [ "$required_unknown" = "1" ]; then
   required_blocked=true
 fi
+scheduled_blocked=false
+if [ "$scheduled_red" = "1" ] || [ "$scheduled_unknown" = "1" ]; then
+  scheduled_blocked=true
+fi
+blocked=false
+if [ "$required_blocked" = "true" ] || [ "$scheduled_blocked" = "true" ]; then
+  blocked=true
+fi
+any_red=false
+if [ "$required_red" = "1" ] || [ "$scheduled_red" = "1" ]; then
+  any_red=true
+fi
+any_unknown=false
+if [ "$required_unknown" = "1" ] || [ "$scheduled_unknown" = "1" ]; then
+  any_unknown=true
+fi
+scheduled_not_green="$(jq -c --arg repo "$SERVER_REPO" \
+  '[.[] | select(.repo == $repo and .tier == "scheduled" and .state != "success") | .check_name] | unique' \
+  <<<"$lanes_json")"
 watched_blocked=false
 if [ "$watched_red" = "1" ] || [ "$watched_unknown" = "1" ]; then
   watched_blocked=true
@@ -398,12 +420,14 @@ errors_json="$(printf '%s\n' "${report_errors[@]+"${report_errors[@]}"}" | jq -R
 report="$(jq -n \
   --arg schema "ci-heartbeat/v1" \
   --arg generated_at "$now_utc" \
-  --argjson blocked "$required_blocked" \
-  --argjson any_red "$([ "$required_red" = "1" ] && echo true || echo false)" \
-  --argjson any_unknown "$([ "$required_unknown" = "1" ] && echo true || echo false)" \
+  --argjson blocked "$blocked" \
+  --argjson any_red "$any_red" \
+  --argjson any_unknown "$any_unknown" \
   --argjson required_blocked "$required_blocked" \
   --argjson required_red "$([ "$required_red" = "1" ] && echo true || echo false)" \
   --argjson required_unknown "$([ "$required_unknown" = "1" ] && echo true || echo false)" \
+  --argjson scheduled_blocked "$scheduled_blocked" \
+  --argjson scheduled_not_green "$scheduled_not_green" \
   --argjson watched_blocked "$watched_blocked" \
   --argjson watched_red "$([ "$watched_red" = "1" ] && echo true || echo false)" \
   --argjson watched_unknown "$([ "$watched_unknown" = "1" ] && echo true || echo false)" \
@@ -418,6 +442,8 @@ report="$(jq -n \
     required_blocked: $required_blocked,
     required_red: $required_red,
     required_unknown: $required_unknown,
+    scheduled_blocked: $scheduled_blocked,
+    scheduled_not_green: $scheduled_not_green,
     watched_blocked: $watched_blocked,
     watched_red: $watched_red,
     watched_unknown: $watched_unknown,
@@ -435,10 +461,11 @@ if [ "$QUIET" != "1" ]; then
   printf '%s\n' "$report"
 fi
 
-if [ "$required_blocked" = "true" ]; then
+if [ "$blocked" = "true" ]; then
   {
-    echo "::error::ci-heartbeat: at least one required lane is red or unknown"
-    echo "ci-heartbeat: BLOCKED — a required lane is red or unknown (snapshot: $OUT_PATH)"
+    echo "::error::ci-heartbeat: at least one required or scheduled lane is red or unknown"
+    echo "ci-heartbeat: BLOCKED — a required or scheduled lane is red or unknown (snapshot: $OUT_PATH)"
+    jq -r '.[] | "  scheduled_not_green: \(.)"' <<<"$scheduled_not_green"
     jq -r '.lanes[] | select(.state != "success") | "  \(.state)\t\(.repo)\t\(.check_name)\t\(.run_url // "no run observed")"' <<<"$report"
     for error in "${report_errors[@]+"${report_errors[@]}"}"; do
       echo "  error: $error"
@@ -450,8 +477,8 @@ fi
 if [ "$watched_blocked" = "true" ]; then
   if [ "$QUIET" != "1" ]; then
     {
-      echo "::warning::ci-heartbeat: required lanes are green, but an advisory watched lane is red or unknown"
-      echo "ci-heartbeat: ADVISORY — scheduled/advisory lane evidence is red or unknown (snapshot: $OUT_PATH)"
+      echo "::warning::ci-heartbeat: required and scheduled lanes are green, but an advisory watched lane is red or unknown"
+      echo "ci-heartbeat: ADVISORY — driver advisory lane evidence is red or unknown (snapshot: $OUT_PATH)"
       jq -r '.lanes[] | select(.state != "success") | "  \(.state)\t\(.repo)\t\(.check_name)\t\(.run_url // "no run observed")"' <<<"$report"
       for error in "${report_errors[@]+"${report_errors[@]}"}"; do
         echo "  error: $error"

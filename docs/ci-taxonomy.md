@@ -109,13 +109,21 @@ almost always a push superseding an in-flight one under this repo's
 would itself be a false alarm. A lane the script cannot observe (API failure,
 no completed run yet) renders `unknown`, never a fabricated `success`.
 
-The heartbeat snapshot separates gate posture from watched-lane posture.
-`blocked`, `any_red`, and `any_unknown` retain the required-lane exit-code
-contract: a required red or unknown lane fails the heartbeat job. The
-`watched_blocked`, `watched_red`, and `watched_unknown` fields cover every
-watched lane, including advisory scheduled lanes such as the fuzz shards. Those advisory lanes do not fail the heartbeat job, but a missing or red
-advisory lane must still render as red or unknown in the snapshot and warning
-output, never as "all watched lanes are green."
+The heartbeat gates on this repo's required (tier A) **and** scheduled
+(tier B) lanes. A scheduled server job that is red or unknown on its latest
+completed scheduled run is listed in `scheduled_not_green`, named in the stderr
+banner, and makes the heartbeat exit non-zero: the Fuzz Campaign failed at
+"Set up job" every night for six days while its own failure notifications went
+unnoticed, and the old heartbeat, which gated only required lanes, exited 0.
+`blocked`, `any_red` and `any_unknown` cover both tiers; `required_blocked` and
+`scheduled_blocked` say which one caused it. The sibling driver repo's lanes
+stay advisory (R1): recorded as `driver_advisory` / `driver_scheduled`, counted
+in `watched_*`, never in the exit code. `scripts/release_preflight.sh` runs the
+same check when a new tag is cut and refuses it while any tier-B lane is not
+green, printing `lane -> found -> expected success`; the repair workflows
+(`docker.yml`, `publish-mcp.yml`) that re-validate an already-published release
+skip it. `scripts/test_ci_heartbeat.sh` replays the recorded 2026-09-23 failure
+and the other cases offline.
 
 `.github/workflows/ci-heartbeat.yml` drives it every 30 minutes
 (`workflow_dispatch` also works on demand). The script's exit code is the

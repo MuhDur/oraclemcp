@@ -61,6 +61,9 @@ jobs:
         env:
           RELEASE_TAG: v${{ steps.release.outputs.version }}
           RELEASE_REQUIRE_MAIN: "true"
+          # Re-validates an already-published release: today's tier-B lane
+          # state says nothing about that tag, so it must not block a repair.
+          RELEASE_PREFLIGHT_EXISTING_RELEASE: "1"
         run: bash scripts/release_preflight.sh
 
   publish:

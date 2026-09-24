@@ -8,9 +8,10 @@ name: CI Heartbeat
 # discontinued and off-limits, so its own gates are watched but never fail this
 # heartbeat). Scheduled server workflows are recorded per job (workflow-level
 # green is not spread over a matrix). The notifier fails THIS job when any of
-# oraclemcp's OWN required lanes is red, blocked, or unknown. A failing scheduled
-# run rides GitHub's own scheduled-workflow-failure notification, so a red
-# lane surfaces within one cycle instead of waiting for someone to look.
+# oraclemcp's OWN required or scheduled (tier B) lanes is red, blocked, or
+# unknown; that failing run rides GitHub's own scheduled-workflow-failure
+# notification, so a red lane surfaces within one cycle instead of waiting for
+# someone to look.
 # The dashboard does not depend on this runner's ephemeral artifact: a bounded
 # background poller in `oraclemcp serve` writes the same durable lane state on
 # the dashboard host, outside the request path.

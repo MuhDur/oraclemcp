@@ -1,0 +1,116 @@
+{
+  "jobs": [
+    {
+      "completed_at": "2026-09-23T08:49:19Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257726",
+      "name": "fuzz oraclemcp-audit / chain_verify shard 0/1",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "completed_at": "2026-09-23T08:49:18Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257921",
+      "name": "fuzz oraclemcp-auth / oauth_token_validate shard 0/1",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "completed_at": "2026-09-23T08:49:19Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257779",
+      "name": "fuzz oraclemcp-config / config_toml shard 0/1",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "completed_at": "2026-09-23T08:49:18Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257743",
+      "name": "fuzz oraclemcp-guard / alter_session_parse shard 0/4",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "completed_at": "2026-09-23T08:49:20Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257628",
+      "name": "fuzz oraclemcp-guard / alter_session_parse shard 1/4",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "completed_at": "2026-09-23T08:49:19Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257896",
+      "name": "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "completed_at": "2026-09-23T08:49:20Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257952",
+      "name": "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    },
+    {
+      "completed_at": "2026-09-23T08:49:19Z",
+      "conclusion": "failure",
+      "html_url": "https://github.com/MuhDur/oraclemcp/actions/runs/35839299781/job/107110257940",
+      "name": "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
+      "status": "completed",
+      "steps": [
+        {
+          "conclusion": "failure",
+          "name": "Set up job",
+          "status": "completed"
+        }
+      ]
+    }
+  ]
+}

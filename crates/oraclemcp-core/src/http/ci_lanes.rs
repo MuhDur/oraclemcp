@@ -749,12 +749,12 @@ pub(super) fn ci_lane_snapshot_from_heartbeat(
         .collect();
     let mut errors = document.errors;
     if document.blocked {
-        // Never re-derive the heartbeat's required-vs-advisory exit semantics
-        // here; carry its own verdict forward so a red or unknown REQUIRED
-        // lane (which this tile's scheduled/advisory catalog does not list)
-        // still keeps the summary posture away from green.
+        // Never re-derive the heartbeat's gating exit semantics here; carry
+        // its own verdict forward so a red or unknown REQUIRED lane (which
+        // this tile's scheduled/advisory catalog does not list) or scheduled
+        // lane still keeps the summary posture away from green.
         errors.push(
-            "the CI heartbeat reports a blocked lane: at least one required lane is red or unknown"
+            "the CI heartbeat reports a blocked lane: at least one required or scheduled lane is red or unknown"
                 .to_owned(),
         );
     }

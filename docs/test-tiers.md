@@ -42,8 +42,9 @@ workspace `cargo test`, golden/conformance suites, architecture/honesty/seam
 lints, `cargo deny`, the API/semver locks. Must be green to merge. This is
 plan §7's tier A (`ci_taxonomy` class `required`).
 
-**Tier 2 — Nightly / scheduled (advisory-but-watched, no per-PR cost).** Fuzz
-campaigns and the CI heartbeat (plan §7 tier B, class `scheduled`). The
+**Tier 2 — Nightly / scheduled (no per-PR cost, but gating).** Fuzz
+campaigns and the CI heartbeat (plan §7 tier B, class `scheduled`). A red or
+unknown tier-B lane fails the heartbeat and blocks a release tag. The
 mutation sweep and the coverage ratchet were retired under R34 (§6).
 
 **Tier 3 — Live / real-cloud / release candidate (deliberate dispatch, never

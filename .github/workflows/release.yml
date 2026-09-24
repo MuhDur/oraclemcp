@@ -88,6 +88,11 @@ jobs:
     # 45m edge on a cold-ish cache; a workspace-crate source change (e.g. the
     # binary) forces a recompile that tips it over. 60 gives headroom.
     timeout-minutes: 60
+    # actions: read lets release_preflight.sh read the tier-B scheduled lanes
+    # through scripts/ci_heartbeat.sh; a red one refuses the tag.
+    permissions:
+      contents: read
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -114,6 +119,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || '' }}
           RELEASE_REQUIRE_MAIN: ${{ startsWith(github.ref, 'refs/tags/') }}
+          GH_TOKEN: ${{ github.token }}
         run: bash scripts/release_preflight.sh
 
       - name: Validate workflow dependency policy
