@@ -552,7 +552,7 @@ jobs:
   # `driver_seam` test in crates/oraclemcp-db so `cargo test` catches a leak too.
   boundary:
     name: engine-free boundary + surface + driver-seam + honesty + conformance accounting
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -562,6 +562,10 @@ jobs:
           # cited by close evidence; a shallow checkout reports SOURCE_SHA_ABSENT
           # for perfectly valid main-reachable commits (2026-07-20 red).
           fetch-depth: 0
+      - name: Install pinned ripgrep for architecture lint
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ripgrep=14.1.0-1
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

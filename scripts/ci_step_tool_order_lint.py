@@ -114,7 +114,9 @@ def parse_jobs(text: str) -> dict[str, list[Step]]:
         if apt_match:
             for word in apt_match.group(0).split()[3:]:
                 if not word.startswith("-"):
-                    step.provides.add(word)
+                    # Debian package pins use `package=version`; the provider
+                    # name remains the portion before the equals sign.
+                    step.provides.add(word.split("=", maxsplit=1)[0])
         install_match = re.search(r"cargo install\s+([A-Za-z0-9_-]+)", raw)
         if install_match:
             step.provides.add(install_match.group(1))
@@ -233,6 +235,15 @@ jobs:
       - run: rg --files > fixture.txt
 """
     expect("ripgrep installed first", ripgrep_ordered, None)
+
+    ripgrep_version_pinned = """
+jobs:
+  good:
+    steps:
+      - run: sudo apt-get install -y ripgrep=14.1.0-1
+      - run: rg --files > fixture.txt
+"""
+    expect("version-pinned ripgrep installed first", ripgrep_version_pinned, None)
 
     if failures:
         print("ci_step_tool_order_lint selftest: FAIL", file=sys.stderr)
