@@ -2376,6 +2376,7 @@ dependencies = [
  "toml_edit",
  "tracing",
  "tracing-subscriber",
+ "windows-permissions",
 ]
 
 [[package]]

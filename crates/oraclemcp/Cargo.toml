@@ -118,5 +118,11 @@ regex = "1"
 insta = { version = "1", features = ["filters"] }
 serde_yaml = "0.9"
 
+# Windows audit startup tests read back the owner and exact DACL that startup
+# installs on audit and WORM parents (bead .12.2). Already in the graph through
+# oraclemcp-audit's Windows hardening.
+[target.'cfg(windows)'.dev-dependencies]
+windows-permissions = "0.2.4"
+
 [lints]
 workspace = true
