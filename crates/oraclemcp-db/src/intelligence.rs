@@ -1552,11 +1552,13 @@ pub async fn describe_columns(
     owner: &str,
     table: &str,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT column_name, data_type, data_length, nullable, data_default \
-               FROM all_tab_columns WHERE owner = :1 AND table_name = :2 \
-               ORDER BY column_id";
-    conn.query_rows(cx, sql, &[OracleBind::from(owner), OracleBind::from(table)])
-        .await
+    run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::DescribeColumns,
+        &[OracleBind::from(owner), OracleBind::from(table)],
+    )
+    .await
 }
 
 /// Constraint metadata for a table/view (owner + name bound exactly as
@@ -1568,21 +1570,10 @@ pub async fn describe_constraints(
     table: &str,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT * FROM ( \
-                   SELECT c.constraint_name, c.constraint_type, c.status, \
-                          c.deferrable, c.deferred, c.validated, c.generated, \
-                          c.r_owner, c.r_constraint_name, cc.column_name, cc.position \
-                   FROM all_constraints c \
-                   LEFT JOIN all_cons_columns cc \
-                     ON cc.owner = c.owner \
-                    AND cc.constraint_name = c.constraint_name \
-                    AND cc.table_name = c.table_name \
-                   WHERE c.owner = :1 AND c.table_name = :2 \
-                   ORDER BY c.constraint_name, cc.position \
-               ) WHERE ROWNUM <= :3";
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        sql,
+        conn,
+        CatalogQueryId::DescribeConstraints,
         &[
             OracleBind::from(owner),
             OracleBind::from(table),
@@ -1813,33 +1804,16 @@ pub async fn list_source_types(
     owner: &str,
     name: &str,
 ) -> Result<Vec<String>, DbError> {
-    let sql = "SELECT type \
-               FROM ( \
-                   SELECT DISTINCT type, \
-                          CASE type \
-                              WHEN 'PACKAGE' THEN 1 \
-                              WHEN 'PACKAGE BODY' THEN 2 \
-                              WHEN 'TYPE' THEN 3 \
-                              WHEN 'TYPE BODY' THEN 4 \
-                              WHEN 'PROCEDURE' THEN 5 \
-                              WHEN 'FUNCTION' THEN 6 \
-                              WHEN 'TRIGGER' THEN 7 \
-                              ELSE 99 \
-                          END sort_key \
-                   FROM all_source \
-                   WHERE owner = :1 AND name = :2 \
-               ) \
-               ORDER BY sort_key, type";
-    let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                OracleBind::from(owner.to_ascii_uppercase()),
-                OracleBind::from(name.to_ascii_uppercase()),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::SourceTypes,
+        &[
+            OracleBind::from(owner.to_ascii_uppercase()),
+            OracleBind::from(name.to_ascii_uppercase()),
+        ],
+    )
+    .await?;
     let mut types = Vec::new();
     for row in rows {
         if let Some(source_type) = row.text("TYPE").and_then(normalize_source_object_type)
@@ -1891,25 +1865,16 @@ pub async fn primary_key_columns(
     owner: &str,
     table: &str,
 ) -> Result<Vec<String>, DbError> {
-    let rows = conn
-        .query_rows(
-            cx,
-            "SELECT cc.column_name \
-             FROM all_constraints c \
-             JOIN all_cons_columns cc \
-               ON cc.owner = c.owner \
-              AND cc.constraint_name = c.constraint_name \
-              AND cc.table_name = c.table_name \
-             WHERE c.owner = :1 \
-               AND c.table_name = :2 \
-               AND c.constraint_type = 'P' \
-             ORDER BY cc.position",
-            &[
-                OracleBind::String(owner.to_ascii_uppercase()),
-                OracleBind::String(table.to_ascii_uppercase()),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PrimaryKeyColumns,
+        &[
+            OracleBind::String(owner.to_ascii_uppercase()),
+            OracleBind::String(table.to_ascii_uppercase()),
+        ],
+    )
+    .await?;
     Ok(rows
         .iter()
         .filter_map(|row| row.text("COLUMN_NAME").map(str::to_owned))
@@ -2232,12 +2197,7 @@ pub async fn explain_plan(
     // guarantees it is a classifier-vetted SELECT.
     conn.execute(cx, &format!("EXPLAIN PLAN FOR {sql}"), &[])
         .await?;
-    conn.query_rows(
-        cx,
-        "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY)",
-        &[],
-    )
-    .await
+    run_catalog_query(cx, conn, CatalogQueryId::ExplainPlanDisplay, &[]).await
 }
 
 /// Reminder folded into every [`PlanCostEstimate`]: these numbers are the
@@ -2312,7 +2272,7 @@ pub struct PlanCostEstimate {
 /// `plan_id`, mirroring how `DBMS_XPLAN.DISPLAY` (with no explicit
 /// `statement_id`) selects the most recently explained statement — so the cost
 /// block describes exactly the plan the `DISPLAY` output above shows.
-const PLAN_COST_SQL: &str = "SELECT id, operation, options, object_owner, object_name, \
+pub(crate) const PLAN_COST_SQL: &str = "SELECT id, operation, options, object_owner, object_name, \
 cost, cardinality, bytes, access_predicates, filter_predicates \
 FROM plan_table \
 WHERE plan_id = (SELECT MAX(plan_id) FROM plan_table) \
@@ -2395,7 +2355,7 @@ pub async fn plan_cost_estimate(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> Result<Option<PlanCostEstimate>, DbError> {
-    let rows = conn.query_rows(cx, PLAN_COST_SQL, &[]).await?;
+    let rows = run_catalog_query(cx, conn, CatalogQueryId::PlanCostEstimate, &[]).await?;
     Ok(assemble_cost_estimate(&rows))
 }
 

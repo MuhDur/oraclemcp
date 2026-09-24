@@ -135,11 +135,23 @@ pub enum CatalogQueryId {
     SearchIndexes,
     /// Column identities within one index.
     SearchIndexColumns,
+    /// Detailed column metadata for one relation.
+    DescribeColumns,
+    /// Constraint and constrained-column metadata for one relation.
+    DescribeConstraints,
+    /// Visible PL/SQL source types for one object.
+    SourceTypes,
+    /// Primary-key columns for one table.
+    PrimaryKeyColumns,
+    /// Output from the diagnostic EXPLAIN PLAN just issued.
+    ExplainPlanDisplay,
+    /// Optimizer estimates from the latest plan root.
+    PlanCostEstimate,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 36] = [
+    pub const ALL: [Self; 42] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -176,6 +188,12 @@ impl CatalogQueryId {
         Self::SearchColumns,
         Self::SearchIndexes,
         Self::SearchIndexColumns,
+        Self::DescribeColumns,
+        Self::DescribeConstraints,
+        Self::SourceTypes,
+        Self::PrimaryKeyColumns,
+        Self::ExplainPlanDisplay,
+        Self::PlanCostEstimate,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -465,6 +483,86 @@ impl CatalogQueryId {
                  ORDER BY column_position",
                 TT,
                 "read index column identities",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::DescribeColumns => (
+                "SELECT column_name, data_type, data_length, nullable, data_default \
+                 FROM all_tab_columns WHERE owner = :1 AND table_name = :2 \
+                 ORDER BY column_id",
+                TT,
+                "describe relation columns",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::DescribeConstraints => (
+                "SELECT * FROM ( \
+                   SELECT c.constraint_name, c.constraint_type, c.status, \
+                          c.deferrable, c.deferred, c.validated, c.generated, \
+                          c.r_owner, c.r_constraint_name, cc.column_name, cc.position \
+                   FROM all_constraints c \
+                   LEFT JOIN all_cons_columns cc \
+                     ON cc.owner = c.owner \
+                    AND cc.constraint_name = c.constraint_name \
+                    AND cc.table_name = c.table_name \
+                   WHERE c.owner = :1 AND c.table_name = :2 \
+                   ORDER BY c.constraint_name, cc.position \
+               ) WHERE ROWNUM <= :3",
+                TTI,
+                "describe relation constraints",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::SourceTypes => (
+                "SELECT type \
+                 FROM ( \
+                     SELECT DISTINCT type, \
+                            CASE type \
+                                WHEN 'PACKAGE' THEN 1 \
+                                WHEN 'PACKAGE BODY' THEN 2 \
+                                WHEN 'TYPE' THEN 3 \
+                                WHEN 'TYPE BODY' THEN 4 \
+                                WHEN 'PROCEDURE' THEN 5 \
+                                WHEN 'FUNCTION' THEN 6 \
+                                WHEN 'TRIGGER' THEN 7 \
+                                ELSE 99 \
+                            END sort_key \
+                     FROM all_source \
+                     WHERE owner = :1 AND name = :2 \
+                 ) \
+                 ORDER BY sort_key, type",
+                TT,
+                "list visible source object types",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::PrimaryKeyColumns => (
+                "SELECT cc.column_name \
+                 FROM all_constraints c \
+                 JOIN all_cons_columns cc \
+                   ON cc.owner = c.owner \
+                  AND cc.constraint_name = c.constraint_name \
+                  AND cc.table_name = c.table_name \
+                 WHERE c.owner = :1 \
+                   AND c.table_name = :2 \
+                   AND c.constraint_type = 'P' \
+                 ORDER BY cc.position",
+                TT,
+                "read primary-key column order",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExplainPlanDisplay => (
+                "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY)",
+                EMPTY,
+                "read current diagnostic plan output",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::PlanCostEstimate => (
+                crate::intelligence::PLAN_COST_SQL,
+                EMPTY,
+                "read latest diagnostic plan estimates",
                 DictionaryMetadata,
                 Diagnostic,
             ),
