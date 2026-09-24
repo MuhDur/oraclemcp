@@ -2692,6 +2692,7 @@ dependencies = [
  "futures-core",
  "getrandom 0.2.17",
  "libc",
+ "loom",
  "oracledb",
  "oraclemcp-driver-cx",
  "oraclemcp-driver-cx-protocol",

@@ -73,6 +73,11 @@ jobs:
             --test-threads=1 2>&1 | tee "$LOOM_RESULTS_DIR/core-lane-lock-order.log"
           lock_order_status=${PIPESTATUS[0]}
 
+          RUSTFLAGS="--cfg loom" cargo +"$RUST_TOOLCHAIN" test \
+            -p oraclemcp-db --test loom_official_actor --release -- \
+            --test-threads=1 2>&1 | tee "$LOOM_RESULTS_DIR/db-official-actor.log"
+          official_actor_status=${PIPESTATUS[0]}
+
           jq -n \
             --arg sha "$GITHUB_SHA" \
             --arg toolchain "$RUST_TOOLCHAIN" \
@@ -80,6 +85,7 @@ jobs:
             --argjson audit "$audit_status" \
             --argjson admission "$admission_status" \
             --argjson lock_order "$lock_order_status" \
+            --argjson official_actor "$official_actor_status" \
             '{
               schema: "oraclemcp.loom-invariant-results/v1",
               workflow: ".github/workflows/loom.yml",
@@ -87,15 +93,16 @@ jobs:
               commit_sha: $sha,
               toolchain: $toolchain,
               loom_max_preemptions: $max_preemptions,
-              outcome: (if ($audit + $admission + $lock_order) == 0 then "passed" else "failed" end),
+              outcome: (if ($audit + $admission + $lock_order + $official_actor) == 0 then "passed" else "failed" end),
               models: [
                 {crate: "oraclemcp-audit", test_target: "loom_shipping_spool", exit_code: $audit},
                 {crate: "oraclemcp-core", test_target: "loom_admission", exit_code: $admission},
-                {crate: "oraclemcp-core", test_target: "loom_lane_lock_order", exit_code: $lock_order}
+                {crate: "oraclemcp-core", test_target: "loom_lane_lock_order", exit_code: $lock_order},
+                {crate: "oraclemcp-db", test_target: "loom_official_actor", exit_code: $official_actor}
               ]
             }' > "$LOOM_RESULTS_DIR/result.json"
 
-          if (( audit_status != 0 || admission_status != 0 || lock_order_status != 0 )); then
+          if (( audit_status != 0 || admission_status != 0 || lock_order_status != 0 || official_actor_status != 0 )); then
             exit 1
           fi
 
@@ -111,11 +118,13 @@ jobs:
           command: >-
             RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-audit --test loom_shipping_spool --release -- --test-threads=1;
             RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-core --test loom_admission --release -- --test-threads=1;
-            RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-core --test loom_lane_lock_order --release -- --test-threads=1
+            RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-core --test loom_lane_lock_order --release -- --test-threads=1;
+            RUSTFLAGS="--cfg loom" cargo +nightly-2026-05-11 test -p oraclemcp-db --test loom_official_actor --release -- --test-threads=1
           tests: |
             loom:loom_shipping_spool:test-target=PASS
             loom:loom_admission:test-target=PASS
             loom:loom_lane_lock_order:test-target=PASS
+            loom:loom_official_actor:test-target=PASS
           artifacts: target/loom-invariant-results/result.json
           output-name: loom-invariants.jsonl
 

@@ -49,6 +49,9 @@ oraclemcp-driver-cx-protocol = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
 [dev-dependencies]
 asupersync = { workspace = true, features = ["test-internals"] }
 async-trait.workspace = true

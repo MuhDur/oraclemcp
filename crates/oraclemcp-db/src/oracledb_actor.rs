@@ -6,6 +6,11 @@
 //! use a bounded Cx-aware mailbox and oneshot reply, and a deadline,
 //! cancellation, dropped reply, or actor failure makes that physical session
 //! permanently unavailable for reuse.
+//!
+//! The Loom mirror for this actor's state, reply/acknowledgement ordering,
+//! resource retirement, and connect-guard slot lifecycle lives in
+//! `tests/loom_official_actor.rs`. Keep its documented source correspondence
+//! in step with changes to this synchronization skeleton.
 
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
