@@ -20,6 +20,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -46,6 +47,46 @@ pub const OTEL_SCHEMA_URL: &str = "https://opentelemetry.io/schemas/1.37.0";
 pub const SCOPE_NAME: &str = "oraclemcp.telemetry";
 /// Instrumentation scope version.
 pub const SCOPE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+static REQUEST_IDGEN: OnceLock<IdGen> = OnceLock::new();
+
+/// Generate W3C trace/span IDs that can be recorded in a local request span
+/// and adopted unchanged by the OTLP layer.
+#[must_use]
+pub fn new_request_trace_ids() -> (String, String) {
+    let seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0x4f52_4143_4c45_4d43);
+    let generator = REQUEST_IDGEN.get_or_init(|| IdGen::new(seed));
+    (
+        hex(&generator.next_trace_id()),
+        hex(&generator.next_span_id()),
+    )
+}
+
+fn hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn parse_hex<const N: usize>(value: Option<&str>) -> Option<[u8; N]> {
+    let value = value?;
+    if value.len() != N * 2 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    let mut out = [0u8; N];
+    for (index, pair) in value.as_bytes().chunks_exact(2).enumerate() {
+        let digits = std::str::from_utf8(pair).ok()?;
+        out[index] = u8::from_str_radix(digits, 16).ok()?;
+    }
+    Some(out)
+}
 
 /// A completed span ready for OTLP encoding.
 #[derive(Clone, Debug, PartialEq)]
@@ -251,6 +292,8 @@ fn hex_to_array<const N: usize>(hex: &str) -> Option<[u8; N]> {
 struct FieldVisitor {
     attributes: Vec<(String, String)>,
     traceparent: Option<String>,
+    explicit_trace_id: Option<String>,
+    explicit_span_id: Option<String>,
     status_error: bool,
 }
 
@@ -260,6 +303,8 @@ impl FieldVisitor {
             // Inbound W3C context from the MCP client — captured, never emitted
             // as an attribute (it would be redundant with the threaded ids).
             "traceparent" => self.traceparent = Some(value),
+            "trace_id" => self.explicit_trace_id = Some(value),
+            "span_id" => self.explicit_span_id = Some(value),
             "otel.status_code" => {
                 if value.eq_ignore_ascii_case("error") {
                     self.status_error = true;
@@ -315,6 +360,8 @@ impl FieldVisitor {
             if routed.traceparent.is_some() {
                 out.traceparent = routed.traceparent;
             }
+            out.explicit_trace_id = routed.explicit_trace_id.or(out.explicit_trace_id);
+            out.explicit_span_id = routed.explicit_span_id.or(out.explicit_span_id);
             out.status_error |= routed.status_error;
         }
         out
@@ -325,6 +372,8 @@ impl FieldVisitor {
 struct ConsumedFields {
     attributes: Vec<(String, String)>,
     traceparent: Option<String>,
+    explicit_trace_id: Option<String>,
+    explicit_span_id: Option<String>,
     status_error: bool,
 }
 
@@ -469,6 +518,8 @@ where
                 } else {
                     (self.idgen.next_trace_id(), [0u8; 8], String::new(), None)
                 }
+            } else if let Some(trace_id) = parse_hex::<16>(consumed.explicit_trace_id.as_deref()) {
+                (trace_id, [0u8; 8], String::new(), None)
             } else if let Some((tid, pid, sampled)) =
                 consumed.traceparent.as_deref().and_then(parse_traceparent)
             {
@@ -482,7 +533,8 @@ where
 
         let state = SpanState {
             trace_id,
-            span_id: self.idgen.next_span_id(),
+            span_id: parse_hex::<8>(consumed.explicit_span_id.as_deref())
+                .unwrap_or_else(|| self.idgen.next_span_id()),
             parent_span_id,
             name: span.name().to_owned(),
             kind: span_kind_for(span.name()),

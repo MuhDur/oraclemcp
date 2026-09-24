@@ -3017,6 +3017,24 @@ fn doctor_oauth_command_is_a_local_cli_subcommand() {
     ));
 }
 
+#[test]
+fn doctor_verbose_requires_online_and_is_opt_in() {
+    let error = Cli::try_parse_from(["oraclemcp", "doctor", "--verbose"])
+        .expect_err("--verbose without --online must be rejected");
+    assert!(error.to_string().contains("--online"));
+
+    let parsed = Cli::try_parse_from(["oraclemcp", "doctor", "--online", "--verbose"])
+        .expect("parse explicit online verbose doctor");
+    assert!(matches!(
+        parsed.command,
+        Some(Command::Doctor {
+            online: true,
+            verbose: true,
+            ..
+        })
+    ));
+}
+
 const DOCTOR_OAUTH_TEST_SECRET: &str = "doctor-oauth-test-secret-at-least-32-bytes";
 
 fn doctor_oauth_test_config(required_scopes: Vec<&str>) -> ResourceServerConfig {

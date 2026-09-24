@@ -2,30 +2,15 @@
 //!
 //! Logs go to stderr as JSON, filtered by `RUST_LOG` (default `info`).
 //!
-//! **Redaction scope (§31.2 correction — read this before adding a log site):**
-//! [`crate::otlp::Redactor`] is wired into the **OTLP export path only**
-//! (`OtlpLogLayer`/`OtlpTraceLayer`, see [`crate::otlp::logs`]/[`crate::otlp::traces`]).
-//! The local stderr JSON layer installed below has **no structural redaction
-//! backstop** — it is the raw `tracing_subscriber` JSON formatter, unfiltered.
-//! Bind values and secrets are never logged only because callers are
-//! disciplined about it (SQL is logged as SHA-256 + preview, never binds — see
-//! `oraclemcp-audit`); nothing in this module enforces that on the stderr path.
-//! If a log call ever interpolates a raw error message that could carry a
-//! secret (a connect string, a bearer token), it reaches stderr unredacted.
-//! See [`crate::otlp::redact`] for the policy enforced on the OTLP path only.
+//! **Redaction:** local stderr JSON and the OTLP export path use the same
+//! [`crate::otlp::Redactor`] policy. The local writer parses each JSON event,
+//! drops sensitive-key fields, and scrubs secret-shaped values before writing.
 //!
-//! **Correlation:** there is no per-request span created anywhere in this
-//! crate or wired automatically by [`init_telemetry`] — that would be a
-//! decision for the request-dispatch path, which lives outside
-//! `oraclemcp-telemetry`. What *is* real: when a caller does create a span
-//! (`#[instrument]` / `info_span!`) while the OTLP traces layer is installed,
-//! [`crate::otlp::logs::OtlpLogLayer`] correlates any log event emitted inside
-//! it by attaching that span's `trace_id`/`span_id` (see
-//! `crate::otlp::traces::current_span_trace_context`, crate-private). Today
-//! only test code and one trace-level span (`catalog_extract.rs`, in
-//! `oraclemcp-db`) create spans, so this plumbing is real but mostly dormant —
-//! it activates automatically wherever a span gets created, without another
-//! change to this crate.
+//! **Correlation:** the request-dispatch path creates an `mcp.request` span
+//! carrying request/session/lane IDs and explicit W3C trace/span IDs. The local
+//! JSON formatter renders its current-span fields, and the OTLP traces layer
+//! adopts those same IDs; [`crate::otlp::logs::OtlpLogLayer`] also correlates
+//! events with the enclosing span.
 //!
 //! [`init_telemetry`] is the wired entry point: it installs the JSON stderr
 //! layer and, when an [`OtlpConfig`](crate::otlp::OtlpConfig) is supplied, also
@@ -33,6 +18,7 @@
 //! a [`TelemetryGuard`] the server keeps alive; dropping it flushes + joins the
 //! export pump with a bounded budget.
 
+use std::io::{self, Write};
 use std::sync::OnceLock;
 
 use tracing_subscriber::EnvFilter;
@@ -47,12 +33,8 @@ use crate::otlp::{ExportPump, Redactor};
 
 static INIT: OnceLock<()> = OnceLock::new();
 
-/// Build the local JSON layer at the one spot both entry points (and the
-/// redaction-scope test below) share, so the test exercises the exact
-/// production construction rather than a hand copy that could drift.
-///
-/// **No redaction runs here.** This is the raw `tracing_subscriber` JSON
-/// formatter over `writer` — see the module docs' "Redaction scope" note.
+/// Build the local JSON layer at the one spot both entry points and the
+/// redaction test share, so the test exercises the production construction.
 fn json_fmt_layer<S, W>(writer: W) -> impl tracing_subscriber::Layer<S>
 where
     S: tracing::Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
@@ -63,7 +45,107 @@ where
         .with_current_span(true)
         .with_span_list(false)
         .with_target(true)
-        .with_writer(writer)
+        .with_writer(RedactingMakeWriter {
+            inner: writer,
+            redactor: Redactor::new(),
+        })
+}
+
+struct RedactingMakeWriter<W> {
+    inner: W,
+    redactor: Redactor,
+}
+
+struct RedactingWriter<W: Write> {
+    inner: W,
+    redactor: Redactor,
+    pending: Vec<u8>,
+}
+
+impl<W> Write for RedactingWriter<W>
+where
+    W: Write,
+{
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return self.inner.flush();
+        }
+        let mut safe = Vec::new();
+        for line in self.pending.split_inclusive(|byte| *byte == b'\n') {
+            match serde_json::from_slice::<serde_json::Value>(line) {
+                Ok(mut value) => {
+                    redact_json_value(&mut value, None, &self.redactor);
+                    serde_json::to_writer(&mut safe, &value).map_err(io::Error::other)?;
+                    if line.last() == Some(&b'\n') {
+                        safe.push(b'\n');
+                    }
+                }
+                Err(_) => safe.extend_from_slice(b"[REDACTED LOG EVENT]\n"),
+            }
+        }
+        self.pending.clear();
+        self.inner.write_all(&safe)?;
+        self.inner.flush()
+    }
+}
+
+impl<W: Write> Drop for RedactingWriter<W> {
+    fn drop(&mut self) {
+        let _ = self.flush();
+    }
+}
+
+impl<'a, W> tracing_subscriber::fmt::MakeWriter<'a> for RedactingMakeWriter<W>
+where
+    W: tracing_subscriber::fmt::MakeWriter<'a> + 'static,
+{
+    type Writer = RedactingWriter<<W as tracing_subscriber::fmt::MakeWriter<'a>>::Writer>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RedactingWriter {
+            inner: self.inner.make_writer(),
+            redactor: self.redactor,
+            pending: Vec::new(),
+        }
+    }
+}
+
+fn redact_json_value(
+    value: &mut serde_json::Value,
+    parent_key: Option<&str>,
+    redactor: &Redactor,
+) -> bool {
+    match value {
+        serde_json::Value::Object(object) => {
+            object.retain(|key, value| {
+                if redactor.should_drop_key(key) {
+                    return false;
+                }
+                redact_json_value(value, Some(key), redactor)
+            });
+            true
+        }
+        serde_json::Value::Array(items) => {
+            items.retain_mut(|item| redact_json_value(item, parent_key, redactor));
+            true
+        }
+        serde_json::Value::String(text) => {
+            let key = parent_key.unwrap_or("message");
+            match redactor.filter(key, text) {
+                Some((_, safe)) => {
+                    *text = safe;
+                    true
+                }
+                None => false,
+            }
+        }
+        _ => true,
+    }
 }
 
 /// Initialize JSON logging to stderr, filtered by `RUST_LOG` (default `level`).
@@ -171,6 +253,7 @@ pub fn init_telemetry(default_level: &str, otlp: Option<OtlpConfig>) -> Telemetr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::otlp::traces::{FinishedSpan, OtlpTraceLayer, SpanSink};
 
     #[test]
     fn init_is_idempotent() {
@@ -207,8 +290,7 @@ mod tests {
         // Dropping the guard must perform a bounded drain + join without hanging.
     }
 
-    /// An in-memory [`tracing_subscriber::fmt::MakeWriter`] so the redaction
-    /// scope test below can inspect what the local JSON layer actually wrote,
+    /// An in-memory [`tracing_subscriber::fmt::MakeWriter`] for local JSON tests.
     /// without touching the process's real stderr.
     #[derive(Clone, Default)]
     struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
@@ -237,27 +319,154 @@ mod tests {
     }
 
     #[test]
-    fn local_stderr_layer_has_no_redaction_backstop_matching_the_doc() {
-        // Proves the module doc's "Redaction scope" claim: `json_fmt_layer`
-        // (the exact construction both init_json_logging and init_telemetry
-        // use for the local stderr path) runs no Redactor pass, so a
-        // secret-shaped field reaches the formatted line verbatim.
-        //
-        // Contrast with the OTLP path, which DOES redact the same shape of
-        // value before export — see otlp/logs.rs's
-        // `secret_attributes_are_dropped_and_bodies_redacted` and
-        // otlp/redact.rs's redaction tests. Together these two tests are the
-        // executable proof that the doc's scope claim matches reality.
+    fn stderr_redactor_scrubs_secrets_and_keeps_useful_error_context() {
         let writer = CapturingWriter::default();
         let subscriber = tracing_subscriber::registry().with(json_fmt_layer(writer.clone()));
         tracing::subscriber::with_default(subscriber, || {
-            tracing::error!(password = "QA_H8_SECRET_SENTINEL", "auth failed");
+            tracing::error!(
+                tool = "oracle_query",
+                error_class = "ConnectionFailed",
+                ora_code = 1017,
+                password = "synthetic-password-canary",
+                token = "synthetic-token-canary",
+                dsn = "user/synthetic-dsn-canary@db.example/service",
+                bind = "synthetic-bind-canary",
+                credential_ref = "env:SYNTHETIC_REFERENCE_CANARY",
+                "auth failed for ocid1.instance.oc1.synthetic-canary"
+            );
         });
         let out = writer.contents();
+        for canary in [
+            "synthetic-password-canary",
+            "synthetic-token-canary",
+            "synthetic-dsn-canary",
+            "synthetic-bind-canary",
+            "SYNTHETIC_REFERENCE_CANARY",
+            "ocid1.instance.oc1.synthetic-canary",
+        ] {
+            assert!(!out.contains(canary), "stderr leaked {canary}: {out}");
+        }
+        for safe in ["oracle_query", "ConnectionFailed", "1017"] {
+            assert!(out.contains(safe), "stderr lost {safe}: {out}");
+        }
+    }
+
+    #[derive(Default)]
+    struct SpanCapture(std::sync::Mutex<Vec<FinishedSpan>>);
+
+    impl SpanSink for SpanCapture {
+        fn submit(&self, span: FinishedSpan) {
+            self.0.lock().unwrap().push(span);
+        }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn request_span_ids_match_local_log_and_otlp() {
+        let writer = CapturingWriter::default();
+        let sink = std::sync::Arc::new(SpanCapture::default());
+        let subscriber = tracing_subscriber::registry()
+            .with(json_fmt_layer(writer.clone()))
+            .with(OtlpTraceLayer::new(sink.clone(), Redactor::new(), 1.0));
+        let (trace_id, span_id) = crate::otlp::new_request_trace_ids();
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "mcp.request",
+                request_id = "request-73",
+                session_id = "session-1",
+                lane_id = "lane-1",
+                subject_id = "subject-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                tool = "oracle_query",
+                trace_id = %trace_id,
+                span_id = %span_id,
+            );
+            span.in_scope(|| {
+                tracing::error!(
+                    error_class = "ConnectionFailed",
+                    ora_code = 1017,
+                    "connect failed"
+                )
+            });
+        });
+
+        let local = writer.contents();
         assert!(
-            out.contains("QA_H8_SECRET_SENTINEL"),
-            "local stderr JSON layer has no redaction backstop (matches the \
-             module doc's 'Redaction scope' note); captured: {out}"
+            local.contains(&format!("\"trace_id\":\"{trace_id}\"")),
+            "missing trace id in local line: {local}"
         );
+        assert!(
+            local.contains(&format!("\"span_id\":\"{span_id}\"")),
+            "missing span id in local line: {local}"
+        );
+        let spans = sink.0.lock().unwrap();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(hex(&spans[0].trace_id), trace_id);
+        assert_eq!(hex(&spans[0].span_id), span_id);
+        assert!(
+            spans[0]
+                .attributes
+                .iter()
+                .any(|(key, value)| key == "request_id" && value == "request-73")
+        );
+    }
+
+    #[test]
+    fn concurrent_requests_separable_by_request_id() {
+        let writer = CapturingWriter::default();
+        let sink = std::sync::Arc::new(SpanCapture::default());
+        let mut threads = Vec::new();
+        for number in 0..8 {
+            let writer = writer.clone();
+            let sink = sink.clone();
+            threads.push(std::thread::spawn(move || {
+                let subscriber = tracing_subscriber::registry()
+                    .with(json_fmt_layer(writer))
+                    .with(OtlpTraceLayer::new(sink, Redactor::new(), 1.0));
+                let (trace_id, span_id) = crate::otlp::new_request_trace_ids();
+                tracing::subscriber::with_default(subscriber, || {
+                    let request_id = format!("request-{number}");
+                    let span = tracing::info_span!(
+                        "mcp.request",
+                        request_id = %request_id,
+                        session_id = "session-1",
+                        lane_id = "lane-1",
+                        subject_id = "subject-sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        tool = "oracle_query",
+                        trace_id = %trace_id,
+                        span_id = %span_id,
+                    );
+                    span.in_scope(|| tracing::info!("request completed"));
+                });
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("request span thread");
+        }
+        let spans = sink.0.lock().unwrap();
+        assert_eq!(spans.len(), 8);
+        for number in 0..8 {
+            let request_id = format!("request-{number}");
+            assert_eq!(
+                spans
+                    .iter()
+                    .filter(|span| span
+                        .attributes
+                        .iter()
+                        .any(|(key, value)| key == "request_id" && value == &request_id))
+                    .count(),
+                1,
+                "request ID must select exactly one OTLP span"
+            );
+        }
+        let local = writer.contents();
+        for number in 0..8 {
+            assert!(
+                local.contains(&format!("request-{number}")),
+                "missing request ID in local logs"
+            );
+        }
     }
 }

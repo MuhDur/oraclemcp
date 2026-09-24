@@ -30,6 +30,7 @@ use oraclemcp_db::{
     detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema, preflight, probe_privileges,
     probe_write_posture, run_catalog_query, supported_wallet_modes,
 };
+use oraclemcp_db::{ConnectPhaseReached, connect_hint_for};
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
 use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
 use serde::Serialize;
@@ -2297,6 +2298,21 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
     }
 }
 
+fn connect_phase_from_error(error: &str) -> Option<ConnectPhaseReached> {
+    let value = error.split("[connect_phase=").nth(1)?.split(']').next()?;
+    Some(match value {
+        "Dns" => ConnectPhaseReached::Dns,
+        "Tcp" => ConnectPhaseReached::Tcp,
+        "Tls" => ConnectPhaseReached::Tls,
+        "Wallet" => ConnectPhaseReached::Wallet,
+        "Accept" => ConnectPhaseReached::Accept,
+        "AuthTtc" => ConnectPhaseReached::AuthTtc,
+        "Session" => ConnectPhaseReached::Session,
+        "Unknown" => ConnectPhaseReached::Unknown,
+        _ => return None,
+    })
+}
+
 async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if ctx.configuration_error.is_some() {
         return CheckResult::new(
@@ -2307,14 +2323,19 @@ async fn check_connectivity(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
         );
     }
     if let Some(error) = &ctx.connection_error {
-        let detail = sanitized_detail(ctx, format!("connect failed: {error}"));
-        let fix = connectivity_fix(&detail);
+        let phase = connect_phase_from_error(error);
+        let detail = format!("connect failed: {error}");
+        let detail = sanitized_detail(ctx, detail);
+        let fix = phase.map_or_else(
+            || connectivity_fix(&detail),
+            |phase| connect_hint_for(phase).to_owned(),
+        );
         return CheckResult::new(3, "Connectivity", CheckStatus::Fail, detail.clone())
             .with_fix(fix)
             .with_failure_class(connectivity_failure_class(error))
             .with_auth_mode(classify_auth_mode(error))
             .with_wallet_error(classify_wallet_error(error))
-            .with_oracle_error(&detail);
+            .with_oracle_error(error);
     }
     match ctx.conn {
         None => {
@@ -4782,6 +4803,47 @@ mod tests {
             report.checks.iter().find(|c| c.id == 6).unwrap().status,
             CheckStatus::Skip
         );
+    }
+
+    #[test]
+    fn auth_ttc_connectivity_report_has_phase_code_and_auth_hint() {
+        let ctx = DoctorContext {
+            connection_error: Some(
+                "Oracle connection failed; driver detail suppressed ORA-01017 [connect_phase=AuthTtc]; driver=oracle-authentication-error ORA-01017".to_owned(),
+            ),
+            online: true,
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let connectivity = report.checks.iter().find(|check| check.id == 3).unwrap();
+        assert_eq!(connectivity.ora_code, Some(1017));
+        assert!(connectivity.detail.contains("phase=AuthTtc"));
+        assert!(
+            connectivity
+                .detail
+                .contains("oracle-authentication-error ORA-01017")
+        );
+        assert!(
+            connectivity
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("TNS ACCEPT succeeded")
+        );
+        assert!(
+            !connectivity
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("verify the connect string")
+        );
+        assert!(
+            report.to_json()["checks"][2]["detail"]
+                .as_str()
+                .unwrap()
+                .contains("connect_phase=AuthTtc")
+        );
+        assert!(report.to_text().contains("phase=AuthTtc"));
     }
 
     #[test]

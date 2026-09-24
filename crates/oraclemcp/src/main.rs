@@ -43,8 +43,10 @@ use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+static CONNECT_DETAIL_ENV: OnceLock<bool> = OnceLock::new();
 
 use asupersync::Cx;
 use clap::{CommandFactory, FromArgMatches};
@@ -183,6 +185,8 @@ fn bare_invocation_hint(binary_name: &str) -> String {
 }
 
 fn main() -> ExitCode {
+    let _ = CONNECT_DETAIL_ENV
+        .set(std::env::var("ORACLEMCP_CONNECT_DETAIL").is_ok_and(|value| value == "1"));
     let binary_name = current_display_binary_name();
     let cli = parse_cli(binary_name);
     let robot_json = cli.robot_json;
@@ -217,11 +221,12 @@ fn main() -> ExitCode {
         Command::Doctor {
             profile,
             online,
+            verbose,
             fix,
             command,
         } => match command {
             Some(DoctorCommand::Oauth { token }) => run_doctor_oauth_cmd(robot_json, &token),
-            None => run_doctor_cmd(robot_json, profile, online, fix),
+            None => run_doctor_cmd(robot_json, profile, online, verbose, fix),
         },
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
@@ -6886,6 +6891,8 @@ struct DoctorProfileContext {
     stateless_pool_configured: bool,
     configuration_error: Option<String>,
     connection_error: Option<String>,
+    connection_phase: Option<oraclemcp_db::ConnectPhaseReached>,
+    connect_detail: Option<String>,
     wallet_location: Option<String>,
     protected_profile_writable: bool,
     connection_strategy: Option<String>,
@@ -6918,6 +6925,8 @@ impl DoctorProfileContext {
             stateless_pool_configured: false,
             configuration_error: None,
             connection_error: None,
+            connection_phase: None,
+            connect_detail: None,
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
@@ -6963,7 +6972,11 @@ fn doctor_sensitive_values(opts: &OracleConnectOptions) -> Vec<String> {
 }
 
 fn doctor_connection_error(error: DbError) -> String {
-    error.into_envelope().message
+    let envelope = error.into_envelope();
+    match envelope.ora_code {
+        Some(code) => format!("{} ORA-{code:05}", envelope.message),
+        None => envelope.message,
+    }
 }
 
 /// Render a configuration failure with both the configuration file contract and
@@ -6978,12 +6991,16 @@ fn doctor_configuration_error(error: impl std::fmt::Display) -> String {
 }
 
 fn doctor_resolution_error_context(error: DbError) -> DoctorProfileContext {
+    let connection_phase = Some(error.connect_phase_reached());
+    let connect_detail = error.connect_detail_redacted();
     let error = doctor_connection_error(error);
     let mut context = DoctorProfileContext::offline();
     if error.starts_with("config load failed:") {
         context.configuration_error = Some(doctor_configuration_error(error));
     } else {
         context.connection_error = Some(error);
+        context.connection_phase = connection_phase;
+        context.connect_detail = connect_detail;
     }
     context
 }
@@ -7079,6 +7096,8 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         stateless_pool_configured: chosen.pool.is_some(),
         configuration_error: None,
         connection_error: None,
+        connection_phase: None,
+        connect_detail: None,
         wallet_location: chosen
             .oci
             .as_ref()
@@ -7171,6 +7190,8 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             stateless_pool_configured: false,
             configuration_error: None,
             connection_error: Some(format!("connection profile `{profile}` not found")),
+            connection_phase: None,
+            connect_detail: None,
             wallet_location: None,
             protected_profile_writable: false,
             connection_strategy: None,
@@ -7342,6 +7363,8 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 stateless_pool_configured: pool_configured,
                 configuration_error: None,
                 connection_error: None,
+                connection_phase: None,
+                connect_detail: None,
                 wallet_location,
                 protected_profile_writable,
                 connection_strategy,
@@ -7362,29 +7385,35 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 wallet_password,
             }
         }
-        Err(e) => DoctorProfileContext {
-            conn: None,
-            stateless_conn: None,
-            stateless_pool_configured: pool_configured,
-            configuration_error: None,
-            connection_error: Some(doctor_connection_error(e)),
-            wallet_location,
-            protected_profile_writable,
-            connection_strategy: configured_connection_strategy,
-            call_timeout_resolved: true,
-            call_timeout,
-            connect_timeout_seconds,
-            inactivity_timeout_seconds,
-            keepalive_minutes,
-            proxy_user,
-            profile_caps,
-            auth_capabilities,
-            sensitive_values,
-            credential_env_hint: None,
-            iam_token_source,
-            iam_token,
-            wallet_password,
-        },
+        Err(e) => {
+            let connection_phase = Some(e.connect_phase_reached());
+            let connect_detail = e.connect_detail_redacted();
+            DoctorProfileContext {
+                conn: None,
+                stateless_conn: None,
+                stateless_pool_configured: pool_configured,
+                configuration_error: None,
+                connection_error: Some(doctor_connection_error(e)),
+                connection_phase,
+                connect_detail,
+                wallet_location,
+                protected_profile_writable,
+                connection_strategy: configured_connection_strategy,
+                call_timeout_resolved: true,
+                call_timeout,
+                connect_timeout_seconds,
+                inactivity_timeout_seconds,
+                keepalive_minutes,
+                proxy_user,
+                profile_caps,
+                auth_capabilities,
+                sensitive_values,
+                credential_env_hint: None,
+                iam_token_source,
+                iam_token,
+                wallet_password,
+            }
+        }
     }
 }
 
@@ -7627,13 +7656,29 @@ fn render_doctor_oauth_diagnostic(robot_json: bool, diagnostic: DoctorOauthDiagn
     }
 }
 
-fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: bool) -> ExitCode {
+fn run_doctor_cmd(
+    robot_json: bool,
+    profile: Option<String>,
+    online: bool,
+    verbose: bool,
+    fix: bool,
+) -> ExitCode {
     // Offline by default: profile metadata inspection does not resolve secrets
     // or open Oracle. --online is the explicit live-connect boundary.
     let audit_posture = doctor_audit_posture(profile.as_deref());
     let profile_ctx = doctor_profile_context(profile.as_deref(), online);
     let skipped_custom_tools = doctor_skipped_custom_tools(profile.as_deref());
     let state_layout = doctor_state_layout(doctor_audit_path_configured());
+    let mut connection_error = profile_ctx.connection_error;
+    let connect_detail_enabled = verbose || CONNECT_DETAIL_ENV.get().copied().unwrap_or(false);
+    if connect_detail_enabled && let Some(error) = connection_error.as_mut() {
+        if let Some(phase) = profile_ctx.connection_phase {
+            error.push_str(&format!(" [connect_phase={phase:?}]"));
+        }
+        if let Some(detail) = profile_ctx.connect_detail.as_deref() {
+            error.push_str(&format!("; driver={detail}"));
+        }
+    }
     let mut fix_mutations = Vec::new();
     if fix {
         match apply_legacy_state_migration(state_layout.as_ref()) {
@@ -7647,7 +7692,7 @@ fn run_doctor_cmd(robot_json: bool, profile: Option<String>, online: bool, fix: 
         stateless_conn: profile_ctx.stateless_conn.as_deref(),
         stateless_pool_configured: profile_ctx.stateless_pool_configured,
         configuration_error: profile_ctx.configuration_error,
-        connection_error: profile_ctx.connection_error,
+        connection_error,
         tns_admin: std::env::var("TNS_ADMIN").ok(),
         wallet_location: profile_ctx.wallet_location,
         // Offline-by-default invariant: profile metadata inspection never

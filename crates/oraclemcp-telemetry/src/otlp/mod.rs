@@ -28,6 +28,7 @@ pub mod traces;
 pub use config::OtlpConfig;
 pub use pump::{ExportPump, PumpHandle};
 pub use redact::Redactor;
+pub use traces::new_request_trace_ids;
 
 use asupersync::observability::otel::OtlpHttpExporter;
 

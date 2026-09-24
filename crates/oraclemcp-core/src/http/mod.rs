@@ -2244,7 +2244,10 @@ fn handle_mcp_post_exchange(
             })
             .unwrap_or_default();
         let (frames_tx, frames_rx) = mpsc::channel(QUERY_ROW_STREAM_CHANNEL_CAPACITY);
-        match server.start_tool_stream_blocking_with_context(context, name, args, frames_tx) {
+        let span = crate::server::tool_request_span(&request_id, &name, context);
+        match span.in_scope(|| {
+            server.start_tool_stream_blocking_with_context(context, name, args, frames_tx)
+        }) {
             Outcome::Ok(reply_rx) => {
                 return HttpExchange::ToolStream(Box::new(HttpToolStream::new(
                     server.clone(),

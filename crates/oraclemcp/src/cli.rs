@@ -85,6 +85,9 @@ pub(crate) enum Command {
         /// Open a live database connection for connectivity/auth/role probes.
         #[arg(long)]
         online: bool,
+        /// Show a redacted driver class and Oracle code for an online connect failure.
+        #[arg(long, requires = "online")]
+        verbose: bool,
         /// Plan scoped self-repair. Out-of-scope targets are refused with exit 4.
         #[arg(long)]
         fix: bool,

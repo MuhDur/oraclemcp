@@ -2230,7 +2230,11 @@ impl OracleMcpServer {
                 Some(&format!("{name} started")),
             );
         }
-        match self.run_tool_blocking_outcome_with_context(context, name.to_owned(), args) {
+        let span = tool_request_span(&id, name, context);
+        let outcome = span.in_scope(|| {
+            self.run_tool_blocking_outcome_with_context(context, name.to_owned(), args)
+        });
+        match outcome {
             Outcome::Ok(result) => {
                 if let Some(token) = &progress_token
                     && let Some(owner) = context.notification_request_owner()
@@ -2441,6 +2445,32 @@ impl OracleMcpServer {
         let value = self.dispatch_resource_tool(context, "oracle_list_profiles", json!({}))?;
         Ok(completion_names_from(&value, "profiles", "name", prefix))
     }
+}
+
+/// Create the shared local/OTLP request span at the tool dispatch boundary.
+pub(crate) fn tool_request_span(
+    request_id: &Value,
+    tool: &str,
+    context: DispatchContext<'_>,
+) -> tracing::Span {
+    let request_id = request_id
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| request_id.to_string());
+    let session_id = context.http_session_id().unwrap_or("stdio");
+    let lane_id = context.lane_id().unwrap_or("process");
+    let subject_id = crate::operator_subject_id_hash(context.principal_key().unwrap_or("stdio"));
+    let (trace_id, span_id) = oraclemcp_telemetry::otlp::new_request_trace_ids();
+    tracing::info_span!(
+        "mcp.request",
+        request_id = %request_id,
+        session_id = %session_id,
+        lane_id = %lane_id,
+        subject_id = %subject_id,
+        tool = %tool,
+        trace_id = %trace_id,
+        span_id = %span_id,
+    )
 }
 
 /// Derive the export access context (E3) from a request's authorization

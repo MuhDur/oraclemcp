@@ -69,6 +69,12 @@ impl Redactor {
     #[must_use]
     pub fn redact_value(&self, key: &str, value: &str) -> String {
         let key_lc = key.to_ascii_lowercase();
+        if (key_lc == "trace_id" && is_hex_len(value, 32))
+            || (key_lc == "span_id" && is_hex_len(value, 16))
+            || (key_lc == "subject_id" && is_subject_sha256(value))
+        {
+            return value.to_ascii_lowercase();
+        }
         if is_safe_bind_count_key(&key_lc) && value.parse::<u64>().is_err() {
             return REDACTED.to_owned();
         }
@@ -106,6 +112,10 @@ impl Redactor {
         }
         Some((key, self.redact_value(key, value)))
     }
+}
+
+fn is_hex_len(value: &str, len: usize) -> bool {
+    value.len() == len && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 /// Substrings that mark an attribute key as carrying a secret. Matched

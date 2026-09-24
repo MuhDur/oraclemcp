@@ -344,6 +344,55 @@ pub enum ConnectFailureKind {
     HandshakeProtocol,
 }
 
+/// Furthest known transport/authentication phase reached by a failed connect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectPhaseReached {
+    /// Resolving a hostname.
+    Dns,
+    /// Opening the TCP socket.
+    Tcp,
+    /// Negotiating TLS.
+    Tls,
+    /// Loading or opening wallet material.
+    Wallet,
+    /// Completing TNS listener ACCEPT.
+    Accept,
+    /// Oracle TTC authentication and protocol negotiation.
+    AuthTtc,
+    /// Creating or configuring an authenticated session.
+    Session,
+    /// The available error did not identify a phase.
+    Unknown,
+}
+
+impl ConnectPhaseReached {
+    /// Stable phase-specific remediation text.
+    #[must_use]
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::Dns | Self::Tcp => {
+                "verify the connect string host and port and listener reachability"
+            }
+            Self::Tls | Self::Wallet => {
+                "verify the wallet location, TLS server certificate DN, SNI, and wallet permissions"
+            }
+            Self::Accept => "verify the listener endpoint and service name",
+            Self::AuthTtc => {
+                "TNS ACCEPT succeeded; failure is in authentication or TTC protocol negotiation; verify credentials or IAM configuration"
+            }
+            Self::Session => "verify session setup hooks and session initialization settings",
+            Self::Unknown => "verify the connection profile and inspect the redacted driver detail",
+        }
+    }
+}
+
+/// Return the remediation hint for a known connect phase.
+#[must_use]
+pub const fn connect_hint_for(phase: ConnectPhaseReached) -> &'static str {
+    phase.hint()
+}
+
 impl ConnectFailureKind {
     /// Stable, grep-able class token, rendered as `[label]` in messages so
     /// operators, doctor, and log pipelines can match it without parsing
@@ -557,6 +606,73 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// Furthest connect phase derivable from this error without exposing detail.
+    #[must_use]
+    pub fn connect_phase_reached(&self) -> ConnectPhaseReached {
+        let message = match self {
+            DbError::Connect(message) => message.as_str(),
+            DbError::ConnectHandshake { kind, .. } => {
+                return match kind {
+                    ConnectFailureKind::ListenerRefused { .. }
+                    | ConnectFailureKind::ConnectResendLoop { .. }
+                    | ConnectFailureKind::ListenerRedirectUnsupported
+                    | ConnectFailureKind::UnexpectedTnsPacket { .. } => ConnectPhaseReached::Accept,
+                    ConnectFailureKind::HandshakeProtocol
+                    | ConnectFailureKind::FastAuthNotAdvertised
+                    | ConnectFailureKind::UnsupportedWireFeature { .. } => {
+                        ConnectPhaseReached::AuthTtc
+                    }
+                    ConnectFailureKind::ServerGenerationUnsupported { .. } => {
+                        ConnectPhaseReached::Accept
+                    }
+                };
+            }
+            _ => return ConnectPhaseReached::Unknown,
+        };
+        let lower = message.to_ascii_lowercase();
+        if lower.contains("ora-01017") || lower.contains("invalid username/password") {
+            ConnectPhaseReached::AuthTtc
+        } else if lower.contains("wallet") || lower.contains("ewallet") || lower.contains("cwallet")
+        {
+            ConnectPhaseReached::Wallet
+        } else if lower.contains("tls") || lower.contains("tcps") || lower.contains("certificate") {
+            ConnectPhaseReached::Tls
+        } else if lower.contains("resolve") || lower.contains("dns") || lower.contains("hostname") {
+            ConnectPhaseReached::Dns
+        } else if lower.contains("listener")
+            || lower.contains("tns-125")
+            || lower.contains("ora-125")
+        {
+            ConnectPhaseReached::Accept
+        } else if lower.contains("tcp")
+            || lower.contains("socket")
+            || lower.contains("timed out")
+            || lower.contains("connection refused")
+        {
+            ConnectPhaseReached::Tcp
+        } else {
+            ConnectPhaseReached::Unknown
+        }
+    }
+
+    /// Safe concise driver diagnosis for an opt-in local doctor report.
+    /// Raw connect strings and driver text remain suppressed on tool envelopes.
+    #[must_use]
+    pub fn connect_detail_redacted(&self) -> Option<String> {
+        let phase = self.connect_phase_reached();
+        let message = match self {
+            DbError::Connect(message) | DbError::ConnectHandshake { message, .. } => message,
+            _ => return None,
+        };
+        let code = parse_ora_code(message).map(|code| format!(" ORA-{code:05}"));
+        let class = match self {
+            DbError::ConnectHandshake { kind, .. } => kind.label(),
+            _ if phase == ConnectPhaseReached::AuthTtc => "oracle-authentication-error",
+            _ => "oracle-connect-error",
+        };
+        Some(format!("{class}{}", code.unwrap_or_default()))
+    }
+
     /// Mark a query/execute failure as originating in SQL composed by this
     /// server. Other typed failures retain their existing classification.
     #[must_use]
@@ -625,25 +741,18 @@ impl DbError {
     pub fn into_envelope(self) -> ErrorEnvelope {
         match self {
             DbError::Connect(msg) => {
-                // Classify via the embedded ORA- code where present.
-                let env = oracle_error_envelope(&msg);
-                if env.error_class == ErrorClass::Internal {
-                    // No ORA- code recognised: keep it as a connection-class
-                    // failure rather than a bare Internal. Driver transport
-                    // detail is not an operator contract and may disclose
-                    // socket internals, so never render it on a tool surface.
-                    ErrorEnvelope::new(
-                        ErrorClass::ConnectionFailed,
-                        "Oracle connection failed; driver detail suppressed",
-                    )
-                        .with_next_step(
-                            "verify the connect string (host, port, service name), credentials, \
-                             and listener reachability",
-                        )
-                        .with_next_step(CONNECT_TRACE_NEXT_STEP)
-                } else {
-                    env
+                let code = parse_ora_code(&msg);
+                let classified = oracle_error_envelope(&msg);
+                let phase = Self::Connect(msg).connect_phase_reached();
+                let mut env = ErrorEnvelope::new(
+                    if code.is_some() { classified.error_class } else { ErrorClass::ConnectionFailed },
+                    "Oracle connection failed; driver detail suppressed",
+                );
+                if let Some(code) = code {
+                    env = env.with_ora_code(code);
                 }
+                env.with_next_step(connect_hint_for(phase))
+                    .with_next_step(CONNECT_TRACE_NEXT_STEP)
             }
             DbError::ConnectHandshake { kind, message } => {
                 connect_handshake_envelope(&kind, &message)
@@ -803,7 +912,7 @@ pub(crate) fn classify_flashback_refusal_message(
 /// failure: a plain-language message headed by the stable `[label]` token,
 /// the implied `ORA-` code when well-defined, and concrete `next_steps` for
 /// every class — a raw driver string never travels without guidance.
-fn connect_handshake_envelope(kind: &ConnectFailureKind, detail: &str) -> ErrorEnvelope {
+fn connect_handshake_envelope(kind: &ConnectFailureKind, _detail: &str) -> ErrorEnvelope {
     let class = match kind {
         // Server/config capability mismatches: retrying cannot help, the
         // profile or the server has to change.
@@ -813,9 +922,8 @@ fn connect_handshake_envelope(kind: &ConnectFailureKind, detail: &str) -> ErrorE
         _ => ErrorClass::ConnectionFailed,
     };
     let message = format!(
-        "connect handshake failed [{}]: {}: {detail}",
-        kind.label(),
-        kind.describe()
+        "connect handshake failed [{}]; driver detail suppressed",
+        kind.label()
     );
     let mut env = ErrorEnvelope::new(class, message);
     if let Some(code) = kind.ora_code() {
@@ -1495,6 +1603,115 @@ mod tests {
     }
 
     #[test]
+    fn connect_phase_from_error_kind_table() {
+        let cases = [
+            (
+                ConnectFailureKind::ListenerRefused {
+                    err_code: Some(12514),
+                },
+                ConnectPhaseReached::Accept,
+            ),
+            (
+                ConnectFailureKind::ConnectResendLoop { rounds: 2 },
+                ConnectPhaseReached::Accept,
+            ),
+            (
+                ConnectFailureKind::ListenerRedirectUnsupported,
+                ConnectPhaseReached::Accept,
+            ),
+            (
+                ConnectFailureKind::UnexpectedTnsPacket { packet_type: 11 },
+                ConnectPhaseReached::Accept,
+            ),
+            (
+                ConnectFailureKind::HandshakeProtocol,
+                ConnectPhaseReached::AuthTtc,
+            ),
+            (
+                ConnectFailureKind::FastAuthNotAdvertised,
+                ConnectPhaseReached::AuthTtc,
+            ),
+            (
+                ConnectFailureKind::UnsupportedWireFeature {
+                    feature: "synthetic".to_owned(),
+                },
+                ConnectPhaseReached::AuthTtc,
+            ),
+            (
+                ConnectFailureKind::ServerGenerationUnsupported {
+                    tns_version: Some(299),
+                },
+                ConnectPhaseReached::Accept,
+            ),
+        ];
+        for (kind, expected) in cases {
+            let error = DbError::ConnectHandshake {
+                kind,
+                message: "safe detail".to_owned(),
+            };
+            assert_eq!(error.connect_phase_reached(), expected);
+        }
+        assert_eq!(
+            DbError::Connect("ORA-01017: invalid username/password".to_owned())
+                .connect_phase_reached(),
+            ConnectPhaseReached::AuthTtc
+        );
+        assert_eq!(
+            DbError::Connect("connect timed out on TCP".to_owned()).connect_phase_reached(),
+            ConnectPhaseReached::Tcp
+        );
+    }
+
+    #[test]
+    fn auth_connect_envelope_suppresses_detail_and_uses_authentication_hint() {
+        let env =
+            DbError::Connect("ORA-01017: invalid username/password; secret=canary".to_owned())
+                .into_envelope();
+        assert_eq!(env.ora_code, Some(1017));
+        assert!(env.message.contains("driver detail suppressed"));
+        assert!(!env.message.contains("canary"));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("TNS ACCEPT succeeded"))
+        );
+        assert!(
+            !env.next_steps
+                .iter()
+                .any(|step| step.contains("verify the connect string"))
+        );
+    }
+
+    #[test]
+    fn tool_envelope_stays_detail_suppressed_with_verbose_env() {
+        let error = DbError::ConnectHandshake {
+            kind: ConnectFailureKind::HandshakeProtocol,
+            message: "password=PASSWORD_CANARY token=TOKEN_CANARY dsn=DSN_CANARY".to_owned(),
+        };
+        let envelope = error.into_envelope();
+        assert!(envelope.message.contains("driver detail suppressed"));
+        for canary in ["PASSWORD_CANARY", "TOKEN_CANARY", "DSN_CANARY"] {
+            assert!(!envelope.message.contains(canary));
+        }
+        assert!(
+            envelope
+                .next_steps
+                .iter()
+                .any(|step| step.contains("ORACLEDB_TRACE_CONNECT=1"))
+        );
+    }
+
+    #[test]
+    fn verbose_connect_summary_only_returns_class_and_oracle_code() {
+        let error = DbError::Connect("ORA-01017: pass=PASSWORD_CANARY token=TOKEN_CANARY ocid1.instance.oc1.secret dsn=DSN_CANARY".to_owned());
+        let detail = error.connect_detail_redacted().unwrap();
+        assert_eq!(detail, "oracle-authentication-error ORA-01017");
+        for secret in ["PASSWORD_CANARY", "TOKEN_CANARY", "ocid1.", "DSN_CANARY"] {
+            assert!(!detail.contains(secret));
+        }
+    }
+
+    #[test]
     fn pool_error_is_busy_with_retry() {
         let env = DbError::Pool("timed out waiting for connection".to_owned()).into_envelope();
         assert_eq!(env.error_class, ErrorClass::Busy);
@@ -1526,9 +1743,8 @@ mod tests {
         .into_envelope();
         assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
         assert!(env.message.contains("[unexpected-tns-packet]"));
-        assert!(env.message.contains("TNS packet type 11"));
-        // Honest layering: this is the network-layer handshake, not TTC/SQL.
-        assert!(env.message.contains("network layer"));
+        assert!(env.message.contains("driver detail suppressed"));
+        assert!(!env.message.contains("TNS packet type 11"));
         assert!(
             env.next_steps
                 .iter()
@@ -1545,7 +1761,7 @@ mod tests {
         .into_envelope();
         assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
         assert!(env.message.contains("[connect-resend-loop]"));
-        assert!(env.message.contains("5 rounds"));
+        assert!(env.message.contains("driver detail suppressed"));
         assert!(
             env.next_steps
                 .iter()
@@ -1562,11 +1778,16 @@ mod tests {
         .into_envelope();
         assert_eq!(env.error_class, ErrorClass::InvalidArguments);
         assert!(env.message.contains("[fast-auth-not-advertised]"));
-        assert!(env.message.contains("pre-23ai"));
+        assert!(env.message.contains("driver detail suppressed"));
         assert!(
             env.next_steps
                 .iter()
                 .any(|step| step.contains("credential_ref"))
+        );
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("Oracle 23ai"))
         );
     }
 
@@ -1581,7 +1802,8 @@ mod tests {
         .into_envelope();
         assert_eq!(env.error_class, ErrorClass::InvalidArguments);
         assert!(env.message.contains("[unsupported-wire-feature]"));
-        assert!(env.message.contains("Native Network Encryption"));
+        assert!(env.message.contains("driver detail suppressed"));
+        assert!(!env.message.contains("Native Network Encryption"));
         assert!(
             env.next_steps
                 .iter()
@@ -1601,7 +1823,7 @@ mod tests {
         assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
         assert_eq!(env.ora_code, Some(12514));
         assert!(env.message.contains("[listener-refused]"));
-        assert!(env.message.contains("service name"));
+        assert!(env.message.contains("driver detail suppressed"));
         assert!(
             env.next_steps
                 .iter()
@@ -1636,8 +1858,7 @@ mod tests {
         .into_envelope();
         assert_eq!(env.error_class, ErrorClass::InvalidArguments);
         assert!(env.message.contains("[server-generation-unsupported]"));
-        assert!(env.message.contains("298"));
-        assert!(env.message.contains("Oracle 12.1"));
+        assert!(env.message.contains("driver detail suppressed"));
         assert!(!env.next_steps.is_empty());
     }
 
@@ -1645,15 +1866,15 @@ mod tests {
     fn handshake_protocol_error_names_the_phase_and_trace() {
         let env = DbError::ConnectHandshake {
             kind: ConnectFailureKind::HandshakeProtocol,
-            message: "unknown TTC message type 11 at position 4".to_owned(),
+            message: "unknown TTC message type 11 at position 4 password=PASSWORD_CANARY"
+                .to_owned(),
         }
         .into_envelope();
         assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
         assert!(env.message.contains("[handshake-protocol-error]"));
-        assert!(env.message.contains("connect handshake"));
-        // The sanitized driver detail is preserved for triage…
-        assert!(env.message.contains("unknown TTC message type 11"));
-        // …but never without next actions.
+        assert!(env.message.contains("driver detail suppressed"));
+        assert!(!env.message.contains("unknown TTC message type 11"));
+        assert!(!env.message.contains("PASSWORD_CANARY"));
         assert!(
             env.next_steps
                 .iter()

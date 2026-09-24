@@ -125,9 +125,9 @@ pub use connection::{
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};
 pub use error::{
-    CONNECT_TRACE_NEXT_STEP, ConnectFailureKind, DbError, FlashbackRefusalKind, QuarantineOutcome,
-    RetryDecision, RetryPolicy, StatementClass, StatementOutcome, is_transient_error,
-    retry_decision,
+    CONNECT_TRACE_NEXT_STEP, ConnectFailureKind, ConnectPhaseReached, DbError,
+    FlashbackRefusalKind, QuarantineOutcome, RetryDecision, RetryPolicy, StatementClass,
+    StatementOutcome, connect_hint_for, is_transient_error, retry_decision,
 };
 pub use hard_parse_closure::{HardParseEffectClosureV1, prove_hard_parse_effect_closure};
 pub use health::{
