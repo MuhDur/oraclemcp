@@ -181,7 +181,10 @@ fn catalog_facts_live_roundtrip() {
             status.success(),
             "fresh process must revalidate stored Free23 facts"
         );
-        log_case("catalog_facts_live_roundtrip", "fresh_after_process_restart");
+        log_case(
+            "catalog_facts_live_roundtrip",
+            "fresh_after_process_restart",
+        );
         eprintln!(
             "[catalog-facts-live] FREE23 unchanged synthetic package was Fresh after process restart"
         );
@@ -288,7 +291,10 @@ fn catalog_facts_live_recompile_is_stale() {
             matches!(result, Revalidation::Stale(_)),
             "recompile must stale facts, got {result:?}"
         );
-        log_case("catalog_facts_live_recompile_is_stale", "stale_after_last_ddl_time_change");
+        log_case(
+            "catalog_facts_live_recompile_is_stale",
+            "stale_after_last_ddl_time_change",
+        );
         eprintln!("[catalog-facts-live] FREE23 package recompile returned Stale");
     });
 }
