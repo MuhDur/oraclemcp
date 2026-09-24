@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T09:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.7",
+  "scope": {
+    "summary": "Cross-backend (driver-cx vs official oracledb) NUMBER boundary and row-streaming parity, live on FREE 23ai (74b81d0f).",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/cross_backend_parity.rs"
+    ],
+    "out_of_scope": [
+      "XE18/XE21: the bead scopes the proof to FREE 23ai (\"green on FREE 23ai\").",
+      "Cursor lifecycle under stress and guard behaviour (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "74b81d0f67c514745044e4099e60116fe8c6fb78",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "live parity (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean detached gate worktree at 74b81d0f, build lease held: ORACLEMCP_DUAL_BACKEND_LAB=1 against FREE23 (localhost:1523/FREEPDB1, synthetic fixture user), run id W411226A66A0: cargo test -p oraclemcp-db --features oracledb,live-xe --test cross_backend_parity live_cross_backend_number_and_streaming_parity -- --ignored --exact: 1 passed, 0 failed. Parity records present for both backends for all 10 named cases (parity_number_pos_38_digits, _neg_38_digits, _zero_and_neg_zero, _scale_rounding, _extreme_exponents, _is_exact_json_string, parity_stream_empty, _ordered_1000_rows, _early_drop_no_stale_reuse, _cancel_no_stale_reuse). Follow-up SELECT 42 returned 42 on both backends after early drop and cancel. No lab objects remained for the run id afterwards."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "The number oracle compares each backend value, required to be a JSON string, against Oracle TO_CHAR text canonicalised the same way, so a planted f64 conversion loses 38-digit precision and fails. The named cases are labelled cases inside one live test function, not separate #[test] functions."
+      },
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Implementer verified-push gate passed at 74b81d0f (workspace test). The orchestrator workspace gate at 020deb99 (3559/0) predates this test-only commit; the changed file compiles only with the oracledb,live-xe features, which the live run above exercised."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live proof re-executed by the orchestrator, independent of the implementing pane; trace recorded in integration_evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
