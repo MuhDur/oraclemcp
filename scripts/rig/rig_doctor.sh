@@ -64,14 +64,21 @@ USAGE
   e2e_usage_common
 }
 
-lane_container() {
-  case "$1" in
-    xe18) printf '%s\n' 'oracle-xe18-1518' ;;
-    xe21) printf '%s\n' 'oracle-xe21-1520' ;;
-    free23) printf '%s\n' 'rust-oracledb-free' ;;
-    *) return 1 ;;
-  esac
+LANES_TOML="${ORACLEMCP_RIG_L1_LANES_TOML:-$ROOT/scripts/rig/lanes.toml}"
+
+# The lane's container name from the rig's single inventory (lanes.toml).
+lane_inventory_container() {
+  python3 - "$LANES_TOML" "$1" <<'PY' 2>/dev/null
+import sys, tomllib
+with open(sys.argv[1], "rb") as handle:
+    lane = tomllib.load(handle)["lanes"].get(sys.argv[2])
+if not lane or "container" not in lane:
+    sys.exit(1)
+print(lane["container"])
+PY
 }
+
+lane_container() { lane_inventory_container "$1"; }
 
 lane_env_prefix() {
   printf 'ORACLEMCP_RIG_L1_%s_ADMIN_PASSWORD' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]')"
@@ -156,6 +163,17 @@ check_docker_version() {
 
 # PRESENT-BUT-WRONG #3: busybox `timeout` exists but has no -k, which every
 # bounded rig command uses. Absence and wrong-flavour need different messages.
+check_python3() {
+  if command -v python3 >/dev/null 2>&1; then
+    ok "python3" "python3 on PATH at $(command -v python3) (reads scripts/rig/lanes.toml)"
+    return 0
+  fi
+  refuse "python3" "MISSING" "python3 is not on PATH" \
+    "PATH=$PATH" \
+    "install python3 (3.11+ for tomllib), then re-run: bash scripts/rig/rig_doctor.sh"
+  return 1
+}
+
 check_timeout_tool() {
   if ! command -v timeout >/dev/null 2>&1; then
     refuse "timeout-binary" "MISSING" "timeout is not on PATH" \
@@ -228,16 +246,19 @@ check_state_dir() {
   return 1
 }
 
-# The rig deliberately REFUSES to create lab containers, so a missing container is
-# a hard refusal here rather than something `up` will fix.
+# `oracle_l1.sh up` creates an absent lane from its pinned image, so an absent
+# container is not a refusal; a lane missing from the inventory is.
 check_lane_container() {
   local lane="$1" container
-  container="$(lane_container "$lane")"
-  if ! docker container inspect "$container" >/dev/null 2>&1; then
+  if ! container="$(lane_container "$lane")" || [ -z "$container" ]; then
     refuse "container-$lane" "MISSING" \
-      "lane $lane has no container named $container (the rig refuses to create lab containers)" \
-      "docker container inspect $container" \
-      "create it from the lane's cached image, or point the lane at an existing container"
+      "lane $lane has no entry in the rig lane inventory" \
+      "$LANES_TOML" \
+      "add [lanes.$lane] with container, image (pinned by digest), host_port and pdb"
+    return 1
+  fi
+  if ! docker container inspect "$container" >/dev/null 2>&1; then
+    ok "container-$lane" "$container absent; 'oracle_l1.sh up --lane $lane' creates it from its pinned image"
     return 1
   fi
   if docker container inspect -f '{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
@@ -301,6 +322,7 @@ run_all_checks() {
     check_docker_daemon || true
     check_docker_version || true
   fi
+  check_python3 || true
   check_timeout_tool || true
   check_timeout_env || true
   check_fixture_password || true
@@ -354,6 +376,7 @@ selftest() {
   PATH="/nonexistent"
   selftest_check_can_fail "docker-binary" check_docker_binary || failures=1
   selftest_check_can_fail "timeout-binary" check_timeout_tool || failures=1
+  selftest_check_can_fail "python3" check_python3 || failures=1
   PATH="$saved_path"
 
   ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS="zero" \
@@ -363,9 +386,9 @@ selftest() {
   STATE_DIR="/proc/nonexistent-rig-state" \
     selftest_check_can_fail "state-dir" check_state_dir || failures=1
 
-  # A lane whose container cannot exist.
+  # A lane the inventory does not define.
   # shellcheck disable=SC2329
-  lane_container() { printf '%s\n' 'oraclemcp-rig-doctor-absent-container'; }
+  lane_container() { return 1; }
   selftest_check_can_fail "container-lane" check_lane_container xe18 || failures=1
 
   # The accept direction: a check that refuses everything is as useless as one
@@ -373,14 +396,7 @@ selftest() {
   local before="$FINDINGS"
   unset -f lane_container
   # shellcheck disable=SC2329
-  lane_container() {
-    case "$1" in
-      xe18) printf '%s\n' 'oracle-xe18-1518' ;;
-      xe21) printf '%s\n' 'oracle-xe21-1520' ;;
-      free23) printf '%s\n' 'rust-oracledb-free' ;;
-      *) return 1 ;;
-    esac
-  }
+  lane_container() { lane_inventory_container "$1"; }
   check_timeout_env >/dev/null 2>&1
   if [ "$FINDINGS" -ne "$before" ]; then
     echo "selftest: a well-formed environment was refused (checks refuse unconditionally)" >&2
@@ -405,7 +421,11 @@ selftest() {
   # The rig's lanes must all be preflighted; a lane the rig knows and the doctor
   # does not is the same false-healthy hole in lane shape.
   local rig_lanes lane
-  rig_lanes="$(sed -n '/^lane_container()/,/^}/p' "$RIG_L1" | grep -oE '^\s+[a-z0-9]+\)' | tr -d ' )' | sort -u)"
+  rig_lanes="$(sed -n 's/^lanes=(\(.*\))$/\1/p' "$RIG_L1" | tr ' ' '\n' | sort -u)"
+  if [ -z "$rig_lanes" ]; then
+    echo "selftest: extracted NO lanes from $RIG_L1 — the lane coverage assertion is vacuous" >&2
+    failures=1
+  fi
   for lane in $rig_lanes; do
     case " ${LANES[*]} " in
       *" $lane "*) ;;

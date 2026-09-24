@@ -39,6 +39,7 @@ scenarios=(
   scripts/e2e/http_oauth_lanes.sh
   scripts/e2e/dashboard_readonly.sh
   scripts/rig/rig_browser_lane.sh
+  scripts/rig/oracle_l1.sh
   scripts/e2e/served_console.sh
   scripts/e2e/audit_append.sh
   scripts/e2e/verdict_certificate.sh

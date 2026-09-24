@@ -1,0 +1,28 @@
+# Rig L1 lanes owned by oraclemcp (bead .9.2). scripts/rig/oracle_l1.sh reads
+# this file: it creates a missing lane from its pinned image (labelled
+# oraclemcp.rig=1), starts a stopped one, and never touches a container that is
+# not listed here. Admin passwords are runtime-only (ORACLE_PASSWORD in the
+# container environment, or ORACLEMCP_RIG_L1_<LANE>_ADMIN_PASSWORD).
+#
+# The free23 image digest equals the one pinned for the `oracle-free23` job in
+# .github/workflows/ci.yml; the selftest enforces that.
+
+[lanes.xe18]
+container = "oraclemcp-xe18-rel"
+image = "gvenzl/oracle-xe:18-slim@sha256:118d22f6df24caff2456323e334c14b9cfcc8fad7475b5421fa1638baa6f54ca"
+host_port = 1518
+pdb = "XEPDB1"
+
+[lanes.xe21]
+container = "oraclemcp-xe21-rel"
+image = "gvenzl/oracle-xe:21-slim@sha256:ecdf4302ac3d134e1bac5ef6e0c223c2d0f4d4d2b6d551aa79b2346f1ab8f792"
+host_port = 1520
+pdb = "XEPDB1"
+
+# :1522 belongs to another repository's container; ORACLEMCP_RIG_FREE23_PORT
+# overrides the port.
+[lanes.free23]
+container = "oraclemcp-free23-rel"
+image = "gvenzl/oracle-free:23-slim@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8"
+host_port = 1523
+pdb = "FREEPDB1"

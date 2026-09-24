@@ -194,6 +194,9 @@ require_scaffold_tools
 
 case "$cmd" in
   doctor)
+    # One JSON line per lane (lane, container, pinned image, image digests,
+    # present, healthy, owned, version, port), then the environment preflight.
+    bash "$RIG_L1" status
     bash "$RIG_DOCTOR" "$@"
     ;;
   up)

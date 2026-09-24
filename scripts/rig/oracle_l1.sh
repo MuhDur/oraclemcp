@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Rig L1: reuse the local XE 18 / XE 21 / Free 23ai lab containers.
+# Rig L1: the oraclemcp-owned XE 18 / XE 21 / FREE 23ai lab lanes (bead .9.2).
 #
-# The command intentionally never creates or removes a container. `run` starts
-# only stopped, pre-existing lanes; waits for the driver's readiness sentinel;
-# invokes the driver's idempotent schema bootstrap; smoke-queries every lane;
-# and stops only lanes started by this process. That makes a repeated `run`
-# deterministic without taking down a container another operator already had up.
+# scripts/rig/lanes.toml is the lane inventory: container name, image pinned by
+# digest, host port and PDB. `up` creates a missing lane from its pinned image
+# (labelled oraclemcp.rig=1), starts a stopped one and adopts a running one;
+# the bootstrap SQL lives in scripts/rig/bootstrap/. `down` stops only lanes
+# that carry the oraclemcp.rig=1 label and removes them only with the explicit
+# operator flag --remove. Nothing here calls into another repository.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,18 +18,21 @@ E2E_PROFILE="container-lab"
 E2E_LEVEL="READ_ONLY"
 export E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
 
-DRIVER_ROOT="${ORACLEMCP_DRIVER_ROOT:-$ROOT/../rust-oracledb}"
-DRIVER_CONTAINER="$DRIVER_ROOT/scripts/container.sh"
-DRIVER_BOOTSTRAP="$DRIVER_ROOT/scripts/bootstrap_live_schema.sh"
+LANES_TOML="${ORACLEMCP_RIG_L1_LANES_TOML:-$ROOT/scripts/rig/lanes.toml}"
+BOOTSTRAP_SQL="$ROOT/scripts/rig/bootstrap/01_fixture_principals.sql"
+RIG_LABEL='oraclemcp.rig=1'
 CAPABILITY_FIXTURES_SQL="$ROOT/scripts/rig/oracle_l1_capabilities.sql"
 PRIVILEGE_MATRIX_SQL="$ROOT/scripts/rig/oracle_l1_privilege_matrix.sql"
 READY_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS:-300}"
 BOOTSTRAP_TIMEOUT_SECS="${ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS:-300}"
-# The driver bootstrap owns this throwaway principal. Keep the D2 fixture
-# credentials aligned with it while permitting an operator to override a
-# rotated lab password without printing it.
+# Synthetic fixture principals created by scripts/rig/bootstrap. The names stay
+# the ones the D2 fixtures, rig doctor and tool sweep already connect as; an
+# operator may override a rotated lab password without printing it.
 FIXTURE_USER="${PYO_TEST_MAIN_USER:-pythontest}"
 FIXTURE_PASSWORD="${ORACLEMCP_RIG_L1_FIXTURE_PASSWORD:-${PYO_TEST_MAIN_PASSWORD:-testpw}}"
+PROXY_USER="${PYO_TEST_PROXY_USER:-pythontestproxy}"
+PROXY_PASSWORD="${PYO_TEST_PROXY_PASSWORD:-proxypw}"
+REMOVE_LANES=0
 # Keep runtime-only credentials lane-specific: the reused XE and Free images
 # may deliberately have different SYS passwords. The shared variable remains a
 # convenience fallback for lab images that use one password everywhere.
@@ -38,56 +42,28 @@ OWNED_STATE_FILE="$OWNED_STATE_DIR/owned-containers.tsv"
 
 lanes=(xe18 xe21 free23)
 
-usage() {
-  cat <<'USAGE'
-Rig L1 Oracle container harness.
-
-Usage:
-  bash scripts/rig/oracle_l1.sh run --log
-  bash scripts/rig/oracle_l1.sh <up|wait|bootstrap|fixtures|smoke|drcp-identity|privilege-matrix|down|run> [--log|--dry-run]
-
-`run` is the one-command L1 cycle: start stopped existing containers, wait for
-the Oracle readiness sentinel, seed the reusable driver schema, smoke-query
-and verify D2 capability fixtures in each lane, then stop only containers this
-process started. It never creates or removes a container and leaves pre-existing
-running lanes untouched.
-
-`drcp-identity` runs the two-profile DRCP reuse assertion against FREE 23ai.
-It intentionally fails until B14a clears identity before setting it; that red
-result is the fixture's proof that it can catch the cross-profile bleed.
-
-`privilege-matrix` provisions the D4 fixture (no-flashback + catalog-blind
-principals) on FREE 23ai and prints the ORACLEMCP_D4_* environment the live test
-crates/oraclemcp-db/tests/privilege_matrix_live.rs consumes. Eval its stdout to
-export that environment. The two test cases stay #[ignore]d expected-red until
-A3a/A3b and A1a land.
-
-Environment:
-  ORACLEMCP_DRIVER_ROOT                 rust-oracledb checkout (default sibling)
-  ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS   per-lane bounded readiness wait (default 300)
-  ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS  per-lane bootstrap ceiling (default 300)
-  ORACLEMCP_RIG_L1_<LANE>_ADMIN_PASSWORD  lane SYS password (XE18, XE21, FREE23; not logged)
-  ORACLEMCP_RIG_L1_ADMIN_PASSWORD         shared fallback SYS password (not logged)
-  ORACLEMCP_RIG_L1_FIXTURE_PASSWORD       PYO_TEST_MAIN_USER password after bootstrap (default: testpw; not logged)
-USAGE
-  e2e_usage_common
+# One field of one lane from lanes.toml (the single lane inventory).
+lane_field() {
+  python3 - "$LANES_TOML" "$1" "$2" <<'PY'
+import sys, tomllib
+with open(sys.argv[1], "rb") as handle:
+    lane = tomllib.load(handle)["lanes"].get(sys.argv[2])
+if lane is None or sys.argv[3] not in lane:
+    sys.exit(1)
+print(lane[sys.argv[3]])
+PY
 }
 
-lane_container() {
-  case "$1" in
-    xe18) printf '%s\n' 'oracle-xe18-1518' ;;
-    xe21) printf '%s\n' 'oracle-xe21-1520' ;;
-    free23) printf '%s\n' 'rust-oracledb-free' ;;
-    *) return 1 ;;
-  esac
-}
+lane_container() { lane_field "$1" container; }
+lane_pdb() { lane_field "$1" pdb; }
+lane_image() { lane_field "$1" image; }
 
-lane_pdb() {
-  case "$1" in
-    xe18 | xe21) printf '%s\n' 'XEPDB1' ;;
-    free23) printf '%s\n' 'FREEPDB1' ;;
-    *) return 1 ;;
-  esac
+lane_host_port() {
+  if [ "$1" = 'free23' ] && [ -n "${ORACLEMCP_RIG_FREE23_PORT:-}" ]; then
+    printf '%s\n' "$ORACLEMCP_RIG_FREE23_PORT"
+    return 0
+  fi
+  lane_field "$1" host_port
 }
 
 lane_admin_password() {
@@ -119,8 +95,9 @@ require_runtime_tools() {
   command -v timeout >/dev/null 2>&1 || e2e_finish_fail 'timeout is required for bounded rig L1 commands'
   [[ "$READY_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || e2e_finish_fail 'ORACLEMCP_RIG_L1_READY_TIMEOUT_SECS must be a positive integer'
   [[ "$BOOTSTRAP_TIMEOUT_SECS" =~ ^[1-9][0-9]*$ ]] || e2e_finish_fail 'ORACLEMCP_RIG_L1_BOOTSTRAP_TIMEOUT_SECS must be a positive integer'
-  [ -x "$DRIVER_CONTAINER" ] || e2e_finish_fail "driver container helper is not executable: $DRIVER_CONTAINER"
-  [ -x "$DRIVER_BOOTSTRAP" ] || e2e_finish_fail "driver bootstrap hook is not executable: $DRIVER_BOOTSTRAP"
+  command -v python3 >/dev/null 2>&1 || e2e_finish_fail 'python3 is required to read scripts/rig/lanes.toml'
+  [ -r "$LANES_TOML" ] || e2e_finish_fail "lane inventory is not readable: $LANES_TOML"
+  [ -r "$BOOTSTRAP_SQL" ] || e2e_finish_fail "lane bootstrap SQL is not readable: $BOOTSTRAP_SQL"
   [ -r "$CAPABILITY_FIXTURES_SQL" ] || e2e_finish_fail "D2 capability fixture SQL is not readable: $CAPABILITY_FIXTURES_SQL"
 }
 
@@ -161,7 +138,10 @@ start_lane() {
     e2e_log_event 'container_start' 'setup' 'skipped' 0 "lane=$lane dry-run"
     return 0
   fi
-  container_exists "$container" || e2e_finish_fail "lane=$lane expected existing container $container; rig L1 refuses to create lab containers"
+  if ! container_exists "$container"; then
+    create_lane "$lane"
+    return 0
+  fi
   if container_running "$container"; then
     e2e_log_event 'container_start' 'setup' 'pass' 0 "lane=$lane container already running"
     return 0
@@ -172,6 +152,31 @@ start_lane() {
   timeout -k 5 60 docker start "$container" >/dev/null
   record_owned_state "$container" 'started'
   e2e_log_event 'container_start' 'setup' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane started owned container"
+}
+
+# Create a missing lane from its pinned image. The admin password reaches the
+# container through the environment (never argv): an explicit lane password, or
+# a fresh random one that `lane_admin_password` later reads back from Docker.
+create_lane() {
+  local lane="$1"
+  local container image port started password
+  container="$(lane_container "$lane")"
+  image="$(lane_image "$lane")"
+  port="$(lane_host_port "$lane")"
+  password="$(lane_admin_password "$lane")"
+  if [ -z "$password" ]; then
+    password="Rig$(od -An -N12 -tx1 /dev/urandom | tr -d ' \n')x9"
+  fi
+  started="$(e2e_epoch_ms)"
+  e2e_log_event 'container_create' 'setup' 'running' 0 "lane=$lane container=$container image=$image port=$port"
+  if ! ORACLE_PASSWORD="$password" timeout -k 5 900 docker run -d --name "$container" \
+    --label "$RIG_LABEL" --label "oraclemcp.rig.lane=$lane" \
+    -p "$port:1521" -e ORACLE_PASSWORD "$image" >/dev/null; then
+    e2e_log_event 'container_create' 'setup' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane docker run failed"
+    e2e_finish_fail "lane=$lane could not create $container from $image"
+  fi
+  record_owned_state "$container" 'started'
+  e2e_log_event 'container_create' 'setup' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane created owned container $container"
 }
 
 wait_lane() {
@@ -212,15 +217,20 @@ bootstrap_lane() {
   password="$(lane_admin_password "$lane")"
   container_running "$container" || e2e_finish_fail "lane=$lane container is not running: $container"
   started="$(e2e_epoch_ms)"
-  e2e_log_event 'fixture_bootstrap' 'act' 'running' 0 "lane=$lane driver bootstrap hook"
-  # Do not use e2e_run_command: its command artifact would include the secret
-  # environment assignment. The hook's normal success line contains no secret.
-  if ! ORACLEDB_CONTAINER_NAME="$container" ORACLEDB_PDB="$pdb" ORACLE_PASSWORD="$password" \
-    timeout -k 10 "$BOOTSTRAP_TIMEOUT_SECS" "$DRIVER_BOOTSTRAP" >/dev/null; then
-    e2e_log_event 'fixture_bootstrap' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane driver bootstrap failed"
-    e2e_finish_fail "lane=$lane driver bootstrap failed"
+  e2e_log_event 'fixture_bootstrap' 'act' 'running' 0 "lane=$lane scripts/rig/bootstrap"
+  # Every secret travels by environment-variable NAME (`-e VAR`): never on the
+  # host argv, never in a log line. Inside the container they become SQL*Plus
+  # substitution values for the bootstrap script.
+  if ! ORACLE_PASSWORD="$password" PDB="$pdb" RIG_FU="$FIXTURE_USER" RIG_FP="$FIXTURE_PASSWORD" \
+    RIG_PU="$PROXY_USER" RIG_PP="$PROXY_PASSWORD" \
+    timeout -k 10 "$BOOTSTRAP_TIMEOUT_SECS" docker exec -i -e ORACLE_PASSWORD -e PDB \
+    -e RIG_FU -e RIG_FP -e RIG_PU -e RIG_PP "$container" bash -c \
+    'sqlplus -S -L "sys/\"$ORACLE_PASSWORD\"@localhost:1521/$PDB as sysdba" @/dev/stdin "$RIG_FU" "$RIG_FP" "$RIG_PU" "$RIG_PP"' \
+    <"$BOOTSTRAP_SQL" >/dev/null; then
+    e2e_log_event 'fixture_bootstrap' 'assert' 'fail' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane bootstrap failed"
+    e2e_finish_fail "lane=$lane bootstrap failed"
   fi
-  e2e_log_event 'fixture_bootstrap' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane driver bootstrap completed"
+  e2e_log_event 'fixture_bootstrap' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane bootstrap completed"
 }
 
 seed_capability_lane() {
@@ -391,17 +401,6 @@ drcp_identity_fixture() {
   e2e_log_event 'drcp_identity_fixture' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" 'lane=free23 DRCP profile isolation held'
 }
 
-# Host port each lane's Oracle listener is published on. Mirrors the container
-# names (oracle-xe18-1518, oracle-xe21-1520) and the free23 mapping to 1522.
-lane_host_port() {
-  case "$1" in
-    xe18) printf '%s\n' '1518' ;;
-    xe21) printf '%s\n' '1520' ;;
-    free23) printf '%s\n' '1522' ;;
-    *) return 1 ;;
-  esac
-}
-
 # D4 — provision the privilege-matrix fixture (no-flashback + catalog-blind
 # principals) and emit the environment the live Rust test consumes.
 #
@@ -474,8 +473,9 @@ smoke_lane() {
   started="$(e2e_epoch_ms)"
   e2e_log_event 'smoke_query' 'act' 'running' 0 "lane=$lane SELECT 1 FROM dual"
   set +e
-  output="$(timeout -k 5 60 docker exec -i "$container" \
-    sqlplus -S -L "sys/${password}@localhost:1521/${pdb} as sysdba" <<'SQL'
+  output="$(ORACLE_PASSWORD="$password" PDB="$pdb" timeout -k 5 60 docker exec -i \
+    -e ORACLE_PASSWORD -e PDB "$container" bash -c \
+    'sqlplus -S -L "sys/\"$ORACLE_PASSWORD\"@localhost:1521/$PDB as sysdba"' <<'SQL'
 whenever sqlerror exit failure
 set echo off feedback off heading off verify off pagesize 0
 select 1 from dual;
@@ -491,6 +491,7 @@ SQL
   e2e_log_event 'smoke_query' 'assert' 'pass' "$(( $(e2e_epoch_ms) - started ))" "lane=$lane SELECT 1 FROM dual returned 1"
 }
 
+# `run` cleanup: stop only lanes this process started.
 teardown_owned_lanes() {
   local lane container started state
   if [ "$E2E_DRY_RUN" = '1' ]; then
@@ -515,6 +516,102 @@ teardown_owned_lanes() {
   done
 }
 
+container_is_owned() {
+  [ "$(docker inspect --format '{{index .Config.Labels "oraclemcp.rig"}}' "$1" 2>/dev/null || true)" = '1' ]
+}
+
+# `down`: stop (and, only with --remove, remove) lanes that carry the
+# oraclemcp.rig=1 label. An unlabelled container is never touched, even under
+# a lane's name: it was not created by this rig.
+down_lanes() {
+  local lane container
+  for lane in "${lanes[@]}"; do
+    container="$(lane_container "$lane")"
+    if [ "$E2E_DRY_RUN" = '1' ]; then
+      e2e_log_event 'container_down' 'teardown' 'skipped' 0 "lane=$lane container=$container dry-run"
+      continue
+    fi
+    if ! container_exists "$container"; then
+      e2e_log_event 'container_down' 'teardown' 'skipped' 0 "lane=$lane container=$container absent"
+      continue
+    fi
+    if ! container_is_owned "$container"; then
+      e2e_log_event 'container_down' 'teardown' 'skipped' 0 "lane=$lane container=$container not labelled $RIG_LABEL; left untouched"
+      continue
+    fi
+    if container_running "$container"; then
+      timeout -k 5 60 docker stop "$container" >/dev/null
+    fi
+    if [ "$REMOVE_LANES" = '1' ]; then
+      timeout -k 5 60 docker rm "$container" >/dev/null
+      e2e_log_event 'container_down' 'teardown' 'pass' 0 "lane=$lane container=$container stopped and removed (--remove)"
+    else
+      e2e_log_event 'container_down' 'teardown' 'pass' 0 "lane=$lane container=$container stopped"
+    fi
+  done
+}
+
+# One JSON line per lane (rig.sh doctor consumes this).
+status_lanes() {
+  local lane container image port present running owned digest version
+  for lane in "${lanes[@]}"; do
+    container="$(lane_container "$lane")"
+    image="$(lane_image "$lane")"
+    port="$(lane_host_port "$lane")"
+    present=false running=false owned=false digest='' version=''
+    if [ "$E2E_DRY_RUN" != '1' ] && container_exists "$container"; then
+      present=true
+      container_running "$container" && running=true
+      container_is_owned "$container" && owned=true
+      digest="$(docker image inspect --format '{{join .RepoDigests ","}}' \
+        "$(docker inspect --format '{{.Image}}' "$container")" 2>/dev/null || true)"
+      version="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$container" 2>/dev/null || true)"
+    fi
+    python3 -c 'import json, sys; keys = ["lane", "container", "pinned_image", "port", "present", "healthy", "owned", "image_digests", "version"]; vals = sys.argv[1:]; row = dict(zip(keys, vals)); [row.__setitem__(k, row[k] == "true") for k in ("present", "healthy", "owned")]; row["port"] = int(row["port"]); print(json.dumps(row, sort_keys=True))' \
+      "$lane" "$container" "$image" "$port" "$present" "$running" "$owned" "$digest" "$version"
+  done
+}
+
+# Offline selftest: the inventory is complete and pinned, the free23 pin equals
+# CI's, no rig file references another repository's checkout (proved against a
+# planted reference), and a planted admin password never reaches a log line.
+selftest() {
+  local failures=0 lane field file planted canary logdir
+  for lane in "${lanes[@]}"; do
+    for field in container image host_port pdb; do
+      lane_field "$lane" "$field" >/dev/null || { echo "selftest: lane $lane lacks $field" >&2; failures=1; }
+    done
+    [[ "$(lane_image "$lane")" == *@sha256:* ]] || { echo "selftest: lane $lane image is not pinned by digest" >&2; failures=1; }
+  done
+  grep -F "image: $(lane_image free23)" "$ROOT/.github/workflows/ci.yml" >/dev/null ||
+    { echo "selftest: free23 image differs from the ci.yml oracle-free23 pin" >&2; failures=1; }
+  rig_files=("$ROOT/scripts/rig/oracle_l1.sh" "$LANES_TOML" "$BOOTSTRAP_SQL" "$ROOT/scripts/e2e/lib.sh")
+  # The pattern is assembled from pieces so this file never matches itself.
+  local driver_repo='rust''-oracledb' driver_root='ORACLEMCP_''DRIVER_ROOT' driver_hook='bootstrap_''live_schema'
+  local foreign_pattern="$driver_repo|$driver_root|$driver_hook"
+  scan_foreign() { grep -nE "$foreign_pattern" "$@"; }
+  for file in "${rig_files[@]}"; do
+    if scan_foreign "$file" >/dev/null; then
+      echo "selftest: $file references another repository's checkout" >&2
+      failures=1
+    fi
+  done
+  planted="$(mktemp)"
+  printf 'bash "$ROOT/../%s/scripts/%s.sh"\n' "$driver_repo" "$driver_hook" >"$planted"
+  scan_foreign "$planted" >/dev/null || { echo "selftest: the foreign-reference scan missed a planted reference" >&2; failures=1; }
+  canary="RigCanary$(od -An -N6 -tx1 /dev/urandom | tr -d ' \n')"
+  logdir="$(mktemp -d)"
+  ORACLEMCP_RIG_L1_ADMIN_PASSWORD="$canary" E2E_ARTIFACT_DIR="$logdir" ORACLEMCP_E2E_ARTIFACT_DIR="$logdir" \
+    bash "$ROOT/scripts/rig/oracle_l1.sh" run --log --dry-run >"$logdir/stdout" 2>"$logdir/stderr" ||
+    { echo "selftest: dry-run failed" >&2; failures=1; }
+  if grep -rF "$canary" "$logdir" >/dev/null; then
+    echo "selftest: the planted admin password reached a log line" >&2
+    failures=1
+  fi
+  [ "$failures" = '0' ] || return 1
+  echo "oracle_l1 selftest: OK (3 pinned lanes, free23 pin = ci.yml, no foreign checkout reference, password canary absent)"
+}
+
 run_all_lanes() {
   local lane
   for lane in "${lanes[@]}"; do
@@ -532,30 +629,67 @@ run_all_lanes() {
 command='run'
 if [ "$#" -gt 0 ]; then
   case "$1" in
-    up | wait | bootstrap | fixtures | smoke | drcp-identity | privilege-matrix | down | run)
+    up | wait | bootstrap | fixtures | smoke | status | drcp-identity | privilege-matrix | down | run)
       command="$1"
       shift
       ;;
+    --selftest)
+      selftest
+      exit $?
+      ;;
   esac
 fi
-for arg in "$@"; do
+only_lane=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --lane)
+      [ "$#" -ge 2 ] || e2e_finish_fail '--lane requires xe18, xe21 or free23'
+      only_lane="$2"
+      shift 2
+      continue
+      ;;
+    --remove)
+      REMOVE_LANES=1
+      shift
+      continue
+      ;;
+  esac
   set +e
-  e2e_parse_common_arg "$arg"
+  e2e_parse_common_arg "$1"
   parsed=$?
   set -e
   case "$parsed" in
-    0) continue ;;
+    0) shift; continue ;;
     3) usage; exit 0 ;;
-    1) e2e_finish_fail "unknown argument: $arg" ;;
+    1) e2e_finish_fail "unknown argument: $1" ;;
   esac
 done
+if [ -n "$only_lane" ]; then
+  case "$only_lane" in
+    xe18 | xe21 | free23) lanes=("$only_lane") ;;
+    *) e2e_finish_fail "unknown lane: $only_lane" ;;
+  esac
+fi
+[ "$REMOVE_LANES" = '0' ] || [ "$command" = 'down' ] || e2e_finish_fail '--remove is only valid with down'
 
 require_runtime_tools
 e2e_log_event 'scenario_start' 'setup' 'running' 0 "Rig L1 command=$command lanes=${lanes[*]}"
+for lane in "${lanes[@]}"; do
+  e2e_log_event 'lane_plan' 'setup' 'pass' 0 "lane=$lane container=$(lane_container "$lane") image=$(lane_image "$lane") port=$(lane_host_port "$lane") pdb=$(lane_pdb "$lane")"
+done
 
 case "$command" in
   up)
-    for lane in "${lanes[@]}"; do start_lane "$lane"; done
+    # Sequential per lane: create/start, readiness, bootstrap, smoke.
+    for lane in "${lanes[@]}"; do
+      start_lane "$lane"
+      wait_lane "$lane"
+      bootstrap_lane "$lane"
+      smoke_lane "$lane"
+    done
+    ;;
+  status)
+    status_lanes
     ;;
   wait)
     for lane in "${lanes[@]}"; do wait_lane "$lane"; done
@@ -580,7 +714,7 @@ case "$command" in
     privilege_matrix_fixture
     ;;
   down)
-    teardown_owned_lanes
+    down_lanes
     ;;
   run)
     trap teardown_owned_lanes EXIT

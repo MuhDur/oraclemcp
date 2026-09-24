@@ -189,23 +189,72 @@ fn blocking_free23_matrix_keeps_the_governed_plsql_lifecycle_contract() {
     );
 }
 
-#[test]
-fn rig_l1_dry_run_is_a_single_command_with_complete_lane_plan() {
-    let root = repo_root();
-    let driver_root = root
-        .parent()
-        .expect("oraclemcp has a parent")
-        .join("rust-oracledb");
-    if !std::process::Command::new("docker")
+fn docker_available() -> bool {
+    Command::new("docker")
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
-        || !driver_root.join("scripts/container.sh").is_file()
-        || !driver_root
-            .join("scripts/bootstrap_live_schema.sh")
-            .is_file()
-    {
-        eprintln!("skipping Rig L1 dry-run: Docker or sibling driver helpers are unavailable");
+}
+
+/// .9.2: the rig owns its three lanes. The dry run names each owned container,
+/// its digest-pinned image and its port (from scripts/rig/lanes.toml), the
+/// free23 lane is not another repository's container, and the offline
+/// selftest (pins, ci.yml free23 pin, foreign-checkout scan with a planted
+/// reference, password canary) passes.
+#[test]
+fn rig_l1_dry_run_lists_owned_lanes_with_digests() {
+    let root = repo_root();
+    if !docker_available() {
+        eprintln!("skipping Rig L1 lane plan: Docker is unavailable");
+        return;
+    }
+    let output = run_script("scripts/rig/oracle_l1.sh", &["up", "--log", "--dry-run"]);
+    assert!(
+        output.status.success(),
+        "Rig L1 up dry-run failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let events = json_lines(&output.stderr);
+    for (lane, container, port) in [
+        ("xe18", "oraclemcp-xe18-rel", "1518"),
+        ("xe21", "oraclemcp-xe21-rel", "1520"),
+        ("free23", "oraclemcp-free23-rel", "1523"),
+    ] {
+        let plan = events
+            .iter()
+            .filter(|event| event["event"] == "lane_plan")
+            .filter_map(|event| event["message"].as_str())
+            .find(|message| message.starts_with(&format!("lane={lane} ")))
+            .unwrap_or_else(|| panic!("no lane_plan for {lane}: {events:?}"));
+        assert!(plan.contains(&format!("container={container} ")), "{plan}");
+        assert!(plan.contains("@sha256:"), "image pinned by digest: {plan}");
+        assert!(plan.contains(&format!("port={port} ")), "{plan}");
+        assert!(!plan.contains("rust-oracledb"), "{plan}");
+    }
+    let selftest = Command::new(common::bash_bin())
+        .arg(root.join("scripts/rig/oracle_l1.sh"))
+        .arg("--selftest")
+        .current_dir(&root)
+        .output()
+        .expect("run oracle_l1 selftest");
+    assert!(
+        selftest.status.success(),
+        "oracle_l1 --selftest failed: {}",
+        String::from_utf8_lossy(&selftest.stderr)
+    );
+    let run_all =
+        std::fs::read_to_string(root.join("scripts/e2e/run_all.sh")).expect("read run_all.sh");
+    assert!(
+        run_all.contains("scripts/rig/oracle_l1.sh"),
+        "Rig L1 is registered in run_all.sh"
+    );
+}
+
+#[test]
+fn rig_l1_dry_run_is_a_single_command_with_complete_lane_plan() {
+    let root = repo_root();
+    if !docker_available() {
+        eprintln!("skipping Rig L1 dry-run: Docker is unavailable");
         return;
     }
 
