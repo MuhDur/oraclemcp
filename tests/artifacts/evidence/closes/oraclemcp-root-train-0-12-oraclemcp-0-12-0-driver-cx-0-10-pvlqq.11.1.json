@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T19:30:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.1",
+  "scope": {
+    "summary": "Wallet files are opened with O_NOFOLLOW|O_NONBLOCK and verified as regular files on the opened handle before any read; FIFOs, symlinks, directories and devices are refused with a typed error in the driver reader (rust-oracledb d6ae7c0), doctor, wallet_certificate_validity and connect (b95cf31d, fa8a8d83; driver pin 5eb7cfda).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-db/tests/wallet_connect_io.rs"
+    ],
+    "out_of_scope": [
+      "Real ADB wallet connect (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "36126b07adcf2844c37565f5a7bda021a19e86b0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 36126b07 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3611 passed, 0 failed; cargo test -p oraclemcp --all-targets --features plsql-intelligence: pass; cargo deny OK; secret_scan OK; fuzz crates compile. The arch-fitness lint reports 2 file-size violations introduced by f6015799 (.13.5, main_tests.rs and cli.rs), unrelated to these beads and routed to its owner."
+      },
+      {
+        "name": "driver tests (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean rust-oracledb worktree at d6ae7c0, build lease: cargo test -p oraclemcp-driver-cx-protocol read_wallet_file: read_wallet_file_refuses_fifo_without_blocking, _refuses_symlink_to_regular_wallet, _refuses_directory_at_wallet_name, _refuses_char_device, _reads_regular_file_unchanged: 5 passed, 0 failed."
+      },
+      {
+        "name": "oraclemcp tests",
+        "kind": "cli",
+        "trace": "doctor_wallet_posture_refuses_fifo_wallet_without_hanging, doctor_wallet_posture_refuses_symlinked_wallet, unix::wallet_certificate_validity_refuses_fifo_pem, unix::connect_refuses_fifo_wallet_before_blocking: ok in the gate log."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "read_wallet_file_bounded opens with O_CLOEXEC|O_NOFOLLOW|O_NONBLOCK (FILE_FLAG_OPEN_REPARSE_POINT on Windows) and checks file.metadata().file_type().is_file() on the opened handle: post-open verification, not the forbidden symlink_metadata pre-check."
+      },
+      {
+        "name": "incident",
+        "kind": "cli",
+        "trace": "b95cf31d first landed while the driver pin (4fa672cd) lacked WalletError::NotRegularFile and broke the build; the pre-push test had used a local --config patch. Fixed by the pin refresh 5eb7cfda; ORDERS now forbid local patch overrides in pre-push tests."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Re-executed by the orchestrator where stated; implementer-reported items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

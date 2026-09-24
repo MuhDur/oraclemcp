@@ -1,0 +1,68 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T19:30:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.1.1",
+  "scope": {
+    "summary": "Dev pins: [patch.crates-io] to pushed sibling revs (driver rust-oracledb d6ae7c06, engine plsql-intelligence 27806fbe), allow-git limited to the two sibling URLs, a tag-refusal gate for dev pins, an unused-patch guard, exhaustive fail-closed handling of the pinned engine EdgeKind variants, and version reporting in info (8341d2c6, c2f4d952, 9789b2ed, 6dd897cb, 19cafe92, 06a0499c, 7ede434f, 78c3f8da, 45ca7efb, 5eb7cfda).",
+    "in_scope": [
+      "Cargo.toml",
+      "Cargo.lock",
+      "deny.toml",
+      "scripts/local_release_gate_check.sh",
+      "scripts/cargo_patch_warning_guard.sh",
+      "crates/oraclemcp/src/plsql_tools.rs"
+    ],
+    "out_of_scope": [
+      "crates.io resolution, sibling CI health and cross-target release builds (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "36126b07adcf2844c37565f5a7bda021a19e86b0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 36126b07 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3611 passed, 0 failed; cargo test -p oraclemcp --all-targets --features plsql-intelligence: pass; cargo deny OK; secret_scan OK; fuzz crates compile. The arch-fitness lint reports 2 file-size violations introduced by f6015799 (.13.5, main_tests.rs and cli.rs), unrelated to these beads and routed to its owner."
+      },
+      {
+        "name": "cargo metadata (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "cargo metadata --locked --all-features: 2 driver crates from rust-oracledb at the pinned rev and 17 engine crates from plsql-intelligence at 27806fbe; no \"patch was not used\" warning."
+      },
+      {
+        "name": "dev-pin refusal",
+        "kind": "cli",
+        "trace": "scripts/local_release_gate_check.sh --refuse-dev-pins exits 1 on the dev-pinned tree naming each [patch.crates-io] entry; tests/release_contract_test.sh cases dev_pins_refuse_tag_patch_entry, _refuse_tag_allow_git, _refuse_tag_git_lock_source, _clean_manifest_passes, _non_tag_run_is_not_refused are real fixture cases asserting exit status and the named entry; unused-patch fixture refused by cargo_patch_warning_guard.sh (7ede434f)."
+      },
+      {
+        "name": "engine variants",
+        "kind": "cli",
+        "trace": "78c3f8da maps the 11 new engine EdgeKind variants explicitly (effectful -> ProvenSideEffecting, unresolved -> Unknown, no wildcard); the plsql-intelligence feature suite passes in the gate."
+      },
+      {
+        "name": "docker (implementer)",
+        "kind": "cli",
+        "trace": "Implementer-reported clean-clone Docker build of both runtime targets at 5eb7cfda, PL/SQL image reporting driver 0.9.3 and engine 0.7.0. Not re-executed by the orchestrator."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Re-executed by the orchestrator where stated; implementer-reported items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
