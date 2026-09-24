@@ -22,6 +22,7 @@ pub oraclemcp_error::ErrorClass::OperatingLevelTooLow
 pub oraclemcp_error::ErrorClass::PolicyDenied
 pub oraclemcp_error::ErrorClass::RepreviewRequired
 pub oraclemcp_error::ErrorClass::RuntimeStateRequired
+pub oraclemcp_error::ErrorClass::SnapshotTooOld
 pub oraclemcp_error::ErrorClass::SyntaxError
 pub oraclemcp_error::ErrorClass::Timeout
 pub oraclemcp_error::ErrorClass::Transient

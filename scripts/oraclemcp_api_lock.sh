@@ -62,22 +62,25 @@ else:
 }
 
 select_baseline_tag() {
-  local version="$1" tag
+  local version="$1" tag tag_commit head_commit
   if [ -n "${ORACLEMCP_SEMVER_BASELINE_TAG:-}" ]; then
     tag="$ORACLEMCP_SEMVER_BASELINE_TAG"
   else
-    tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude="v$version" HEAD)" || {
+    tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD)" || {
       echo "oraclemcp-api-lock: no previous release tag found before workspace version $version" >&2
       return 1
     }
+    tag_commit="$(git rev-parse "$tag^{commit}")"
+    head_commit="$(git rev-parse HEAD)"
+    if [ "$tag_commit" = "$head_commit" ]; then
+      tag="$(git describe --tags --abbrev=0 --match 'v[0-9]*' --exclude="$tag" HEAD)" || {
+        echo "oraclemcp-api-lock: no earlier release tag found before $tag" >&2
+        return 1
+      }
+    fi
   fi
   if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-.][[:alnum:].-]+)?$ ]]; then
     echo "oraclemcp-api-lock: invalid baseline release tag '$tag'" >&2
-    return 1
-  fi
-  local tag_version="${tag#v}"
-  if [ "$tag_version" = "$version" ]; then
-    echo "oraclemcp-api-lock: baseline $tag is the workspace version $version" >&2
     return 1
   fi
   if ! git rev-parse --verify --quiet "$tag^{commit}" >/dev/null; then
@@ -88,11 +91,14 @@ select_baseline_tag() {
     echo "oraclemcp-api-lock: baseline tag '$tag' is not an ancestor of HEAD" >&2
     return 1
   fi
+  echo "oraclemcp-api-lock: workspace version $version; explicit SemVer release type: minor" >&2
   printf '%s\n' "$tag"
 }
 
 run_semver_check() {
-  local baseline_tag="$1" crate archive baseline_metadata baseline_target baseline_rustdoc
+  local baseline_tag="$1" release_type="${2:-minor}" require_checks="${3:-true}"
+  local crate archive baseline_metadata baseline_target baseline_rustdoc output check_count
+  SEMVER_CHECKS_RUN=0
   echo "oraclemcp-api-lock: semver baseline tag: $baseline_tag"
   archive="${CARGO_TARGET_DIR:-$ROOT/target}/semver-baseline-${baseline_tag}"
   baseline_target="${CARGO_TARGET_DIR:-$ROOT/target}/semver-baseline-target-${baseline_tag}"
@@ -119,16 +125,33 @@ PY
       echo "oraclemcp-api-lock: missing baseline rustdoc JSON for $crate at $baseline_tag: $baseline_rustdoc" >&2
       return 1
     fi
-    cargo --offline --locked semver-checks check-release \
-      --baseline-rustdoc "$baseline_rustdoc" -p "$crate"
+    if ! output="$(cargo --offline --locked semver-checks check-release \
+      --release-type "$release_type" --baseline-rustdoc "$baseline_rustdoc" \
+      -p "$crate" 2>&1)"; then
+      printf '%s\n' "$output" >&2
+      return 1
+    fi
+    printf '%s\n' "$output"
+    check_count="$(sed -nE 's/.*Checked \[[^]]+\] ([0-9]+) checks:.*/\1/p' <<<"$output" | tail -n 1)"
+    if [[ ! "$check_count" =~ ^[0-9]+$ ]]; then
+      echo "oraclemcp-api-lock: could not read semver check count for $crate at $baseline_tag" >&2
+      return 1
+    fi
+    SEMVER_CHECKS_RUN=$((SEMVER_CHECKS_RUN + check_count))
+    if [ "$require_checks" = true ] && [ "$check_count" -eq 0 ]; then
+      echo "oraclemcp-api-lock: no semver checks ran for $crate at $baseline_tag" >&2
+      return 1
+    fi
   done
 }
 
 log_selftest_case() {
-  python3 - "$1" "$2" "$3" "$4" <<'PY'
+  python3 - "$1" "$2" "$3" "$4" "${5:-}" <<'PY'
 import json, sys
+checks_run = int(sys.argv[5]) if sys.argv[5] else None
 print(json.dumps({"case_id": sys.argv[1], "baseline_tag": sys.argv[2],
-                  "expected": sys.argv[3], "actual": sys.argv[4]}))
+                  "expected": sys.argv[3], "actual": sys.argv[4],
+                  "checks_run": checks_run}))
 PY
 }
 
@@ -136,11 +159,11 @@ selftest() {
   local version baseline scratch yanked_root planted_root planted_tag actual output
   version="$(workspace_version)"
   baseline="$(select_baseline_tag "$version")"
-  if run_semver_check "$baseline"; then
-    log_selftest_case semver_baseline_head_passes "$baseline" pass pass
+  if run_semver_check "$baseline" minor true; then
+    log_selftest_case semver_baseline_head_passes "$baseline" pass pass "$SEMVER_CHECKS_RUN"
   else
     actual=fail
-    log_selftest_case semver_baseline_head_passes "$baseline" pass "$actual"
+    log_selftest_case semver_baseline_head_passes "$baseline" pass "$actual" "$SEMVER_CHECKS_RUN"
     return 1
   fi
 
@@ -192,7 +215,7 @@ PY
       --package oraclemcp-error --lib --no-deps --target-dir "$planted_target"
   planted_rustdoc="$planted_target/doc/oraclemcp_error.json"
   if output="$(cd "$planted_root" && cargo --offline --locked semver-checks check-release \
-      --baseline-rustdoc "$planted_rustdoc" -p oraclemcp-error 2>&1)"; then
+      --release-type minor --baseline-rustdoc "$planted_rustdoc" -p oraclemcp-error 2>&1)"; then
     printf '%s\n' "$output"
     log_selftest_case semver_baseline_detects_planted_break "$planted_tag" fail pass
     return 1
@@ -203,8 +226,18 @@ PY
       oracle_retry_action_from_message fail
     return 1
   fi
+  local planted_checks
+  planted_checks="$(sed -nE 's/.*Checked \[[^]]+\] ([0-9]+) checks:.*/\1/p' <<<"$output" | tail -n 1)"
+  if [[ ! "$planted_checks" =~ ^[1-9][0-9]*$ ]]; then
+    printf '%s\n' "$output" >&2
+    echo "oraclemcp-api-lock: planted-break SemVer run was vacuous" >&2
+    log_selftest_case semver_baseline_detects_planted_break "$planted_tag" \
+      oracle_retry_action_from_message fail "${planted_checks:-0}"
+    return 1
+  fi
   printf '%s\n' "$output"
-  log_selftest_case semver_baseline_detects_planted_break "$planted_tag" fail fail-detected
+  log_selftest_case semver_baseline_detects_planted_break "$planted_tag" \
+    fail fail-detected "$planted_checks"
 
   # v0.10.0 locks the now-yanked oracledb 0.9.1. Fetch that committed lock
   # first, then force offline mode for the semver comparison to prove the
@@ -216,10 +249,10 @@ PY
     log_selftest_case semver_baseline_yanked_dependency_reproducible v0.10.0 pass fetch-failed
     return 1
   fi
-  if ORACLEMCP_SEMVER_BASELINE_TAG=v0.10.0 run_semver_check v0.10.0; then
-    log_selftest_case semver_baseline_yanked_dependency_reproducible v0.10.0 pass pass
+  if ORACLEMCP_SEMVER_BASELINE_TAG=v0.10.0 run_semver_check v0.10.0 major false; then
+    log_selftest_case semver_baseline_yanked_dependency_reproducible v0.10.0 pass pass "$SEMVER_CHECKS_RUN"
   else
-    log_selftest_case semver_baseline_yanked_dependency_reproducible v0.10.0 pass fail
+    log_selftest_case semver_baseline_yanked_dependency_reproducible v0.10.0 pass fail "$SEMVER_CHECKS_RUN"
     return 1
   fi
 }

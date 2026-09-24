@@ -36,6 +36,10 @@ impl core::marker::Unpin for oraclemcp_verifier::TestAttestationFormatError
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationFormatError
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationFormatError
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationFormatError
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::TestAttestationFormatError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationFormatError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::TestAttestationFormatError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::TestAttestationFormatError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationFormatError where U: core::convert::From<T>
 pub fn oraclemcp_verifier::TestAttestationFormatError::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationFormatError where U: core::convert::Into<T>
@@ -50,6 +54,7 @@ pub fn oraclemcp_verifier::TestAttestationFormatError::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::TestAttestationFormatError::to_owned(&self) -> T
 impl<T> alloc::string::ToString for oraclemcp_verifier::TestAttestationFormatError where T: core::fmt::Display + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestAttestationFormatError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::TestAttestationFormatError
 impl<T> core::any::Any for oraclemcp_verifier::TestAttestationFormatError where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestAttestationFormatError::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationFormatError where T: ?core::marker::Sized
@@ -60,10 +65,14 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationFormat
 pub unsafe fn oraclemcp_verifier::TestAttestationFormatError::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationFormatError
 pub fn oraclemcp_verifier::TestAttestationFormatError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::TestAttestationFormatError
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationFormatError
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationFormatError
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationFormatError
 pub type oraclemcp_verifier::TestAttestationFormatError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::TestAttestationFormatError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::TestAttestationFormatError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::TestAttestationFormatError::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_verifier::TestAttestationVerificationError
 pub oraclemcp_verifier::TestAttestationVerificationError::AmbiguousKey
 pub oraclemcp_verifier::TestAttestationVerificationError::InvalidPayload(oraclemcp_verifier::TestAttestationFormatError)
@@ -95,6 +104,10 @@ impl core::marker::Unpin for oraclemcp_verifier::TestAttestationVerificationErro
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationVerificationError
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationVerificationError
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationVerificationError
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::TestAttestationVerificationError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationVerificationError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::TestAttestationVerificationError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::TestAttestationVerificationError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationVerificationError where U: core::convert::From<T>
 pub fn oraclemcp_verifier::TestAttestationVerificationError::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationVerificationError where U: core::convert::Into<T>
@@ -109,6 +122,7 @@ pub fn oraclemcp_verifier::TestAttestationVerificationError::clone_into(&self, &
 pub fn oraclemcp_verifier::TestAttestationVerificationError::to_owned(&self) -> T
 impl<T> alloc::string::ToString for oraclemcp_verifier::TestAttestationVerificationError where T: core::fmt::Display + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestAttestationVerificationError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::TestAttestationVerificationError
 impl<T> core::any::Any for oraclemcp_verifier::TestAttestationVerificationError where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestAttestationVerificationError::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationVerificationError where T: ?core::marker::Sized
@@ -119,10 +133,14 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationVerifi
 pub unsafe fn oraclemcp_verifier::TestAttestationVerificationError::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationVerificationError
 pub fn oraclemcp_verifier::TestAttestationVerificationError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::TestAttestationVerificationError
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationVerificationError
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationVerificationError
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationVerificationError
 pub type oraclemcp_verifier::TestAttestationVerificationError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::TestAttestationVerificationError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::TestAttestationVerificationError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::TestAttestationVerificationError::vzip(self) -> V
 pub enum oraclemcp_verifier::TestOutcome
 pub oraclemcp_verifier::TestOutcome::Fail
 pub oraclemcp_verifier::TestOutcome::Pass
@@ -147,6 +165,10 @@ impl core::marker::Unpin for oraclemcp_verifier::TestOutcome
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestOutcome
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestOutcome
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestOutcome
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::TestOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestOutcome::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::TestOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::TestOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestOutcome where U: core::convert::From<T>
 pub fn oraclemcp_verifier::TestOutcome::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestOutcome where U: core::convert::Into<T>
@@ -159,6 +181,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestOutcome where T: core
 pub type oraclemcp_verifier::TestOutcome::Owned = T
 pub fn oraclemcp_verifier::TestOutcome::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::TestOutcome::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::TestOutcome
 impl<T> core::any::Any for oraclemcp_verifier::TestOutcome where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestOutcome::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestOutcome where T: ?core::marker::Sized
@@ -169,11 +192,15 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestOutcome where T: 
 pub unsafe fn oraclemcp_verifier::TestOutcome::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::TestOutcome
 pub fn oraclemcp_verifier::TestOutcome::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::TestOutcome
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::TestOutcome where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestOutcome
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestOutcome
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestOutcome
 pub type oraclemcp_verifier::TestOutcome::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::TestOutcome where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::TestOutcome where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::TestOutcome::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_verifier::VerdictVerificationError
 pub oraclemcp_verifier::VerdictVerificationError::AuditCertificateCoreHashMismatch
 pub oraclemcp_verifier::VerdictVerificationError::AuditRecordHashInvalid
@@ -207,6 +234,10 @@ impl core::marker::Unpin for oraclemcp_verifier::VerdictVerificationError
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::VerdictVerificationError
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerdictVerificationError
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerdictVerificationError
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::VerdictVerificationError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerdictVerificationError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::VerdictVerificationError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::VerdictVerificationError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerdictVerificationError where U: core::convert::From<T>
 pub fn oraclemcp_verifier::VerdictVerificationError::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerdictVerificationError where U: core::convert::Into<T>
@@ -221,6 +252,7 @@ pub fn oraclemcp_verifier::VerdictVerificationError::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::VerdictVerificationError::to_owned(&self) -> T
 impl<T> alloc::string::ToString for oraclemcp_verifier::VerdictVerificationError where T: core::fmt::Display + ?core::marker::Sized
 pub fn oraclemcp_verifier::VerdictVerificationError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::VerdictVerificationError
 impl<T> core::any::Any for oraclemcp_verifier::VerdictVerificationError where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::VerdictVerificationError::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerdictVerificationError where T: ?core::marker::Sized
@@ -231,10 +263,14 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::VerdictVerificationEr
 pub unsafe fn oraclemcp_verifier::VerdictVerificationError::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::VerdictVerificationError
 pub fn oraclemcp_verifier::VerdictVerificationError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::VerdictVerificationError
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerdictVerificationError
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerdictVerificationError
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerdictVerificationError
 pub type oraclemcp_verifier::VerdictVerificationError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::VerdictVerificationError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::VerdictVerificationError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::VerdictVerificationError::vzip(self) -> V
 pub struct oraclemcp_verifier::AttestedArtifact
 pub oraclemcp_verifier::AttestedArtifact::path: alloc::string::String
 pub oraclemcp_verifier::AttestedArtifact::sha256: alloc::string::String
@@ -257,6 +293,10 @@ impl core::marker::Unpin for oraclemcp_verifier::AttestedArtifact
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::AttestedArtifact
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::AttestedArtifact
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::AttestedArtifact
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::AttestedArtifact where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedArtifact::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::AttestedArtifact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::AttestedArtifact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::AttestedArtifact where U: core::convert::From<T>
 pub fn oraclemcp_verifier::AttestedArtifact::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::AttestedArtifact where U: core::convert::Into<T>
@@ -269,6 +309,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::AttestedArtifact where T:
 pub type oraclemcp_verifier::AttestedArtifact::Owned = T
 pub fn oraclemcp_verifier::AttestedArtifact::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::AttestedArtifact::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::AttestedArtifact
 impl<T> core::any::Any for oraclemcp_verifier::AttestedArtifact where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::AttestedArtifact::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::AttestedArtifact where T: ?core::marker::Sized
@@ -279,11 +320,15 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::AttestedArtifact wher
 pub unsafe fn oraclemcp_verifier::AttestedArtifact::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::AttestedArtifact
 pub fn oraclemcp_verifier::AttestedArtifact::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::AttestedArtifact
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::AttestedArtifact where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::AttestedArtifact
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::AttestedArtifact
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::AttestedArtifact
 pub type oraclemcp_verifier::AttestedArtifact::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::AttestedArtifact where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::AttestedArtifact where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::AttestedArtifact::vzip(self) -> V
 pub struct oraclemcp_verifier::AttestedTest
 pub oraclemcp_verifier::AttestedTest::detail: core::option::Option<alloc::string::String>
 pub oraclemcp_verifier::AttestedTest::name: alloc::string::String
@@ -307,6 +352,10 @@ impl core::marker::Unpin for oraclemcp_verifier::AttestedTest
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::AttestedTest
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::AttestedTest
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::AttestedTest
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::AttestedTest where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::AttestedTest::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::AttestedTest where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::AttestedTest where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::AttestedTest where U: core::convert::From<T>
 pub fn oraclemcp_verifier::AttestedTest::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::AttestedTest where U: core::convert::Into<T>
@@ -319,6 +368,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::AttestedTest where T: cor
 pub type oraclemcp_verifier::AttestedTest::Owned = T
 pub fn oraclemcp_verifier::AttestedTest::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::AttestedTest::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::AttestedTest
 impl<T> core::any::Any for oraclemcp_verifier::AttestedTest where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::AttestedTest::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::AttestedTest where T: ?core::marker::Sized
@@ -329,11 +379,15 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::AttestedTest where T:
 pub unsafe fn oraclemcp_verifier::AttestedTest::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::AttestedTest
 pub fn oraclemcp_verifier::AttestedTest::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::AttestedTest
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::AttestedTest where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::AttestedTest
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::AttestedTest
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::AttestedTest
 pub type oraclemcp_verifier::AttestedTest::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::AttestedTest where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::AttestedTest where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::AttestedTest::vzip(self) -> V
 pub struct oraclemcp_verifier::TestAttestation
 impl oraclemcp_verifier::TestAttestation
 pub fn oraclemcp_verifier::TestAttestation::all_tests_passed(&self) -> bool
@@ -366,6 +420,10 @@ impl core::marker::Unpin for oraclemcp_verifier::TestAttestation
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestation
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestation
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestation
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::TestAttestation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestation::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::TestAttestation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::TestAttestation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestation where U: core::convert::From<T>
 pub fn oraclemcp_verifier::TestAttestation::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestation where U: core::convert::Into<T>
@@ -378,6 +436,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestation where T: 
 pub type oraclemcp_verifier::TestAttestation::Owned = T
 pub fn oraclemcp_verifier::TestAttestation::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::TestAttestation::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::TestAttestation
 impl<T> core::any::Any for oraclemcp_verifier::TestAttestation where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestAttestation::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestation where T: ?core::marker::Sized
@@ -388,11 +447,15 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestation where
 pub unsafe fn oraclemcp_verifier::TestAttestation::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestation
 pub fn oraclemcp_verifier::TestAttestation::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::TestAttestation
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::TestAttestation where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestation
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestation
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestation
 pub type oraclemcp_verifier::TestAttestation::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::TestAttestation where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::TestAttestation where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::TestAttestation::vzip(self) -> V
 pub struct oraclemcp_verifier::TestAttestationDraft
 pub oraclemcp_verifier::TestAttestationDraft::artifacts: alloc::vec::Vec<oraclemcp_verifier::AttestedArtifact>
 pub oraclemcp_verifier::TestAttestationDraft::command: alloc::string::String
@@ -413,6 +476,8 @@ impl core::marker::Unpin for oraclemcp_verifier::TestAttestationDraft
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationDraft
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationDraft
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationDraft
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::TestAttestationDraft where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::TestAttestationDraft where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationDraft where U: core::convert::From<T>
 pub fn oraclemcp_verifier::TestAttestationDraft::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationDraft where U: core::convert::Into<T>
@@ -425,6 +490,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestationDraft wher
 pub type oraclemcp_verifier::TestAttestationDraft::Owned = T
 pub fn oraclemcp_verifier::TestAttestationDraft::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::TestAttestationDraft::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::TestAttestationDraft
 impl<T> core::any::Any for oraclemcp_verifier::TestAttestationDraft where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestAttestationDraft::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationDraft where T: ?core::marker::Sized
@@ -435,10 +501,14 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationDraft 
 pub unsafe fn oraclemcp_verifier::TestAttestationDraft::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationDraft
 pub fn oraclemcp_verifier::TestAttestationDraft::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::TestAttestationDraft
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationDraft
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationDraft
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationDraft
 pub type oraclemcp_verifier::TestAttestationDraft::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::TestAttestationDraft where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::TestAttestationDraft where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::TestAttestationDraft::vzip(self) -> V
 pub struct oraclemcp_verifier::TestAttestationSignature
 pub oraclemcp_verifier::TestAttestationSignature::key_id: alloc::string::String
 pub oraclemcp_verifier::TestAttestationSignature::payload_sha256: alloc::string::String
@@ -463,6 +533,10 @@ impl core::marker::Unpin for oraclemcp_verifier::TestAttestationSignature
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::TestAttestationSignature
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::TestAttestationSignature
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::TestAttestationSignature
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::TestAttestationSignature where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::TestAttestationSignature::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::TestAttestationSignature where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::TestAttestationSignature where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::TestAttestationSignature where U: core::convert::From<T>
 pub fn oraclemcp_verifier::TestAttestationSignature::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::TestAttestationSignature where U: core::convert::Into<T>
@@ -475,6 +549,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::TestAttestationSignature 
 pub type oraclemcp_verifier::TestAttestationSignature::Owned = T
 pub fn oraclemcp_verifier::TestAttestationSignature::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::TestAttestationSignature::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::TestAttestationSignature
 impl<T> core::any::Any for oraclemcp_verifier::TestAttestationSignature where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::TestAttestationSignature::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::TestAttestationSignature where T: ?core::marker::Sized
@@ -485,11 +560,15 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::TestAttestationSignat
 pub unsafe fn oraclemcp_verifier::TestAttestationSignature::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::TestAttestationSignature
 pub fn oraclemcp_verifier::TestAttestationSignature::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::TestAttestationSignature
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_verifier::TestAttestationSignature where T: for<'de> serde_core::de::Deserialize<'de>
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::TestAttestationSignature
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::TestAttestationSignature
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::TestAttestationSignature
 pub type oraclemcp_verifier::TestAttestationSignature::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::TestAttestationSignature where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::TestAttestationSignature where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::TestAttestationSignature::vzip(self) -> V
 pub struct oraclemcp_verifier::VerdictEvidence<'a>
 pub oraclemcp_verifier::VerdictEvidence::audit_keys: &'a [oraclemcp_audit::record::SigningKey]
 pub oraclemcp_verifier::VerdictEvidence::audit_record: &'a oraclemcp_audit::record::AuditRecord
@@ -502,6 +581,8 @@ impl<'a> core::marker::Unpin for oraclemcp_verifier::VerdictEvidence<'a>
 impl<'a> core::marker::UnsafeUnpin for oraclemcp_verifier::VerdictEvidence<'a>
 impl<'a> core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerdictEvidence<'a>
 impl<'a> core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerdictEvidence<'a>
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::VerdictEvidence<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::VerdictEvidence<'a> where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerdictEvidence<'a> where U: core::convert::From<T>
 pub fn oraclemcp_verifier::VerdictEvidence<'a>::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerdictEvidence<'a> where U: core::convert::Into<T>
@@ -510,6 +591,7 @@ pub fn oraclemcp_verifier::VerdictEvidence<'a>::try_from(U) -> core::result::Res
 impl<T, U> core::convert::TryInto<U> for oraclemcp_verifier::VerdictEvidence<'a> where U: core::convert::TryFrom<T>
 pub type oraclemcp_verifier::VerdictEvidence<'a>::Error = <U as core::convert::TryFrom<T>>::Error
 pub fn oraclemcp_verifier::VerdictEvidence<'a>::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::VerdictEvidence<'a>
 impl<T> core::any::Any for oraclemcp_verifier::VerdictEvidence<'a> where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::VerdictEvidence<'a>::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerdictEvidence<'a> where T: ?core::marker::Sized
@@ -518,10 +600,14 @@ impl<T> core::borrow::BorrowMut<T> for oraclemcp_verifier::VerdictEvidence<'a> w
 pub fn oraclemcp_verifier::VerdictEvidence<'a>::borrow_mut(&mut self) -> &mut T
 impl<T> core::convert::From<T> for oraclemcp_verifier::VerdictEvidence<'a>
 pub fn oraclemcp_verifier::VerdictEvidence<'a>::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::VerdictEvidence<'a>
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerdictEvidence<'a>
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerdictEvidence<'a>
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerdictEvidence<'a>
 pub type oraclemcp_verifier::VerdictEvidence<'a>::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::VerdictEvidence<'a> where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::VerdictEvidence<'a> where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::VerdictEvidence<'a>::vzip(self) -> V
 pub struct oraclemcp_verifier::VerifiedTestAttestation
 pub oraclemcp_verifier::VerifiedTestAttestation::attestation: oraclemcp_verifier::TestAttestation
 pub oraclemcp_verifier::VerifiedTestAttestation::key_id: alloc::string::String
@@ -541,6 +627,10 @@ impl core::marker::Unpin for oraclemcp_verifier::VerifiedTestAttestation
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::VerifiedTestAttestation
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerifiedTestAttestation
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerifiedTestAttestation
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::VerifiedTestAttestation where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedTestAttestation::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::VerifiedTestAttestation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::VerifiedTestAttestation where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerifiedTestAttestation where U: core::convert::From<T>
 pub fn oraclemcp_verifier::VerifiedTestAttestation::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerifiedTestAttestation where U: core::convert::Into<T>
@@ -553,6 +643,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::VerifiedTestAttestation w
 pub type oraclemcp_verifier::VerifiedTestAttestation::Owned = T
 pub fn oraclemcp_verifier::VerifiedTestAttestation::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::VerifiedTestAttestation::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::VerifiedTestAttestation
 impl<T> core::any::Any for oraclemcp_verifier::VerifiedTestAttestation where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::VerifiedTestAttestation::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerifiedTestAttestation where T: ?core::marker::Sized
@@ -563,10 +654,14 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::VerifiedTestAttestati
 pub unsafe fn oraclemcp_verifier::VerifiedTestAttestation::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::VerifiedTestAttestation
 pub fn oraclemcp_verifier::VerifiedTestAttestation::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::VerifiedTestAttestation
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerifiedTestAttestation
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerifiedTestAttestation
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerifiedTestAttestation
 pub type oraclemcp_verifier::VerifiedTestAttestation::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::VerifiedTestAttestation where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::VerifiedTestAttestation where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::VerifiedTestAttestation::vzip(self) -> V
 pub struct oraclemcp_verifier::VerifiedVerdict
 pub oraclemcp_verifier::VerifiedVerdict::audit_entry_hash: alloc::string::String
 pub oraclemcp_verifier::VerifiedVerdict::danger: oraclemcp_guard::levels::DangerLevel
@@ -587,6 +682,10 @@ impl core::marker::Unpin for oraclemcp_verifier::VerifiedVerdict
 impl core::marker::UnsafeUnpin for oraclemcp_verifier::VerifiedVerdict
 impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_verifier::VerifiedVerdict
 impl core::panic::unwind_safe::UnwindSafe for oraclemcp_verifier::VerifiedVerdict
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_verifier::VerifiedVerdict where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_verifier::VerifiedVerdict::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_verifier::VerifiedVerdict where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_verifier::VerifiedVerdict where ST: ?core::marker::Sized, DT: ?core::marker::Sized
 impl<T, U> core::convert::Into<U> for oraclemcp_verifier::VerifiedVerdict where U: core::convert::From<T>
 pub fn oraclemcp_verifier::VerifiedVerdict::into(self) -> U
 impl<T, U> core::convert::TryFrom<U> for oraclemcp_verifier::VerifiedVerdict where U: core::convert::Into<T>
@@ -599,6 +698,7 @@ impl<T> alloc::borrow::ToOwned for oraclemcp_verifier::VerifiedVerdict where T: 
 pub type oraclemcp_verifier::VerifiedVerdict::Owned = T
 pub fn oraclemcp_verifier::VerifiedVerdict::clone_into(&self, &mut T)
 pub fn oraclemcp_verifier::VerifiedVerdict::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_verifier::VerifiedVerdict
 impl<T> core::any::Any for oraclemcp_verifier::VerifiedVerdict where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_verifier::VerifiedVerdict::type_id(&self) -> core::any::TypeId
 impl<T> core::borrow::Borrow<T> for oraclemcp_verifier::VerifiedVerdict where T: ?core::marker::Sized
@@ -609,10 +709,14 @@ impl<T> core::clone::CloneToUninit for oraclemcp_verifier::VerifiedVerdict where
 pub unsafe fn oraclemcp_verifier::VerifiedVerdict::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_verifier::VerifiedVerdict
 pub fn oraclemcp_verifier::VerifiedVerdict::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_verifier::VerifiedVerdict
 impl<T> tracing::instrument::Instrument for oraclemcp_verifier::VerifiedVerdict
 impl<T> tracing::instrument::WithSubscriber for oraclemcp_verifier::VerifiedVerdict
 impl<T> typenum::type_operators::Same for oraclemcp_verifier::VerifiedVerdict
 pub type oraclemcp_verifier::VerifiedVerdict::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_verifier::VerifiedVerdict where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_verifier::VerifiedVerdict where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_verifier::VerifiedVerdict::vzip(self) -> V
 pub const oraclemcp_verifier::TEST_ATTESTATION_FRAME: &str
 pub const oraclemcp_verifier::TEST_ATTESTATION_SCHEMA: &str
 pub const oraclemcp_verifier::TEST_ATTESTATION_SIGNATURE_SCHEMA: &str
