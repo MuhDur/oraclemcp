@@ -1278,6 +1278,175 @@ pub(super) async fn stream_query_response(
     }))
 }
 
+impl OracleDispatcher {
+    /// Read one side of a cross-database `oracle_diff` from a named profile, on
+    /// a connection opened and closed inside this call.
+    ///
+    /// Arc H adds *reach*, never admission surface. Every guard the caller would
+    /// meet on the way to this database through `oracle_switch_profile` is met
+    /// here, in the same order:
+    ///
+    /// 1. **Exposure (E5).** The profile is admitted through
+    ///    [`ProfileDrainState::admit_mcp_profile`] before its credentials are
+    ///    resolved, so a diff can never reach a profile the caller could not
+    ///    switch to, and a hidden name is refused without revealing that it
+    ///    exists.
+    /// 2. **Its own catalog.** The statement is re-resolved and re-classified
+    ///    against *this* database with a fresh
+    ///    [`OracleCatalogResolverCache`]. The cache key carries no database
+    ///    identity, so reusing the pinned session's cache would resolve this
+    ///    database's SQL against the other one's objects — the same text can name
+    ///    different objects here.
+    /// 3. **Its own egress policy.** Rows are masked under this profile's
+    ///    masking policy, not the active session's.
+    ///
+    /// The connection is transient: it is never installed in `DispatcherState`,
+    /// so the pinned session, its transaction, and its quarantine are untouched.
+    /// It is deliberately *not* wired to `self.quarantine` — a failure on the
+    /// database being compared against must not poison the caller's own session.
+    pub(super) async fn read_diff_side_from_profile(
+        &self,
+        cx: &Cx,
+        request: DiffSideRequest<'_>,
+    ) -> Result<DiffSideRead, ErrorEnvelope> {
+        let DiffSideRequest {
+            side,
+            profile,
+            sql,
+            binds,
+            caps,
+            scn,
+            serialize_defaults,
+            subject,
+            budget,
+            infer_key,
+        } = request;
+
+        let lease = match self
+            .profile_drain
+            .admit_mcp_profile(profile, self.mcp_exposure.is_exposed(profile))
+        {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            ProfileGenerationAdmission::NotExposed => {
+                return Err(diff_side_failure(
+                    side,
+                    profile,
+                    profile_not_available(profile),
+                ));
+            }
+            ProfileGenerationAdmission::Draining => {
+                return Err(diff_side_failure(
+                    side,
+                    profile,
+                    profile_draining_error(profile),
+                ));
+            }
+        };
+        let Some(connector) = &self.connector else {
+            return Err(diff_side_failure(
+                side,
+                profile,
+                ErrorEnvelope::new(
+                    ErrorClass::RuntimeStateRequired,
+                    "cross-database diff is unavailable in this server instance",
+                )
+                .with_next_step("restart the server with `oraclemcp serve --profile <name>`"),
+            ));
+        };
+        let policy = profile_dispatch_policy(&lease)
+            .map_err(|error| diff_side_failure(side, profile, error))?;
+        let (conn, _stateless) = connector(cx, &lease)
+            .await
+            .map_err(|error| diff_side_failure(side, profile, DbError::into_envelope(error)))?
+            .into_parts();
+
+        let limits = ConnectionLimitGuard::install(
+            cx,
+            conn.as_ref(),
+            None,
+            None,
+            budget.deadline(),
+            Some(budget.db_quota()),
+        )
+        .map_err(|error| diff_side_failure(side, profile, DbError::into_envelope(error)))?;
+
+        // Everything fallible below runs inside this block so the connection's
+        // request limits are always restored, whatever the outcome.
+        let read = async {
+            let observed = ReadUncertaintyConn {
+                inner: conn.as_ref(),
+                quarantine: None,
+            };
+            let executed_sql = with_audit_marker(sql, Some(profile), "oracle_diff");
+            let catalog_cache = OracleCatalogResolverCache::new();
+            let (relations, _) =
+                resolve_read_only_relations(cx, &observed, &catalog_cache, &executed_sql).await?;
+            let inferred_key = if infer_key {
+                inferred_diff_key_columns(cx, &observed, &relations).await?
+            } else {
+                Vec::new()
+            };
+            let serialize_opts = SerializeOptions {
+                result_masking: policy.result_masking.clone(),
+                ..serialize_defaults
+            };
+            let mut response = match scn {
+                Some(scn) => {
+                    read_query_as_of(
+                        cx,
+                        &observed,
+                        &executed_sql,
+                        binds,
+                        caps,
+                        0,
+                        &serialize_opts,
+                        &AsOf::Scn(scn),
+                    )
+                    .await
+                }
+                None => {
+                    read_query(
+                        cx,
+                        &observed,
+                        &executed_sql,
+                        binds,
+                        caps,
+                        0,
+                        &serialize_opts,
+                    )
+                    .await
+                }
+            }
+            .map_err(DbError::into_envelope)?;
+            bind_result_masking_audit(
+                cx,
+                &observed,
+                self.auditor.as_deref(),
+                subject,
+                "oracle_diff",
+                &executed_sql,
+                &mut response,
+            )
+            .await?;
+            Ok(DiffSideRead {
+                response,
+                inferred_key,
+            })
+        }
+        .await
+        .map_err(|error| diff_side_failure(side, profile, error));
+
+        // Restore before surfacing the read outcome: a restore failure on a
+        // connection we are about to drop must not mask the real error.
+        let restore = limits
+            .restore()
+            .map_err(|error| diff_side_failure(side, profile, DbError::into_envelope(error)));
+        let read = read?;
+        restore?;
+        Ok(read)
+    }
+}
+
 #[cfg(test)]
 mod fga_shape_tests {
     use super::*;
