@@ -90,7 +90,15 @@ def emit(document):
     print(json.dumps(document))
 
 
-if "MuhDur/rust-oracledb/actions/workflows/" in path:
+if "repos/MuhDur/oraclemcp/releases/tags/" in path:
+    tag = path.rsplit("/", 1)[1]
+    release = os.environ.get("HB_RELEASE", "absent")
+    if release == "absent":
+        print('{"message":"Not Found","status":"404"}')
+        sys.stderr.write("gh: Not Found (HTTP 404)\n")
+        raise SystemExit(1)
+    emit({"tag_name": tag, "draft": release == "draft", "prerelease": False})
+elif "MuhDur/rust-oracledb/actions/workflows/" in path:
     emit(runs(29900000009, "failure" if scenario == "driver_advisory_red_still_exits_zero" else "success"))
 elif "actions/workflows/required.yml/runs" in path:
     emit(runs(29900000001))
@@ -191,6 +199,41 @@ preflight_case() {
 }
 preflight_case release_preflight_refuses_red_scheduled_lane scheduled_setup_failure_exits_nonzero 1
 preflight_case release_preflight_accepts_green_scheduled_lanes scheduled_green_required_green_exits_zero 0
+# RELEASE_PREFLIGHT_EXISTING_RELEASE may skip the tier-B gate only for a tag
+# whose GitHub release is proven published; otherwise it would let a new tag
+# past a red lane. Every case below replays the red lanes.
+tag_gate_case() {
+  local name="$1" flag="$2" release="$3" expected_exit="$4" actual_exit=0
+  local stderr="$workdir/$name.stderr"
+  HB_SCENARIO=scheduled_setup_failure_exits_nonzero HB_FIXTURES="$root/tests/ci_heartbeat" \
+    HB_RELEASE="$release" RELEASE_TAG=v9.9.9 RELEASE_PREFLIGHT_EXISTING_RELEASE="$flag" \
+    PATH="$workdir/bin:$PATH" CI_HEARTBEAT_TAXONOMY="$taxonomy" \
+    bash "$root/scripts/release_preflight.sh" --check-tag-gate >/dev/null \
+    2>"$stderr" || actual_exit=$?
+  jq -nc --arg case "$name" --argjson expected_exit "$expected_exit" \
+    --argjson actual_exit "$actual_exit" \
+    '{case: $case, expected_exit: $expected_exit, actual_exit: $actual_exit}'
+  if [ "$actual_exit" != "$expected_exit" ]; then
+    echo "ci-heartbeat test: $name exited $actual_exit, expected $expected_exit ($stderr)" >&2
+    failures=$((failures + 1))
+  fi
+}
+tag_gate_case tag_gate_new_tag_red_lanes_refused 0 absent 1
+tag_gate_case tag_gate_existing_release_flag_without_release_refused 1 absent 1
+tag_gate_case tag_gate_existing_release_flag_draft_release_refused 1 draft 1
+tag_gate_case tag_gate_existing_release_flag_published_release_accepted 1 published 0
+for refused in tag_gate_existing_release_flag_without_release_refused tag_gate_existing_release_flag_draft_release_refused; do
+  grep -Fq "no published GitHub release exists for v9.9.9" "$workdir/$refused.stderr" || {
+    echo "ci-heartbeat test: $refused was not refused for the missing release" >&2
+    failures=$((failures + 1))
+  }
+done
+grep -Fq "classify_fuzz shard 0/1 -> failure -> expected success" \
+  "$workdir/tag_gate_new_tag_red_lanes_refused.stderr" || {
+  echo "ci-heartbeat test: a new tag was not refused for the red scheduled lanes" >&2
+  failures=$((failures + 1))
+}
+
 grep -Fq "fuzz oraclemcp-guard / classify_fuzz shard 0/1 -> failure -> expected success" \
   "$workdir/release_preflight_refuses_red_scheduled_lane.stderr" || {
   echo "ci-heartbeat test: the tag refusal does not name the red lane as lane -> found -> expected" >&2

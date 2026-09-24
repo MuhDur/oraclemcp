@@ -120,11 +120,31 @@ check_scheduled_lanes() {
   echo "release-preflight: scheduled lanes green"
 }
 
+# The tier-B gate for a tag. docker.yml / publish-mcp.yml re-validate an
+# already-published release and set RELEASE_PREFLIGHT_EXISTING_RELEASE=1: the
+# current tier-B state says nothing about that tag. The flag is honoured only
+# after the GitHub release for the tag is proven to exist and be published;
+# otherwise it would be a way to cut a new tag past a red lane.
+check_tag_gate() {
+  local tag="$1" release
+  if [ "${RELEASE_PREFLIGHT_EXISTING_RELEASE:-0}" != "1" ]; then
+    check_scheduled_lanes
+    return
+  fi
+  need gh
+  need jq
+  if ! release="$(gh api "repos/MuhDur/oraclemcp/releases/tags/$tag" 2>/dev/null)" ||
+    ! jq -e --arg tag "$tag" '.tag_name == $tag and .draft == false' >/dev/null <<<"$release"; then
+    fail "RELEASE_PREFLIGHT_EXISTING_RELEASE is set but no published GitHub release exists for $tag; a new tag must pass the tier-B scheduled-lane gate"
+  fi
+  echo "release-preflight: existing published release $tag; tier-B scheduled lanes not re-checked"
+}
+
 need python3
 validate_registry_limits
 
 mode="${1:-}"
-[ "$#" -le 1 ] || fail "usage: scripts/release_preflight.sh [--check-driver-registry|--check-scheduled-lanes]"
+[ "$#" -le 1 ] || fail "usage: scripts/release_preflight.sh [--check-driver-registry|--check-scheduled-lanes|--check-tag-gate]"
 case "$mode" in
   --check-driver-registry)
     need "$curl_bin"
@@ -134,6 +154,11 @@ case "$mode" in
     ;;
   --check-scheduled-lanes)
     check_scheduled_lanes
+    exit 0
+    ;;
+  --check-tag-gate)
+    [ -n "${RELEASE_TAG:-}" ] || fail "--check-tag-gate needs RELEASE_TAG"
+    check_tag_gate "$RELEASE_TAG"
     exit 0
     ;;
   "") ;;
@@ -204,14 +229,7 @@ if [ -n "$tag" ]; then
     fail "tag '$tag' is not a supported semver tag (expected vX.Y.Z or vX.Y.Z-prerelease)"
   [ "$tag" = "v$version" ] ||
     fail "tag '$tag' does not match workspace version '$version' (expected v$version)"
-  # docker.yml / publish-mcp.yml re-validate an already-published release; the
-  # current tier-B state says nothing about that tag, so only a new tag
-  # (release.yml) is gated on it.
-  if [ "${RELEASE_PREFLIGHT_EXISTING_RELEASE:-0}" = "1" ]; then
-    echo "release-preflight: existing release $tag; tier-B scheduled lanes not re-checked"
-  else
-    check_scheduled_lanes
-  fi
+  check_tag_gate "$tag"
 fi
 
 server_version="$(jq -r '.version' server.json)"

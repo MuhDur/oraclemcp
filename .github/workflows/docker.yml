@@ -106,6 +106,9 @@ jobs:
           # Re-validates an already-published release: today's tier-B lane
           # state says nothing about that tag, so it must not block a rollback.
           RELEASE_PREFLIGHT_EXISTING_RELEASE: "1"
+          # release_preflight.sh honours the flag only after reading the
+          # published GitHub release for the tag.
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           tag="refs/tags/v$VERSION"

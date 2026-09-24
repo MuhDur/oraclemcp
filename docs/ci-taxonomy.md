@@ -120,9 +120,11 @@ unnoticed, and the old heartbeat, which gated only required lanes, exited 0.
 stay advisory (R1): recorded as `driver_advisory` / `driver_scheduled`, counted
 in `watched_*`, never in the exit code. `scripts/release_preflight.sh` runs the
 same check when a new tag is cut and refuses it while any tier-B lane is not
-green, printing `lane -> found -> expected success`; the repair workflows
-(`docker.yml`, `publish-mcp.yml`) that re-validate an already-published release
-skip it. `scripts/test_ci_heartbeat.sh` replays the recorded 2026-09-23 failure
+green, printing `lane -> found -> expected success`. The repair workflows
+(`docker.yml`, `publish-mcp.yml`) re-validate an already-published release and
+set `RELEASE_PREFLIGHT_EXISTING_RELEASE=1`; the preflight honours it only after
+the GitHub releases API shows a published (non-draft) release for that tag, and
+refuses otherwise, so the flag cannot carry a new tag past a red lane. `scripts/test_ci_heartbeat.sh` replays the recorded 2026-09-23 failure
 and the other cases offline.
 
 `.github/workflows/ci-heartbeat.yml` drives it every 30 minutes
