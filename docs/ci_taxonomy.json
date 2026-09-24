@@ -386,6 +386,18 @@
       "path_filtered": false
     },
     {
+      "check_name": "fuzz oraclemcp-guard / grant_predicate shard 0/1",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "fuzz oraclemcp-guard / grant_scope_match shard 0/2",
       "tier": "scheduled",
       "workflow": "Fuzz Campaign",
@@ -745,6 +757,7 @@
         "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
         "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
         "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
+        "fuzz oraclemcp-guard / grant_predicate shard 0/1",
         "fuzz oraclemcp-guard / grant_scope_match shard 0/2",
         "fuzz oraclemcp-guard / grant_scope_match shard 1/2"
       ]
@@ -885,6 +898,7 @@
       "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
       "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
       "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
+      "fuzz oraclemcp-guard / grant_predicate shard 0/1",
       "fuzz oraclemcp-guard / grant_scope_match shard 0/2",
       "fuzz oraclemcp-guard / grant_scope_match shard 1/2",
       "watch required + scheduled lanes (server + driver)"

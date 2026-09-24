@@ -232,7 +232,7 @@ fn current_multi_job_taxonomy_maps_only_exact_per_job_heartbeat_evidence() {
         .filter(|lane| lane.workflow_file == "fuzz.yml")
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(fuzz.len(), 10, "current scheduled fuzz shards");
+    assert_eq!(fuzz.len(), 11, "current scheduled fuzz shards");
     assert!(fuzz.iter().all(|lane| !lane.whole_workflow));
     assert!(
         catalog

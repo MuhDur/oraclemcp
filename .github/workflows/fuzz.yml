@@ -72,6 +72,11 @@ jobs:
             shard: 1
             shards: 2
             seed: 6002
+          - crate: oraclemcp-guard
+            target: grant_predicate
+            shard: 0
+            shards: 1
+            seed: 7001
           - crate: oraclemcp-config
             target: config_toml
             shard: 0
