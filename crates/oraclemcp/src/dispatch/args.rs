@@ -894,6 +894,11 @@ mod strict_contract_tests {
 
     fn alias_canonical_field(tool: &str, property: &str) -> Option<&'static str> {
         match (tool, property) {
+            ("oracle_switch_profile", "db") => Some("profile"),
+            ("switch_database", "profile") => Some("db"),
+            ("oracle_set_session_level", "target_level") => Some("level"),
+            ("oracle_plscope_inspect", "object_name") => Some("name"),
+            ("execute_approved", "confirm" | "confirmation_token") => Some("token"),
             (
                 "oracle_compile_object" | "compile_object" | "compile_with_warnings",
                 "object_name",
@@ -908,6 +913,7 @@ mod strict_contract_tests {
             ("oracle_patch_source" | "patch_package" | "patch_view", "replacement") => {
                 Some("new_text")
             }
+            ("deploy_ddl", "sql" | "source_code") => Some("ddl"),
             ("oracle_describe", "table_name" | "name") => Some("table"),
             ("describe_table", "table" | "name") => Some("table_name"),
             ("oracle_describe_index", "index_name") => Some("name"),

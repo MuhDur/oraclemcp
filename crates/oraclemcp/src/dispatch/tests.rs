@@ -8912,7 +8912,7 @@ fn create_or_replace_rejects_other_sql_shapes() {
             json!({ "source_code": "ALTER TABLE t ADD (id NUMBER)" }),
         )
         .expect_err("non create-or-replace is rejected");
-    assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(err.error_class, ErrorClass::SyntaxError);
 }
 
 #[test]
@@ -16520,7 +16520,7 @@ fn preview_dml_refuses_what_it_cannot_sandbox_and_grants_nothing() {
     let read = dispatcher
         .dispatch("oracle_preview_dml", json!({ "sql": "SELECT 1 FROM dual" }))
         .expect_err("a read needs no sandbox");
-    assert_eq!(read.error_class, ErrorClass::InvalidArguments);
+    assert_eq!(read.error_class, ErrorClass::ForbiddenStatement);
     assert_eq!(read.suggested_tool.as_deref(), Some("oracle_query"));
     assert!(
         state.executed.lock().expect("executed mutex").is_empty()

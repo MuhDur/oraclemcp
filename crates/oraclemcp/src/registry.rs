@@ -618,7 +618,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "profile": { "type": "string", "description": "Configured profile name from oracle_list_profiles." },
                 "db": { "type": "string", "description": "Alias for profile for compatibility with older clients. Prefer profile." }
             }),
-            &[],
+            &["profile"],
         )),
     );
 
@@ -631,15 +631,15 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "level": { "type": "string", "description": "Target level: READ_WRITE, DDL, or ADMIN. READ_ONLY drops any active elevation." },
-                    "target_level": { "type": "string", "description": "Alias for level." },
+                    "level": { "type": "string", "enum": ["READ_WRITE", "DDL", "ADMIN", "READ_ONLY"], "description": "Target level: READ_WRITE, DDL, or ADMIN. READ_ONLY drops any active elevation." },
+                    "target_level": { "type": "string", "enum": ["READ_WRITE", "DDL", "ADMIN", "READ_ONLY"], "description": "Alias for level." },
                     "ttl_seconds": { "type": "integer", "minimum": 1, "maximum": 3600, "description": "Temporary elevation window in seconds (default 900, hard cap 3600)." },
                     "execute": { "type": "boolean", "description": "Default false previews the level change and returns a confirmation token. Set true with confirm to apply elevation." },
-                    "action": { "type": "string", "description": "Optional action: preview, apply, drop, or status. Omit for preview/apply based on execute." }
+                    "action": { "type": "string", "enum": ["preview", "apply", "drop", "status"], "description": "Optional action: preview, apply, drop, or status. Omit for preview/apply based on execute." }
                 }),
                 &[confirm_trio("Confirmation token returned by preview. Required when execute=true raises the level.")],
             ),
-            &[],
+            &["level"],
         ))
         .destructive(),
     );
@@ -743,7 +743,7 @@ pub fn tool_registry() -> ToolRegistry {
                 }),
                 &[timeout_seconds_prop()],
             ),
-            &["over"],
+            &["over", "query_vector"],
         ))
         .with_output_schema(semantic_search_output_schema()),
     );
@@ -793,7 +793,7 @@ pub fn tool_registry() -> ToolRegistry {
                 }),
                 &[timeout_seconds_prop()],
             ),
-            &["sql"],
+            &["sql", "scn_a", "scn_b"],
         ))
         .with_output_schema(diff_output_schema()),
     );
@@ -999,7 +999,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
                     "name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                     "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
-                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "object_type": { "type": "string", "enum": ["PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "VIEW"], "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
                     "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
                     "search_text": { "type": "string", "description": "Alias for old_text." },
                     "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
@@ -1290,7 +1290,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum identifiers and SQL statements per array (default 200, hard cap 5000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows. Prefer max_rows." }
             }),
-            &[],
+            &["name"],
         )),
     );
 
@@ -1389,7 +1389,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "db": { "type": "string", "description": "Configured profile name. Alias for profile." },
                 "profile": { "type": "string", "description": "Configured profile name from oracle_list_profiles." }
             }),
-            &[],
+            &["db"],
         )),
     );
 
@@ -1503,7 +1503,7 @@ pub fn tool_registry() -> ToolRegistry {
                     dbms_output_props("Default false. When true, returns bounded DBMS_OUTPUT lines. Caller PL/SQL must use literal/bind-only SYS.DBMS_OUTPUT.PUT_LINE statements."),
                 ],
             ),
-            &[],
+            &["token"],
         ))
         .destructive(),
     );
@@ -1686,7 +1686,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &[],
+            &["ddl"],
         ))
         .destructive(),
     );
@@ -2155,6 +2155,14 @@ mod tests {
                 "oracle_patch_source",
                 &["object_type", "name", "old_text", "new_text"],
             ),
+            ("oracle_switch_profile", &["profile"]),
+            ("oracle_set_session_level", &["level"]),
+            ("oracle_semantic_search", &["over", "query_vector"]),
+            ("oracle_diff", &["sql", "scn_a", "scn_b"]),
+            ("oracle_plscope_inspect", &["name"]),
+            ("switch_database", &["db"]),
+            ("execute_approved", &["token"]),
+            ("deploy_ddl", &["ddl"]),
             ("oracle_describe", &["table"]),
             ("oracle_describe_index", &["name"]),
             ("oracle_describe_trigger", &["name"]),
@@ -2236,7 +2244,7 @@ mod tests {
     }
 
     #[test]
-    fn switch_profile_advertises_db_alias_without_false_required_key() {
+    fn switch_profile_schema_requires_one_advertised_spelling() {
         let registry = tool_registry();
         let tool = registry
             .tools
@@ -2257,10 +2265,58 @@ mod tests {
             .get("required")
             .and_then(Value::as_array)
             .expect("oracle_switch_profile schema must declare required args");
+        assert_eq!(required, &[json!("profile")]);
+        let validator = jsonschema::validator_for(schema).expect("valid switch profile schema");
         assert!(
-            required.is_empty(),
-            "profile and db are alternative spellings, so neither key is individually required"
+            !validator.is_valid(&json!({})),
+            "an empty profile switch is invalid"
         );
+        assert!(validator.is_valid(&json!({"profile": "free23"})));
+    }
+
+    #[test]
+    fn compatibility_schemas_reject_empty_calls_and_accept_canonical_fields() {
+        let registry = tool_registry();
+        let valid_calls = [
+            ("switch_database", json!({"db": "free23"})),
+            (
+                "oracle_plscope_inspect",
+                json!({"name": "W4O_W40000ABCDEF"}),
+            ),
+            ("oracle_set_session_level", json!({"level": "READ_WRITE"})),
+            (
+                "oracle_semantic_search",
+                json!({
+                    "over": {"table": "W4O_W40000ABCDEF", "column": "VEC"},
+                    "query_vector": [1.0]
+                }),
+            ),
+            (
+                "oracle_diff",
+                json!({
+                    "sql": "SELECT 1 FROM dual", "scn_a": 1, "scn_b": 1
+                }),
+            ),
+            ("execute_approved", json!({"token": "synthetic-token"})),
+            ("deploy_ddl", json!({"ddl": "CREATE TABLE T (ID NUMBER)"})),
+        ];
+        for (name, valid_alias_call) in valid_calls {
+            let schema = registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} must be registered"))
+                .input_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} must advertise an input schema"));
+            let validator = jsonschema::validator_for(schema)
+                .unwrap_or_else(|error| panic!("{name} schema is valid: {error}"));
+            assert!(!validator.is_valid(&json!({})), "{name} must reject {{}}");
+            assert!(
+                validator.is_valid(&valid_alias_call),
+                "{name} schema must admit {valid_alias_call}"
+            );
+        }
     }
 
     #[test]

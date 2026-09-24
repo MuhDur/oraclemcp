@@ -8273,10 +8273,11 @@ async fn preview_dml_inner(
         )
     })?;
     if required_level <= OperatingLevel::ReadOnly {
-        return Err(
-            invalid_args("oracle_preview_dml dry-runs a write; a read needs no sandbox")
-                .with_suggested_tool("oracle_query"),
-        );
+        return Err(ErrorEnvelope::new(
+            ErrorClass::ForbiddenStatement,
+            "oracle_preview_dml accepts only reversible DML; use oracle_query for reads",
+        )
+        .with_suggested_tool("oracle_query"));
     }
     if required_level >= OperatingLevel::Ddl {
         return Err(invalid_args(
@@ -9928,9 +9929,10 @@ fn create_or_replace_source_arg(
         return Ok(source);
     }
     if !upper.starts_with("CREATE OR REPLACE ") {
-        return Err(invalid_args(format!(
-            "invalid arguments for {tool_name}: source_code must start with CREATE OR REPLACE"
-        ))
+        return Err(ErrorEnvelope::new(
+            ErrorClass::SyntaxError,
+            format!("{tool_name} requires CREATE OR REPLACE SQL source"),
+        )
         .with_next_step("pass one full CREATE OR REPLACE statement, or use oracle_preview_sql/oracle_execute for other SQL"));
     }
     Ok(source)
