@@ -3042,7 +3042,7 @@ mod tests {
         let sample = crate::query::sample_rows_sql("hr", "docs").expect("valid relation");
         assert_eq!(
             sample,
-            "SELECT * FROM (SELECT * FROM HR.DOCS) WHERE ROWNUM <= :1"
+            "SELECT * FROM (SELECT * FROM HR.DOCS) WHERE ROWNUM <= (:1 + 1)"
         );
         assert!(crate::query::sample_rows_sql("hr", "docs;drop").is_err());
 

@@ -1782,6 +1782,29 @@ impl OracleConnection for OneRowMock {
             return Ok(rows);
         }
         let sql_lower = sql.to_ascii_lowercase();
+        if sql_lower.contains("from app.two_rows") {
+            let requested_limit = match binds.first() {
+                Some(OracleBind::I64(limit)) => usize::try_from(*limit).unwrap_or(0),
+                _ => 0,
+            };
+            let fetch_limit =
+                requested_limit + usize::from(sql_lower.contains("rownum <= (:1 + 1)"));
+            return Ok((1..=2)
+                .take(fetch_limit)
+                .map(|id| OracleRow {
+                    columns: vec![
+                        (
+                            "ID".to_owned(),
+                            OracleCell::new("NUMBER", Some(id.to_string())),
+                        ),
+                        (
+                            "LABEL".to_owned(),
+                            OracleCell::new("VARCHAR2", Some(format!("row-{id}"))),
+                        ),
+                    ],
+                })
+                .collect());
+        }
         if sql_lower.contains("get_system_change_number") || sql_lower.contains("timestamp_to_scn")
         {
             return Ok(vec![OracleRow {
@@ -5293,6 +5316,30 @@ fn dictionary_tools_accept_default_owner_qualified_names_and_aliases() {
     assert_eq!(plscope["name"], json!("PKG"));
     assert!(plscope["identifiers"].is_array());
     assert!(plscope["statements"].is_array());
+}
+
+#[test]
+fn sample_rows_reports_truncation_only_when_an_extra_row_exists() {
+    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+
+    let capped = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "TWO_ROWS", "max_rows": 1 }),
+        )
+        .expect("sample returns its requested row cap");
+    assert_eq!(capped["row_count"], json!(1));
+    assert_eq!(capped["rows"], json!([{ "ID": "1", "LABEL": "row-1" }]));
+    assert_eq!(capped["truncated"], json!(true));
+
+    let exact = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({ "owner": "APP", "table": "TWO_ROWS", "max_rows": 2 }),
+        )
+        .expect("a result exactly at the requested cap is complete");
+    assert_eq!(exact["row_count"], json!(2));
+    assert_eq!(exact["truncated"], json!(false));
 }
 
 #[test]

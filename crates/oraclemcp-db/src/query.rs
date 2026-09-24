@@ -32,7 +32,7 @@ pub fn sample_rows_sql(owner: &str, table: &str) -> Result<String, DbError> {
         )));
     }
     Ok(format!(
-        "SELECT * FROM (SELECT * FROM {}.{}) WHERE ROWNUM <= :1",
+        "SELECT * FROM (SELECT * FROM {}.{}) WHERE ROWNUM <= (:1 + 1)",
         owner.to_ascii_uppercase(),
         table.to_ascii_uppercase()
     ))
