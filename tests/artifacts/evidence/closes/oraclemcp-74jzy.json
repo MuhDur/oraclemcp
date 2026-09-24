@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T09:05:00Z",
+  "bead_id": "oraclemcp-74jzy",
+  "scope": {
+    "summary": "oracle_sample_rows fetches max_rows+1 and reports truncated=true only when an extra row exists (ff1820da).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp-db/src/query.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "020deb993faad3962a2406cb9f530234f6e69c2d",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 020deb99 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3559 passed, 0 failed; cargo deny OK; all fuzz crates compile. dispatch::tests::sample_rows_reports_truncation_only_when_an_extra_row_exists ok."
+      },
+      {
+        "name": "live W4 (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary built in the clean gate worktree at 020deb99 (sha256 3a284e54f7624b5b4da259eb91e95e03161713f99a4a50de9b596565070a8d42); scripts/e2e/w4/driver.py --case w4_sample_rows_bounded_max_rows: pass on free23, xe21 and xe18, stdio and HTTP (6/6)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane; live trace recorded in integration_evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
