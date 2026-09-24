@@ -2910,9 +2910,16 @@ mod tests {
         let calls = view_mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 2);
         assert!(calls[0].0.contains("FROM all_views"));
-        assert!(calls[1].0.contains("FROM all_tab_columns"));
+        assert!(calls[1].0.contains("FROM all_tab_cols"));
         assert_eq!(
             calls[0].1,
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::String("EMP_V".to_owned()),
+            ]
+        );
+        assert_eq!(
+            calls[1].1,
             vec![
                 OracleBind::String("HR".to_owned()),
                 OracleBind::String("EMP_V".to_owned()),
