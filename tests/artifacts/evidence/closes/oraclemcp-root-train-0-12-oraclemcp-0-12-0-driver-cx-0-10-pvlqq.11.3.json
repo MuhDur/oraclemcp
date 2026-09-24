@@ -1,0 +1,62 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T23:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.3",
+  "scope": {
+    "summary": "Public-API semver baseline reproducible independent of registry yanks: scripts/oraclemcp_api_lock.sh builds the previous in-repo release tag from its committed lockfile (offline, locked), derives the release type from the planned version (CHANGELOG plans 0.12.0 vs v0.11.0 -> major for 0.x), and gates unreviewed API change via the committed public-API snapshots; api-lock CI job required (no continue-on-error, not PR-only). Commits d9eb2c09, bb24aac0, 7e2ba5ed, c9f20703 (earlier cb401f5a/c56a1aff).",
+    "in_scope": [
+      "scripts/oraclemcp_api_lock.sh",
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "Proving every 0.12.0 API change is intended (bead no-claim); reviewed break list lives in CHANGELOG.md [Unreleased]."
+    ]
+  },
+  "source": {
+    "sha": "c9f207036fb43ed9a6394d481862ce50f9114291",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "head check (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean worktree at origin/main c9f20703, build lease: bash scripts/oraclemcp_api_lock.sh rc=0, baseline tag v0.11.0, 'oraclemcp-api-lock: OK - all locked public-API surfaces match their baselines.'"
+      },
+      {
+        "name": "selftest (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "bash scripts/oraclemcp_api_lock.sh --selftest rc=0: semver_baseline_head_passes (v0.11.0, pass, checks_run 1012); semver_baseline_detects_planted_break (v0.11.0, expected snapshot-drift, actual fail-detected); semver_baseline_yanked_dependency_reproducible (v0.10.0 with yanked oracledb 0.9.1 via committed lockfile, pass)."
+      },
+      {
+        "name": "CI wiring (orchestrator check)",
+        "kind": "cli",
+        "trace": "origin/main .github/workflows/ci.yml api-lock job: no if: filter, no continue-on-error; runs --selftest then the head check. 7e2ba5ed briefly made it advisory; c9f20703 (on top) removed that."
+      },
+      {
+        "name": "compat check",
+        "kind": "cli",
+        "trace": "Implementer-reported and consistent with code: ErrorClass/ReasonCategory serialize as SCREAMING_SNAKE_CASE strings; audit failure fields stored as strings; only ora_code numeric - shifted discriminants do not break persisted records."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "For the planned 0.x breaking release cargo-semver-checks evaluates 0 checks (253 skipped per crate); 'checks_run' counts enumerated checks, not evaluated ones. The effective gate for unreviewed API change is the committed public-API snapshot (planted removal detected as snapshot drift).",
+    "Orchestrator ruling (bead comment): 0.12.0 breaks vs v0.11.0 are the planned release changes."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Rename checks_run to checks_enumerated or add checks_evaluated so the metric cannot be read as evaluated checks."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
