@@ -1021,10 +1021,7 @@ fn over_refusal_28_29_31_33_admitted_with_every_relation_proven() {
             "29_natural_join",
             "SELECT ID FROM APP.ORDERS a NATURAL JOIN APP.ORDERS b ORDER BY ID",
         ),
-        (
-            "31_owner_table_column",
-            "SELECT APP.ORDERS.ID FROM APP.ORDERS",
-        ),
+        ("31_owner_table_column", "SELECT APP.ORDERS.ID FROM ORDERS"),
         (
             "33_pseudocolumn",
             "SELECT ID FROM APP.ORDERS WHERE ORA_ROWSCN > 0",
@@ -1072,7 +1069,7 @@ fn over_refusal_fix_does_not_admit_view_behind_alias() {
     let error = dispatcher
         .dispatch(
             "oracle_query",
-            json!({"sql": "SELECT v.ID FROM APP.SIDE_VIEW v ORDER BY v.ID"}),
+            json!({"sql": "SELECT v.ID AS ORDER_ID FROM APP.SIDE_VIEW v ORDER BY ORDER_ID"}),
         )
         .expect_err("a view behind a relation alias is not an ordinary table");
     assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
