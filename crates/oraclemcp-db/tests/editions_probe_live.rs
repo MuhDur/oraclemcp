@@ -102,6 +102,7 @@ fn assert_live_enabled(proof: &oraclemcp_db::EditionsEnabledProof, lane: &str) {
     assert_eq!(proof.owner_enabled, EditionsProofStatus::Proven, "{lane}");
     assert_eq!(proof.type_enabled, EditionsProofStatus::Proven, "{lane}");
     assert!(proof.is_proven(), "{lane}");
+    assert_probe_audit(proof, lane);
 }
 
 fn assert_refused_before_statement(proof: &oraclemcp_db::EditionsEnabledProof, lane: &str) {
@@ -117,6 +118,26 @@ fn assert_refused_before_statement(proof: &oraclemcp_db::EditionsEnabledProof, l
         ReasonCategory::EditionsNotEnabled,
         "{lane}"
     );
+    assert_probe_audit(proof, lane);
+}
+
+fn assert_probe_audit(proof: &oraclemcp_db::EditionsEnabledProof, lane: &str) {
+    assert!(
+        proof.audit_contains_only_catalog_reads(),
+        "{lane} editions probe audit contains a non-catalog statement attempt: {:?}",
+        proof.audit_records
+    );
+    for record in &proof.audit_records {
+        println!(
+            "{}",
+            serde_json::json!({
+                "case_id":"editions_probe_audit_contains_only_catalog_reads_live",
+                "lane":lane,
+                "audit_record":record,
+                "verdict":"pass"
+            })
+        );
+    }
 }
 
 #[test]
@@ -327,6 +348,14 @@ fn editions_probe_columns_present_per_version_live() {
                     .is_some_and(|version| version.starts_with(version_prefix)),
                 "{lane} version mismatch"
             );
+            assert!(
+                !capabilities.audit_records.is_empty()
+                    && capabilities.audit_records.iter().all(|record| matches!(
+                        record,
+                        oraclemcp_db::EditionsProbeAuditRecord::CatalogRead { .. }
+                    )),
+                "{lane} catalog capability audit must contain the metadata catalog read"
+            );
             for column in &capabilities.columns {
                 println!(
                     "{}",
@@ -341,6 +370,35 @@ fn editions_probe_columns_present_per_version_live() {
                     })
                 );
             }
+        }
+    });
+}
+
+#[test]
+fn editions_probe_audit_contains_only_catalog_reads_live() {
+    if !enabled() {
+        return;
+    }
+    run_with_cx(|cx| async move {
+        for (lane, dsn, _) in LANES {
+            let conn = connect(&cx, lane, dsn).await;
+            let capabilities = probe_editions_catalog(&cx, &conn).await;
+            let session_user = capabilities
+                .session_user
+                .as_deref()
+                .expect("session user in editions capability snapshot");
+            let proof =
+                probe_editions_enabled(&cx, &conn, &capabilities, session_user, "VIEW").await;
+            assert_probe_audit(&proof, lane);
+            println!(
+                "{}",
+                serde_json::json!({
+                    "case_id":"editions_probe_audit_contains_only_catalog_reads_live",
+                    "lane":lane,
+                    "catalog_read_count":proof.audit_records.len(),
+                    "verdict":"pass"
+                })
+            );
         }
     });
 }

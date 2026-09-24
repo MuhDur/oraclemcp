@@ -368,6 +368,8 @@ pub enum CatalogQueryId {
     SemanticSearchOnnxModel,
     /// Existing child of a named edition before creating another.
     EditionChildren,
+    /// Oracle server version used to label version-scoped catalog evidence.
+    EditionsProbeServerVersion,
     /// Columns exposed for the supported EBR evidence views in this session.
     EditionsCatalogColumns,
     /// Whether the connected schema has editions enabled, when exposed by USER_USERS.
@@ -522,7 +524,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 154] = [
+    pub const ALL: [Self; 155] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -609,6 +611,7 @@ impl CatalogQueryId {
         Self::SemanticSearchCompatible,
         Self::SemanticSearchOnnxModel,
         Self::EditionChildren,
+        Self::EditionsProbeServerVersion,
         Self::EditionsCatalogColumns,
         Self::EditionsEnabledOwnerSelf,
         Self::EditionsEnabledOwnerDba,
@@ -1586,6 +1589,13 @@ impl CatalogQueryId {
                 "SELECT edition_name FROM all_editions WHERE parent_edition_name = :1",
                 BindSchema(&[Text]),
                 "prove a parent edition has no existing child",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::EditionsProbeServerVersion => (
+                "SELECT version_full FROM product_component_version WHERE rownum = 1",
+                EMPTY,
+                "label the Oracle version for version-scoped editions catalog evidence",
                 InternalProof,
                 Diagnostic,
             ),

@@ -12,7 +12,7 @@ use oraclemcp_error::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::catalog_query::{CatalogQueryId, run_catalog_query};
+use crate::catalog_query::{CatalogAuditClass, CatalogQueryId, run_catalog_query};
 use crate::{OracleBind, OracleConnection};
 
 /// Bound for the object types returned when checking an owner's editioned
@@ -52,6 +52,60 @@ pub struct EditionsCatalogColumn {
     pub present: bool,
 }
 
+/// One database action observed while running the editions probe.
+///
+/// Catalog reads retain their closed query identity, SQL text, and audit
+/// classification. A statement attempt is represented separately so the
+/// probe audit can explicitly reject any non-catalog action, including DDL.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EditionsProbeAuditRecord {
+    /// A fixed query issued through the closed catalog runner.
+    CatalogRead {
+        /// Closed catalog query identifier.
+        query_id: String,
+        /// Fixed SQL text; bind values are intentionally excluded.
+        sql: String,
+        /// Audit class assigned to the query by its fixed specification.
+        audit_class: String,
+    },
+    /// Any attempted statement outside the closed catalog query path.
+    StatementAttempt {
+        /// SQL text for the attempted statement.
+        statement: String,
+    },
+}
+
+impl EditionsProbeAuditRecord {
+    fn is_catalog_read(&self) -> bool {
+        match self {
+            Self::CatalogRead {
+                query_id,
+                sql,
+                audit_class,
+            } => {
+                let allowed_query = [
+                    "EditionsCatalogColumns",
+                    "SessionContext",
+                    "EditionsProbeServerVersion",
+                    "EditionsEnabledOwnerSelf",
+                    "EditionsEnabledOwnerDba",
+                    "EditionedTypesSelf",
+                    "EditionedTypesDba",
+                    "EditionableTypesCapability",
+                ]
+                .iter()
+                .any(|allowed| query_id == allowed);
+                allowed_query
+                    && !audit_class.is_empty()
+                    && sql.trim_start().to_ascii_uppercase().starts_with("SELECT ")
+                    && !sql.to_ascii_uppercase().contains("ALTER USER")
+            }
+            Self::StatementAttempt { .. } => false,
+        }
+    }
+}
+
 /// Capability snapshot for one Oracle connection.
 ///
 /// The version string and column observations are captured together and can be
@@ -66,6 +120,8 @@ pub struct EditionsCatalogCapabilities {
     pub metadata_visible: bool,
     /// The supported view-column set and observed availability.
     pub columns: Vec<EditionsCatalogColumn>,
+    /// Actions observed while loading the version and column snapshot.
+    pub audit_records: Vec<EditionsProbeAuditRecord>,
 }
 
 impl EditionsCatalogCapabilities {
@@ -101,6 +157,9 @@ pub struct EditionsEnabledProof {
     pub type_evidence_view: Option<String>,
     /// View that supplied database-level capability evidence, when readable.
     pub capability_evidence_view: Option<String>,
+    /// Catalog actions observed while producing this owner/type proof,
+    /// including the capability snapshot used to select version-safe reads.
+    pub audit_records: Vec<EditionsProbeAuditRecord>,
 }
 
 impl EditionsEnabledProof {
@@ -109,6 +168,17 @@ impl EditionsEnabledProof {
     pub fn is_proven(&self) -> bool {
         self.owner_enabled == EditionsProofStatus::Proven
             && self.type_enabled == EditionsProofStatus::Proven
+    }
+
+    /// Whether every recorded probe action was one of the fixed SELECT-only
+    /// editions catalog reads.
+    #[must_use]
+    pub fn audit_contains_only_catalog_reads(&self) -> bool {
+        !self.audit_records.is_empty()
+            && self
+                .audit_records
+                .iter()
+                .all(EditionsProbeAuditRecord::is_catalog_read)
     }
 
     /// Build the typed refusal used when the required editions proof is not
@@ -151,12 +221,37 @@ pub async fn probe_editions_catalog(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> EditionsCatalogCapabilities {
-    let info = conn.describe(cx).await.ok();
-    let (metadata_visible, rows) =
-        match run_catalog_query(cx, conn, CatalogQueryId::EditionsCatalogColumns, &[]).await {
-            Ok(rows) => (true, rows),
-            Err(_) => (false, Vec::new()),
-        };
+    let mut audit_records = Vec::new();
+    let session_rows = run_editions_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::SessionContext,
+        &[],
+        &mut audit_records,
+    )
+    .await
+    .unwrap_or_default();
+    let version_rows = run_editions_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::EditionsProbeServerVersion,
+        &[],
+        &mut audit_records,
+    )
+    .await
+    .unwrap_or_default();
+    let (metadata_visible, rows) = match run_editions_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::EditionsCatalogColumns,
+        &[],
+        &mut audit_records,
+    )
+    .await
+    {
+        Ok(rows) => (true, rows),
+        Err(_) => (false, Vec::new()),
+    };
     let columns = EBR_COLUMNS
         .iter()
         .map(|(view, column)| EditionsCatalogColumn {
@@ -173,10 +268,17 @@ pub async fn probe_editions_catalog(
         .collect();
 
     EditionsCatalogCapabilities {
-        server_version: info.as_ref().and_then(|item| item.server_version.clone()),
-        session_user: info.and_then(|item| item.session_user),
+        server_version: version_rows
+            .first()
+            .and_then(|row| row.text("VERSION_FULL"))
+            .map(str::to_owned),
+        session_user: session_rows
+            .first()
+            .and_then(|row| row.text("SESSION_USER"))
+            .map(str::to_owned),
         metadata_visible,
         columns,
+        audit_records,
     }
 }
 
@@ -198,6 +300,7 @@ pub async fn probe_editions_enabled(
         .session_user
         .as_deref()
         .is_some_and(|session_user| session_user == owner);
+    let mut audit_records = capabilities.audit_records.clone();
 
     let owner_flag = if self_owner && capabilities.has_column("USER_USERS", "EDITIONS_ENABLED") {
         Some((
@@ -220,7 +323,8 @@ pub async fn probe_editions_enabled(
     let mut owner_enabled = EditionsProofStatus::Unknown;
     let mut owner_evidence_view = None;
     if let Some((query, binds, view)) = owner_flag
-        && let Ok(rows) = run_catalog_query(cx, conn, query, &binds).await
+        && let Ok(rows) =
+            run_editions_catalog_query(cx, conn, query, &binds, &mut audit_records).await
     {
         owner_evidence_view = Some(view.to_owned());
         owner_enabled = rows
@@ -256,7 +360,8 @@ pub async fn probe_editions_enabled(
     let mut type_enabled = EditionsProofStatus::Unknown;
     let mut type_evidence_view = None;
     if let Some((query, binds, view)) = type_catalog
-        && let Ok(rows) = run_catalog_query(cx, conn, query, &binds).await
+        && let Ok(rows) =
+            run_editions_catalog_query(cx, conn, query, &binds, &mut audit_records).await
     {
         type_evidence_view = Some(view.to_owned());
         let type_present = rows.iter().any(|row| {
@@ -282,11 +387,12 @@ pub async fn probe_editions_enabled(
 
     let (database_type_capability, capability_evidence_view) =
         if capabilities.has_column("V_$EDITIONABLE_TYPES", "EDITIONABLE_TYPE") {
-            match run_catalog_query(
+            match run_editions_catalog_query(
                 cx,
                 conn,
                 CatalogQueryId::EditionableTypesCapability,
                 &[OracleBind::String(object_type.clone()), OracleBind::I64(1)],
+                &mut audit_records,
             )
             .await
             {
@@ -313,7 +419,29 @@ pub async fn probe_editions_enabled(
         owner_evidence_view,
         type_evidence_view,
         capability_evidence_view,
+        audit_records,
     }
+}
+
+async fn run_editions_catalog_query(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    query_id: CatalogQueryId,
+    binds: &[OracleBind],
+    audit_records: &mut Vec<EditionsProbeAuditRecord>,
+) -> Result<Vec<crate::OracleRow>, crate::DbError> {
+    let spec = query_id.spec();
+    audit_records.push(EditionsProbeAuditRecord::CatalogRead {
+        query_id: format!("{query_id:?}"),
+        sql: spec.sql.to_owned(),
+        audit_class: match spec.audit_class {
+            CatalogAuditClass::ReadPurity => "read_purity",
+            CatalogAuditClass::NameResolution => "name_resolution",
+            CatalogAuditClass::Diagnostic => "diagnostic",
+        }
+        .to_owned(),
+    });
+    run_catalog_query(cx, conn, query_id, binds).await
 }
 
 fn parse_enabled_flag(value: &str) -> EditionsProofStatus {
@@ -345,6 +473,11 @@ mod tests {
             owner_evidence_view: Some("DBA_USERS".to_owned()),
             type_evidence_view: Some("DBA_EDITIONED_TYPES".to_owned()),
             capability_evidence_view: Some("V$EDITIONABLE_TYPES".to_owned()),
+            audit_records: vec![EditionsProbeAuditRecord::CatalogRead {
+                query_id: "EditionsCatalogColumns".to_owned(),
+                sql: "SELECT column_name FROM all_tab_columns".to_owned(),
+                audit_class: "diagnostic".to_owned(),
+            }],
         }
     }
 
@@ -384,6 +517,8 @@ mod tests {
     #[test]
     fn editions_probe_catalog_queries_never_issue_ddl() {
         let query_ids = [
+            CatalogQueryId::SessionContext,
+            CatalogQueryId::EditionsProbeServerVersion,
             CatalogQueryId::EditionsCatalogColumns,
             CatalogQueryId::EditionsEnabledOwnerSelf,
             CatalogQueryId::EditionsEnabledOwnerDba,
@@ -396,6 +531,22 @@ mod tests {
             assert!(sql.starts_with("SELECT "), "{query_id:?}: {sql}");
             assert!(!sql.contains("ALTER USER"), "{query_id:?}: {sql}");
         }
+    }
+
+    #[test]
+    fn editions_probe_audit_accepts_catalog_reads_and_rejects_planted_alter_user() {
+        let mut proof = proof(EditionsProofStatus::Proven, EditionsProofStatus::Proven);
+        assert!(proof.audit_contains_only_catalog_reads());
+
+        proof
+            .audit_records
+            .push(EditionsProbeAuditRecord::StatementAttempt {
+                statement: "ALTER USER SYNTH_OWNER ENABLE EDITIONS FOR VIEW".to_owned(),
+            });
+        assert!(
+            !proof.audit_contains_only_catalog_reads(),
+            "planted ALTER USER must fail the no-DDL audit assertion"
+        );
     }
 
     #[test]

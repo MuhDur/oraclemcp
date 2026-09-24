@@ -97,8 +97,9 @@ pub use awr::{
     resolve_top_sql_source, select_diagnostics_source, top_sql_query,
 };
 pub use catalog_editions::{
-    EditionsCatalogCapabilities, EditionsCatalogColumn, EditionsEnabledProof, EditionsProofStatus,
-    MAX_EDITIONED_TYPES, probe_editions_catalog, probe_editions_enabled,
+    EditionsCatalogCapabilities, EditionsCatalogColumn, EditionsEnabledProof,
+    EditionsProbeAuditRecord, EditionsProofStatus, MAX_EDITIONED_TYPES, probe_editions_catalog,
+    probe_editions_enabled,
 };
 pub use catalog_extract::{
     CatalogExtractReport, CatalogExtractRequest, CatalogExtractWarning, CatalogRowBatch,
