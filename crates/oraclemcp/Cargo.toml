@@ -105,6 +105,9 @@ plsql-doc = { workspace = true, optional = true }
 plsql-sast = { workspace = true, optional = true }
 plsql-output = { workspace = true, optional = true }
 
+[build-dependencies]
+toml = "0.8"
+
 [dev-dependencies]
 oraclemcp-db = { path = "../oraclemcp-db", version = "0.11.0", features = ["test-utils"] }
 proptest = "1"

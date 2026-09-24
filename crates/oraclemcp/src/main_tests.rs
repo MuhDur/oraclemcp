@@ -4472,6 +4472,27 @@ fn build_capability_payloads_do_not_claim_live_connectivity() {
 }
 
 #[test]
+fn info_payload_reports_exact_driver_and_optional_engine_versions() {
+    let info = info_payload();
+    assert_eq!(
+        info["driver_version"],
+        serde_json::json!(oraclemcp_db::DRIVER_VERSION)
+    );
+    assert_eq!(
+        info["engine"],
+        serde_json::json!(cfg!(feature = "plsql-intelligence"))
+    );
+    if cfg!(feature = "plsql-intelligence") {
+        assert_eq!(
+            info["engine_version"],
+            serde_json::json!(env!("OMCP_BUILD_PLSQL_ENGINE_VERSION"))
+        );
+    } else {
+        assert!(info["engine_version"].is_null());
+    }
+}
+
+#[test]
 fn client_credential_commands_distinguish_offline_and_live_revocation() {
     let client_id = "client-0123456789abcdef0123456789abcdef";
     let client_command = client_credential_client_command("ocmcp_fixture_bearer");

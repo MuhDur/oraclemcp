@@ -4759,10 +4759,14 @@ fn setup_display_path(path: &str) -> String {
 }
 
 fn info_payload() -> serde_json::Value {
+    let engine_version =
+        cfg!(feature = "plsql-intelligence").then_some(env!("OMCP_BUILD_PLSQL_ENGINE_VERSION"));
     serde_json::json!({
         "binary": "oraclemcp",
         "version": env!("CARGO_PKG_VERSION"),
+        "driver_version": oraclemcp_db::DRIVER_VERSION,
         "engine": cfg!(feature = "plsql-intelligence"),
+        "engine_version": engine_version,
         "built_with_live_db": BUILT_WITH_LIVE_DB,
         "transports": ["stdio", "http"],
         "tools": registry::tool_names(),
