@@ -269,6 +269,20 @@ TOML
 run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_parse_error refuse tag \
   'Cargo.lock parse'
 
+dev_pin_fixture="$(new_dev_pin_fixture cargo-parse-error)"
+cat >"$dev_pin_fixture/Cargo.toml" <<'TOML'
+not-valid = [toml
+TOML
+run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_cargo_parse_error refuse tag \
+  'Cargo.toml parse'
+
+dev_pin_fixture="$(new_dev_pin_fixture deny-parse-error)"
+cat >"$dev_pin_fixture/deny.toml" <<'TOML'
+not-valid = [toml
+TOML
+run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_deny_parse_error refuse tag \
+  'deny.toml parse'
+
 python3 "$HELPER" --check >/dev/null
 driver_version="$(python3 "$HELPER" --value driver_version)"
 [[ "$driver_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
