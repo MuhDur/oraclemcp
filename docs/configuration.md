@@ -97,7 +97,7 @@ in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
 | `profiles.explain_plan_table` | string(OWNER.TABLE) | none | yes | no | 1 | Optional operator-owned global temporary table for EXPLAIN PLAN; its Oracle object identity is pinned on first verification. |
 | `profiles.allow_change_notification` | bool | false | yes | no | 2 | Permit CQN registration (still classifier/step-up/audit gated; never widens SQL admission). |
 | `profiles.require_fga_evidence` | bool | false | yes | no | 2 | Refuse reads when ALL_AUDIT_POLICIES is unreadable (default admits them with an fga_evidence: unavailable observation + audit record; a proven FGA handler always refuses). |
-| `profiles.require_hard_parse_evidence` | bool | false | yes | no | 2 | Refuse EXPLAIN and decisive query-cost admission when hard-parse callback or PLAN_TABLE evidence is unreadable; default emits a verification observation and a separate audit record, and doctor warns. |
+| `profiles.require_hard_parse_evidence` | bool | false | yes | no | 2 | Refuse EXPLAIN and decisive query-cost admission when installed hard-parse callback or PLAN_TABLE evidence is unreadable; default emits a verification observation and separate audit record, and doctor warns only when an online probe finds unreadable evidence. |
 | `profiles.max_subscriptions` | integer | 4 | yes | no | 2 | Per-principal live-subscription cap; 0 disables new subscriptions fail-closed. |
 | `profiles.mcp_exposed` | bool | true | yes | no | 1 | E5 per-profile MCP exposure opt-out (visibility, never access control). |
 | `profiles.dashboard_ddl_workbench` | bool | false | yes | no | 2 | Reserved profile metadata; browser DDL/Admin apply is refused in this release. |

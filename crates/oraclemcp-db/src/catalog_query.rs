@@ -244,7 +244,7 @@ pub enum CatalogQueryId {
     TargetColumnCatalogProof,
     /// Diagnostic access to DBA_OBJECTS.
     DbaObjectsProbe,
-    /// Diagnostic access to ALL_OBJECTS.
+    /// Diagnostic access to ALL_OBJECTS and presence of optional OLS/RAS catalogs.
     AllObjectsProbe,
     /// Whether the Diagnostics Pack is enabled for this database.
     DiagnosticsPackProbe,
@@ -891,10 +891,10 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::AllObjectsProbe => (
-                "SELECT 1 FROM all_objects WHERE rownum = 1",
+                "SELECT object_name FROM all_objects WHERE owner = 'SYS' AND object_type = 'VIEW' AND object_name IN ('ALL_SA_TABLE_POLICIES', 'ALL_SA_SCHEMA_POLICIES', 'ALL_XS_APPLIED_POLICIES') UNION SELECT synonym_name AS object_name FROM all_synonyms WHERE owner = 'PUBLIC' AND synonym_name IN ('ALL_SA_TABLE_POLICIES', 'ALL_SA_SCHEMA_POLICIES', 'ALL_XS_APPLIED_POLICIES')",
                 EMPTY,
-                "observe ALL_OBJECTS access",
-                VisibilityObservation,
+                "probe optional SYS OLS/RAS catalogs through ALL_OBJECTS and ALL_SYNONYMS",
+                InternalProof,
                 Diagnostic,
             ),
             Self::DiagnosticsPackProbe => (

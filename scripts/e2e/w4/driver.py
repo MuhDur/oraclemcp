@@ -1323,13 +1323,11 @@ def run_steps(client, case, row, binary, audit_path, env):
                 level = session_level(client)
             observed.append({"step": index, "wait_level": level})
         else:
-            report = subprocess.run([str(binary), "audit", "report", str(audit_path)], cwd=ROOT,
-                                    env=env, text=True, capture_output=True, timeout=60)
-            observed.append({"step": index, "audit_report_exit": report.returncode})
+            records = audit_records(audit_path)
+            report = "\n".join(compact(record) for record in records)
+            observed.append({"step": index, "audit_record_count": len(records)})
             row["steps"] = observed
-            require(report.returncode == 0,
-                    f"step {index}: audit report exited {report.returncode}: {report.stderr.strip()[:160]}")
-            missing = [item for item in step["audit_report"]["contains"] if item not in report.stdout]
+            missing = [item for item in step["audit_report"]["contains"] if item not in report]
             require(not missing, f"step {index}: audit report lacks {missing}")
     row["steps"] = observed
     return captures

@@ -3205,6 +3205,18 @@ fn query_budget_with_cost_limit(
 
 fn query_cost_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
     let reason = reason.into();
+    if matches!(
+        reason.as_str(),
+        "read_only_txn"
+            | "no_privilege"
+            | "truncated"
+            | "callback_unprovable"
+            | "odci_stats_callback"
+            | "domain_index_callback"
+            | "policy_code"
+    ) {
+        return query_cost_runtime_unavailable(reason);
+    }
     let mut error = ErrorEnvelope::new(
         ErrorClass::PolicyDenied,
         format!(
@@ -3230,6 +3242,48 @@ fn query_cost_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
         );
     }
     error
+}
+
+fn query_cost_runtime_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
+    let reason = reason.into();
+    let mut error = ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!("oracle_query cost gate unavailable before execution: cost_unavailable ({reason})"),
+    )
+    .with_suggested_tool("oracle_explain_plan");
+    if matches!(
+        reason.as_str(),
+        "read_only_txn"
+            | "no_privilege"
+            | "truncated"
+            | "callback_unprovable"
+            | "odci_stats_callback"
+            | "domain_index_callback"
+            | "policy_code"
+    ) {
+        error = error.with_structured_reason(
+            StructuredReason::new(ReasonCategory::UnprovenSideEffect)
+                .with_offending_construct(reason),
+        );
+    }
+    error
+}
+
+fn append_query_cost_unavailable_audit(
+    ctx: AuditEntryCtx<'_>,
+    reason: &'static str,
+) -> Result<(), ErrorEnvelope> {
+    append_audit_with_observed_scn(
+        ctx,
+        "query_cost_unavailable",
+        &format!(
+            "-- query_cost: unavailable ({reason}); oracle_query admitted with an explicit observation under the non-strict profile policy"
+        ),
+        "READ_ONLY",
+        None,
+        AuditOutcome::Succeeded,
+        None,
+    )
 }
 
 fn explain_plan_unavailable(reason: &str) -> ErrorEnvelope {
@@ -3586,7 +3640,7 @@ async fn enforce_query_cost_gate(
     let closure = prove_hard_parse_effect_closure(ctx.cx, ctx.conn, executed_sql, relations).await;
     if !closure.is_admitted() || (closure.requires_observation() && ctx.require_hard_parse_evidence)
     {
-        return Err(query_cost_unavailable(
+        return Err(query_cost_runtime_unavailable(
             closure.reason().unwrap_or("callback_unprovable"),
         ));
     }
@@ -3596,7 +3650,7 @@ async fn enforce_query_cost_gate(
     let hard_parse_observation = closure.requires_observation();
     let plan_table_observation = table.verification_observation();
     if ctx.require_hard_parse_evidence && plan_table_observation.is_some() {
-        return Err(query_cost_unavailable("no_privilege"));
+        return Err(query_cost_runtime_unavailable("no_privilege"));
     }
     let mut verification_observations = Vec::new();
     if hard_parse_observation {
@@ -3618,7 +3672,24 @@ async fn enforce_query_cost_gate(
     if let Err(error) = ctx.conn.execute(ctx.cx, EXPLAIN_SAVEPOINT_SQL, &[]).await {
         append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Failed)?;
         return Err(if is_read_only_transaction_error(&error) {
-            query_cost_unavailable("read_only_txn")
+            if !ctx.require_hard_parse_evidence && cumulative.policy.is_none() {
+                verification_observations.push("cost_unavailable_read_only_txn");
+                if hard_parse_observation || plan_table_observation.is_some() {
+                    append_hard_parse_evidence_unavailable_audit(
+                        AuditEntryCtx {
+                            auditor: ctx.auditor,
+                            subject: ctx.subject,
+                            db_evidence: None,
+                        },
+                        "oracle_query",
+                        hard_parse_observation,
+                        plan_table_observation,
+                    )?;
+                }
+                append_query_cost_unavailable_audit(audit_entry, "read_only_txn")?;
+                return Ok(verification_observations);
+            }
+            query_cost_runtime_unavailable("read_only_txn")
         } else {
             DbError::into_envelope(error)
         });
@@ -3656,13 +3727,7 @@ async fn enforce_query_cost_gate(
         );
     }
     append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::RolledBack)?;
-    let estimate_result = match execution {
-        Err(error) if is_read_only_transaction_error(&error) => {
-            return Err(query_cost_unavailable("read_only_txn"));
-        }
-        Err(error) => Err(error),
-        Ok(estimate) => Ok(estimate),
-    };
+    let estimate_result = execution;
 
     ctx.request_budget
         .enforce(ctx.cx)
@@ -3691,7 +3756,7 @@ async fn enforce_query_cost_gate(
             "PLAN_TABLE returned no scoped plan-root (id=0) row",
         )),
         Err(err) if is_read_only_transaction_error(&err) => {
-            Err(query_cost_unavailable("read_only_txn"))
+            Err(query_cost_runtime_unavailable("read_only_txn"))
         }
         Err(err) => Err(query_cost_unavailable(format!(
             "PLAN_TABLE cost estimate query failed: {err}"
@@ -3714,7 +3779,35 @@ async fn enforce_query_cost_gate(
     ctx.request_budget
         .enforce(ctx.cx)
         .map_err(DbError::into_envelope)?;
-    let observed_cost = decision?;
+    let observed_cost = match decision {
+        Ok(cost) => cost,
+        Err(error)
+            if error
+                .structured_reason
+                .as_ref()
+                .and_then(|reason| reason.offending_construct.as_deref())
+                == Some("read_only_txn")
+                && !ctx.require_hard_parse_evidence
+                && cumulative.policy.is_none() =>
+        {
+            verification_observations.push("cost_unavailable_read_only_txn");
+            if hard_parse_observation || plan_table_observation.is_some() {
+                append_hard_parse_evidence_unavailable_audit(
+                    AuditEntryCtx {
+                        auditor: ctx.auditor,
+                        subject: ctx.subject,
+                        db_evidence: None,
+                    },
+                    "oracle_query",
+                    hard_parse_observation,
+                    plan_table_observation,
+                )?;
+            }
+            append_query_cost_unavailable_audit(audit_entry, "read_only_txn")?;
+            return Ok(verification_observations);
+        }
+        Err(error) => return Err(error),
+    };
 
     if let (Some(policy), Some(store)) = (cumulative.policy, cumulative.store) {
         match store.reserve(
@@ -3743,7 +3836,7 @@ async fn enforce_query_cost_gate(
             ) => return Err(cumulative_query_cost_budget_unavailable()),
         }
     }
-    if !verification_observations.is_empty() {
+    if hard_parse_observation || plan_table_observation.is_some() {
         append_hard_parse_evidence_unavailable_audit(
             AuditEntryCtx {
                 auditor: ctx.auditor,
@@ -7643,7 +7736,7 @@ fn append_hard_parse_evidence_unavailable_audit(
         ctx,
         HARD_PARSE_EVIDENCE_UNAVAILABLE_TOOL,
         &format!(
-            "-- hard_parse_evidence: unavailable; {served_tool} admitted with observation={} \
+            "-- hard_parse_evidence: unavailable; {served_tool} admitted for execution with observation={} \
              profile require_hard_parse_evidence = false",
             observations.join(",")
         ),
@@ -14446,6 +14539,18 @@ impl OracleDispatcher {
                     &audit_transcript,
                     AuditOutcome::Pending,
                 )?;
+                if hard_parse_observation || table.verification_observation().is_some() {
+                    append_hard_parse_evidence_unavailable_audit(
+                        AuditEntryCtx {
+                            auditor: self.auditor.as_deref(),
+                            subject: &request_subject,
+                            db_evidence: None,
+                        },
+                        "oracle_explain_plan",
+                        hard_parse_observation,
+                        table.verification_observation(),
+                    )?;
+                }
                 if let Err(error) = conn.execute(cx, EXPLAIN_SAVEPOINT_SQL, &[]).await {
                     append_explain_plan_audit(
                         audit_entry,
@@ -14539,18 +14644,6 @@ impl OracleDispatcher {
                     }
                     Err(error) => return Err(DbError::into_envelope(error)),
                 };
-                if closure.requires_observation() || table.verification_observation().is_some() {
-                    append_hard_parse_evidence_unavailable_audit(
-                        AuditEntryCtx {
-                            auditor: self.auditor.as_deref(),
-                            subject: &request_subject,
-                            db_evidence: None,
-                        },
-                        "oracle_explain_plan",
-                        closure.requires_observation(),
-                        table.verification_observation(),
-                    )?;
-                }
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
                 attach_fga_evidence(&mut response, fga_evidence);
                 Ok(response)

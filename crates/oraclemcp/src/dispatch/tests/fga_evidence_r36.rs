@@ -185,6 +185,70 @@ fn proven_evidence_writes_no_fga_marker() {
     );
 }
 
+#[test]
+fn hard_parse_evidence_unavailable_has_a_readable_signed_record() {
+    let sink = Arc::new(MemoryAuditSink::new());
+    let auditor = oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(Arc::clone(&sink))),
+        SigningKey::new(
+            "hard-parse-test-key",
+            b"hard-parse-evidence-audit-test-key".to_vec(),
+        )
+        .expect("valid test key"),
+    );
+    let subject = AuditSubject::new("profile", "synthetic-cross-rw");
+    append_hard_parse_evidence_unavailable_audit(
+        AuditEntryCtx {
+            auditor: Some(&auditor),
+            subject: &subject,
+            db_evidence: None,
+        },
+        "oracle_explain_plan",
+        true,
+        Some("plan_table_verification_no_privilege_sys_fallback"),
+    )
+    .expect("the admission record is durable before EXPLAIN is attempted");
+
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    let record = &records[0];
+    assert_eq!(record.tool, "hard_parse_evidence_unavailable");
+    assert_eq!(record.subject, subject);
+    assert_eq!(record.danger_level, "READ_ONLY");
+    assert_eq!(record.decision, AuditDecision::Allowed);
+    assert_eq!(record.outcome, AuditOutcome::Succeeded);
+    assert_eq!(record.rows_affected, None);
+    assert_eq!(record.sql_preview, "<sql text redacted; see sql_sha256>");
+    assert!(record.hash_is_valid());
+    assert!(record.signature.is_some());
+}
+
+#[test]
+fn hard_parse_cost_closure_refusal_keeps_the_typed_odci_reason() {
+    let error = query_cost_runtime_unavailable("odci_stats_callback");
+    assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+    assert_eq!(
+        error
+            .structured_reason
+            .as_ref()
+            .and_then(|reason| reason.offending_construct.as_deref()),
+        Some("odci_stats_callback")
+    );
+
+    let read_path_error = query_cost_unavailable("odci_stats_callback");
+    assert_eq!(
+        read_path_error.error_class,
+        ErrorClass::RuntimeStateRequired
+    );
+    assert_eq!(
+        read_path_error
+            .structured_reason
+            .as_ref()
+            .and_then(|reason| reason.offending_construct.as_deref()),
+        Some("odci_stats_callback")
+    );
+}
+
 /// The initially served profile is governed by its own `require_fga_evidence`:
 /// binding the accepted config snapshot installs the rule, exactly as a
 /// profile switch would.

@@ -25,14 +25,18 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as CapOpenOptions};
 use oraclemcp_audit::AuditLockProbe;
 use oraclemcp_db::{
-    CatalogQueryId, DRIVER_VERSION, DbError, DiagnosticsSource, OracleConnection,
-    OracleVpdRlsObservation, OracleVpdRlsObservationStatus, canonical_nls_statements,
-    detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema, preflight, probe_privileges,
-    probe_write_posture, run_catalog_query, supported_wallet_modes,
+    CatalogQueryId, DRIVER_VERSION, DbError, DiagnosticsSource, HardParseEffectClosureV1,
+    OracleConnection, OracleVpdRlsObservation, OracleVpdRlsObservationStatus,
+    canonical_nls_statements, detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema,
+    preflight, probe_privileges, probe_write_posture, prove_hard_parse_effect_closure,
+    resolve_plan_table, run_catalog_query, supported_wallet_modes,
 };
 use oraclemcp_db::{ConnectPhaseReached, connect_hint_for};
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
-use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
+use oraclemcp_guard::{
+    CatalogObjectKind, Classifier, ClassifierConfig, OperatingLevel, ResolvedIdentity,
+    ResolvedObject,
+};
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -1398,7 +1402,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_configuration(ctx),
         check_rls_vpd_visibility(cx, ctx).await,
         check_fga_catalog_visibility(cx, ctx).await,
-        check_hard_parse_evidence_policy(ctx.profile_caps.as_ref()),
+        check_hard_parse_evidence_policy(cx, ctx).await,
     ];
     DoctorReport {
         checks,
@@ -2685,8 +2689,8 @@ const FGA_CATALOG_CHECK_ID: u8 = 18;
 const FGA_CATALOG_CHECK_NAME: &str = "FGA catalog visibility";
 const HARD_PARSE_POLICY_CHECK_ID: u8 = 19;
 
-fn check_hard_parse_evidence_policy(caps: Option<&DoctorProfileCaps>) -> CheckResult {
-    let Some(caps) = caps else {
+async fn check_hard_parse_evidence_policy(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
+    let Some(caps) = ctx.profile_caps.as_ref() else {
         return CheckResult::new(
             HARD_PARSE_POLICY_CHECK_ID,
             "Hard-parse evidence policy",
@@ -2694,21 +2698,97 @@ fn check_hard_parse_evidence_policy(caps: Option<&DoctorProfileCaps>) -> CheckRe
             "no selected profile; standalone dispatch uses its explicit runtime policy",
         );
     };
-    if caps.require_hard_parse_evidence {
-        CheckResult::new(
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
             HARD_PARSE_POLICY_CHECK_ID,
             "Hard-parse evidence policy",
+            CheckStatus::Skip,
+            "skipped because connectivity failed before catalog visibility could be probed",
+        );
+    }
+    let Some(conn) = ctx.conn else {
+        return CheckResult::new(
+            HARD_PARSE_POLICY_CHECK_ID,
+            "Hard-parse evidence policy",
+            CheckStatus::Skip,
+            "offline — requires live probes of the hard-parse evidence catalogs",
+        );
+    };
+    let relation = ResolvedObject {
+        owner: "SYS".to_owned(),
+        name: "DUAL".to_owned(),
+        kind: CatalogObjectKind::Table,
+        container: None,
+        member: None,
+        overloads: Vec::new(),
+        quote_exact: false,
+        synonym_chain: Vec::new(),
+        db_link: None,
+        identity: ResolvedIdentity {
+            object_id: 0,
+            edition: None,
+        },
+    };
+    let closure =
+        prove_hard_parse_effect_closure(cx, conn, "SELECT DUMMY FROM SYS.DUAL", &[relation]).await;
+    let plan_table = resolve_plan_table(cx, conn, None).await;
+    let probe = match plan_table {
+        Ok(table) if table.verification_observation().is_some() => match closure {
+            HardParseEffectClosureV1::Proven => HardParseEffectClosureV1::AdmittedWithObservation {
+                reason: "no_privilege",
+            },
+            other => other,
+        },
+        Err(error) if error.reason() == "no_privilege" => match closure {
+            HardParseEffectClosureV1::Proven => HardParseEffectClosureV1::AdmittedWithObservation {
+                reason: "no_privilege",
+            },
+            other => other,
+        },
+        Err(_) => HardParseEffectClosureV1::Unavailable {
+            reason: "callback_unprovable",
+        },
+        Ok(_) => closure,
+    };
+    hard_parse_evidence_policy_result(probe, caps.require_hard_parse_evidence)
+}
+
+fn hard_parse_evidence_policy_result(
+    probe: HardParseEffectClosureV1,
+    require_evidence: bool,
+) -> CheckResult {
+    let (status, detail) = match probe {
+        HardParseEffectClosureV1::Proven => (
             CheckStatus::Pass,
-            "profile refuses EXPLAIN and decisive cost admission when hard-parse or PLAN_TABLE evidence is unreadable",
-        )
-    } else {
-        CheckResult::new(
-            HARD_PARSE_POLICY_CHECK_ID,
-            "Hard-parse evidence policy",
+            "online probes read every installed hard-parse evidence catalog; optional OLS/RAS catalogs absent from SYS are treated as absent features".to_owned(),
+        ),
+        HardParseEffectClosureV1::AdmittedWithObservation { reason } if !require_evidence => (
             CheckStatus::Warn,
-            "profile may admit EXPLAIN or decisive cost reads when hard-parse or PLAN_TABLE evidence is unreadable; admitted results carry an observation and a separate audit record; set require_hard_parse_evidence = true to refuse them",
-        )
-        .with_fix("set require_hard_parse_evidence = true in this profile to require complete evidence")
+            format!("online hard-parse or PLAN_TABLE evidence probes found unreadable evidence ({reason}); reads may proceed with an observation and separate audit record"),
+        ),
+        HardParseEffectClosureV1::AdmittedWithObservation { reason } => (
+            CheckStatus::Fail,
+            format!("profile requires complete hard-parse and PLAN_TABLE evidence, but online probes found unreadable evidence ({reason}); EXPLAIN and decisive cost reads refuse"),
+        ),
+        HardParseEffectClosureV1::Refused { reason } => (
+            CheckStatus::Fail,
+            format!("online hard-parse evidence probe found a callback or policy ({reason}) on SYS.DUAL"),
+        ),
+        HardParseEffectClosureV1::Unavailable { reason } => (
+            CheckStatus::Fail,
+            format!("online hard-parse evidence probe could not establish catalog visibility ({reason})"),
+        ),
+    };
+    let result = CheckResult::new(
+        HARD_PARSE_POLICY_CHECK_ID,
+        "Hard-parse evidence policy",
+        status,
+        detail,
+    );
+    if status == CheckStatus::Warn {
+        result.with_fix("grant the served account read access to the installed hard-parse evidence catalogs, or set require_hard_parse_evidence = true to refuse when any evidence is unreadable")
+    } else {
+        result
     }
 }
 
@@ -3483,29 +3563,27 @@ mod tests {
     };
 
     #[test]
-    fn hard_parse_evidence_default_warns_and_strict_profile_passes() {
-        let caps = |required| DoctorProfileCaps {
-            profile: "synthetic".to_owned(),
-            configured: DoctorLevelCaps {
-                default_level: OperatingLevel::ReadOnly,
-                max_level: OperatingLevel::ReadOnly,
-            },
-            effective: DoctorLevelCaps {
-                default_level: OperatingLevel::ReadOnly,
-                max_level: OperatingLevel::ReadOnly,
-            },
-            protected: false,
-            read_only_standby: false,
-            require_fga_evidence: false,
-            require_hard_parse_evidence: required,
-        };
+    fn hard_parse_evidence_warning_is_conditional_on_online_catalog_reads() {
         assert_eq!(
-            check_hard_parse_evidence_policy(Some(&caps(false))).status,
+            run_hard_parse_doctor_probe(false, false, false).status,
+            CheckStatus::Pass
+        );
+        assert_eq!(
+            run_hard_parse_doctor_probe(true, false, false).status,
             CheckStatus::Warn
         );
         assert_eq!(
-            check_hard_parse_evidence_policy(Some(&caps(true))).status,
-            CheckStatus::Pass
+            run_hard_parse_doctor_probe(true, false, true).status,
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            run_hard_parse_doctor_probe(false, true, false).status,
+            CheckStatus::Warn,
+            "the warning also reflects inaccessible PLAN_TABLE evidence"
+        );
+        assert_eq!(
+            run_hard_parse_doctor_probe(false, true, true).status,
+            CheckStatus::Fail
         );
     }
 
@@ -3584,6 +3662,120 @@ mod tests {
         async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
+    }
+
+    struct HardParseEvidenceDoctorMock {
+        unreadable: bool,
+        plan_table_unreadable: bool,
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for HardParseEvidenceDoctorMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                current_schema: Some("APP".to_owned()),
+                ..OracleConnectionInfo::default()
+            })
+        }
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            if self.unreadable && sql.to_ascii_lowercase().contains("from all_associations") {
+                return Err(DbError::ServerQuery(
+                    "ORA-01031: insufficient privileges".to_owned(),
+                ));
+            }
+            let normalized = sql.to_ascii_lowercase();
+            if normalized.contains("from all_synonyms")
+                && normalized.contains("owner = 'public'")
+                && normalized.contains("synonym_name = 'plan_table'")
+            {
+                return Ok(vec![doctor_row(&[
+                    ("TABLE_OWNER", Some("SYS")),
+                    ("TABLE_NAME", Some("PLAN_TABLE$")),
+                    ("DB_LINK", None),
+                ])]);
+            }
+            if normalized.contains("from all_tables t join all_objects")
+                && normalized.contains("plan_table$")
+            {
+                if self.plan_table_unreadable {
+                    return Err(DbError::ServerQuery(
+                        "ORA-01031: insufficient privileges".to_owned(),
+                    ));
+                }
+                return Ok(vec![doctor_row(&[
+                    ("TEMPORARY", Some("Y")),
+                    ("DURATION", Some("SYS$SESSION")),
+                    ("OBJECT_ID", Some("42")),
+                ])]);
+            }
+            Ok(Vec::new())
+        }
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn run_hard_parse_doctor_probe(
+        unreadable: bool,
+        plan_table_unreadable: bool,
+        require_evidence: bool,
+    ) -> CheckResult {
+        let conn = HardParseEvidenceDoctorMock {
+            unreadable,
+            plan_table_unreadable,
+        };
+        let caps = DoctorProfileCaps {
+            profile: "synthetic".to_owned(),
+            configured: DoctorLevelCaps {
+                default_level: OperatingLevel::ReadOnly,
+                max_level: OperatingLevel::ReadOnly,
+            },
+            effective: DoctorLevelCaps {
+                default_level: OperatingLevel::ReadOnly,
+                max_level: OperatingLevel::ReadOnly,
+            },
+            protected: false,
+            read_only_standby: false,
+            require_fga_evidence: false,
+            require_hard_parse_evidence: require_evidence,
+        };
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            profile_caps: Some(caps),
+            ..DoctorContext::default()
+        };
+        let runtime = RuntimeBuilder::current_thread()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            check_hard_parse_evidence_policy(&cx, &ctx).await
+        })
     }
 
     fn doctor_row(columns: &[(&str, Option<&str>)]) -> OracleRow {

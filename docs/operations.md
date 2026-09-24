@@ -323,9 +323,16 @@ recorded while the remaining probes continue; any readable positive evidence
 still refuses. When no readable probe finds a callback, the default may admit
 with a `verification_observations` field and a separate readable
 `hard_parse_evidence_unavailable` audit record. The doctor reports check 19,
-"Hard-parse evidence policy", as WARN while
-`require_hard_parse_evidence = false`; setting it to `true` restores refusal
-when hard-parse or PLAN_TABLE verification is incomplete. A configured
+"Hard-parse evidence policy", as WARN only when an online probe finds an
+installed evidence catalog unreadable; absent optional OLS/RAS catalogs do not
+warn. Setting `require_hard_parse_evidence = true` restores refusal when
+hard-parse or PLAN_TABLE verification is incomplete. If `EXPLAIN` cost
+estimation hits `ORA-01456` inside a READ_ONLY transaction, a non-strict
+profile admits the routine read with the
+`cost_unavailable_read_only_txn` observation and a separate
+`query_cost_unavailable` audit record. A strict profile refuses; cumulative
+query-cost budgets also refuse because they cannot reserve an unestimated cost.
+A configured
 `explain_plan_table` whose verification is denied for lack of privilege uses
 the fixed SYS plan table only with an explicit
 `configured_plan_table_unavailable_sys_fallback` observation.
