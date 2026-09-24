@@ -16,6 +16,16 @@ CRATES_DIR="$ROOT/crates"
 violations=0
 cd "$ROOT"
 
+# `cargo tree --workspace` below is classified as a heavy Cargo operation by
+# the compiler guard because Cargo still starts rustc to inspect target-specific
+# configuration. Take a real lease for the full dependency-graph inspection so
+# the existing fail-closed guard can verify the nested Cargo process normally.
+# When called from an already leased command (or on a single-tenant CI runner),
+# the preflight succeeds and this script reuses that context.
+if ! "$ROOT/scripts/check_build_lease.sh" --require-lease >/dev/null 2>&1; then
+  exec "$ROOT/scripts/build_lease.sh" --slots 3 -- timeout 1800 bash "$0" "$@"
+fi
+
 mapfile -t core_crates < <(find "$CRATES_DIR" -maxdepth 1 -type d -name 'oraclemcp-*' | sort)
 
 if [ "${#core_crates[@]}" -eq 0 ]; then
