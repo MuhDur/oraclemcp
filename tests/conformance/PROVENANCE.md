@@ -59,6 +59,7 @@ exact command + git-ref) and the check will fail until it does.
 
 | Artifact | Origin | Regenerate / source of truth |
 | --- | --- | --- |
+| `tests/golden/guard/bypass_corpus.jsonl` | Hand-maintained synthetic SQL/profile/expected-outcome regression corpus for the served read-guard boundary | Source of truth is this JSONL corpus; validated by `guard_bypass_corpus_matches_golden` in `crates/oraclemcp/src/dispatch/tests/guard_bypass_corpus.rs` (no automatic generator) |
 | `crates/oraclemcp-core/tests/fixtures/wallet/good_sso/cwallet.sso` | Synthetic Oracle wallet (lab-only; CN=oracle-test.invalid) | OpenSSL 3.5.5 legacy chain / orapki SSO copied from the oracledb driver fixture — see `crates/oraclemcp-core/tests/fixtures/wallet/PROVENANCE.md` |
 | `crates/oraclemcp-core/tests/fixtures/wallet/undecryptable_without_sso/ewallet.pem` | Synthetic Oracle wallet (lab-only; CN=oracle-test.invalid) | OpenSSL 3.5.5 legacy chain / orapki SSO copied from the oracledb driver fixture — see `crates/oraclemcp-core/tests/fixtures/wallet/PROVENANCE.md` |
 | `crates/oraclemcp-core/tests/fixtures/wallet/undecryptable_with_sso/cwallet.sso` | Synthetic Oracle wallet (lab-only; CN=oracle-test.invalid) | OpenSSL 3.5.5 legacy chain / orapki SSO copied from the oracledb driver fixture — see `crates/oraclemcp-core/tests/fixtures/wallet/PROVENANCE.md` |
