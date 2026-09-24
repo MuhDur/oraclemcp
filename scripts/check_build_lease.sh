@@ -151,7 +151,7 @@ require_lease() {
   local lease_dir="${CARGO_SWARM_BUILD_LEASE_DIR:-}"
   local lease_slot="${CARGO_SWARM_BUILD_LEASE_SLOT:-}"
   local lease_pid="${CARGO_SWARM_BUILD_LEASE_PID:-}"
-  local slot_file record lease_fd
+  local slot_file record lease_fd invalid_marker=0
   if [ -n "$lease_dir" ] && [ -n "$lease_slot" ] && [ -n "$lease_pid" ]; then
     case "$lease_slot:$lease_pid" in
       *[!0-9:]*|:*|*:) ;;
@@ -173,8 +173,26 @@ require_lease() {
         fi
         ;;
     esac
+    invalid_marker=1
+  fi
+
+  # Some Cargo frontends (notably cargo-deny) start a nested Cargo process
+  # with a sanitized environment. A compiler launched by that nested Cargo
+  # still belongs to the leased command when the live lease owner is an actual
+  # process ancestor. Recover that identity from the held slot record instead
+  # of trusting a caller-supplied PID or a Boolean environment marker.
+  local ancestor_identity
+  ancestor_identity="$(find_live_ancestor_lease || true)"
+  if [ -n "$ancestor_identity" ]; then
+    IFS=$'\t' read -r lease_dir lease_slot lease_pid <<<"$ancestor_identity"
+    echo "check_build_lease: OK — verified live ancestor build lease (slot=$lease_slot pid=$lease_pid)." >&2
+    return 0
+  fi
+
+  if [ "$invalid_marker" -eq 1 ]; then
     echo "check_build_lease: supplied build-lease identity is not a live held flock; refusing." >&2
   fi
+
   if [ -n "${CI:-}" ]; then
     echo "check_build_lease: OK — CI runner is single-tenant; lease requirement waived." >&2
     return 0
@@ -193,8 +211,81 @@ EOF
   exit 75
 }
 
+find_live_ancestor_lease() {
+  # Only an actual ancestor of this checker can lend its lease. A matching
+  # slot record alone is insufficient: the recorded PID must be in the parent
+  # chain, alive, and still hold the slot's flock.
+  [ -d /proc/$$ ] || return 1
+
+  local pid="$PPID" depth=0 parent entry env_lease_dir lease_dir slot_file
+  local record current_record lease_fd slot_number script_arg script_path expected_script
+  local -a ancestor_argv=()
+  declare -A checked_lease_dirs=()
+
+  while [ "$pid" -gt 1 ] && [ "$depth" -lt 64 ]; do
+    env_lease_dir=""
+    if [ -r "/proc/$pid/environ" ]; then
+      while IFS= read -r -d '' entry; do
+        case "$entry" in
+          CARGO_SWARM_BUILD_LEASE_DIR=*) env_lease_dir="${entry#*=}" ;;
+        esac
+      done <"/proc/$pid/environ" || true
+    fi
+
+    for lease_dir in "$env_lease_dir" "$HOME/.cache/oraclemcp-build-lease"; do
+      [ -n "$lease_dir" ] || continue
+      [ -z "${checked_lease_dirs[$lease_dir]+x}" ] || continue
+      checked_lease_dirs["$lease_dir"]=1
+
+      for slot_file in "$lease_dir"/slot.*; do
+        [ -f "$slot_file" ] || continue
+        record=""
+        IFS= read -r record <"$slot_file" || true
+        [[ " $record " == *" pid=$pid "* ]] || continue
+        kill -0 "$pid" 2>/dev/null || continue
+        ancestor_argv=()
+        mapfile -d '' -t ancestor_argv <"/proc/$pid/cmdline" || continue
+        [ "${#ancestor_argv[@]}" -ge 2 ] || continue
+        script_arg="${ancestor_argv[1]}"
+        if [[ "$script_arg" = /* ]]; then
+          script_path="$script_arg"
+        else
+          script_path="/proc/$pid/cwd/$script_arg"
+        fi
+        expected_script="$(readlink -f "$ROOT/scripts/build_lease.sh" 2>/dev/null || true)"
+        [ -n "$expected_script" ] &&
+          [ "$(readlink -f "$script_path" 2>/dev/null || true)" = "$expected_script" ] || continue
+
+        if ! exec {lease_fd}>>"$slot_file"; then
+          continue
+        fi
+        if ! flock -n "$lease_fd"; then
+          current_record=""
+          IFS= read -r current_record <"$slot_file" || true
+          if kill -0 "$pid" 2>/dev/null &&
+            [[ " $current_record " == *" pid=$pid "* ]]; then
+            slot_number="${slot_file##*.}"
+            printf '%s\t%s\t%s\n' "$lease_dir" "$slot_number" "$pid"
+            exec {lease_fd}>&-
+            return 0
+          fi
+        fi
+        exec {lease_fd}>&-
+      done
+    done
+
+    parent="$(sed -E 's/^[0-9]+ \(.*\) [^ ]+ ([0-9]+) .*/\1/' "/proc/$pid/stat" 2>/dev/null || true)"
+    case "$parent" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+    pid="$parent"
+    depth=$((depth + 1))
+  done
+  return 1
+}
+
 selftest() {
-  local self="$ROOT/scripts/check_build_lease.sh" rc tmp_target lease_test_dir spoof_dir
+  local self="$ROOT/scripts/check_build_lease.sh" rc tmp_target lease_test_dir spoof_dir nested_lease_dir
   local pass=0 fail=0
   verdict() { # verdict WANT_RC GOT_RC DESCRIPTION
     if [ "$2" -eq "$1" ]; then
@@ -221,7 +312,34 @@ selftest() {
       "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 0 "$rc" "leased heavy build passes"
 
-  # 3. A caller cannot turn a string into a lease. The checker verifies that
+  # 3. Cargo frontends can clear the lease variables before spawning Cargo.
+  # Accept the nested heavy command only because a real, flock-holding lease
+  # owner is in its process ancestry.
+  rc=0
+  nested_lease_dir="$lease_test_dir/nested"
+  CARGO_SWARM_BUILD_LEASE_DIR="$nested_lease_dir" CARGO_TARGET_DIR="$ROOT/target" \
+    "$ROOT/scripts/build_lease.sh" --slots 2 --timeout 30 --label check-nested -- \
+      env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
+        -u CARGO_SWARM_BUILD_LEASE_PID -u CI -u CARGO_TARGET_DIR \
+        "$self" -- cargo fetch --manifest-path "$ROOT/Cargo.toml" \
+          "$HOME/.cargo/bin/cargo-deny" deny check >/dev/null 2>&1 || rc=$?
+  verdict 0 "$rc" "nested cargo-deny fetch accepted only under a live ancestor lease"
+
+  # A process cannot lend a forged slot merely by writing its PID and holding
+  # a flock; the slot owner must actually be the repository lease wrapper.
+  rc=0
+  forged_ancestor_dir="$lease_test_dir/forged-ancestor"
+  mkdir -p "$forged_ancestor_dir"
+  CARGO_SWARM_BUILD_LEASE_DIR="$forged_ancestor_dir" env -u CI -u CARGO_TARGET_DIR \
+    bash -c '
+      exec 9>>"$CARGO_SWARM_BUILD_LEASE_DIR/slot.0"
+      flock -n 9
+      printf "label=forged pid=%s acquired=never cmd=none\\n" "$$" >"$CARGO_SWARM_BUILD_LEASE_DIR/slot.0"
+      "$1" -- cargo test --workspace >/dev/null 2>&1
+    ' bash "$self" || rc=$?
+  verdict 75 "$rc" "forged ancestor with a held flock is refused"
+
+  # 4. A caller cannot turn a string into a lease. The checker verifies that
   # the named slot is currently flocked, not merely that marker variables exist.
   spoof_dir="$lease_test_dir/spoof"
   mkdir -p "$spoof_dir"
@@ -233,35 +351,35 @@ selftest() {
     "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 75 "$rc" "spoofed marker without a held flock is refused"
 
-  # 4. heavy + CI runner => passes with waiver
+  # 5. heavy + CI runner => passes with waiver
   rc=0
   env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
     -u CARGO_SWARM_BUILD_LEASE_PID -u CARGO_TARGET_DIR CI=true \
     "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 0 "$rc" "CI runner waiver applies"
 
-  # 5. scoped build, un-leased => passes (iteration path is never gated)
+  # 6. scoped build, un-leased => passes (iteration path is never gated)
   rc=0
   env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
     -u CARGO_SWARM_BUILD_LEASE_PID -u CI -u CARGO_TARGET_DIR \
     "$self" -- cargo test -p oraclemcp-db >/dev/null 2>&1 || rc=$?
   verdict 0 "$rc" "scoped 'cargo test -p' passes without a lease"
 
-  # 6. cargo-mutants is heavy even when scoped
+  # 7. cargo-mutants is heavy even when scoped
   rc=0
   env -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
     -u CARGO_SWARM_BUILD_LEASE_PID -u CI -u CARGO_TARGET_DIR \
     "$self" -- cargo mutants -p oraclemcp-db >/dev/null 2>&1 || rc=$?
   verdict 75 "$rc" "cargo mutants classified heavy"
 
-  # 7. shared target dir refused with exit 78 before checking the lease
+  # 8. shared target dir refused with exit 78 before checking the lease
   rc=0
   env -u CI -u CARGO_SWARM_BUILD_LEASE_DIR -u CARGO_SWARM_BUILD_LEASE_SLOT \
     -u CARGO_SWARM_BUILD_LEASE_PID CARGO_TARGET_DIR="$HOME/.cache/cargo-target" \
     "$self" -- cargo test --workspace >/dev/null 2>&1 || rc=$?
   verdict 78 "$rc" "shared ~/.cache/cargo-target refused"
 
-  # 8. tmpfs target dir refused (skipped when /tmp is not tmpfs on this host).
+  # 9. tmpfs target dir refused (skipped when /tmp is not tmpfs on this host).
   # The target need not exist: check_target_dir deliberately probes its nearest
   # existing ancestor, so this test creates and deletes no scratch directory.
   tmp_target="/tmp/oraclemcp-build-lease-selftest-target"

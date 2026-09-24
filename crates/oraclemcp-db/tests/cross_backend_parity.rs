@@ -6,16 +6,28 @@
 //! creates short-lived tables inside an exact run-owned W4 fixture schema. It is not a self-skipping live
 //! claim: missing opt-in environment is an error when the ignored test is run.
 //!
-//! Run after `scripts/rig/oracle_l1.sh run --log` with:
+//! Run after `scripts/rig/oracle_l1.sh run --log` and provisioning the exact
+//! disposable W4 fixture named by `ORACLEMCP_PARITY_RUN_ID`. The test creates
+//! tables in that fixture's `W4O_<run-id>` schema, so `pythontest` is not a
+//! suitable test identity unless separately granted cross-schema DDL rights.
+//! Use the fixture owner's password from the secure provisioning channel; the
+//! W4 fixture grants that owner CREATE SESSION, CREATE TABLE, and UNLIMITED
+//! TABLESPACE. Do not grant CREATE ANY TABLE or DROP ANY TABLE to pythontest.
+//!
+//! Create/verify the registered fixture with `scripts/e2e/w4/fixture.py setup
+//! --lane free23 --run-id <W4-run-id>` and `scripts/e2e/w4/fixture.py describe
+//! --lane free23 --run-id <W4-run-id>`. Use the corresponding owner credential
+//! supplied by the fixture provisioner, then run:
 //!
 //! ```text
 //! ORACLEMCP_DUAL_BACKEND_LAB=1 \
 //! ORACLEMCP_TEST_DSN=//localhost:1523/FREEPDB1 \
-//! ORACLEMCP_TEST_USER=pythontest \
-//! ORACLEMCP_TEST_PASSWORD=<local-lab-password> \
-//! ORACLEMCP_PARITY_RUN_ID=<registered W4 run id> \
+//! ORACLEMCP_TEST_USER=W4O_<W4-run-id> \
+//! ORACLEMCP_TEST_PASSWORD=<securely-provided W4 owner password> \
+//! ORACLEMCP_PARITY_RUN_ID=<same registered W4 run id> \
 //! cargo test -p oraclemcp-db --features oracledb,live-xe \
-//!   --test cross_backend_parity -- --ignored --exact
+//!   --test cross_backend_parity live_cross_backend_error_and_vector_parity \
+//!   -- --ignored --exact --nocapture
 //! ```
 //!
 //! The PEM-only TCPS connection row is separate and needs an endpoint whose
