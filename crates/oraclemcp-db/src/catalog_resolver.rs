@@ -605,6 +605,10 @@ fn fga_condition_proven_builtin(condition: Option<&str>) -> bool {
     condition.is_none_or(|text| matches!(text.trim(), "1=1" | "1 = 1"))
 }
 
+fn fga_policy_impossible_for_local_sys_object(object: &ResolvedObject) -> bool {
+    object.owner == "SYS" && object.db_link.is_none() && object.identity.object_id != 0
+}
+
 /// Prove FGA policies cannot invoke user code for the exact resolved objects.
 /// An unreadable catalog, malformed row, or a saturated batch is uncertainty.
 pub async fn fga_closure(
@@ -632,7 +636,17 @@ pub async fn fga_closure(
             reason: "fga_relation_identity_unknown",
         };
     }
-    for chunk in relations.chunks(32) {
+    // Oracle refuses FGA policies on SYS-owned objects. Only exact resolved,
+    // local object identities qualify; a synonym targeting another owner is
+    // checked under the target owner, and any unresolved identity refused above.
+    let policy_eligible = relations
+        .iter()
+        .filter(|relation| !fga_policy_impossible_for_local_sys_object(relation))
+        .collect::<Vec<_>>();
+    if policy_eligible.is_empty() {
+        return FgaClosure::ProvenReadOnly;
+    }
+    for chunk in policy_eligible.chunks(32) {
         let mut binds = Vec::with_capacity(64);
         for relation in chunk {
             binds.push(OracleBind::from(relation.owner.as_str()));
@@ -3162,6 +3176,114 @@ mod tests {
                 FgaClosure::ProvenReadOnly
             );
             assert!(conn.queries.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn fga_sys_owned_local_relation_needs_no_catalog_probe() {
+        // LIVE FREE23 23.0.0.0.0: DBMS_FGA.ADD_POLICY on SYS.DUAL returned
+        // ORA-46399 (FGA policy cannot be applied to a SYS-owned object);
+        // DBA_AUDIT_POLICIES contained zero rows for the unique probe policy.
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([]);
+            let dual = ResolvedObject {
+                owner: "SYS".to_owned(),
+                name: "DUAL".to_owned(),
+                ..table_object()
+            };
+            for kind in [
+                FgaStatementKind::Select,
+                FgaStatementKind::Insert,
+                FgaStatementKind::Update,
+                FgaStatementKind::Delete,
+            ] {
+                assert_eq!(
+                    fga_closure(&cx, &conn, std::slice::from_ref(&dual), kind).await,
+                    FgaClosure::ProvenReadOnly
+                );
+            }
+            assert!(conn.queries.lock().unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn fga_mixed_sys_and_non_sys_relations_still_probe_non_sys() {
+        run_with_cx(|cx| async move {
+            let dual = ResolvedObject {
+                owner: "SYS".to_owned(),
+                name: "DUAL".to_owned(),
+                ..table_object()
+            };
+            let relations = [dual, table_object()];
+            let conn = ScriptedRows::results([
+                Ok(Vec::new()),
+                Err(DbError::Query("ORA-00942".to_owned())),
+            ]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &relations, FgaStatementKind::Select).await,
+                FgaClosure::Unknown {
+                    reason: "fga_catalog_unavailable"
+                }
+            );
+            let queries = conn.queries.lock().unwrap();
+            assert_eq!(queries.len(), 2);
+            assert_eq!(queries[0].1[0], OracleBind::from("APP"));
+            assert_eq!(queries[0].1[1], OracleBind::from("ORDERS"));
+            assert_eq!(queries[1].0, FGA_CATALOG_PROOF_SQL);
+        });
+    }
+
+    #[test]
+    fn fga_owner_spelled_like_sys_is_not_the_sys_owner_proof() {
+        run_with_cx(|cx| async move {
+            let quoted_other_owner = ResolvedObject {
+                owner: "sys".to_owned(),
+                ..table_object()
+            };
+            let conn = ScriptedRows::results([
+                Ok(Vec::new()),
+                Err(DbError::Query("ORA-00942".to_owned())),
+            ]);
+            assert_eq!(
+                fga_closure(&cx, &conn, &[quoted_other_owner], FgaStatementKind::Select).await,
+                FgaClosure::Unknown {
+                    reason: "fga_catalog_unavailable"
+                }
+            );
+            assert_eq!(
+                conn.queries.lock().unwrap()[0].1[0],
+                OracleBind::from("sys")
+            );
+        });
+    }
+
+    #[test]
+    fn fga_sys_owner_without_exact_local_identity_stays_unknown() {
+        run_with_cx(|cx| async move {
+            for relation in [
+                ResolvedObject {
+                    owner: "SYS".to_owned(),
+                    identity: ResolvedIdentity {
+                        object_id: 0,
+                        edition: None,
+                    },
+                    ..table_object()
+                },
+                ResolvedObject {
+                    owner: "SYS".to_owned(),
+                    db_link: Some("REMOTE".to_owned()),
+                    ..table_object()
+                },
+            ] {
+                let conn = ScriptedRows::new([]);
+                assert_eq!(
+                    fga_closure(&cx, &conn, &[relation], FgaStatementKind::Select).await,
+                    FgaClosure::Unknown {
+                        reason: "fga_relation_identity_unknown"
+                    }
+                );
+                assert!(conn.queries.lock().unwrap().is_empty());
+            }
         });
     }
 
