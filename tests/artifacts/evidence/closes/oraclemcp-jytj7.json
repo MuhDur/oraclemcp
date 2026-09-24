@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T05:50:00Z",
+  "bead_id": "oraclemcp-jytj7",
+  "scope": {
+    "summary": "Fail-open in the read proof fixed: a nested EXISTS no longer resolves a qualified USING column against an outer alias; qualified USING references refuse at every depth while genuine correlated references stay admitted (005eceef).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "53c544111b85639dc077a3e6ffc254fad854514e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 53c54411 (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3517 passed, 0 failed; cargo deny OK. (Earlier gate at 0780f94a: 3472 passed, 0 failed.)"
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "catalog_resolver::tests::nested_qualified_using_stays_bound_to_its_local_query_block, issue29_qualified_using_column_stays_refused, issue29_using_column_resolves_once, guard_metamorphic_wrap_never_turns_refusal_into_allow and the composed proptest ok by exact name in the 53c54411 gate log."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

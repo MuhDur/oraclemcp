@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T05:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.12",
+  "scope": {
+    "summary": "R36: FGA evidence that is unavailable (ORA-00942/ORA-01031 on the FGA catalog reads only) admits the read with an fga_evidence: unavailable observation and a signed audit record; per-profile require_fga_evidence=true restores the typed refusal; a proven FGA handler refuses under both policies; write paths unchanged (2cc82fb0).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "crates/oraclemcp/src/dispatch/tests/fga_evidence_r36.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-config/src/profile.rs",
+      "docs/operations.md",
+      "docs/configuration.md"
+    ],
+    "out_of_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs is excluded from the clean-scope claim because later commits touched it; its state at 53c54411 is covered by the gate.",
+      "Live xe21/xe18 re-execution of the positive case was not done by the orchestrator (implementer reported W4 FGA canaries 4/4 on all three lanes).",
+      "Main's W4 free23 lane is red for unrelated generated contract negatives (filed as oraclemcp-h6r4w); this close does not claim a green lane."
+    ]
+  },
+  "source": {
+    "sha": "53c544111b85639dc077a3e6ffc254fad854514e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 53c54411 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3517 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "fga_evidence_r36 suite (6 tests incl. unavailable_fga_evidence_admits_the_read_with_an_observation, require_fga_evidence_refuses_the_unavailable_read, proven_fga_handler_refuses_under_either_policy, unavailable_fga_evidence_is_recorded_in_the_audit_chain_before_the_read) and fga_shape_tests ok by exact name in the gate log; doctor FGA tests ok."
+      },
+      {
+        "name": "live positive + strict negative (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary built in the clean gate worktree at 53c54411. Disposable free23 account granted only CREATE SESSION (precondition: ORA-00942 on SYS.ALL_AUDIT_POLICIES), owning table T with one row, driven over stdio by an external Python MCP client: default profile - oracle_query and oracle_sample_rows both returned the row with fga_evidence = \"unavailable\", audit chain holds 2 fga_evidence_unavailable records; profile with require_fga_evidence = true - both calls refused with fga_evidence_unknown. Account dropped afterwards."
+      },
+      {
+        "name": "live negative canary (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "W4 free23 with the same binary: w4_query_fga_handler_canary_refused and w4_sample_rows_fga_handler_canary_refused pass on stdio and HTTP, at driver checkouts 53c54411 and 6ab809ad."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane; live traces are recorded in integration_evidence, not as committed artifacts."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
