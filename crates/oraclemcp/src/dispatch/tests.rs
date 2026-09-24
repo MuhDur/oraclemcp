@@ -5414,14 +5414,18 @@ fn oracle_describe_not_visible_returns_structured_not_found_with_next_actions() 
         error.message.contains("not found or is not visible"),
         "the response must not disguise catalog invisibility as an empty description: {error:?}"
     );
+    let calls = state.calls.lock().expect("describe catalog call mutex");
+    assert_eq!(calls.len(), 2);
+    assert!(calls[0].0.contains("FROM all_tab_columns"));
+    assert!(calls[0].0.contains("DATA_DEFAULT_VC"));
+    assert!(calls[0].1.is_empty());
+    assert!(calls[1].0.contains("FROM all_tab_cols"));
     assert_eq!(
-        state
-            .calls
-            .lock()
-            .expect("describe catalog call mutex")
-            .len(),
-        1,
-        "constraints are not queried after the object is known absent"
+        calls[1].1,
+        vec![
+            OracleBind::String("APP".to_owned()),
+            OracleBind::String("MISSING_TABLE".to_owned()),
+        ]
     );
 }
 
@@ -5463,9 +5467,17 @@ fn oracle_describe_preserves_double_quoted_identifier_case() {
     assert_eq!(description["owner"], json!("AppOwner"));
     assert_eq!(description["table"], json!("camelCase"));
     let calls = state.calls.lock().expect("describe catalog call mutex");
-    assert_eq!(calls.len(), 2);
+    assert_eq!(calls.len(), 3);
+    assert!(calls[0].0.contains("FROM all_tab_columns"));
+    assert!(calls[0].0.contains("DATA_DEFAULT_VC"));
+    assert!(calls[0].1.is_empty());
+    assert!(
+        calls[1]
+            .0
+            .contains("CAST(NULL AS VARCHAR2(4000)) AS data_default")
+    );
     assert_eq!(
-        calls[0].1,
+        calls[1].1,
         vec![
             OracleBind::String("AppOwner".to_owned()),
             OracleBind::String("camelCase".to_owned()),
