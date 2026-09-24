@@ -180,6 +180,7 @@ pub fn read_sensitive_file(
 const IGNORED_ENV_KEYS: &[&str] = &[
     "audit_key",
     "config",
+    "connect_detail",
     "custom_tools_hmac_key",
     "http_allow_remote",
     "live_xe",
@@ -3193,6 +3194,7 @@ mod tests {
             let home = jail.directory().display().to_string();
             jail.set_env("HOME", home);
             jail.set_env("ORACLEMCP_LOG", "debug");
+            jail.set_env("ORACLEMCP_CONNECT_DETAIL", "1");
             jail.set_env("ORACLEMCP_STDIO_TOKEN", "token-for-stdio");
             jail.set_env("ORACLEMCP_TOOLS_DIR", "/tmp/oraclemcp-tools");
             jail.set_env("ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY", "test-hmac-key");

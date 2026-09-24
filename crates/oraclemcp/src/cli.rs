@@ -14,6 +14,9 @@ use super::DEFAULT_SETUP_CONFIG_PATH;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
+mod doctor;
+pub(crate) use doctor::{DoctorArgs, DoctorCommand};
+
 #[derive(Parser, Debug)]
 #[command(
     name = "oraclemcp",
@@ -79,21 +82,8 @@ pub(crate) enum Command {
     Info,
     /// Run diagnostics; exit 2 on a blocker.
     Doctor {
-        /// Inspect this named profile. Offline unless --online is also set.
-        #[arg(long)]
-        profile: Option<String>,
-        /// Open a live database connection for connectivity/auth/role probes.
-        #[arg(long)]
-        online: bool,
-        /// Show a redacted driver class and Oracle code for an online connect failure.
-        #[arg(long, requires = "online")]
-        verbose: bool,
-        /// Plan scoped self-repair. Out-of-scope targets are refused with exit 4.
-        #[arg(long)]
-        fix: bool,
-        /// Local-only doctor diagnostics.
-        #[command(subcommand)]
-        command: Option<DoctorCommand>,
+        #[command(flatten)]
+        args: DoctorArgs,
     },
     /// List configured connection profiles without opening a database connection.
     #[command(alias = "list-profiles")]
@@ -204,18 +194,6 @@ pub(crate) enum Command {
     RefusalCorpus {
         #[command(subcommand)]
         command: RefusalCorpusCommand,
-    },
-}
-
-/// Local-only `doctor` diagnostics. These are never part of an MCP or HTTP
-/// request path.
-#[derive(Subcommand, Debug)]
-pub(crate) enum DoctorCommand {
-    /// Validate one supplied OAuth token against the local resource-server config.
-    Oauth {
-        /// JWT to diagnose. It is never logged, persisted, or rendered.
-        #[arg(long, value_name = "JWT")]
-        token: String,
     },
 }
 

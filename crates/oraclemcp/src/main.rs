@@ -218,15 +218,15 @@ fn main() -> ExitCode {
             robot_json,
         ),
         Command::Info => run_info(robot_json),
-        Command::Doctor {
-            profile,
-            online,
-            verbose,
-            fix,
-            command,
-        } => match command {
+        Command::Doctor { args } => match args.command {
             Some(DoctorCommand::Oauth { token }) => run_doctor_oauth_cmd(robot_json, &token),
-            None => run_doctor_cmd(robot_json, profile, online, verbose, fix),
+            None => run_doctor_cmd(
+                robot_json,
+                args.profile,
+                args.online,
+                args.verbose,
+                args.fix,
+            ),
         },
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),

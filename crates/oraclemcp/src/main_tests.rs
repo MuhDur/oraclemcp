@@ -3011,26 +3011,10 @@ fn doctor_oauth_command_is_a_local_cli_subcommand() {
     assert!(matches!(
         parsed.command,
         Some(Command::Doctor {
-            command: Some(DoctorCommand::Oauth { .. }),
-            ..
-        })
-    ));
-}
-
-#[test]
-fn doctor_verbose_requires_online_and_is_opt_in() {
-    let error = Cli::try_parse_from(["oraclemcp", "doctor", "--verbose"])
-        .expect_err("--verbose without --online must be rejected");
-    assert!(error.to_string().contains("--online"));
-
-    let parsed = Cli::try_parse_from(["oraclemcp", "doctor", "--online", "--verbose"])
-        .expect("parse explicit online verbose doctor");
-    assert!(matches!(
-        parsed.command,
-        Some(Command::Doctor {
-            online: true,
-            verbose: true,
-            ..
+            args: DoctorArgs {
+                command: Some(DoctorCommand::Oauth { .. }),
+                ..
+            }
         })
     ));
 }
