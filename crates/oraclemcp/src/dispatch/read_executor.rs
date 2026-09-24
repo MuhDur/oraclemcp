@@ -1687,6 +1687,173 @@ pub(super) async fn stream_query_response(
 }
 
 impl OracleDispatcher {
+    pub(super) async fn prepare_query_stream_delivery(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        request_budget: RequestBudget,
+        active_profile: Option<String>,
+        admitted: AdmittedRead,
+    ) -> Result<QueryStreamDelivery, ErrorEnvelope> {
+        let prepared = admitted.into_plan();
+        let ReadExecutionPlan {
+            args: a,
+            audit_tool: _,
+            executed_sql,
+            gate,
+            verdict_certificate: _,
+            as_of,
+            rls_vpd_relations: _,
+            policy: _,
+        } = prepared;
+        dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
+        gate?;
+        let binds = a
+            .binds
+            .iter()
+            .map(json_to_bind)
+            .collect::<Result<Vec<_>, _>>()?;
+        let offset = decode_query_cursor(a.cursor.as_deref(), &a.sql, active_profile.as_deref())?;
+        if a.export {
+            return Err(invalid_args(
+                "streaming and export are mutually exclusive: choose incremental \
+                 delivery (streaming=true) OR a single export resource (export=true)",
+            )
+            .with_next_step("re-run with exactly one of streaming / export"));
+        }
+        if as_of.is_some() {
+            return Err(invalid_args(
+                "streaming and as_of are mutually exclusive: a flashback read is \
+                 delivered as a single page — resume it with the returned cursor",
+            )
+            .with_next_step("drop streaming, or page the as_of read with cursor"));
+        }
+        let caps = query_caps_from_args(&a);
+        let result_masking = self.result_masking_policy()?;
+        if result_masking.is_some() {
+            return Err(invalid_args(
+                "streaming masked query results is temporarily unavailable because \
+                 mask-decision certificates must be audit-bound before rows leave the server",
+            )
+            .with_next_step(
+                "retry without streaming=true so the masked page can carry an audit-bound certificate",
+            ));
+        }
+        let serialize_opts =
+            query_serialize_options_from_args_with_policy(&a, result_masking.as_ref());
+        let timeout = call_timeout_duration(a.timeout_seconds)?;
+        let stream_budget = match timeout {
+            Some(timeout) => request_budget.tighten_timeout(timeout),
+            None => request_budget,
+        };
+        stream_budget.enforce(cx).map_err(DbError::into_envelope)?;
+        let limits = ConnectionLimitGuard::install(
+            cx,
+            conn,
+            Some(&self.quarantine),
+            timeout,
+            stream_budget.deadline(),
+            Some(stream_budget.db_quota()),
+        )
+        .map_err(DbError::into_envelope)?;
+        let fetch_rows = MAX_QUERY_STREAM_ROWS.saturating_add(1);
+        let wrapped_sql = paginated_sql(&executed_sql, offset, fetch_rows);
+        let stream_start = conn
+            .query_row_stream(
+                cx,
+                &wrapped_sql,
+                &binds,
+                caps.max_rows.max(1),
+                &serialize_opts,
+            )
+            .await
+            .map_err(|err| self.stream_db_error_envelope(err));
+        let restore = limits.restore();
+        let stream_start = match (stream_start, restore) {
+            (Ok(value), Ok(())) => value,
+            (Err(err), _) => return Err(err),
+            (Ok(QueryRowStreamStart::Stream(stream)), Err(err)) => {
+                recover_row_stream_cleanup(cx, stream)
+                    .await
+                    .map_err(|recover_err| self.stream_db_error_envelope(recover_err))?;
+                return Err(limit_restore_failure(&self.quarantine, false, err));
+            }
+            (Ok(_), Err(err)) => {
+                return Err(limit_restore_failure(&self.quarantine, false, err));
+            }
+        };
+        match stream_start {
+            QueryRowStreamStart::Stream(stream) => {
+                let columns = stream.columns().to_vec();
+                Ok(QueryStreamDelivery::Rows(Box::new(QueryRowStreamPlan {
+                    stream,
+                    columns,
+                    cursor_sql: a.sql,
+                    active_profile,
+                    start_offset: offset,
+                    serialize_opts,
+                    request_budget: stream_budget,
+                })))
+            }
+            QueryRowStreamStart::Fallback { reason } => {
+                tracing::debug!(
+                    fallback_reason = %reason,
+                    "oracle_query row streaming fell back to cursor chunks"
+                );
+                // `query_row_stream` returned after the first guard was
+                // restored. Reinstall the exact same absolute deadline and
+                // shared quota for the entire multi-page fallback; otherwise
+                // every page would receive a fresh relative timeout.
+                let fallback_limits = ConnectionLimitGuard::install(
+                    cx,
+                    conn,
+                    Some(&self.quarantine),
+                    timeout,
+                    stream_budget.deadline(),
+                    Some(stream_budget.db_quota()),
+                )
+                .map_err(DbError::into_envelope)?;
+                let response = read_executor::stream_query_response(
+                    cx,
+                    conn,
+                    &stream_budget,
+                    &executed_sql,
+                    &a.sql,
+                    &binds,
+                    caps,
+                    offset,
+                    &serialize_opts,
+                    active_profile.as_deref(),
+                )
+                .await;
+                let restore_error = fallback_limits.restore().err();
+                let response = match response {
+                    Ok(response) => response,
+                    Err(primary) => {
+                        if let Some(restore_error) = restore_error {
+                            let _ = mark_connection_quarantined(
+                                &self.quarantine,
+                                AuditOutcome::UnknownDiscarded,
+                                format!(
+                                    "chunked stream fallback failed and request-limit restoration also failed: {restore_error}"
+                                ),
+                            );
+                        }
+                        return Err(primary);
+                    }
+                };
+                if let Some(restore_error) = restore_error {
+                    return Err(limit_restore_failure(
+                        &self.quarantine,
+                        false,
+                        restore_error,
+                    ));
+                }
+                Ok(QueryStreamDelivery::Chunked(response))
+            }
+        }
+    }
+
     /// Admit once, then fetch both SCNs through the guarded pinned read lane.
     pub(super) async fn read_diff_time_pair(
         &self,
