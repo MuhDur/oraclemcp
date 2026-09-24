@@ -166,6 +166,22 @@ macro_rules! health_probe_sql {
     };
 }
 
+pub(crate) const VPD_RLS_POLICY_BY_SCHEMA_SQL: &str = "SELECT object_owner, object_name, policy_name, \
+    pf_owner, package, function, sel, ins, upd, del, enable \
+    FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
+                 upd, del, enable \
+          FROM all_policies WHERE object_owner = :1 \
+          ORDER BY object_owner, object_name, policy_name) \
+    WHERE ROWNUM <= :2";
+
+pub(crate) const VPD_RLS_POLICY_BY_OBJECT_SQL: &str = "SELECT object_owner, object_name, policy_name, \
+    pf_owner, package, function, sel, ins, upd, del, enable \
+    FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
+                 upd, del, enable \
+          FROM all_policies WHERE object_owner = :1 AND object_name = :2 \
+          ORDER BY object_owner, object_name, policy_name) \
+    WHERE ROWNUM <= :3";
+
 /// The complete catalog-query set used by the current semantic read proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogQueryId {
@@ -381,11 +397,15 @@ pub enum CatalogQueryId {
     HealthProbeSysstat,
     /// Column identities and types for one live lineage relation.
     LineageColumns,
+    /// Bounded visible VPD policies for one schema, for diagnostic display only.
+    VpdRlsPoliciesBySchema,
+    /// Bounded visible VPD policies for one relation, for diagnostic display only.
+    VpdRlsPoliciesByObject,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 106] = [
+    pub const ALL: [Self; 108] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -492,6 +512,8 @@ impl CatalogQueryId {
         Self::HealthProbeAllConstraints,
         Self::HealthProbeSysstat,
         Self::LineageColumns,
+        Self::VpdRlsPoliciesBySchema,
+        Self::VpdRlsPoliciesByObject,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -1504,6 +1526,20 @@ impl CatalogQueryId {
                 TT,
                 "cross-check live lineage columns against the visible dictionary",
                 DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::VpdRlsPoliciesBySchema => (
+                VPD_RLS_POLICY_BY_SCHEMA_SQL,
+                TI,
+                "observe bounded visible VPD policies for one schema",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::VpdRlsPoliciesByObject => (
+                VPD_RLS_POLICY_BY_OBJECT_SQL,
+                TTI,
+                "observe bounded visible VPD policies for one relation",
+                VisibilityObservation,
                 Diagnostic,
             ),
         };

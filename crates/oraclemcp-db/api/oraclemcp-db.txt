@@ -537,8 +537,10 @@ pub oraclemcp_db::CatalogQueryId::TypeAttribute
 pub oraclemcp_db::CatalogQueryId::ViewMetadata
 pub oraclemcp_db::CatalogQueryId::VirtualColumn
 pub oraclemcp_db::CatalogQueryId::VirtualColumnsForRelations32
+pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesByObject
+pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesBySchema
 impl oraclemcp_db::CatalogQueryId
-pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 106]
+pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 108]
 pub const fn oraclemcp_db::CatalogQueryId::spec(self) -> oraclemcp_db::CatalogReadSpec
 impl core::clone::Clone for oraclemcp_db::CatalogQueryId
 pub fn oraclemcp_db::CatalogQueryId::clone(&self) -> oraclemcp_db::CatalogQueryId

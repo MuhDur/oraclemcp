@@ -24,7 +24,8 @@ use crate::catalog_query::{
     MEMBER_PROCEDURES_SQL, OBJECTS_SQL, POLICY_CATALOG_PROOF_SQL, POLICY_ROWS_FOR_RELATIONS_32_SQL,
     RELATION_COLUMN_SQL, SELECT_POLICY_SQL, STANDALONE_ARGUMENTS_SQL, STANDALONE_PROCEDURES_SQL,
     SYNONYMS_SQL, TARGET_COLUMN_CATALOG_PROOF_SQL, VIRTUAL_COLUMN_SQL,
-    VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
+    VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL, VPD_RLS_POLICY_BY_OBJECT_SQL,
+    VPD_RLS_POLICY_BY_SCHEMA_SQL,
 };
 use crate::catalog_query::{CatalogQueryId, run_catalog_query};
 use crate::{DbError, OracleBind, OracleConnection, OracleRow};
@@ -38,22 +39,6 @@ const MAX_CANDIDATES: usize = 32;
 const MAX_SYNONYM_HOPS: usize = 16;
 const MAX_ARGUMENT_ROWS: usize = 512;
 const MAX_SESSION_ROLES: usize = 256;
-
-const VPD_RLS_POLICY_BY_SCHEMA_SQL: &str = "SELECT object_owner, object_name, policy_name, \
-    pf_owner, package, function, sel, ins, upd, del, enable \
-    FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
-                 upd, del, enable \
-          FROM all_policies WHERE object_owner = :1 \
-          ORDER BY object_owner, object_name, policy_name) \
-    WHERE ROWNUM <= :2";
-
-const VPD_RLS_POLICY_BY_OBJECT_SQL: &str = "SELECT object_owner, object_name, policy_name, \
-    pf_owner, package, function, sel, ins, upd, del, enable \
-    FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
-                 upd, del, enable \
-          FROM all_policies WHERE object_owner = :1 AND object_name = :2 \
-          ORDER BY object_owner, object_name, policy_name) \
-    WHERE ROWNUM <= :3";
 
 /// Maximum VPD/RLS policy rows surfaced in one diagnostic observation.
 pub const MAX_VPD_RLS_POLICY_ROWS: usize = 64;
@@ -1400,7 +1385,7 @@ pub async fn observe_vpd_rls_for_schema(
     let (policies, policy_error) = query_vpd_rls_policies(
         cx,
         conn,
-        VPD_RLS_POLICY_BY_SCHEMA_SQL,
+        CatalogQueryId::VpdRlsPoliciesBySchema,
         &[
             OracleBind::from(schema),
             OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
@@ -1431,7 +1416,7 @@ pub async fn observe_vpd_rls_for_relations(
         let (mut rows, error) = query_vpd_rls_policies(
             cx,
             conn,
-            VPD_RLS_POLICY_BY_OBJECT_SQL,
+            CatalogQueryId::VpdRlsPoliciesByObject,
             &[
                 OracleBind::from(relation.owner.as_str()),
                 OracleBind::from(relation.name.as_str()),
@@ -2766,10 +2751,10 @@ async fn query_policy_catalog_probe(
 async fn query_vpd_rls_policies(
     cx: &Cx,
     conn: &dyn OracleConnection,
-    sql: &str,
+    id: CatalogQueryId,
     binds: &[OracleBind],
 ) -> (Vec<OracleVpdRlsPolicy>, Option<String>) {
-    match conn.query_rows(cx, sql, binds).await {
+    match run_catalog_query(cx, conn, id, binds).await {
         Ok(rows) => (
             rows.iter()
                 .take(MAX_VPD_RLS_POLICY_ROWS)
@@ -3596,7 +3581,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 106);
+        assert_eq!(specs.len(), 108);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -3728,6 +3713,48 @@ mod tests {
             assert_eq!(
                 observation.policies[0].statement_types,
                 vec!["select".to_owned()]
+            );
+            let queries = conn.queries.lock().expect("queries lock");
+            assert_eq!(
+                queries[2].0,
+                CatalogQueryId::VpdRlsPoliciesBySchema.spec().sql
+            );
+            assert_eq!(queries[2].1[0], OracleBind::from("ORACLEMCP_D3_OWNER"));
+            assert_eq!(queries[2].1[1], OracleBind::from(65_i64));
+        });
+    }
+
+    #[test]
+    fn vpd_rls_relation_observation_uses_bound_closed_catalog_query() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                vec![row(&[
+                    ("SESSION_USER", Some("APP")),
+                    ("CURRENT_SCHEMA", Some("APP")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])],
+                Vec::new(),
+                Vec::new(),
+                vec![row(&[("VISIBLE_POLICY_ROWS", Some("0"))])],
+            ]);
+            let observation = observe_vpd_rls_for_relations(&cx, &conn, &[table_object()]).await;
+            assert_eq!(
+                observation.status,
+                OracleVpdRlsObservationStatus::NoVisiblePolicyCatalogRows
+            );
+            let queries = conn.queries.lock().expect("queries lock");
+            assert_eq!(queries.len(), 4);
+            assert_eq!(
+                queries[2].0,
+                CatalogQueryId::VpdRlsPoliciesByObject.spec().sql
+            );
+            assert_eq!(
+                queries[2].1,
+                vec![
+                    OracleBind::from("APP"),
+                    OracleBind::from("ORDERS"),
+                    OracleBind::from(65_i64),
+                ]
             );
         });
     }
