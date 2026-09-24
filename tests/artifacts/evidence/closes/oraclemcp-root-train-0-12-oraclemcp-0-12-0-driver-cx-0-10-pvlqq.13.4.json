@@ -1,0 +1,62 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T20:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.13.4",
+  "scope": {
+    "summary": "Driver (rust-oracledb, oraclemcp-driver-cx) phase-tagged, redaction-safe connect tracing: every connect-path error carries connect_phase(); ORACLEDB_TRACE_CONNECT=1 emits one ordered event per phase through session; user/password canaries never appear in default trace output; AUTH hex only under =raw after the WARNING line. Driver commits b2b8ae6, a8f2204, 2c07292, 6fdb581, fbf40ec, eafd821 (rust-oracledb main eafd8211). Reaches oraclemcp via the T0.7 pin refresh; the server pin is unchanged by this bead.",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "Server-side hint quality and any ADB connect (bead no-claim).",
+      "The oraclemcp driver pin move (T0.7)."
+    ]
+  },
+  "source": {
+    "sha": "e92068802ebce7b8d87aff7f259592a20970e6a4",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "driver unit tests (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean rust-oracledb worktree detached at eafd8211, build lease: cargo test -p oraclemcp-driver-cx --lib: connect_phase_reported_on_accept_parse_failure, connect_phase_reported_on_auth_phase_one_failure (classic XE18 exchange, peer drops after phase one -> AuthPhaseOne), connect_phase_reported_on_tls_failure, trace_events_cover_every_post_accept_step (asserts ordered events for fast and classic paths and AuthPhaseTwo after phase-two drop), connect_trace_formatter_redacts_default_bytes_and_warns_before_raw: 5 passed, 0 failed. AC name connect_phase_reported_on_auth_phase_two_failure was renamed; its phase-two assertion lives in trace_events_cover_every_post_accept_step (lib.rs:12050)."
+      },
+      {
+        "name": "real-connect-path canary (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-driver-cx --test connect_trace_secret: connect_trace_redacts_secrets_on_the_real_connect_path ok. Re-execs itself as a child with ORACLEDB_TRACE_CONNECT=1 and =raw, production Connection::connect against a loopback golden peer, canary user+password in ConnectOptions, captured child stderr: canaries absent as text and hex, no ' hex=' line by default; under raw every ' hex=' line follows its WARNING line (>=2 required)."
+      },
+      {
+        "name": "live FREE23 (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "live_connect::live_wrong_password_reports_auth_connect_phase ok vs FREE23 localhost:1522/FREEPDB1 (AUTH phase reported). connect_trace_secret::password_absent_from_connect_trace ok with PYO_TEST_MAIN_USER=system: 'live connect trace reached phases: dns -> tcp -> connect -> accept -> auth_phase_one -> auth_phase_two -> session', password and user absent, no ' hex='. A first run with a mismatched user/password env failed ORA-01017 (orchestrator env error, not a code defect)."
+      },
+      {
+        "name": "independent test-body review",
+        "kind": "cli",
+        "trace": "Second-agent read-only review of 2c07292..eafd821: canary test REAL on the production path; phase-one/two tests distinguish phases; docs/OBSERVABILITY.md no longer claims zero-cost when off (matches code); eafd821 release-surfaces change is a real 0.9.3/0.9.2 package split, not a loosened gate; no production redaction/phase logic change in the rework. First review of 2c07292 found the canary test bypassed the real path; reworked."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Token canary: with_access_token is refused over plain TCP before any trace output, so the token check only covers pre-connect refusal; a token flowing through the trace needs a TLS loopback peer.",
+    "Default-mode canary assertions do not require that trace lines were emitted (an empty trace would pass that half); the raw-mode half requires >=2 hex lines and the live test proves all seven phases are emitted."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Non-blocking: assert phase= lines are present in default mode; drop the self-comparing toml_package_version check in release-surfaces.toml."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
