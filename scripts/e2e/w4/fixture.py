@@ -80,9 +80,9 @@ def load_lane(config_path, lane):
     if not isinstance(settings, dict) or settings.get("lab") is not True:
         refuse(f"lane {lane!r} lacks lab = true in rig config")
     dsn = settings.get("dsn", "")
-    if re.fullmatch(r"(?:localhost|127\.0\.0\.1):(?:1518|1520|1522)/(?:XEPDB1|FREEPDB1)", dsn, re.I) is None:
+    if re.fullmatch(r"(?:localhost|127\.0\.0\.1):(?:1518|1520|1523)/(?:XEPDB1|FREEPDB1)", dsn, re.I) is None:
         refuse("W4 DDL requires a known loopback XE/FREE lab DSN")
-    expected = {"xe18": "1518/XEPDB1", "xe21": "1520/XEPDB1", "free23": "1522/FREEPDB1"}
+    expected = {"xe18": "1518/XEPDB1", "xe21": "1520/XEPDB1", "free23": "1523/FREEPDB1"}
     if lane not in expected or not dsn.upper().endswith(expected[lane]):
         refuse(f"lane {lane!r} has the wrong lab port/service")
     return settings
