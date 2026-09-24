@@ -77,6 +77,26 @@ def expand_case(value, run_id, transport):
     return value
 
 
+def freshen_vsql_marker(case):
+    marker = case["call"].get("vsql_absent_marker")
+    if marker is None:
+        return case
+    require(marker in compact(case["call"]["arguments"]),
+            "V$SQL absence marker must occur in the SQL sent by the case")
+    fresh = "W4MARK_" + secrets.token_hex(12).upper()
+
+    def replace(value):
+        if isinstance(value, str):
+            return value.replace(marker, fresh)
+        if isinstance(value, list):
+            return [replace(item) for item in value]
+        if isinstance(value, dict):
+            return {key: replace(item) for key, item in value.items()}
+        return value
+
+    return replace(case)
+
+
 def deep_subset(expected, actual):
     if isinstance(expected, dict):
         return isinstance(actual, dict) and all(
@@ -1349,7 +1369,7 @@ def run_lane(args):
                                      owner=owner)
                 client_env = {**env, "XDG_STATE_HOME": str(state)}
                 expanded_family = ([] if args.contract_only else [
-                    expand_case(case, fixture_id, transport) for case in family_cases
+                    freshen_vsql_marker(expand_case(case, fixture_id, transport)) for case in family_cases
                     if transport in case["transports"]])
                 for case in expanded_family:
                     if (case.get("setup_phase") == "before_server"
@@ -1458,6 +1478,22 @@ def run_lane(args):
 
 def selftest():
     load_cases()
+    original_marker = "W4MARK_FGAHANDLER000001"
+    marker_case = {"call": {"arguments": {"sql": f"SELECT 1 /* {original_marker} */"},
+                            "vsql_absent_marker": original_marker}}
+    first = freshen_vsql_marker(marker_case)
+    second = freshen_vsql_marker(marker_case)
+    for expanded in (first, second):
+        marker = expanded["call"]["vsql_absent_marker"]
+        require(re.fullmatch(r"W4MARK_[A-Z0-9]{12,32}", marker) is not None,
+                "fresh V$SQL marker has invalid shape")
+        require(marker in expanded["call"]["arguments"]["sql"]
+                and original_marker not in expanded["call"]["arguments"]["sql"],
+                "fresh V$SQL marker did not replace the sent SQL")
+    require(first["call"]["vsql_absent_marker"] != second["call"]["vsql_absent_marker"],
+            "two runs reused a V$SQL refusal marker")
+    require(marker_case["call"]["vsql_absent_marker"] == original_marker,
+            "fresh V$SQL marker mutated the manifest case")
     synthetic_descriptor = {"inputSchema": {"type": "object", "properties": {
         "object_name": {"type": "string"}}, "required": ["object_name"]}}
     generated = list(generic_contract_cases(
