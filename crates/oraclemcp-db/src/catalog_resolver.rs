@@ -462,23 +462,31 @@ pub async fn resolved_relations_read_purity(
                 let Some(expression) = required_text(row, "DATA_DEFAULT") else {
                     return true;
                 };
+                let hidden_system = row.text("HIDDEN_COLUMN") == Some("YES")
+                    && row.text("USER_GENERATED") == Some("NO");
+                let user_generated = row.text("USER_GENERATED") == Some("YES")
+                    && matches!(row.text("HIDDEN_COLUMN"), Some("YES" | "NO"));
                 !chunk
                     .iter()
                     .any(|relation| relation.owner == owner && relation.name == table)
-                    || row.text("HIDDEN_COLUMN") != Some("YES")
-                    || row.text("USER_GENERATED") != Some("NO")
                     || row.cell("DATA_DEFAULT").is_some_and(|cell| {
                         cell.source_length
                             .is_some_and(|length| length > expression.chars().count())
                     })
-                    || values.iter().any(|value| {
-                        normalize_parts(&value.parts)
-                            .is_some_and(|parts| parts.iter().any(|part| part == &column))
-                    })
-                    || !oraclemcp_guard::builtin_only_virtual_column_expression(
-                        &column,
-                        &expression,
-                    )
+                    || if hidden_system {
+                        values.iter().any(|value| {
+                            normalize_parts(&value.parts)
+                                .is_some_and(|parts| parts.iter().any(|part| part == &column))
+                        }) || !oraclemcp_guard::builtin_only_virtual_column_expression(
+                            &column,
+                            &expression,
+                        )
+                    } else {
+                        !user_generated
+                            || !oraclemcp_guard::function_free_virtual_column_expression(
+                                &expression,
+                            )
+                    }
             })
         {
             return Ok(oraclemcp_guard::Purity::Unknown);
@@ -4485,6 +4493,40 @@ mod tests {
                         .await
                         .expect("visible or referenced virtual column"),
                     Purity::Unknown,
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn user_virtual_arithmetic_is_readable_but_callable_expression_refuses() {
+        run_with_cx(|cx| async move {
+            for (expression, expected) in [
+                ("\"N_VAL\"+1", Purity::ProvenReadOnly),
+                ("APP.CANARY_FN(\"N_VAL\")", Purity::Unknown),
+                ("\"N_VAL\"+APP.CANARY_FN(1)", Purity::Unknown),
+            ] {
+                let conn = ScriptedRows::new([
+                    Vec::new(),
+                    vec![issue30_virtual_column_row(
+                        "VIRTUAL_VAL",
+                        "NO",
+                        "YES",
+                        expression,
+                    )],
+                    Vec::new(),
+                    Vec::new(),
+                ]);
+                let values = [RawName::new(
+                    [RawNamePart::unquoted("N_VAL")],
+                    SyntacticRole::ValuePosition,
+                )];
+                assert_eq!(
+                    resolved_relations_read_purity(&cx, &conn, &[table_object()], &values)
+                        .await
+                        .expect("complete virtual-column metadata"),
+                    expected,
+                    "{expression}"
                 );
             }
         });

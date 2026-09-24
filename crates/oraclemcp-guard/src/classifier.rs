@@ -1694,6 +1694,60 @@ pub fn builtin_only_virtual_column_expression(column_name: &str, expression: &st
     )
 }
 
+/// Prove a user-generated virtual column contains only quoted column names,
+/// literals, parentheses, and ordinary arithmetic. This is narrower than the
+/// hidden system-column proof: no function call, qualified name, subquery, or
+/// unparsed suffix may be present even when the virtual column is selected.
+#[must_use]
+pub fn function_free_virtual_column_expression(expression: &str) -> bool {
+    use sqlparser::ast::{BinaryOperator, UnaryOperator};
+
+    if expression.is_empty() || expression.len() >= 4000 {
+        return false;
+    }
+    let Ok(mut parser) = Parser::new(&OracleDialect {}).try_with_sql(expression) else {
+        return false;
+    };
+    let Ok(parsed) = parser.parse_expr() else {
+        return false;
+    };
+    if !matches!(parser.peek_token().token, Token::EOF) {
+        return false;
+    }
+
+    struct ArithmeticExpressionVisitor;
+
+    impl Visitor for ArithmeticExpressionVisitor {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+            match expr {
+                Expr::Identifier(identifier) if identifier.quote_style == Some('"') => {}
+                Expr::Value(_) | Expr::Nested(_) => {}
+                Expr::UnaryOp {
+                    op: UnaryOperator::Plus | UnaryOperator::Minus,
+                    ..
+                } => {}
+                Expr::BinaryOp {
+                    op:
+                        BinaryOperator::Plus
+                        | BinaryOperator::Minus
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide,
+                    ..
+                } => {}
+                _ => return ControlFlow::Break(()),
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    matches!(
+        parsed.visit(&mut ArithmeticExpressionVisitor),
+        ControlFlow::Continue(())
+    )
+}
+
 fn exact_oracle_oson_index_expression(expression: &str) -> bool {
     use sqlparser::tokenizer::Token;
 
@@ -4649,6 +4703,27 @@ mod tests {
             "SYS_NC00003$",
             "OSON(\"DOC\" FORMAT OSON , 'ime' RETURNING RAW(2000) NULL ON ERROR)"
         ));
+    }
+
+    #[test]
+    fn user_virtual_arithmetic_excludes_callable_neighbors() {
+        for expression in ["\"N_VAL\"+1", "(\"A\" - 2) * +\"B\" / 3"] {
+            assert!(function_free_virtual_column_expression(expression));
+        }
+        for expression in [
+            "APP.CANARY_FN(\"N_VAL\")",
+            "\"N_VAL\" + APP.CANARY_FN(1)",
+            "UPPER(\"N_VAL\")",
+            "APP.PKG.MEMBER",
+            "(SELECT 1 FROM DUAL)",
+            "\"N_VAL\"+1 FROM DUAL",
+            "\"N_VAL\"+1 /* incomplete",
+        ] {
+            assert!(
+                !function_free_virtual_column_expression(expression),
+                "{expression}"
+            );
+        }
     }
 
     fn token_refs(tokens: &[Token]) -> Vec<&Token> {
