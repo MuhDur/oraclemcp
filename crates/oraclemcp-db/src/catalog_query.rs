@@ -12,8 +12,12 @@ use crate::{DbError, OracleBind, OracleConnection, OracleRow};
 pub enum CatalogBindKind {
     /// A VARCHAR2-style identifier or name.
     Text,
+    /// A VARCHAR2-style identifier or name, or SQL NULL for an absent filter.
+    NullableText,
     /// An integral row limit.
     Integer,
+    /// An integral bound, or SQL NULL for an absent range endpoint.
+    NullableInteger,
 }
 
 /// Ordered bind kinds required by one fixed query.
@@ -147,11 +151,17 @@ pub enum CatalogQueryId {
     ExplainPlanDisplay,
     /// Optimizer estimates from the latest plan root.
     PlanCostEstimate,
+    /// Bounded object listing with optional filters.
+    ListObjects,
+    /// Deterministic object listing page with optional filters.
+    ListObjectsPage,
+    /// Compact schema projection page with optional filters.
+    SchemaProjectionPage,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 42] = [
+    pub const ALL: [Self; 45] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -194,13 +204,16 @@ impl CatalogQueryId {
         Self::PrimaryKeyColumns,
         Self::ExplainPlanDisplay,
         Self::PlanCostEstimate,
+        Self::ListObjects,
+        Self::ListObjectsPage,
+        Self::SchemaProjectionPage,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
     #[must_use]
     pub const fn spec(self) -> CatalogReadSpec {
         use CatalogAuditClass::{Diagnostic, NameResolution, ReadPurity};
-        use CatalogBindKind::{Integer, Text};
+        use CatalogBindKind::{Integer, NullableText, Text};
         use CatalogOutputPolicy::{
             DictionaryMetadata, InternalProof, SessionContext, VisibilityObservation,
         };
@@ -212,6 +225,10 @@ impl CatalogQueryId {
         const TTTI: BindSchema = BindSchema(&[Text, Text, Text, Integer]);
         const TTT: BindSchema = BindSchema(&[Text, Text, Text]);
         const T32: BindSchema = BindSchema(&[Text; 64]);
+        const N3I: BindSchema = BindSchema(&[NullableText, NullableText, NullableText, Integer]);
+        const N3II: BindSchema =
+            BindSchema(&[NullableText, NullableText, NullableText, Integer, Integer]);
+        const N2II: BindSchema = BindSchema(&[NullableText, NullableText, Integer, Integer]);
         let (sql, binds, purpose, output_policy, audit_class) = match self {
             Self::SessionContext => (
                 SESSION_CONTEXT_SQL,
@@ -566,6 +583,61 @@ impl CatalogQueryId {
                 DictionaryMetadata,
                 Diagnostic,
             ),
+            Self::ListObjects => (
+                "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
+                   ) \
+                   SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
+                   FROM all_objects o CROSS JOIN args \
+                   WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
+                     AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
+                     AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
+                   ORDER BY o.owner, o.object_type, o.object_name \
+               ) WHERE ROWNUM <= :4",
+                N3I,
+                "list bounded objects with optional filters",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ListObjectsPage => (
+                "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
+                   SELECT selected.*, ROWNUM AS page_row FROM ( \
+                       WITH args AS ( \
+                           SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
+                       ) \
+                       SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
+                       FROM all_objects o CROSS JOIN args \
+                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
+                         AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
+                         AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
+                       ORDER BY o.owner, o.object_type, o.object_name \
+                   ) selected WHERE ROWNUM <= :4 \
+               ) WHERE page_row > :5",
+                N3II,
+                "page bounded objects with optional filters",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::SchemaProjectionPage => (
+                "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
+                   SELECT selected.*, ROWNUM AS page_row FROM ( \
+                       WITH args AS ( \
+                           SELECT :1 owner_filter, :2 name_filter FROM dual \
+                       ) \
+                       SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
+                       FROM all_objects o CROSS JOIN args \
+                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
+                         AND o.object_type IN ('TABLE', 'VIEW', 'PACKAGE') \
+                         AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
+                       ORDER BY o.owner, o.object_type, o.object_name \
+                   ) selected WHERE ROWNUM <= :3 \
+               ) WHERE page_row > :4",
+                N2II,
+                "page compact schema projection",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
         };
         CatalogReadSpec {
             sql,
@@ -590,7 +662,15 @@ pub async fn run_catalog_query(
             matches!(
                 (bind, kind),
                 (OracleBind::String(_), CatalogBindKind::Text)
+                    | (
+                        OracleBind::String(_) | OracleBind::Null,
+                        CatalogBindKind::NullableText
+                    )
                     | (OracleBind::I64(_), CatalogBindKind::Integer)
+                    | (
+                        OracleBind::I64(_) | OracleBind::Null,
+                        CatalogBindKind::NullableInteger
+                    )
             )
         })
     {

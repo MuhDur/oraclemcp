@@ -3266,7 +3266,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 42);
+        assert_eq!(specs.len(), 45);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -3305,6 +3305,52 @@ mod tests {
                     serde_json::json!({"case_id": "catalog_wrong_arity", "expected": {"internal": true, "query_count": 0}, "actual": {"internal": arity_internal, "query_count": query_count}}),
                     serde_json::json!({"case_id": "catalog_wrong_type", "expected": {"internal": true, "query_count": 0}, "actual": {"internal": type_internal, "query_count": query_count}}),
                 ],
+            );
+        });
+    }
+
+    #[test]
+    fn catalog_query_nullable_filter_accepts_only_text_or_null() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([Vec::new()]);
+            run_catalog_query(
+                &cx,
+                &conn,
+                CatalogQueryId::ListObjects,
+                &[
+                    OracleBind::Null,
+                    OracleBind::Null,
+                    OracleBind::Null,
+                    OracleBind::I64(5),
+                ],
+            )
+            .await
+            .expect("absent optional text filters are represented by SQL NULL");
+            let accepted = conn.queries.lock().expect("queries lock").len();
+            assert_eq!(accepted, 1);
+            let error = run_catalog_query(
+                &cx,
+                &conn,
+                CatalogQueryId::ListObjects,
+                &[
+                    OracleBind::I64(1),
+                    OracleBind::Null,
+                    OracleBind::Null,
+                    OracleBind::I64(5),
+                ],
+            )
+            .await
+            .expect_err("an integer cannot be an optional text filter");
+            assert!(matches!(error, DbError::Internal(_)));
+            let actual_queries = conn.queries.lock().expect("queries lock").len();
+            assert_eq!(actual_queries, 1);
+            write_catalog_test_artifact(
+                "catalog_nullable_text",
+                &[serde_json::json!({
+                    "case_id": "catalog_nullable_text",
+                    "expected": {"accepted_queries": 1, "wrong_type_refused_without_query": true},
+                    "actual": {"accepted_queries": accepted, "wrong_type_refused_without_query": actual_queries == 1},
+                })],
             );
         });
     }

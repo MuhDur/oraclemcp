@@ -725,17 +725,6 @@ pub async fn list_objects(
     name_like: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT * FROM ( \
-                   WITH args AS ( \
-                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
-                   ) \
-                   SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                   FROM all_objects o CROSS JOIN args \
-                   WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
-                     AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
-                     AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
-                   ORDER BY o.owner, o.object_type, o.object_name \
-               ) WHERE ROWNUM <= :4";
     let owner_bind = owner.map_or(OracleBind::Null, |o| {
         OracleBind::from(o.to_ascii_uppercase())
     });
@@ -745,9 +734,10 @@ pub async fn list_objects(
     let name_like_bind = name_like.map_or(OracleBind::Null, |n| {
         OracleBind::from(n.to_ascii_uppercase())
     });
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        sql,
+        conn,
+        CatalogQueryId::ListObjects,
         &[
             owner_bind,
             type_bind,
@@ -772,19 +762,6 @@ pub async fn list_objects_page(
     offset: usize,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
-                       ) \
-                       SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                       FROM all_objects o CROSS JOIN args \
-                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
-                         AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
-                         AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
-                       ORDER BY o.owner, o.object_type, o.object_name \
-                   ) selected WHERE ROWNUM <= :4 \
-               ) WHERE page_row > :5";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
@@ -795,9 +772,10 @@ pub async fn list_objects_page(
         OracleBind::from(value.to_ascii_uppercase())
     });
     let upper_bound = page_upper_bound(offset, max_rows)?;
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        sql,
+        conn,
+        CatalogQueryId::ListObjectsPage,
         &[
             owner_bind,
             type_bind,
@@ -821,19 +799,6 @@ pub async fn list_schema_projection_page(
     offset: usize,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter, :2 name_filter FROM dual \
-                       ) \
-                       SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                       FROM all_objects o CROSS JOIN args \
-                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
-                         AND o.object_type IN ('TABLE', 'VIEW', 'PACKAGE') \
-                         AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
-                       ORDER BY o.owner, o.object_type, o.object_name \
-                   ) selected WHERE ROWNUM <= :3 \
-               ) WHERE page_row > :4";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
@@ -841,9 +806,10 @@ pub async fn list_schema_projection_page(
         OracleBind::from(value.to_ascii_uppercase())
     });
     let upper_bound = page_upper_bound(offset, max_rows)?;
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        sql,
+        conn,
+        CatalogQueryId::SchemaProjectionPage,
         &[
             owner_bind,
             name_like_bind,
