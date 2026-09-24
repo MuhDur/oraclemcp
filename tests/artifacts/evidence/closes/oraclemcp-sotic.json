@@ -1,0 +1,59 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T04:05:00Z",
+  "bead_id": "oraclemcp-sotic",
+  "scope": {
+    "summary": "Windows audit instability root-caused: (1) REAL product defect fixed: DurableShippingForwarder::flush() could be lost between a failed delivery and the worker parking for its retry backoff (lost wakeup; worker slept the full backoff); fixed with a flush_requested flag bridged through the queue mutex, consumed before parking. (2) shutdown_budget_includes_waiting_for_the_queue_mutex was a timing assumption, pinned deterministically. (3) sink.rs Windows failure was a test-setup race (helper now signals over a pipe). Liveness-only deadlines use one named 30s hang guard where the eventual outcome is still asserted (7b2f9942).",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/shipping_spool.rs",
+      "crates/oraclemcp-audit/src/sink.rs"
+    ],
+    "out_of_scope": [
+      "Windows lint warnings in untouched code are tracked as oraclemcp-aer4w."
+    ]
+  },
+  "source": {
+    "sha": "7b2f9942584060ef95f0643a0b11dcc78549fb9e",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "linux gate",
+        "kind": "cli",
+        "trace": "Orchestrator Linux batch gate at 7b2f9942 (clean worktree, lease): fmt/clippy/deny OK; 118 suites, 3482 passed, 0 failed."
+      },
+      {
+        "name": "named tests (gate)",
+        "kind": "cli",
+        "trace": "flush_between_a_failure_and_the_backoff_park_still_wakes_the_worker, a_second_shutdown_is_stopped_only_once_the_worker_has_exited, flush_wakes_worker_out_of_retry_backoff, shutdown_budget_includes_waiting_for_the_queue_mutex, blocked_destination_cannot_exceed_shutdown_budget_and_record_stays_durable: all ok."
+      },
+      {
+        "name": "native windows",
+        "kind": "cli",
+        "trace": "Native Windows \"Windows audit native proof\" runs 35952039744, 35952041544, 35952043277 read by the orchestrator: all conclusion success at headSha 7b2f9942 (full job green)."
+      },
+      {
+        "name": "limit",
+        "kind": "cli",
+        "trace": "The three Windows runners were fast (audit tests ~8-9s vs 65s on the slow runner that produced the original failures); slow-runner behaviour is covered by the 30s hang guard, not re-observed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Windows proof is GitHub-hosted native runs read (not re-run) by the orchestrator."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
