@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-24T01:45:00Z",
+  "generated_at": "2026-09-24T02:45:00Z",
   "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.16.2",
   "scope": {
     "summary": "ImpactBindingV1 seam: canonical encoding and field statuses on every confirmation-minting preview (all seven impact fields present as unavailable(not_wired) until W14 wiring beads) (313b9458); protocol goldens refreshed for the added outputSchema (6f0a6c58).",
@@ -16,7 +16,7 @@
     ]
   },
   "source": {
-    "sha": "5b5b93f7dc9f86a0c595efb61d8d7236dc0eb181",
+    "sha": "0780f94a56ec0ad4b650d12ca38d12a47fd39190",
     "tree_clean": true,
     "branch": "main"
   },
@@ -37,6 +37,11 @@
         "name": "golden review",
         "kind": "cli",
         "trace": "6f0a6c58 golden hunks all add outputSchema for the impact field; no search_objects hunk (the separate search_objects regression was a harness-fake call-shape gap fixed in f3147dd7 with expected output unchanged)."
+      },
+      {
+        "name": "correction (orchestrator)",
+        "kind": "cli",
+        "trace": "The original close at 5b5b93f7 cited a property test that later produced a counterexample (field 8, change 1) at d46d8c03. Root cause: the test mutator for DBID was a no-op for that input (.16.12, 2e2b4890), not a product defect. Re-verified at 0780f94a: prop_decisive_digest_changes_on_each_decisive_field ok with the regression seed replayed; gate 3472 passed, 0 failed."
       }
     ]
   },
@@ -45,7 +50,8 @@
     "artifacts": []
   },
   "limitations": [
-    "Verified by the orchestrator by re-execution, independent of the implementing pane; live runs on local lab containers, not committed as artifacts."
+    "Verified by the orchestrator by re-execution, independent of the implementing pane; live runs on local lab containers, not committed as artifacts.",
+    "Corrected close: the first close relied on a property test whose mutator could no-op; replacement evidence cites the fixed test."
   ],
   "known_defects": [],
   "follow_ups": [],

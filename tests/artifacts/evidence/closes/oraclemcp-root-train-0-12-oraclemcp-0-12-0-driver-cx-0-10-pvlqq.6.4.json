@@ -1,0 +1,76 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T02:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.4",
+  "scope": {
+    "summary": "Tighten-only metamorphic relations exercised through the SERVED gate, 26-case bypass corpus, AST differential fuzz target, 20 issue seeds (723b55fa); it found the jytj7 fail-open.",
+    "in_scope": [
+      "Cargo.lock",
+      "crates/oraclemcp-guard/fuzz/Cargo.lock",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue28_order_alias",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue29_natural",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue29_qualified_using",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue29_using",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue30_hidden_virtual",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue30_user_function_virtual",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue31_owner_table_column",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue32_json_dot",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue32_object_method",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue33_pseudocolumn",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue34_cte",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue34_derived",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue34_union",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue35_dictionary_view",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue52_exists_view",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue52_in_policy",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue52_scalar_view",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue53_sample_mask",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue53_sample_policy",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/issue53_sample_view",
+      "crates/oraclemcp-guard/fuzz/fuzz_targets/classify_fuzz.rs",
+      "crates/oraclemcp-guard/tests/classifier_metamorphic.rs",
+      "crates/oraclemcp/Cargo.toml",
+      "crates/oraclemcp/proptest-regressions/dispatch/tests/guard_metamorphic.txt",
+      "crates/oraclemcp/src/dispatch/tests/guard_bypass_corpus.rs",
+      "crates/oraclemcp/src/dispatch/tests/guard_metamorphic.rs",
+      "tests/golden/guard/bypass_corpus.jsonl"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "0780f94a56ec0ad4b650d12ca38d12a47fd39190",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 0780f94a (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 118 suites, 3472 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "6 of 7 named tests ok by exact name; the 7th (classify_fuzz) is a cargo-fuzz target run by the implementer (256 runs), not by the orchestrator."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

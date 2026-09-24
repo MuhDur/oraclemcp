@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T02:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.5",
+  "scope": {
+    "summary": "Over-refusals fixed for #28 ORDER BY alias, #29 USING/NATURAL merged joins, #31 three-part column, #33 pseudocolumns, with unsafe neighbours still refused (c078348b, 1f171650, 4defc867, e8014368); the scoping unsoundness found afterwards (jytj7) is fixed in 005eceef.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/classifier_query_blocks.rs",
+      "crates/oraclemcp-guard/src/purity.rs",
+      "crates/oraclemcp-guard/src/resolver.rs"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "0780f94a56ec0ad4b650d12ca38d12a47fd39190",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 0780f94a (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 118 suites, 3472 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "live W4 (orchestrator)",
+        "kind": "cli",
+        "trace": "release build at c89f05ec, free23 external client, stdio AND http: w4_query_issue28_order_by_alias, issue29_join_using, issue29_natural_join, issue31_owner_table_column, issue33_pseudocolumns pass; issue28_alias_expression_refused and issue29_qualified_using_refused pass (refused)."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "11 named unit tests ok in the gate."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

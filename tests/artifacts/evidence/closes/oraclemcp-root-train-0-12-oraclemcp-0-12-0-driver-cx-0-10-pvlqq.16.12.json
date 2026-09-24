@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T02:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.16.12",
+  "scope": {
+    "summary": "ImpactBindingV1 decisive-digest property counterexample (field 8 = DBID, change 1) root-caused as a test-mutator no-op, not a product defect; mutation made effective and the proptest seed committed (2e2b4890, 1d4ae8bc).",
+    "in_scope": [
+      "crates/oraclemcp-guard/tests/impact_binding.proptest-regressions",
+      "crates/oraclemcp-guard/tests/impact_binding.rs"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "0780f94a56ec0ad4b650d12ca38d12a47fd39190",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 0780f94a (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 118 suites, 3472 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "prop_decisive_digest_changes_on_each_decisive_field ok at 0780f94a with the committed regression seed replayed first."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

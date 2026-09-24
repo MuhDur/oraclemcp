@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T02:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.2.1",
+  "scope": {
+    "summary": "Fuzz lane repaired (actions/cache v4.3.0 SHA-pinned; checkout/upload-artifact pinned); heartbeat fails on any red or unknown scheduled lane; tag gate refuses while a scheduled lane is not green; repair-workflow opt-out honoured only for a published release (197a3515, 9c3a2d24).",
+    "in_scope": [
+      ".github/workflows/ci-heartbeat.yml",
+      ".github/workflows/docker.yml",
+      ".github/workflows/fuzz.yml",
+      ".github/workflows/publish-mcp.yml",
+      ".github/workflows/release.yml",
+      "crates/oraclemcp-core/src/http/ci_lanes.rs",
+      "docs/ci-taxonomy.md",
+      "docs/test-tiers.md",
+      "scripts/ci_heartbeat.sh",
+      "scripts/release_preflight.sh",
+      "scripts/test_ci_heartbeat.sh",
+      "tests/ci_heartbeat/fuzz-setup-job-failure-2026-09-23.jobs.json",
+      "tests/ci_heartbeat/fuzz-setup-job-failure-2026-09-23.runs.json"
+    ],
+    "out_of_scope": [
+      "Files changed after the verified tree, or carrying other agents' uncommitted edits, are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "0780f94a56ec0ad4b650d12ca38d12a47fd39190",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 0780f94a (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 118 suites, 3472 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "heartbeat/preflight tests (orchestrator)",
+        "kind": "cli",
+        "trace": "scripts/test_ci_heartbeat.sh at 0780f94a rc 0: scheduled_setup_failure_exits_nonzero, scheduled_unknown_exits_nonzero, tag_gate_existing_release_flag_without_release_refused, ..._draft_release_refused, ..._published_release_accepted all as expected."
+      },
+      {
+        "name": "limit",
+        "kind": "cli",
+        "trace": "The scheduled 03:43 UTC corpus-saving fuzz run is recorded when it lands; the live heartbeat is expected red until then."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution where stated; implementer-only items are labelled."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
