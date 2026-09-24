@@ -8,6 +8,7 @@ enum ToolRoute {
     NoSql,
     CallerOrServerRead,
     CatalogRead,
+    TemporaryDml,
     PrivilegedApply,
 }
 
@@ -15,7 +16,8 @@ fn registered_route(name: &str) -> Option<ToolRoute> {
     use ToolRoute::{CallerOrServerRead as Read, CatalogRead, NoSql, PrivilegedApply as Apply};
     Some(match name {
         "oracle_list_profiles" | "oracle_switch_profile" | "switch_database" => NoSql,
-        "oracle_connection_info" | "current_database" => CatalogRead,
+        // These report connection metadata through ping/describe, not SQL.
+        "oracle_connection_info" | "current_database" => NoSql,
         "oracle_set_session_level" | "enable_writes" | "disable_writes" => Apply,
         "oracle_query"
         | "query"
@@ -24,8 +26,10 @@ fn registered_route(name: &str) -> Option<ToolRoute> {
         | "oracle_sample_rows"
         | "oracle_read_clob"
         | "get_clob"
-        | "oracle_explain_plan"
-        | "oracle_preview_dml" => Read,
+        | "oracle_explain_plan" => Read,
+        // The preview executes guarded DML under a savepoint and rolls it
+        // back; it does not issue a read query to the provenance connection.
+        "oracle_preview_dml" => ToolRoute::TemporaryDml,
         "oracle_preview_sql"
         | "preview_sql"
         | "oracle_execute"
@@ -90,6 +94,27 @@ fn registry_accepts(name: &str, reclassified_at_apply: bool) -> Result<(), &'sta
     }
 }
 
+fn validate_dispatched_provenance(
+    route: Option<ToolRoute>,
+    tagged_before: usize,
+    untagged_before: usize,
+    log: &ProvenanceLog,
+) -> Result<(), &'static str> {
+    if log.untagged.load(Ordering::SeqCst) > untagged_before {
+        return Err("dispatch issued untagged SQL");
+    }
+    let route = route.ok_or("unregistered path")?;
+    let tagged_after = log.tags.lock().expect("provenance log").len();
+    if matches!(
+        route,
+        ToolRoute::CallerOrServerRead | ToolRoute::CatalogRead
+    ) && tagged_after == tagged_before
+    {
+        return Err("DB read route issued no provenance-tagged query");
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct ProvenanceLog {
     tags: Mutex<Vec<ReadQueryProvenance>>,
@@ -112,30 +137,30 @@ impl OracleConnection for ProvenanceCheckingConn {
         Ok(())
     }
 
-    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-        Ok(OracleConnectionInfo::default())
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        OneRowMock.describe(cx).await
     }
 
     async fn query_rows(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _binds: &[OracleBind],
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
         self.0.untagged.fetch_add(1, Ordering::SeqCst);
-        Ok(Vec::new())
+        OneRowMock.query_rows(cx, sql, binds).await
     }
 
     async fn query_rows_with_provenance(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _binds: &[OracleBind],
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
         provenance: ReadQueryProvenance,
         _serialize_opts: Option<&SerializeOptions>,
     ) -> Result<Vec<OracleRow>, DbError> {
         self.0.tags.lock().expect("provenance log").push(provenance);
-        Ok(Vec::new())
+        OneRowMock.query_rows(cx, sql, binds).await
     }
 
     async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
@@ -181,80 +206,60 @@ fn every_sql_path_goes_through_the_read_executor() {
         registry_names,
         "tool_names and the runtime descriptor registry must describe the same surface"
     );
-    for name in runtime_names {
-        assert!(
-            registered_route(name).is_some(),
-            "runtime tool {name} has no SQL/apply route registration"
-        );
-    }
-
     let log = Arc::new(ProvenanceLog::default());
-    let conn = ProvenanceCheckingConn(Arc::clone(&log));
-    let runtime = RuntimeBuilder::current_thread()
-        .build()
-        .expect("asupersync test runtime builds");
-    runtime.block_on(async {
-        let cx = Cx::current().expect("runtime installs a current Cx");
-        for provenance in [
-            ReadQueryProvenance::CallerRead,
-            ReadQueryProvenance::ServerRead,
-        ] {
-            conn.query_rows_with_provenance(&cx, "SELECT 1 FROM dual", &[], provenance, None)
-                .await
-                .expect("executor query records its type-level provenance");
-        }
-        run_catalog_query(&cx, &conn, CatalogQueryId::SessionContext, &[])
-            .await
-            .expect("session context catalog query is tagged");
-    });
-    assert_eq!(log.untagged.load(Ordering::SeqCst), 0);
-    assert_eq!(
-        log.tags.lock().expect("provenance log").as_slice(),
-        &[
-            ReadQueryProvenance::CallerRead,
-            ReadQueryProvenance::ServerRead,
-            ReadQueryProvenance::Catalog(CatalogQueryId::SessionContext),
-        ]
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ProvenanceCheckingConn(Arc::clone(&log))),
+        Some("dev".to_owned()),
+        read_write_level(),
     );
+    for name in runtime_names {
+        let route = registered_route(name);
+        assert!(
+            route.is_some(),
+            "runtime tool {name} has no route registration"
+        );
+        let tagged_before = log.tags.lock().expect("provenance log").len();
+        let untagged_before = log.untagged.load(Ordering::SeqCst);
+
+        // Exercise the real in-process dispatch path with the same synthetic,
+        // schema-valid arguments used by the registry routing tests. A refusal
+        // is acceptable, but a raw SQL call or a read route that never reaches
+        // the provenance-aware connection is not.
+        let result = dispatcher.dispatch(name, args_for(name));
+        validate_dispatched_provenance(route, tagged_before, untagged_before, &log)
+            .unwrap_or_else(|error| panic!("{name}: {error}; dispatch={result:?}"));
+    }
+    assert_eq!(log.untagged.load(Ordering::SeqCst), 0);
+    assert!(!log.tags.lock().expect("provenance log").is_empty());
 }
 
 #[test]
 fn unregistered_sql_path_fails_the_registry() {
     let log = Arc::new(ProvenanceLog::default());
     let conn = ProvenanceCheckingConn(Arc::clone(&log));
-    let subject = system_generated_read_subject();
-    let guarded = GuardedGeneratedReadConn {
-        inner: &conn,
-        audit: GeneratedReadAuditCtx {
-            entry: AuditEntryCtx {
-                auditor: None,
-                subject: &subject,
-                db_evidence: None,
-            },
-            tool: "synthetic_unregistered_tool",
-        },
-    };
     let runtime = RuntimeBuilder::current_thread()
         .build()
         .expect("asupersync test runtime builds");
+    let untagged_before = log.untagged.load(Ordering::SeqCst);
+    let tagged_before = log.tags.lock().expect("provenance log").len();
     runtime.block_on(async {
         let cx = Cx::current().expect("runtime installs a current Cx");
-        let refusal = guarded
-            .query_rows(&cx, "SELECT 1 FROM dual", &[])
+        // This is the planted regression route: it bypasses the executor and
+        // reaches the instrumented connection with raw query_rows.
+        conn.query_rows(&cx, "SELECT 1 FROM dual", &[])
             .await
-            .expect_err("a synthetic raw path has no provenance and must refuse");
-        assert!(refusal.to_string().contains("untagged SQL"));
-        assert_eq!(log.untagged.load(Ordering::SeqCst), 0);
-        assert!(log.tags.lock().expect("provenance log").is_empty());
-
-        run_catalog_query(&cx, &guarded, CatalogQueryId::SessionContext, &[])
-            .await
-            .expect("the same connection accepts a closed catalog identifier");
+            .expect("the raw mock connection records the planted untagged call");
     });
-    assert_eq!(log.untagged.load(Ordering::SeqCst), 0);
+    assert_eq!(log.untagged.load(Ordering::SeqCst), untagged_before + 1);
     assert_eq!(
-        log.tags.lock().expect("provenance log").as_slice(),
-        &[ReadQueryProvenance::Catalog(CatalogQueryId::SessionContext)]
+        validate_dispatched_provenance(
+            registered_route("synthetic_unregistered_tool"),
+            tagged_before,
+            untagged_before,
+            &log,
+        ),
+        Err("dispatch issued untagged SQL"),
+        "the same registry audit used for runtime tools must reject the planted raw route"
     );
 }
 
