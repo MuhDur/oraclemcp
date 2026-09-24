@@ -2000,14 +2000,14 @@ fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
             .await
             .expect("default top-SQL source resolves");
         assert_eq!(default_source, oraclemcp_db::DiagnosticsSource::LiveCursor);
-        let live_sql = oraclemcp_db::top_sql_query(
+        let (live_id, live_binds) = oraclemcp_db::top_sql_query(
             default_source,
             oraclemcp_db::TopSqlMetric::Elapsed,
             5,
             None,
         )
         .expect("live cursor query builds");
-        conn.query_rows(&cx, &live_sql, &[])
+        oraclemcp_db::run_catalog_query(&cx, &conn, live_id, &live_binds)
             .await
             .expect("live top-SQL runs as a pure read");
 
@@ -2018,10 +2018,10 @@ fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
         eprintln!("[live-xe] top_queries historical source resolved to {historical:?}");
         match oraclemcp_db::top_sql_query(historical, oraclemcp_db::TopSqlMetric::Elapsed, 5, None)
         {
-            Ok(sql) => {
+            Ok((id, binds)) => {
                 // AWR or Statspack: the SQL is valid against the live dictionary.
                 // (A privilege miss is acceptable; a success proves the path works.)
-                match conn.query_rows(&cx, &sql, &[]).await {
+                match oraclemcp_db::run_catalog_query(&cx, &conn, id, &binds).await {
                     Ok(_) => eprintln!("[live-xe] historical top-SQL ran against {historical:?}"),
                     Err(e) => eprintln!(
                         "[live-xe] historical top-SQL ({historical:?}) degraded on a privilege/feature miss ({e})"

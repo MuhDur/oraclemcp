@@ -13431,21 +13431,15 @@ impl OracleDispatcher {
                     timeout_seconds,
                     CompletionPolicy::EnforceDeadlineAfterBody,
                     || async {
-                        let source =
-                            oraclemcp_db::resolve_top_sql_source(cx, &guarded_conn, historical)
-                                .await
-                                .map_err(DbError::into_envelope)?;
-                        let sql = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
-                        let rows = guarded_conn
-                            .query_rows(cx, &sql, &[])
-                            .await
-                            .map_err(DbError::into_envelope)?;
-                        Ok(json!({
-                            "source": serde_json::to_value(source).unwrap_or(Value::Null),
-                            "metric": serde_json::to_value(metric).unwrap_or(Value::Null),
-                            "rows": rows_to_json(&rows),
-                            "row_count": rows.len(),
-                        }))
+                        self.read_top_queries_catalog(
+                            cx,
+                            &guarded_conn,
+                            metric,
+                            top_n,
+                            min_pct,
+                            historical,
+                        )
+                        .await
                     },
                 )
                 .await;

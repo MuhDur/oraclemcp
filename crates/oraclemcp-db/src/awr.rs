@@ -8,7 +8,7 @@
 //! contract, gated by the P2-9 privilege matrix).
 
 use crate::error_envelope::{ErrorClass, ErrorEnvelope};
-use crate::{CatalogQueryId, run_catalog_query};
+use crate::{CatalogQueryId, OracleBind, run_catalog_query};
 use oraclemcp_error::parse_ora_code;
 
 /// Which performance-diagnostics source is available for this target.
@@ -177,14 +177,15 @@ pub async fn resolve_top_sql_source(
     ))
 }
 
-/// The top-SQL query for a source, ranked by `metric`. `top_n` is clamped to a
-/// sane range. For the free `LiveCursor` source, `min_pct_of_total` (e.g. 5)
+/// The fixed catalog query and typed binds for a source, ranked by `metric`.
+/// `top_n` is clamped to a sane range. For the free `LiveCursor` source, `min_pct_of_total` (e.g. 5)
 /// keeps only statements whose share of the total selected metric meets the
 /// threshold (the "5%-of-total" mode). `Unavailable` returns a structured
 /// "diagnostics not licensed" error that offers Statspack — never an empty
 /// success. Every source aliases the four ranking metrics to a uniform output
 /// column set (`elapsed_time`/`cpu_time`/`buffer_gets`/`disk_reads`) plus
-/// `sql_id`, `sql_text`, and `executions`.
+/// `sql_id`, `sql_text`, and `executions`. SQL identifiers and structure are
+/// fixed by `CatalogQueryId`; row/share bounds are positional binds.
 // `ErrorEnvelope` is the deliberate agent-facing error payload (§8.2); boxing it
 // on this cold error path would add noise for no real benefit.
 #[allow(clippy::result_large_err)]
@@ -193,51 +194,27 @@ pub fn top_sql_query(
     metric: TopSqlMetric,
     top_n: u32,
     min_pct_of_total: Option<u8>,
-) -> Result<String, ErrorEnvelope> {
-    let n = top_n.clamp(1, 100);
-    let order = metric.order_column();
-    match source {
-        DiagnosticsSource::LiveCursor => {
-            // RATIO_TO_REPORT gives each row's share of the total selected
-            // metric; the optional threshold is the "5%-of-total" mode.
-            let pct_filter = match min_pct_of_total {
-                Some(pct) => format!("pct_of_total >= {} AND ", pct.min(100)),
-                None => String::new(),
-            };
-            Ok(format!(
-                "SELECT * FROM (\
-                   SELECT sql_id, SUBSTR(sql_text, 1, 200) AS sql_text, executions, \
-                          elapsed_time, cpu_time, buffer_gets, disk_reads, \
-                          ROUND(RATIO_TO_REPORT({order}) OVER () * 100, 2) AS pct_of_total \
-                   FROM v$sqlstats ORDER BY {order} DESC NULLS LAST\
-                 ) WHERE {pct_filter}rownum <= {n}"
-            ))
-        }
-        DiagnosticsSource::AwrAsh => Ok(format!(
-            "SELECT * FROM (\
-               SELECT s.sql_id, \
-                      (SELECT SUBSTR(t.sql_text, 1, 200) FROM dba_hist_sqltext t \
-                         WHERE t.sql_id = s.sql_id AND rownum = 1) AS sql_text, \
-                      SUM(s.executions_delta) AS executions, \
-                      SUM(s.elapsed_time_delta) AS elapsed_time, \
-                      SUM(s.cpu_time_delta) AS cpu_time, \
-                      SUM(s.buffer_gets_delta) AS buffer_gets, \
-                      SUM(s.disk_reads_delta) AS disk_reads \
-               FROM dba_hist_sqlstat s GROUP BY s.sql_id ORDER BY {order} DESC NULLS LAST\
-             ) WHERE rownum <= {n}"
-        )),
-        DiagnosticsSource::Statspack => Ok(format!(
-            "SELECT * FROM (\
-               SELECT old_hash_value AS sql_id, SUBSTR(MAX(sql_text), 1, 200) AS sql_text, \
-                      SUM(executions) AS executions, \
-                      SUM(elapsed_time) AS elapsed_time, \
-                      SUM(cpu_time) AS cpu_time, \
-                      SUM(buffer_gets) AS buffer_gets, \
-                      SUM(disk_reads) AS disk_reads \
-               FROM stats$sql_summary GROUP BY old_hash_value ORDER BY {order} DESC NULLS LAST\
-             ) WHERE rownum <= {n}"
-        )),
-        DiagnosticsSource::Unavailable => Err(ErrorEnvelope::new(
+) -> Result<(CatalogQueryId, Vec<OracleBind>), ErrorEnvelope> {
+    use CatalogQueryId as C;
+    let n = OracleBind::I64(i64::from(top_n.clamp(1, 100)));
+    let id = match (source, metric, min_pct_of_total.is_some()) {
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::Elapsed, false) => C::TopSqlLiveElapsed,
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::Cpu, false) => C::TopSqlLiveCpu,
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::BufferGets, false) => C::TopSqlLiveBufferGets,
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::DiskReads, false) => C::TopSqlLiveDiskReads,
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::Elapsed, true) => C::TopSqlLiveElapsedPct,
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::Cpu, true) => C::TopSqlLiveCpuPct,
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::BufferGets, true) => C::TopSqlLiveBufferGetsPct,
+        (DiagnosticsSource::LiveCursor, TopSqlMetric::DiskReads, true) => C::TopSqlLiveDiskReadsPct,
+        (DiagnosticsSource::AwrAsh, TopSqlMetric::Elapsed, _) => C::TopSqlAwrElapsed,
+        (DiagnosticsSource::AwrAsh, TopSqlMetric::Cpu, _) => C::TopSqlAwrCpu,
+        (DiagnosticsSource::AwrAsh, TopSqlMetric::BufferGets, _) => C::TopSqlAwrBufferGets,
+        (DiagnosticsSource::AwrAsh, TopSqlMetric::DiskReads, _) => C::TopSqlAwrDiskReads,
+        (DiagnosticsSource::Statspack, TopSqlMetric::Elapsed, _) => C::TopSqlStatspackElapsed,
+        (DiagnosticsSource::Statspack, TopSqlMetric::Cpu, _) => C::TopSqlStatspackCpu,
+        (DiagnosticsSource::Statspack, TopSqlMetric::BufferGets, _) => C::TopSqlStatspackBufferGets,
+        (DiagnosticsSource::Statspack, TopSqlMetric::DiskReads, _) => C::TopSqlStatspackDiskReads,
+        (DiagnosticsSource::Unavailable, _, _) => return Err(ErrorEnvelope::new(
             ErrorClass::PolicyDenied,
             "Historical performance diagnostics require a licensed Diagnostics Pack \
              (control_management_pack_access != NONE) or an installed Statspack (PERFSTAT). \
@@ -246,7 +223,14 @@ pub fn top_sql_query(
         .with_next_step(
             "use the default live source, or install Statspack (free) / enable the Diagnostics Pack for history",
         )),
-    }
+    };
+    let binds = match (source, min_pct_of_total) {
+        (DiagnosticsSource::LiveCursor, Some(pct)) => {
+            vec![OracleBind::I64(i64::from(pct.min(100))), n]
+        }
+        _ => vec![n],
+    };
+    Ok((id, binds))
 }
 
 /// A single AWR snapshot's optimizer-plan observation.
@@ -684,34 +668,41 @@ mod tests {
 
     #[test]
     fn awr_query_targets_dba_hist() {
-        let q = top_sql_query(DiagnosticsSource::AwrAsh, TopSqlMetric::Elapsed, 10, None)
+        let (id, binds) = top_sql_query(DiagnosticsSource::AwrAsh, TopSqlMetric::Elapsed, 10, None)
             .expect("awr query");
+        let q = id.spec().sql;
         assert!(q.to_ascii_lowercase().contains("dba_hist_sqlstat"));
-        assert!(q.contains("rownum <= 10"));
+        assert!(q.contains("rownum <= :1"));
+        assert_eq!(binds, [OracleBind::I64(10)]);
     }
 
     #[test]
     fn statspack_query_targets_stats_tables() {
-        let q = top_sql_query(DiagnosticsSource::Statspack, TopSqlMetric::Elapsed, 5, None)
-            .expect("statspack query");
+        let (id, binds) =
+            top_sql_query(DiagnosticsSource::Statspack, TopSqlMetric::Elapsed, 5, None)
+                .expect("statspack query");
+        let q = id.spec().sql;
         assert!(q.to_ascii_lowercase().contains("stats$sql_summary"));
-        assert!(q.contains("rownum <= 5"));
+        assert!(q.contains("rownum <= :1"));
+        assert_eq!(binds, [OracleBind::I64(5)]);
     }
 
     #[test]
     fn live_cursor_is_free_and_targets_v_sqlstats() {
         // The default source needs no Diagnostics Pack — it reads the live
         // cursor cache and is never "unavailable".
-        let q = top_sql_query(
+        let (id, binds) = top_sql_query(
             DiagnosticsSource::LiveCursor,
             TopSqlMetric::Elapsed,
             10,
             None,
         )
         .expect("live query");
+        let q = id.spec().sql;
         assert!(q.to_ascii_lowercase().contains("v$sqlstats"));
         assert!(q.contains("ORDER BY elapsed_time DESC"));
-        assert!(q.contains("rownum <= 10"));
+        assert!(q.contains("rownum <= :1"));
+        assert_eq!(binds, [OracleBind::I64(10)]);
     }
 
     #[test]
@@ -721,37 +712,41 @@ mod tests {
             (TopSqlMetric::BufferGets, "buffer_gets"),
             (TopSqlMetric::DiskReads, "disk_reads"),
         ] {
-            let q = top_sql_query(DiagnosticsSource::LiveCursor, m, 5, None).expect("q");
+            let (id, binds) = top_sql_query(DiagnosticsSource::LiveCursor, m, 5, None).expect("q");
+            let q = id.spec().sql;
             assert!(
                 q.contains(&format!("ORDER BY {col} DESC")),
                 "metric {m:?} should rank by {col}"
             );
+            assert_eq!(binds, [OracleBind::I64(5)]);
         }
     }
 
     #[test]
     fn five_pct_of_total_mode_adds_a_share_threshold() {
-        let q = top_sql_query(
+        let (id, binds) = top_sql_query(
             DiagnosticsSource::LiveCursor,
             TopSqlMetric::Elapsed,
             50,
             Some(5),
         )
         .expect("q");
+        let q = id.spec().sql;
         assert!(q.contains("RATIO_TO_REPORT"), "computes share of total");
         assert!(
-            q.contains("pct_of_total >= 5"),
+            q.contains("pct_of_total >= :1"),
             "keeps only the >=5% statements"
         );
-        // Without the threshold there is no pct filter.
-        let unfiltered = top_sql_query(
+        assert_eq!(binds, [OracleBind::I64(5), OracleBind::I64(50)]);
+        let (unfiltered_id, unfiltered_binds) = top_sql_query(
             DiagnosticsSource::LiveCursor,
             TopSqlMetric::Elapsed,
             50,
             None,
         )
-        .unwrap();
-        assert!(!unfiltered.contains("pct_of_total >="));
+        .expect("unfiltered query");
+        assert!(!unfiltered_id.spec().sql.contains("pct_of_total >= :1"));
+        assert_eq!(unfiltered_binds, [OracleBind::I64(50)]);
     }
 
     #[test]
@@ -765,17 +760,56 @@ mod tests {
 
     #[test]
     fn top_n_is_clamped() {
-        // 0 -> 1, huge -> 100 (no unbounded scan).
-        assert!(
+        assert_eq!(
             top_sql_query(DiagnosticsSource::AwrAsh, TopSqlMetric::Elapsed, 0, None)
-                .unwrap()
-                .contains("rownum <= 1")
+                .expect("lower cap")
+                .1,
+            [OracleBind::I64(1)]
         );
-        assert!(
+        assert_eq!(
             top_sql_query(DiagnosticsSource::AwrAsh, TopSqlMetric::Elapsed, 9999, None)
-                .unwrap()
-                .contains("rownum <= 100")
+                .expect("upper cap")
+                .1,
+            [OracleBind::I64(100)]
         );
+    }
+
+    #[test]
+    fn every_top_sql_source_metric_and_share_uses_a_fixed_catalog_query() {
+        for (source, view) in [
+            (DiagnosticsSource::LiveCursor, "v$sqlstats"),
+            (DiagnosticsSource::AwrAsh, "dba_hist_sqlstat"),
+            (DiagnosticsSource::Statspack, "stats$sql_summary"),
+        ] {
+            for metric in [
+                TopSqlMetric::Elapsed,
+                TopSqlMetric::Cpu,
+                TopSqlMetric::BufferGets,
+                TopSqlMetric::DiskReads,
+            ] {
+                for pct in [None, Some(5)] {
+                    let (id, binds) = top_sql_query(source, metric, 7, pct)
+                        .expect("available diagnostic source has a fixed query");
+                    let spec = id.spec();
+                    assert!(spec.sql.contains(view), "{source:?} {metric:?} {pct:?}");
+                    assert!(
+                        spec.sql
+                            .contains(&format!("ORDER BY {} DESC", metric.order_column())),
+                        "{source:?} {metric:?} {pct:?}"
+                    );
+                    assert_eq!(spec.binds.0.len(), binds.len());
+                    assert!(
+                        !spec.sql.contains("<= 7") && !spec.sql.contains(">= 5"),
+                        "bounds must be binds, never interpolated"
+                    );
+                    if source == DiagnosticsSource::LiveCursor && pct.is_some() {
+                        assert_eq!(binds, [OracleBind::I64(5), OracleBind::I64(7)]);
+                    } else {
+                        assert_eq!(binds, [OracleBind::I64(7)]);
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -64,6 +64,54 @@ pub struct CatalogReadSpec {
     pub audit_class: CatalogAuditClass,
 }
 
+macro_rules! top_sql_live {
+    ($order:literal, $filter:literal, $limit:literal) => {
+        concat!(
+            "SELECT * FROM (SELECT sql_id, SUBSTR(sql_text, 1, 200) AS sql_text, executions, ",
+            "elapsed_time, cpu_time, buffer_gets, disk_reads, ",
+            "ROUND(RATIO_TO_REPORT(",
+            $order,
+            ") OVER () * 100, 2) AS pct_of_total ",
+            "FROM v$sqlstats ORDER BY ",
+            $order,
+            " DESC NULLS LAST) WHERE ",
+            $filter,
+            "rownum <= ",
+            $limit
+        )
+    };
+}
+
+macro_rules! top_sql_awr {
+    ($order:literal) => {
+        concat!(
+            "SELECT * FROM (SELECT s.sql_id, ",
+            "(SELECT SUBSTR(t.sql_text, 1, 200) FROM dba_hist_sqltext t ",
+            "WHERE t.sql_id = s.sql_id AND rownum = 1) AS sql_text, ",
+            "SUM(s.executions_delta) AS executions, SUM(s.elapsed_time_delta) AS elapsed_time, ",
+            "SUM(s.cpu_time_delta) AS cpu_time, SUM(s.buffer_gets_delta) AS buffer_gets, ",
+            "SUM(s.disk_reads_delta) AS disk_reads FROM dba_hist_sqlstat s ",
+            "GROUP BY s.sql_id ORDER BY ",
+            $order,
+            " DESC NULLS LAST) WHERE rownum <= :1"
+        )
+    };
+}
+
+macro_rules! top_sql_statspack {
+    ($order:literal) => {
+        concat!(
+            "SELECT * FROM (SELECT old_hash_value AS sql_id, ",
+            "SUBSTR(MAX(sql_text), 1, 200) AS sql_text, SUM(executions) AS executions, ",
+            "SUM(elapsed_time) AS elapsed_time, SUM(cpu_time) AS cpu_time, ",
+            "SUM(buffer_gets) AS buffer_gets, SUM(disk_reads) AS disk_reads ",
+            "FROM stats$sql_summary GROUP BY old_hash_value ORDER BY ",
+            $order,
+            " DESC NULLS LAST) WHERE rownum <= :1"
+        )
+    };
+}
+
 /// The complete catalog-query set used by the current semantic read proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogQueryId {
@@ -205,11 +253,43 @@ pub enum CatalogQueryId {
     SemanticSearchOnnxModel,
     /// Existing child of a named edition before creating another.
     EditionChildren,
+    /// Free live cursor cache ranked by elapsed time.
+    TopSqlLiveElapsed,
+    /// Free live cursor cache ranked by CPU time.
+    TopSqlLiveCpu,
+    /// Free live cursor cache ranked by logical reads.
+    TopSqlLiveBufferGets,
+    /// Free live cursor cache ranked by physical reads.
+    TopSqlLiveDiskReads,
+    /// Live cursor cache ranked by elapsed time with a minimum share.
+    TopSqlLiveElapsedPct,
+    /// Live cursor cache ranked by CPU time with a minimum share.
+    TopSqlLiveCpuPct,
+    /// Live cursor cache ranked by logical reads with a minimum share.
+    TopSqlLiveBufferGetsPct,
+    /// Live cursor cache ranked by physical reads with a minimum share.
+    TopSqlLiveDiskReadsPct,
+    /// Licensed AWR SQL history ranked by elapsed time.
+    TopSqlAwrElapsed,
+    /// Licensed AWR SQL history ranked by CPU time.
+    TopSqlAwrCpu,
+    /// Licensed AWR SQL history ranked by logical reads.
+    TopSqlAwrBufferGets,
+    /// Licensed AWR SQL history ranked by physical reads.
+    TopSqlAwrDiskReads,
+    /// Free Statspack SQL history ranked by elapsed time.
+    TopSqlStatspackElapsed,
+    /// Free Statspack SQL history ranked by CPU time.
+    TopSqlStatspackCpu,
+    /// Free Statspack SQL history ranked by logical reads.
+    TopSqlStatspackBufferGets,
+    /// Free Statspack SQL history ranked by physical reads.
+    TopSqlStatspackDiskReads,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 69] = [
+    pub const ALL: [Self; 85] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -279,6 +359,22 @@ impl CatalogQueryId {
         Self::SemanticSearchCompatible,
         Self::SemanticSearchOnnxModel,
         Self::EditionChildren,
+        Self::TopSqlLiveElapsed,
+        Self::TopSqlLiveCpu,
+        Self::TopSqlLiveBufferGets,
+        Self::TopSqlLiveDiskReads,
+        Self::TopSqlLiveElapsedPct,
+        Self::TopSqlLiveCpuPct,
+        Self::TopSqlLiveBufferGetsPct,
+        Self::TopSqlLiveDiskReadsPct,
+        Self::TopSqlAwrElapsed,
+        Self::TopSqlAwrCpu,
+        Self::TopSqlAwrBufferGets,
+        Self::TopSqlAwrDiskReads,
+        Self::TopSqlStatspackElapsed,
+        Self::TopSqlStatspackCpu,
+        Self::TopSqlStatspackBufferGets,
+        Self::TopSqlStatspackDiskReads,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -291,6 +387,7 @@ impl CatalogQueryId {
         };
         const EMPTY: BindSchema = BindSchema(&[]);
         const I: BindSchema = BindSchema(&[Integer]);
+        const II: BindSchema = BindSchema(&[Integer, Integer]);
         const TT: BindSchema = BindSchema(&[Text, Text]);
         const TI: BindSchema = BindSchema(&[Text, Integer]);
         const TTI: BindSchema = BindSchema(&[Text, Text, Integer]);
@@ -1025,6 +1122,118 @@ impl CatalogQueryId {
                 BindSchema(&[Text]),
                 "prove a parent edition has no existing child",
                 InternalProof,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveElapsed => (
+                top_sql_live!("elapsed_time", "", ":1"),
+                I,
+                "read bounded live top SQL by elapsed time",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveCpu => (
+                top_sql_live!("cpu_time", "", ":1"),
+                I,
+                "read bounded live top SQL by CPU time",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveBufferGets => (
+                top_sql_live!("buffer_gets", "", ":1"),
+                I,
+                "read bounded live top SQL by logical reads",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveDiskReads => (
+                top_sql_live!("disk_reads", "", ":1"),
+                I,
+                "read bounded live top SQL by physical reads",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveElapsedPct => (
+                top_sql_live!("elapsed_time", "pct_of_total >= :1 AND ", ":2"),
+                II,
+                "read bounded live top SQL by elapsed time and share",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveCpuPct => (
+                top_sql_live!("cpu_time", "pct_of_total >= :1 AND ", ":2"),
+                II,
+                "read bounded live top SQL by CPU time and share",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveBufferGetsPct => (
+                top_sql_live!("buffer_gets", "pct_of_total >= :1 AND ", ":2"),
+                II,
+                "read bounded live top SQL by logical reads and share",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlLiveDiskReadsPct => (
+                top_sql_live!("disk_reads", "pct_of_total >= :1 AND ", ":2"),
+                II,
+                "read bounded live top SQL by physical reads and share",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlAwrElapsed => (
+                top_sql_awr!("elapsed_time"),
+                I,
+                "read licensed AWR top SQL by elapsed time",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlAwrCpu => (
+                top_sql_awr!("cpu_time"),
+                I,
+                "read licensed AWR top SQL by CPU time",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlAwrBufferGets => (
+                top_sql_awr!("buffer_gets"),
+                I,
+                "read licensed AWR top SQL by logical reads",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlAwrDiskReads => (
+                top_sql_awr!("disk_reads"),
+                I,
+                "read licensed AWR top SQL by physical reads",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlStatspackElapsed => (
+                top_sql_statspack!("elapsed_time"),
+                I,
+                "read Statspack top SQL by elapsed time",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlStatspackCpu => (
+                top_sql_statspack!("cpu_time"),
+                I,
+                "read Statspack top SQL by CPU time",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlStatspackBufferGets => (
+                top_sql_statspack!("buffer_gets"),
+                I,
+                "read Statspack top SQL by logical reads",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TopSqlStatspackDiskReads => (
+                top_sql_statspack!("disk_reads"),
+                I,
+                "read Statspack top SQL by physical reads",
+                DictionaryMetadata,
                 Diagnostic,
             ),
         };

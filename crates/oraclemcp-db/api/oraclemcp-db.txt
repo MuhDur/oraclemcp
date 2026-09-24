@@ -250,6 +250,8 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::CatalogAuditClass where 
 pub fn oraclemcp_db::CatalogAuditClass::vzip(self) -> V
 pub enum oraclemcp_db::CatalogBindKind
 pub oraclemcp_db::CatalogBindKind::Integer
+pub oraclemcp_db::CatalogBindKind::NullableInteger
+pub oraclemcp_db::CatalogBindKind::NullableText
 pub oraclemcp_db::CatalogBindKind::Text
 impl core::clone::Clone for oraclemcp_db::CatalogBindKind
 pub fn oraclemcp_db::CatalogBindKind::clone(&self) -> oraclemcp_db::CatalogBindKind
@@ -434,36 +436,88 @@ pub oraclemcp_db::CatalogQueryId::AllObjectsProbe
 pub oraclemcp_db::CatalogQueryId::AllPoliciesVisibility
 pub oraclemcp_db::CatalogQueryId::ColumnConflict
 pub oraclemcp_db::CatalogQueryId::ColumnPathType
+pub oraclemcp_db::CatalogQueryId::CompileErrors
+pub oraclemcp_db::CatalogQueryId::CurrentScn
 pub oraclemcp_db::CatalogQueryId::DbaObjectsProbe
+pub oraclemcp_db::CatalogQueryId::Dependents
+pub oraclemcp_db::CatalogQueryId::DescribeColumns
+pub oraclemcp_db::CatalogQueryId::DescribeConstraints
 pub oraclemcp_db::CatalogQueryId::DiagnosticsPackProbe
+pub oraclemcp_db::CatalogQueryId::EditionChildren
+pub oraclemcp_db::CatalogQueryId::ExplainPlanDisplay
 pub oraclemcp_db::CatalogQueryId::FgaCatalogProof
 pub oraclemcp_db::CatalogQueryId::FgaPoliciesForRelations32
+pub oraclemcp_db::CatalogQueryId::GetDdl
+pub oraclemcp_db::CatalogQueryId::GetSource
+pub oraclemcp_db::CatalogQueryId::IndexColumns
+pub oraclemcp_db::CatalogQueryId::IndexExpressions
+pub oraclemcp_db::CatalogQueryId::IndexMetadata
 pub oraclemcp_db::CatalogQueryId::JsonColumn
 pub oraclemcp_db::CatalogQueryId::JsonConstraint
+pub oraclemcp_db::CatalogQueryId::ListObjects
+pub oraclemcp_db::CatalogQueryId::ListObjectsPage
+pub oraclemcp_db::CatalogQueryId::ListSchemas
 pub oraclemcp_db::CatalogQueryId::MemberArguments
 pub oraclemcp_db::CatalogQueryId::MemberProcedures
 pub oraclemcp_db::CatalogQueryId::NativeRedactionOption
+pub oraclemcp_db::CatalogQueryId::ObjectComment
 pub oraclemcp_db::CatalogQueryId::Objects
+pub oraclemcp_db::CatalogQueryId::OrientForeignKeysPage
+pub oraclemcp_db::CatalogQueryId::OrientHotObjectsPage
+pub oraclemcp_db::CatalogQueryId::OrientRecentDdlPage
+pub oraclemcp_db::CatalogQueryId::OrientSchemaPage
+pub oraclemcp_db::CatalogQueryId::PlanCostEstimate
 pub oraclemcp_db::CatalogQueryId::PlanCostTimeline
 pub oraclemcp_db::CatalogQueryId::PlscopeIdentifiers
 pub oraclemcp_db::CatalogQueryId::PlscopeStatements
 pub oraclemcp_db::CatalogQueryId::PolicyCatalogProof
 pub oraclemcp_db::CatalogQueryId::PolicyRowsForRelations32
+pub oraclemcp_db::CatalogQueryId::PrimaryKeyColumns
 pub oraclemcp_db::CatalogQueryId::RelationColumn
-pub oraclemcp_db::CatalogQueryId::TypeAttribute
+pub oraclemcp_db::CatalogQueryId::SchemaProjectionPage
+pub oraclemcp_db::CatalogQueryId::SearchColumns
+pub oraclemcp_db::CatalogQueryId::SearchIndexColumns
+pub oraclemcp_db::CatalogQueryId::SearchIndexes
+pub oraclemcp_db::CatalogQueryId::SearchSource
 pub oraclemcp_db::CatalogQueryId::SelectPolicy
+pub oraclemcp_db::CatalogQueryId::SemanticSearchCompatible
+pub oraclemcp_db::CatalogQueryId::SemanticSearchOnnxModel
 pub oraclemcp_db::CatalogQueryId::SessionContext
 pub oraclemcp_db::CatalogQueryId::SessionPrivileges
 pub oraclemcp_db::CatalogQueryId::SessionRoles
+pub oraclemcp_db::CatalogQueryId::SourceTypes
 pub oraclemcp_db::CatalogQueryId::StandaloneArguments
 pub oraclemcp_db::CatalogQueryId::StandaloneProcedures
 pub oraclemcp_db::CatalogQueryId::StatspackProbe
 pub oraclemcp_db::CatalogQueryId::Synonyms
+pub oraclemcp_db::CatalogQueryId::TableColumnCount
+pub oraclemcp_db::CatalogQueryId::TableStats
+pub oraclemcp_db::CatalogQueryId::TableStatsStale
 pub oraclemcp_db::CatalogQueryId::TargetColumnCatalogProof
+pub oraclemcp_db::CatalogQueryId::TimestampToScn
+pub oraclemcp_db::CatalogQueryId::TopSqlAwrBufferGets
+pub oraclemcp_db::CatalogQueryId::TopSqlAwrCpu
+pub oraclemcp_db::CatalogQueryId::TopSqlAwrDiskReads
+pub oraclemcp_db::CatalogQueryId::TopSqlAwrElapsed
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveBufferGets
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveBufferGetsPct
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveCpu
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveCpuPct
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveDiskReads
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveDiskReadsPct
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveElapsed
+pub oraclemcp_db::CatalogQueryId::TopSqlLiveElapsedPct
+pub oraclemcp_db::CatalogQueryId::TopSqlStatspackBufferGets
+pub oraclemcp_db::CatalogQueryId::TopSqlStatspackCpu
+pub oraclemcp_db::CatalogQueryId::TopSqlStatspackDiskReads
+pub oraclemcp_db::CatalogQueryId::TopSqlStatspackElapsed
+pub oraclemcp_db::CatalogQueryId::TriggerMetadata
+pub oraclemcp_db::CatalogQueryId::TypeAttribute
+pub oraclemcp_db::CatalogQueryId::ViewMetadata
 pub oraclemcp_db::CatalogQueryId::VirtualColumn
 pub oraclemcp_db::CatalogQueryId::VirtualColumnsForRelations32
 impl oraclemcp_db::CatalogQueryId
-pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 29]
+pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 85]
 pub const fn oraclemcp_db::CatalogQueryId::spec(self) -> oraclemcp_db::CatalogReadSpec
 impl core::clone::Clone for oraclemcp_db::CatalogQueryId
 pub fn oraclemcp_db::CatalogQueryId::clone(&self) -> oraclemcp_db::CatalogQueryId
@@ -10403,7 +10457,7 @@ pub fn oraclemcp_db::serialize_cell(&oraclemcp_db::OracleCell, &oraclemcp_db::Se
 pub fn oraclemcp_db::serialize_row(&oraclemcp_db::OracleRow, &oraclemcp_db::SerializeOptions) -> serde_json::value::Value
 pub fn oraclemcp_db::supported_wallet_modes() -> &'static [oraclemcp_db::WalletMode]
 pub fn oraclemcp_db::tablespace_usage_sql() -> (&'static str, alloc::string::String)
-pub fn oraclemcp_db::top_sql_query(oraclemcp_db::DiagnosticsSource, oraclemcp_db::TopSqlMetric, u32, core::option::Option<u8>) -> core::result::Result<alloc::string::String, oraclemcp_error::ErrorEnvelope>
+pub fn oraclemcp_db::top_sql_query(oraclemcp_db::DiagnosticsSource, oraclemcp_db::TopSqlMetric, u32, core::option::Option<u8>) -> core::result::Result<(oraclemcp_db::CatalogQueryId, alloc::vec::Vec<oraclemcp_db::OracleBind>), oraclemcp_error::ErrorEnvelope>
 pub fn oraclemcp_db::unusable_indexes_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::validate_adb_connect_string(&str) -> core::result::Result<oraclemcp_db::AdbConnectInfo, oraclemcp_db::OciError>
 pub fn oraclemcp_db::wallet_certificate_validity(&std::path::Path, core::option::Option<&str>) -> alloc::vec::Vec<oraclemcp_db::WalletCertValidity>

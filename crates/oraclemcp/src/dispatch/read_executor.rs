@@ -1687,6 +1687,31 @@ pub(super) async fn stream_query_response(
 }
 
 impl OracleDispatcher {
+    /// Resolve the licensed diagnostic source, then run only its closed SQL ID.
+    pub(super) async fn read_top_queries_catalog(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        metric: oraclemcp_db::TopSqlMetric,
+        top_n: u32,
+        min_pct: Option<u8>,
+        historical: bool,
+    ) -> Result<Value, ErrorEnvelope> {
+        let source = oraclemcp_db::resolve_top_sql_source(cx, conn, historical)
+            .await
+            .map_err(DbError::into_envelope)?;
+        let (id, binds) = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
+        let rows = run_catalog_query(cx, conn, id, &binds)
+            .await
+            .map_err(DbError::into_envelope)?;
+        Ok(json!({
+            "source": serde_json::to_value(source).unwrap_or(Value::Null),
+            "metric": serde_json::to_value(metric).unwrap_or(Value::Null),
+            "rows": rows_to_json(&rows),
+            "row_count": rows.len(),
+        }))
+    }
+
     pub(super) async fn prepare_query_stream_delivery(
         &self,
         cx: &Cx,
