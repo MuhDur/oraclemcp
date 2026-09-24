@@ -82,6 +82,29 @@ fn grant_predicate_accepts_each_allowed_operator() {
 }
 
 #[test]
+fn grant_predicate_number_in_and_equality_render_as_four_typed_binds() {
+    let requests = [
+        PredicateConjunctRequest::in_list("ID", vec![number("101"), number("102"), number("103")]),
+        PredicateConjunctRequest::comparison("TENANT_ID", "eq", number("7")),
+    ];
+    let predicate = build(&requests).expect("the NUMBER predicate is valid");
+    let (ast, binds) = render_ast(&predicate);
+
+    assert_eq!(
+        ast.to_string(),
+        "(\"ID\" IN (:omcp_g1, :omcp_g2, :omcp_g3)) AND (\"TENANT_ID\" = :omcp_g4)"
+    );
+    assert_eq!(
+        binds.iter().map(|bind| bind.name()).collect::<Vec<_>>(),
+        ["omcp_g1", "omcp_g2", "omcp_g3", "omcp_g4"]
+    );
+    assert_eq!(binds.len(), 4);
+    assert!(binds.iter().all(|bind| {
+        bind.value().kind() == oraclemcp_guard::scoped_grant::GrantValueKind::Number
+    }));
+}
+
+#[test]
 fn grant_predicate_rejects_or_and_not() {
     for op in ["or", "not"] {
         let request = PredicateConjunctRequest::comparison("ID", op, number("1"));
@@ -341,31 +364,93 @@ fn nested(expression: Expr) -> Expr {
     Expr::Nested(Box::new(expression))
 }
 
+fn caller_expr_strategy() -> impl Strategy<Value = Expr> {
+    let identifier =
+        "[A-Z][A-Z0-9_]{0,7}".prop_map(|name| Expr::Identifier(Ident::with_quote('"', name)));
+    let string_value = prop_oneof![
+        Just("contains ) in a value".to_owned()),
+        Just("text OR 1=1 stays a value".to_owned()),
+        Just("x') OR 1=1 --".to_owned()),
+        "[A-Za-z0-9 )=]{0,24}"
+    ];
+    let scalar = prop_oneof![
+        (-1000i32..=1000)
+            .prop_map(|value| Expr::Value(Value::Number(value.to_string(), false).into())),
+        string_value.prop_map(|value| Expr::Value(Value::SingleQuotedString(value).into())),
+    ];
+    let atom = prop_oneof![
+        identifier.clone(),
+        (identifier, scalar).prop_map(|(left, right)| Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOperator::Eq,
+            right: Box::new(right),
+        }),
+    ];
+
+    atom.prop_recursive(4, 64, 4, |inner| {
+        let conjunction = (inner.clone(), inner.clone()).prop_map(|(left, right)| Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOperator::And,
+            right: Box::new(right),
+        });
+        let disjunction = (inner.clone(), inner.clone()).prop_map(|(left, right)| Expr::BinaryOp {
+            left: Box::new(left),
+            op: BinaryOperator::Or,
+            right: Box::new(right),
+        });
+        prop_oneof![conjunction, disjunction, inner.prop_map(nested)]
+    })
+}
+
+fn has_three_parenthesized_and_conjuncts(expression: &Expr) -> bool {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::And,
+        right,
+    } = expression
+    else {
+        return false;
+    };
+    let Expr::Nested(_grant) = right.as_ref() else {
+        return false;
+    };
+    let Expr::Nested(first_pair) = left.as_ref() else {
+        return false;
+    };
+    let Expr::BinaryOp {
+        left: caller,
+        op: BinaryOperator::And,
+        right: policy,
+    } = first_pair.as_ref()
+    else {
+        return false;
+    };
+    matches!(caller.as_ref(), Expr::Nested(_)) && matches!(policy.as_ref(), Expr::Nested(_))
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 10_000, ..ProptestConfig::default() })]
 
     #[test]
-    fn prop_composed_where_implies_p_and_q(bytes in prop::collection::vec(any::<u8>(), 0..64)) {
-        let payload = bytes.into_iter().map(|byte| char::from(32 + byte % 95)).collect::<String>();
-        let caller = Expr::Value(Value::SingleQuotedString(payload).into());
+    fn prop_composed_where_implies_p_and_q(caller in caller_expr_strategy()) {
         let policy = Expr::Identifier(Ident::with_quote('"', "TENANT_ID"));
         let grant = Expr::Identifier(Ident::with_quote('"', "ID"));
         let composed = compose_where(Some(caller.clone()), Some(policy.clone()), grant.clone());
+        let rendered = composed.to_string();
+        let reparsed = oraclemcp_guard::scoped_grant::predicate::parse_rendered_ast(&composed)
+            .expect("rendered caller SQL parses fully as one expression");
 
-        let Expr::BinaryOp { left, op: BinaryOperator::And, right } = composed else {
-            prop_assert!(false, "composed root was not AND");
-            return Ok(());
-        };
-        prop_assert_eq!(*right, nested(grant));
-        let Expr::Nested(first_pair) = *left else {
-            prop_assert!(false, "left pair lost parentheses");
-            return Ok(());
-        };
-        let Expr::BinaryOp { left: caller_part, op: BinaryOperator::And, right: policy_part } = *first_pair else {
-            prop_assert!(false, "caller-policy pair was not AND");
-            return Ok(());
-        };
-        prop_assert_eq!(*caller_part, nested(caller));
-        prop_assert_eq!(*policy_part, nested(policy));
+        prop_assert!(
+            has_three_parenthesized_and_conjuncts(&reparsed),
+            "rendered SQL lost the caller, policy, grant parenthesized AND structure: {}; reparsed={:?}",
+            rendered,
+            reparsed
+        );
+        prop_assert_eq!(
+            reparsed.to_string(),
+            rendered,
+            "reparsing rendered SQL must preserve the entire expression: {}",
+            reparsed
+        );
     }
 }
