@@ -1636,6 +1636,7 @@ mod tests {
         fs::remove_dir_all(&root).expect("cleanup untrusted-parent fixture root");
     }
 
+    #[cfg(unix)]
     #[test]
     fn substituted_staging_entry_is_refused_before_publication() {
         let root = temporary_path("staging-substitution");
@@ -1651,6 +1652,52 @@ mod tests {
         assert!(staging.publish().is_err());
         assert!(!destination.exists());
         drop(staging);
+        fs::remove_dir_all(&root).expect("cleanup staging-substitution fixture root");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn substituted_staging_entry_is_refused_before_publication() {
+        let root = temporary_path("staging-substitution");
+        create_private_test_dir(&root);
+        let destination = root.join("bundle");
+        let mut staging =
+            StagedBundle::create_sibling(&destination).expect("create staging bundle");
+        let staging_path = root.join(&staging.staging_name);
+        let displaced_path = root.join("displaced");
+        fs::write(staging_path.join("marker"), b"original staging")
+            .expect("write original staging marker");
+
+        let error = fs::rename(&staging_path, &displaced_path)
+            .expect_err("Windows must refuse substitution while staging is held open");
+        assert_eq!(error.raw_os_error(), Some(32), "expected sharing violation");
+        assert!(staging_path.is_dir(), "the original staging entry remains");
+        assert!(
+            !displaced_path.exists(),
+            "the attacker did not park staging"
+        );
+        assert!(
+            !destination.exists(),
+            "nothing was published by the attacker"
+        );
+
+        staging
+            .publish()
+            .expect("publish the unchanged staging entry");
+        assert_eq!(
+            fs::read(destination.join("marker")).expect("read published marker"),
+            b"original staging"
+        );
+        drop(staging);
+
+        // The same directory can move once its held handles are closed, so
+        // the refusal above proves that the live descriptor blocked the swap.
+        fs::rename(&destination, &displaced_path)
+            .expect("move published directory after staged handles close");
+        assert_eq!(
+            fs::read(displaced_path.join("marker")).expect("read moved marker"),
+            b"original staging"
+        );
         fs::remove_dir_all(&root).expect("cleanup staging-substitution fixture root");
     }
 
