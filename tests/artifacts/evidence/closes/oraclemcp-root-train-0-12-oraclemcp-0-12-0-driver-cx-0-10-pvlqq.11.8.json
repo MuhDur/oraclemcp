@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T12:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.8",
+  "scope": {
+    "summary": "Cross-backend (driver-cx vs official oracledb) parity for ORA error taxonomy (syntax, unique constraint, privilege, call timeout) and VECTOR variants (float64 dense/sparse, int8, binary, null, non-finite components), live on FREE 23ai (ea431d97; recipe doc fix 62cbb42a).",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/cross_backend_parity.rs"
+    ],
+    "out_of_scope": [
+      "Tool-level error responses (bead no-claim).",
+      "XE18/XE21: the bead scopes the proof to FREE 23ai."
+    ]
+  },
+  "source": {
+    "sha": "62cbb42a34814476bc699148ebbae3041652e8ea",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at ea431d97 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3560 passed, 0 failed; cargo deny OK. The only later change to the in-scope file (62cbb42a) is the doc-comment run recipe."
+      },
+      {
+        "name": "live parity (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean gate worktree at 62cbb42a: fresh W4 fixture on FREE23 (localhost:1523/FREEPDB1, run id W41206763565) provisioned with scripts/e2e/w4/fixture.py setup; ORACLEMCP_TEST_USER=W4O_<run> per the header recipe; cargo test -p oraclemcp-db --features oracledb,live-xe --test cross_backend_parity live_cross_backend_error_and_vector_parity -- --ignored --exact: 1 passed, 0 failed; parity records for both backends for all 10 named cases. Fixture teardown: first attempt ORA-01940 (a session still connected right after the test exited; v$session showed none moments later), retry PASS with 37 objects dropped and no leftovers."
+      },
+      {
+        "name": "planted negatives (implementer)",
+        "kind": "cli",
+        "trace": "Implementer-reported: mapping ORA-00001 to Internal failed parity_error_unique_constraint; projecting FLOAT64 as FLOAT32 failed parity_vector_float64_dense (mutations restored before commit). Not re-executed by the orchestrator."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live proof re-executed by the orchestrator; planted-mutation negatives are implementer-reported."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
