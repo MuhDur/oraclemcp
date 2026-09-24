@@ -1,4 +1,5 @@
 use std::collections::BTreeSet;
+use std::time::Duration;
 
 use oraclemcp_guard::action_envelope::{
     ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, ExecLimits, OutputCapture,
@@ -6,7 +7,15 @@ use oraclemcp_guard::action_envelope::{
 use oraclemcp_guard::effective_dml_plan::{DmlCallerStatementV1, DmlPlanError, EffectiveDmlPlanV1};
 use oraclemcp_guard::impact_binding::ImpactBindingV1;
 use oraclemcp_guard::resolver::CatalogGeneration;
-use oraclemcp_guard::scoped_grant::{ColumnIdent, GrantContainer, GrantTargetIdentity};
+use oraclemcp_guard::scoped_grant::{
+    ClosureFingerprints, ColumnIdent, EffectiveCeiling, GrantComparison, GrantContainer,
+    GrantLimits, GrantOp, GrantOperand, GrantTargetIdentity, GrantValue, LastDdlTime, ScopedGrant,
+    ScopedGrantRequest,
+};
+use oraclemcp_guard::{ExecGrantBinding, OperatingLevel};
+use sqlparser::ast::{Expr, SetExpr, Statement};
+use sqlparser::dialect::OracleDialect;
+use sqlparser::parser::Parser;
 
 fn target() -> GrantTargetIdentity {
     GrantTargetIdentity {
@@ -29,6 +38,51 @@ fn columns() -> BTreeSet<ColumnIdent> {
         .into_iter()
         .map(|name| ColumnIdent::new(name).unwrap())
         .collect()
+}
+
+fn grant() -> ScopedGrant {
+    let request = ScopedGrantRequest {
+        profile: "test-profile".into(),
+        binding: ExecGrantBinding::new("session", "lane", "subject", 3),
+        verbs: vec!["UPDATE".into(), "DELETE".into()],
+        target: target(),
+        columns: BTreeSet::from([ColumnIdent::new("STATUS").unwrap()]),
+        row_predicate: oraclemcp_guard::scoped_grant::GrantPredicateV1::new(vec![
+            GrantComparison {
+                column: ColumnIdent::new("ID").unwrap(),
+                op: GrantOp::Eq,
+                operand: GrantOperand::Single(GrantValue::number("11").unwrap()),
+            },
+        ]),
+        limits: GrantLimits {
+            max_rows_per_statement: 5,
+            max_statements: 20,
+            max_total_rows: 20,
+        },
+        ttl: Duration::from_secs(600),
+        commit_allowed: false,
+        closure: ClosureFingerprints::new(),
+        last_ddl_time: LastDdlTime::new("2024-01-01T00:00:00").unwrap(),
+    };
+    ScopedGrant::new(
+        request,
+        EffectiveCeiling {
+            profile_max_level: OperatingLevel::ReadWrite,
+            oauth_ceiling: None,
+        },
+        false,
+        &[9; 32],
+    )
+    .unwrap()
+}
+
+fn parse_expr(sql: &str) -> Expr {
+    let mut parser = Parser::new(&OracleDialect {}).try_with_sql(sql).unwrap();
+    let expression = parser.parse_expr().unwrap();
+    parser
+        .expect_token(&sqlparser::tokenizer::Token::EOF)
+        .unwrap();
+    expression
 }
 
 fn parse(sql: &str, binds: &[CanonicalBind<'_>]) -> Result<DmlCallerStatementV1, DmlPlanError> {
@@ -144,7 +198,8 @@ fn plan_with(
     rules: Vec<String>,
     schema_digest: [u8; 32],
     ruleset_digest: [u8; 32],
-    template: &str,
+    policy_where: &str,
+    row_cap: u64,
 ) -> EffectiveDmlPlanV1 {
     let sql = "DELETE FROM APP.ORDERS WHERE ID = :1";
     let binds = BindEnvelope::from_binds(&[7; 32], &[CanonicalBind::I64(11)]);
@@ -166,6 +221,7 @@ fn plan_with(
         },
         scoped_grant_ref: Some([4; 32]),
     };
+    let grant = grant();
     EffectiveDmlPlanV1::from_verified_rewrite(
         caller,
         &envelope,
@@ -173,18 +229,22 @@ fn plan_with(
         ruleset_digest,
         rules,
         [9; 32],
-        [4; 32],
-        5,
-        template.into(),
+        Some(parse_expr(policy_where)),
+        &grant,
+        row_cap,
     )
     .unwrap()
 }
 
 #[test]
 fn plan_and_impact_bind_policy_identity_order_and_final_template() {
-    let base_sql = "DELETE FROM APP.ORDERS WHERE (ID = :1) AND (TENANT_ID = 3)";
-    let changed_sql = "DELETE FROM APP.ORDERS WHERE (ID = :1) AND (TENANT_ID = 4)";
-    let base = plan_with(vec!["P1".into(), "P2".into()], [1; 32], [2; 32], base_sql);
+    let base = plan_with(
+        vec!["P1".into(), "P2".into()],
+        [1; 32],
+        [2; 32],
+        "TENANT_ID = 3",
+        5,
+    );
     let mut binding = ImpactBindingV1::default();
     assert!(!binding.decisive.matches_effective_plan(&base));
     binding.decisive.bind_effective_plan(&base);
@@ -196,16 +256,48 @@ fn plan_and_impact_bind_policy_identity_order_and_final_template() {
     assert!(binding.decisive.matches_effective_plan(&base));
     let base_digest = binding.decisive_digest().unwrap();
     for changed in [
-        plan_with(vec!["P1".into()], [1; 32], [2; 32], base_sql),
-        plan_with(vec!["P2".into(), "P1".into()], [1; 32], [2; 32], base_sql),
-        plan_with(vec!["P1".into(), "P3".into()], [1; 32], [2; 32], base_sql),
-        plan_with(vec!["P1".into(), "P2".into()], [3; 32], [2; 32], base_sql),
-        plan_with(vec!["P1".into(), "P2".into()], [1; 32], [3; 32], base_sql),
+        plan_with(vec!["P1".into()], [1; 32], [2; 32], "TENANT_ID = 3", 5),
+        plan_with(
+            vec!["P2".into(), "P1".into()],
+            [1; 32],
+            [2; 32],
+            "TENANT_ID = 3",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P3".into()],
+            [1; 32],
+            [2; 32],
+            "TENANT_ID = 3",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P2".into()],
+            [3; 32],
+            [2; 32],
+            "TENANT_ID = 3",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P2".into()],
+            [1; 32],
+            [3; 32],
+            "TENANT_ID = 3",
+            5,
+        ),
         plan_with(
             vec!["P1".into(), "P2".into()],
             [1; 32],
             [2; 32],
-            changed_sql,
+            "TENANT_ID = 4",
+            5,
+        ),
+        plan_with(
+            vec!["P1".into(), "P2".into()],
+            [1; 32],
+            [2; 32],
+            "TENANT_ID = 3",
+            4,
         ),
     ] {
         assert_ne!(base.digest(), changed.digest());
@@ -217,10 +309,104 @@ fn plan_and_impact_bind_policy_identity_order_and_final_template() {
 }
 
 #[test]
+fn impact_count_query_reuses_exact_effective_plan_predicate_and_binds() {
+    let plan = plan_with(
+        vec!["tenant-floor".into()],
+        [1; 32],
+        [2; 32],
+        "TENANT_ID = 3",
+        5,
+    );
+    let execution_statements = Parser::parse_sql(&OracleDialect {}, plan.effective_sql()).unwrap();
+    assert_eq!(execution_statements.len(), 1);
+    let Statement::Delete(execution) = &execution_statements[0] else {
+        panic!("effective plan must render one DELETE");
+    };
+    let impact_statements = Parser::parse_sql(&OracleDialect {}, plan.impact_count_sql()).unwrap();
+    assert_eq!(impact_statements.len(), 1);
+    let Statement::Query(impact) = &impact_statements[0] else {
+        panic!("impact plan must render one SELECT");
+    };
+    let SetExpr::Select(impact_select) = impact.body.as_ref() else {
+        panic!("impact query must have one SELECT body");
+    };
+    assert_eq!(
+        execution.selection.as_ref(),
+        impact_select.selection.as_ref()
+    );
+    assert_eq!(
+        execution.selection.as_ref(),
+        Some(plan.effective_selection())
+    );
+    assert!(plan.effective_sql().contains(":omcp_g1"));
+    assert!(plan.impact_count_sql().contains(":omcp_g1"));
+    assert!(!plan.effective_sql().contains("11"));
+    assert!(!plan.impact_count_sql().contains("11"));
+    assert_eq!(plan.grant_binds().len(), 1);
+    assert_eq!(plan.grant_binds()[0].name(), "omcp_g1");
+}
+
+#[test]
+fn effective_plan_rejects_widening_policy_predicate_and_excess_grant_cap() {
+    let sql = "DELETE FROM APP.ORDERS WHERE ID = :1";
+    let binds = BindEnvelope::from_binds(&[7; 32], &[CanonicalBind::I64(11)]);
+    let caller = DmlCallerStatementV1::parse(sql, target(), "APP", &columns(), &binds).unwrap();
+    let grant = grant();
+    let envelope = ActionEnvelopeV1 {
+        version: 1,
+        action_kind: ActionKind::ExecuteDml,
+        statement_digest: ActionEnvelopeV1::statement_digest(sql),
+        binds,
+        commit: false,
+        hold: false,
+        output: OutputCapture {
+            capture_dbms_output: false,
+            max_lines: 0,
+            max_chars: 0,
+        },
+        limits: ExecLimits {
+            timeout_seconds: Some(5),
+        },
+        scoped_grant_ref: Some([4; 32]),
+    };
+    assert_eq!(
+        EffectiveDmlPlanV1::from_verified_rewrite(
+            caller.clone(),
+            &envelope,
+            [1; 32],
+            [2; 32],
+            vec!["P1".into()],
+            [3; 32],
+            Some(parse_expr("TENANT_ID = 3 OR ID = 2")),
+            &grant,
+            5,
+        )
+        .unwrap_err(),
+        DmlPlanError::PolicyPredicateInvalid
+    );
+    assert_eq!(
+        EffectiveDmlPlanV1::from_verified_rewrite(
+            caller,
+            &envelope,
+            [1; 32],
+            [2; 32],
+            vec!["P1".into()],
+            [3; 32],
+            Some(parse_expr("TENANT_ID = 3")),
+            &grant,
+            6,
+        )
+        .unwrap_err(),
+        DmlPlanError::GrantMismatch
+    );
+}
+
+#[test]
 fn plan_refuses_mismatched_original_envelope() {
     let sql = "DELETE FROM APP.ORDERS WHERE ID = :1";
     let binds = BindEnvelope::from_binds(&[7; 32], &[CanonicalBind::I64(11)]);
     let caller = DmlCallerStatementV1::parse(sql, target(), "APP", &columns(), &binds).unwrap();
+    let grant = grant();
     let mut envelope = ActionEnvelopeV1 {
         version: 1,
         action_kind: ActionKind::ExecuteDml,
@@ -247,9 +433,9 @@ fn plan_refuses_mismatched_original_envelope() {
             [2; 32],
             vec![],
             [3; 32],
-            [4; 32],
+            Some(parse_expr("TENANT_ID = 3")),
+            &grant,
             1,
-            "DELETE FROM APP.ORDERS WHERE ID = :1".into(),
         )
         .unwrap_err(),
         DmlPlanError::InvalidEffectivePlan
@@ -264,9 +450,9 @@ fn plan_refuses_mismatched_original_envelope() {
             [2; 32],
             vec![],
             [3; 32],
-            [4; 32],
+            Some(parse_expr("TENANT_ID = 3")),
+            &grant,
             1,
-            "DELETE FROM APP.ORDERS WHERE ID = :1".into(),
         )
         .unwrap_err(),
         DmlPlanError::InvalidEffectivePlan

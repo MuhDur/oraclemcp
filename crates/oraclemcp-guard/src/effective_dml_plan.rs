@@ -3,24 +3,28 @@
 //! This module accepts only one local UPDATE/DELETE against a catalog-resolved
 //! target. The WHERE is an AND-list of comparisons between resolved target
 //! columns and typed literals or positional binds. Every other expression is
-//! refused before a scoped grant can use it. The executable rewrite is built
-//! by the later grant-rewrite consumer, never from caller-supplied SQL text.
-//! This module defines that consumer's binding contract; current dispatch
-//! still refuses scoped-grant execution until the rewrite is wired.
+//! refused before a scoped grant can use it. `EffectiveDmlPlanV1` builds both
+//! execution SQL and impact-count SQL from the same validated ASTs. Current
+//! dispatch still refuses scoped-grant execution until the runtime consumer is
+//! wired; this plan does not itself authorize or execute DML.
 
 use std::collections::BTreeSet;
 use std::fmt;
 
 use sha2::{Digest, Sha256};
 use sqlparser::ast::{
-    AssignmentTarget, BinaryOperator, DataType, Expr, FromTable, ObjectName, Statement,
+    AssignmentTarget, BinaryOperator, DataType, Expr, FromTable, ObjectName, SetExpr, Statement,
     TableFactor, Value,
 };
 use sqlparser::dialect::OracleDialect;
 use sqlparser::parser::Parser;
 
 use crate::action_envelope::{ActionEnvelopeV1, ActionKind, BindEnvelope, OracleBindType};
-use crate::scoped_grant::{ColumnIdent, GrantTargetIdentity, GrantVerb, MAX_IN_LIST_VALUES};
+use crate::scoped_grant::predicate::{compose_where, render_ast};
+use crate::scoped_grant::{
+    ColumnIdent, GrantBind, GrantPredicateV1, GrantTargetIdentity, GrantVerb, MAX_IN_LIST_VALUES,
+    ScopedGrant,
+};
 
 const PLAN_DOMAIN: &[u8] = b"omcp/effective-dml-plan/v1";
 /// Every change to the W13 SQL template must change this version.
@@ -40,6 +44,8 @@ pub enum DmlPlanError {
     PredicateTooComplex,
     InvalidBind,
     BindCountMismatch,
+    GrantMismatch,
+    PolicyPredicateInvalid,
     InvalidEffectivePlan,
 }
 
@@ -56,6 +62,8 @@ impl DmlPlanError {
             Self::PredicateTooComplex => "DML_PLAN_PREDICATE_TOO_COMPLEX",
             Self::InvalidBind => "DML_PLAN_BIND_INVALID",
             Self::BindCountMismatch => "DML_PLAN_BIND_COUNT_MISMATCH",
+            Self::GrantMismatch => "DML_PLAN_GRANT_MISMATCH",
+            Self::PolicyPredicateInvalid => "DML_PLAN_POLICY_PREDICATE_INVALID",
             Self::InvalidEffectivePlan => "DML_PLAN_EFFECTIVE_INVALID",
         }
     }
@@ -113,6 +121,7 @@ pub struct DmlCallerStatementV1 {
     statement: Statement,
     verb: GrantVerb,
     target: GrantTargetIdentity,
+    resolved_columns: BTreeSet<ColumnIdent>,
     assignments: BTreeSet<ColumnIdent>,
     predicate: DmlCallerPredicateV1,
     statement_digest: [u8; 32],
@@ -224,6 +233,7 @@ impl DmlCallerStatementV1 {
             statement,
             verb,
             target,
+            resolved_columns: columns.clone(),
             assignments,
             predicate: DmlCallerPredicateV1 {
                 expression: selection,
@@ -512,9 +522,9 @@ fn checked_comparison(
     Ok(())
 }
 
-/// Bound components of one executable DML rewrite. The server-owned renderer
-/// must supply its exact final SQL; construction binds it but does not prove
-/// rewrite correctness or authorize execution.
+/// Bound components of one executable DML rewrite and its impact-count query.
+/// Construction validates and renders the plan but does not authorize or
+/// execute DML.
 pub struct EffectiveDmlPlanV1 {
     caller: DmlCallerStatementV1,
     envelope_digest: [u8; 32],
@@ -522,10 +532,15 @@ pub struct EffectiveDmlPlanV1 {
     policy_ruleset_digest: [u8; 32],
     matched_rule_ids: Vec<String>,
     policy_predicate_digest: [u8; 32],
+    policy_predicate: Option<Expr>,
+    grant_predicate: GrantPredicateV1,
     grant_scope_digest: [u8; 32],
     bind_hmac: [u8; 32],
     row_cap: u64,
     executable_template: String,
+    impact_count_template: String,
+    grant_binds: Vec<GrantBind>,
+    effective_selection: Expr,
 }
 
 impl fmt::Debug for EffectiveDmlPlanV1 {
@@ -539,10 +554,10 @@ impl fmt::Debug for EffectiveDmlPlanV1 {
 }
 
 impl EffectiveDmlPlanV1 {
-    /// Assemble a binding after the server-owned rewriter has checked the
-    /// template. This function verifies envelope identity, not rewrite
-    /// semantics. The consumer must classify final SQL and compare the plan
-    /// digest at apply; it must never use caller-supplied template text.
+    /// Build the executable and impact-count SQL from the same validated
+    /// caller AST, policy predicate, and immutable grant. No caller-supplied
+    /// rewrite string is accepted. The final SQL still requires classifier,
+    /// closure, authorization, count, and apply-time digest checks.
     #[allow(clippy::too_many_arguments)]
     pub fn from_verified_rewrite(
         caller: DmlCallerStatementV1,
@@ -551,20 +566,81 @@ impl EffectiveDmlPlanV1 {
         policy_ruleset_digest: [u8; 32],
         matched_rule_ids: Vec<String>,
         policy_predicate_digest: [u8; 32],
-        grant_scope_digest: [u8; 32],
+        policy_predicate: Option<Expr>,
+        grant: &ScopedGrant,
         row_cap: u64,
-        executable_template: String,
     ) -> Result<Self, DmlPlanError> {
         if row_cap == 0
-            || executable_template.is_empty()
-            || executable_template.contains('\0')
             || envelope.version != 1
             || envelope.action_kind != ActionKind::ExecuteDml
             || envelope.statement_digest != caller.statement_digest
             || envelope.binds != caller.binds
+            || envelope.scoped_grant_ref.is_none()
         {
             return Err(DmlPlanError::InvalidEffectivePlan);
         }
+        if grant.target() != caller.target()
+            || !grant.verbs().contains(caller.verb())
+            || row_cap > grant.limits().max_rows_per_statement
+            || grant
+                .row_predicate()
+                .columns()
+                .iter()
+                .any(|column| !caller.resolved_columns.contains(*column))
+            || caller
+                .assignments()
+                .iter()
+                .any(|column| !grant.columns().contains(column))
+        {
+            return Err(DmlPlanError::GrantMismatch);
+        }
+        if matched_rule_ids.iter().any(String::is_empty)
+            || matched_rule_ids.iter().collect::<BTreeSet<_>>().len() != matched_rule_ids.len()
+        {
+            return Err(DmlPlanError::InvalidEffectivePlan);
+        }
+
+        if let Some(predicate) = &policy_predicate {
+            let mut positions = BTreeSet::new();
+            let mut columns = BTreeSet::new();
+            let mut conjuncts = 0;
+            check_predicate(
+                predicate,
+                &caller.resolved_columns,
+                &caller.binds,
+                &mut positions,
+                &mut columns,
+                &mut conjuncts,
+                0,
+            )
+            .map_err(|_| DmlPlanError::PolicyPredicateInvalid)?;
+            if !positions.is_empty() {
+                return Err(DmlPlanError::PolicyPredicateInvalid);
+            }
+        }
+
+        let (grant_predicate_ast, grant_binds) = render_ast(grant.row_predicate());
+        let caller_where = match &caller.statement {
+            Statement::Update(update) => update.selection.clone(),
+            Statement::Delete(delete) => delete.selection.clone(),
+            _ => None,
+        }
+        .ok_or(DmlPlanError::InvalidEffectivePlan)?;
+        let effective_selection = compose_where(
+            Some(caller_where),
+            policy_predicate.clone(),
+            grant_predicate_ast,
+        );
+        let mut effective_statement = caller.statement.clone();
+        match &mut effective_statement {
+            Statement::Update(update) => update.selection = Some(effective_selection.clone()),
+            Statement::Delete(delete) => delete.selection = Some(effective_selection.clone()),
+            _ => return Err(DmlPlanError::InvalidEffectivePlan),
+        }
+        let executable_template = effective_statement.to_string();
+        let impact_count_template =
+            impact_count_template(&caller.target, effective_selection.clone())?;
+
         Ok(Self {
             caller,
             envelope_digest: envelope.digest(),
@@ -572,10 +648,15 @@ impl EffectiveDmlPlanV1 {
             policy_ruleset_digest,
             matched_rule_ids,
             policy_predicate_digest,
-            grant_scope_digest,
+            policy_predicate,
+            grant_predicate: grant.row_predicate().clone(),
+            grant_scope_digest: grant.scope_digest(),
             bind_hmac: envelope.binds.value_hmac,
             row_cap,
             executable_template,
+            impact_count_template,
+            grant_binds,
+            effective_selection,
         })
     }
 
@@ -597,6 +678,34 @@ impl EffectiveDmlPlanV1 {
     #[must_use]
     pub fn matched_rule_ids(&self) -> &[String] {
         &self.matched_rule_ids
+    }
+
+    #[must_use]
+    pub fn grant_binds(&self) -> &[GrantBind] {
+        &self.grant_binds
+    }
+
+    /// COUNT query template derived from the exact selection in
+    /// [`Self::effective_sql`]. Caller binds stay in the original envelope;
+    /// server-owned grant binds are returned by [`Self::grant_binds`].
+    #[must_use]
+    pub fn impact_count_sql(&self) -> &str {
+        &self.impact_count_template
+    }
+
+    #[must_use]
+    pub fn effective_selection(&self) -> &Expr {
+        &self.effective_selection
+    }
+
+    #[must_use]
+    pub fn policy_predicate(&self) -> Option<&Expr> {
+        self.policy_predicate.as_ref()
+    }
+
+    #[must_use]
+    pub fn grant_predicate(&self) -> &GrantPredicateV1 {
+        &self.grant_predicate
     }
 
     #[must_use]
@@ -670,4 +779,23 @@ impl EffectiveDmlPlanV1 {
 fn put(out: &mut Vec<u8>, value: &[u8]) {
     out.extend_from_slice(&(value.len() as u64).to_be_bytes());
     out.extend_from_slice(value);
+}
+
+fn impact_count_template(
+    target: &GrantTargetIdentity,
+    selection: Expr,
+) -> Result<String, DmlPlanError> {
+    let owner = sqlparser::ast::Ident::with_quote('"', &target.owner);
+    let object = sqlparser::ast::Ident::with_quote('"', &target.object_name);
+    let sql = format!("SELECT COUNT(*) FROM {owner}.{object}");
+    let mut statements = Parser::parse_sql(&OracleDialect {}, &sql)
+        .map_err(|_| DmlPlanError::InvalidEffectivePlan)?;
+    let [Statement::Query(query)] = statements.as_mut_slice() else {
+        return Err(DmlPlanError::InvalidEffectivePlan);
+    };
+    let SetExpr::Select(select) = query.body.as_mut() else {
+        return Err(DmlPlanError::InvalidEffectivePlan);
+    };
+    select.selection = Some(selection);
+    Ok(statements[0].to_string())
 }
