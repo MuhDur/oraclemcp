@@ -593,7 +593,7 @@ pub struct DdlText {
 /// Metadata and column/expression details for one index.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct IndexDescription {
-    /// The `ALL_INDEXES` metadata row, or `None` when the index is not visible.
+    /// The `ALL_INDEXES` metadata row for the visible index.
     pub metadata: Option<OracleRow>,
     /// `ALL_IND_COLUMNS` rows in column position order.
     pub columns: Vec<OracleRow>,
@@ -601,17 +601,17 @@ pub struct IndexDescription {
     pub expressions: Vec<OracleRow>,
 }
 
-/// Metadata and body for one trigger.
+/// Metadata and body for one visible trigger.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TriggerDescription {
-    /// The `ALL_TRIGGERS` metadata row, or `None` when the trigger is not visible.
+    /// The `ALL_TRIGGERS` metadata row for the visible trigger.
     pub metadata: Option<OracleRow>,
 }
 
-/// Metadata/definition and column details for one view.
+/// Metadata/definition and column details for one visible view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ViewDescription {
-    /// The `ALL_VIEWS` metadata row, or `None` when the view is not visible.
+    /// The `ALL_VIEWS` metadata row for the visible view.
     pub metadata: Option<OracleRow>,
     /// View columns from `ALL_TAB_COLUMNS`.
     pub columns: Vec<OracleRow>,
@@ -1616,6 +1616,9 @@ pub async fn describe_index(
         .await?
         .into_iter()
         .next();
+    if metadata.is_none() {
+        return Err(describe_object_not_found("index", &owner, &index_name));
+    }
     let columns = run_catalog_query(cx, conn, CatalogQueryId::IndexColumns, &binds).await?;
     let expressions = run_catalog_query(cx, conn, CatalogQueryId::IndexExpressions, &binds).await?;
 
@@ -1634,18 +1637,23 @@ pub async fn describe_trigger(
     owner: &str,
     trigger_name: &str,
 ) -> Result<TriggerDescription, DbError> {
+    let owner = owner.to_ascii_uppercase();
+    let trigger_name = trigger_name.to_ascii_uppercase();
     let metadata = run_catalog_query(
         cx,
         conn,
         CatalogQueryId::TriggerMetadata,
         &[
-            OracleBind::from(owner.to_ascii_uppercase()),
-            OracleBind::from(trigger_name.to_ascii_uppercase()),
+            OracleBind::from(owner.clone()),
+            OracleBind::from(trigger_name.clone()),
         ],
     )
     .await?
     .into_iter()
     .next();
+    if metadata.is_none() {
+        return Err(describe_object_not_found("trigger", &owner, &trigger_name));
+    }
     Ok(TriggerDescription { metadata })
 }
 
@@ -1668,8 +1676,23 @@ pub async fn describe_view(
         .await?
         .into_iter()
         .next();
+    if metadata.is_none() {
+        return Err(describe_object_not_found("view", &owner, &view_name));
+    }
     let columns = describe_columns(cx, conn, &owner, &view_name).await?;
     Ok(ViewDescription { metadata, columns })
+}
+
+fn describe_object_not_found(object_type: &str, owner: &str, name: &str) -> DbError {
+    DbError::Refused(Box::new(
+        oraclemcp_error::ErrorEnvelope::new(
+            oraclemcp_error::ErrorClass::ObjectNotFound,
+            format!("{object_type} {owner}.{name} was not found or is not visible to this session"),
+        )
+        .with_suggested_tool("oracle_schema_inspect")
+        .with_next_step("call oracle_schema_inspect to list objects visible to this session")
+        .with_next_step("verify the owner, object name, and exact case for quoted identifiers"),
+    ))
 }
 
 /// Columns of a table/view (owner + name bound exactly as resolved by the
@@ -2526,6 +2549,7 @@ mod tests {
     struct CaptureMock {
         calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
         data_default_vc_available: bool,
+        describe_metadata_available: bool,
     }
 
     struct PlanResolverMock {
@@ -2667,6 +2691,14 @@ mod tests {
                 .lock()
                 .expect("capture lock")
                 .push((sql.to_owned(), binds.to_vec()));
+            let lower_sql = sql.to_ascii_lowercase();
+            if self.describe_metadata_available
+                && ["all_indexes", "all_triggers", "all_views"]
+                    .iter()
+                    .any(|marker| lower_sql.contains(marker))
+            {
+                return Ok(vec![OracleRow { columns: vec![] }]);
+            }
             if self.data_default_vc_available && sql.contains("column_name = 'DATA_DEFAULT_VC'") {
                 Ok(vec![OracleRow { columns: vec![] }])
             } else {
@@ -3428,11 +3460,14 @@ mod tests {
 
     #[test]
     fn describe_index_trigger_and_view_bind_names() {
-        let index_mock = CaptureMock::default();
+        let index_mock = CaptureMock {
+            describe_metadata_available: true,
+            ..CaptureMock::default()
+        };
         let im = &index_mock;
         let index =
             run_with_cx(|cx| async move { describe_index(&cx, im, "hr", "emp_ix").await.unwrap() });
-        assert!(index.metadata.is_none());
+        assert!(index.metadata.is_some());
         assert!(index.columns.is_empty());
         assert!(index.expressions.is_empty());
         let calls = index_mock.calls.lock().expect("capture lock");
@@ -3449,13 +3484,16 @@ mod tests {
         );
         drop(calls);
 
-        let trigger_mock = CaptureMock::default();
+        let trigger_mock = CaptureMock {
+            describe_metadata_available: true,
+            ..CaptureMock::default()
+        };
         let tm = &trigger_mock;
         let trigger =
             run_with_cx(
                 |cx| async move { describe_trigger(&cx, tm, "hr", "emp_biu").await.unwrap() },
             );
-        assert!(trigger.metadata.is_none());
+        assert!(trigger.metadata.is_some());
         let calls = trigger_mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.contains("FROM all_triggers"));
@@ -3468,11 +3506,14 @@ mod tests {
         );
         drop(calls);
 
-        let view_mock = CaptureMock::default();
+        let view_mock = CaptureMock {
+            describe_metadata_available: true,
+            ..CaptureMock::default()
+        };
         let vm = &view_mock;
         let view =
             run_with_cx(|cx| async move { describe_view(&cx, vm, "hr", "emp_v").await.unwrap() });
-        assert!(view.metadata.is_none());
+        assert!(view.metadata.is_some());
         assert!(view.columns.is_empty());
         let calls = view_mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 3);
@@ -3518,6 +3559,77 @@ mod tests {
                 OracleBind::String("hr".to_owned()),
                 OracleBind::String("emp_v".to_owned()),
             ]
+        );
+    }
+
+    #[test]
+    fn describe_view_missing_is_object_not_found_issue_43() {
+        let conn = CaptureMock::default();
+        let conn_ref = &conn;
+        let error =
+            run_with_cx(
+                |cx| async move { describe_view(&cx, conn_ref, "app", "missing_view").await },
+            )
+            .expect_err("an absent view must not return empty success");
+
+        let envelope = error.into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::ObjectNotFound
+        );
+        assert_eq!(
+            envelope.suggested_tool.as_deref(),
+            Some("oracle_schema_inspect")
+        );
+        assert!(envelope.message.contains("APP.MISSING_VIEW"));
+        let calls = conn.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1, "view absence stops before column lookup");
+        assert!(calls[0].0.contains("FROM all_views"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::String("APP".to_owned()),
+                OracleBind::String("MISSING_VIEW".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn describe_index_missing_is_object_not_found() {
+        let conn = CaptureMock::default();
+        let error =
+            run_with_cx(
+                |cx| async move { describe_index(&cx, &conn, "app", "missing_index").await },
+            )
+            .expect_err("an absent index must not return empty success");
+
+        let envelope = error.into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::ObjectNotFound
+        );
+        assert_eq!(
+            envelope.suggested_tool.as_deref(),
+            Some("oracle_schema_inspect")
+        );
+    }
+
+    #[test]
+    fn describe_trigger_missing_is_object_not_found() {
+        let conn = CaptureMock::default();
+        let error = run_with_cx(|cx| async move {
+            describe_trigger(&cx, &conn, "app", "missing_trigger").await
+        })
+        .expect_err("an absent trigger must not return empty success");
+
+        let envelope = error.into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::ObjectNotFound
+        );
+        assert_eq!(
+            envelope.suggested_tool.as_deref(),
+            Some("oracle_schema_inspect")
         );
     }
 

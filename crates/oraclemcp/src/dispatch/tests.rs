@@ -3424,6 +3424,116 @@ fn connection_info_reports_the_active_profile() {
 }
 
 #[test]
+fn connection_info_shows_effective_access_on_protected_profile_issue_44() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("prod_ro".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadOnly, true),
+    );
+
+    let out = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("protected connection info");
+
+    assert_eq!(
+        out["effective_access"]["operating_level"],
+        json!("READ_ONLY")
+    );
+    assert_eq!(out["effective_access"]["max_level"], json!("READ_ONLY"));
+    assert_eq!(out["effective_access"]["protected"], json!(true));
+    assert_eq!(
+        out["effective_access"]["writes_permitted_now"],
+        json!(false)
+    );
+    assert_eq!(out["connection"]["open_mode"], json!("READ WRITE"));
+    assert_eq!(out["connection"]["read_only"], json!(false));
+    assert_eq!(
+        out["connection"]["database_state"]["open_mode"],
+        json!("READ WRITE")
+    );
+    assert_eq!(
+        out["connection"]["database_state"]["read_only"],
+        json!(false)
+    );
+}
+
+#[test]
+fn connection_info_shows_effective_access_after_confirmed_elevation() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        SessionLevelState::new(OperatingLevel::ReadWrite, false),
+    );
+
+    let preview = dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({ "level": "READ_WRITE", "ttl_seconds": 60 }),
+        )
+        .expect("elevation preview");
+    let token = preview["confirmation"]["confirm"]
+        .as_str()
+        .expect("preview confirmation token")
+        .to_owned();
+    dispatcher
+        .dispatch(
+            "oracle_set_session_level",
+            json!({
+                "level": "READ_WRITE",
+                "ttl_seconds": 60,
+                "execute": true,
+                "token": token,
+            }),
+        )
+        .expect("confirmed elevation");
+
+    let out = dispatcher
+        .dispatch("oracle_connection_info", json!({}))
+        .expect("connection info after elevation");
+    assert_eq!(
+        out["effective_access"]["operating_level"],
+        json!("READ_WRITE")
+    );
+    assert_eq!(out["effective_access"]["max_level"], json!("READ_WRITE"));
+    assert_eq!(out["effective_access"]["protected"], json!(false));
+    assert_eq!(out["effective_access"]["writes_permitted_now"], json!(true));
+    assert_eq!(
+        out["connection"]["database_state"]["open_mode"],
+        json!("READ WRITE")
+    );
+}
+
+#[test]
+fn connection_info_effective_access_reflects_narrower_oauth_scope() {
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(OneRowMock),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let read_scope = scope_grant("oracle:read");
+
+    let out = dispatcher
+        .dispatch_with_context(
+            "oracle_connection_info",
+            json!({}),
+            DispatchContext::with_scope_grant(&read_scope),
+        )
+        .expect("scoped connection info");
+
+    assert_eq!(
+        out["effective_access"]["operating_level"],
+        json!("READ_ONLY")
+    );
+    assert_eq!(out["effective_access"]["max_level"], json!("READ_WRITE"));
+    assert_eq!(out["effective_access"]["protected"], json!(false));
+    assert_eq!(
+        out["effective_access"]["writes_permitted_now"],
+        json!(false)
+    );
+    assert_eq!(out["connection"]["read_only"], json!(false));
+}
+
+#[test]
 fn connection_info_keeps_schema_and_service_redacted_for_remote_transport() {
     let dispatcher =
         OracleDispatcher::new_with_profile(Box::new(OneRowMock), Some("dev".to_owned()));
@@ -4505,6 +4615,32 @@ fn e5_switch_to_an_exposed_profile_is_allowed() {
         .dispatch("oracle_switch_profile", json!({ "profile": "agent_ro" }))
         .expect("switching to an mcp_exposed profile is permitted");
     assert_eq!(out["active_profile"], json!("agent_ro"));
+}
+
+#[test]
+fn switch_profile_shows_effective_access() {
+    let dispatcher = exposed_only_dispatcher();
+
+    let out = dispatcher
+        .dispatch("oracle_switch_profile", json!({ "profile": "agent_ro" }))
+        .expect("switch to exposed profile");
+
+    assert_eq!(
+        out["effective_access"]["operating_level"],
+        json!("READ_ONLY")
+    );
+    assert_eq!(out["effective_access"]["max_level"], json!("READ_ONLY"));
+    assert_eq!(out["effective_access"]["protected"], json!(false));
+    assert_eq!(
+        out["effective_access"]["writes_permitted_now"],
+        json!(false)
+    );
+    assert_eq!(out["connection"]["open_mode"], json!("READ WRITE"));
+    assert_eq!(out["connection"]["read_only"], json!(false));
+    assert_eq!(
+        out["connection"]["database_state"]["open_mode"],
+        json!("READ WRITE")
+    );
 }
 
 #[test]

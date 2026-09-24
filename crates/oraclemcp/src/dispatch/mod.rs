@@ -11473,23 +11473,43 @@ fn connection_info_json(
 fn connection_info_for_transport(info: &OracleConnectionInfo, local_transport: bool) -> Value {
     let mut connection =
         serde_json::to_value(info.redacted()).expect("redacted connection info serializes");
-    if !local_transport {
-        return connection;
-    }
-
-    let Some(fields) = connection.as_object_mut() else {
-        return connection;
-    };
-    fields.insert("current_schema".to_owned(), json!(info.current_schema));
-    fields.insert("service_name".to_owned(), json!(info.service_name));
-    if let Some(redacted_fields) = fields
-        .get_mut("redacted_fields")
-        .and_then(Value::as_array_mut)
-    {
-        redacted_fields
-            .retain(|field| !matches!(field.as_str(), Some("current_schema" | "service_name")));
+    if let Some(fields) = connection.as_object_mut() {
+        // Keep the original fields for clients that already consume them, and
+        // group an explicitly labelled copy so database state cannot be read
+        // as the MCP profile's granted operating level.
+        fields.insert(
+            "database_state".to_owned(),
+            json!({
+                "database_role": info.database_role,
+                "open_mode": info.open_mode,
+                "read_only": info.read_only,
+                "read_only_reason": info.read_only_reason,
+            }),
+        );
+        if local_transport {
+            fields.insert("current_schema".to_owned(), json!(info.current_schema));
+            fields.insert("service_name".to_owned(), json!(info.service_name));
+            if let Some(redacted_fields) = fields
+                .get_mut("redacted_fields")
+                .and_then(Value::as_array_mut)
+            {
+                redacted_fields.retain(|field| {
+                    !matches!(field.as_str(), Some("current_schema" | "service_name"))
+                });
+            }
+        }
     }
     connection
+}
+
+fn effective_access_json(session: &SessionLevelState) -> Value {
+    let operating_level = session.effective_level();
+    json!({
+        "operating_level": operating_level.as_str(),
+        "max_level": session.max_level().as_str(),
+        "protected": session.is_protected(),
+        "writes_permitted_now": operating_level > OperatingLevel::ReadOnly,
+    })
 }
 
 async fn connection_strategy_json(cx: &Cx, conn: &dyn OracleConnection) -> Value {
@@ -12025,8 +12045,15 @@ impl OracleDispatcher {
                 return Err(DbError::into_envelope(error));
             }
             budget_after_prepare?;
-            let response = response.map_err(DbError::into_envelope)?;
+            let mut response = response.map_err(DbError::into_envelope)?;
             let new_policy = profile_dispatch_policy(&profile_generation)?;
+            let response_level = scoped_session_level(&new_policy.level, context);
+            if let Value::Object(map) = &mut response {
+                map.insert(
+                    "effective_access".to_owned(),
+                    effective_access_json(&response_level),
+                );
+            }
             let new_level = new_policy.level;
             let new_custom_catalog = match &self.custom_loader {
                 Some(loader) => loader(&profile_generation, &new_level)?,
@@ -13009,6 +13036,10 @@ impl OracleDispatcher {
                     context.is_local_transport(),
                 );
                 if let Value::Object(map) = &mut value {
+                    map.insert(
+                        "effective_access".to_owned(),
+                        effective_access_json(&scoped_level),
+                    );
                     if let Some(generation) = state.profile_generation.as_ref() {
                         map.insert("profile_generation_active".to_owned(), json!(true));
                         map.insert(

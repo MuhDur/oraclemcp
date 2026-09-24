@@ -398,6 +398,55 @@ fn query_output_schema() -> Value {
     })
 }
 
+fn effective_access_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "description": "Effective MCP session access, derived from the active profile policy and current operating-level window. It is independent of Oracle database open mode.",
+        "properties": {
+            "operating_level": { "type": "string", "enum": ["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"] },
+            "max_level": { "type": "string", "enum": ["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"], "description": "Profile's configured maximum operating level before any narrower request scope." },
+            "protected": { "type": "boolean" },
+            "writes_permitted_now": { "type": "boolean", "description": "True only while the effective operating level is above READ_ONLY, including a live temporary elevation window." }
+        },
+        "required": ["operating_level", "max_level", "protected", "writes_permitted_now"],
+        "additionalProperties": false
+    })
+}
+
+fn connection_info_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "active_profile": { "type": ["string", "null"] },
+            "connected": { "type": "boolean" },
+            "effective_access": effective_access_output_schema(),
+            "connection": {
+                "type": ["object", "null"],
+                "description": "Oracle connection metadata. Its legacy open_mode/read_only fields, and database_state group, describe Oracle database state rather than permissions granted by this MCP profile.",
+                "properties": {
+                    "open_mode": { "type": ["string", "null"], "description": "Oracle database open mode, not the MCP session operating level." },
+                    "read_only": { "type": "boolean", "description": "Whether the Oracle database role/open mode is read-only, not whether this MCP profile permits writes." },
+                    "database_state": {
+                        "type": "object",
+                        "properties": {
+                            "database_role": { "type": ["string", "null"] },
+                            "open_mode": { "type": ["string", "null"] },
+                            "read_only": { "type": "boolean" },
+                            "read_only_reason": { "type": ["string", "null"] }
+                        },
+                        "required": ["read_only"],
+                        "additionalProperties": false
+                    }
+                },
+                "additionalProperties": true
+            },
+            "connection_error": { "type": "object", "additionalProperties": true }
+        },
+        "required": ["connected", "effective_access"],
+        "additionalProperties": true
+    })
+}
+
 fn semantic_search_output_schema() -> Value {
     let mut schema = query_output_schema();
     let properties = schema["properties"]
@@ -605,16 +654,17 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_connection_info",
             ToolTier::FoundationLiveDb,
-            "Describe the active profile and Oracle connection. When live connection metadata is unavailable, returns connected=false with a structured connection_error and next_actions.",
+            "Describe the active profile, its effective MCP access (operating level, profile max_level, protected status, and whether writes are permitted now), and Oracle connection state. Database open_mode/read_only describe the Oracle target, not granted access. When live metadata is unavailable, returns connected=false with a structured connection_error and next_actions.",
         )
-        .with_input_schema(object_schema(json!({}), &[])),
+        .with_input_schema(object_schema(json!({}), &[]))
+        .with_output_schema(connection_info_output_schema()),
     );
 
     registry.register(
         ToolDescriptor::new(
             "oracle_switch_profile",
             ToolTier::FoundationLiveDb,
-            "Reconnect this MCP server to another configured profile by name.",
+            "Reconnect this MCP server to another configured profile by name and report that profile's effective MCP access. Oracle database open_mode/read_only describe the target database, not granted access.",
         )
         .with_input_schema(object_schema(
             json!({
@@ -622,7 +672,8 @@ pub fn tool_registry() -> ToolRegistry {
                 "db": { "type": "string", "description": "Alias for profile for compatibility with older clients. Prefer profile." }
             }),
             &["profile"],
-        )),
+        ))
+        .with_output_schema(connection_info_output_schema()),
     );
 
     registry.register(
@@ -2134,6 +2185,41 @@ mod tests {
             diff["properties"]["changed"]["items"]["required"],
             json!(["key", "before", "after"])
         );
+    }
+
+    #[test]
+    fn connection_tools_advertise_effective_access_separately_from_database_state() {
+        let registry = tool_registry();
+        for name in ["oracle_connection_info", "oracle_switch_profile"] {
+            let tool = registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == name)
+                .unwrap_or_else(|| panic!("{name} registered"));
+            let schema = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} declares output_schema"));
+            assert_eq!(
+                schema["properties"]["effective_access"]["type"],
+                json!("object")
+            );
+            assert_eq!(
+                schema["properties"]["effective_access"]["required"],
+                json!([
+                    "operating_level",
+                    "max_level",
+                    "protected",
+                    "writes_permitted_now"
+                ])
+            );
+            assert_eq!(
+                schema["properties"]["connection"]["properties"]["database_state"]["properties"]["open_mode"]
+                    ["type"],
+                json!(["string", "null"])
+            );
+            assert!(tool.summary.contains("not granted access"));
+        }
     }
 
     #[test]
