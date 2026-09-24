@@ -200,8 +200,9 @@ mutation floor, and the scheduled `cargo-mutants` sweep (`mutation-safety.yml`,
 fix, so the `coverage-ratchet` and `release-metadata` jobs sat permanently red
 behind `continue-on-error`, and re-sealing is a day-scale campaign that gates
 no user-facing capability. The lanes and scripts (including the D1 generator
-`scripts/coverage_baseline.sh`) were removed rather than left red. What they
-were meant to catch is covered this way now:
+`scripts/coverage_baseline.sh`, its `tests/coverage/BASELINE.*` output and the
+mutation result helpers) were removed rather than left red. What they were
+meant to catch is covered this way now:
 
 - tests that assert behavior: required `cargo test` plus the golden and
   conformance suites (tier A), and the fail-closed guard's own negative tests;
@@ -209,6 +210,3 @@ were meant to catch is covered this way now:
   release candidate (tier C) and bound into the release proof;
 - release metadata: `scripts/release_preflight.sh` in `release.yml` on every
   tag, with no stale-seal override left anywhere.
-
-`tests/coverage/BASELINE.{json,md}` remain as historical numbers from D1; no
-lane regenerates or reads them.
