@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T15:40:00Z",
+  "bead_id": "oraclemcp-er9pp",
+  "scope": {
+    "summary": "Main CI 23ai matrix ladder smoke was red because the harness previewed without commit intent and then executed with commit=true; the server (b4293abf) correctly refused with REPREVIEW_REQUIRED + preview_for_commit. Fixed in the caller (b048fd08): the ladder previews with commit intent and follows preview_for_commit; product contract unchanged.",
+    "in_scope": [
+      "scripts/e2e/oracle_ladder_session.py"
+    ],
+    "out_of_scope": [
+      "No product code changed (the envelope binding is correct fail-closed behaviour)."
+    ]
+  },
+  "source": {
+    "sha": "b048fd08e9fcacd2f6bb8ab6336d996550bb668a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "main CI verdict",
+        "kind": "cli",
+        "trace": "GitHub Actions ci.yml run 36014465053 on main at b048fd08: job \"Oracle FREE 23ai matrix + VECTOR smoke\" conclusion success (it had failed on every main run since at least 9c3a2d24 with LADDER FAIL REPREVIEW_REQUIRED). The same run still has two unrelated red jobs (architecture lint ratchet and PL/SQL intelligence feature matrix) owned by .1.1."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "Orchestrator reviewed the diff: only scripts/e2e/oracle_ladder_session.py changed (0 product lines). Dispatcher unit tests keep asserting that a commit-intent change without re-preview is refused."
+      },
+      {
+        "name": "live (implementer)",
+        "kind": "cli",
+        "trace": "Implementer-reported ladder proof on free23, xe21 and xe18 at the rebased source; the CI 23ai lane above is the independent confirmation."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Orchestrator relied on the CI 23ai lane verdict as the independent live check; XE lanes are implementer-reported."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
