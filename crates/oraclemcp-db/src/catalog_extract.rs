@@ -260,7 +260,7 @@ pub struct CatalogExtractReport {
 
 struct CatalogQuerySpec {
     row_set: CatalogRowSetName,
-    sql: String,
+    id: crate::CatalogQueryId,
     schema_filtered: bool,
     optional: bool,
     warning_code: Option<&'static str>,
@@ -279,25 +279,19 @@ pub fn catalog_extract_rowsets(include_plscope: bool) -> Vec<CatalogRowSetName> 
 
 /// Extract live Oracle dictionary rows for a downstream `CatalogSnapshotBuilder`.
 #[instrument(level = "trace", skip(cx, conn, request))]
-pub async fn extract_catalog_rowsets<C: OracleConnection + ?Sized>(
+pub async fn extract_catalog_rowsets(
     cx: &Cx,
-    conn: &C,
+    conn: &dyn OracleConnection,
     request: &CatalogExtractRequest,
 ) -> Result<CatalogExtractReport, DbError> {
     let connection_info = conn.describe(cx).await?;
     let schema_names = resolve_schema_filters(&connection_info, request)?;
-    let query_specs = catalog_query_specs(schema_names.len(), request.include_plscope)?;
-    let schema_binds = schema_filter_binds(&schema_names);
+    let query_specs = catalog_query_specs(request.include_plscope);
     let mut batches = Vec::with_capacity(query_specs.len());
     let mut warnings = Vec::new();
 
     for spec in query_specs {
-        let binds = if spec.schema_filtered {
-            schema_binds.as_slice()
-        } else {
-            &[]
-        };
-        match conn.query_rows(cx, &spec.sql, binds).await {
+        match run_extract_query(cx, conn, &spec, &schema_names).await {
             Ok(rows) => batches.push(CatalogRowBatch {
                 row_set: spec.row_set,
                 rows,
@@ -320,6 +314,32 @@ pub async fn extract_catalog_rowsets<C: OracleConnection + ?Sized>(
         batches,
         warnings,
     })
+}
+
+/// The fixed query is repeated over deterministic owner chunks. PUBLIC rows
+/// are included only in the first chunk, including when PUBLIC is explicitly
+/// named in a later owner chunk.
+async fn run_extract_query(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    spec: &CatalogQuerySpec,
+    schema_names: &[String],
+) -> Result<Vec<OracleRow>, DbError> {
+    if !spec.schema_filtered {
+        return crate::run_catalog_query(cx, conn, spec.id, &[]).await;
+    }
+    let mut rows = Vec::new();
+    for (chunk_index, owners) in schema_names.chunks(32).enumerate() {
+        let mut binds = schema_filter_binds_32(owners);
+        if matches!(
+            spec.id,
+            crate::CatalogQueryId::ExtractSynonyms | crate::CatalogQueryId::ExtractDatabaseLinks
+        ) {
+            binds.push(OracleBind::from(i64::from(chunk_index == 0)));
+        }
+        rows.extend(crate::run_catalog_query(cx, conn, spec.id, &binds).await?);
+    }
+    Ok(rows)
 }
 
 fn resolve_schema_filters(
@@ -360,100 +380,92 @@ fn resolve_schema_filters(
     Ok(resolved)
 }
 
-fn catalog_query_specs(
-    schema_count: usize,
-    include_plscope: bool,
-) -> Result<Vec<CatalogQuerySpec>, DbError> {
-    let owner_clause = oracle_bind_placeholders(schema_count, 1)?;
+fn catalog_query_specs(include_plscope: bool) -> Vec<CatalogQuerySpec> {
+    use crate::CatalogQueryId;
     let mut specs = vec![
-        required(CatalogRowSetName::Objects, objects_sql(&owner_clause)),
-        required(CatalogRowSetName::Columns, columns_sql(&owner_clause)),
+        required(CatalogRowSetName::Objects, CatalogQueryId::ExtractObjects),
+        required(CatalogRowSetName::Columns, CatalogQueryId::ExtractColumns),
         required(
             CatalogRowSetName::Constraints,
-            constraints_sql(&owner_clause),
+            CatalogQueryId::ExtractConstraints,
         ),
-        required(CatalogRowSetName::Indexes, indexes_sql(&owner_clause)),
-        required(CatalogRowSetName::Triggers, triggers_sql(&owner_clause)),
-        required(CatalogRowSetName::Synonyms, synonyms_sql(&owner_clause)),
-        required(CatalogRowSetName::Routines, routines_sql(&owner_clause)),
+        required(CatalogRowSetName::Indexes, CatalogQueryId::ExtractIndexes),
+        required(CatalogRowSetName::Triggers, CatalogQueryId::ExtractTriggers),
+        required(CatalogRowSetName::Synonyms, CatalogQueryId::ExtractSynonyms),
+        required(CatalogRowSetName::Routines, CatalogQueryId::ExtractRoutines),
         required(
             CatalogRowSetName::RoutineArguments,
-            routine_arguments_sql(&owner_clause),
+            CatalogQueryId::ExtractRoutineArguments,
         ),
-        required(CatalogRowSetName::Views, views_sql(&owner_clause)),
+        required(CatalogRowSetName::Views, CatalogQueryId::ExtractViews),
         required(
             CatalogRowSetName::MaterializedViews,
-            materialized_views_sql(&owner_clause),
+            CatalogQueryId::ExtractMaterializedViews,
         ),
-        required(CatalogRowSetName::Sequences, sequences_sql(&owner_clause)),
+        required(
+            CatalogRowSetName::Sequences,
+            CatalogQueryId::ExtractSequences,
+        ),
         required(
             CatalogRowSetName::TypeAttributes,
-            type_attributes_sql(&owner_clause),
+            CatalogQueryId::ExtractTypeAttributes,
         ),
         optional_unfiltered(
             CatalogRowSetName::Users,
-            "select username from all_users order by username",
+            CatalogQueryId::ExtractUsers,
             "all-users-probe",
             "ensure the analysis user can SELECT ALL_USERS so object grants to roles are not misclassified as direct user grants.",
         ),
-        required(CatalogRowSetName::Grants, grants_sql(&owner_clause)),
+        required(CatalogRowSetName::Grants, CatalogQueryId::ExtractGrants),
         required(
             CatalogRowSetName::DatabaseLinks,
-            db_links_sql(&owner_clause),
+            CatalogQueryId::ExtractDatabaseLinks,
         ),
         required(
             CatalogRowSetName::TableComments,
-            table_comments_sql(&owner_clause),
+            CatalogQueryId::ExtractTableComments,
         ),
         required(
             CatalogRowSetName::ColumnComments,
-            column_comments_sql(&owner_clause),
+            CatalogQueryId::ExtractColumnComments,
         ),
-        required_unfiltered(
-            CatalogRowSetName::Editions,
-            "select
-  edition_name,
-  parent_edition_name,
-  usable
-from all_editions
-order by edition_name",
-        ),
+        required_unfiltered(CatalogRowSetName::Editions, CatalogQueryId::ExtractEditions),
         required(
             CatalogRowSetName::EditioningViews,
-            editioning_views_sql(&owner_clause),
+            CatalogQueryId::ExtractEditioningViews,
         ),
         required(
             CatalogRowSetName::VpdPolicies,
-            vpd_policies_sql(&owner_clause),
+            CatalogQueryId::ExtractVpdPolicies,
         ),
         required(
             CatalogRowSetName::Dependencies,
-            dependencies_sql(&owner_clause),
+            CatalogQueryId::ExtractDependencies,
         ),
     ];
 
     if include_plscope {
         specs.push(optional(
             CatalogRowSetName::PlScopeAvailability,
-            plscope_availability_sql(&owner_clause),
+            CatalogQueryId::ExtractPlscopeAvailability,
             "plscope-detect-failed",
             "grant SELECT on ALL_PLSQL_OBJECT_SETTINGS, or accept that PL/Scope detection is unavailable.",
         ));
         specs.push(optional(
             CatalogRowSetName::PlScopeIdentifiers,
-            plscope_identifiers_sql(&owner_clause),
+            CatalogQueryId::ExtractPlscopeIdentifiers,
             "plscope-identifiers-failed",
             "ensure the user can read ALL_IDENTIFIERS, or recompile target objects with PL/Scope enabled.",
         ));
     }
 
-    Ok(specs)
+    specs
 }
 
-fn required(row_set: CatalogRowSetName, sql: String) -> CatalogQuerySpec {
+fn required(row_set: CatalogRowSetName, id: crate::CatalogQueryId) -> CatalogQuerySpec {
     CatalogQuerySpec {
         row_set,
-        sql,
+        id,
         schema_filtered: true,
         optional: false,
         warning_code: None,
@@ -461,10 +473,10 @@ fn required(row_set: CatalogRowSetName, sql: String) -> CatalogQuerySpec {
     }
 }
 
-fn required_unfiltered(row_set: CatalogRowSetName, sql: impl Into<String>) -> CatalogQuerySpec {
+fn required_unfiltered(row_set: CatalogRowSetName, id: crate::CatalogQueryId) -> CatalogQuerySpec {
     CatalogQuerySpec {
         row_set,
-        sql: sql.into(),
+        id,
         schema_filtered: false,
         optional: false,
         warning_code: None,
@@ -474,13 +486,13 @@ fn required_unfiltered(row_set: CatalogRowSetName, sql: impl Into<String>) -> Ca
 
 fn optional(
     row_set: CatalogRowSetName,
-    sql: String,
+    id: crate::CatalogQueryId,
     warning_code: &'static str,
     remediation: &'static str,
 ) -> CatalogQuerySpec {
     CatalogQuerySpec {
         row_set,
-        sql,
+        id,
         schema_filtered: true,
         optional: true,
         warning_code: Some(warning_code),
@@ -490,13 +502,13 @@ fn optional(
 
 fn optional_unfiltered(
     row_set: CatalogRowSetName,
-    sql: impl Into<String>,
+    id: crate::CatalogQueryId,
     warning_code: &'static str,
     remediation: &'static str,
 ) -> CatalogQuerySpec {
     CatalogQuerySpec {
         row_set,
-        sql: sql.into(),
+        id,
         schema_filtered: false,
         optional: true,
         warning_code: Some(warning_code),
@@ -504,399 +516,14 @@ fn optional_unfiltered(
     }
 }
 
-fn oracle_bind_placeholders(count: usize, start_index: usize) -> Result<String, DbError> {
-    if count == 0 {
-        return Err(DbError::Query(
-            "catalog extraction requires at least one schema bind".to_owned(),
-        ));
-    }
-    Ok((0..count)
-        .map(|offset| format!(":{}", start_index + offset))
-        .collect::<Vec<_>>()
-        .join(", "))
-}
-
-fn schema_filter_binds(schema_names: &[String]) -> Vec<OracleBind> {
-    schema_names
+fn schema_filter_binds_32(schema_names: &[String]) -> Vec<OracleBind> {
+    let mut binds = schema_names
         .iter()
         .cloned()
         .map(OracleBind::String)
-        .collect()
-}
-
-fn objects_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  object_name,
-  object_type,
-  status,
-  to_char(last_ddl_time, 'YYYY-MM-DD\"T\"HH24:MI:SS') as last_ddl_time_iso,
-  editionable,
-  edition_name
-from all_objects
-where owner in ({owner_clause})
-  and object_type in (
-    'TABLE',
-    'VIEW',
-    'MATERIALIZED VIEW',
-    'SEQUENCE',
-    'TYPE',
-    'PACKAGE',
-    'PROCEDURE',
-    'FUNCTION',
-    'TRIGGER',
-    'EDITIONING VIEW'
-  )
-order by owner, object_type, object_name"
-    )
-}
-
-fn columns_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  table_name,
-  column_name,
-  nvl(column_id, internal_column_id) as column_position,
-  data_type_owner,
-  data_type,
-  data_length,
-  data_precision,
-  data_scale,
-  char_used,
-  nullable,
-  data_default_vc,
-  virtual_column,
-  hidden_column
-from all_tab_cols
-where owner in ({owner_clause})
-order by owner, table_name, nvl(column_id, internal_column_id)"
-    )
-}
-
-fn constraints_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  c.owner,
-  c.constraint_name,
-  c.table_name,
-  c.constraint_type,
-  c.r_owner as referenced_table_owner,
-  p.table_name as referenced_table_name,
-  c.search_condition_vc,
-  case when c.deferrable = 'DEFERRABLE' then 'Y' else 'N' end as is_deferrable,
-  case when c.deferred = 'DEFERRED' then 'Y' else 'N' end as is_deferred,
-  child.column_name,
-  child.position as column_position,
-  parent.column_name as referenced_column_name
-from all_constraints c
-left join all_constraints p
-  on p.owner = c.r_owner
- and p.constraint_name = c.r_constraint_name
-left join all_cons_columns child
-  on child.owner = c.owner
- and child.constraint_name = c.constraint_name
-left join all_cons_columns parent
-  on parent.owner = p.owner
- and parent.constraint_name = p.constraint_name
- and parent.position = child.position
-where c.owner in ({owner_clause})
-  and c.constraint_type in ('P', 'R', 'U', 'C', 'F')
-order by c.owner, c.constraint_name, child.position"
-    )
-}
-
-fn indexes_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  i.owner,
-  i.index_name,
-  i.table_owner,
-  i.table_name,
-  case when i.uniqueness = 'UNIQUE' then 'Y' else 'N' end as is_unique,
-  i.index_type,
-  i.status,
-  c.column_name,
-  c.column_position
-from all_indexes i
-left join all_ind_columns c
-  on c.index_owner = i.owner
- and c.index_name = i.index_name
- and c.table_owner = i.table_owner
- and c.table_name = i.table_name
-where i.owner in ({owner_clause})
-order by i.owner, i.index_name, c.column_position"
-    )
-}
-
-fn triggers_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  trigger_name,
-  table_owner,
-  table_name,
-  trigger_type,
-  triggering_event,
-  when_clause
-from all_triggers
-where owner in ({owner_clause})
-  and base_object_type in ('TABLE', 'VIEW')
-order by owner, trigger_name"
-    )
-}
-
-fn synonyms_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  synonym_name,
-  table_owner,
-  table_name,
-  db_link
-from all_synonyms
-where owner = 'PUBLIC'
-   or owner in ({owner_clause})
-order by owner, synonym_name"
-    )
-}
-
-fn routines_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  object_name,
-  procedure_name,
-  subprogram_id,
-  overload,
-  object_type,
-  deterministic,
-  pipelined
-from all_procedures
-where owner in ({owner_clause})
-  and (procedure_name is not null or object_type in ('FUNCTION', 'PROCEDURE'))
-order by owner, object_name, procedure_name, subprogram_id"
-    )
-}
-
-fn routine_arguments_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  package_name,
-  object_name,
-  subprogram_id,
-  overload,
-  argument_name,
-  position,
-  sequence,
-  data_type,
-  type_owner,
-  type_name,
-  data_length,
-  data_precision,
-  data_scale,
-  in_out,
-  defaulted
-from all_arguments
-where owner in ({owner_clause})
-  and data_level = 0
-order by owner, package_name, object_name, subprogram_id, sequence"
-    )
-}
-
-fn views_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  view_name,
-  text_vc,
-  read_only
-from all_views
-where owner in ({owner_clause})
-order by owner, view_name"
-    )
-}
-
-fn materialized_views_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  mview_name,
-  refresh_mode,
-  refresh_method,
-  query
-from all_mviews
-where owner in ({owner_clause})
-order by owner, mview_name"
-    )
-}
-
-fn sequences_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  sequence_owner,
-  sequence_name,
-  min_value,
-  max_value,
-  increment_by,
-  cycle_flag,
-  order_flag,
-  cache_size
-from all_sequences
-where sequence_owner in ({owner_clause})
-order by sequence_owner, sequence_name"
-    )
-}
-
-fn type_attributes_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  type_name,
-  attr_name,
-  attr_no,
-  attr_type_owner,
-  attr_type_name,
-  length,
-  precision,
-  scale
-from all_type_attrs
-where owner in ({owner_clause})
-order by owner, type_name, attr_no"
-    )
-}
-
-fn grants_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  table_schema,
-  table_name,
-  grantee,
-  privilege,
-  grantable,
-  hierarchy
-from all_tab_privs
-where table_schema in ({owner_clause})
-order by table_schema, table_name, grantee, privilege"
-    )
-}
-
-fn db_links_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  db_link,
-  host
-from all_db_links
-where owner = 'PUBLIC'
-   or owner in ({owner_clause})
-order by owner, db_link"
-    )
-}
-
-fn table_comments_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  table_name,
-  table_type,
-  comments
-from all_tab_comments
-where owner in ({owner_clause})
-  and comments is not null
-order by owner, table_name"
-    )
-}
-
-fn column_comments_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  table_name,
-  column_name,
-  comments
-from all_col_comments
-where owner in ({owner_clause})
-  and comments is not null
-order by owner, table_name, column_name"
-    )
-}
-
-fn editioning_views_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  view_name,
-  table_name
-from all_editioning_views
-where owner in ({owner_clause})
-order by owner, view_name"
-    )
-}
-
-fn vpd_policies_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  object_owner,
-  object_name,
-  policy_group,
-  policy_name,
-  pf_owner,
-  package,
-  function,
-  sel,
-  ins,
-  upd,
-  del,
-  enable
-from all_policies
-where object_owner in ({owner_clause})
-order by object_owner, object_name, policy_group, policy_name"
-    )
-}
-
-fn dependencies_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  name,
-  type,
-  referenced_owner,
-  referenced_name,
-  referenced_type,
-  dependency_type
-from all_dependencies
-where owner in ({owner_clause})
-order by owner, name, referenced_owner, referenced_name"
-    )
-}
-
-fn plscope_availability_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  plscope_settings
-from all_plsql_object_settings
-where owner in ({owner_clause})"
-    )
-}
-
-fn plscope_identifiers_sql(owner_clause: &str) -> String {
-    format!(
-        "select
-  owner,
-  name,
-  type,
-  usage,
-  line,
-  col,
-  object_name
-from all_identifiers
-where owner in ({owner_clause})
-order by owner, object_name, line, col"
-    )
+        .collect::<Vec<_>>();
+    binds.resize(32, OracleBind::Null);
+    binds
 }
 
 #[cfg(test)]
@@ -925,6 +552,7 @@ mod tests {
     struct RecordingConn {
         calls: Mutex<Vec<(String, Vec<OracleBind>)>>,
         fail_contains: Option<&'static str>,
+        synthesize_owners: bool,
     }
 
     #[async_trait(?Send)]
@@ -963,6 +591,32 @@ mod tests {
                 .is_some_and(|needle| sql.contains(needle))
             {
                 return Err(DbError::Query("scripted query failure".to_owned()));
+            }
+            if self.synthesize_owners {
+                let public_catalog =
+                    sql.contains("from all_synonyms") || sql.contains("from all_db_links");
+                let mut owners = binds
+                    .iter()
+                    .take(32)
+                    .filter_map(|bind| match bind {
+                        OracleBind::String(owner) if !public_catalog || owner != "PUBLIC" => {
+                            Some(owner.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                if public_catalog && binds.get(32) == Some(&OracleBind::I64(1)) {
+                    owners.push("PUBLIC".to_owned());
+                }
+                return Ok(owners
+                    .into_iter()
+                    .map(|owner| OracleRow {
+                        columns: vec![(
+                            "OWNER".to_owned(),
+                            OracleCell::new("VARCHAR2", Some(owner)),
+                        )],
+                    })
+                    .collect());
             }
             Ok(vec![OracleRow {
                 columns: vec![(
@@ -1028,6 +682,37 @@ mod tests {
     }
 
     #[test]
+    fn every_extract_rowset_has_a_closed_bind_contract() {
+        let specs = catalog_query_specs(true);
+        assert_eq!(
+            specs.len(),
+            CatalogRowSetName::CORE.len() + CatalogRowSetName::PLSCOPE.len()
+        );
+        let mut seen = Vec::new();
+        for spec in specs {
+            assert!(
+                !seen.contains(&spec.id),
+                "duplicate catalog id for {:?}",
+                spec.row_set
+            );
+            seen.push(spec.id);
+            let arity = spec.id.spec().binds.0.len();
+            let expected = if !spec.schema_filtered {
+                0
+            } else if matches!(
+                spec.id,
+                crate::CatalogQueryId::ExtractSynonyms
+                    | crate::CatalogQueryId::ExtractDatabaseLinks
+            ) {
+                33
+            } else {
+                32
+            };
+            assert_eq!(arity, expected, "{:?}", spec.row_set);
+        }
+    }
+
+    #[test]
     fn extraction_uses_bound_schema_filters_and_builder_order() {
         let conn = RecordingConn::default();
         let request = CatalogExtractRequest::for_named_schemas(["DEMO", "HR"]);
@@ -1053,18 +738,122 @@ mod tests {
 
         let calls = conn.calls.lock().expect("call log");
         assert!(calls[0].0.contains("from all_objects"));
-        assert!(calls[0].0.contains("owner in (:1, :2)"));
-        assert_eq!(
-            calls[0].1,
-            vec![
-                OracleBind::String("DEMO".to_owned()),
-                OracleBind::String("HR".to_owned())
-            ]
-        );
+        assert!(calls[0].0.contains("owner in (:1, :2, :3"));
+        assert_eq!(calls[0].1.len(), 32);
+        assert_eq!(calls[0].1[0], OracleBind::String("DEMO".to_owned()));
+        assert_eq!(calls[0].1[1], OracleBind::String("HR".to_owned()));
+        assert!(calls[0].1[2..].iter().all(|bind| *bind == OracleBind::Null));
         assert!(calls[12].0.contains("from all_users"));
         assert!(calls[12].1.is_empty());
         assert!(calls[17].0.contains("from all_editions"));
         assert!(calls[17].1.is_empty());
+    }
+
+    #[test]
+    fn seventy_owners_match_unbounded_catalog_content_without_duplicate_public_rows() {
+        for explicitly_selected_public in [false, true] {
+            let conn = RecordingConn {
+                synthesize_owners: true,
+                ..RecordingConn::default()
+            };
+            let mut owners = (0..70)
+                .map(|index| format!("O{index:03}"))
+                .collect::<Vec<_>>();
+            if explicitly_selected_public {
+                owners[60] = "PUBLIC".to_owned();
+            }
+            let request = CatalogExtractRequest::for_named_schemas(owners.clone());
+            let conn_ref = &conn;
+            let report = run_with_cx(|cx| async move {
+                extract_catalog_rowsets(&cx, conn_ref, &request)
+                    .await
+                    .expect("fixed catalog queries batch all owners")
+            });
+            assert_eq!(report.batches.len(), 23);
+            assert!(report.warnings.is_empty());
+            let calls = conn.calls.lock().expect("call log");
+            assert_eq!(
+                calls.len(),
+                65,
+                "21 filtered rowsets in three chunks, two unfiltered once"
+            );
+            let filtered_calls = calls
+                .iter()
+                .filter(|(sql, _)| {
+                    !sql.contains("from all_users") && !sql.contains("from all_editions")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(filtered_calls.len(), 63);
+            for (call_index, (_, binds)) in filtered_calls.iter().enumerate() {
+                let chunk_index = call_index % 3;
+                let start = chunk_index * 32;
+                let end = (start + 32).min(owners.len());
+                let expected_binds = schema_filter_binds_32(&owners[start..end]);
+                assert_eq!(&binds[..32], expected_binds.as_slice());
+                if binds.len() == 33 {
+                    assert_eq!(
+                        binds[32],
+                        OracleBind::I64(i64::from(chunk_index == 0)),
+                        "PUBLIC is present only in the first ordered owner chunk"
+                    );
+                }
+            }
+            for batch in &report.batches {
+                let mut actual = batch
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.text("OWNER"))
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>();
+                let mut expected = if matches!(
+                    batch.row_set,
+                    CatalogRowSetName::Users | CatalogRowSetName::Editions
+                ) {
+                    Vec::new()
+                } else {
+                    owners.clone()
+                };
+                if matches!(
+                    batch.row_set,
+                    CatalogRowSetName::Synonyms | CatalogRowSetName::DatabaseLinks
+                ) && !explicitly_selected_public
+                {
+                    expected.push("PUBLIC".to_owned());
+                }
+                actual.sort();
+                expected.sort();
+                assert_eq!(
+                    actual, expected,
+                    "{:?}: content must equal the former unbounded owner filter",
+                    batch.row_set
+                );
+            }
+            for view in ["from all_synonyms", "from all_db_links"] {
+                let flags = calls
+                    .iter()
+                    .filter(|(sql, _)| sql.contains(view))
+                    .map(|(_, binds)| binds[32].clone())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    flags,
+                    [OracleBind::I64(1), OracleBind::I64(0), OracleBind::I64(0)]
+                );
+            }
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(sql, _)| sql.contains("from all_users"))
+                    .count(),
+                1
+            );
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|(sql, _)| sql.contains("from all_editions"))
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]

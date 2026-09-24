@@ -5,7 +5,10 @@
 //! giving a served tool a raw query capability.
 
 use super::*;
-use oraclemcp_db::{FgaEvidence, FgaEvidencePolicy, ReadPlanProofError, prove_semantic_read_plan};
+use oraclemcp_db::{
+    FgaEvidence, FgaEvidencePolicy, ReadPlanProofError, ReadQueryProvenance,
+    prove_semantic_read_plan,
+};
 use oraclemcp_guard::semantic_read_plan_checked;
 
 /// Observe read failures at the connection-ownership boundary.
@@ -19,6 +22,7 @@ use oraclemcp_guard::semantic_read_plan_checked;
 pub(super) struct ReadUncertaintyConn<'a> {
     pub(super) inner: &'a dyn OracleConnection,
     pub(super) quarantine: Option<&'a SyncMutex<Option<ConnectionQuarantine>>>,
+    pub(super) provenance: ReadQueryProvenance,
 }
 
 impl ReadUncertaintyConn<'_> {
@@ -64,7 +68,28 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        self.observe("query", self.inner.query_rows(cx, sql, binds).await)
+        self.observe(
+            "query",
+            self.inner
+                .query_rows_with_provenance(cx, sql, binds, self.provenance, None)
+                .await,
+        )
+    }
+
+    async fn query_rows_with_provenance(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        provenance: ReadQueryProvenance,
+        serialize_opts: Option<&SerializeOptions>,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.observe(
+            "query",
+            self.inner
+                .query_rows_with_provenance(cx, sql, binds, provenance, serialize_opts)
+                .await,
+        )
     }
 
     async fn query_rows_with_serialize_options(
@@ -77,7 +102,7 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
         self.observe(
             "query",
             self.inner
-                .query_rows_with_serialize_options(cx, sql, binds, serialize_opts)
+                .query_rows_with_provenance(cx, sql, binds, self.provenance, Some(serialize_opts))
                 .await,
         )
     }
@@ -90,10 +115,37 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
         arraysize: usize,
         serialize_opts: &SerializeOptions,
     ) -> Result<QueryRowStreamStart, DbError> {
+        self.query_row_stream_with_provenance(
+            cx,
+            sql,
+            binds,
+            arraysize,
+            serialize_opts,
+            self.provenance,
+        )
+        .await
+    }
+
+    async fn query_row_stream_with_provenance(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        arraysize: usize,
+        serialize_opts: &SerializeOptions,
+        provenance: ReadQueryProvenance,
+    ) -> Result<QueryRowStreamStart, DbError> {
         self.observe(
             "row stream startup",
             self.inner
-                .query_row_stream(cx, sql, binds, arraysize, serialize_opts)
+                .query_row_stream_with_provenance(
+                    cx,
+                    sql,
+                    binds,
+                    arraysize,
+                    serialize_opts,
+                    provenance,
+                )
                 .await,
         )
     }
@@ -190,9 +242,31 @@ pub(super) struct GuardedGeneratedReadConn<'a> {
 }
 
 impl GuardedGeneratedReadConn<'_> {
-    async fn before_query(&self, cx: &Cx, sql: &str) -> Result<(String, Option<u64>), DbError> {
-        let danger = ensure_generated_read_sql_allowed(sql).map_err(db_internal_from_envelope)?;
-        let danger = audit_danger_string(danger);
+    async fn before_query(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        provenance: ReadQueryProvenance,
+    ) -> Result<(String, Option<u64>), DbError> {
+        if matches!(
+            provenance,
+            ReadQueryProvenance::CallerRead | ReadQueryProvenance::ServerRead
+        ) {
+            return Err(DbError::Internal(
+                "metadata connection refuses application-read provenance".to_owned(),
+            ));
+        }
+        let ReadQueryProvenance::Catalog(id) = provenance else {
+            unreachable!("the provenance match above admits catalog reads only")
+        };
+        if id.spec().sql != sql {
+            return Err(DbError::Internal(
+                "catalog query provenance does not match its closed SQL".to_owned(),
+            ));
+        }
+        // This label is supplied by the closed CatalogQueryId boundary and
+        // checked bind schema; caller text never receives the catalog label.
+        let danger = audit_danger_string(DangerLevel::Safe);
         let observed_scn = match self.audit.entry.auditor {
             Some(_) => observed_scn_for_audit(cx, self.inner, self.audit.entry).await?,
             None => None,
@@ -254,8 +328,26 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        let (danger, observed_scn) = self.before_query(cx, sql).await?;
-        match self.inner.query_rows(cx, sql, binds).await {
+        let _ = (cx, sql, binds);
+        Err(DbError::Internal(
+            "metadata connection refuses untagged SQL; use CatalogQueryId".to_owned(),
+        ))
+    }
+
+    async fn query_rows_with_provenance(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        provenance: ReadQueryProvenance,
+        serialize_opts: Option<&SerializeOptions>,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let (danger, observed_scn) = self.before_query(cx, sql, provenance).await?;
+        match self
+            .inner
+            .query_rows_with_provenance(cx, sql, binds, provenance, serialize_opts)
+            .await
+        {
             Ok(rows) => {
                 self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
                 Ok(rows)
@@ -274,21 +366,10 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         binds: &[OracleBind],
         serialize_opts: &SerializeOptions,
     ) -> Result<Vec<OracleRow>, DbError> {
-        let (danger, observed_scn) = self.before_query(cx, sql).await?;
-        match self
-            .inner
-            .query_rows_with_serialize_options(cx, sql, binds, serialize_opts)
-            .await
-        {
-            Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
-                Ok(rows)
-            }
-            Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
-                Err(err)
-            }
-        }
+        let _ = (cx, sql, binds, serialize_opts);
+        Err(DbError::Internal(
+            "metadata connection refuses untagged SQL; use CatalogQueryId".to_owned(),
+        ))
     }
 
     async fn query_rows_named(
@@ -297,17 +378,10 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         sql: &str,
         binds: &[(String, OracleBind)],
     ) -> Result<Vec<OracleRow>, DbError> {
-        let (danger, observed_scn) = self.before_query(cx, sql).await?;
-        match self.inner.query_rows_named(cx, sql, binds).await {
-            Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
-                Ok(rows)
-            }
-            Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
-                Err(err)
-            }
-        }
+        let _ = (cx, sql, binds);
+        Err(DbError::Internal(
+            "metadata connection refuses untagged named SQL".to_owned(),
+        ))
     }
 
     async fn query_rows_named_with_serialize_options(
@@ -317,21 +391,10 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         binds: &[(String, OracleBind)],
         serialize_opts: &SerializeOptions,
     ) -> Result<Vec<OracleRow>, DbError> {
-        let (danger, observed_scn) = self.before_query(cx, sql).await?;
-        match self
-            .inner
-            .query_rows_named_with_serialize_options(cx, sql, binds, serialize_opts)
-            .await
-        {
-            Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
-                Ok(rows)
-            }
-            Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
-                Err(err)
-            }
-        }
+        let _ = (cx, sql, binds, serialize_opts);
+        Err(DbError::Internal(
+            "metadata connection refuses untagged named SQL".to_owned(),
+        ))
     }
 
     async fn query_optional_row(
@@ -340,17 +403,10 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Option<OracleRow>, DbError> {
-        let (danger, observed_scn) = self.before_query(cx, sql).await?;
-        match self.inner.query_optional_row(cx, sql, binds).await {
-            Ok(row) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
-                Ok(row)
-            }
-            Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
-                Err(err)
-            }
-        }
+        let _ = (cx, sql, binds);
+        Err(DbError::Internal(
+            "metadata connection refuses untagged optional-row SQL".to_owned(),
+        ))
     }
 
     async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
@@ -510,16 +566,20 @@ pub(super) struct ReadExecutionPlan {
 /// ```
 pub struct AdmittedRead {
     plan: ReadExecutionPlan,
+    provenance: ReadQueryProvenance,
 }
 
 impl AdmittedRead {
-    fn new(plan: ReadExecutionPlan) -> Result<Self, ErrorEnvelope> {
+    fn new(
+        plan: ReadExecutionPlan,
+        provenance: ReadQueryProvenance,
+    ) -> Result<Self, ErrorEnvelope> {
         plan.gate.as_ref().map_err(Clone::clone)?;
-        Ok(Self { plan })
+        Ok(Self { plan, provenance })
     }
 
-    pub(super) fn into_plan(self) -> ReadExecutionPlan {
-        self.plan
+    pub(super) fn into_parts(self) -> (ReadExecutionPlan, ReadQueryProvenance) {
+        (self.plan, self.provenance)
     }
 }
 
@@ -785,6 +845,7 @@ impl<'a> GuardedReadExecutor<'a> {
             current_schema,
             scoped_level,
             audit_tool,
+            ReadQueryProvenance::ServerRead,
         )
         .await
     }
@@ -815,6 +876,7 @@ impl<'a> GuardedReadExecutor<'a> {
         current_schema: Option<String>,
         scoped_level: &SessionLevelState,
         tool: &str,
+        provenance: ReadQueryProvenance,
     ) -> Result<Value, ErrorEnvelope> {
         let (prepared, semantic_metadata) = {
             let audit_tool = tool.to_owned();
@@ -1039,7 +1101,7 @@ impl<'a> GuardedReadExecutor<'a> {
         };
         let conn: &dyn OracleConnection = state.conn.as_ref();
         let policy_attachment = prepared.policy.clone();
-        let admitted = AdmittedRead::new(prepared)?;
+        let admitted = AdmittedRead::new(prepared, provenance)?;
         let mut response = self
             .run_prepared_query(
                 cx,
@@ -1258,7 +1320,7 @@ impl<'a> GuardedReadExecutor<'a> {
             let conn: &dyn OracleConnection = state.conn.as_ref();
             let policy_attachment = prepared.policy.clone();
             let fga_evidence = prepared.fga_evidence;
-            let admitted = AdmittedRead::new(prepared)?;
+            let admitted = AdmittedRead::new(prepared, ReadQueryProvenance::CallerRead)?;
             if fga_evidence == FgaEvidence::Unavailable {
                 append_fga_evidence_unavailable_audit(
                     AuditEntryCtx {
@@ -1299,7 +1361,7 @@ impl<'a> GuardedReadExecutor<'a> {
         runtime: PreparedQueryRuntime<'_>,
         admitted: AdmittedRead,
     ) -> Result<Value, ErrorEnvelope> {
-        let prepared = admitted.into_plan();
+        let (prepared, provenance) = admitted.into_parts();
         let PreparedQueryRuntime {
             conn,
             request_budget,
@@ -1324,6 +1386,7 @@ impl<'a> GuardedReadExecutor<'a> {
         let read_conn = ReadUncertaintyConn {
             inner: conn,
             quarantine: Some(&self.quarantine),
+            provenance,
         };
         // A9: narrow the handler context to the read-path capability row
         // (TIME + IO; no SPAWN / REMOTE / RANDOM). The pure handler work below —
@@ -1772,7 +1835,7 @@ impl OracleDispatcher {
         active_profile: Option<String>,
         admitted: AdmittedRead,
     ) -> Result<QueryStreamDelivery, ErrorEnvelope> {
-        let prepared = admitted.into_plan();
+        let (prepared, provenance) = admitted.into_parts();
         let ReadExecutionPlan {
             args: a,
             audit_tool: _,
@@ -1837,12 +1900,13 @@ impl OracleDispatcher {
         let fetch_rows = MAX_QUERY_STREAM_ROWS.saturating_add(1);
         let wrapped_sql = paginated_sql(&executed_sql, offset, fetch_rows);
         let stream_start = conn
-            .query_row_stream(
+            .query_row_stream_with_provenance(
                 cx,
                 &wrapped_sql,
                 &binds,
                 caps.max_rows.max(1),
                 &serialize_opts,
+                provenance,
             )
             .await
             .map_err(|err| self.stream_db_error_envelope(err));
@@ -1985,6 +2049,7 @@ impl OracleDispatcher {
         let read_conn = ReadUncertaintyConn {
             inner: conn,
             quarantine: Some(&self.quarantine),
+            provenance: ReadQueryProvenance::CallerRead,
         };
         let mut before = read_query_as_of(
             cx,
@@ -2135,6 +2200,7 @@ impl OracleDispatcher {
             let observed = ReadUncertaintyConn {
                 inner: conn.as_ref(),
                 quarantine: None,
+                provenance: ReadQueryProvenance::CallerRead,
             };
             let executed_sql = with_audit_marker(sql, Some(profile), "oracle_diff");
             let catalog_cache = OracleCatalogResolverCache::new();

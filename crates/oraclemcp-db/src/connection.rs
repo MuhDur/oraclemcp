@@ -991,6 +991,26 @@ pub trait OracleConnection: Send + Sync {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError>;
+    /// Run a query while retaining the typed read origin at connection
+    /// adapters and test observers. Implementations that do not inspect
+    /// provenance keep the normal driver behavior.
+    async fn query_rows_with_provenance(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        provenance: crate::ReadQueryProvenance,
+        serialize_opts: Option<&SerializeOptions>,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let _ = provenance;
+        match serialize_opts {
+            Some(options) => {
+                self.query_rows_with_serialize_options(cx, sql, binds, options)
+                    .await
+            }
+            None => self.query_rows(cx, sql, binds).await,
+        }
+    }
     /// Run a query with serialization caps available to the backend. Backends
     /// that materialize driver-side locators should use these caps; backends
     /// without locator values can fall back to [`OracleConnection::query_rows`].
@@ -1035,6 +1055,20 @@ pub trait OracleConnection: Send + Sync {
         Err(DbError::UnsupportedFeature(
             "owned row streaming is not supported by this Oracle backend".to_owned(),
         ))
+    }
+    /// Start a streamed read while retaining the executor's typed provenance.
+    async fn query_row_stream_with_provenance(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        arraysize: usize,
+        serialize_opts: &SerializeOptions,
+        provenance: crate::ReadQueryProvenance,
+    ) -> Result<QueryRowStreamStart, DbError> {
+        let _ = provenance;
+        self.query_row_stream(cx, sql, binds, arraysize, serialize_opts)
+            .await
     }
     /// Run a query, binding `binds` by name (`:name`). Values are always bound,
     /// never interpolated. Backends that cannot bind by name should fail

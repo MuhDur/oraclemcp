@@ -58,18 +58,18 @@ use oraclemcp_db::{
     MaskComparabilityBreak, OracleBackend, OracleBind, OracleCatalogResolverCache,
     OracleConnection, OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome,
     QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart,
-    ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingDecisionAction,
-    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, SemanticSearchMetric,
-    SerializeOptions, SourceReadOptions, StructuredDecodeCaps, compile_errors,
-    compile_object_statements, describe_columns, describe_constraints, describe_index,
-    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
-    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
-    incomparable_masked_columns, list_objects, list_objects_page, list_schema_projection_page,
-    list_schemas, observe_vpd_rls_for_relations, paginated_sql, plan_cost_estimate,
-    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_query,
-    read_query_as_of, run_catalog_query, search_objects, search_source, semantic_search_query,
-    semantic_search_query_with_filter, semantic_search_text_query,
-    semantic_search_text_query_with_filter, serialize_row,
+    ReadQueryProvenance, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
+    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
+    ResultMaskingRule, SemanticSearchMetric, SerializeOptions, SourceReadOptions,
+    StructuredDecodeCaps, compile_errors, compile_object_statements, describe_columns,
+    describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
+    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
+    get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
+    list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, paginated_sql,
+    plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
+    probe_dependents, read_query, read_query_as_of, run_catalog_query, search_objects,
+    search_source, semantic_search_query, semantic_search_query_with_filter,
+    semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{
     FgaEvidence, FgaEvidencePolicy, SearchDetailLevel, SourceText, StatementOutcome,
@@ -85,10 +85,10 @@ use oraclemcp_guard::{
     ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, CatalogObjectKind, Classifier,
     ClassifierConfig, DangerLevel, EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql,
     EscalationError, ExecGrantBinding, ExecGrantError, ExecGrantStore, ExecLimits, GuardDecision,
-    ImpactV1, LevelDecision, ObjectRef, OperatingLevel, OperatorStatementClass, OutputCapture,
-    PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity, QuoteSemantics,
-    RawName, ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig,
-    VerdictCertificate, enforce_sql_policy, is_allowed_alter_session, parse_edition_lifecycle_sql,
+    ImpactV1, LevelDecision, OperatingLevel, OperatorStatementClass, OutputCapture, PolicyGate,
+    PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, QuoteSemantics, RawName,
+    ResolvedObject, SessionLevelState, SqlPolicyConfig, VerdictCertificate, enforce_sql_policy,
+    is_allowed_alter_session, parse_edition_lifecycle_sql,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1138,6 +1138,7 @@ impl OracleDispatcher {
             let observed = ReadUncertaintyConn {
                 inner: conn.as_ref(),
                 quarantine: None,
+                provenance: ReadQueryProvenance::ServerRead,
             };
             let connection = describe_conn(cx, &observed).await?;
             let catalog_revision = OracleCatalogResolverCache::new().generation().0;
@@ -1210,6 +1211,7 @@ impl OracleDispatcher {
             let observed = ReadUncertaintyConn {
                 inner: conn.as_ref(),
                 quarantine: None,
+                provenance: ReadQueryProvenance::ServerRead,
             };
             let objects = search_objects(
                 cx,
@@ -1561,28 +1563,6 @@ static READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
 /// live catalog for every lexical occurrence.
 static SEMANTIC_READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> =
     LazyLock::new(|| Classifier::engine_free_baseline(ClassifierConfig::new()));
-
-/// Classifier used for server-generated read SQL. It is deliberately separate
-/// from [`DEFAULT_CLASSIFIER`] so only this internal surface gets a tiny purity
-/// oracle for Oracle-owned read-only package routines used by dictionary tools.
-static GENERATED_READ_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
-    Classifier::new(ClassifierConfig::new()).with_oracle(Arc::new(GeneratedReadPurityOracle))
-});
-
-struct GeneratedReadPurityOracle;
-
-impl SideEffectOracle for GeneratedReadPurityOracle {
-    fn routine_purity(&self, routine: &ObjectRef) -> Purity {
-        let schema = routine.schema.as_deref().unwrap_or("").to_ascii_uppercase();
-        let name = routine.name.to_ascii_uppercase();
-        match (schema.as_str(), name.as_str()) {
-            ("DBMS_LOB", "SUBSTR") | ("DBMS_METADATA", "GET_DDL") | ("DBMS_XPLAN", "DISPLAY") => {
-                Purity::ProvenReadOnly
-            }
-            _ => Purity::Unknown,
-        }
-    }
-}
 
 /// Serialize a slice of rows to a JSON array via the canonical row serializer.
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
@@ -7612,77 +7592,6 @@ fn db_internal_from_envelope(err: ErrorEnvelope) -> DbError {
     DbError::Internal(format!("{:?}: {}", err.error_class, err.message))
 }
 
-fn normalized_generated_sql(sql: &str) -> String {
-    sql.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase()
-}
-
-fn generated_read_sql_is_allowlisted(sql: &str) -> bool {
-    let normalized = normalized_generated_sql(sql);
-    if normalized.contains(';') || !normalized.starts_with("SELECT ") {
-        return false;
-    }
-
-    const ALLOWED_SURFACE_TOKENS: &[&str] = &[
-        " FROM ALL_",
-        " JOIN ALL_",
-        " FROM DBA_",
-        " JOIN DBA_",
-        " FROM USER_",
-        " JOIN USER_",
-        " FROM V$",
-        " JOIN V$",
-        " FROM GV$",
-        " JOIN GV$",
-        " FROM PERFSTAT.",
-        " JOIN PERFSTAT.",
-        " FROM STATS$",
-        " JOIN STATS$",
-        " DBMS_LOB.SUBSTR(",
-        " DBMS_METADATA.GET_DDL(",
-        " TABLE(DBMS_XPLAN.DISPLAY",
-    ];
-    if ALLOWED_SURFACE_TOKENS
-        .iter()
-        .any(|token| normalized.contains(token))
-    {
-        return true;
-    }
-
-    let sample_shape = normalized.starts_with("SELECT * FROM (SELECT * FROM ")
-        && normalized.ends_with(") WHERE ROWNUM <= :1");
-    let lob_lookup_shape = normalized.contains(" AS LOB_VALUE FROM ")
-        && normalized.ends_with(" = :1 FETCH FIRST 1 ROW ONLY");
-    sample_shape || lob_lookup_shape
-}
-
-fn ensure_generated_read_sql_allowed(sql: &str) -> Result<DangerLevel, ErrorEnvelope> {
-    let baseline = GENERATED_READ_CLASSIFIER.classify(sql);
-    if matches!(baseline.danger, DangerLevel::Forbidden) {
-        return ensure_read_only_decision(baseline).map(|()| DangerLevel::Safe);
-    }
-    if !generated_read_sql_is_allowlisted(sql) {
-        return Err(ErrorEnvelope::new(
-            ErrorClass::PolicyDenied,
-            "server-generated read SQL is not on the built-in metadata/monitor allowlist",
-        )
-        .with_next_step(
-            "route ad-hoc SQL through oracle_query so the caller-supplied SQL gate owns it",
-        ));
-    }
-    if ensure_read_only_decision(baseline.clone()).is_ok() {
-        return Ok(baseline.danger);
-    }
-    let decision = Classifier::new(ClassifierConfig::new().with_allow(sql))
-        .with_oracle(Arc::new(GeneratedReadPurityOracle))
-        .classify(sql);
-    let danger = decision.danger;
-    ensure_read_only_decision(decision)?;
-    Ok(danger)
-}
-
 fn generated_read_tool(tool: &str) -> bool {
     matches!(
         tool,
@@ -11688,6 +11597,7 @@ impl OracleDispatcher {
             let observed_conn = ReadUncertaintyConn {
                 inner: state.conn.as_ref(),
                 quarantine: Some(&self.quarantine),
+                provenance: ReadQueryProvenance::ServerRead,
             };
             match observe_connection_info(cx, &observed_conn).await {
                 Ok(info) => {
@@ -12284,6 +12194,7 @@ impl OracleDispatcher {
                     current_schema,
                     &scoped_level,
                     tool,
+                    ReadQueryProvenance::CallerRead,
                 )
                 .await;
         }
@@ -12470,10 +12381,12 @@ impl OracleDispatcher {
         let observed_conn = ReadUncertaintyConn {
             inner: conn,
             quarantine: Some(&self.quarantine),
+            provenance: ReadQueryProvenance::ServerRead,
         };
         let observed_metadata_conn = ReadUncertaintyConn {
             inner: metadata_conn,
             quarantine: std::ptr::eq(conn, metadata_conn).then_some(&self.quarantine),
+            provenance: ReadQueryProvenance::ServerRead,
         };
         let generated_read_subject = system_generated_read_subject();
         let (generated_read_db_evidence, generated_read_evidence_error) = if generated_read {

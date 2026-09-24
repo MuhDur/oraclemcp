@@ -166,6 +166,17 @@ macro_rules! health_probe_sql {
     };
 }
 
+macro_rules! extract_owner_sql {
+    ($before:literal, $after:literal) => {
+        concat!(
+            $before,
+            ":1, :2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14, :15, :16, ",
+            ":17, :18, :19, :20, :21, :22, :23, :24, :25, :26, :27, :28, :29, :30, :31, :32",
+            $after
+        )
+    };
+}
+
 pub(crate) const VPD_RLS_POLICY_BY_SCHEMA_SQL: &str = "SELECT object_owner, object_name, policy_name, \
     pf_owner, package, function, sel, ins, upd, del, enable \
     FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
@@ -401,11 +412,71 @@ pub enum CatalogQueryId {
     VpdRlsPoliciesBySchema,
     /// Bounded visible VPD policies for one relation, for diagnostic display only.
     VpdRlsPoliciesByObject,
+    /// Fixed owner-batched catalog snapshot rowsets.
+    ExtractObjects,
+    /// Snapshot column metadata.
+    ExtractColumns,
+    /// Snapshot constraint metadata.
+    ExtractConstraints,
+    /// Snapshot index metadata.
+    ExtractIndexes,
+    /// Snapshot trigger metadata.
+    ExtractTriggers,
+    /// Snapshot visible synonyms and PUBLIC synonyms once.
+    ExtractSynonyms,
+    /// Snapshot routine metadata.
+    ExtractRoutines,
+    /// Snapshot routine argument metadata.
+    ExtractRoutineArguments,
+    /// Snapshot view metadata.
+    ExtractViews,
+    /// Snapshot materialized view metadata.
+    ExtractMaterializedViews,
+    /// Snapshot sequence metadata.
+    ExtractSequences,
+    /// Snapshot object type attributes.
+    ExtractTypeAttributes,
+    /// Snapshot visible users once.
+    ExtractUsers,
+    /// Snapshot object grants.
+    ExtractGrants,
+    /// Snapshot database links and PUBLIC links once.
+    ExtractDatabaseLinks,
+    /// Snapshot table comments.
+    ExtractTableComments,
+    /// Snapshot column comments.
+    ExtractColumnComments,
+    /// Snapshot visible editions once.
+    ExtractEditions,
+    /// Snapshot editioning views.
+    ExtractEditioningViews,
+    /// Snapshot VPD policy metadata.
+    ExtractVpdPolicies,
+    /// Snapshot object dependencies.
+    ExtractDependencies,
+    /// Snapshot PL/Scope availability.
+    ExtractPlscopeAvailability,
+    /// Snapshot PL/Scope identifiers.
+    ExtractPlscopeIdentifiers,
+}
+
+/// Typed origin for a query reaching an [`OracleConnection`].
+///
+/// Caller and server SQL are admitted by the dispatch read executor. Catalog
+/// SQL is identified by a closed [`CatalogQueryId`], never by its text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadQueryProvenance {
+    /// Caller-provided SQL admitted by the semantic read proof.
+    CallerRead,
+    /// Server-built application SQL admitted by the same semantic proof.
+    ServerRead,
+    /// Closed server-owned dictionary or diagnostic SQL.
+    Catalog(CatalogQueryId),
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 108] = [
+    pub const ALL: [Self; 131] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -514,6 +585,29 @@ impl CatalogQueryId {
         Self::LineageColumns,
         Self::VpdRlsPoliciesBySchema,
         Self::VpdRlsPoliciesByObject,
+        Self::ExtractObjects,
+        Self::ExtractColumns,
+        Self::ExtractConstraints,
+        Self::ExtractIndexes,
+        Self::ExtractTriggers,
+        Self::ExtractSynonyms,
+        Self::ExtractRoutines,
+        Self::ExtractRoutineArguments,
+        Self::ExtractViews,
+        Self::ExtractMaterializedViews,
+        Self::ExtractSequences,
+        Self::ExtractTypeAttributes,
+        Self::ExtractUsers,
+        Self::ExtractGrants,
+        Self::ExtractDatabaseLinks,
+        Self::ExtractTableComments,
+        Self::ExtractColumnComments,
+        Self::ExtractEditions,
+        Self::ExtractEditioningViews,
+        Self::ExtractVpdPolicies,
+        Self::ExtractDependencies,
+        Self::ExtractPlscopeAvailability,
+        Self::ExtractPlscopeIdentifiers,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -533,6 +627,42 @@ impl CatalogQueryId {
         const TTTI: BindSchema = BindSchema(&[Text, Text, Text, Integer]);
         const TTT: BindSchema = BindSchema(&[Text, Text, Text]);
         const T32: BindSchema = BindSchema(&[Text; 64]);
+        const OWNER32: BindSchema = BindSchema(&[NullableText; 32]);
+        const OWNER32_PUBLIC: BindSchema = BindSchema(&[
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            Integer,
+        ]);
         const N3I: BindSchema = BindSchema(&[NullableText, NullableText, NullableText, Integer]);
         const N3II: BindSchema =
             BindSchema(&[NullableText, NullableText, NullableText, Integer, Integer]);
@@ -1542,6 +1672,344 @@ impl CatalogQueryId {
                 VisibilityObservation,
                 Diagnostic,
             ),
+            Self::ExtractObjects => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, object_name, object_type, status,
+  to_char(last_ddl_time, 'YYYY-MM-DD"T"HH24:MI:SS') as last_ddl_time_iso,
+  editionable, edition_name
+from all_objects
+where owner in ("#,
+                    r#")
+  and object_type in ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'SEQUENCE', 'TYPE',
+                      'PACKAGE', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'EDITIONING VIEW')
+order by owner, object_type, object_name"#
+                ),
+                OWNER32,
+                "extract object identities for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractColumns => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, table_name, column_name, nvl(column_id, internal_column_id) as column_position,
+  data_type_owner, data_type, data_length, data_precision, data_scale, char_used,
+  nullable, data_default_vc, virtual_column, hidden_column
+from all_tab_cols
+where owner in ("#,
+                    r#")
+order by owner, table_name, nvl(column_id, internal_column_id)"#
+                ),
+                OWNER32,
+                "extract columns for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractConstraints => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  c.owner, c.constraint_name, c.table_name, c.constraint_type,
+  c.r_owner as referenced_table_owner, p.table_name as referenced_table_name,
+  c.search_condition_vc,
+  case when c.deferrable = 'DEFERRABLE' then 'Y' else 'N' end as is_deferrable,
+  case when c.deferred = 'DEFERRED' then 'Y' else 'N' end as is_deferred,
+  child.column_name, child.position as column_position,
+  parent.column_name as referenced_column_name
+from all_constraints c
+left join all_constraints p on p.owner = c.r_owner and p.constraint_name = c.r_constraint_name
+left join all_cons_columns child on child.owner = c.owner and child.constraint_name = c.constraint_name
+left join all_cons_columns parent on parent.owner = p.owner and parent.constraint_name = p.constraint_name
+  and parent.position = child.position
+where c.owner in ("#,
+                    r#")
+  and c.constraint_type in ('P', 'R', 'U', 'C', 'F')
+order by c.owner, c.constraint_name, child.position"#
+                ),
+                OWNER32,
+                "extract constraints for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractIndexes => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  i.owner, i.index_name, i.table_owner, i.table_name,
+  case when i.uniqueness = 'UNIQUE' then 'Y' else 'N' end as is_unique,
+  i.index_type, i.status, c.column_name, c.column_position
+from all_indexes i
+left join all_ind_columns c on c.index_owner = i.owner and c.index_name = i.index_name
+  and c.table_owner = i.table_owner and c.table_name = i.table_name
+where i.owner in ("#,
+                    r#")
+order by i.owner, i.index_name, c.column_position"#
+                ),
+                OWNER32,
+                "extract indexes for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractTriggers => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, trigger_name, table_owner, table_name, trigger_type, triggering_event, when_clause
+from all_triggers
+where owner in ("#,
+                    r#") and base_object_type in ('TABLE', 'VIEW')
+order by owner, trigger_name"#
+                ),
+                OWNER32,
+                "extract triggers for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractSynonyms => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, synonym_name, table_owner, table_name, db_link
+from all_synonyms
+where (owner = 'PUBLIC' and :33 = 1)
+   or (owner <> 'PUBLIC' and owner in ("#,
+                    r#"))
+order by owner, synonym_name"#
+                ),
+                OWNER32_PUBLIC,
+                "extract synonyms, including PUBLIC once",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractRoutines => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, object_name, procedure_name, subprogram_id, overload, object_type,
+  deterministic, pipelined
+from all_procedures
+where owner in ("#,
+                    r#")
+  and (procedure_name is not null or object_type in ('FUNCTION', 'PROCEDURE'))
+order by owner, object_name, procedure_name, subprogram_id"#
+                ),
+                OWNER32,
+                "extract routines for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractRoutineArguments => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, package_name, object_name, subprogram_id, overload, argument_name,
+  position, sequence, data_type, type_owner, type_name, data_length,
+  data_precision, data_scale, in_out, defaulted
+from all_arguments
+where owner in ("#,
+                    r#") and data_level = 0
+order by owner, package_name, object_name, subprogram_id, sequence"#
+                ),
+                OWNER32,
+                "extract routine arguments for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractViews => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, view_name, text_vc, read_only
+from all_views
+where owner in ("#,
+                    r#")
+order by owner, view_name"#
+                ),
+                OWNER32,
+                "extract views for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractMaterializedViews => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, mview_name, refresh_mode, refresh_method, query
+from all_mviews
+where owner in ("#,
+                    r#")
+order by owner, mview_name"#
+                ),
+                OWNER32,
+                "extract materialized views for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractSequences => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  sequence_owner, sequence_name, min_value, max_value, increment_by,
+  cycle_flag, order_flag, cache_size
+from all_sequences
+where sequence_owner in ("#,
+                    r#")
+order by sequence_owner, sequence_name"#
+                ),
+                OWNER32,
+                "extract sequences for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractTypeAttributes => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, type_name, attr_name, attr_no, attr_type_owner, attr_type_name,
+  length, precision, scale
+from all_type_attrs
+where owner in ("#,
+                    r#")
+order by owner, type_name, attr_no"#
+                ),
+                OWNER32,
+                "extract type attributes for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractUsers => (
+                "SELECT username from all_users order by username",
+                EMPTY,
+                "extract visible users once",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractGrants => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  table_schema, table_name, grantee, privilege, grantable, hierarchy
+from all_tab_privs
+where table_schema in ("#,
+                    r#")
+order by table_schema, table_name, grantee, privilege"#
+                ),
+                OWNER32,
+                "extract grants for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractDatabaseLinks => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, db_link, host
+from all_db_links
+where (owner = 'PUBLIC' and :33 = 1)
+   or (owner <> 'PUBLIC' and owner in ("#,
+                    r#"))
+order by owner, db_link"#
+                ),
+                OWNER32_PUBLIC,
+                "extract database links, including PUBLIC once",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractTableComments => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, table_name, table_type, comments
+from all_tab_comments
+where owner in ("#,
+                    r#") and comments is not null
+order by owner, table_name"#
+                ),
+                OWNER32,
+                "extract table comments for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractColumnComments => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, table_name, column_name, comments
+from all_col_comments
+where owner in ("#,
+                    r#") and comments is not null
+order by owner, table_name, column_name"#
+                ),
+                OWNER32,
+                "extract column comments for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractEditions => (
+                "SELECT edition_name, parent_edition_name, usable from all_editions order by edition_name",
+                EMPTY,
+                "extract visible editions once",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractEditioningViews => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, view_name, table_name
+from all_editioning_views
+where owner in ("#,
+                    r#")
+order by owner, view_name"#
+                ),
+                OWNER32,
+                "extract editioning views for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractVpdPolicies => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  object_owner, object_name, policy_group, policy_name, pf_owner, package,
+  function, sel, ins, upd, del, enable
+from all_policies
+where object_owner in ("#,
+                    r#")
+order by object_owner, object_name, policy_group, policy_name"#
+                ),
+                OWNER32,
+                "extract VPD policies for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractDependencies => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, name, type, referenced_owner, referenced_name, referenced_type,
+  dependency_type
+from all_dependencies
+where owner in ("#,
+                    r#")
+order by owner, name, referenced_owner, referenced_name"#
+                ),
+                OWNER32,
+                "extract dependencies for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractPlscopeAvailability => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, plscope_settings
+from all_plsql_object_settings
+where owner in ("#,
+                    r#")"#
+                ),
+                OWNER32,
+                "extract PL/Scope settings for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractPlscopeIdentifiers => (
+                extract_owner_sql!(
+                    r#"SELECT "
+  owner, name, type, usage, line, col, object_name
+from all_identifiers
+where owner in ("#,
+                    r#")
+order by owner, object_name, line, col"#
+                ),
+                OWNER32,
+                "extract PL/Scope identifiers for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
         };
         CatalogReadSpec {
             sql,
@@ -1582,7 +2050,8 @@ pub async fn run_catalog_query(
             "catalog query {id:?} bind schema mismatch"
         )));
     }
-    conn.query_rows(cx, spec.sql, binds).await
+    conn.query_rows_with_provenance(cx, spec.sql, binds, ReadQueryProvenance::Catalog(id), None)
+        .await
 }
 
 pub(crate) const SESSION_CONTEXT_SQL: &str = "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user, \
