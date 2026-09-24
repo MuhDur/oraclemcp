@@ -711,7 +711,11 @@ async fn export_query_to_resource(
     auditor: Option<&Auditor>,
     audit_subject: &AuditSubject,
 ) -> Result<Value, ErrorEnvelope> {
-    let format = oraclemcp_core::ExportFormat::parse(a.export_format.as_deref())
+    let requested_format = a.export_format.map(|format| match format {
+        super::args::ExportFormat::Csv => "csv",
+        super::args::ExportFormat::Json => "json",
+    });
+    let format = oraclemcp_core::ExportFormat::parse(requested_format)
         .ok_or_else(|| invalid_args("export_format must be \"csv\" or \"json\""))?;
     let Some(exports) = exports else {
         return Err(ErrorEnvelope::new(

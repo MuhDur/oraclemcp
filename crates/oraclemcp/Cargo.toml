@@ -117,6 +117,7 @@ toml = "0.8"
 regex = "1"
 insta = { version = "1", features = ["filters"] }
 serde_yaml = "0.9"
+jsonschema = { version = "0.33.0", default-features = false }
 
 # Windows audit startup tests read back the owner and exact DACL that startup
 # installs on audit and WORM parents (bead .12.2). Already in the graph through

@@ -2108,6 +2108,11 @@ fn handle_mcp_post_exchange(
     let parsed = match crate::strict_json::decode_strict_value(&request.body) {
         Ok(value) => value,
         Err(error) => {
+            if let Some(response) =
+                server.duplicate_tools_call_argument_response(&request.body, &error)
+            {
+                return HttpExchange::Buffered(json_response(200, &response));
+            }
             let status = if error.duplicate_pointer().is_some() {
                 400
             } else {

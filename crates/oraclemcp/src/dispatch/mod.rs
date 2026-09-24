@@ -14373,4 +14373,7 @@ impl OracleDispatcher {
 }
 
 #[cfg(test)]
+#[path = "h6r4w_contract_tests.rs"]
+mod h6r4w_contract_tests;
+#[cfg(test)]
 mod tests;

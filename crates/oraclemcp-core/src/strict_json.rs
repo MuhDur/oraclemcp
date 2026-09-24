@@ -8,8 +8,8 @@ use serde_json::{Map, Number, Value};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StrictJsonError {
-    #[error("duplicate JSON member at {json_pointer}")]
-    DuplicateMember { json_pointer: String },
+    #[error("duplicate JSON member at one or more JSON pointers")]
+    DuplicateMember { json_pointers: Vec<String> },
     #[error("invalid JSON: {0}")]
     InvalidJson(#[from] serde_json::Error),
 }
@@ -17,8 +17,18 @@ pub enum StrictJsonError {
 impl StrictJsonError {
     pub fn duplicate_pointer(&self) -> Option<&str> {
         match self {
-            Self::DuplicateMember { json_pointer } => Some(json_pointer),
+            Self::DuplicateMember { json_pointers } => json_pointers.first().map(String::as_str),
             Self::InvalidJson(_) => None,
+        }
+    }
+
+    /// Every duplicated member observed while decoding the complete JSON
+    /// value. Keeping the full set lets transports distinguish ambiguous
+    /// request-envelope fields from duplicate tool arguments.
+    pub fn duplicate_pointers(&self) -> &[String] {
+        match self {
+            Self::DuplicateMember { json_pointers } => json_pointers,
+            Self::InvalidJson(_) => &[],
         }
     }
 
@@ -36,29 +46,35 @@ impl StrictJsonError {
 }
 
 pub fn decode_strict_value(bytes: &[u8]) -> Result<Value, StrictJsonError> {
-    let first_duplicate = RefCell::new(None);
+    let duplicates = RefCell::new(Vec::new());
     let mut decoder = serde_json::Deserializer::from_slice(bytes);
     let decoded = ValueSeed {
         path: String::new(),
-        first_duplicate: &first_duplicate,
+        duplicates: &duplicates,
     }
     .deserialize(&mut decoder)
     .and_then(|value| decoder.end().map(|()| value));
+    let duplicate_pointers = duplicates.into_inner();
     match decoded {
-        Ok(value) => Ok(value),
-        Err(error) => match first_duplicate.into_inner() {
-            Some(json_pointer) => {
-                tracing::warn!(class = "duplicate_json_member", %json_pointer, "JSON request refused");
-                Err(StrictJsonError::DuplicateMember { json_pointer })
-            }
-            None => Err(StrictJsonError::InvalidJson(error)),
-        },
+        Ok(value) if duplicate_pointers.is_empty() => Ok(value),
+        Ok(_) => Err(duplicate_member_error(duplicate_pointers)),
+        Err(_error) if !duplicate_pointers.is_empty() => {
+            Err(duplicate_member_error(duplicate_pointers))
+        }
+        Err(error) => Err(StrictJsonError::InvalidJson(error)),
     }
+}
+
+fn duplicate_member_error(json_pointers: Vec<String>) -> StrictJsonError {
+    for json_pointer in &json_pointers {
+        tracing::warn!(class = "duplicate_json_member", %json_pointer, "JSON request refused");
+    }
+    StrictJsonError::DuplicateMember { json_pointers }
 }
 
 struct ValueSeed<'a> {
     path: String,
-    first_duplicate: &'a RefCell<Option<String>>,
+    duplicates: &'a RefCell<Vec<String>>,
 }
 
 impl<'de> DeserializeSeed<'de> for ValueSeed<'_> {
@@ -116,7 +132,7 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
         let mut values = Vec::new();
         while let Some(value) = seq.next_element_seed(ValueSeed {
             path: child_pointer(&self.0.path, &values.len().to_string()),
-            first_duplicate: self.0.first_duplicate,
+            duplicates: self.0.duplicates,
         })? {
             values.push(value);
         }
@@ -127,15 +143,17 @@ impl<'de> Visitor<'de> for ValueVisitor<'_> {
         let mut values = Map::new();
         while let Some(key) = map.next_key::<String>()? {
             let pointer = child_pointer(&self.0.path, &key);
-            if values.contains_key(&key) {
-                *self.0.first_duplicate.borrow_mut() = Some(pointer);
-                return Err(de::Error::custom("duplicate JSON member"));
+            let duplicate = values.contains_key(&key);
+            if duplicate {
+                self.0.duplicates.borrow_mut().push(pointer.clone());
             }
             let value = map.next_value_seed(ValueSeed {
                 path: pointer,
-                first_duplicate: self.0.first_duplicate,
+                duplicates: self.0.duplicates,
             })?;
-            values.insert(key, value);
+            if !duplicate {
+                values.insert(key, value);
+            }
         }
         Ok(Value::Object(values))
     }
