@@ -14607,7 +14607,7 @@ impl OracleDispatcher {
                     Some(stream_budget.db_quota()),
                 )
                 .map_err(DbError::into_envelope)?;
-                let response = Self::stream_query_response(
+                let response = read_executor::stream_query_response(
                     cx,
                     conn,
                     &stream_budget,
@@ -14760,97 +14760,6 @@ impl OracleDispatcher {
             }
         }
         Ok(response)
-    }
-
-    /// K10: deliver a proven read as an ordered, resumable `chunks` array —
-    /// streaming delivery of `oracle_query`. Each chunk is one [`read_query`]
-    /// cursor page, so a chunk's rows are BYTE-IDENTICAL to the page a caller
-    /// would get by resuming with the previous chunk's `next_cursor`; streaming
-    /// changes DELIVERY, never the proven-read bytes, and the classifier is
-    /// untouched (the read was already gated in `run_prepared_query`).
-    ///
-    /// Backpressure / budget: every chunk boundary re-checkpoints `cx`, so the
-    /// request deadline + cancellation (the asupersync budget carried on `cx`)
-    /// stop the walk between pages — a cancelled or expired stream never keeps
-    /// fetching. Bounded by [`MAX_QUERY_STREAM_ROWS`]: at the cap the final chunk
-    /// carries a resume cursor and the response is flagged `truncated`.
-    ///
-    /// Over the HTTP/SSE transport the assembled `chunks` are re-emitted as
-    /// individual `event: chunk` SSE frames by the transport layer
-    /// (`oraclemcp_core::http`); over stdio/JSON the same `chunks` array is the
-    /// inline incremental-delivery contract.
-    #[allow(clippy::too_many_arguments)]
-    async fn stream_query_response(
-        cx: &Cx,
-        conn: &dyn OracleConnection,
-        request_budget: &RequestBudget,
-        executed_sql: &str,
-        cursor_sql: &str,
-        binds: &[OracleBind],
-        caps: QueryCaps,
-        start_offset: usize,
-        serialize_opts: &SerializeOptions,
-        active_profile: Option<&str>,
-    ) -> Result<Value, ErrorEnvelope> {
-        let page_rows = caps.max_rows.max(1);
-        let max_chunks = MAX_QUERY_STREAM_ROWS.div_ceil(page_rows).max(1);
-        let mut offset = start_offset;
-        let mut chunks: Vec<Value> = Vec::new();
-        let mut columns: Vec<String> = Vec::new();
-        let mut total_rows = 0usize;
-        let mut truncated = false;
-        let mut final_cursor = Value::Null;
-        for seq in 0..max_chunks {
-            // Budget/cancellation checkpoint at every chunk boundary — the
-            // backpressure signal for the walk (A9-narrowed cx is sufficient;
-            // only the DB round trip inside read_query needs the full row).
-            dispatch_checkpoint(cx, "oraclemcp.dispatch.query.stream.chunk")?;
-            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
-            let page = read_query(cx, conn, executed_sql, binds, caps, offset, serialize_opts)
-                .await
-                .map_err(DbError::into_envelope)?;
-            request_budget.enforce(cx).map_err(DbError::into_envelope)?;
-            if seq == 0 {
-                columns = page.columns.clone();
-            }
-            let more = page.truncated;
-            let reached_cap = seq + 1 >= max_chunks;
-            let last = !more || reached_cap;
-            total_rows += page.row_count;
-            // Re-seal the raw next offset as the tamper-evident cursor a
-            // paginated caller would receive (E2); present only when more rows
-            // remain. On the final chunk this doubles as the resume cursor.
-            let sealed_next = page
-                .next_cursor
-                .as_deref()
-                .map(|raw| Value::String(seal_raw_query_cursor(raw, cursor_sql, active_profile)))
-                .unwrap_or(Value::Null);
-            let next_offset = offset + page.row_count;
-            chunks.push(json!({
-                "seq": seq,
-                "rows": page.rows,
-                "row_count": page.row_count,
-                "total_bytes": page.total_bytes,
-                "next_cursor": sealed_next.clone(),
-                "last": last,
-            }));
-            if last {
-                truncated = more;
-                final_cursor = sealed_next;
-                break;
-            }
-            offset = next_offset;
-        }
-        let chunk_count = chunks.len();
-        Ok(json!({
-            "streaming": true,
-            "columns": columns,
-            "chunks": chunks,
-            "chunk_count": chunk_count,
-            "row_count": total_rows,
-            "truncated": truncated,
-            "next_cursor": final_cursor,
-        }))
     }
 }
 
