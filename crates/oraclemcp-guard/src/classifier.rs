@@ -6430,6 +6430,7 @@ mod tests {
             "SELECT employees.name FROM employees@prod.example.com",
             "SELECT \"run@ddl\" FROM (SELECT 1 \"run@ddl\" FROM dual)",
             "WITH c AS (SELECT 1 id FROM dual) SELECT c.id FROM c ORDER BY c.id",
+            "WITH p AS (SELECT ID, LABEL FROM APP.T_PARENT) SELECT p.ID, p.LABEL FROM p ORDER BY p.ID",
         ] {
             assert_eq!(
                 strict.classify(sql).danger,

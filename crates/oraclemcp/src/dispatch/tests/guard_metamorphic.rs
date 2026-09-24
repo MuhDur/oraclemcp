@@ -376,3 +376,20 @@ fn guard_metamorphic_local_alias_shadowing_and_correlated_controls() {
         );
     }
 }
+
+#[test]
+fn cte_qualified_projection_and_order_are_served_reads() {
+    let ordinary = BASES[0];
+    let sql =
+        "WITH p AS (SELECT ID, LABEL FROM APP.ORDERS) SELECT p.ID, p.LABEL FROM p ORDER BY p.ID";
+    let (admitted, calls, error) = served(ordinary, sql);
+    assert!(admitted, "CTE-qualified columns refused: {error:?}");
+    assert_eq!(calls, 1);
+
+    // The CTE exposes only its projected columns. A similarly spelled
+    // qualified callable must remain refused before caller SQL reaches Oracle.
+    let unsafe_sql = "WITH p AS (SELECT ID, LABEL FROM APP.ORDERS) SELECT p.DANGEROUS_FN FROM p";
+    let (admitted, calls, error) = served(ordinary, unsafe_sql);
+    assert!(!admitted, "unprojected CTE member admitted: {error:?}");
+    assert_eq!(calls, 0);
+}
