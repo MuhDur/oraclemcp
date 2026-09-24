@@ -10835,10 +10835,10 @@ fn cumulative_query_cost_budget_only_tightens_existing_query_refusals() {
 }
 
 #[test]
-fn query_cost_gate_refuses_null_or_missing_cost_as_unavailable() {
+fn query_cost_gate_observes_null_or_missing_cost_by_default() {
     for root in [PlanCostFixture::Root(None), PlanCostFixture::NoRoot] {
         let (dispatcher, state) = query_cost_dispatcher(root, 50_000);
-        let err = dispatcher
+        let out = dispatcher
             .dispatch(
                 "oracle_query",
                 json!({
@@ -10846,13 +10846,15 @@ fn query_cost_gate_refuses_null_or_missing_cost_as_unavailable() {
                     "allow_plan_table_write": true
                 }),
             )
-            .expect_err("missing estimate refuses fail-closed");
+            .expect("default policy admits with an explicit unavailable-cost observation");
 
-        assert_eq!(err.error_class, ErrorClass::PolicyDenied);
-        assert!(err.message.contains("cost_unavailable"), "{err:?}");
+        assert_eq!(
+            out["verification_observations"],
+            json!(["cost_unavailable"])
+        );
         assert_eq!(state.explain_writes.load(Ordering::SeqCst), 1);
         assert_eq!(state.plan_cost_reads.load(Ordering::SeqCst), 1);
-        assert_eq!(state.actual_reads.load(Ordering::SeqCst), 0);
+        assert_eq!(state.actual_reads.load(Ordering::SeqCst), 1);
         assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
     }
 }
