@@ -1,0 +1,1423 @@
+[
+  {
+    "case_id": "w4_query_cte_read",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "WITH p AS (SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}) SELECT p.ID, p.LABEL FROM p ORDER BY p.ID",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1",
+          "LABEL": "parent-1"
+        },
+        {
+          "ID": "2",
+          "LABEL": "parent-2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_query_cte_read_unqualified_columns",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "WITH p AS (SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}) SELECT ID, LABEL FROM p ORDER BY ID",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1",
+          "LABEL": "parent-1"
+        },
+        {
+          "ID": "2",
+          "LABEL": "parent-2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_query_cross_owner_read",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT x.ID, x.LABEL FROM ${cross}.T_CROSS_${run_id} x ORDER BY x.ID",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1",
+          "LABEL": "cross-owner"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${cross}.T_CROSS_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "cross-owner"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_query_types_exact_rows",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT t.ID, t.N_VAL, t.V_TEXT, t.NV_TEXT, t.D_VAL, t.TS_VAL, t.IYM_VAL, t.IDS_VAL, t.R_VAL FROM ${owner}.T_TYPES_${run_id} t ORDER BY t.ID",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "D_VAL": "1900-01-01T00:00:00",
+          "ID": "1",
+          "IDS_VAL": "3 04:05:06.123456000",
+          "IYM_VAL": "2-3",
+          "NV_TEXT": "\u0646\u0635\u4eee",
+          "N_VAL": "0",
+          "R_VAL": {
+            "byte_length": 3,
+            "data": "AH//",
+            "encoding": "base64",
+            "truncated": false
+          },
+          "TS_VAL": "9999-12-31T23:59:59.123456000",
+          "V_TEXT": "fixture"
+        },
+        {
+          "D_VAL": null,
+          "ID": "2",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "0",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "3",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "4",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "999999999999999999999999999999999999990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "5",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "99999999999999999999999999999999999999",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "6",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": null,
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, V_TEXT, RAWTOHEX(R_VAL) FROM ${owner}.T_TYPES_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "fixture",
+            "007FFF"
+          ],
+          [
+            2,
+            null,
+            null
+          ],
+          [
+            3,
+            null,
+            null
+          ],
+          [
+            4,
+            null,
+            null
+          ],
+          [
+            5,
+            null,
+            null
+          ],
+          [
+            6,
+            null,
+            null
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_query_types_exact_rows_plain_copy",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE TABLE ${owner}.T_TYPES_COPY_${run_id} AS SELECT ID, N_VAL, V_TEXT, NV_TEXT, D_VAL, TS_VAL, IYM_VAL, IDS_VAL, R_VAL FROM ${owner}.T_TYPES_${run_id}"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT c.ID, c.N_VAL, c.V_TEXT, c.NV_TEXT, c.D_VAL, c.TS_VAL, c.IYM_VAL, c.IDS_VAL, c.R_VAL FROM ${owner}.T_TYPES_COPY_${run_id} c ORDER BY c.ID",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "D_VAL": "1900-01-01T00:00:00",
+          "ID": "1",
+          "IDS_VAL": "3 04:05:06.123456000",
+          "IYM_VAL": "2-3",
+          "NV_TEXT": "\u0646\u0635\u4eee",
+          "N_VAL": "0",
+          "R_VAL": {
+            "byte_length": 3,
+            "data": "AH//",
+            "encoding": "base64",
+            "truncated": false
+          },
+          "TS_VAL": "9999-12-31T23:59:59.123456000",
+          "V_TEXT": "fixture"
+        },
+        {
+          "D_VAL": null,
+          "ID": "2",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "0",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "3",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "0.0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "4",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "999999999999999999999999999999999999990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "5",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": "99999999999999999999999999999999999999",
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        },
+        {
+          "D_VAL": null,
+          "ID": "6",
+          "IDS_VAL": null,
+          "IYM_VAL": null,
+          "NV_TEXT": null,
+          "N_VAL": null,
+          "R_VAL": null,
+          "TS_VAL": null,
+          "V_TEXT": null
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, V_TEXT, RAWTOHEX(R_VAL) FROM ${owner}.T_TYPES_COPY_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "fixture",
+            "007FFF"
+          ],
+          [
+            2,
+            null,
+            null
+          ],
+          [
+            3,
+            null,
+            null
+          ],
+          [
+            4,
+            null,
+            null
+          ],
+          [
+            5,
+            null,
+            null
+          ],
+          [
+            6,
+            null,
+            null
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "setup_ready_sql": "SELECT ID FROM ${owner}.T_TYPES_COPY_${run_id} WHERE ID = 1"
+  },
+  {
+    "case_id": "w4_query_vpd_protected_relation_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT s.ID FROM ${owner}.T_SECURE_${run_id} s WHERE s.ID > 0 /* W4MARK_QUERYVPD000000001 */",
+        "max_rows": 10
+      },
+      "vsql_absent_marker": "W4MARK_QUERYVPD000000001"
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_SECURE_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "audit_zero_executions": true,
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_query_masked_column_masked",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE TABLE ${owner}.T_MASK_${run_id} (ID NUMBER(10) PRIMARY KEY, SECRET_TEXT VARCHAR2(200))"
+      },
+      {
+        "sql": "INSERT INTO ${owner}.T_MASK_${run_id} (ID, SECRET_TEXT) VALUES (1, 'W4_MASK_CANARY_${run_id}')"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT m.ID, m.SECRET_TEXT FROM ${owner}.T_MASK_${run_id} m ORDER BY m.ID",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "<masked>",
+          "SECRET_TEXT": "<masked>"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, SECRET_TEXT FROM ${owner}.T_MASK_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "W4_MASK_CANARY_${run_id}"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "setup_phase": "before_server",
+    "setup_ready_sql": "SELECT ID FROM ${owner}.T_MASK_${run_id} WHERE ID = 1"
+  },
+  {
+    "case_id": "w4_query_dml_refused_readonly",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-query-dml' WHERE ID = 1 /* W4MARK_QUERYDML00000001 */"
+      },
+      "vsql_absent_marker": "W4MARK_QUERYDML00000001"
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "w4_execute_dml_refused_readonly",
+    "tool": "oracle_execute",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-ro-dml' WHERE ID = 1 /* W4MARK_EXECRODML0000001 */"
+      },
+      "vsql_absent_marker": "W4MARK_EXECRODML0000001"
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "w4_execute_insert_rollback_default",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_PARENT_${run_id} (ID, LABEL) VALUES (101, 'w4-insert-rollback')"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": false,
+        "rolled_back": true,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_execute_update_rollback_default",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-updated' WHERE ID = 1"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": false,
+        "rolled_back": true,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_execute_delete_multi_row_rollback",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "DELETE FROM ${owner}.T_TYPES_${run_id} WHERE ID IN (2, 3, 4)"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": false,
+        "rolled_back": true,
+        "rows_affected": 3
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ],
+          [
+            3
+          ],
+          [
+            4
+          ],
+          [
+            5
+          ],
+          [
+            6
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK",
+        "rows_affected": 3
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_execute_merge_rollback",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "MERGE INTO ${owner}.T_PARENT_${run_id} t USING (SELECT 1 AS ID, 'w4-merged' AS LABEL FROM DUAL UNION ALL SELECT 102, 'w4-merge-new' FROM DUAL) s ON (t.ID = s.ID) WHEN MATCHED THEN UPDATE SET t.LABEL = s.LABEL WHEN NOT MATCHED THEN INSERT (ID, LABEL) VALUES (s.ID, s.LABEL)"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": false,
+        "rolled_back": true,
+        "rows_affected": 2
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK",
+        "rows_affected": 2
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_execute_cte_dml_refused_or_admitted_per_classifier",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_PARENT_${run_id} (ID, LABEL) WITH s AS (SELECT 103 AS ID, 'w4-cte' AS LABEL FROM DUAL) SELECT ID, LABEL FROM s"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "rolled_back": true,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_execute_lob_insert_clob_blob",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID, C_VAL, NC_VAL, B_VAL) VALUES (201, TO_CLOB(:1), TO_NCLOB(:2), HEXTORAW(:3))",
+        "binds": [
+          "w4-clob-value",
+          "w4-nclob-value",
+          "CAFEBABE"
+        ]
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": false,
+        "rolled_back": true,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID = 201",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_execute_ddl_refused_at_read_write",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "CREATE TABLE ${owner}.T_DDLRW_${run_id} (ID NUMBER) /* W4MARK_EXECDDLRW0000001 */",
+        "commit": true
+      },
+      "vsql_absent_marker": "W4MARK_EXECDDLRW0000001"
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = '${owner}' AND TABLE_NAME = 'T_DDLRW_${run_id}'",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "w4_execute_commit_without_confirmation_refused",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-unconfirmed' WHERE ID = 1 /* W4MARK_EXECNOCONF000001 */",
+        "commit": true
+      },
+      "vsql_absent_marker": "W4MARK_EXECNOCONF000001"
+    },
+    "expect": {
+      "error_class": "CHALLENGE_REQUIRED"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "CHALLENGE_REQUIRED"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "w4_execute_forged_confirmation_refused",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-forged' WHERE ID = 1 /* W4MARK_EXECFORGED00001 */",
+        "commit": true,
+        "confirm": "w4-forged-confirmation-token"
+      },
+      "vsql_absent_marker": "W4MARK_EXECFORGED00001"
+    },
+    "expect": {
+      "error_class": "CHALLENGE_REQUIRED"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "CHALLENGE_REQUIRED"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "w4_preview_sql_verdict_level_read_only",
+    "tool": "oracle_preview_sql",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id}"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "required_level": "READ_ONLY"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_preview_sql_verdict_level_read_write",
+    "tool": "oracle_preview_sql",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 1"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "required_level": "READ_WRITE"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_preview_sql_verdict_level_ddl",
+    "tool": "oracle_preview_sql",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "CREATE TABLE ${owner}.T_PREVIEW_${run_id} (ID NUMBER)"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "required_level": "DDL"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_preview_sql_verdict_level_admin",
+    "tool": "oracle_preview_sql",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "GRANT SELECT ON ${owner}.T_PARENT_${run_id} TO ${cross}"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "required_level": "ADMIN"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_preview_dml_row_estimate_matches_reread",
+    "tool": "oracle_preview_dml",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-preview' WHERE ID IN (1, 2)",
+        "witness": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "rows_affected": 2
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id} WHERE ID IN (1, 2)",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_set_session_level_exceeds_max_level_refused",
+    "tool": "oracle_set_session_level",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "level": "READ_WRITE"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "changed": false,
+        "confirmation": null,
+        "gate": {
+          "decision": "blocked",
+          "reason": {
+            "type": "exceeds_ceiling",
+            "ceiling": "READ_ONLY",
+            "required": "READ_WRITE"
+          }
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_set_session_level_apply_above_max_level_refused",
+    "tool": "oracle_set_session_level",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "level": "READ_WRITE",
+        "execute": true,
+        "confirm": "w4-forged-elevation-token"
+      }
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_undo_to_unknown_checkpoint_typed_error",
+    "tool": "oracle_undo_to",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "name": "W4_NO_SUCH_CHECKPOINT"
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_sees_rows_committed_between_calls",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "INSERT INTO ${owner}.T_PARENT_${run_id} (ID, LABEL) VALUES (301, 'w4-committed-between-calls')"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT p.ID, p.LABEL FROM ${owner}.T_PARENT_${run_id} p ORDER BY p.ID",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "row_count": 3
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ],
+          [
+            301,
+            "w4-committed-between-calls"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  }
+]
