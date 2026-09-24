@@ -1168,7 +1168,7 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "object_type": { "type": "string", "description": "Allowlisted type, e.g. TABLE, VIEW, PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, SEQUENCE, INDEX, SYNONYM." },
+                "object_type": { "type": "string", "enum": ["TABLE", "VIEW", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "SEQUENCE", "INDEX", "SYNONYM"], "description": "Allowlisted type for DBMS_METADATA.GET_DDL." },
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
                 "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." }
@@ -1819,7 +1819,7 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "object_type": { "type": "string", "description": "Allowlisted object type." },
+                "object_type": { "type": "string", "enum": ["TABLE", "VIEW", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "SEQUENCE", "INDEX", "SYNONYM"], "description": "Allowlisted type for DBMS_METADATA.GET_DDL." },
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "object_name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                 "name": { "type": "string", "description": "Alias for object_name." }
