@@ -863,6 +863,43 @@ fn same_part(left: &RawNamePart, right: &RawNamePart) -> bool {
     }
 }
 
+/// A qualified value must be resolved (or refused) in the nearest scope that
+/// binds its qualifier. A failed local column proof is not permission to bind
+/// the same spelling to an outer alias: in particular, Oracle forbids
+/// `o.id` when `id` belongs to a local `JOIN ... USING (id)`.
+fn local_scope_binds_value_qualifier(block: &QueryBlock, name: &RawName) -> bool {
+    let [qualifier, ..] = name.parts.as_slice() else {
+        return false;
+    };
+    if name.parts.len() < 2 {
+        return false;
+    }
+    if block
+        .statement_scope
+        .aliases
+        .iter()
+        .any(|alias| parts_equal(alias, qualifier))
+    {
+        return true;
+    }
+    block.statement_scope.relations.iter().any(|relation| {
+        relation
+            .alias
+            .as_ref()
+            .is_some_and(|alias| parts_equal(alias, qualifier))
+            || (relation.alias.is_none()
+                && relation
+                    .name
+                    .parts
+                    .last()
+                    .is_some_and(|part| parts_equal(part, qualifier)))
+            || (name.parts.len() >= 3
+                && relation.name.parts.len() >= 2
+                && parts_equal(&relation.name.parts[0], qualifier)
+                && parts_equal(&relation.name.parts[1], &name.parts[1]))
+    })
+}
+
 fn projected_from_local_source(
     plan: &SemanticReadPlan,
     block: &QueryBlock,
@@ -1053,7 +1090,7 @@ pub async fn prove_semantic_read_plan(
                     ));
                 }
             }
-            if block.parent.is_some() {
+            if block.parent.is_some() && !local_scope_binds_value_qualifier(block, name) {
                 let mut ancestor = block.parent;
                 while let Some(id) = ancestor {
                     let outer = &plan.blocks[id.0];
@@ -4154,6 +4191,59 @@ mod tests {
             ));
             assert!(conn.queries.lock().unwrap().is_empty());
         });
+    }
+
+    #[test]
+    fn nested_qualified_using_stays_bound_to_its_local_query_block() {
+        for sql in [
+            "SELECT o.ID FROM APP.ORDERS o WHERE EXISTS (SELECT o.ID FROM APP.ORDERS o JOIN APP.ORDERS p USING (ID))",
+            "SELECT o.ID FROM APP.ORDERS o WHERE EXISTS (SELECT m.ID FROM APP.ORDERS m WHERE EXISTS (SELECT o.ID FROM APP.ORDERS o JOIN APP.ORDERS p USING (ID)))",
+            "SELECT \"O\".ID FROM APP.ORDERS \"O\" WHERE EXISTS (SELECT o.ID FROM APP.ORDERS \"O\" JOIN APP.ORDERS p USING (ID))",
+        ] {
+            let plan = oraclemcp_guard::semantic_read_plan_checked(sql).expect("nested plan");
+            let inner = plan
+                .blocks
+                .iter()
+                .find(|block| !block.statement_scope.merged_joins.is_empty())
+                .expect("USING block");
+            let qualified_using = inner
+                .values
+                .iter()
+                .find(|name| name.parts.len() == 2 && name.parts[1].text.eq_ignore_ascii_case("ID"))
+                .expect("qualified USING value");
+            assert!(
+                local_scope_binds_value_qualifier(inner, qualified_using),
+                "local qualifier must shadow every outer alias: {sql}"
+            );
+            assert!(
+                !inner.correlated_outer_refs.contains(qualified_using),
+                "local USING value is not a correlated reference: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_correlated_reference_retains_outer_resolution_path() {
+        let sql = "SELECT o.ID FROM APP.ORDERS o WHERE EXISTS (SELECT 1 FROM APP.ORDERS i WHERE i.ID = o.ID)";
+        let plan = oraclemcp_guard::semantic_read_plan_checked(sql).expect("correlated plan");
+        let inner = plan
+            .blocks
+            .iter()
+            .find(|block| matches!(block.kind, QueryBlockKind::ExistsSubquery))
+            .expect("inner EXISTS block");
+        let outer_value = inner
+            .values
+            .iter()
+            .find(|name| name.parts.len() == 2 && name.parts[0].text.eq_ignore_ascii_case("O"))
+            .expect("outer alias reference");
+        assert!(
+            !local_scope_binds_value_qualifier(inner, outer_value),
+            "local i alias cannot shadow outer o"
+        );
+        assert!(
+            inner.correlated_outer_refs.contains(outer_value),
+            "outer o reference remains eligible for ancestor resolution"
+        );
     }
 
     #[test]
