@@ -425,6 +425,54 @@
   }
  },
  {
+  "case_id": "w4_describe_view_after_describe_keeps_session_usable",
+  "tool": "oracle_describe_view",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.T_DESC_${run_id} (ID NUMBER(10) CONSTRAINT PK_DESC_${run_id} PRIMARY KEY, LABEL VARCHAR2(40) DEFAULT 'w4' NOT NULL, TWICE NUMBER GENERATED ALWAYS AS (ID * 2) VIRTUAL, HIDDEN_NOTE VARCHAR2(10) INVISIBLE, PARENT_ID NUMBER(10) CONSTRAINT FK_DESC_${run_id} REFERENCES ${owner}.T_PARENT_${run_id}(ID), CONSTRAINT CK_DESC_${run_id} CHECK (ID > 0))"
+   }
+  ],
+  "setup_phase": "before_server",
+  "call": {
+   "arguments": {
+    "owner": "${owner}",
+    "name": "V_TYPES_${run_id}"
+   }
+  },
+  "expect": {
+   "json_subset": {
+    "owner": "${owner}",
+    "name": "V_TYPES_${run_id}"
+   }
+  },
+  "db_reread": [],
+  "audit_expect": [],
+  "on_unsupported": {
+   "error_class": "INVALID_ARGUMENTS"
+  },
+  "steps": [
+   {
+    "tool": "oracle_describe",
+    "arguments": {
+     "owner": "${owner}",
+     "table": "T_DESC_${run_id}"
+    },
+    "expect": {
+     "json_subset": {
+      "owner": "${owner}",
+      "table": "T_DESC_${run_id}"
+     }
+    }
+   }
+  ]
+ },
+ {
   "case_id": "w4_describe_table_columns_exact",
   "tool": "oracle_describe",
   "level": "READ_ONLY",

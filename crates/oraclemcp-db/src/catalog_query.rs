@@ -972,7 +972,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::DescribeColumns => (
-                "SELECT column_name, data_type, data_length, nullable, data_default \
+                "SELECT column_name, data_type, data_length, nullable, data_default_vc AS data_default \
                  FROM all_tab_columns WHERE owner = :1 AND table_name = :2 \
                  ORDER BY column_id",
                 TT,

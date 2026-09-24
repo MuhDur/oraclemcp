@@ -3708,6 +3708,16 @@ mod tests {
     }
 
     #[test]
+    fn describe_columns_projects_default_without_returning_a_long() {
+        let sql = CatalogQueryId::DescribeColumns
+            .spec()
+            .sql
+            .to_ascii_lowercase();
+        assert!(sql.contains("data_default_vc as data_default"));
+        assert!(!sql.contains(", data_default "));
+    }
+
+    #[test]
     fn catalog_query_runner_refuses_bind_arity_mismatch_without_executing() {
         run_with_cx(|cx| async move {
             let conn = ScriptedRows::new([]);
