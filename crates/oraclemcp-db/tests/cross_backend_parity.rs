@@ -358,6 +358,366 @@ fn parity_table(run_id: &str, family: &str) -> String {
     format!("W4O_{run_id}.ORACLEMCP_PARITY_{family}_{run_id}")
 }
 
+fn parity_error_facts(error: DbError, operation: &str) -> Value {
+    let envelope = error.into_envelope();
+    json!({
+        "error_class": envelope.error_class,
+        "ora_code": envelope.ora_code,
+        "retry_after_ms": envelope.retry_after_ms,
+        "operation": operation,
+    })
+}
+
+fn compare_error_outcomes(
+    case_id: &str,
+    operation: &str,
+    expected: Value,
+    driver_result: Result<(), DbError>,
+    official_result: Result<(), DbError>,
+) {
+    let driver_error = driver_result.expect_err(case_id);
+    let official_error = official_result.expect_err(case_id);
+    let driver_facts = parity_error_facts(driver_error, operation);
+    let official_facts = parity_error_facts(official_error, operation);
+    parity_record(
+        case_id,
+        "ErrorEnvelope",
+        "driver-cx",
+        &driver_facts,
+        &driver_facts,
+    );
+    parity_record(
+        case_id,
+        "ErrorEnvelope",
+        "official",
+        &driver_facts,
+        &official_facts,
+    );
+    assert_eq!(
+        driver_facts, official_facts,
+        "{case_id} error envelope parity"
+    );
+    assert_eq!(
+        driver_facts, expected,
+        "{case_id} independent expected envelope"
+    );
+}
+
+async fn run_error_taxonomy_scenario(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    low_driver: &dyn OracleConnection,
+    low_official: &dyn OracleConnection,
+    run_id: &str,
+) {
+    compare_error_outcomes(
+        "parity_error_syntax",
+        "query",
+        json!({"error_class":"SYNTAX_ERROR","ora_code":900,"retry_after_ms":null,"operation":"query"}),
+        driver
+            .query_rows(cx, "SELEC 1 FROM dual", &[])
+            .await
+            .map(|_| ()),
+        official
+            .query_rows(cx, "SELEC 1 FROM dual", &[])
+            .await
+            .map(|_| ()),
+    );
+
+    let table = parity_table(run_id, "ERR");
+    driver
+        .execute(
+            cx,
+            &format!("CREATE TABLE {table} (ID NUMBER PRIMARY KEY)"),
+            &[],
+        )
+        .await
+        .expect("create run-owned unique-constraint table");
+    driver
+        .execute(cx, &format!("INSERT INTO {table} VALUES (1)"), &[])
+        .await
+        .expect("seed run-owned unique-constraint table");
+    driver.commit(cx).await.expect("commit duplicate key seed");
+    let duplicate_insert = format!("INSERT INTO {table} VALUES (1)");
+    compare_error_outcomes(
+        "parity_error_unique_constraint",
+        "execute",
+        json!({"error_class":"INTERNAL","ora_code":1,"retry_after_ms":null,"operation":"execute"}),
+        driver.execute(cx, &duplicate_insert, &[]).await.map(|_| ()),
+        official
+            .execute(cx, &duplicate_insert, &[])
+            .await
+            .map(|_| ()),
+    );
+
+    let hidden = parity_table(run_id, "HIDDEN");
+    driver
+        .execute(cx, &format!("CREATE TABLE {hidden} (ID NUMBER)"), &[])
+        .await
+        .expect("create run-owned privilege table");
+    driver.commit(cx).await.expect("commit privilege table");
+    let hidden_sql = format!("SELECT ID FROM {hidden}");
+    compare_error_outcomes(
+        "parity_error_privilege",
+        "query",
+        json!({"error_class":"OBJECT_NOT_FOUND","ora_code":942,"retry_after_ms":null,"operation":"query"}),
+        low_driver
+            .query_rows(cx, &hidden_sql, &[])
+            .await
+            .map(|_| ()),
+        low_official
+            .query_rows(cx, &hidden_sql, &[])
+            .await
+            .map(|_| ()),
+    );
+
+    let timeout_options = OracleConnectOptions {
+        call_timeout: Some(std::time::Duration::from_secs(1)),
+        ..local_lab_options()
+    };
+    let timeout_driver = RustOracleConnection::connect(cx, timeout_options.clone())
+        .await
+        .expect("driver-cx timeout session");
+    let timeout_official = OfficialOracleConnection::connect(cx, timeout_options)
+        .await
+        .expect("official timeout session");
+    compare_error_outcomes(
+        "parity_error_call_timeout",
+        "execute",
+        json!({"error_class":"TRANSIENT","ora_code":null,"retry_after_ms":null,"operation":"execute"}),
+        timeout_driver
+            .execute(cx, "BEGIN DBMS_SESSION.SLEEP(5); END;", &[])
+            .await
+            .map(|_| ()),
+        timeout_official
+            .execute(cx, "BEGIN DBMS_SESSION.SLEEP(5); END;", &[])
+            .await
+            .map(|_| ()),
+    );
+    timeout_driver
+        .close(cx)
+        .await
+        .expect("close driver-cx timeout session");
+    match timeout_official.close(cx).await {
+        Ok(()) | Err(DbError::Quarantined { .. }) => {}
+        Err(error) => panic!("close official timeout session: {error:?}"),
+    }
+
+    driver
+        .execute(cx, &format!("DROP TABLE {hidden} PURGE"), &[])
+        .await
+        .expect("drop run-owned privilege table");
+    driver
+        .execute(cx, &format!("DROP TABLE {table} PURGE"), &[])
+        .await
+        .expect("drop run-owned error table");
+    driver
+        .commit(cx)
+        .await
+        .expect("commit parity error fixture cleanup");
+}
+
+async fn run_vector_variants_scenario(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    run_id: &str,
+) {
+    let table = parity_table(run_id, "VECVAR");
+    let create = format!(
+        "CREATE TABLE {table} (ID NUMBER PRIMARY KEY, F64 VECTOR(3,FLOAT64), F64S VECTOR(1000,FLOAT64,SPARSE), I8 VECTOR(3,INT8), BIN VECTOR(16,BINARY))"
+    );
+    driver
+        .execute(cx, &create, &[])
+        .await
+        .expect("create run-owned VECTOR variants table");
+    driver.execute(cx, &format!("INSERT INTO {table} VALUES (1, '[1.25,-2.5,3.75]', VECTOR('[1000, [0, 500, 999], [1.5, 2.5, 3.5]]',1000,FLOAT64,SPARSE), '[1,-2,3]', '[85,170]')"), &[])
+        .await.expect("insert FLOAT64, sparse FLOAT64, INT8, and BINARY vectors");
+    driver
+        .execute(cx, &format!("INSERT INTO {table} (ID) VALUES (2)"), &[])
+        .await
+        .expect("insert NULL VECTOR row");
+    driver.commit(cx).await.expect("commit VECTOR fixture");
+
+    for (case_id, column, expected) in [
+        (
+            "parity_vector_float64_dense",
+            "F64",
+            json!({"kind":"vector","storage":"dense","format":"float64","values":[1.25,-2.5,3.75]}),
+        ),
+        (
+            "parity_vector_float64_sparse",
+            "F64S",
+            json!({"kind":"vector","storage":"sparse","format":"float64","num_dimensions":1000,"indices":[0,500,999],"values":[1.5,2.5,3.5]}),
+        ),
+        (
+            "parity_vector_int8",
+            "I8",
+            json!({"kind":"vector","storage":"dense","format":"int8","values":[1,-2,3]}),
+        ),
+        (
+            "parity_vector_binary",
+            "BIN",
+            json!({"kind":"vector","storage":"dense","format":"binary","values":[85,170]}),
+        ),
+    ] {
+        assert_parity_cell(
+            cx,
+            driver,
+            official,
+            (case_id, "VECTOR"),
+            &format!("SELECT {column} AS V FROM {table} WHERE ID=1"),
+            expected,
+            &SerializeOptions::default(),
+        )
+        .await;
+    }
+    assert_parity_cell(
+        cx,
+        driver,
+        official,
+        ("parity_vector_null", "VECTOR"),
+        &format!("SELECT F64 AS V FROM {table} WHERE ID=2"),
+        Value::Null,
+        &SerializeOptions::default(),
+    )
+    .await;
+
+    let non_finite = format!(
+        "INSERT INTO {table} VALUES (3, VECTOR('[NaN,Infinity,-Infinity]',3,FLOAT64), NULL, NULL, NULL)"
+    );
+    let driver_outcome = driver.execute(cx, &non_finite, &[]).await;
+    let official_outcome = official.execute(cx, &non_finite, &[]).await;
+    match (driver_outcome, official_outcome) {
+        (Err(driver_error), Err(official_error)) => {
+            let driver_facts = parity_error_facts(driver_error, "execute");
+            let official_facts = parity_error_facts(official_error, "execute");
+            parity_record(
+                "parity_vector_non_finite_components",
+                "VECTOR(FLOAT64)",
+                "driver-cx",
+                &driver_facts,
+                &driver_facts,
+            );
+            parity_record(
+                "parity_vector_non_finite_components",
+                "VECTOR(FLOAT64)",
+                "official",
+                &driver_facts,
+                &official_facts,
+            );
+            assert_eq!(
+                driver_facts, official_facts,
+                "non-finite VECTOR refusal parity"
+            );
+        }
+        (Ok(_), Ok(_)) => {
+            let sql = format!("SELECT F64 AS V FROM {table} WHERE ID=3");
+            let driver_row = serialized_single_row(
+                driver
+                    .query_rows(cx, &sql, &[])
+                    .await
+                    .expect("read driver-cx non-finite VECTOR"),
+                "driver-cx non-finite VECTOR",
+            );
+            let official_row = serialized_single_row(
+                official
+                    .query_rows(cx, &sql, &[])
+                    .await
+                    .expect("read official non-finite VECTOR"),
+                "official non-finite VECTOR",
+            );
+            assert!(
+                driver_row["V"].is_object(),
+                "non-finite VECTOR must retain structured serialization"
+            );
+            let expected = driver_row["V"].clone();
+            parity_record(
+                "parity_vector_non_finite_components",
+                "VECTOR(FLOAT64)",
+                "driver-cx",
+                &expected,
+                &driver_row["V"],
+            );
+            parity_record(
+                "parity_vector_non_finite_components",
+                "VECTOR(FLOAT64)",
+                "official",
+                &expected,
+                &official_row["V"],
+            );
+            assert_eq!(
+                driver_row["V"], official_row["V"],
+                "non-finite VECTOR serialization parity"
+            );
+        }
+        (driver, official) => panic!(
+            "non-finite VECTOR result differs: driver-cx={:?}, official={:?}",
+            driver
+                .err()
+                .map(|error| parity_error_facts(error, "execute")),
+            official
+                .err()
+                .map(|error| parity_error_facts(error, "execute"))
+        ),
+    }
+    driver
+        .execute(cx, &format!("DROP TABLE {table} PURGE"), &[])
+        .await
+        .expect("drop run-owned VECTOR table");
+    driver.commit(cx).await.expect("commit VECTOR cleanup");
+}
+
+#[test]
+#[ignore = "requires explicit local Oracle Free23 lab credentials, DDL/DML acknowledgement, and W4 cross-user password"]
+fn live_cross_backend_error_and_vector_parity() {
+    run_with_cx(|cx| async move {
+        let options = local_lab_options();
+        let driver = RustOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("driver-cx lab connection");
+        let official = OfficialOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("official lab connection");
+        let run_id = required_lab_env("ORACLEMCP_PARITY_RUN_ID");
+        validate_parity_run_id(&run_id);
+
+        let low_options = OracleConnectOptions {
+            username: Some(format!("W4X_{run_id}")),
+            password: Some(required_lab_env("ORACLEMCP_PARITY_CROSS_PASSWORD")),
+            ..options
+        };
+        let low_driver = RustOracleConnection::connect(&cx, low_options.clone())
+            .await
+            .expect("driver-cx W4 low-privilege connection");
+        let low_official = OfficialOracleConnection::connect(&cx, low_options)
+            .await
+            .expect("official W4 low-privilege connection");
+
+        run_vector_variants_scenario(&cx, &driver, &official, &run_id).await;
+        run_error_taxonomy_scenario(&cx, &driver, &official, &low_driver, &low_official, &run_id)
+            .await;
+
+        low_driver
+            .close(&cx)
+            .await
+            .expect("close driver-cx W4 low-privilege connection");
+        low_official
+            .close(&cx)
+            .await
+            .expect("close official W4 low-privilege connection");
+        driver
+            .close(&cx)
+            .await
+            .expect("close driver-cx parity connection");
+        official
+            .close(&cx)
+            .await
+            .expect("close official parity connection");
+    });
+}
+
 fn parity_record(
     case_id: &str,
     column_type: &str,

@@ -526,6 +526,16 @@ pub enum DbError {
     /// The request context was cancelled before or after a DB boundary.
     #[error("database call cancelled: {0}")]
     Cancelled(String),
+    /// A database call exceeded its per-call timeout. The retry disposition is
+    /// retained separately because one backend may drain and reuse its session
+    /// while another must discard a session whose timeout recovery failed.
+    #[error("Oracle {operation} call timed out")]
+    CallTimeout {
+        /// The connection operation that timed out (`query` or `execute`).
+        operation: String,
+        /// Backend-specific safe disposition after timeout recovery.
+        retry_action: OracleRetryAction,
+    },
     /// An auth mode is configured that this build cannot satisfy yet.
     #[error("unsupported auth mode: {0}")]
     UnsupportedAuth(String),
@@ -568,6 +578,9 @@ impl DbError {
             | DbError::ConnectionLost(_)
             | DbError::Pool(_)
             | DbError::Quarantined { .. } => true,
+            DbError::CallTimeout { retry_action, .. } => {
+                *retry_action == OracleRetryAction::ReconnectThenRetry
+            }
             DbError::Query(message) | DbError::Execute(message) => {
                 message_is_uncertain_connection_state(message)
             }
@@ -590,6 +603,7 @@ impl DbError {
     pub fn retry_action(&self) -> OracleRetryAction {
         match self {
             DbError::ConnectionLost(_) => OracleRetryAction::ReconnectThenRetry,
+            DbError::CallTimeout { retry_action, .. } => *retry_action,
             DbError::Query(message)
             | DbError::Execute(message)
             | DbError::ServerQuery(message)
@@ -721,6 +735,10 @@ impl DbError {
                 ErrorEnvelope::new(ErrorClass::Busy, msg).with_retry_after_ms(250)
             }
             DbError::Cancelled(msg) => ErrorEnvelope::new(ErrorClass::Timeout, msg),
+            DbError::CallTimeout { operation, .. } => ErrorEnvelope::new(
+                ErrorClass::Transient,
+                format!("Oracle {operation} call timed out"),
+            ),
             DbError::UnsupportedAuth(msg) | DbError::UnsupportedFeature(msg) => {
                 ErrorEnvelope::new(ErrorClass::InvalidArguments, msg)
             }
@@ -1659,6 +1677,32 @@ mod tests {
         assert_eq!(env.error_class, ErrorClass::Timeout);
         assert!(env.message.contains("oracle_query.serialize.rows"));
         assert!(env.retry_after_ms.is_none());
+    }
+
+    #[test]
+    fn typed_call_timeout_preserves_transient_envelope_and_connection_disposition() {
+        let reusable = DbError::CallTimeout {
+            operation: "execute".to_owned(),
+            retry_action: OracleRetryAction::RetrySameConnection,
+        };
+        let envelope = reusable.clone().into_envelope();
+        assert_eq!(envelope.error_class, ErrorClass::Transient);
+        assert_eq!(envelope.ora_code, None);
+        assert_eq!(envelope.retry_after_ms, None);
+        assert_eq!(
+            reusable.retry_action(),
+            OracleRetryAction::RetrySameConnection
+        );
+        assert!(!reusable.is_connection_lost());
+        assert!(!reusable.is_uncertain_session_state());
+
+        let dead = DbError::CallTimeout {
+            operation: "execute".to_owned(),
+            retry_action: OracleRetryAction::ReconnectThenRetry,
+        };
+        assert_eq!(dead.retry_action(), OracleRetryAction::ReconnectThenRetry);
+        assert!(dead.is_connection_lost());
+        assert!(dead.is_uncertain_session_state());
     }
 
     // --- into_envelope coverage for the remaining DbError variants (H5) -----

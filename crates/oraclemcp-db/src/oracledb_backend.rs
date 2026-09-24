@@ -1321,9 +1321,15 @@ fn official_error(error: oracledb::Error, operation: OfficialOperation) -> DbErr
         |code| format!("ORA-{code:05}: official Oracle driver operation failed"),
     );
     match error.kind() {
-        oracledb::ErrorKind::CallTimeoutExceeded => {
-            DbError::Cancelled("official Oracle driver call timeout exceeded".to_owned())
-        }
+        oracledb::ErrorKind::CallTimeoutExceeded => DbError::CallTimeout {
+            operation: match operation {
+                OfficialOperation::Connect => "connect",
+                OfficialOperation::Query => "query",
+                OfficialOperation::Execute => "execute",
+            }
+            .to_owned(),
+            retry_action: oraclemcp_error::OracleRetryAction::RetrySameConnection,
+        },
         oracledb::ErrorKind::DeadConnection
         | oracledb::ErrorKind::NotConnected
         | oracledb::ErrorKind::UnableToRecover => DbError::ConnectionLost(detail),

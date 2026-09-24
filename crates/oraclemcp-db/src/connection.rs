@@ -6510,6 +6510,12 @@ mod driver {
         opts: &OracleConnectOptions,
         context: Option<&str>,
     ) -> DbError {
+        if matches!(&err, oraclemcp_driver_cx::Error::CallTimeout(_)) {
+            return DbError::CallTimeout {
+                operation: context.unwrap_or("query").to_owned(),
+                retry_action: oraclemcp_error::OracleRetryAction::RetrySameConnection,
+            };
+        }
         // TTC message type 129 is a transient protocol desynchronization in
         // the metadata/direct-path response family. The pinned driver raises
         // it as `ProtocolError::UnknownMessageType` but deliberately reports
