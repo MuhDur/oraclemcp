@@ -26,6 +26,8 @@ RUN dnf -y install ca-certificates curl gcc && dnf clean all && \
     chmod 0755 /tmp/rustup-init && \
     /tmp/rustup-init -y --profile minimal --default-toolchain nightly-2026-05-11
 ENV PATH="/root/.cargo/bin:${PATH}"
+# Bound compiler fanout inside Docker builds the same way as host cargo runs.
+ENV CARGO_BUILD_JOBS=16
 # The image build compiles inside a single-tenant container, but `COPY . .`
 # below brings in the repo's .cargo/config.toml RUSTC_WRAPPER (cargo_build_guard),
 # which fails closed demanding a machine-wide build lease it cannot find here.
