@@ -36,6 +36,11 @@
       "trace": "required-quality"
     },
     {
+      "path": "scripts/cargo_patch_warning_guard.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/changelog_pace_lint.sh",
       "kind": "entry_point",
       "trace": "required-quality"
