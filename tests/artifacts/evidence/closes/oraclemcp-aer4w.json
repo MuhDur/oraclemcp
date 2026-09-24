@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T04:20:00Z",
+  "bead_id": "oraclemcp-aer4w",
+  "scope": {
+    "summary": "Seven Windows unused-function lint errors resolved by cfg-gating test hooks and stubs to the targets that use them (no allow() suppression) (c361317c).",
+    "in_scope": [
+      "crates/oraclemcp-audit/src/anchor.rs",
+      "crates/oraclemcp-audit/src/shipping.rs",
+      "crates/oraclemcp-audit/src/sink/open_tests.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "48bc88a5e5b18e192ca359f51e00d49304e03bad",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "linux gate",
+        "kind": "cli",
+        "trace": "Orchestrator Linux batch gate at 48bc88a5 (contains 7b2f9942 and c361317c; clean worktree, lease): fmt/clippy/deny OK; 118 suites, 3482 passed, 0 failed."
+      },
+      {
+        "name": "native windows",
+        "kind": "cli",
+        "trace": "Windows audit native proof run 35953177320 at c361317c: conclusion success (read by the orchestrator)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Windows-target clippy result is the implementer's; the orchestrator read the native run verdict."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

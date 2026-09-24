@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-24T04:05:00Z",
+  "generated_at": "2026-09-24T04:20:00Z",
   "bead_id": "oraclemcp-sotic",
   "scope": {
     "summary": "Windows audit instability root-caused: (1) REAL product defect fixed: DurableShippingForwarder::flush() could be lost between a failed delivery and the worker parking for its retry backoff (lost wakeup; worker slept the full backoff); fixed with a flush_requested flag bridged through the queue mutex, consumed before parking. (2) shutdown_budget_includes_waiting_for_the_queue_mutex was a timing assumption, pinned deterministically. (3) sink.rs Windows failure was a test-setup race (helper now signals over a pipe). Liveness-only deadlines use one named 30s hang guard where the eventual outcome is still asserted (7b2f9942).",
@@ -14,7 +14,7 @@
     ]
   },
   "source": {
-    "sha": "7b2f9942584060ef95f0643a0b11dcc78549fb9e",
+    "sha": "48bc88a5e5b18e192ca359f51e00d49304e03bad",
     "tree_clean": true,
     "branch": "main"
   },
@@ -24,7 +24,7 @@
       {
         "name": "linux gate",
         "kind": "cli",
-        "trace": "Orchestrator Linux batch gate at 7b2f9942 (clean worktree, lease): fmt/clippy/deny OK; 118 suites, 3482 passed, 0 failed."
+        "trace": "Orchestrator Linux batch gate at 48bc88a5 (contains 7b2f9942 and c361317c; clean worktree, lease): fmt/clippy/deny OK; 118 suites, 3482 passed, 0 failed."
       },
       {
         "name": "named tests (gate)",
@@ -40,6 +40,11 @@
         "name": "limit",
         "kind": "cli",
         "trace": "The three Windows runners were fast (audit tests ~8-9s vs 65s on the slow runner that produced the original failures); slow-runner behaviour is covered by the 30s hang guard, not re-observed."
+      },
+      {
+        "name": "native windows after aer4w",
+        "kind": "cli",
+        "trace": "Windows audit native proof run 35953177320 at c361317c (aer4w cfg-gating in the same files): conclusion success, read by the orchestrator."
       }
     ]
   },

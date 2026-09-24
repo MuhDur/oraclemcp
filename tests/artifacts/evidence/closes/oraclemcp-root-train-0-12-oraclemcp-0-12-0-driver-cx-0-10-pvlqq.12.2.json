@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-24T04:05:00Z",
+  "generated_at": "2026-09-24T04:20:00Z",
   "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.12.2",
   "scope": {
     "summary": "WORM shipping parent and startup audit parent ownership proven on native Windows (fresh-object owner, broad-DACL tightening, foreign-owned refusal) (ffb9b04e, c36292b1); the job-level instability that kept the native job red is fixed in sotic (7b2f9942).",
@@ -13,7 +13,7 @@
     ]
   },
   "source": {
-    "sha": "7b2f9942584060ef95f0643a0b11dcc78549fb9e",
+    "sha": "48bc88a5e5b18e192ca359f51e00d49304e03bad",
     "tree_clean": true,
     "branch": "main"
   },
@@ -23,12 +23,17 @@
       {
         "name": "linux gate",
         "kind": "cli",
-        "trace": "Orchestrator Linux batch gate at 7b2f9942 (clean worktree, lease): fmt/clippy/deny OK; 118 suites, 3482 passed, 0 failed."
+        "trace": "Orchestrator Linux batch gate at 48bc88a5 (contains 7b2f9942 and c361317c; clean worktree, lease): fmt/clippy/deny OK; 118 suites, 3482 passed, 0 failed."
       },
       {
         "name": "native windows",
         "kind": "cli",
         "trace": "Native Windows \"Windows audit native proof\" runs 35952039744, 35952041544, 35952043277 read by the orchestrator: all conclusion success at headSha 7b2f9942 (full job green). The six .12.2 tests (build_auditor_hardens_a_new_worm_parent_before_opening_the_mirror, worm_parent_existing_broad_user_owned_dacl_is_tightened, worm_parent_foreign_owned_is_refused_shipping_invalid, startup_audit_parent_missing_is_created_private, startup_audit_parent_broad_dacl_negative_case, startup_audit_parent_foreign_owned_is_refused) are part of that green job."
+      },
+      {
+        "name": "native windows after aer4w",
+        "kind": "cli",
+        "trace": "Windows audit native proof run 35953177320 at c361317c (aer4w cfg-gating in the same files): conclusion success, read by the orchestrator."
       }
     ]
   },
