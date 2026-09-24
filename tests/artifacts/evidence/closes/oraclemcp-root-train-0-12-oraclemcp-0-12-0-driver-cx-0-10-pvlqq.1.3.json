@@ -1,0 +1,58 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T21:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.1.3",
+  "scope": {
+    "summary": "Driver repo (rust-oracledb) health at 110db0ac: Required workflow green on the latest pushed SHA; br doctor schema.tables/schema.columns ok (no SCHEMA_MISMATCH); mock-code audit: zero todo!/unimplemented! in crate code outside tests; one production-reachable silent no-op (pyshim clear_end_user_security_context) routed to child oraclemcp-7h14a and closed; typed fail-closed NotImplemented refusals classified as documented unsupported surface (not stubs); SBOM/provenance regenerated; rustls already 0.23.45 (RUSTSEC-2026-0285 clear).",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "Scheduled-lane health and driver feature correctness (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "b41e4c95d0527a93cea8603cc38f2934fb1b452b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Required CI on exact SHA (orchestrator check)",
+        "kind": "cli",
+        "trace": "gh run list -R MuhDur/rust-oracledb --workflow required.yml: 110db0ac completed success (run 36061861994); driver origin/main == 110db0a. Earlier SHAs b0b88c59/c2cb8177 failed (SBOM drift) and were fixed, not skipped."
+      },
+      {
+        "name": "tracker check (orchestrator)",
+        "kind": "cli",
+        "trace": "br doctor --json in rust-oracledb: schema.tables ok, schema.columns ok."
+      },
+      {
+        "name": "mock-code audit (orchestrator re-check)",
+        "kind": "cli",
+        "trace": "git grep '(todo|unimplemented)!(' origin/main -- crates/*.rs excluding tests: 0 hits. Child oraclemcp-7h14a (silent Ok no-op) closed with a revert-sensitive test. Typed refusals listed with file:line in the .1.3 READY comment: conn.rs:1622, convert.rs:1405,1423,1459,1486, var.rs:938, pyutil.rs:229, lob.rs:206, arrow/builders.rs:798,886,1685, arrow/mod.rs:358."
+      },
+      {
+        "name": "forbidden-substitute check",
+        "kind": "cli",
+        "trace": "git diff 2c07292..origin/main -- .github/workflows: no continue-on-error / if:false / skip additions."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Implementer prepush (1135 passed) is implementer-reported; the Required CI run is the independent execution."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
