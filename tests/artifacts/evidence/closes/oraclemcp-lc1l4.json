@@ -13,7 +13,7 @@
     ]
   },
   "source": {
-    "sha": "b048fd08e9fcacd2f6bb8ab6336d996550bb668a",
+    "sha": "f5edd178456f6a56e4c99f47b4a38a23088ddc91",
     "tree_clean": true,
     "branch": "main"
   },
@@ -28,7 +28,7 @@
       {
         "name": "local",
         "kind": "cli",
-        "trace": "bash scripts/secret_scan.sh exits 0 locally after the rewording."
+        "trace": "bash scripts/secret_scan.sh exits 0 at the evidence source commit (current main HEAD, including every later tracker update)."
       }
     ]
   },
