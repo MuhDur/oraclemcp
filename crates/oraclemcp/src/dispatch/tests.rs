@@ -189,6 +189,7 @@ struct SemanticGuardState {
     compatible: Mutex<Option<String>>,
     embedding_models: Mutex<Vec<String>>,
     fga_handler_table: Mutex<Option<String>>,
+    virtual_column_default: Mutex<Option<String>>,
 }
 
 impl Default for SemanticGuardState {
@@ -201,6 +202,7 @@ impl Default for SemanticGuardState {
             compatible: Mutex::new(Some("23.4.0.0.0".to_owned())),
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
             fga_handler_table: Mutex::new(None),
+            virtual_column_default: Mutex::new(None),
         }
     }
 }
@@ -433,12 +435,43 @@ impl OracleConnection for SemanticGuardMock {
                 ("DEFAULTED", Some("N")),
             ])]);
         }
+        if normalized.contains("select data_type, data_type_owner from all_tab_columns") {
+            let data_type = match string_bind(binds, 2) {
+                Some("DOC") => "JSON",
+                Some("ADDRESS") => "ADDRESS_T",
+                _ => return Ok(Vec::new()),
+            };
+            return Ok(vec![semantic_row(&[
+                ("DATA_TYPE", Some(data_type)),
+                (
+                    "DATA_TYPE_OWNER",
+                    (data_type == "ADDRESS_T").then_some("APP"),
+                ),
+            ])]);
+        }
+        if normalized.contains("from all_type_attrs") {
+            if string_bind(binds, 0) == Some("APP")
+                && string_bind(binds, 1) == Some("ADDRESS_T")
+                && string_bind(binds, 2) == Some("CITY")
+            {
+                return Ok(vec![semantic_row(&[
+                    ("ATTR_NAME", Some("CITY")),
+                    ("ATTR_TYPE_OWNER", None),
+                    ("ATTR_TYPE_NAME", Some("VARCHAR2")),
+                    ("ATTR_TYPE_MOD", None),
+                ])]);
+            }
+            return Ok(Vec::new());
+        }
+        if normalized.contains("from all_json_columns") {
+            return Ok(Vec::new());
+        }
         if normalized.contains("from all_tab_columns") && normalized.contains("column_name = :1") {
             let column = string_bind(binds, 0)
                 .unwrap_or_default()
                 .to_ascii_uppercase();
             return Ok(match column.as_str() {
-                "ID" | "EMBEDDING" | "LABEL" => vec![semantic_row(&[
+                "ID" | "EMBEDDING" | "LABEL" | "DOC" | "ADDRESS" => vec![semantic_row(&[
                     ("OWNER", Some("APP")),
                     ("TABLE_NAME", Some("ORDERS")),
                     ("COLUMN_NAME", Some(column.as_str())),
@@ -449,10 +482,14 @@ impl OracleConnection for SemanticGuardMock {
         }
         if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
             let column = string_bind(binds, 2).unwrap_or_default();
-            return Ok((matches!(column, "ID" | "EMBEDDING" | "LABEL"))
-                .then(|| semantic_row(&[("COLUMN_NAME", Some(column)), ("COLUMN_ID", Some("1"))]))
-                .into_iter()
-                .collect());
+            return Ok(
+                (matches!(column, "ID" | "EMBEDDING" | "LABEL" | "DOC" | "ADDRESS"))
+                    .then(|| {
+                        semantic_row(&[("COLUMN_NAME", Some(column)), ("COLUMN_ID", Some("1"))])
+                    })
+                    .into_iter()
+                    .collect(),
+            );
         }
         if normalized.contains("from all_tab_columns") {
             return Ok(Vec::new());
@@ -491,6 +528,27 @@ impl OracleConnection for SemanticGuardMock {
             return Ok(Vec::new());
         }
         if normalized.contains("from all_tab_cols") {
+            if normalized.contains("virtual_column = 'yes'") {
+                let expression = self
+                    .state
+                    .virtual_column_default
+                    .lock()
+                    .expect("virtual column fixture lock");
+                return Ok(expression
+                    .as_deref()
+                    .map(|expression| {
+                        semantic_row(&[
+                            ("OWNER", Some("APP")),
+                            ("TABLE_NAME", Some("ORDERS")),
+                            ("COLUMN_NAME", Some("SYS_NC00003$")),
+                            ("HIDDEN_COLUMN", Some("YES")),
+                            ("USER_GENERATED", Some("NO")),
+                            ("DATA_DEFAULT", Some(expression)),
+                        ])
+                    })
+                    .into_iter()
+                    .collect());
+            }
             return Ok(semantic_tab_col_rows_for(sql));
         }
         self.state.caller_queries.fetch_add(1, Ordering::SeqCst);
@@ -1082,6 +1140,105 @@ fn over_refusal_fix_does_not_admit_view_behind_alias() {
             "expected": {"error_class": "ForbiddenStatement", "caller_queries": 0},
             "actual": {"error_class": format!("{:?}", error.error_class), "caller_queries": caller_queries},
         })],
+    );
+}
+
+#[test]
+fn over_refusal_30_32_admitted_with_every_relation_proven() {
+    let mut cases = Vec::new();
+    for (case_id, sql, virtual_expression, expected_probe) in [
+        (
+            "30_hidden_builtin_virtual_column",
+            "SELECT ID FROM APP.ORDERS",
+            Some("UPPER(\"LABEL\")"),
+            "from all_tab_cols",
+        ),
+        (
+            "32_native_json_path",
+            "SELECT j.DOC.customer.id FROM APP.ORDERS j",
+            None,
+            "select data_type, data_type_owner from all_tab_columns",
+        ),
+        (
+            "32_object_attribute_path",
+            "SELECT e.ADDRESS.CITY FROM APP.ORDERS e",
+            None,
+            "from all_type_attrs",
+        ),
+    ] {
+        let (dispatcher, state) = semantic_dispatcher();
+        *state
+            .virtual_column_default
+            .lock()
+            .expect("virtual column fixture lock") = virtual_expression.map(str::to_owned);
+        let result = dispatcher
+            .dispatch("oracle_query", json!({"sql": sql}))
+            .unwrap_or_else(|error| panic!("{case_id}: {error:?}"));
+        assert!(!result["rows"].as_array().expect("rows array").is_empty());
+        assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1, "{case_id}");
+        let events = state.read_events.lock().expect("read events lock");
+        let caller_at = events
+            .iter()
+            .position(|event| event.contains("tool=oracle_query */"))
+            .expect("exact caller SQL executed");
+        let proof_before_caller = [
+            "from all_objects",
+            "from all_audit_policies",
+            expected_probe,
+        ]
+        .into_iter()
+        .all(|probe| {
+            events[..caller_at]
+                .iter()
+                .any(|event| event.to_ascii_lowercase().contains(probe))
+        });
+        assert!(
+            proof_before_caller,
+            "{case_id}: proof must precede caller SQL: {events:?}"
+        );
+        if case_id == "32_native_json_path" {
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| event.contains("all_json_columns")),
+                "native JSON needs no text-column JSON check: {events:?}"
+            );
+        }
+        cases.push(json!({
+            "case_id": case_id,
+            "expected": {"admitted": true, "caller_queries": 1, "proof_before_caller": true},
+            "actual": {"admitted": true, "caller_queries": state.caller_queries.load(Ordering::SeqCst), "proof_before_caller": proof_before_caller},
+        }));
+    }
+
+    let (dispatcher, state) = semantic_dispatcher();
+    *state
+        .virtual_column_default
+        .lock()
+        .expect("virtual column fixture lock") = Some("APP.CANARY_FN(\"LABEL\")".to_owned());
+    let refused = dispatcher
+        .dispatch("oracle_query", json!({"sql": "SELECT ID FROM APP.ORDERS"}))
+        .expect_err("a hidden virtual column invoking user code must refuse");
+    assert_eq!(refused.error_class, ErrorClass::ForbiddenStatement);
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+    let virtual_probe_seen = state
+        .read_events
+        .lock()
+        .expect("read events lock")
+        .iter()
+        .any(|event| event.to_ascii_lowercase().contains("from all_tab_cols"));
+    assert!(
+        virtual_probe_seen,
+        "the user routine virtual row caused the refusal"
+    );
+    cases.push(json!({
+        "case_id": "30_hidden_user_routine_virtual_column",
+        "expected": {"error_class": "ForbiddenStatement", "caller_queries": 0, "virtual_probe_seen": true},
+        "actual": {"error_class": format!("{:?}", refused.error_class), "caller_queries": state.caller_queries.load(Ordering::SeqCst), "virtual_probe_seen": virtual_probe_seen},
+    }));
+    write_executor_test_artifact(
+        "over_refusal_30_32_admitted_with_every_relation_proven",
+        &cases,
     );
 }
 
