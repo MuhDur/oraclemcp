@@ -53,21 +53,22 @@ use oraclemcp_core::{
     sign_token, verify_token,
 };
 use oraclemcp_db::{
-    AsOf, CatalogInvalidation, DbError, DbRequestQuota, DbmsOutput, DependentObject,
-    DependentsProbe, FlashbackRefusalKind, IncomparableMaskedColumn, MaskComparabilityBreak,
-    OracleBackend, OracleBind, OracleCatalogResolverCache, OracleConnection, OracleConnectionInfo,
-    OracleRow, PlanCostEstimate, QuarantineOutcome, QueryCaps, QueryDiffSource, QueryResponse,
-    QueryRowStream, QueryRowStreamStart, ResultColumnMatch, ResultMaskingAction,
-    ResultMaskingCertificate, ResultMaskingDecisionAction, ResultMaskingDecisionSource,
-    ResultMaskingPolicy, ResultMaskingRule, SemanticSearchMetric, SerializeOptions,
-    SourceReadOptions, StructuredDecodeCaps, compile_errors, compile_object_statements,
-    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    diff_query_responses, execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl,
-    get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
-    list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, paginated_sql,
-    plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
-    probe_dependents, read_query, read_query_as_of, search_objects, search_source,
-    semantic_search_query, semantic_search_query_with_filter, semantic_search_text_query,
+    AsOf, CatalogInvalidation, CatalogQueryId, DbError, DbRequestQuota, DbmsOutput,
+    DependentObject, DependentsProbe, FlashbackRefusalKind, IncomparableMaskedColumn,
+    MaskComparabilityBreak, OracleBackend, OracleBind, OracleCatalogResolverCache,
+    OracleConnection, OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome,
+    QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart,
+    ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingDecisionAction,
+    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, SemanticSearchMetric,
+    SerializeOptions, SourceReadOptions, StructuredDecodeCaps, compile_errors,
+    compile_object_statements, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
+    incomparable_masked_columns, list_objects, list_objects_page, list_schema_projection_page,
+    list_schemas, observe_vpd_rls_for_relations, paginated_sql, plan_cost_estimate,
+    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_query,
+    read_query_as_of, run_catalog_query, search_objects, search_source, semantic_search_query,
+    semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{SearchDetailLevel, SourceText, StatementOutcome};
@@ -2914,8 +2915,7 @@ async fn semantic_search_text_model(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> Result<String, ErrorEnvelope> {
-    let compatible = conn
-        .query_rows(cx, SEMANTIC_SEARCH_COMPATIBLE_SQL, &[])
+    let compatible = run_catalog_query(cx, conn, CatalogQueryId::SemanticSearchCompatible, &[])
         .await
         .ok()
         .and_then(|rows| {
@@ -2934,8 +2934,7 @@ async fn semantic_search_text_model(
         ));
     }
 
-    let models = conn
-        .query_rows(cx, SEMANTIC_SEARCH_ONNX_MODEL_SQL, &[])
+    let models = run_catalog_query(cx, conn, CatalogQueryId::SemanticSearchOnnxModel, &[])
         .await
         .ok()
         .map(|rows| {
@@ -6944,15 +6943,14 @@ async fn reserve_checked_edition_child_slot(
     parent: &EditionIdentifier,
 ) -> Result<EditionCreationReservation, ErrorEnvelope> {
     let reservation = reserve_edition_child_slot(parent, ctx.active_profile)?;
-    let rows = ctx
-        .conn
-        .query_rows(
-            ctx.cx,
-            EDITION_CHILDREN_SQL,
-            &[OracleBind::String(parent.as_str().to_owned())],
-        )
-        .await
-        .map_err(DbError::into_envelope)?;
+    let rows = run_catalog_query(
+        ctx.cx,
+        ctx.conn,
+        CatalogQueryId::EditionChildren,
+        &[OracleBind::String(parent.as_str().to_owned())],
+    )
+    .await
+    .map_err(DbError::into_envelope)?;
     if !rows.is_empty() {
         return Err(one_child_edition_error());
     }

@@ -93,16 +93,6 @@ pub(super) const MAX_SEMANTIC_SEARCH_VECTOR_DIMENSIONS: usize = 16_384;
 /// Hard cap on query text accepted by the in-database embedding expression.
 /// This bounds one request before it reaches either the driver or the model.
 pub(super) const MAX_SEMANTIC_SEARCH_TEXT_CHARS: usize = 32_768;
-/// Fixed capability probe. `COMPATIBLE`, not the marketing/server banner, is
-/// the governing contract for the SQL vector-embedding grammar.
-pub(super) const SEMANTIC_SEARCH_COMPATIBLE_SQL: &str =
-    "SELECT value AS compatible FROM v$parameter WHERE name = 'compatible'";
-/// Read at most two candidates: zero proves no local model, two proves the
-/// unconfigured server-side selection would be ambiguous. The tool never
-/// accepts a model name from a caller.
-pub(super) const SEMANTIC_SEARCH_ONNX_MODEL_SQL: &str = "SELECT model_name FROM user_mining_models \
-     WHERE mining_function = 'EMBEDDING' AND algorithm = 'ONNX' \
-     ORDER BY model_name FETCH FIRST 2 ROWS ONLY";
 /// Default temporary session elevation window for `oracle_set_session_level`.
 pub(super) const DEFAULT_SESSION_LEVEL_TTL_SECONDS: u64 = 900;
 /// Hard cap for one temporary session elevation window.
@@ -123,12 +113,6 @@ pub(super) const EXECUTE_APPROVED_TOKEN_TTL_SECONDS: u64 = 300;
 pub(super) const MAX_EXECUTE_APPROVED_TOKENS: usize = 128;
 /// Tamper-token scope for signed execution grant references.
 pub(super) const EXECUTE_GRANT_TOKEN_SCOPE: &str = "grant:execute";
-/// Bound dictionary preflight for Oracle's one-child edition rule. The parent
-/// name is positional-bind-only; caller text is never interpolated into this
-/// generated SQL.
-pub(super) const EDITION_CHILDREN_SQL: &str =
-    "SELECT edition_name FROM all_editions WHERE parent_edition_name = :1";
-
 /// Hard cap on remembered source patch previews in one server process.
 pub(super) const MAX_PATCH_PREVIEWS: usize = 128;
 /// Each orient snapshot is four bounded dictionary reads; cap retained profiles,

@@ -199,11 +199,17 @@ pub enum CatalogQueryId {
     GetSource,
     /// Bounded DDL text for one allowlisted object type.
     GetDdl,
+    /// Database compatibility setting for in-database vector embedding.
+    SemanticSearchCompatible,
+    /// Visible local ONNX models for in-database vector embedding.
+    SemanticSearchOnnxModel,
+    /// Existing child of a named edition before creating another.
+    EditionChildren,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 66] = [
+    pub const ALL: [Self; 69] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -270,6 +276,9 @@ impl CatalogQueryId {
         Self::SearchSource,
         Self::GetSource,
         Self::GetDdl,
+        Self::SemanticSearchCompatible,
+        Self::SemanticSearchOnnxModel,
+        Self::EditionChildren,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -993,6 +1002,29 @@ impl CatalogQueryId {
                 TTT,
                 "fetch bounded metadata DDL for one allowlisted object",
                 DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::SemanticSearchCompatible => (
+                "SELECT value AS compatible FROM v$parameter WHERE name = 'compatible'",
+                EMPTY,
+                "prove database compatibility for in-database embedding",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::SemanticSearchOnnxModel => (
+                "SELECT model_name FROM user_mining_models \
+                 WHERE mining_function = 'EMBEDDING' AND algorithm = 'ONNX' \
+                 ORDER BY model_name FETCH FIRST 2 ROWS ONLY",
+                EMPTY,
+                "select one visible local ONNX embedding model",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::EditionChildren => (
+                "SELECT edition_name FROM all_editions WHERE parent_edition_name = :1",
+                BindSchema(&[Text]),
+                "prove a parent edition has no existing child",
+                InternalProof,
                 Diagnostic,
             ),
         };
