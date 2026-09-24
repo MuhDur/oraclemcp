@@ -16,7 +16,11 @@
 
 use asupersync::Cx;
 
-use crate::{connection::OracleConnection, error::DbError};
+use crate::{
+    catalog_query::{CatalogQueryId, run_catalog_query},
+    connection::OracleConnection,
+    error::DbError,
+};
 use oraclemcp_error::parse_ora_code;
 use serde_json::{Value, json};
 
@@ -287,13 +291,13 @@ pub async fn detect_view_tier(
     dba_view: &str,
     all_view: &str,
 ) -> Result<Option<ViewTier>, DbError> {
-    match conn.query_rows(cx, &probe_sql(dba_view), &[]).await {
+    match run_catalog_query(cx, conn, health_probe_id(dba_view)?, &[]).await {
         Ok(_) => return Ok(Some(ViewTier::Dba)),
         Err(error) if error.is_uncertain_session_state() => return Err(error),
         Err(error) if is_dictionary_access_error(&error) => {}
         Err(error) => return Err(error),
     }
-    match conn.query_rows(cx, &probe_sql(all_view), &[]).await {
+    match run_catalog_query(cx, conn, health_probe_id(all_view)?, &[]).await {
         Ok(_) => Ok(Some(ViewTier::All)),
         Err(error) if error.is_uncertain_session_state() => Err(error),
         Err(error) if is_dictionary_access_error(&error) => Ok(None),
@@ -301,11 +305,24 @@ pub async fn detect_view_tier(
     }
 }
 
-/// A cheap existence/privilege probe for a dictionary view: select nothing
-/// (`WHERE 1=0`) so it costs no rows but still fails if the view is not
-/// visible to the session. Pure read.
-fn probe_sql(view: &str) -> String {
-    format!("SELECT 1 FROM {view} WHERE 1 = 0")
+/// Only named dictionary views may be probed. An unsupported view is refused
+/// before the connection sees any SQL.
+fn health_probe_id(view: &str) -> Result<CatalogQueryId, DbError> {
+    match view {
+        "DBA_OBJECTS" => Ok(CatalogQueryId::HealthProbeDbaObjects),
+        "ALL_OBJECTS" => Ok(CatalogQueryId::HealthProbeAllObjects),
+        "DBA_INDEXES" => Ok(CatalogQueryId::HealthProbeDbaIndexes),
+        "ALL_INDEXES" => Ok(CatalogQueryId::HealthProbeAllIndexes),
+        "DBA_TABLESPACE_USAGE_METRICS" => Ok(CatalogQueryId::HealthProbeTablespaceUsage),
+        "DBA_SEQUENCES" => Ok(CatalogQueryId::HealthProbeDbaSequences),
+        "ALL_SEQUENCES" => Ok(CatalogQueryId::HealthProbeAllSequences),
+        "DBA_CONSTRAINTS" => Ok(CatalogQueryId::HealthProbeDbaConstraints),
+        "ALL_CONSTRAINTS" => Ok(CatalogQueryId::HealthProbeAllConstraints),
+        "V$SYSSTAT" => Ok(CatalogQueryId::HealthProbeSysstat),
+        _ => Err(DbError::Internal(
+            "unsupported health dictionary view".to_owned(),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +414,7 @@ pub async fn preflight(cx: &Cx, conn: &dyn OracleConnection) -> Result<Preflight
         // rather than inventing an ALL_* fallback that does not exist.
         let tier_result = match all_view {
             Some(all_view) => detect_view_tier(cx, conn, dba_view, all_view).await,
-            None => match conn.query_rows(cx, &probe_sql(dba_view), &[]).await {
+            None => match run_catalog_query(cx, conn, health_probe_id(dba_view)?, &[]).await {
                 Ok(_) => Ok(Some(ViewTier::Dba)),
                 Err(error) if error.is_uncertain_session_state() => Err(error),
                 Err(error) if is_dictionary_access_error(&error) => Ok(None),
@@ -639,6 +656,38 @@ enum DegradingQuery {
     Finding(Finding),
 }
 
+fn health_query_id(subcheck: HealthSubcheck, tier: ViewTier) -> Result<CatalogQueryId, DbError> {
+    match (subcheck, tier) {
+        (HealthSubcheck::InvalidObjects, ViewTier::Dba) => {
+            Ok(CatalogQueryId::HealthInvalidObjectsDba)
+        }
+        (HealthSubcheck::InvalidObjects, ViewTier::All) => {
+            Ok(CatalogQueryId::HealthInvalidObjectsAll)
+        }
+        (HealthSubcheck::UnusableIndexes, ViewTier::Dba) => {
+            Ok(CatalogQueryId::HealthUnusableIndexesDba)
+        }
+        (HealthSubcheck::UnusableIndexes, ViewTier::All) => {
+            Ok(CatalogQueryId::HealthUnusableIndexesAll)
+        }
+        (HealthSubcheck::SequenceCeiling, ViewTier::Dba) => {
+            Ok(CatalogQueryId::HealthSequenceCeilingDba)
+        }
+        (HealthSubcheck::SequenceCeiling, ViewTier::All) => {
+            Ok(CatalogQueryId::HealthSequenceCeilingAll)
+        }
+        (HealthSubcheck::DisabledConstraints, ViewTier::Dba) => {
+            Ok(CatalogQueryId::HealthDisabledConstraintsDba)
+        }
+        (HealthSubcheck::DisabledConstraints, ViewTier::All) => {
+            Ok(CatalogQueryId::HealthDisabledConstraintsAll)
+        }
+        _ => Err(DbError::Internal(
+            "health subcheck has no tiered catalog query".to_owned(),
+        )),
+    }
+}
+
 /// Execute a real diagnostic query against `DBA_*`, falling back to the
 /// corresponding `ALL_*` query only for recognized dictionary-access errors.
 /// This avoids treating an arbitrary DBA query failure as permission to issue
@@ -649,8 +698,8 @@ async fn query_with_dba_fallback(
     subcheck: HealthSubcheck,
     build: impl Fn(ViewTier) -> (&'static str, String),
 ) -> Result<DegradingQuery, DbError> {
-    let (dba_view, dba_sql) = build(ViewTier::Dba);
-    match conn.query_rows(cx, &dba_sql, &[]).await {
+    let (dba_view, _) = build(ViewTier::Dba);
+    match run_catalog_query(cx, conn, health_query_id(subcheck, ViewTier::Dba)?, &[]).await {
         Ok(rows) => {
             return Ok(DegradingQuery::Rows {
                 view: dba_view,
@@ -669,8 +718,8 @@ async fn query_with_dba_fallback(
         }
     }
 
-    let (all_view, all_sql) = build(ViewTier::All);
-    match conn.query_rows(cx, &all_sql, &[]).await {
+    let (all_view, _) = build(ViewTier::All);
+    match run_catalog_query(cx, conn, health_query_id(subcheck, ViewTier::All)?, &[]).await {
         Ok(rows) => Ok(DegradingQuery::Rows {
             view: all_view,
             rows,
@@ -813,8 +862,8 @@ async fn tablespace_subcheck(
     conn: &dyn OracleConnection,
     subcheck: HealthSubcheck,
 ) -> Result<Finding, DbError> {
-    let (view, sql) = tablespace_usage_sql();
-    let rows = match conn.query_rows(cx, &sql, &[]).await {
+    let (view, _) = tablespace_usage_sql();
+    let rows = match run_catalog_query(cx, conn, CatalogQueryId::HealthTablespaceUsage, &[]).await {
         Ok(rows) => rows,
         Err(error) => return single_view_failure(subcheck, view, error),
     };
@@ -857,8 +906,9 @@ async fn buffer_cache_subcheck(
     conn: &dyn OracleConnection,
     subcheck: HealthSubcheck,
 ) -> Result<Finding, DbError> {
-    let (view, sql) = buffer_cache_hit_ratio_sql();
-    let rows = match conn.query_rows(cx, &sql, &[]).await {
+    let (view, _) = buffer_cache_hit_ratio_sql();
+    let rows = match run_catalog_query(cx, conn, CatalogQueryId::HealthBufferCacheStats, &[]).await
+    {
         Ok(rows) => rows,
         Err(error) => return single_view_failure(subcheck, view, error),
     };
@@ -1018,6 +1068,90 @@ mod tests {
         assert!(sql.contains("FROM V$SYSSTAT"));
         assert!(sql.contains("physical reads cache"));
         assert!(is_read_only(&sql));
+    }
+
+    #[test]
+    fn health_catalog_queries_match_the_diagnostic_builders() {
+        let cases = [
+            (
+                HealthSubcheck::InvalidObjects,
+                ViewTier::Dba,
+                invalid_objects_sql(ViewTier::Dba).1,
+            ),
+            (
+                HealthSubcheck::InvalidObjects,
+                ViewTier::All,
+                invalid_objects_sql(ViewTier::All).1,
+            ),
+            (
+                HealthSubcheck::UnusableIndexes,
+                ViewTier::Dba,
+                unusable_indexes_sql(ViewTier::Dba).1,
+            ),
+            (
+                HealthSubcheck::UnusableIndexes,
+                ViewTier::All,
+                unusable_indexes_sql(ViewTier::All).1,
+            ),
+            (
+                HealthSubcheck::TablespaceUndo,
+                ViewTier::Dba,
+                tablespace_usage_sql().1,
+            ),
+            (
+                HealthSubcheck::SequenceCeiling,
+                ViewTier::Dba,
+                sequence_ceiling_sql(ViewTier::Dba, SEQUENCE_CEILING_PCT).1,
+            ),
+            (
+                HealthSubcheck::SequenceCeiling,
+                ViewTier::All,
+                sequence_ceiling_sql(ViewTier::All, SEQUENCE_CEILING_PCT).1,
+            ),
+            (
+                HealthSubcheck::DisabledConstraints,
+                ViewTier::Dba,
+                disabled_constraints_sql(ViewTier::Dba).1,
+            ),
+            (
+                HealthSubcheck::DisabledConstraints,
+                ViewTier::All,
+                disabled_constraints_sql(ViewTier::All).1,
+            ),
+            (
+                HealthSubcheck::BufferCacheHitRatio,
+                ViewTier::Dba,
+                buffer_cache_hit_ratio_sql().1,
+            ),
+        ];
+        for (subcheck, tier, builder_sql) in cases {
+            let id = match subcheck {
+                HealthSubcheck::TablespaceUndo => CatalogQueryId::HealthTablespaceUsage,
+                HealthSubcheck::BufferCacheHitRatio => CatalogQueryId::HealthBufferCacheStats,
+                _ => health_query_id(subcheck, tier).expect("tiered catalog query"),
+            };
+            let normalize = |sql: &str| sql.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(normalize(id.spec().sql), normalize(&builder_sql), "{id:?}");
+            assert!(id.spec().binds.0.is_empty(), "{id:?}");
+        }
+        assert!(health_query_id(HealthSubcheck::TablespaceUndo, ViewTier::All).is_err());
+        assert!(health_query_id(HealthSubcheck::BufferCacheHitRatio, ViewTier::All).is_err());
+    }
+
+    #[test]
+    fn health_privilege_probes_are_closed_zero_row_catalog_reads() {
+        for subcheck in HealthSubcheck::all() {
+            let (dba_view, all_view) = subcheck.probe_views();
+            for view in std::iter::once(dba_view).chain(all_view) {
+                let spec = health_probe_id(view)
+                    .expect("registered health probe")
+                    .spec();
+                assert_eq!(spec.sql, format!("SELECT 1 FROM {view} WHERE 1 = 0"));
+                assert!(spec.binds.0.is_empty());
+            }
+        }
+        assert!(health_probe_id("SYS.DBA_OBJECTS").is_err());
+        assert!(health_probe_id("ALL_USERS").is_err());
     }
 
     /// A skipped finding is structured (never a raw ORA-), Info severity, and

@@ -8,8 +8,9 @@ use asupersync::Cx;
 use chrono::Utc;
 use oraclemcp_core::tools::{ToolDescriptor, ToolRegistry, ToolTier};
 use oraclemcp_db::{
-    CatalogExtractReport, CatalogExtractRequest, CatalogRowSetName, CatalogSchemaFilter, DbError,
-    OracleBind, OracleConnection, OracleRow as DbOracleRow, extract_catalog_rowsets,
+    CatalogExtractReport, CatalogExtractRequest, CatalogQueryId, CatalogRowSetName,
+    CatalogSchemaFilter, DbError, OracleBind, OracleConnection, OracleRow as DbOracleRow,
+    extract_catalog_rowsets, run_catalog_query,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
 use oraclemcp_guard::{Classifier, ClassifierConfig, ObjectRef, Purity, SideEffectOracle};
@@ -1547,20 +1548,17 @@ async fn live_catalog_snapshot_for_lineage(
 
     let mut snapshot = LiveCatalogSnapshot::default();
     for (owner, object) in objects {
-        for row in conn
-            .query_rows(
-                cx,
-                "SELECT column_name, data_type \
-                 FROM all_tab_columns \
-                 WHERE owner = :1 AND table_name = :2 \
-                 ORDER BY column_id",
-                &[
-                    OracleBind::from(owner.clone()),
-                    OracleBind::from(object.clone()),
-                ],
-            )
-            .await
-            .map_err(DbError::into_envelope)?
+        for row in run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::LineageColumns,
+            &[
+                OracleBind::from(owner.clone()),
+                OracleBind::from(object.clone()),
+            ],
+        )
+        .await
+        .map_err(DbError::into_envelope)?
         {
             let Some(column_name) = row.text("COLUMN_NAME") else {
                 continue;

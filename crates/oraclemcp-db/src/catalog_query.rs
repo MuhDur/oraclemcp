@@ -112,6 +112,60 @@ macro_rules! top_sql_statspack {
     };
 }
 
+macro_rules! health_invalid_objects_sql {
+    ($view:literal) => {
+        concat!(
+            "SELECT owner, object_type, COUNT(*) AS invalid_count, ",
+            "SUBSTR(LISTAGG(object_name, ',') WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects ",
+            "FROM ", $view, " WHERE status = 'INVALID' ",
+            "GROUP BY owner, object_type ORDER BY invalid_count DESC, owner, object_type"
+        )
+    };
+}
+
+macro_rules! health_unusable_indexes_sql {
+    ($view:literal) => {
+        concat!(
+            "SELECT owner, index_name, table_name, status ",
+            "FROM ",
+            $view,
+            " WHERE status = 'UNUSABLE' ",
+            "ORDER BY owner, table_name, index_name"
+        )
+    };
+}
+
+macro_rules! health_sequence_ceiling_sql {
+    ($view:literal) => {
+        concat!(
+            "SELECT sequence_owner, sequence_name, last_number, max_value, increment_by, cycle_flag, ",
+            "ROUND((last_number / max_value) * 100, 2) AS pct_consumed ",
+            "FROM ", $view, " ",
+            "WHERE cycle_flag = 'N' AND max_value > 0 AND last_number >= max_value * 0.9 ",
+            "ORDER BY pct_consumed DESC, sequence_owner, sequence_name"
+        )
+    };
+}
+
+macro_rules! health_disabled_constraints_sql {
+    ($view:literal) => {
+        concat!(
+            "SELECT owner, table_name, constraint_name, constraint_type, status, validated ",
+            "FROM ",
+            $view,
+            " ",
+            "WHERE status = 'DISABLED' OR validated = 'NOT VALIDATED' ",
+            "ORDER BY owner, table_name, constraint_name"
+        )
+    };
+}
+
+macro_rules! health_probe_sql {
+    ($view:literal) => {
+        concat!("SELECT 1 FROM ", $view, " WHERE 1 = 0")
+    };
+}
+
 /// The complete catalog-query set used by the current semantic read proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CatalogQueryId {
@@ -285,11 +339,53 @@ pub enum CatalogQueryId {
     TopSqlStatspackBufferGets,
     /// Free Statspack SQL history ranked by physical reads.
     TopSqlStatspackDiskReads,
+    /// Invalid objects from the privileged dictionary.
+    HealthInvalidObjectsDba,
+    /// Invalid objects visible to the session.
+    HealthInvalidObjectsAll,
+    /// Unusable indexes from the privileged dictionary.
+    HealthUnusableIndexesDba,
+    /// Unusable indexes visible to the session.
+    HealthUnusableIndexesAll,
+    /// Tablespace headroom from privileged metrics.
+    HealthTablespaceUsage,
+    /// Non-cycling sequences near the configured health threshold.
+    HealthSequenceCeilingDba,
+    /// Visible non-cycling sequences near the configured health threshold.
+    HealthSequenceCeilingAll,
+    /// Disabled constraints from the privileged dictionary.
+    HealthDisabledConstraintsDba,
+    /// Disabled constraints visible to the session.
+    HealthDisabledConstraintsAll,
+    /// Instance buffer cache counters.
+    HealthBufferCacheStats,
+    /// Zero-row privilege probe for DBA_OBJECTS.
+    HealthProbeDbaObjects,
+    /// Zero-row privilege probe for ALL_OBJECTS.
+    HealthProbeAllObjects,
+    /// Zero-row privilege probe for DBA_INDEXES.
+    HealthProbeDbaIndexes,
+    /// Zero-row privilege probe for ALL_INDEXES.
+    HealthProbeAllIndexes,
+    /// Zero-row privilege probe for DBA_TABLESPACE_USAGE_METRICS.
+    HealthProbeTablespaceUsage,
+    /// Zero-row privilege probe for DBA_SEQUENCES.
+    HealthProbeDbaSequences,
+    /// Zero-row privilege probe for ALL_SEQUENCES.
+    HealthProbeAllSequences,
+    /// Zero-row privilege probe for DBA_CONSTRAINTS.
+    HealthProbeDbaConstraints,
+    /// Zero-row privilege probe for ALL_CONSTRAINTS.
+    HealthProbeAllConstraints,
+    /// Zero-row privilege probe for V$SYSSTAT.
+    HealthProbeSysstat,
+    /// Column identities and types for one live lineage relation.
+    LineageColumns,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 85] = [
+    pub const ALL: [Self; 106] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -375,6 +471,27 @@ impl CatalogQueryId {
         Self::TopSqlStatspackCpu,
         Self::TopSqlStatspackBufferGets,
         Self::TopSqlStatspackDiskReads,
+        Self::HealthInvalidObjectsDba,
+        Self::HealthInvalidObjectsAll,
+        Self::HealthUnusableIndexesDba,
+        Self::HealthUnusableIndexesAll,
+        Self::HealthTablespaceUsage,
+        Self::HealthSequenceCeilingDba,
+        Self::HealthSequenceCeilingAll,
+        Self::HealthDisabledConstraintsDba,
+        Self::HealthDisabledConstraintsAll,
+        Self::HealthBufferCacheStats,
+        Self::HealthProbeDbaObjects,
+        Self::HealthProbeAllObjects,
+        Self::HealthProbeDbaIndexes,
+        Self::HealthProbeAllIndexes,
+        Self::HealthProbeTablespaceUsage,
+        Self::HealthProbeDbaSequences,
+        Self::HealthProbeAllSequences,
+        Self::HealthProbeDbaConstraints,
+        Self::HealthProbeAllConstraints,
+        Self::HealthProbeSysstat,
+        Self::LineageColumns,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -1233,6 +1350,159 @@ impl CatalogQueryId {
                 top_sql_statspack!("disk_reads"),
                 I,
                 "read Statspack top SQL by physical reads",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthInvalidObjectsDba => (
+                health_invalid_objects_sql!("DBA_OBJECTS"),
+                EMPTY,
+                "inspect invalid objects in the privileged dictionary",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthInvalidObjectsAll => (
+                health_invalid_objects_sql!("ALL_OBJECTS"),
+                EMPTY,
+                "inspect invalid objects visible to the session",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthUnusableIndexesDba => (
+                health_unusable_indexes_sql!("DBA_INDEXES"),
+                EMPTY,
+                "inspect unusable indexes in the privileged dictionary",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthUnusableIndexesAll => (
+                health_unusable_indexes_sql!("ALL_INDEXES"),
+                EMPTY,
+                "inspect unusable indexes visible to the session",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthTablespaceUsage => (
+                "SELECT tablespace_name, ROUND(used_percent, 2) AS used_percent, used_space, tablespace_size \
+                 FROM DBA_TABLESPACE_USAGE_METRICS ORDER BY used_percent DESC",
+                EMPTY,
+                "inspect privileged tablespace headroom",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthSequenceCeilingDba => (
+                health_sequence_ceiling_sql!("DBA_SEQUENCES"),
+                EMPTY,
+                "inspect privileged sequences near the health threshold",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthSequenceCeilingAll => (
+                health_sequence_ceiling_sql!("ALL_SEQUENCES"),
+                EMPTY,
+                "inspect visible sequences near the health threshold",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthDisabledConstraintsDba => (
+                health_disabled_constraints_sql!("DBA_CONSTRAINTS"),
+                EMPTY,
+                "inspect disabled constraints in the privileged dictionary",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthDisabledConstraintsAll => (
+                health_disabled_constraints_sql!("ALL_CONSTRAINTS"),
+                EMPTY,
+                "inspect disabled constraints visible to the session",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthBufferCacheStats => (
+                "SELECT name, value FROM V$SYSSTAT \
+                 WHERE name IN ('db block gets', 'consistent gets', 'physical reads cache') \
+                 ORDER BY name",
+                EMPTY,
+                "inspect instance buffer cache counters",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::HealthProbeDbaObjects => (
+                health_probe_sql!("DBA_OBJECTS"),
+                EMPTY,
+                "probe privileged object dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeAllObjects => (
+                health_probe_sql!("ALL_OBJECTS"),
+                EMPTY,
+                "probe visible object dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeDbaIndexes => (
+                health_probe_sql!("DBA_INDEXES"),
+                EMPTY,
+                "probe privileged index dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeAllIndexes => (
+                health_probe_sql!("ALL_INDEXES"),
+                EMPTY,
+                "probe visible index dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeTablespaceUsage => (
+                health_probe_sql!("DBA_TABLESPACE_USAGE_METRICS"),
+                EMPTY,
+                "probe privileged tablespace metrics access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeDbaSequences => (
+                health_probe_sql!("DBA_SEQUENCES"),
+                EMPTY,
+                "probe privileged sequence dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeAllSequences => (
+                health_probe_sql!("ALL_SEQUENCES"),
+                EMPTY,
+                "probe visible sequence dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeDbaConstraints => (
+                health_probe_sql!("DBA_CONSTRAINTS"),
+                EMPTY,
+                "probe privileged constraint dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeAllConstraints => (
+                health_probe_sql!("ALL_CONSTRAINTS"),
+                EMPTY,
+                "probe visible constraint dictionary access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HealthProbeSysstat => (
+                health_probe_sql!("V$SYSSTAT"),
+                EMPTY,
+                "probe instance statistic access",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::LineageColumns => (
+                "SELECT column_name, data_type \
+                 FROM all_tab_columns \
+                 WHERE owner = :1 AND table_name = :2 \
+                 ORDER BY column_id",
+                TT,
+                "cross-check live lineage columns against the visible dictionary",
                 DictionaryMetadata,
                 Diagnostic,
             ),

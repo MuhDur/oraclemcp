@@ -449,11 +449,32 @@ pub oraclemcp_db::CatalogQueryId::FgaCatalogProof
 pub oraclemcp_db::CatalogQueryId::FgaPoliciesForRelations32
 pub oraclemcp_db::CatalogQueryId::GetDdl
 pub oraclemcp_db::CatalogQueryId::GetSource
+pub oraclemcp_db::CatalogQueryId::HealthBufferCacheStats
+pub oraclemcp_db::CatalogQueryId::HealthDisabledConstraintsAll
+pub oraclemcp_db::CatalogQueryId::HealthDisabledConstraintsDba
+pub oraclemcp_db::CatalogQueryId::HealthInvalidObjectsAll
+pub oraclemcp_db::CatalogQueryId::HealthInvalidObjectsDba
+pub oraclemcp_db::CatalogQueryId::HealthProbeAllConstraints
+pub oraclemcp_db::CatalogQueryId::HealthProbeAllIndexes
+pub oraclemcp_db::CatalogQueryId::HealthProbeAllObjects
+pub oraclemcp_db::CatalogQueryId::HealthProbeAllSequences
+pub oraclemcp_db::CatalogQueryId::HealthProbeDbaConstraints
+pub oraclemcp_db::CatalogQueryId::HealthProbeDbaIndexes
+pub oraclemcp_db::CatalogQueryId::HealthProbeDbaObjects
+pub oraclemcp_db::CatalogQueryId::HealthProbeDbaSequences
+pub oraclemcp_db::CatalogQueryId::HealthProbeSysstat
+pub oraclemcp_db::CatalogQueryId::HealthProbeTablespaceUsage
+pub oraclemcp_db::CatalogQueryId::HealthSequenceCeilingAll
+pub oraclemcp_db::CatalogQueryId::HealthSequenceCeilingDba
+pub oraclemcp_db::CatalogQueryId::HealthTablespaceUsage
+pub oraclemcp_db::CatalogQueryId::HealthUnusableIndexesAll
+pub oraclemcp_db::CatalogQueryId::HealthUnusableIndexesDba
 pub oraclemcp_db::CatalogQueryId::IndexColumns
 pub oraclemcp_db::CatalogQueryId::IndexExpressions
 pub oraclemcp_db::CatalogQueryId::IndexMetadata
 pub oraclemcp_db::CatalogQueryId::JsonColumn
 pub oraclemcp_db::CatalogQueryId::JsonConstraint
+pub oraclemcp_db::CatalogQueryId::LineageColumns
 pub oraclemcp_db::CatalogQueryId::ListObjects
 pub oraclemcp_db::CatalogQueryId::ListObjectsPage
 pub oraclemcp_db::CatalogQueryId::ListSchemas
@@ -517,7 +538,7 @@ pub oraclemcp_db::CatalogQueryId::ViewMetadata
 pub oraclemcp_db::CatalogQueryId::VirtualColumn
 pub oraclemcp_db::CatalogQueryId::VirtualColumnsForRelations32
 impl oraclemcp_db::CatalogQueryId
-pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 85]
+pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 106]
 pub const fn oraclemcp_db::CatalogQueryId::spec(self) -> oraclemcp_db::CatalogReadSpec
 impl core::clone::Clone for oraclemcp_db::CatalogQueryId
 pub fn oraclemcp_db::CatalogQueryId::clone(&self) -> oraclemcp_db::CatalogQueryId
