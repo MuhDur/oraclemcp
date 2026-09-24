@@ -964,6 +964,20 @@ def wait_for_setup_ready(settings, password, sql):
     raise DriverError("post-DDL fresh-session readiness deadline expired")
 
 
+def alias_target(rule):
+    if not isinstance(rule, dict):
+        return None
+    description = rule.get("description")
+    if not isinstance(description, str):
+        return None
+    match = re.search(
+        r"\b(?:runtime\s+compatibility\s+|compatibility\s+|legacy\s+)?alias\s+for\s+`?([a-z][a-z0-9_]*)`?",
+        description,
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None
+
+
 def schema_placeholder(rule, field="", lane=""):
     if not isinstance(rule, dict):
         return None
@@ -978,11 +992,23 @@ def schema_placeholder(rule, field="", lane=""):
     if isinstance(kind, list):
         kind = next((item for item in kind if item != "null"), kind[0])
     if kind == "string":
-        if field.lower() == "sql":
+        field_name = field.lower()
+        alias = alias_target(rule)
+        if field_name == "sql_id":
+            return "0000000000000"
+        if field_name == "ddl":
+            return "CREATE TABLE W4O_W40000ABCDEF (ID NUMBER)"
+        if field_name == "source_code":
+            return "CREATE OR REPLACE VIEW W4O_W40000ABCDEF AS SELECT 1 AS ID FROM dual"
+        if field_name == "sql" and alias in {"ddl", "source_code"}:
+            if alias == "ddl":
+                return "CREATE TABLE W4O_W40000ABCDEF (ID NUMBER)"
+            return "CREATE OR REPLACE VIEW W4O_W40000ABCDEF AS SELECT 1 AS ID FROM dual"
+        if field_name == "sql":
             return "SELECT 1 FROM dual"
-        if field.lower() in {"profile", "db"}:
+        if field_name in {"profile", "db"}:
             return lane
-        if field.lower() in {"name", "table", "owner", "object_name"}:
+        if field_name in {"name", "table", "owner", "object_name"}:
             return "W4O_W40000ABCDEF"
         return "X"
     if kind in {"integer", "number"}:
@@ -1033,9 +1059,15 @@ def generic_contract_cases(descriptors, lane, baselines=None):
                    expect={"error_class": "INVALID_ARGUMENTS"})
         for prop, rule in properties.items():
             if isinstance(rule, dict) and isinstance(rule.get("enum"), list):
-                baseline = {**minimal, prop: rule["enum"][0]}
+                baseline = dict(minimal)
+                canonical = alias_target(rule)
+                if canonical and canonical != prop:
+                    baseline.pop(canonical, None)
+                baseline[prop] = rule["enum"][0]
+                invalid = dict(baseline)
+                invalid[prop] = "__w4_wrong_enum__"
                 yield dict(base, case_id=f"w4_contract_{name}_{prop}_wrong_enum",
-                           call={"arguments": {**baseline, prop: "__w4_wrong_enum__"},
+                           call={"arguments": invalid,
                                  "baseline_arguments": baseline},
                            expect={"error_class": "INVALID_ARGUMENTS"})
 
@@ -1692,6 +1724,38 @@ def selftest():
         {"oracle_synthetic": {"object_name": "W4O_VALID"}}))
     require(generated[0]["call"]["baseline_arguments"] == {"object_name": "W4O_VALID"},
             "per-family contract baseline did not override schema placeholder")
+    enum_schema = {"inputSchema": {"type": "object", "properties": {
+        "level": {"type": "string", "enum": ["READ_ONLY", "DDL"]},
+        "target_level": {"type": "string", "enum": ["READ_ONLY", "DDL"],
+                         "description": "Alias for level."}},
+        "required": ["level"]}}
+    enum_cases = list(generic_contract_cases(
+        {"oracle_synthetic_level": enum_schema}, "free23"))
+    alias_enum = next(case for case in enum_cases
+                      if case["case_id"].endswith("target_level_wrong_enum"))
+    require(alias_enum["call"]["baseline_arguments"] == {"target_level": "READ_ONLY"}
+            and alias_enum["call"]["arguments"] ==
+            {"target_level": "__w4_wrong_enum__"},
+            "enum alias cases must never send canonical and alias fields together")
+    sql_id = schema_placeholder(
+        {"type": "string", "minLength": 13, "maxLength": 13}, "sql_id")
+    require(isinstance(sql_id, str) and len(sql_id) == 13,
+            "SQL-ID placeholder must satisfy the advertised 13-character bound")
+    ddl = schema_placeholder({"type": "string"}, "ddl")
+    require(ddl.startswith("CREATE TABLE ") and ddl.endswith("(ID NUMBER)"),
+            "DDL placeholder must be a real CREATE TABLE statement")
+    ddl_alias = schema_placeholder(
+        {"type": "string", "description": "Alias for ddl."}, "sql")
+    require(ddl_alias == ddl, "DDL aliases must receive a real CREATE TABLE statement")
+    source_code = schema_placeholder({"type": "string"}, "source_code")
+    require(source_code.startswith("CREATE OR REPLACE VIEW ")
+            and " AS SELECT 1 AS ID FROM dual" in source_code,
+            "source-code placeholder must be a real CREATE OR REPLACE statement")
+    source_alias = schema_placeholder(
+        {"type": "string", "description": "Runtime compatibility alias for source_code."},
+        "sql")
+    require(source_alias == source_code,
+            "source-code aliases must receive a real CREATE OR REPLACE statement")
     rejected_marker = {"case_id": "w4_selftest_marker", "tool": "oracle_synthetic",
                        "level": "READ_ONLY", "transports": ["stdio"],
                        "requires": ["priv:SELECT_V_SQL"], "setup": [],
