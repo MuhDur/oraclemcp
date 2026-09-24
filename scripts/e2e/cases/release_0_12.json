@@ -1297,26 +1297,32 @@
     "title": "Connection failure phase diagnosis",
     "reproducible": "live",
     "input": {
-      "profile": "W4_<run>_ADB_FAULT",
-      "fault": "synthetic post-ACCEPT TTC failure"
+      "profile": "W4_<run>_DOCTOR",
+      "faults": [
+        "wrong password on the selected lab service",
+        "closed loopback TCP port",
+        "synthetic TCPS profile with a missing wallet directory"
+      ],
+      "runner": "scripts/e2e/doctor_online_connect_phase.py"
     },
-    "tool_or_path": "doctor --online",
-    "pre_fix_outcome": "0.11.0 hid driver detail and trace stopped at ACCEPT with misleading connect-string hint",
-    "post_fix_expected": "opt-in redacted detail and post-ACCEPT phase-aware hint",
+    "tool_or_path": "installed binary: doctor --online --verbose",
+    "pre_fix_outcome": "0.11.0 suppressed the failed connect phase and supplied the generic connect-string hint after listener ACCEPT",
+    "post_fix_expected": "the external case reports AuthTtc, Tcp, and Wallet for the planted failures, with the AuthTtc hint and no canary leak",
     "assertions": [
-      "no secret/identifier in output; phase identifies auth/TTC; default stays redacted"
+      "wrong password reports AuthTtc and ORA-01017 with authentication/TTC hint",
+      "closed loopback port reports Tcp",
+      "missing wallet directory reports Wallet",
+      "password/token/OCID/DSN canaries never appear in verbose stdout or stderr",
+      "default doctor output stays redacted"
     ],
     "versions": [
+      "version:18",
+      "version:21",
       "version:23"
     ],
-    "capabilities": [
-      "adb"
-    ],
+    "capabilities": [],
     "repo": "oraclemcp",
-    "symbols": [
-      "connect trace",
-      "doctor_online"
-    ],
+    "symbols": ["connect_phase_from_error", "doctor_online_connect_phase"],
     "test_id": "w4_doctor_online_connect_phase",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i56_connect_phase.jsonl"

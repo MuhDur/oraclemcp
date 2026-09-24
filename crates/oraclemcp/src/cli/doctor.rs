@@ -55,4 +55,18 @@ mod tests {
             })
         ));
     }
+
+    #[test]
+    fn connect_hint_after_accept_never_suggests_connect_string() {
+        let hint = oraclemcp_db::connect_hint_for(oraclemcp_db::ConnectPhaseReached::AuthTtc);
+        let lower = hint.to_ascii_lowercase();
+        assert!(
+            lower.contains("authentication") && lower.contains("ttc"),
+            "{hint}"
+        );
+        assert!(
+            !lower.contains("connect string") && !lower.contains("host and port"),
+            "post-ACCEPT diagnostics must not send operators back to the connect string: {hint}"
+        );
+    }
 }
