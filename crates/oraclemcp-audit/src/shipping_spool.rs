@@ -276,6 +276,7 @@ impl DurableShippingForwarder {
             wake: Condvar::new(),
             enqueue_closed: AtomicBool::new(false),
             worker_stop: AtomicBool::new(false),
+            flush_requested: AtomicBool::new(false),
             pending: AtomicU64::new(pending_len),
             pending_bytes: AtomicU64::new(
                 u64::try_from(recovered.pending_bytes).unwrap_or(u64::MAX),
@@ -511,6 +512,13 @@ impl ShippingForwarder for DurableShippingForwarder {
     }
 
     fn flush(&self) -> Result<(), ShippingError> {
+        // A bare notify is lost when it lands between a delivery failure and
+        // the worker parking in `wait_retry`, and the worker then sleeps the
+        // whole backoff (oraclemcp-sotic). The flag survives that window, and
+        // the queue mutex bridges the worker's flag check to its park, as in
+        // `shutdown`.
+        self.shared.flush_requested.store(true, Ordering::Release);
+        drop(self.shared.queue.lock());
         self.shared.wake.notify_one();
         Ok(())
     }
@@ -541,6 +549,9 @@ struct SpoolShared {
     enqueue_closed: AtomicBool,
     /// Stops destination delivery without disabling durable enqueue/overflow.
     worker_stop: AtomicBool,
+    /// Set by `flush`, consumed by the worker before it parks for a retry
+    /// backoff, so a flush that lands before the park is not lost.
+    flush_requested: AtomicBool,
     pending: AtomicU64,
     pending_bytes: AtomicU64,
     delivered: AtomicU64,
@@ -1626,8 +1637,12 @@ fn deliver_with_deadline(
 
 fn wait_retry(shared: &SpoolShared, delay: Duration) {
     let mut queue = shared.queue.lock();
-    if !shared.worker_stop.load(Ordering::Acquire) {
+    if !shared.worker_stop.load(Ordering::Acquire)
+        && !shared.flush_requested.swap(false, Ordering::AcqRel)
+    {
         shared.wake.wait_for(&mut queue, delay);
+        // A flush that woke this backoff is answered by the retry below.
+        shared.flush_requested.store(false, Ordering::Release);
     }
 }
 
@@ -2410,6 +2425,13 @@ mod tests {
             .expect("authenticate primary")
     }
 
+    /// The deadline for waits on an outcome that must eventually happen
+    /// (a delivery, a timeout being recorded, a worker exit). It only turns a
+    /// hang into a failure; no property depends on it, so it matches the
+    /// file's existing 30s liveness guard rather than a latency budget.
+    /// Budget and ordering assertions keep their own exact deadlines.
+    const LIVENESS_HANG_GUARD: Duration = Duration::from_secs(30);
+
     fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
         let deadline = Instant::now() + timeout;
         while !predicate() {
@@ -2525,7 +2547,8 @@ mod tests {
         );
 
         open_gate(&gate);
-        wait_until(Duration::from_secs(30), || {
+        // Hang guard only; still asserts the gated record is eventually delivered once the gate opens.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().delivered_records == 1
         });
     }
@@ -2661,7 +2684,8 @@ mod tests {
         assert_eq!(indicator.count, 2);
         assert_eq!((indicator.first_seq, indicator.last_seq), (3, 4));
         open_gate(&gate);
-        wait_until(Duration::from_secs(2), || {
+        // Hang guard only; still asserts both admitted records are eventually delivered once the gate opens.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().delivered_records == 2
         });
     }
@@ -2692,7 +2716,8 @@ mod tests {
             DurableShippingForwarder::open(cfg, Box::new(SharedCapture(Arc::clone(&capture))))
                 .expect("recover worker");
         let status = delivery.status_handle();
-        wait_until(Duration::from_secs(2), || {
+        // Hang guard only; still asserts the restarted worker eventually replays all three records.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().delivered_records == 3
         });
         assert_eq!(*capture.seqs.lock(), vec![1, 2, 3]);
@@ -2737,7 +2762,8 @@ mod tests {
         let _release = release_gate_on_drop(&gate);
         pair.forward(&record(1)).expect("enqueue both");
         pair.forward(&record(2)).expect("enqueue both");
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the fast spool eventually delivers both records while the slow one is gated shut.
+        wait_until(LIVENESS_HANG_GUARD, || {
             fast_status.snapshot().delivered_records == 2
         });
         assert_eq!(*capture.seqs.lock(), vec![1, 2]);
@@ -2816,7 +2842,8 @@ mod tests {
         .expect("open spool");
         let status = delivery.status_handle();
         delivery.forward(&record(1)).expect("enqueue");
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the supervised worker eventually delivers after the destination panic.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().delivered_records == 1
         });
         assert!(calls.load(Ordering::SeqCst) >= 2);
@@ -2923,8 +2950,11 @@ mod tests {
     fn flush_wakes_worker_out_of_retry_backoff() {
         let directory = tempfile::tempdir().expect("tempdir");
         let attempts = Arc::new(AtomicUsize::new(0));
+        // An hour-long backoff: a delivery inside the wait below can only come
+        // from the flush, on any machine at any speed. The old 800ms backoff
+        // against a 250ms deadline measured scheduling as much as waking.
         let cfg = config(directory.path(), "flush-wakes")
-            .with_retry(Duration::from_millis(800), Duration::from_millis(800));
+            .with_retry(Duration::from_secs(3600), Duration::from_secs(3600));
         let delivery = DurableShippingForwarder::open(
             cfg,
             Box::new(FlakyForwarder {
@@ -2937,15 +2967,88 @@ mod tests {
         delivery
             .forward(&record(1))
             .expect("enqueue for retry path");
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the first attempt eventually fails and leaves the record queued.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().delivery_failures >= 1 && status.snapshot().pending_records == 1
         });
 
         delivery.flush().expect("flush can unblock retry");
-        wait_until(Duration::from_millis(250), || {
+        // Hang guard only; still asserts the flush, not the hour-long backoff, eventually delivers the record.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().pending_records == 0
         });
         assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    struct FailOnceGate {
+        state: Arc<(Mutex<DestinationCallGateState>, Condvar)>,
+        attempts: Arc<AtomicUsize>,
+    }
+
+    impl ShippingForwarder for FailOnceGate {
+        fn forward(&self, record: &AuditRecord) -> Result<(), ShippingError> {
+            if self.attempts.fetch_add(1, Ordering::SeqCst) > 0 {
+                return Ok(());
+            }
+            DestinationCallGate {
+                state: Arc::clone(&self.state),
+            }
+            .forward(record)?;
+            Err(ShippingError::Transport("first attempt fails".to_owned()))
+        }
+    }
+
+    /// oraclemcp-sotic: a flush that lands after a delivery failure but before
+    /// the worker parks in its retry backoff must still wake it. The test holds
+    /// the queue mutex across the failure, so the worker cannot have parked
+    /// when the flush arrives. A bare notify was lost here and the worker slept
+    /// the whole hour-long backoff.
+    #[test]
+    fn flush_between_a_failure_and_the_backoff_park_still_wakes_the_worker() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new((
+            Mutex::new(DestinationCallGateState::default()),
+            Condvar::new(),
+        ));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delivery = Arc::new(
+            DurableShippingForwarder::open(
+                config(directory.path(), "flush-before-park")
+                    .with_retry(Duration::from_secs(3600), Duration::from_secs(3600)),
+                Box::new(FailOnceGate {
+                    state: Arc::clone(&state),
+                    attempts: Arc::clone(&attempts),
+                }),
+            )
+            .expect("open spool"),
+        );
+        let status = delivery.status_handle();
+        delivery.forward(&record(1)).expect("enqueue");
+        wait_for_destination_call(&state);
+
+        let queue = delivery.shared.queue.lock();
+        release_destination_call(&state);
+        // The failure is counted before `wait_retry` takes the mutex this test
+        // holds, so from here until `queue` drops the worker cannot park.
+        while status.snapshot().delivery_failures == 0 {
+            thread::yield_now();
+        }
+        let flusher = {
+            let delivery = Arc::clone(&delivery);
+            thread::spawn(move || delivery.flush().expect("flush"))
+        };
+        while !delivery.shared.flush_requested.load(Ordering::Acquire) {
+            thread::yield_now();
+        }
+        drop(queue);
+        flusher.join().expect("flush caller joins");
+
+        // Hang guard only; still asserts the flush, not the hour-long backoff, eventually delivers the record.
+        wait_until(LIVENESS_HANG_GUARD, || {
+            status.snapshot().pending_records == 0
+        });
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(delivery.shutdown(), DurableShippingShutdownOutcome::Stopped);
     }
 
     #[test]
@@ -3078,7 +3181,8 @@ mod tests {
         )
         .expect("authenticated suffix bridges mirror to primary");
         let status = delivery.status_handle();
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the recovered suffix is eventually delivered.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().delivered_records == 1
         });
         assert_eq!(delivery.shutdown(), DurableShippingShutdownOutcome::Stopped);
@@ -3259,6 +3363,7 @@ mod tests {
             wake: Condvar::new(),
             enqueue_closed: AtomicBool::new(false),
             worker_stop: AtomicBool::new(false),
+            flush_requested: AtomicBool::new(false),
             pending: AtomicU64::new(2),
             pending_bytes: AtomicU64::new(pending_bytes as u64),
             delivered: AtomicU64::new(0),
@@ -3347,6 +3452,7 @@ mod tests {
             wake: Condvar::new(),
             enqueue_closed: AtomicBool::new(false),
             worker_stop: AtomicBool::new(false),
+            flush_requested: AtomicBool::new(false),
             pending: AtomicU64::new(1),
             pending_bytes: AtomicU64::new(pending_bytes as u64),
             delivered: AtomicU64::new(0),
@@ -4047,7 +4153,8 @@ mod tests {
         );
 
         release_destination_call(&state);
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the record is eventually delivered through the held spool directory.
+        wait_until(LIVENESS_HANG_GUARD, || {
             delivery.status_handle().snapshot().delivered_records == 1
         });
         assert!(
@@ -4295,7 +4402,8 @@ mod tests {
     fn wait_for_destination_call(state: &Arc<(Mutex<DestinationCallGateState>, Condvar)>) {
         let (state, wake) = &**state;
         let mut state = state.lock();
-        let deadline = Instant::now() + Duration::from_secs(1);
+        // Hang guard only; still asserts the worker eventually enters the call.
+        let deadline = Instant::now() + LIVENESS_HANG_GUARD;
         while !state.started {
             let remaining = deadline.saturating_duration_since(Instant::now());
             assert!(
@@ -4351,7 +4459,8 @@ mod tests {
 
         release_destination_call(&state);
         let status = delivery.status_handle();
-        wait_until(Duration::from_secs(1), || !status.snapshot().worker_running);
+        // Hang guard only; still asserts the worker eventually stops on the substituted record.
+        wait_until(LIVENESS_HANG_GUARD, || !status.snapshot().worker_running);
         assert_eq!(
             state.0.lock().seqs,
             vec![1],
@@ -4388,6 +4497,89 @@ mod tests {
         );
         drop(queue);
         caller.join().expect("shutdown caller joins");
+        // A second shutdown gets a fresh 20ms budget, and whether the woken
+        // worker has been scheduled and exited inside it is up to the machine
+        // (oraclemcp-sotic: TimedOut on a loaded Windows runner). Wait for the
+        // exit itself; the outcome of that race is pinned by
+        // `a_second_shutdown_is_stopped_only_once_the_worker_has_exited`.
+        wait_for_worker_exit(&delivery);
+        assert_eq!(delivery.shutdown(), DurableShippingShutdownOutcome::Stopped);
+    }
+
+    /// The worker drops its destination as it returns, before it signals
+    /// completion, so a destination whose drop is gated holds the worker
+    /// between "stop observed" and "exited" for as long as the test wants.
+    struct DropGate {
+        state: Arc<(Mutex<DestinationCallGateState>, Condvar)>,
+    }
+
+    impl ShippingForwarder for DropGate {
+        fn forward(&self, _record: &AuditRecord) -> Result<(), ShippingError> {
+            Ok(())
+        }
+    }
+
+    impl Drop for DropGate {
+        fn drop(&mut self) {
+            let (state, wake) = &*self.state;
+            let mut state = state.lock();
+            state.started = true;
+            wake.notify_all();
+            while !state.open {
+                wake.wait(&mut state);
+            }
+        }
+    }
+
+    fn wait_for_worker_exit(delivery: &DurableShippingForwarder) {
+        // Hang guard only; still asserts the worker thread eventually exits.
+        wait_until(LIVENESS_HANG_GUARD, || {
+            delivery
+                .worker
+                .lock()
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+        });
+    }
+
+    /// oraclemcp-sotic: the interleaving behind the flaky second shutdown,
+    /// made deterministic. Every call gets its own budget; a worker that has
+    /// observed the stop but not yet exited is TimedOut, not Stopped, and the
+    /// same forwarder reports Stopped once the worker is gone.
+    #[test]
+    fn a_second_shutdown_is_stopped_only_once_the_worker_has_exited() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new((
+            Mutex::new(DestinationCallGateState::default()),
+            Condvar::new(),
+        ));
+        let delivery = DurableShippingForwarder::open(
+            config(directory.path(), "exit-in-progress")
+                .with_timeouts(Duration::from_secs(1), Duration::from_millis(20)),
+            Box::new(DropGate {
+                state: Arc::clone(&state),
+            }),
+        )
+        .expect("open spool");
+        let status = delivery.status_handle();
+
+        assert_eq!(
+            delivery.shutdown(),
+            DurableShippingShutdownOutcome::TimedOut
+        );
+        // The worker observed the stop and is inside its exit path.
+        wait_for_destination_call(&state);
+        assert_eq!(
+            delivery.shutdown(),
+            DurableShippingShutdownOutcome::TimedOut,
+            "a worker that has not exited must not be reported Stopped"
+        );
+        assert!(status.snapshot().worker_running);
+        assert_eq!(status.snapshot().shutdown_timeouts, 2);
+
+        release_destination_call(&state);
+        wait_for_worker_exit(&delivery);
+        assert!(!status.snapshot().worker_running);
         assert_eq!(delivery.shutdown(), DurableShippingShutdownOutcome::Stopped);
     }
 
@@ -4410,11 +4602,13 @@ mod tests {
         let status = delivery.status_handle();
         delivery.forward(&record(1)).expect("enqueue record");
         wait_for_destination_call(&state);
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the gated destination call eventually times out.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().destination_timeouts == 1
         });
         release_destination_call(&state);
-        wait_until(Duration::from_secs(1), || !status.snapshot().worker_running);
+        // Hang guard only; still asserts the worker eventually exits after the timed-out call returns.
+        wait_until(LIVENESS_HANG_GUARD, || !status.snapshot().worker_running);
 
         let successor = DurableShippingForwarder::open(cfg, Box::new(AlwaysFails))
             .expect("successor acquires the released spool lease");
@@ -4510,7 +4704,8 @@ mod tests {
         assert_eq!(delivery.status_handle().snapshot().shutdown_timeouts, 1);
 
         release_destination_call(&state);
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the worker thread eventually exits after the destination is released.
+        wait_until(LIVENESS_HANG_GUARD, || {
             delivery
                 .worker
                 .lock()
@@ -4555,8 +4750,10 @@ mod tests {
         assert!(overlap_error.to_string().contains("already owned"));
 
         release_destination_call(&state);
-        wait_until(Duration::from_secs(1), || !status.snapshot().worker_running);
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the worker eventually exits after the timed-out call returns.
+        wait_until(LIVENESS_HANG_GUARD, || !status.snapshot().worker_running);
+        // Hang guard only; still asserts the released lease is eventually acquirable.
+        wait_until(LIVENESS_HANG_GUARD, || {
             SpoolLock::acquire(
                 &secure_spool_directory(directory.path()).expect("open held spool directory"),
                 directory.path(),
@@ -4596,7 +4793,8 @@ mod tests {
         let status = delivery.status_handle();
         delivery.forward(&record(1)).expect("enqueue record");
         wait_for_destination_call(&state);
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the gated destination call eventually times out.
+        wait_until(LIVENESS_HANG_GUARD, || {
             let snapshot = status.snapshot();
             snapshot.destination_timeouts == 1
         });
@@ -4628,7 +4826,8 @@ mod tests {
             DurableShippingForwarder::open(cfg, Box::new(SharedCapture(Arc::clone(&capture))))
                 .expect("restart recovers records accepted after the old worker halted");
         let recovery_status = recovery.status_handle();
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the restarted worker eventually delivers both recovered records.
+        wait_until(LIVENESS_HANG_GUARD, || {
             recovery_status.snapshot().delivered_records == 2
         });
         assert_eq!(*capture.seqs.lock(), vec![1, 2]);
@@ -4654,7 +4853,8 @@ mod tests {
         let status = delivery.status_handle();
         delivery.forward(&record(1)).expect("enqueue record");
         wait_for_destination_call(&state);
-        wait_until(Duration::from_secs(1), || {
+        // Hang guard only; still asserts the gated destination call eventually times out.
+        wait_until(LIVENESS_HANG_GUARD, || {
             status.snapshot().destination_timeouts == 1
         });
         assert_eq!(
@@ -4671,7 +4871,8 @@ mod tests {
         assert!(overlap.to_string().contains("already owned"));
 
         release_destination_call(&state);
-        wait_until(Duration::from_secs(1), || !status.snapshot().worker_running);
+        // Hang guard only; still asserts the worker eventually exits after the timed-out call returns.
+        wait_until(LIVENESS_HANG_GUARD, || !status.snapshot().worker_running);
         let successor = DurableShippingForwarder::open(cfg, Box::new(Capture::default()))
             .expect("successor opens only after the timed-out call exits");
         assert_eq!(

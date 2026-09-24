@@ -5850,28 +5850,36 @@ mod tests {
         .expect("install broad fixture DACL");
         let broad_dacl = redacted_windows_dacl_sddl(&path);
 
-        let ready = root.path().join("foreign-ready");
-        let release = root.path().join("foreign-release");
-        let script = "$h=[System.IO.File]::Open($env:AUDIT_TEST_PATH,'Open','ReadWrite','ReadWrite'); [System.IO.File]::WriteAllText($env:AUDIT_TEST_READY,'ready'); for($i=0;$i -lt 100 -and -not (Test-Path $env:AUDIT_TEST_RELEASE);$i++){ Start-Sleep -Milliseconds 100 }; $h.Dispose()";
+        // The holder reports "ready" on stdout once it holds the handle and
+        // keeps it until its stdin closes: pipe barriers, not polling. The old
+        // fixture gave PowerShell 10s to start and then released the handle on
+        // its own 10s clock, and a loaded Windows runner missed the first
+        // window (oraclemcp-sotic).
+        let script = "$h=[System.IO.File]::Open($env:AUDIT_TEST_PATH,'Open','ReadWrite','ReadWrite'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); $null=[Console]::In.ReadToEnd(); $h.Dispose()";
         let mut child = std::process::Command::new("powershell.exe")
             .args(["-NoProfile", "-NonInteractive", "-Command", script])
             .env("AUDIT_TEST_PATH", &path)
-            .env("AUDIT_TEST_READY", &ready)
-            .env("AUDIT_TEST_RELEASE", &release)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
             .spawn()
             .expect("launch foreign handle holder");
-        for _ in 0..100 {
-            if ready.exists() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(100));
-        }
-        assert!(ready.exists(), "foreign process must hold the file handle");
+        let mut ready = String::new();
+        std::io::BufRead::read_line(
+            &mut std::io::BufReader::new(child.stdout.take().expect("holder stdout")),
+            &mut ready,
+        )
+        .expect("read holder readiness");
+        assert_eq!(
+            ready.trim(),
+            "ready",
+            "foreign process must hold the file handle (holder exited: {:?})",
+            child.try_wait()
+        );
         let error = open_private_append_file(&path)
             .expect_err("broad pre-existing DACL with foreign handle must be refused");
         assert!(error.to_string().contains("cannot open audit"), "{error}");
         assert!(child.try_wait().expect("poll holder").is_none());
-        std::fs::write(&release, b"release").expect("release foreign holder");
+        drop(child.stdin.take());
         assert!(child.wait().expect("wait for holder").success());
         assert_eq!(
             redacted_windows_dacl_sddl(&path),
