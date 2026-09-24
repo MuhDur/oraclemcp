@@ -4,8 +4,10 @@
   "generated_at": "2026-09-24T07:40:00Z",
   "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.3",
   "scope": {
-    "summary": "Engine (plsql-intelligence @ 27806fbeff15c73135df0e71d529d6bfa346a90e, on engine main): source-backed RoutineEffectsV1 and InvocationClosureV1, explicit Unknown on unresolved effects, exhaustive construct-to-effect mapping, typed depgraph edges, exact identity/overload/default closure. No oraclemcp files are changed by this bead.",
-    "in_scope": [],
+    "summary": "Engine (plsql-intelligence @ 27806fbeff15c73135df0e71d529d6bfa346a90e, on engine main): source-backed RoutineEffectsV1 and InvocationClosureV1, explicit Unknown on unresolved effects, exhaustive construct-to-effect mapping, typed depgraph edges, exact identity/overload/default closure. No oraclemcp source files change. Cargo.toml is listed as the oraclemcp manifest that consumes the engine (same convention as .10.2).",
+    "in_scope": [
+      "Cargo.toml"
+    ],
     "out_of_scope": [
       "plsql-accretion crate tests were excluded from the orchestrator run: its usr_gate.sh-invoking tests recurse without bound through cargo-mutants on this host (filed oraclemcp-hxty7). The crate is untouched by 27806fb.",
       "Runtime behaviour on Oracle and catalog freshness (bead no-claim)."
