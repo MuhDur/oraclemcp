@@ -160,8 +160,8 @@ The tables below are generated from the server's tool registry — the same desc
 | Tool | Title | Purpose | Visible from | Destructive |
 | --- | --- | --- | --- | --- |
 | `oracle_list_profiles` | Oracle List Profiles | List configured connection profiles without exposing connect strings, usernames, or credential references. | `READ_ONLY` | no |
-| `oracle_connection_info` | Oracle Connection Info | Describe the active profile and Oracle connection. | `READ_ONLY` | no |
-| `oracle_switch_profile` | Oracle Switch Profile | Reconnect this MCP server to another configured profile by name. | `READ_ONLY` | no |
+| `oracle_connection_info` | Oracle Connection Info | Describe the active profile, its effective MCP access (operating level, profile max_level, protected status, and whether writes are permitted now), and Oracle connection state. | `READ_ONLY` | no |
+| `oracle_switch_profile` | Oracle Switch Profile | Reconnect this MCP server to another configured profile by name and report that profile's effective MCP access. | `READ_ONLY` | no |
 | `oracle_set_session_level` | Oracle Set Session Level | Preview or apply a temporary session operating-level elevation within the active profile ceiling, or drop back to READ_ONLY. | `READ_ONLY` | yes |
 | `oracle_query` | Oracle Query | Run a read-only SELECT with positional binds; paginated and row/byte capped. | `READ_ONLY` | no |
 | `oracle_semantic_search` | Oracle Semantic Search | Run a bounded, fail-closed 23ai vector search through the same policy, semantic-resolution, masking, and audit path as oracle_query. | `READ_ONLY` | no |

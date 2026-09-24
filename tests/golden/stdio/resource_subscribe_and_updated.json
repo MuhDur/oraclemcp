@@ -93,7 +93,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Describe the active profile and Oracle connection. When live connection metadata is unavailable, returns connected=false with a structured connection_error and next_actions.",
+            "description": "Describe the active profile, its effective MCP access (operating level, profile max_level, protected status, and whether writes are permitted now), and Oracle connection state. Database open_mode/read_only describe the Oracle target, not granted access. When live metadata is unavailable, returns connected=false with a structured connection_error and next_actions.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {},
@@ -101,6 +101,119 @@
               "type": "object"
             },
             "name": "oracle_connection_info",
+            "outputSchema": {
+              "additionalProperties": true,
+              "properties": {
+                "active_profile": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "connected": {
+                  "type": "boolean"
+                },
+                "connection": {
+                  "additionalProperties": true,
+                  "description": "Oracle connection metadata. Its legacy open_mode/read_only fields, and database_state group, describe Oracle database state rather than permissions granted by this MCP profile.",
+                  "properties": {
+                    "database_state": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "database_role": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "open_mode": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "read_only": {
+                          "type": "boolean"
+                        },
+                        "read_only_reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "read_only"
+                      ],
+                      "type": "object"
+                    },
+                    "open_mode": {
+                      "description": "Oracle database open mode, not the MCP session operating level.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "read_only": {
+                      "description": "Whether the Oracle database role/open mode is read-only, not whether this MCP profile permits writes.",
+                      "type": "boolean"
+                    }
+                  },
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "connection_error": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "effective_access": {
+                  "additionalProperties": false,
+                  "description": "Effective MCP session access, derived from the active profile policy and current operating-level window. It is independent of Oracle database open mode.",
+                  "properties": {
+                    "max_level": {
+                      "description": "Profile's configured maximum operating level before any narrower request scope.",
+                      "enum": [
+                        "READ_ONLY",
+                        "READ_WRITE",
+                        "DDL",
+                        "ADMIN"
+                      ],
+                      "type": "string"
+                    },
+                    "operating_level": {
+                      "enum": [
+                        "READ_ONLY",
+                        "READ_WRITE",
+                        "DDL",
+                        "ADMIN"
+                      ],
+                      "type": "string"
+                    },
+                    "protected": {
+                      "type": "boolean"
+                    },
+                    "writes_permitted_now": {
+                      "description": "True only while the effective operating level is above READ_ONLY, including a live temporary elevation window.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "operating_level",
+                    "max_level",
+                    "protected",
+                    "writes_permitted_now"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "connected",
+                "effective_access"
+              ],
+              "type": "object"
+            },
             "title": "Oracle Connection Info"
           },
           {
@@ -110,7 +223,7 @@
               "openWorldHint": false,
               "readOnlyHint": true
             },
-            "description": "Reconnect this MCP server to another configured profile by name.",
+            "description": "Reconnect this MCP server to another configured profile by name and report that profile's effective MCP access. Oracle database open_mode/read_only describe the target database, not granted access.",
             "inputSchema": {
               "additionalProperties": false,
               "properties": {
@@ -129,6 +242,119 @@
               "type": "object"
             },
             "name": "oracle_switch_profile",
+            "outputSchema": {
+              "additionalProperties": true,
+              "properties": {
+                "active_profile": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "connected": {
+                  "type": "boolean"
+                },
+                "connection": {
+                  "additionalProperties": true,
+                  "description": "Oracle connection metadata. Its legacy open_mode/read_only fields, and database_state group, describe Oracle database state rather than permissions granted by this MCP profile.",
+                  "properties": {
+                    "database_state": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "database_role": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "open_mode": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        },
+                        "read_only": {
+                          "type": "boolean"
+                        },
+                        "read_only_reason": {
+                          "type": [
+                            "string",
+                            "null"
+                          ]
+                        }
+                      },
+                      "required": [
+                        "read_only"
+                      ],
+                      "type": "object"
+                    },
+                    "open_mode": {
+                      "description": "Oracle database open mode, not the MCP session operating level.",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "read_only": {
+                      "description": "Whether the Oracle database role/open mode is read-only, not whether this MCP profile permits writes.",
+                      "type": "boolean"
+                    }
+                  },
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "connection_error": {
+                  "additionalProperties": true,
+                  "type": "object"
+                },
+                "effective_access": {
+                  "additionalProperties": false,
+                  "description": "Effective MCP session access, derived from the active profile policy and current operating-level window. It is independent of Oracle database open mode.",
+                  "properties": {
+                    "max_level": {
+                      "description": "Profile's configured maximum operating level before any narrower request scope.",
+                      "enum": [
+                        "READ_ONLY",
+                        "READ_WRITE",
+                        "DDL",
+                        "ADMIN"
+                      ],
+                      "type": "string"
+                    },
+                    "operating_level": {
+                      "enum": [
+                        "READ_ONLY",
+                        "READ_WRITE",
+                        "DDL",
+                        "ADMIN"
+                      ],
+                      "type": "string"
+                    },
+                    "protected": {
+                      "type": "boolean"
+                    },
+                    "writes_permitted_now": {
+                      "description": "True only while the effective operating level is above READ_ONLY, including a live temporary elevation window.",
+                      "type": "boolean"
+                    }
+                  },
+                  "required": [
+                    "operating_level",
+                    "max_level",
+                    "protected",
+                    "writes_permitted_now"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "connected",
+                "effective_access"
+              ],
+              "type": "object"
+            },
             "title": "Oracle Switch Profile"
           },
           {

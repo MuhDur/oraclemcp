@@ -2041,6 +2041,7 @@ struct DescribeCatalogState {
 struct DescribeCatalogMock {
     state: Arc<DescribeCatalogState>,
     columns: Vec<OracleRow>,
+    view_exists: bool,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -2075,7 +2076,33 @@ impl OracleConnection for DescribeCatalogMock {
             .lock()
             .expect("describe catalog call mutex")
             .push((sql.to_owned(), binds.to_vec()));
-        if sql.to_ascii_lowercase().contains("from all_tab_cols") {
+        let sql = sql.to_ascii_lowercase();
+        if sql.contains("from all_views") {
+            if self.view_exists {
+                Ok(vec![OracleRow {
+                    columns: vec![
+                        (
+                            "OWNER".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("APP".to_owned())),
+                        ),
+                        (
+                            "VIEW_NAME".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("V".to_owned())),
+                        ),
+                        (
+                            "TEXT_LENGTH".to_owned(),
+                            OracleCell::new("NUMBER", Some("8".to_owned())),
+                        ),
+                        (
+                            "TEXT".to_owned(),
+                            OracleCell::new("CLOB", Some("SELECT 1".to_owned())),
+                        ),
+                    ],
+                }])
+            } else {
+                Ok(Vec::new())
+            }
+        } else if sql.contains("from all_tab_cols") {
             Ok(self.columns.clone())
         } else {
             Ok(Vec::new())
@@ -5593,6 +5620,7 @@ fn oracle_describe_not_visible_returns_structured_not_found_with_next_actions() 
     let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
         state: Arc::clone(&state),
         columns: Vec::new(),
+        view_exists: false,
     }));
 
     let error = dispatcher
@@ -5638,6 +5666,7 @@ fn oracle_describe_unresolved_synonym_returns_structured_not_found() {
     let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
         state: Arc::new(DescribeCatalogState::default()),
         columns: Vec::new(),
+        view_exists: false,
     }));
 
     let error = dispatcher
@@ -5659,6 +5688,7 @@ fn oracle_describe_preserves_double_quoted_identifier_case() {
                 OracleCell::new("VARCHAR2", Some("id".to_owned())),
             )],
         }],
+        view_exists: false,
     }));
 
     let description = dispatcher
@@ -5693,7 +5723,7 @@ fn oracle_describe_preserves_double_quoted_identifier_case() {
 fn oracle_describe_and_describe_view_preserve_column_generation_flags() {
     let state = Arc::new(DescribeCatalogState::default());
     let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
-        state,
+        state: Arc::clone(&state),
         columns: vec![OracleRow {
             columns: vec![
                 (
@@ -5714,6 +5744,7 @@ fn oracle_describe_and_describe_view_preserve_column_generation_flags() {
                 ),
             ],
         }],
+        view_exists: true,
     }));
 
     let table = dispatcher
@@ -5730,6 +5761,25 @@ fn oracle_describe_and_describe_view_preserve_column_generation_flags() {
     assert_eq!(table["columns"][0]["HIDDEN_COLUMN"], json!("NO"));
     assert_eq!(table["columns"][0]["USER_GENERATED"], json!("YES"));
     assert_eq!(view["columns"], table["columns"]);
+}
+
+#[test]
+fn oracle_describe_view_missing_object_stays_typed_not_found() {
+    let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
+        state: Arc::new(DescribeCatalogState::default()),
+        columns: Vec::new(),
+        view_exists: false,
+    }));
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_describe_view",
+            json!({ "owner": "APP", "name": "V" }),
+        )
+        .expect_err("a view absent from ALL_VIEWS remains a typed not-found");
+
+    assert_eq!(error.error_class, ErrorClass::ObjectNotFound);
+    assert!(error.message.contains("view APP.V was not found"));
 }
 
 #[test]
