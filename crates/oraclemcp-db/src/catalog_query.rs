@@ -179,11 +179,21 @@ pub enum CatalogQueryId {
     TriggerMetadata,
     /// Definition metadata for one view.
     ViewMetadata,
+    /// Current read-only transaction SCN from DBMS_FLASHBACK.
+    CurrentScn,
+    /// Resolve a timestamp to a flashback SCN.
+    TimestampToScn,
+    /// Bounded compile diagnostics for an optional object name.
+    CompileErrors,
+    /// Bounded source search with nullable metadata filters.
+    SearchSource,
+    /// Source lines for one object with nullable line bounds.
+    GetSource,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 61] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -240,6 +250,11 @@ impl CatalogQueryId {
         Self::IndexExpressions,
         Self::TriggerMetadata,
         Self::ViewMetadata,
+        Self::CurrentScn,
+        Self::TimestampToScn,
+        Self::CompileErrors,
+        Self::SearchSource,
+        Self::GetSource,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -863,6 +878,69 @@ impl CatalogQueryId {
          WHERE owner = :1 AND view_name = :2",
                 TT,
                 "describe view definition metadata",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::CurrentScn => (
+                crate::query::CURRENT_SCN_SQL,
+                EMPTY,
+                "capture the transaction snapshot SCN",
+                SessionContext,
+                Diagnostic,
+            ),
+            Self::TimestampToScn => (
+                crate::query::TIMESTAMP_TO_SCN_SQL,
+                BindSchema(&[Text]),
+                "resolve a flashback timestamp to an SCN",
+                SessionContext,
+                Diagnostic,
+            ),
+            Self::CompileErrors => (
+                "SELECT * FROM ( \
+                   SELECT name, type, line, position, text, attribute \
+                   FROM all_errors \
+                   WHERE owner = :1 AND (:2 IS NULL OR name = :3) \
+                   ORDER BY name, type, sequence \
+               ) WHERE ROWNUM <= :4",
+                BindSchema(&[Text, NullableText, NullableText, Integer]),
+                "inspect bounded compile diagnostics",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::SearchSource => (
+                "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter, :4 needle FROM dual \
+                   ) \
+                   SELECT s.owner, s.name, s.type, s.line, s.text \
+                   FROM all_source s CROSS JOIN args \
+                   WHERE (args.owner_filter IS NULL OR s.owner = args.owner_filter) \
+                     AND (args.type_filter IS NULL OR s.type = args.type_filter) \
+                     AND (args.name_filter IS NULL OR s.name LIKE args.name_filter) \
+                     AND UPPER(s.text) LIKE UPPER('%' || args.needle || '%') \
+                   ORDER BY s.owner, s.name, s.type, s.line \
+               ) WHERE ROWNUM <= :5",
+                BindSchema(&[NullableText, NullableText, NullableText, Text, Integer]),
+                "search bounded visible source text",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::GetSource => (
+                "SELECT line, text FROM all_source \
+               WHERE owner = :1 AND name = :2 AND type = :3 \
+                 AND (:4 IS NULL OR line >= :5) \
+                 AND (:6 IS NULL OR line <= :7) \
+               ORDER BY line",
+                BindSchema(&[
+                    Text,
+                    Text,
+                    Text,
+                    CatalogBindKind::NullableInteger,
+                    CatalogBindKind::NullableInteger,
+                    CatalogBindKind::NullableInteger,
+                    CatalogBindKind::NullableInteger,
+                ]),
+                "read source lines for one visible object",
                 DictionaryMetadata,
                 Diagnostic,
             ),

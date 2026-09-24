@@ -1475,20 +1475,15 @@ pub async fn compile_errors(
     // is written `:2 ... :3` and its value supplied twice. Reusing `:2` made
     // this statement declare four slots against three values, and Oracle
     // answered every call with ORA-01008.
-    let sql = "SELECT * FROM ( \
-                   SELECT name, type, line, position, text, attribute \
-                   FROM all_errors \
-                   WHERE owner = :1 AND (:2 IS NULL OR name = :3) \
-                   ORDER BY name, type, sequence \
-               ) WHERE ROWNUM <= :4";
     let name_bind = || {
         name.map_or(OracleBind::Null, |n| {
             OracleBind::from(n.to_ascii_uppercase())
         })
     };
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        sql,
+        conn,
+        CatalogQueryId::CompileErrors,
         &[
             OracleBind::from(owner.to_ascii_uppercase()),
             name_bind(),
@@ -1517,18 +1512,6 @@ pub async fn search_source(
         ),
         None => None,
     };
-    let sql = "SELECT * FROM ( \
-                   WITH args AS ( \
-                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter, :4 needle FROM dual \
-                   ) \
-                   SELECT s.owner, s.name, s.type, s.line, s.text \
-                   FROM all_source s CROSS JOIN args \
-                   WHERE (args.owner_filter IS NULL OR s.owner = args.owner_filter) \
-                     AND (args.type_filter IS NULL OR s.type = args.type_filter) \
-                     AND (args.name_filter IS NULL OR s.name LIKE args.name_filter) \
-                     AND UPPER(s.text) LIKE UPPER('%' || args.needle || '%') \
-                   ORDER BY s.owner, s.name, s.type, s.line \
-               ) WHERE ROWNUM <= :5";
     let owner_bind = owner.map_or(OracleBind::Null, |o| {
         OracleBind::from(o.to_ascii_uppercase())
     });
@@ -1536,9 +1519,10 @@ pub async fn search_source(
     let name_like_bind = name_like.map_or(OracleBind::Null, |n| {
         OracleBind::from(n.to_ascii_uppercase())
     });
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        sql,
+        conn,
+        CatalogQueryId::SearchSource,
         &[
             owner_bind,
             type_bind,
@@ -1567,11 +1551,6 @@ pub async fn get_source(
     // One positional value per `:n` OCCURRENCE (see `compile_errors`): each
     // optional line bound is tested and compared through its own placeholder
     // and supplied twice, rather than reusing `:4`/`:5`.
-    let sql = "SELECT line, text FROM all_source \
-               WHERE owner = :1 AND name = :2 AND type = :3 \
-                 AND (:4 IS NULL OR line >= :5) \
-                 AND (:6 IS NULL OR line <= :7) \
-               ORDER BY line";
     let from_bind = || {
         options
             .from_line
@@ -1582,21 +1561,21 @@ pub async fn get_source(
             .to_line
             .map_or(OracleBind::Null, |line| OracleBind::from(line as i64))
     };
-    let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                OracleBind::from(owner.to_ascii_uppercase()),
-                OracleBind::from(name.to_ascii_uppercase()),
-                OracleBind::from(source_type),
-                from_bind(),
-                from_bind(),
-                to_bind(),
-                to_bind(),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::GetSource,
+        &[
+            OracleBind::from(owner.to_ascii_uppercase()),
+            OracleBind::from(name.to_ascii_uppercase()),
+            OracleBind::from(source_type),
+            from_bind(),
+            from_bind(),
+            to_bind(),
+            to_bind(),
+        ],
+    )
+    .await?;
 
     let cap = options.max_chars.max(1);
     let mut source = String::new();

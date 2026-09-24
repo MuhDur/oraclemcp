@@ -13,6 +13,7 @@ use oraclemcp_error::parse_ora_code;
 // `connection::db_checkpoint`, which is generic over the `Cx` capability row:
 // a read handler running under a narrowed `Cx<ReadPathCaps>` (A9) checkpoints
 // exactly like one under the full row — no `SPAWN`/`REMOTE`/`RANDOM` needed.
+use crate::catalog_query::{CatalogQueryId, run_catalog_query};
 use crate::catalog_resolver::OracleVpdRlsObservation;
 use crate::connection::{OracleConnection, db_checkpoint};
 use crate::error::{
@@ -224,9 +225,9 @@ pub enum AsOf {
     Timestamp(String),
 }
 
-const CURRENT_SCN_SQL: &str =
+pub(crate) const CURRENT_SCN_SQL: &str =
     "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL";
-const TIMESTAMP_TO_SCN_SQL: &str =
+pub(crate) const TIMESTAMP_TO_SCN_SQL: &str =
     "SELECT TIMESTAMP_TO_SCN(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')) AS OBSERVED_SCN FROM DUAL";
 
 /// ORA-00904 on [`CURRENT_SCN_SQL`] means the `DBMS_FLASHBACK` expression did
@@ -274,7 +275,7 @@ impl AsOf {
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<u64, DbError> {
-        let rows = match conn.query_rows(cx, CURRENT_SCN_SQL, &[]).await {
+        let rows = match run_catalog_query(cx, conn, CatalogQueryId::CurrentScn, &[]).await {
             Ok(rows) => rows,
             // 23ai accepts the package expression above only without
             // parentheses. A privilege, connection, or any other error stays
@@ -311,10 +312,14 @@ impl AsOf {
             Self::Scn(scn) => Ok(*scn),
             Self::Timestamp(timestamp) => {
                 let bind = OracleBind::String(timestamp.trim().replacen('T', " ", 1));
-                let rows = conn
-                    .query_rows(cx, TIMESTAMP_TO_SCN_SQL, std::slice::from_ref(&bind))
-                    .await
-                    .map_err(map_flashback_refusal)?;
+                let rows = run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::TimestampToScn,
+                    std::slice::from_ref(&bind),
+                )
+                .await
+                .map_err(map_flashback_refusal)?;
                 parse_observed_scn(&rows, "timestamp flashback target")
                     .map_err(map_flashback_refusal)
             }
