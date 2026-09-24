@@ -169,6 +169,9 @@ need cargo
 need jq
 need "$curl_bin"
 
+"$ROOT/scripts/cargo_patch_warning_guard.sh" \
+  --locked --all-features --format-version 1 >/dev/null
+
 bash "$ROOT/scripts/release_surface_sync_check.sh"
 env -u ORACLEMCP_RELEASE_FAKE_CURL_MODE -u ORACLEMCP_FAKE_YANKED_CRATE \
   bash "$ROOT/tests/release_contract_test.sh"

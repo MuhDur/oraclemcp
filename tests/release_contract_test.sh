@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SELF="$ROOT/tests/release_contract_test.sh"
 HELPER="$ROOT/scripts/release_surface_manifest.py"
+CARGO_PATCH_WARNING_GUARD="$ROOT/scripts/cargo_patch_warning_guard.sh"
 
 fail() {
   echo "release-contract-test: $*" >&2
@@ -282,6 +283,58 @@ not-valid = [toml
 TOML
 run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_deny_parse_error refuse tag \
   'deny.toml parse'
+
+# Cargo exits successfully when a patch version cannot satisfy the dependency,
+# but warns that the patch was not used. The release check must treat that as a
+# failed pin check. Keep this as a real, offline Cargo metadata fixture.
+unused_patch_fixture="$ROOT/target/e2e/cargo-unused-patch-fixtures-$$"
+mkdir -p "$unused_patch_fixture/src" "$unused_patch_fixture/patched-serde/src"
+cat >"$unused_patch_fixture/Cargo.toml" <<'TOML'
+[workspace]
+
+[package]
+name = "cargo-unused-patch-fixture"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = "=1.0.228"
+
+[patch.crates-io]
+serde = { path = "patched-serde" }
+TOML
+cat >"$unused_patch_fixture/src/main.rs" <<'RS'
+fn main() {}
+RS
+cat >"$unused_patch_fixture/patched-serde/Cargo.toml" <<'TOML'
+[package]
+name = "serde"
+version = "1.0.229"
+edition = "2021"
+TOML
+cat >"$unused_patch_fixture/patched-serde/src/lib.rs" <<'RS'
+#![no_std]
+RS
+
+cargo_target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
+metadata_args=(--manifest-path "$unused_patch_fixture/Cargo.toml" --format-version 1 --offline)
+set +e
+raw_output="$(CARGO_TARGET_DIR="$cargo_target_dir" cargo metadata "${metadata_args[@]}" 2>&1)"
+raw_status=$?
+set -e
+[ "$raw_status" -eq 0 ] || fail "unused-patch Cargo fixture failed before the guard: $raw_output"
+[[ "$raw_output" == *'warning: patch `serde v1.0.229'* ]] ||
+  fail "mismatched Cargo fixture did not produce Cargo's unused-patch warning: $raw_output"
+
+set +e
+guarded_output="$(CARGO_TARGET_DIR="$cargo_target_dir" \
+  "$CARGO_PATCH_WARNING_GUARD" "${metadata_args[@]}" 2>&1)"
+guarded_status=$?
+set -e
+[ "$guarded_status" -ne 0 ] || fail "unused-patch warning guard accepted a mismatched Cargo patch"
+[[ "$guarded_output" == *"cargo-patch-warning-guard: refusing Cargo output with an unused patch"* ]] ||
+  fail "unused-patch warning guard did not identify Cargo's warning: $guarded_output"
+record_dev_pin_case dev_pins_refuse_unused_patch_warning refuse refuse "$guarded_status"
 
 python3 "$HELPER" --check >/dev/null
 driver_version="$(python3 "$HELPER" --value driver_version)"
