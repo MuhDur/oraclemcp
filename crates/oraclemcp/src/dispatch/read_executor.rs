@@ -879,6 +879,28 @@ impl<'a> GuardedReadExecutor<'a> {
         Self { dispatcher }
     }
 
+    /// Open a fresh profile session for optimizer-cost work. The pinned
+    /// request connection may already be inside Oracle's READ ONLY transaction;
+    /// using a separately connected session keeps the diagnostic PLAN_TABLE
+    /// write outside that transaction without weakening its backstop.
+    async fn open_query_cost_metadata_session(
+        &self,
+        cx: &Cx,
+        state: &DispatcherState,
+    ) -> Result<Option<Box<dyn OracleConnection>>, ErrorEnvelope> {
+        let (Some(connector), Some(generation)) =
+            (self.connector.as_ref(), state.profile_generation.as_ref())
+        else {
+            return Ok(None);
+        };
+        let bundle = connector(cx, generation)
+            .await
+            .map_err(DbError::into_envelope)?;
+        let (session, stateless) = bundle.into_parts();
+        drop(stateless);
+        Ok(Some(session))
+    }
+
     /// Admit server-generated application SQL through the same proof as a
     /// caller query, retaining the generated tool's audit identity.
     #[allow(clippy::too_many_arguments)]
@@ -1137,22 +1159,52 @@ impl<'a> GuardedReadExecutor<'a> {
                     .and_then(|profile| profile.explain_plan_table.clone())
             });
             let require_hard_parse_evidence = state.require_hard_parse_evidence;
+            let require_query_cost_estimate = state.require_query_cost_estimate;
+            let mut cost_metadata_session = if cost_limit.is_some() || cumulative_policy.is_some() {
+                self.open_query_cost_metadata_session(cx, state).await?
+            } else {
+                None
+            };
             let DispatcherState {
                 conn,
                 read_only_backstop,
                 checkpoints,
                 ..
             } = &mut *state;
-            prepared.hard_parse_observations = enforce_query_cost_gate(
+            let metadata_quarantine = SyncMutex::new(None);
+            let cost_conn = cost_metadata_session
+                .as_deref()
+                .unwrap_or_else(|| conn.as_ref());
+            let metadata_limits = if cost_metadata_session.is_some() {
+                Some(
+                    ConnectionLimitGuard::install(
+                        cx,
+                        cost_conn,
+                        None,
+                        None,
+                        request_budget.deadline(),
+                        Some(request_budget.db_quota()),
+                    )
+                    .map_err(DbError::into_envelope)?,
+                )
+            } else {
+                None
+            };
+            let gate_result = enforce_query_cost_gate(
                 QueryCostGateCtx {
                     cx,
-                    conn: conn.as_ref(),
+                    conn: cost_conn,
                     auditor: self.auditor.as_deref(),
                     subject: request_subject,
                     session: scoped_level,
                     request_budget: &request_budget,
-                    quarantine: &self.quarantine,
+                    quarantine: if cost_metadata_session.is_some() {
+                        &metadata_quarantine
+                    } else {
+                        &self.quarantine
+                    },
                     require_hard_parse_evidence,
+                    require_query_cost_estimate,
                 },
                 &prepared.args,
                 &prepared.executed_sql,
@@ -1166,7 +1218,16 @@ impl<'a> GuardedReadExecutor<'a> {
                     store: self.query_cost_budget_store.as_deref(),
                 },
             )
-            .await?;
+            .await;
+            if let Some(Err(error)) = metadata_limits.map(ConnectionLimitGuard::restore) {
+                return Err(DbError::into_envelope(error));
+            }
+            if let Some(metadata_session) = cost_metadata_session.take()
+                && let Err(error) = metadata_session.close(cx).await
+            {
+                return Err(DbError::into_envelope(error));
+            }
+            prepared.hard_parse_observations = gate_result?;
             if prepared.as_of.is_some() {
                 // K9: a flashback read cannot coexist with the SET
                 // TRANSACTION READ ONLY backstop — Oracle refuses
@@ -1398,6 +1459,13 @@ impl<'a> GuardedReadExecutor<'a> {
                             .and_then(|profile| profile.explain_plan_table.clone())
                     });
                 let require_hard_parse_evidence = state.require_hard_parse_evidence;
+                let require_query_cost_estimate = state.require_query_cost_estimate;
+                let mut cost_metadata_session =
+                    if cost_limit.is_some() || cumulative_policy.is_some() {
+                        self.open_query_cost_metadata_session(cx, &state).await?
+                    } else {
+                        None
+                    };
                 let DispatcherState {
                     conn,
                     read_only_backstop,
@@ -1405,16 +1473,40 @@ impl<'a> GuardedReadExecutor<'a> {
                     ..
                 } = &mut *state;
                 let cost_audit_subject = audit_subject(context, &self.default_audit_subject);
-                prepared.hard_parse_observations = enforce_query_cost_gate(
+                let metadata_quarantine = SyncMutex::new(None);
+                let cost_conn = cost_metadata_session
+                    .as_deref()
+                    .unwrap_or_else(|| conn.as_ref());
+                let metadata_limits = if cost_metadata_session.is_some() {
+                    Some(
+                        ConnectionLimitGuard::install(
+                            cx,
+                            cost_conn,
+                            None,
+                            None,
+                            request_budget.deadline(),
+                            Some(request_budget.db_quota()),
+                        )
+                        .map_err(DbError::into_envelope)?,
+                    )
+                } else {
+                    None
+                };
+                let gate_result = enforce_query_cost_gate(
                     QueryCostGateCtx {
                         cx,
-                        conn: conn.as_ref(),
+                        conn: cost_conn,
                         auditor: self.auditor.as_deref(),
                         subject: &cost_audit_subject,
                         session: &scoped_level,
                         request_budget: &request_budget,
-                        quarantine: &self.quarantine,
+                        quarantine: if cost_metadata_session.is_some() {
+                            &metadata_quarantine
+                        } else {
+                            &self.quarantine
+                        },
                         require_hard_parse_evidence,
+                        require_query_cost_estimate,
                     },
                     &prepared.args,
                     &prepared.executed_sql,
@@ -1428,7 +1520,16 @@ impl<'a> GuardedReadExecutor<'a> {
                         store: self.query_cost_budget_store.as_deref(),
                     },
                 )
-                .await?;
+                .await;
+                if let Some(Err(error)) = metadata_limits.map(ConnectionLimitGuard::restore) {
+                    return Err(DbError::into_envelope(error));
+                }
+                if let Some(metadata_session) = cost_metadata_session.take()
+                    && let Err(error) = metadata_session.close(cx).await
+                {
+                    return Err(DbError::into_envelope(error));
+                }
+                prepared.hard_parse_observations = gate_result?;
                 if prepared.as_of.is_some() {
                     read_only_backstop.disarm();
                     // Arc I: the flashback wrapper rolls the session back, so

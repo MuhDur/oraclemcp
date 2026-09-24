@@ -107,7 +107,7 @@
       {"tool": "oracle_explain_plan", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "allow_plan_table_write": true}, "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "odci_stats_callback"}}
     ],
     "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "max_query_cost": 1, "allow_plan_table_write": true}},
-    "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "odci_stats_callback"},
+    "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "odci_stats_callback"},
     "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_ODCI_CANARY_${run_id}", "rows": [[0]]}],
     "cleanup": [
       {"sql": "DROP FUNCTION ${owner}.FN_ODCI_${run_id}"},
@@ -131,9 +131,12 @@
       {"tool": "oracle_set_session_level", "arguments": {"level": "READ_WRITE"}, "expect": {"json_subset": {"confirmation": {}}}, "capture": {"elevation": "/confirmation/confirm"}},
       {"tool": "oracle_set_session_level", "arguments": {"level": "READ_WRITE", "execute": true, "confirm": "${cap:elevation}"}, "expect": {"json_subset": {"session": {"current_level": "READ_WRITE"}}}},
       {"tool": "oracle_explain_plan", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "allow_plan_table_write": true}, "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "read_only_txn"}},
-      {"audit_report": {"contains": ["hard_parse_evidence_unavailable", "oracle_explain_plan"]}},
-      {"tool": "oracle_query", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}, "expect": {"json_subset": {"rows": [{"ID": "1"}], "verification_observations": ["hard_parse_evidence_no_privilege", "cost_unavailable_read_only_txn"]}}},
-      {"audit_report": {"contains": ["query_cost_unavailable"]}}
+      {"tool": "oracle_query", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}, "expect": {"json_subset": {"rows": [{"ID": "1"}], "verification_observations": ["hard_parse_evidence_no_privilege"]}}},
+      {"audit_records": [
+        {"tool": "hard_parse_evidence_unavailable[served_tool=oracle_explain_plan;observation=hard_parse_evidence_no_privilege]", "danger_level": "READ_ONLY", "decision": "ALLOWED", "outcome": "SUCCEEDED"},
+        {"tool": "hard_parse_evidence_unavailable[served_tool=oracle_query;observation=hard_parse_evidence_no_privilege]", "danger_level": "READ_ONLY", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+      ]},
+      {"tool": "oracle_query", "arguments": {"sql": "SELECT a.ID FROM ${owner}.T_TYPES_${run_id} a JOIN ${owner}.T_TYPES_${run_id} b ON b.ID = a.ID WHERE a.ID = 1", "max_rows": 1, "max_query_cost": 1, "allow_plan_table_write": true}, "expect": {"error_class": "POLICY_DENIED", "reason_code": "query_cost_exceeded"}}
     ],
     "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1}},
     "expect": {"json_subset": {"rows": [{"ID": "1"}]}},
@@ -151,7 +154,7 @@
     "setup": [],
     "steps": [
       {"tool": "oracle_query", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}, "expect": {"json_subset": {"rows": [{"ID": "1"}], "verification_observations": ["hard_parse_evidence_no_privilege"]}}},
-      {"audit_report": {"contains": ["hard_parse_evidence_unavailable"]}}
+      {"audit_record": {"tool": "hard_parse_evidence_unavailable[served_tool=oracle_query;observation=hard_parse_evidence_no_privilege]", "danger_level": "READ_ONLY", "decision": "ALLOWED", "outcome": "SUCCEEDED"}}
     ],
     "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1}},
     "expect": {"json_subset": {"rows": [{"ID": "1"}]}},

@@ -252,6 +252,7 @@ pub fn synthesize_profiles(
             allow_change_notification: None,
             require_fga_evidence: None,
             require_hard_parse_evidence: None,
+            require_query_cost_estimate: None,
             max_subscriptions: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,

@@ -228,6 +228,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.",
     },
     FieldDisposition {
+        field: "require_query_cost_estimate",
+        disposition: Disposition::Commented,
+        help: "Refuse a read when a requested optimizer-cost estimate is unavailable; independent of callback-safety evidence. Default false admits with a cost_unavailable observation and readable audit record.",
+    },
+    FieldDisposition {
         field: "max_subscriptions",
         disposition: Disposition::Commented,
         help: "Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.",
@@ -365,6 +370,7 @@ mod tests {
             allow_change_notification: Some(false),
             require_fga_evidence: Some(true),
             require_hard_parse_evidence: Some(true),
+            require_query_cost_estimate: Some(false),
             max_subscriptions: Some(4),
             mcp_exposed: Some(true),
             dashboard_ddl_workbench: Some(false),
@@ -412,11 +418,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // R36 added the hard-parse evidence key, bringing this table to 37.
+        // R36 adds the independent query-cost estimate key, bringing this table to 38.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            37,
-            "the design spec fixes ConnectionProfile at 37 serde fields"
+            38,
+            "ConnectionProfile has 38 serde fields"
         );
     }
 

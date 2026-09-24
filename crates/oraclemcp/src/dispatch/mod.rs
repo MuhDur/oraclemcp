@@ -240,6 +240,7 @@ struct ProfileDispatchPolicy {
     /// catalog (`require_fga_evidence`).
     fga_evidence_policy: FgaEvidencePolicy,
     require_hard_parse_evidence: bool,
+    require_query_cost_estimate: bool,
 }
 
 struct PreparedProfileSwitch {
@@ -255,6 +256,7 @@ struct PreparedProfileSwitch {
     sql_policy: Option<SqlPolicyConfig>,
     fga_evidence_policy: FgaEvidencePolicy,
     require_hard_parse_evidence: bool,
+    require_query_cost_estimate: bool,
     custom_catalog: CustomToolCatalog,
     response: Value,
 }
@@ -277,6 +279,7 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         sql_policy: None,
         fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
         require_hard_parse_evidence: false,
+        require_query_cost_estimate: false,
     }
 }
 
@@ -290,10 +293,12 @@ fn install_bound_fga_evidence_policy(state: &mut DispatcherState) {
             Ok(policy) => {
                 state.fga_evidence_policy = policy.fga_evidence_policy;
                 state.require_hard_parse_evidence = policy.require_hard_parse_evidence;
+                state.require_query_cost_estimate = policy.require_query_cost_estimate;
             }
             Err(_) => {
                 state.fga_evidence_policy = FgaEvidencePolicy::RequireProof;
                 state.require_hard_parse_evidence = true;
+                state.require_query_cost_estimate = true;
             }
         }
     }
@@ -421,6 +426,7 @@ fn profile_dispatch_policy(
         sql_policy: profile.sql_policy.clone(),
         fga_evidence_policy: fga_evidence_policy_for(profile),
         require_hard_parse_evidence: profile.require_hard_parse_evidence(),
+        require_query_cost_estimate: profile.require_query_cost_estimate(),
     })
 }
 
@@ -493,6 +499,7 @@ struct DispatcherState {
     /// pinned session on a profile switch.
     fga_evidence_policy: FgaEvidencePolicy,
     require_hard_parse_evidence: bool,
+    require_query_cost_estimate: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -665,6 +672,7 @@ impl OracleDispatcher {
                 checkpoints: CheckpointWorkspace::new(),
                 fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
                 require_hard_parse_evidence: false,
+                require_query_cost_estimate: false,
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -757,6 +765,7 @@ impl OracleDispatcher {
                 checkpoints: CheckpointWorkspace::new(),
                 fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
                 require_hard_parse_evidence: false,
+                require_query_cost_estimate: false,
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -1399,6 +1408,7 @@ impl OracleDispatcher {
             sql_policy,
             fga_evidence_policy,
             require_hard_parse_evidence,
+            require_query_cost_estimate,
         } = profile_dispatch_policy(&profile_generation)?;
         let new_custom_catalog = match &self.custom_loader {
             Some(loader) => loader(&profile_generation, &level)?,
@@ -1471,6 +1481,7 @@ impl OracleDispatcher {
                 state.level = level;
                 state.fga_evidence_policy = fga_evidence_policy;
                 state.require_hard_parse_evidence = require_hard_parse_evidence;
+                state.require_query_cost_estimate = require_query_cost_estimate;
                 state.custom_catalog = custom_catalog;
                 state.grant_generation = state.grant_generation.saturating_add(1);
                 state.execute_grants.clear();
@@ -3207,41 +3218,18 @@ fn query_cost_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
     let reason = reason.into();
     if matches!(
         reason.as_str(),
-        "read_only_txn"
-            | "no_privilege"
-            | "truncated"
-            | "callback_unprovable"
-            | "odci_stats_callback"
-            | "domain_index_callback"
-            | "policy_code"
+        "odci_stats_callback" | "domain_index_callback" | "policy_code"
     ) {
-        return query_cost_runtime_unavailable(reason);
-    }
-    let mut error = ErrorEnvelope::new(
-        ErrorClass::PolicyDenied,
-        format!(
-            "oracle_query cost gate refused before execution: cost_unavailable ({})",
-            reason
-        ),
-    )
-    .with_suggested_tool("oracle_explain_plan")
-    .with_next_step("refresh optimizer statistics or retry without max_query_cost only if an unbounded read is acceptable");
-    if matches!(
-        reason.as_str(),
-        "read_only_txn"
-            | "no_privilege"
-            | "truncated"
-            | "callback_unprovable"
-            | "odci_stats_callback"
-            | "domain_index_callback"
-            | "policy_code"
-    ) {
-        error = error.with_structured_reason(
+        return ErrorEnvelope::new(
+            ErrorClass::ForbiddenStatement,
+            format!("oracle_query cost gate refused: hard-parse risk ({reason})"),
+        )
+        .with_structured_reason(
             StructuredReason::new(ReasonCategory::UnprovenSideEffect)
                 .with_offending_construct(reason),
         );
     }
-    error
+    query_cost_runtime_unavailable(reason)
 }
 
 fn query_cost_runtime_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
@@ -3273,9 +3261,10 @@ fn append_query_cost_unavailable_audit(
     ctx: AuditEntryCtx<'_>,
     reason: &'static str,
 ) -> Result<(), ErrorEnvelope> {
+    let tool = format!("query_cost_unavailable[served_tool=oracle_query;reason={reason}]");
     append_audit_with_observed_scn(
         ctx,
-        "query_cost_unavailable",
+        &tool,
         &format!(
             "-- query_cost: unavailable ({reason}); oracle_query admitted with an explicit observation under the non-strict profile policy"
         ),
@@ -3342,7 +3331,7 @@ fn query_cost_exceeded(
         ),
     )
     .with_suggested_tool("oracle_explain_plan")
-    .with_structured_reason(reason)
+    .with_structured_reason(reason.with_offending_construct("query_cost_exceeded"))
     .with_next_step("tighten the WHERE clause, add a narrower predicate, or ask for a lower-cardinality page")
 }
 
@@ -3505,6 +3494,7 @@ struct QueryCostGateCtx<'a> {
     request_budget: &'a RequestBudget,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
     require_hard_parse_evidence: bool,
+    require_query_cost_estimate: bool,
 }
 
 /// Server-derived cumulative accounting inputs. Profile/principal are copied
@@ -3638,18 +3628,30 @@ async fn enforce_query_cost_gate(
         .enforce(ctx.cx)
         .map_err(DbError::into_envelope)?;
     let closure = prove_hard_parse_effect_closure(ctx.cx, ctx.conn, executed_sql, relations).await;
-    if !closure.is_admitted() || (closure.requires_observation() && ctx.require_hard_parse_evidence)
+    if let Some(error) = hard_parse_closure_error(closure.clone(), ctx.require_hard_parse_evidence)
     {
-        return Err(query_cost_runtime_unavailable(
-            closure.reason().unwrap_or("callback_unprovable"),
-        ));
+        return Err(error);
     }
-    let table = resolve_plan_table(ctx.cx, ctx.conn, configured_plan_table)
-        .await
-        .map_err(|error| query_cost_unavailable(error.reason()))?;
+    let table = match resolve_plan_table(ctx.cx, ctx.conn, configured_plan_table).await {
+        Ok(table) => table,
+        Err(_error) if !ctx.require_query_cost_estimate && cumulative.policy.is_none() => {
+            append_query_cost_unavailable_audit(
+                AuditEntryCtx {
+                    auditor: ctx.auditor,
+                    subject: ctx.subject,
+                    db_evidence: None,
+                },
+                "plan_table_unavailable",
+            )?;
+            return Ok(vec!["cost_unavailable"]);
+        }
+        Err(error) => return Err(query_cost_unavailable(error.reason())),
+    };
     let hard_parse_observation = closure.requires_observation();
     let plan_table_observation = table.verification_observation();
-    if ctx.require_hard_parse_evidence && plan_table_observation.is_some() {
+    if (ctx.require_hard_parse_evidence || ctx.require_query_cost_estimate)
+        && plan_table_observation.is_some()
+    {
         return Err(query_cost_runtime_unavailable("no_privilege"));
     }
     let mut verification_observations = Vec::new();
@@ -3666,26 +3668,26 @@ async fn enforce_query_cost_gate(
         subject: ctx.subject,
         db_evidence: audit_db_evidence.as_ref(),
     };
+    if hard_parse_observation || plan_table_observation.is_some() {
+        append_hard_parse_evidence_unavailable_audit(
+            AuditEntryCtx {
+                auditor: ctx.auditor,
+                subject: ctx.subject,
+                db_evidence: None,
+            },
+            "oracle_query",
+            hard_parse_observation,
+            plan_table_observation,
+        )?;
+    }
     let audit_transcript =
         explain_plan_audit_transcript(executed_sql, &table, &statement_id, hard_parse_observation);
     append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Pending)?;
     if let Err(error) = ctx.conn.execute(ctx.cx, EXPLAIN_SAVEPOINT_SQL, &[]).await {
         append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Failed)?;
         return Err(if is_read_only_transaction_error(&error) {
-            if !ctx.require_hard_parse_evidence && cumulative.policy.is_none() {
+            if !ctx.require_query_cost_estimate && cumulative.policy.is_none() {
                 verification_observations.push("cost_unavailable_read_only_txn");
-                if hard_parse_observation || plan_table_observation.is_some() {
-                    append_hard_parse_evidence_unavailable_audit(
-                        AuditEntryCtx {
-                            auditor: ctx.auditor,
-                            subject: ctx.subject,
-                            db_evidence: None,
-                        },
-                        "oracle_query",
-                        hard_parse_observation,
-                        plan_table_observation,
-                    )?;
-                }
                 append_query_cost_unavailable_audit(audit_entry, "read_only_txn")?;
                 return Ok(verification_observations);
             }
@@ -3782,28 +3784,12 @@ async fn enforce_query_cost_gate(
     let observed_cost = match decision {
         Ok(cost) => cost,
         Err(error)
-            if error
-                .structured_reason
-                .as_ref()
-                .and_then(|reason| reason.offending_construct.as_deref())
-                == Some("read_only_txn")
-                && !ctx.require_hard_parse_evidence
+            if query_cost_is_unavailable(&error)
+                && !ctx.require_query_cost_estimate
                 && cumulative.policy.is_none() =>
         {
-            verification_observations.push("cost_unavailable_read_only_txn");
-            if hard_parse_observation || plan_table_observation.is_some() {
-                append_hard_parse_evidence_unavailable_audit(
-                    AuditEntryCtx {
-                        auditor: ctx.auditor,
-                        subject: ctx.subject,
-                        db_evidence: None,
-                    },
-                    "oracle_query",
-                    hard_parse_observation,
-                    plan_table_observation,
-                )?;
-            }
-            append_query_cost_unavailable_audit(audit_entry, "read_only_txn")?;
+            verification_observations.push("cost_unavailable");
+            append_query_cost_unavailable_audit(audit_entry, "estimate_unavailable")?;
             return Ok(verification_observations);
         }
         Err(error) => return Err(error),
@@ -3836,19 +3822,14 @@ async fn enforce_query_cost_gate(
             ) => return Err(cumulative_query_cost_budget_unavailable()),
         }
     }
-    if hard_parse_observation || plan_table_observation.is_some() {
-        append_hard_parse_evidence_unavailable_audit(
-            AuditEntryCtx {
-                auditor: ctx.auditor,
-                subject: ctx.subject,
-                db_evidence: None,
-            },
-            "oracle_query",
-            hard_parse_observation,
-            plan_table_observation,
-        )?;
-    }
     Ok(verification_observations)
+}
+
+/// A missing cost estimate is an observation in the default profile, while
+/// positive callback evidence and a measured over-cap cost remain refusals.
+fn query_cost_is_unavailable(error: &ErrorEnvelope) -> bool {
+    error.error_class == ErrorClass::RuntimeStateRequired
+        && error.message.contains("cost_unavailable (")
 }
 
 #[cfg(test)]
@@ -7732,19 +7713,24 @@ fn append_hard_parse_evidence_unavailable_audit(
     if let Some(observation) = plan_table_observation {
         observations.push(observation);
     }
-    append_audit_with_observed_scn(
-        ctx,
-        HARD_PARSE_EVIDENCE_UNAVAILABLE_TOOL,
-        &format!(
-            "-- hard_parse_evidence: unavailable; {served_tool} admitted for execution with observation={} \
-             profile require_hard_parse_evidence = false",
-            observations.join(",")
-        ),
-        "READ_ONLY",
-        None,
-        AuditOutcome::Succeeded,
-        None,
-    )
+    for observation in observations {
+        let tool = format!(
+            "{HARD_PARSE_EVIDENCE_UNAVAILABLE_TOOL}[served_tool={served_tool};observation={observation}]"
+        );
+        append_audit_with_observed_scn(
+            ctx,
+            &tool,
+            &format!(
+                "-- hard_parse_evidence: unavailable; {served_tool} admitted for execution with observation={observation} \
+                 profile require_hard_parse_evidence = false"
+            ),
+            "READ_ONLY",
+            None,
+            AuditOutcome::Succeeded,
+            None,
+        )?;
+    }
+    Ok(())
 }
 
 /// R36: durably record that `served_tool` was admitted without FGA proof,
@@ -12323,6 +12309,7 @@ impl OracleDispatcher {
                 sql_policy: new_policy.sql_policy,
                 fga_evidence_policy: new_policy.fga_evidence_policy,
                 require_hard_parse_evidence: new_policy.require_hard_parse_evidence,
+                require_query_cost_estimate: new_policy.require_query_cost_estimate,
                 custom_catalog: new_custom_catalog,
                 response,
             };
@@ -12353,6 +12340,7 @@ impl OracleDispatcher {
                 sql_policy,
                 fga_evidence_policy,
                 require_hard_parse_evidence,
+                require_query_cost_estimate,
                 custom_catalog,
                 mut response,
             } = prepared;
@@ -12433,6 +12421,7 @@ impl OracleDispatcher {
                     state.level = level;
                     state.fga_evidence_policy = fga_evidence_policy;
                     state.require_hard_parse_evidence = require_hard_parse_evidence;
+                    state.require_query_cost_estimate = require_query_cost_estimate;
                     state.custom_catalog = custom_catalog;
                     state.grant_generation = state.grant_generation.saturating_add(1);
                     state.execute_grants.clear();

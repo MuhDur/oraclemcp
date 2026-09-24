@@ -257,9 +257,10 @@ pub async fn prove_hard_parse_effect_closure(
             let rows = match run_catalog_query(cx, conn, query, &binds).await {
                 Ok(rows) => rows,
                 Err(error) if is_privilege_denial(&error) => {
-                    if !optional_policy_view_is_absent(cx, conn, query, &error).await {
-                        privilege_limited = true;
-                    }
+                    // ALL_OBJECTS and ALL_SYNONYMS are privilege-filtered.
+                    // Their silence cannot prove an optional OLS/RAS view is
+                    // absent, so every denied policy probe remains unknown.
+                    privilege_limited = true;
                     Vec::new()
                 }
                 Err(error) => return catalog_unavailable(error),
@@ -294,31 +295,6 @@ fn catalog_unavailable(error: DbError) -> HardParseEffectClosureV1 {
 fn is_privilege_denial(error: &DbError) -> bool {
     let message = error.to_string();
     message.contains("ORA-00942") || message.contains("ORA-01031")
-}
-
-async fn optional_policy_view_is_absent(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    query: CatalogQueryId,
-    error: &DbError,
-) -> bool {
-    if !error.to_string().contains("ORA-00942") {
-        return false;
-    }
-    let expected = match query {
-        CatalogQueryId::HardParseOlsTablePolicies => "ALL_SA_TABLE_POLICIES",
-        CatalogQueryId::HardParseOlsSchemaPolicies => "ALL_SA_SCHEMA_POLICIES",
-        CatalogQueryId::HardParseRasPolicies => "ALL_XS_APPLIED_POLICIES",
-        _ => return false,
-    };
-    run_catalog_query(cx, conn, CatalogQueryId::AllObjectsProbe, &[])
-        .await
-        .is_ok_and(|rows| {
-            !rows.iter().any(|row| {
-                row.text("OBJECT_NAME")
-                    .is_some_and(|name| name.eq_ignore_ascii_case(expected))
-            })
-        })
 }
 
 const fn refused(reason: &'static str) -> HardParseEffectClosureV1 {
@@ -708,16 +684,34 @@ mod tests {
     }
 
     #[test]
-    fn optional_policy_views_absent_by_feature_do_not_cause_strict_mode_false_refusal() {
+    fn optional_policy_view_absent_from_filtered_catalog_is_still_unproven() {
         let mock = ClosureMock {
             optional_policy_catalog_denied: true,
             ..ClosureMock::default()
         };
+        let mock_ref = &mock;
         let result = run(|cx| async move {
-            prove_hard_parse_effect_closure(&cx, &mock, "SELECT id FROM APP.ORDERS", &[relation()])
-                .await
+            prove_hard_parse_effect_closure(
+                &cx,
+                mock_ref,
+                "SELECT id FROM APP.ORDERS",
+                &[relation()],
+            )
+            .await
         });
-        assert_eq!(result, HardParseEffectClosureV1::Proven);
+        assert_eq!(
+            result,
+            HardParseEffectClosureV1::AdmittedWithObservation {
+                reason: "no_privilege"
+            }
+        );
+        assert!(
+            mock.queries
+                .lock()
+                .expect("query log")
+                .iter()
+                .all(|sql| !sql.contains("FROM all_objects"))
+        );
     }
 
     #[test]

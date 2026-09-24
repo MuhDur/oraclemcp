@@ -1943,6 +1943,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.allow_change_notification == after.allow_change_notification
         && before.require_fga_evidence == after.require_fga_evidence
         && before.require_hard_parse_evidence == after.require_hard_parse_evidence
+        && before.require_query_cost_estimate == after.require_query_cost_estimate
         && before.mcp_exposed == after.mcp_exposed
         && before.dashboard_ddl_workbench == after.dashboard_ddl_workbench
         && before.session_identity == after.session_identity
@@ -3966,6 +3967,11 @@ mod tests {
                 "require_hard_parse_evidence",
                 |_| {},
                 |p| p.require_hard_parse_evidence = Some(true),
+            ),
+            (
+                "require_query_cost_estimate",
+                |_| {},
+                |p| p.require_query_cost_estimate = Some(true),
             ),
             ("mcp_exposed", |_| {}, |p| p.mcp_exposed = Some(false)),
             (

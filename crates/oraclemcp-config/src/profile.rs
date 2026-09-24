@@ -890,6 +890,12 @@ pub struct ConnectionProfile {
     /// and admitted least-privilege paths emit an observation and audit row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_hard_parse_evidence: Option<bool>,
+    /// Refuse reads when a requested optimizer-cost estimate is unavailable.
+    /// This key is independent of `require_hard_parse_evidence`; by default an
+    /// unavailable estimate is admitted with a verification observation and
+    /// readable audit record.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_query_cost_estimate: Option<bool>,
     /// Maximum live subscriptions per server-derived principal. Defaults to 4;
     /// `0` deliberately disables new subscriptions for this profile. Each
     /// admitted subscription also consumes one EMON notification connection
@@ -994,6 +1000,10 @@ impl std::fmt::Debug for ConnectionProfile {
                 "require_hard_parse_evidence",
                 &self.require_hard_parse_evidence,
             )
+            .field(
+                "require_query_cost_estimate",
+                &self.require_query_cost_estimate,
+            )
             .field("max_subscriptions", &self.max_subscriptions)
             .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
@@ -1084,6 +1094,12 @@ impl ConnectionProfile {
         self.require_hard_parse_evidence == Some(true)
     }
 
+    /// Whether unavailable query-cost estimates should refuse the read.
+    #[must_use]
+    pub fn require_query_cost_estimate(&self) -> bool {
+        self.require_query_cost_estimate == Some(true)
+    }
+
     /// Whether this profile explicitly permits CQN registration.
     ///
     /// This is a fail-closed capability switch, not an authorization bypass:
@@ -1163,6 +1179,7 @@ impl ConnectionProfile {
             allow_change_notification,
             require_fga_evidence,
             require_hard_parse_evidence,
+            require_query_cost_estimate,
             max_subscriptions,
             mcp_exposed,
             dashboard_ddl_workbench,
@@ -1379,6 +1396,7 @@ mod tests {
             allow_change_notification: None,
             require_fga_evidence: None,
             require_hard_parse_evidence: None,
+            require_query_cost_estimate: None,
             max_subscriptions: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,

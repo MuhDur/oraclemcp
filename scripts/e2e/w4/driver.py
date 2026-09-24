@@ -424,7 +424,8 @@ def validate_steps(case):
     A step is exactly one of: a tool call {tool, arguments, expect, capture?};
     {wait_level, deadline_seconds} which polls the session status until the
     level is reached (an event barrier with a deadline, never a bare sleep);
-    or {audit_report: {contains: [...]}} which renders this run's audit file.
+    or {audit_report: {contains: [...]}} which renders this run's audit file;
+    or {audit_record: {tool, ...}} / {audit_records: [...]} which checks exact readable audit fields.
     """
     steps = case["steps"]
     require(isinstance(steps, list) and 1 <= len(steps) <= 8, "steps needs 1..8 entries")
@@ -458,13 +459,30 @@ def validate_steps(case):
                     and step["wait_level"] in LEVELS
                     and type(step["deadline_seconds"]) is int and 1 <= step["deadline_seconds"] <= 120,
                     "wait_level step needs a level and a 1..120 s deadline")
-        else:
+        elif "audit_report" in step:
             require(set(step) == {"audit_report"} and isinstance(step["audit_report"], dict)
                     and set(step["audit_report"]) == {"contains"}
                     and isinstance(step["audit_report"]["contains"], list)
                     and step["audit_report"]["contains"]
                     and all(isinstance(item, str) and item for item in step["audit_report"]["contains"]),
                     "audit_report step needs a nonempty contains list")
+        elif "audit_record" in step:
+            require(set(step) == {"audit_record"} and isinstance(step["audit_record"], dict)
+                    and {"tool", "outcome"} <= step["audit_record"].keys()
+                    and set(step["audit_record"]) <= {
+                        "tool", "danger_level", "decision", "outcome", "rows_affected", "sql_preview"
+                    }
+                    and all(isinstance(value, str) for key, value in step["audit_record"].items()
+                            if key != "rows_affected")
+                    and ("rows_affected" not in step["audit_record"]
+                         or type(step["audit_record"]["rows_affected"]) is int),
+                    "audit_record step needs exact readable audit fields")
+        else:
+            require(set(step) == {"audit_records"} and isinstance(step["audit_records"], list)
+                    and 1 <= len(step["audit_records"]) <= 4,
+                    "audit_records step needs 1..4 exact records")
+            for expected in step["audit_records"]:
+                validate_steps({**case, "steps": [{"audit_record": expected}]})
     for name in CAPTURE.findall(compact(case["call"]["arguments"])):
         require(name in known, f"call uses capture {name} that no step records")
 
@@ -1184,6 +1202,12 @@ def audit_records(path):
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def audit_record_matches(records, expected):
+    """Match readable audit fields structurally; never search serialized blobs."""
+    return any(all(record.get(key) == value for key, value in expected.items())
+               for record in records)
+
+
 def audit_verify(binary, path, env):
     if not path.exists():
         return False
@@ -1322,13 +1346,25 @@ def run_steps(client, case, row, binary, audit_path, env):
                 time.sleep(0.5)
                 level = session_level(client)
             observed.append({"step": index, "wait_level": level})
-        else:
+        elif "audit_report" in step:
             records = audit_records(audit_path)
             report = "\n".join(compact(record) for record in records)
             observed.append({"step": index, "audit_record_count": len(records)})
             row["steps"] = observed
             missing = [item for item in step["audit_report"]["contains"] if item not in report]
             require(not missing, f"step {index}: audit report lacks {missing}")
+        elif "audit_record" in step:
+            records = audit_records(audit_path)
+            expected = step["audit_record"]
+            require(audit_record_matches(records, expected),
+                    f"step {index}: no audit record matches exact fields {expected}")
+            observed.append({"step": index, "audit_record": expected})
+        else:
+            records = audit_records(audit_path)
+            for expected in step["audit_records"]:
+                require(audit_record_matches(records, expected),
+                        f"step {index}: no audit record matches exact fields {expected}")
+            observed.append({"step": index, "audit_records": step["audit_records"]})
     row["steps"] = observed
     return captures
 
@@ -1893,6 +1929,18 @@ def selftest():
             "two runs reused a V$SQL refusal marker")
     require(marker_case["call"]["vsql_absent_marker"] == original_marker,
             "fresh V$SQL marker mutated the manifest case")
+    hard_parse_record = {
+        "tool": "hard_parse_evidence_unavailable[served_tool=oracle_query;observation=hard_parse_evidence_no_privilege]",
+        "danger_level": "READ_ONLY", "decision": "ALLOWED", "outcome": "SUCCEEDED",
+    }
+    require(audit_record_matches([hard_parse_record], hard_parse_record),
+            "exact audit fields did not match the readable record")
+    changed_observation = {**hard_parse_record,
+                           "tool": hard_parse_record["tool"].replace(
+                               "hard_parse_evidence_no_privilege", "different_observation")}
+    require(not audit_record_matches([hard_parse_record], changed_observation),
+            "audit matcher accepted a different observation code")
+    print(compact({"selftest": "audit_record_exact_observation", "verdict": "pass"}))
     synthetic_descriptor = {"inputSchema": {"type": "object", "properties": {
         "object_name": {"type": "string"}}, "required": ["object_name"]}}
     generated = list(generic_contract_cases(

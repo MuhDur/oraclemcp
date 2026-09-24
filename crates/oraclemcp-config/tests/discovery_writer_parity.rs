@@ -78,6 +78,7 @@ fn fully_populated_profile() -> ConnectionProfile {
         allow_change_notification: Some(false),
         require_fga_evidence: Some(true),
         require_hard_parse_evidence: Some(true),
+        require_query_cost_estimate: Some(false),
         max_subscriptions: Some(4),
         mcp_exposed: Some(true),
         dashboard_ddl_workbench: Some(false),
