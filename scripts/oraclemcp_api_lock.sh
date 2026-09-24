@@ -97,7 +97,7 @@ select_baseline_tag() {
 
 run_semver_check() {
   local baseline_tag="$1" release_type="${2:-minor}" require_checks="${3:-true}"
-  local crate archive baseline_metadata baseline_target baseline_rustdoc output check_count
+  local crate archive baseline_metadata baseline_target baseline_rustdoc output check_count semver_status
   SEMVER_CHECKS_RUN=0
   echo "oraclemcp-api-lock: semver baseline tag: $baseline_tag"
   archive="${CARGO_TARGET_DIR:-$ROOT/target}/semver-baseline-${baseline_tag}"
@@ -125,12 +125,10 @@ PY
       echo "oraclemcp-api-lock: missing baseline rustdoc JSON for $crate at $baseline_tag: $baseline_rustdoc" >&2
       return 1
     fi
-    if ! output="$(cargo --offline --locked semver-checks check-release \
+    semver_status=0
+    output="$(cargo --offline --locked semver-checks check-release \
       --release-type "$release_type" --baseline-rustdoc "$baseline_rustdoc" \
-      -p "$crate" 2>&1)"; then
-      printf '%s\n' "$output" >&2
-      return 1
-    fi
+      -p "$crate" 2>&1)" || semver_status=$?
     printf '%s\n' "$output"
     check_count="$(sed -nE 's/.*Checked \[[^]]+\] ([0-9]+) checks:.*/\1/p' <<<"$output" | tail -n 1)"
     if [[ ! "$check_count" =~ ^[0-9]+$ ]]; then
@@ -138,6 +136,9 @@ PY
       return 1
     fi
     SEMVER_CHECKS_RUN=$((SEMVER_CHECKS_RUN + check_count))
+    if [ "$semver_status" -ne 0 ]; then
+      return 1
+    fi
     if [ "$require_checks" = true ] && [ "$check_count" -eq 0 ]; then
       echo "oraclemcp-api-lock: no semver checks ran for $crate at $baseline_tag" >&2
       return 1
