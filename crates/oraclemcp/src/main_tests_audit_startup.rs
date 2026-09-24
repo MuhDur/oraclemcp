@@ -66,7 +66,7 @@ fn log_audit_parent_case(
     );
 }
 
-/// Owner is TokenUser, and the DACL rendered with the TokenUser SID redacted.
+/// Owner is TokenUser, and the DACL rendered as SDDL for the case log.
 #[cfg(windows)]
 fn windows_owner_and_dacl(path: &Path) -> (bool, String) {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
@@ -87,27 +87,60 @@ fn windows_owner_and_dacl(path: &Path) -> (bool, String) {
         .expect("render DACL");
     (
         descriptor.owner() == Some(&*current),
-        rendered
-            .to_string_lossy()
-            .replace(&current.to_string(), "TokenUser"),
+        rendered.to_string_lossy().into_owned(),
     )
 }
 
-#[cfg(windows)]
-const PRIVATE_DIRECTORY_DACL: &str = "D:P(A;OICI;FA;;;TokenUser)";
-
+/// The exact protected owner-only directory policy, checked structurally the
+/// way oraclemcp-audit verifies it: TokenUser owner, a protected DACL with one
+/// ACCESS_ALLOWED ACE, OI|CI inheritance, full file access, TokenUser SID.
+/// (SDDL text is not compared: Windows renders well-known SIDs as aliases such
+/// as `LA` and adds the auto-inherited flag.)
 #[cfg(windows)]
 fn assert_private_directory(path: &Path) {
-    let (owner_is_user, dacl) = windows_owner_and_dacl(path);
+    use windows_permissions::constants::{
+        AccessRights, AceFlags, AceType, SeObjectType, SecurityInformation,
+    };
+
+    let descriptor = windows_permissions::wrappers::GetNamedSecurityInfo(
+        path.as_os_str(),
+        SeObjectType::SE_FILE_OBJECT,
+        SecurityInformation::Owner | SecurityInformation::Dacl,
+    )
+    .expect("read owner and DACL");
+    let current =
+        windows_permissions::utilities::current_process_sid().expect("resolve TokenUser SID");
+    let (_, sddl) = windows_owner_and_dacl(path);
     assert!(
-        owner_is_user,
+        descriptor.owner() == Some(&*current),
         "{} must be owned by TokenUser",
         path.display()
     );
-    assert_eq!(dacl, PRIVATE_DIRECTORY_DACL, "{} DACL", path.display());
+    assert!(
+        sddl.starts_with("D:P"),
+        "{} DACL must be protected: {sddl}",
+        path.display()
+    );
+    let dacl = descriptor.dacl().expect("a DACL, never a null DACL");
+    assert_eq!(
+        dacl.len(),
+        1,
+        "{} must carry one owner-only ACE: {sddl}",
+        path.display()
+    );
+    let ace = dacl.get_ace(0).expect("the sole ACE");
+    assert!(ace.ace_type() == AceType::ACCESS_ALLOWED_ACE_TYPE, "{sddl}");
+    assert!(
+        ace.flags() == (AceFlags::ObjectInherit | AceFlags::ContainerInherit),
+        "{sddl}"
+    );
+    assert!(ace.mask() == AccessRights::FileAllAccess, "{sddl}");
+    assert!(ace.sid() == Some(&*current), "{sddl}");
 }
 
-/// An unprotected DACL granting Everyone and the user full access, owned by the user.
+/// A user-owned directory with an unprotected DACL granting Everyone and the
+/// user full access. The owner is set explicitly: on an elevated runner a fresh
+/// directory belongs to the token's default owner (Administrators), not TokenUser.
 #[cfg(windows)]
 fn install_broad_directory_dacl(path: &Path) {
     use windows_permissions::constants::{SeObjectType, SecurityInformation};
@@ -122,15 +155,17 @@ fn install_broad_directory_dacl(path: &Path) {
     windows_permissions::wrappers::SetNamedSecurityInfo(
         path.as_os_str(),
         SeObjectType::SE_FILE_OBJECT,
-        SecurityInformation::Dacl | SecurityInformation::UnprotectedDacl,
-        None,
+        SecurityInformation::Owner
+            | SecurityInformation::Dacl
+            | SecurityInformation::UnprotectedDacl,
+        Some(&*current),
         None,
         descriptor.dacl(),
         None,
     )
-    .expect("install broad DACL");
+    .expect("install user owner and broad DACL");
     let (owner_is_user, dacl) = windows_owner_and_dacl(path);
-    assert!(owner_is_user, "broad fixture stays user-owned");
+    assert!(owner_is_user, "broad fixture is user-owned");
     assert!(
         dacl.contains(";;;WD)"),
         "fixture must grant Everyone: {dacl}"
