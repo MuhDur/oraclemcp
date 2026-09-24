@@ -25,7 +25,7 @@ homepage = "https://github.com/MuhDur/oraclemcp"
 # depends on asupersync WITHOUT opting out, and cargo unifies features. Nobody's
 # source uses the nightly syntax — it arrives transitively (bead oraclemcp-yi2z).
 # (2) Windows only: oraclemcp-core's windows_by_handle (see its lib.rs).
-# asupersync does not "require" nightly. The oraclemcp-driver-cx 0.9.2 driver's own source is stable-clean —
+# asupersync does not "require" nightly. The oraclemcp-driver-cx 0.9.3 driver's own source is stable-clean —
 # it is its dep declaration, not its source, that is the proximate cause. See docs/toolchain.md §1.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
@@ -45,12 +45,9 @@ asupersync = { version = "0.3.9", default-features = false, features = ["metrics
 # dispatch future across OS threads). MIT/Apache-2.0 — covered by deny.toml's
 # permissive license allow-list.
 async-trait = "0.1"
-# Pinned EXACTLY (B2; plan §8). The whole driver-cx surface is isolated behind one
-# adapter (crates/oraclemcp-db/src/connection.rs); the 0.2.2 -> 0.5.x cut-over was
-# the deliberate, single-file change that exact pin guarantees — never an
-# accidental float into a new minor. Keep the `=` pin; bump it deliberately
-# (adapter + contract suite green, full gate battery re-run) for each upgrade.
-oraclemcp-driver-cx = { version = "=0.9.2", default-features = false }
+# Pinned EXACTLY while the 0.12 train consumes the pushed T0.2a revision below.
+# R.5 removes the dev pin and moves this requirement to the published RC.
+oraclemcp-driver-cx = { version = "=0.9.3", default-features = false }
 # Oracle's official synchronous Rust driver. `oraclemcp-db` enables its
 # adapter by default so every shipped server artifact contains the bounded
 # connect-time alternate; routing nevertheless keeps driver-cx primary.
@@ -58,8 +55,7 @@ oracledb = { version = "=26.0.0-beta.3", default-features = false }
 # The pure-Rust, sans-I/O TNS/TTC protocol core that driver-cx itself builds on.
 # The TNS-onboarding parse adapter (crates/oraclemcp-db/src/tns.rs) reuses its
 # `TnsnamesReader` directly via the `oraclemcp_driver_cx_protocol::` path.
-# Pinned exactly to the version `oraclemcp-driver-cx 0.9.2`
-# already resolves, so this direct edge never floats the graph; pure
+# Pinned exactly to the protocol version at the T0.2a revision; pure
 # encode/decode (no async runtime), so the engine-free boundary holds.
 oraclemcp-driver-cx-protocol = { version = "=0.9.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
@@ -95,6 +91,25 @@ plsql-cicd = { version = "=0.7.0", default-features = false }
 plsql-doc = { version = "=0.7.0", default-features = false }
 plsql-sast = { version = "=0.7.0", default-features = false }
 plsql-output = { version = "=0.7.0", default-features = false }
+
+# Train-0.12 development pins. These exact public sibling revisions keep the
+# unreleased driver and PL/SQL crates in sync until R.5 publishes their RCs.
+[patch.crates-io]
+oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "4fa672cd8adbd025c88b589acdc538d652b4b496" }
+oraclemcp-driver-cx-protocol = { git = "https://github.com/MuhDur/rust-oracledb", rev = "4fa672cd8adbd025c88b589acdc538d652b4b496" }
+plsql-core = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-engine = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-catalog = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-depgraph = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-lineage = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-project = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-ir = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-parser-antlr = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-symbols = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-cicd = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-doc = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-sast = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
+plsql-output = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "27806fbeff15c73135df0e71d529d6bfa346a90e" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

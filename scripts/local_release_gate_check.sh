@@ -9,6 +9,7 @@ cd "$ROOT"
 require=false
 proof=""
 source_sha=""
+refuse_dev_pins_requested=false
 
 usage() {
   cat <<'USAGE'
@@ -18,6 +19,7 @@ Options:
   --require          fail when no proof is present
   --proof PATH       validate this proof file instead of auto-discovering
   --source-sha SHA   expected source commit short SHA
+  --refuse-dev-pins  refuse development git pins in release inputs
 USAGE
 }
 
@@ -43,6 +45,10 @@ while [ "$#" -gt 0 ]; do
       source_sha="$2"
       shift 2
       ;;
+    --refuse-dev-pins)
+      refuse_dev_pins_requested=true
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -53,6 +59,89 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+refuse_dev_pins() {
+  if ! command -v python3 >/dev/null 2>&1; then
+    echo "local-release-gate-check: missing required command: python3" >&2
+    return 2
+  fi
+  python3 - "$ROOT" <<'PY'
+import pathlib
+import sys
+import tomllib
+
+root = pathlib.Path(sys.argv[1])
+paths = {
+    "Cargo.toml": root / "Cargo.toml",
+    "deny.toml": root / "deny.toml",
+    "Cargo.lock": root / "Cargo.lock",
+}
+offenders = []
+parsed = {}
+for label, path in paths.items():
+    try:
+        with path.open("rb") as source:
+            parsed[label] = tomllib.load(source)
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        offenders.append(f"{label} parse -> {error} -> expected none")
+
+cargo = parsed.get("Cargo.toml")
+if cargo is not None:
+    patch = cargo.get("patch")
+    if patch is not None:
+        if isinstance(patch, dict):
+            for registry, entries in patch.items():
+                if isinstance(entries, dict) and entries:
+                    for crate, value in entries.items():
+                        offenders.append(
+                            f"Cargo.toml.[patch.{registry}].{crate} -> {value!r} -> expected none"
+                        )
+                else:
+                    offenders.append(
+                        f"Cargo.toml.[patch.{registry}] -> {entries!r} -> expected none"
+                    )
+            if not patch:
+                offenders.append("Cargo.toml.[patch] -> empty patch table -> expected none")
+        else:
+            offenders.append(f"Cargo.toml.patch -> {patch!r} -> expected none")
+
+deny = parsed.get("deny.toml")
+if deny is not None:
+    sources = deny.get("sources", {})
+    if not isinstance(sources, dict):
+        sources = {}
+        offenders.append(f"deny.toml.sources -> malformed -> expected a table")
+    allow_git = sources.get("allow-git", [])
+    if not isinstance(allow_git, list):
+        offenders.append(f"deny.toml.sources.allow-git -> {allow_git!r} -> expected none")
+    elif allow_git:
+        offenders.append(f"deny.toml.sources.allow-git -> {allow_git!r} -> expected none")
+
+lock = parsed.get("Cargo.lock")
+if lock is not None:
+    for index, package in enumerate(lock.get("package", [])):
+        source = package.get("source")
+        if isinstance(source, str) and source.startswith("git+"):
+            offenders.append(f"Cargo.lock.package[{index}].source -> {source} -> expected none")
+
+if offenders:
+    for offender in offenders:
+        print(f"local-release-gate-check: dev pin refusal: {offender}", file=sys.stderr)
+    raise SystemExit(1)
+PY
+}
+
+tag_context=false
+if [ -n "${RELEASE_TAG:-}" ] || [ "${GITHUB_REF_TYPE:-}" = "tag" ] || [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+  tag_context=true
+fi
+if [ "$refuse_dev_pins_requested" = true ]; then
+  refuse_dev_pins || exit $?
+  echo "local-release-gate-check: dev pins absent"
+  exit 0
+elif [ "$tag_context" = true ]; then
+  refuse_dev_pins || exit $?
+fi
 
 fail() {
   echo "local-release-gate-check: $*" >&2

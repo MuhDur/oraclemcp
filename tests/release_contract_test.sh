@@ -138,6 +138,137 @@ assert_fails_with() {
 
 cd "$ROOT"
 
+# Dev pins may be used during the train, but must never make it onto a release
+# tag. Exercise the release refusal against isolated copies of the three input
+# manifests so these checks stay offline and cannot see the live workspace.
+dev_pin_log_dir="$ROOT/target/e2e/release-contract"
+dev_pin_fixture_root="$ROOT/target/e2e/dev-pin-fixtures-$$"
+dev_pin_log="$dev_pin_log_dir/dev_pins-$$.jsonl"
+mkdir -p "$dev_pin_log_dir" "$dev_pin_fixture_root"
+
+new_dev_pin_fixture() {
+  local name="$1"
+  local fixture="$dev_pin_fixture_root/$name"
+  mkdir -p "$fixture/scripts"
+  cp "$ROOT/Cargo.toml" "$ROOT/Cargo.lock" "$ROOT/deny.toml" "$fixture/"
+  cp "$ROOT/scripts/local_release_gate_check.sh" "$fixture/scripts/"
+  cat >"$fixture/Cargo.toml" <<'TOML'
+[workspace]
+resolver = "2"
+TOML
+  cat >"$fixture/deny.toml" <<'TOML'
+[sources]
+unknown-git = "deny"
+allow-git = []
+TOML
+  cat >"$fixture/Cargo.lock" <<'TOML'
+version = 4
+
+[[package]]
+name = "release-contract-fixture"
+version = "0.1.0"
+TOML
+  git -C "$fixture" init -q
+  git -C "$fixture" -c user.name=release-contract -c user.email=release-contract.invalid \
+    commit --allow-empty -qm fixture
+  printf '%s\n' "$fixture"
+}
+
+record_dev_pin_case() {
+  local case_name="$1" expected="$2" actual="$3" status="$4"
+  jq -cn --arg case "$case_name" --arg expected "$expected" --arg actual "$actual" \
+    --argjson exit "$status" '{case:$case,expected:$expected,actual:$actual,exit:$exit}' >>"$dev_pin_log"
+}
+
+run_dev_pin_case() {
+  local fixture="$1" case_name="$2" expected="$3" mode="$4" needle="$5"
+  shift 5
+  local output status actual
+  set +e
+  if [ "$mode" = "explicit" ]; then
+    output="$(env -u RELEASE_TAG -u GITHUB_REF_TYPE -u GITHUB_REF \
+      bash "$fixture/scripts/local_release_gate_check.sh" --refuse-dev-pins "$@" 2>&1)"
+  elif [ "$mode" = "tag" ]; then
+    output="$(env -u RELEASE_TAG -u GITHUB_REF_TYPE GITHUB_REF=refs/tags/v0.12.0 \
+      bash "$fixture/scripts/local_release_gate_check.sh" "$@" 2>&1)"
+  else
+    output="$(env -u RELEASE_TAG -u GITHUB_REF_TYPE -u GITHUB_REF -u RELEASE_REQUIRE_LOCAL_GATE \
+      bash "$fixture/scripts/local_release_gate_check.sh" "$@" 2>&1)"
+  fi
+  status=$?
+  set -e
+  if [ "$expected" = "refuse" ]; then
+    actual=refuse
+    [ "$status" -ne 0 ] || fail "$case_name unexpectedly accepted dev pins"
+    [[ "$output" == *"$needle"* ]] || fail "$case_name refusal omitted '$needle': $output"
+  else
+    actual=pass
+    [ "$status" -eq 0 ] || fail "$case_name unexpectedly refused: $output"
+  fi
+  record_dev_pin_case "$case_name" "$expected" "$actual" "$status"
+}
+
+dev_pin_fixture="$(new_dev_pin_fixture patch-entry)"
+cat >>"$dev_pin_fixture/Cargo.toml" <<'TOML'
+
+[patch.crates-io]
+oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "deadbeef" }
+TOML
+run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_patch_entry refuse explicit \
+  'Cargo.toml.[patch.crates-io]'
+
+dev_pin_fixture="$(new_dev_pin_fixture allow-git)"
+python3 - "$dev_pin_fixture/deny.toml" <<'PY'
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+text = path.read_text()
+needle = 'allow-git = []'
+assert text.count(needle) == 1
+path.write_text(text.replace(needle, 'allow-git = ["https://github.com/MuhDur/rust-oracledb"]'))
+PY
+run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_allow_git refuse explicit \
+  'deny.toml.sources.allow-git'
+
+dev_pin_fixture="$(new_dev_pin_fixture git-lock-source)"
+cat >>"$dev_pin_fixture/Cargo.lock" <<'TOML'
+
+[[package]]
+name = "dev-pin-fixture"
+version = "0.0.0"
+source = "git+https://github.com/MuhDur/rust-oracledb?rev=deadbeef#deadbeef"
+TOML
+run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_git_lock_source refuse explicit \
+  'Cargo.lock.package['
+
+dev_pin_fixture="$(new_dev_pin_fixture clean)"
+run_dev_pin_case "$dev_pin_fixture" dev_pins_clean_manifest_passes pass explicit ''
+
+dev_pin_fixture="$(new_dev_pin_fixture non-tag)"
+cat >>"$dev_pin_fixture/Cargo.toml" <<'TOML'
+
+[patch.crates-io]
+oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "deadbeef" }
+TOML
+run_dev_pin_case "$dev_pin_fixture" dev_pins_non_tag_run_is_not_refused pass non-tag ''
+
+dev_pin_fixture="$(new_dev_pin_fixture tag-context)"
+cat >>"$dev_pin_fixture/Cargo.toml" <<'TOML'
+
+[patch.crates-io]
+oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "deadbeef" }
+TOML
+run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_context refuse tag \
+  'Cargo.toml.[patch.crates-io]'
+
+dev_pin_fixture="$(new_dev_pin_fixture tag-parse-error)"
+cat >"$dev_pin_fixture/Cargo.lock" <<'TOML'
+not-valid = [toml
+TOML
+run_dev_pin_case "$dev_pin_fixture" dev_pins_refuse_tag_parse_error refuse tag \
+  'Cargo.lock parse'
+
 python3 "$HELPER" --check >/dev/null
 driver_version="$(python3 "$HELPER" --value driver_version)"
 [[ "$driver_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||

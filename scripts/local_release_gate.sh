@@ -80,6 +80,10 @@ done
 
 cd "$ROOT"
 
+if [ "$commit_proof" = true ]; then
+  bash "$ROOT/scripts/local_release_gate_check.sh" --refuse-dev-pins
+fi
+
 need() {
   command -v "$1" >/dev/null 2>&1 || e2e_finish_fail "missing required command: $1"
 }

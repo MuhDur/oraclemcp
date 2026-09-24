@@ -88,3 +88,5 @@ wildcards = "allow"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# Temporary train-0.12 dev pins; removed by R.5 before release tags.
+allow-git = ["https://github.com/MuhDur/rust-oracledb", "https://github.com/MuhDur/plsql-intelligence"]

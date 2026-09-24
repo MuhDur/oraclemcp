@@ -46,7 +46,7 @@ cargo tree -i asupersync -e features   # asupersync feature "default" <- driver-
 
 Neither the driver's nor the server's own source uses the nightly syntax: the
 feature arrives transitively and unrequested.
-The pinned `oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean — but its
+The pinned `oraclemcp-driver-cx` 0.9.3 driver's own source is stable-clean — but its
 **dependency declaration** is the proximate cause, so "driver-cx is not the
 reason for the pin" is misleading.
 
