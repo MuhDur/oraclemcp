@@ -972,8 +972,9 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::DescribeColumns => (
-                "SELECT column_name, data_type, data_length, nullable, data_default_vc AS data_default \
-                 FROM all_tab_columns WHERE owner = :1 AND table_name = :2 \
+                "SELECT column_name, data_type, data_length, nullable, data_default_vc AS data_default, \
+                        virtual_column, hidden_column, user_generated \
+                 FROM all_tab_cols WHERE owner = :1 AND table_name = :2 \
                  ORDER BY column_id",
                 TT,
                 "describe relation columns",

@@ -3714,6 +3714,8 @@ mod tests {
             .sql
             .to_ascii_lowercase();
         assert!(sql.contains("data_default_vc as data_default"));
+        assert!(sql.contains("from all_tab_cols"));
+        assert!(sql.contains("virtual_column, hidden_column, user_generated"));
         assert!(!sql.contains(", data_default "));
     }
 

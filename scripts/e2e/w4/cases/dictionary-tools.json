@@ -615,27 +615,32 @@
      {
       "COLUMN_NAME": "ID",
       "VIRTUAL_COLUMN": "NO",
-      "HIDDEN_COLUMN": "NO"
+      "HIDDEN_COLUMN": "NO",
+      "USER_GENERATED": "YES"
      },
      {
       "COLUMN_NAME": "LABEL",
       "VIRTUAL_COLUMN": "NO",
-      "HIDDEN_COLUMN": "NO"
+      "HIDDEN_COLUMN": "NO",
+      "USER_GENERATED": "YES"
      },
      {
       "COLUMN_NAME": "TWICE",
       "VIRTUAL_COLUMN": "YES",
-      "HIDDEN_COLUMN": "NO"
+      "HIDDEN_COLUMN": "NO",
+      "USER_GENERATED": "YES"
      },
      {
       "COLUMN_NAME": "PARENT_ID",
       "VIRTUAL_COLUMN": "NO",
-      "HIDDEN_COLUMN": "NO"
+      "HIDDEN_COLUMN": "NO",
+      "USER_GENERATED": "YES"
      },
      {
       "COLUMN_NAME": "HIDDEN_NOTE",
       "VIRTUAL_COLUMN": "NO",
-      "HIDDEN_COLUMN": "YES"
+      "HIDDEN_COLUMN": "YES",
+      "USER_GENERATED": "YES"
      }
     ]
    }
@@ -897,21 +902,30 @@
       "DATA_DEFAULT": null,
       "DATA_LENGTH": "22",
       "DATA_TYPE": "NUMBER",
-      "NULLABLE": "N"
+      "NULLABLE": "N",
+      "VIRTUAL_COLUMN": "NO",
+      "HIDDEN_COLUMN": "NO",
+      "USER_GENERATED": "YES"
      },
      {
       "COLUMN_NAME": "N_VAL",
       "DATA_DEFAULT": null,
       "DATA_LENGTH": "22",
       "DATA_TYPE": "NUMBER",
-      "NULLABLE": "Y"
+      "NULLABLE": "Y",
+      "VIRTUAL_COLUMN": "NO",
+      "HIDDEN_COLUMN": "NO",
+      "USER_GENERATED": "YES"
      },
      {
       "COLUMN_NAME": "V_TEXT",
       "DATA_DEFAULT": null,
       "DATA_LENGTH": "200",
       "DATA_TYPE": "VARCHAR2",
-      "NULLABLE": "Y"
+      "NULLABLE": "Y",
+      "VIRTUAL_COLUMN": "NO",
+      "HIDDEN_COLUMN": "NO",
+      "USER_GENERATED": "YES"
      }
     ]
    }

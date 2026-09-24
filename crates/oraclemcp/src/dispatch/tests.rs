@@ -1969,7 +1969,7 @@ impl OracleConnection for DescribeCatalogMock {
             .lock()
             .expect("describe catalog call mutex")
             .push((sql.to_owned(), binds.to_vec()));
-        if sql.to_ascii_lowercase().contains("from all_tab_columns") {
+        if sql.to_ascii_lowercase().contains("from all_tab_cols") {
             Ok(self.columns.clone())
         } else {
             Ok(Vec::new())
@@ -5383,6 +5383,49 @@ fn oracle_describe_preserves_double_quoted_identifier_case() {
             OracleBind::String("camelCase".to_owned()),
         ]
     );
+}
+
+#[test]
+fn oracle_describe_and_describe_view_preserve_column_generation_flags() {
+    let state = Arc::new(DescribeCatalogState::default());
+    let dispatcher = OracleDispatcher::new(Box::new(DescribeCatalogMock {
+        state,
+        columns: vec![OracleRow {
+            columns: vec![
+                (
+                    "COLUMN_NAME".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("TWICE".to_owned())),
+                ),
+                (
+                    "VIRTUAL_COLUMN".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("YES".to_owned())),
+                ),
+                (
+                    "HIDDEN_COLUMN".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("NO".to_owned())),
+                ),
+                (
+                    "USER_GENERATED".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("YES".to_owned())),
+                ),
+            ],
+        }],
+    }));
+
+    let table = dispatcher
+        .dispatch("oracle_describe", json!({ "owner": "APP", "table": "T" }))
+        .expect("table describe returns per-column catalog flags");
+    let view = dispatcher
+        .dispatch(
+            "oracle_describe_view",
+            json!({ "owner": "APP", "name": "V" }),
+        )
+        .expect("view describe returns per-column catalog flags");
+
+    assert_eq!(table["columns"][0]["VIRTUAL_COLUMN"], json!("YES"));
+    assert_eq!(table["columns"][0]["HIDDEN_COLUMN"], json!("NO"));
+    assert_eq!(table["columns"][0]["USER_GENERATED"], json!("YES"));
+    assert_eq!(view["columns"], table["columns"]);
 }
 
 #[test]
