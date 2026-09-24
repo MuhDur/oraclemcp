@@ -157,11 +157,17 @@ pub enum CatalogQueryId {
     ListObjectsPage,
     /// Compact schema projection page with optional filters.
     SchemaProjectionPage,
+    /// Bounded schema identity map for orient.
+    OrientSchemaPage,
+    /// Bounded newest-first DDL feed for orient.
+    OrientRecentDdlPage,
+    /// Bounded schema list with an optional name filter.
+    ListSchemas,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 45] = [
+    pub const ALL: [Self; 48] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -207,6 +213,9 @@ impl CatalogQueryId {
         Self::ListObjects,
         Self::ListObjectsPage,
         Self::SchemaProjectionPage,
+        Self::OrientSchemaPage,
+        Self::OrientRecentDdlPage,
+        Self::ListSchemas,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -229,6 +238,8 @@ impl CatalogQueryId {
         const N3II: BindSchema =
             BindSchema(&[NullableText, NullableText, NullableText, Integer, Integer]);
         const N2II: BindSchema = BindSchema(&[NullableText, NullableText, Integer, Integer]);
+        const NI: BindSchema = BindSchema(&[NullableText, Integer]);
+        const NII: BindSchema = BindSchema(&[NullableText, Integer, Integer]);
         let (sql, binds, purpose, output_policy, audit_class) = match self {
             Self::SessionContext => (
                 SESSION_CONTEXT_SQL,
@@ -635,6 +646,57 @@ impl CatalogQueryId {
                ) WHERE page_row > :4",
                 N2II,
                 "page compact schema projection",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::OrientSchemaPage => (
+                "SELECT owner, object_name, object_type FROM ( \
+                   SELECT selected.*, ROWNUM AS page_row FROM ( \
+                       WITH args AS ( \
+                           SELECT :1 owner_filter FROM dual \
+                       ) \
+                       SELECT o.owner, o.object_name, o.object_type \
+                       FROM all_objects o CROSS JOIN args \
+                       WHERE args.owner_filter IS NULL OR o.owner = args.owner_filter \
+                       ORDER BY o.owner, o.object_type, o.object_name \
+                   ) selected WHERE ROWNUM <= :2 \
+               ) WHERE page_row > :3",
+                NII,
+                "page bounded orient schema identities",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::OrientRecentDdlPage => (
+                r"SELECT owner, object_name, object_type, last_ddl_time FROM (
+                   SELECT selected.*, ROWNUM AS page_row FROM (
+                       WITH args AS (
+                           SELECT :1 owner_filter FROM dual
+                       )
+                       SELECT o.owner, o.object_name, o.object_type, o.last_ddl_time
+                       FROM all_objects o CROSS JOIN args
+                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter)
+                         AND o.last_ddl_time IS NOT NULL
+                       ORDER BY o.last_ddl_time DESC, o.owner, o.object_type, o.object_name
+                   ) selected WHERE ROWNUM <= :2
+               ) WHERE page_row > :3",
+                NII,
+                "page bounded recent DDL identities",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ListSchemas => (
+                "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 name_filter FROM dual \
+                   ) \
+                   SELECT o.owner AS schema_name, COUNT(*) AS object_count \
+                   FROM all_objects o CROSS JOIN args \
+                   WHERE args.name_filter IS NULL OR o.owner LIKE args.name_filter \
+                   GROUP BY o.owner \
+                   ORDER BY o.owner \
+               ) WHERE ROWNUM <= :2",
+                NI,
+                "list bounded visible schemas",
                 DictionaryMetadata,
                 Diagnostic,
             ),

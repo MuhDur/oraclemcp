@@ -887,32 +887,21 @@ pub async fn orient_schema_page(
     offset: usize,
     max_rows: usize,
 ) -> Result<Vec<OrientSchemaObject>, DbError> {
-    let sql = "SELECT owner, object_name, object_type FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter FROM dual \
-                       ) \
-                       SELECT o.owner, o.object_name, o.object_type \
-                       FROM all_objects o CROSS JOIN args \
-                       WHERE args.owner_filter IS NULL OR o.owner = args.owner_filter \
-                       ORDER BY o.owner, o.object_type, o.object_name \
-                   ) selected WHERE ROWNUM <= :2 \
-               ) WHERE page_row > :3";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
     let upper_bound = page_upper_bound(offset, max_rows)?;
-    let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::OrientSchemaPage,
+        &[
+            owner_bind,
+            OracleBind::from(upper_bound),
+            OracleBind::from(offset as i64),
+        ],
+    )
+    .await?;
 
     Ok(rows
         .into_iter()
@@ -1210,33 +1199,21 @@ pub async fn orient_recent_ddl_page(
     offset: usize,
     max_rows: usize,
 ) -> Result<Vec<OrientRecentDdlObject>, DbError> {
-    let sql = r"SELECT owner, object_name, object_type, last_ddl_time FROM (
-                   SELECT selected.*, ROWNUM AS page_row FROM (
-                       WITH args AS (
-                           SELECT :1 owner_filter FROM dual
-                       )
-                       SELECT o.owner, o.object_name, o.object_type, o.last_ddl_time
-                       FROM all_objects o CROSS JOIN args
-                       WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter)
-                         AND o.last_ddl_time IS NOT NULL
-                       ORDER BY o.last_ddl_time DESC, o.owner, o.object_type, o.object_name
-                   ) selected WHERE ROWNUM <= :2
-               ) WHERE page_row > :3";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
     let upper_bound = page_upper_bound(offset, max_rows)?;
-    let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::OrientRecentDdlPage,
+        &[
+            owner_bind,
+            OracleBind::from(upper_bound),
+            OracleBind::from(offset as i64),
+        ],
+    )
+    .await?;
 
     Ok(rows
         .into_iter()
@@ -1257,22 +1234,13 @@ pub async fn list_schemas(
     name_like: Option<&str>,
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
-    let sql = "SELECT * FROM ( \
-                   WITH args AS ( \
-                       SELECT :1 name_filter FROM dual \
-                   ) \
-                   SELECT o.owner AS schema_name, COUNT(*) AS object_count \
-                   FROM all_objects o CROSS JOIN args \
-                   WHERE args.name_filter IS NULL OR o.owner LIKE args.name_filter \
-                   GROUP BY o.owner \
-                   ORDER BY o.owner \
-               ) WHERE ROWNUM <= :2";
     let name_like_bind = name_like.map_or(OracleBind::Null, |n| {
         OracleBind::from(n.to_ascii_uppercase())
     });
-    conn.query_rows(
+    run_catalog_query(
         cx,
-        sql,
+        conn,
+        CatalogQueryId::ListSchemas,
         &[name_like_bind, OracleBind::from(max_rows as i64)],
     )
     .await
