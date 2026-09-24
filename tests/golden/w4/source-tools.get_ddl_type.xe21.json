@@ -1,0 +1,13 @@
+{
+  "ddl": "\n  CREATE OR REPLACE EDITIONABLE TYPE \"W4O_<run_id>\".\"TY_POINT_<run_id>\" AS OBJECT (\n    X NUMBER,\n    Y NUMBER,\n    MEMBER FUNCTION NORM2 RETURN NUMBER\n);\nCREATE OR REPLACE EDITIONABLE TYPE BODY \"W4O_<run_id>\".\"TY_POINT_<run_id>\" AS\n    MEMBER FUNCTION NORM2 RETURN NUMBER IS\n    BEGIN\n        RETURN X * X + Y * Y;\n    END;\nEND;",
+  "ddl_char_count": 346,
+  "name": "TY_POINT_<run_id>",
+  "next_step": "DDL is complete",
+  "owner": "W4O_<run_id>",
+  "returned_ddl_char_count": 346,
+  "truncated": false,
+  "truncation": {
+    "ddl_prefix": false,
+    "kind": "complete"
+  }
+}

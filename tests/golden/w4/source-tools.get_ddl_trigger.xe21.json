@@ -1,0 +1,13 @@
+{
+  "ddl": "\n  CREATE OR REPLACE EDITIONABLE TRIGGER \"W4O_<run_id>\".\"TRG_CHILD_AUDIT_<run_id>\" \nAFTER INSERT ON T_CHILD_<run_id> FOR EACH ROW\nBEGIN\n    INSERT INTO T_CHILD_AUD_<run_id>(CHILD_ID) VALUES (:NEW.ID);\nEND;\nALTER TRIGGER \"W4O_<run_id>\".\"TRG_CHILD_AUDIT_<run_id>\" ENABLE",
+  "ddl_char_count": 292,
+  "name": "TRG_CHILD_AUDIT_<run_id>",
+  "next_step": "DDL is complete",
+  "owner": "W4O_<run_id>",
+  "returned_ddl_char_count": 292,
+  "truncated": false,
+  "truncation": {
+    "ddl_prefix": false,
+    "kind": "complete"
+  }
+}

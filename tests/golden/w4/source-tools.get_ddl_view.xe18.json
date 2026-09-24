@@ -1,0 +1,13 @@
+{
+  "ddl": "\n  CREATE OR REPLACE FORCE EDITIONABLE VIEW \"W4O_<run_id>\".\"V_TYPES_<run_id>\" (\"ID\", \"N_VAL\", \"V_TEXT\") AS \n  SELECT ID, N_VAL, V_TEXT FROM T_TYPES_<run_id>",
+  "ddl_char_count": 168,
+  "name": "V_TYPES_<run_id>",
+  "next_step": "DDL is complete",
+  "owner": "W4O_<run_id>",
+  "returned_ddl_char_count": 168,
+  "truncated": false,
+  "truncation": {
+    "ddl_prefix": false,
+    "kind": "complete"
+  }
+}

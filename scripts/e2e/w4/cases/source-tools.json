@@ -1,0 +1,2734 @@
+[
+  {
+    "case_id": "w4_create_or_replace_procedure_preview_token_apply",
+    "tool": "oracle_create_or_replace",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source_code": "CREATE OR REPLACE PROCEDURE ${owner}.P_SRC_${run_id} AS\n  v NUMBER := 1; -- w4src:procedure\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "applied": true,
+        "committed": true,
+        "required_level": "DDL",
+        "error_count": 0,
+        "errors": [],
+        "detected_object": {
+          "owner": "${owner}",
+          "name": "P_SRC_${run_id}",
+          "object_type": "PROCEDURE"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'P_SRC_${run_id}' AND OBJECT_TYPE = 'PROCEDURE'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_SRC_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'w4src:procedure') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PROCEDURE ${owner}.P_SRC_${run_id} AS\n  v NUMBER := 1; -- w4src:procedure\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_create_or_replace_function_preview_token_apply",
+    "tool": "oracle_create_or_replace",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source_code": "CREATE OR REPLACE FUNCTION ${owner}.F_SRC_${run_id}(P_ID NUMBER) RETURN NUMBER AS\nBEGIN\n  RETURN P_ID + 1; -- w4src:function\nEND;",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "applied": true,
+        "committed": true,
+        "required_level": "DDL",
+        "error_count": 0,
+        "errors": [],
+        "detected_object": {
+          "owner": "${owner}",
+          "name": "F_SRC_${run_id}",
+          "object_type": "FUNCTION"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F_SRC_${run_id}' AND OBJECT_TYPE = 'FUNCTION'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'F_SRC_${run_id}' AND TYPE = 'FUNCTION' AND INSTR(TEXT, 'w4src:function') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE FUNCTION ${owner}.F_SRC_${run_id}(P_ID NUMBER) RETURN NUMBER AS\nBEGIN\n  RETURN P_ID + 1; -- w4src:function\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_create_or_replace_package_preview_token_apply",
+    "tool": "oracle_create_or_replace",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source_code": "CREATE OR REPLACE PACKAGE BODY ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_ID * 2; -- w4src:package_body\n  END;\nEND;",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "applied": true,
+        "committed": true,
+        "required_level": "DDL",
+        "error_count": 0,
+        "errors": [],
+        "detected_object": {
+          "owner": "${owner}",
+          "name": "PKG_SRC_${run_id}",
+          "object_type": "PACKAGE BODY"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'PKG_SRC_${run_id}' AND OBJECT_TYPE = 'PACKAGE'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'PKG_SRC_${run_id}' AND TYPE = 'PACKAGE' AND INSTR(TEXT, 'w4src:package') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'PKG_SRC_${run_id}' AND OBJECT_TYPE = 'PACKAGE BODY'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'PKG_SRC_${run_id}' AND TYPE = 'PACKAGE BODY' AND INSTR(TEXT, 'w4src:package_body') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PACKAGE ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER; -- w4src:package\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PACKAGE ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER; -- w4src:package\nEND;",
+          "execute": true,
+          "confirm": "${cap:token}"
+        },
+        "expect": {
+          "json_subset": {
+            "applied": true
+          }
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PACKAGE BODY ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_ID * 2; -- w4src:package_body\n  END;\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_create_or_replace_view_preview_token_apply",
+    "tool": "oracle_create_or_replace",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source_code": "CREATE OR REPLACE VIEW ${owner}.V_SRC_${run_id} AS SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "applied": true,
+        "committed": true,
+        "required_level": "DDL",
+        "error_count": 0,
+        "errors": [],
+        "detected_object": {
+          "owner": "${owner}",
+          "name": "V_SRC_${run_id}",
+          "object_type": "VIEW"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'V_SRC_${run_id}' AND OBJECT_TYPE = 'VIEW'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_VIEWS WHERE OWNER = '${owner}' AND VIEW_NAME = 'V_SRC_${run_id}'",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE VIEW ${owner}.V_SRC_${run_id} AS SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_create_or_replace_trigger_preview_token_apply",
+    "tool": "oracle_create_or_replace",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source_code": "CREATE OR REPLACE TRIGGER ${owner}.TRG_SRC_${run_id}\nBEFORE INSERT ON ${owner}.T_AUTO_${run_id} FOR EACH ROW\nBEGIN\n  :NEW.CREATED_AT := SYSTIMESTAMP; -- w4src:trigger\nEND;",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "applied": true,
+        "committed": true,
+        "required_level": "DDL",
+        "error_count": 0,
+        "errors": [],
+        "detected_object": {
+          "owner": "${owner}",
+          "name": "TRG_SRC_${run_id}",
+          "object_type": "TRIGGER"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TRG_SRC_${run_id}' AND OBJECT_TYPE = 'TRIGGER'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'TRG_SRC_${run_id}' AND TYPE = 'TRIGGER' AND INSTR(TEXT, 'w4src:trigger') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE TRIGGER ${owner}.TRG_SRC_${run_id}\nBEFORE INSERT ON ${owner}.T_AUTO_${run_id} FOR EACH ROW\nBEGIN\n  :NEW.CREATED_AT := SYSTIMESTAMP; -- w4src:trigger\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_create_or_replace_type_preview_token_apply",
+    "tool": "oracle_create_or_replace",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source_code": "CREATE OR REPLACE TYPE BODY ${owner}.TY_SRC_${run_id} AS\n  MEMBER FUNCTION TWICE RETURN NUMBER IS\n  BEGIN\n    RETURN N * 2; -- w4src:type_body\n  END;\nEND;",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "applied": true,
+        "committed": true,
+        "required_level": "DDL",
+        "error_count": 0,
+        "errors": [],
+        "detected_object": {
+          "owner": "${owner}",
+          "name": "TY_SRC_${run_id}",
+          "object_type": "TYPE BODY"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TY_SRC_${run_id}' AND OBJECT_TYPE = 'TYPE'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'TY_SRC_${run_id}' AND TYPE = 'TYPE' AND INSTR(TEXT, 'w4src:type') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TY_SRC_${run_id}' AND OBJECT_TYPE = 'TYPE BODY'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'TY_SRC_${run_id}' AND TYPE = 'TYPE BODY' AND INSTR(TEXT, 'w4src:type_body') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE TYPE ${owner}.TY_SRC_${run_id} AS OBJECT (\n  N NUMBER, -- w4src:type\n  MEMBER FUNCTION TWICE RETURN NUMBER\n);"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE TYPE ${owner}.TY_SRC_${run_id} AS OBJECT (\n  N NUMBER, -- w4src:type\n  MEMBER FUNCTION TWICE RETURN NUMBER\n);",
+          "execute": true,
+          "confirm": "${cap:token}"
+        },
+        "expect": {
+          "json_subset": {
+            "applied": true
+          }
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE TYPE BODY ${owner}.TY_SRC_${run_id} AS\n  MEMBER FUNCTION TWICE RETURN NUMBER IS\n  BEGIN\n    RETURN N * 2; -- w4src:type_body\n  END;\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_procedure_valid",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_SRC_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "error_count": 0,
+        "errors": [],
+        "owner": "${owner}",
+        "name": "P_SRC_${run_id}",
+        "object_type": "PROCEDURE"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'P_SRC_${run_id}' AND OBJECT_TYPE = 'PROCEDURE'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "PROCEDURE",
+          "owner": "${owner}",
+          "name": "P_SRC_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_function_valid",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "FUNCTION",
+        "owner": "${owner}",
+        "name": "F_SRC_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "error_count": 0,
+        "errors": [],
+        "owner": "${owner}",
+        "name": "F_SRC_${run_id}",
+        "object_type": "FUNCTION"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F_SRC_${run_id}' AND OBJECT_TYPE = 'FUNCTION'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "FUNCTION",
+          "owner": "${owner}",
+          "name": "F_SRC_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_package_valid",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "PACKAGE_BODY",
+        "owner": "${owner}",
+        "name": "PKG_SRC_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "error_count": 0,
+        "errors": [],
+        "owner": "${owner}",
+        "name": "PKG_SRC_${run_id}",
+        "object_type": "PACKAGE BODY"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'PKG_SRC_${run_id}' AND OBJECT_TYPE = 'PACKAGE BODY'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "PACKAGE_BODY",
+          "owner": "${owner}",
+          "name": "PKG_SRC_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_view_valid",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "VIEW",
+        "owner": "${owner}",
+        "name": "V_SRC_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "error_count": 0,
+        "errors": [],
+        "owner": "${owner}",
+        "name": "V_SRC_${run_id}",
+        "object_type": "VIEW"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'V_SRC_${run_id}' AND OBJECT_TYPE = 'VIEW'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "VIEW",
+          "owner": "${owner}",
+          "name": "V_SRC_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_trigger_valid",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "TRIGGER",
+        "owner": "${owner}",
+        "name": "TRG_SRC_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "error_count": 0,
+        "errors": [],
+        "owner": "${owner}",
+        "name": "TRG_SRC_${run_id}",
+        "object_type": "TRIGGER"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TRG_SRC_${run_id}' AND OBJECT_TYPE = 'TRIGGER'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "TRIGGER",
+          "owner": "${owner}",
+          "name": "TRG_SRC_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_type_valid",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "TYPE_BODY",
+        "owner": "${owner}",
+        "name": "TY_SRC_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "error_count": 0,
+        "errors": [],
+        "owner": "${owner}",
+        "name": "TY_SRC_${run_id}",
+        "object_type": "TYPE BODY"
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TY_SRC_${run_id}' AND OBJECT_TYPE = 'TYPE BODY'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "TYPE_BODY",
+          "owner": "${owner}",
+          "name": "TY_SRC_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_procedure_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_BAD_${run_id} AS BEGIN W4_NO_SUCH_PROC_${run_id}; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "P_BAD_${run_id}",
+        "object_type": "PROCEDURE",
+        "error_count": 2,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "P_BAD_${run_id}",
+            "POSITION": "56",
+            "TYPE": "PROCEDURE",
+            "TEXT": "PLS-00201: identifier 'W4_NO_SUCH_PROC_${run_id}' must be declared"
+          },
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "P_BAD_${run_id}",
+            "POSITION": "56",
+            "TYPE": "PROCEDURE",
+            "TEXT": "PL/SQL: Statement ignored"
+          }
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'P_BAD_${run_id}' AND OBJECT_TYPE = 'PROCEDURE'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'P_BAD_${run_id}' AND TYPE = 'PROCEDURE'",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "PROCEDURE",
+          "owner": "${owner}",
+          "name": "P_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_function_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.F_BAD_${run_id} RETURN NUMBER AS BEGIN RETURN W4_NO_SUCH_FN_${run_id}; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "FUNCTION",
+        "owner": "${owner}",
+        "name": "F_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "F_BAD_${run_id}",
+        "object_type": "FUNCTION",
+        "error_count": 2,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "F_BAD_${run_id}",
+            "POSITION": "76",
+            "TYPE": "FUNCTION",
+            "TEXT": "PLS-00201: identifier 'W4_NO_SUCH_FN_${run_id}' must be declared"
+          },
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "F_BAD_${run_id}",
+            "POSITION": "69",
+            "TYPE": "FUNCTION",
+            "TEXT": "PL/SQL: Statement ignored"
+          }
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F_BAD_${run_id}' AND OBJECT_TYPE = 'FUNCTION'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'F_BAD_${run_id}' AND TYPE = 'FUNCTION'",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "FUNCTION",
+          "owner": "${owner}",
+          "name": "F_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_package_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PACKAGE ${owner}.PKG_BAD_${run_id} AS PROCEDURE RUN; END;"
+      },
+      {
+        "sql": "CREATE OR REPLACE PACKAGE BODY ${owner}.PKG_BAD_${run_id} AS PROCEDURE RUN IS BEGIN W4_NO_SUCH_PROC_${run_id}; END; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "PACKAGE_BODY",
+        "owner": "${owner}",
+        "name": "PKG_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "PKG_BAD_${run_id}",
+        "object_type": "PACKAGE BODY",
+        "error_count": 2,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "PKG_BAD_${run_id}",
+            "POSITION": "78",
+            "TYPE": "PACKAGE BODY",
+            "TEXT": "PLS-00201: identifier 'W4_NO_SUCH_PROC_${run_id}' must be declared"
+          },
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "PKG_BAD_${run_id}",
+            "POSITION": "78",
+            "TYPE": "PACKAGE BODY",
+            "TEXT": "PL/SQL: Statement ignored"
+          }
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'PKG_BAD_${run_id}' AND OBJECT_TYPE = 'PACKAGE BODY'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'PKG_BAD_${run_id}' AND TYPE = 'PACKAGE BODY'",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "PACKAGE_BODY",
+          "owner": "${owner}",
+          "name": "PKG_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_view_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FORCE VIEW ${owner}.V_BAD_${run_id} AS SELECT ID FROM ${owner}.T_NO_SUCH_${run_id}"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "VIEW",
+        "owner": "${owner}",
+        "name": "V_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "V_BAD_${run_id}",
+        "object_type": "VIEW",
+        "error_count": 1,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "0",
+            "NAME": "V_BAD_${run_id}",
+            "POSITION": "0",
+            "TYPE": "VIEW"
+          }
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'V_BAD_${run_id}' AND OBJECT_TYPE = 'VIEW'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'V_BAD_${run_id}' AND TYPE = 'VIEW'",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "VIEW",
+          "owner": "${owner}",
+          "name": "V_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_trigger_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE TRIGGER ${owner}.TRG_BAD_${run_id} BEFORE INSERT ON ${owner}.T_AUTO_${run_id} FOR EACH ROW BEGIN INSERT INTO ${owner}.T_NO_SUCH_${run_id} VALUES (1); END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "TRIGGER",
+        "owner": "${owner}",
+        "name": "TRG_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "TRG_BAD_${run_id}",
+        "object_type": "TRIGGER",
+        "error_count": 2,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "TRG_BAD_${run_id}",
+            "POSITION": "36",
+            "TYPE": "TRIGGER"
+          },
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "TRG_BAD_${run_id}",
+            "POSITION": "7",
+            "TYPE": "TRIGGER",
+            "TEXT": "PL/SQL: SQL Statement ignored"
+          }
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TRG_BAD_${run_id}' AND OBJECT_TYPE = 'TRIGGER'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'TRG_BAD_${run_id}' AND TYPE = 'TRIGGER'",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "TRIGGER",
+          "owner": "${owner}",
+          "name": "TRG_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_object_type_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE TYPE ${owner}.TY_BAD_${run_id} AS OBJECT (N NUMBER, MEMBER FUNCTION F RETURN NUMBER)"
+      },
+      {
+        "sql": "CREATE OR REPLACE TYPE BODY ${owner}.TY_BAD_${run_id} AS MEMBER FUNCTION F RETURN NUMBER IS BEGIN RETURN W4_NO_SUCH_FN_${run_id}; END; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "TYPE_BODY",
+        "owner": "${owner}",
+        "name": "TY_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "TY_BAD_${run_id}",
+        "object_type": "TYPE BODY",
+        "error_count": 2,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "TY_BAD_${run_id}",
+            "POSITION": "99",
+            "TYPE": "TYPE BODY",
+            "TEXT": "PLS-00201: identifier 'W4_NO_SUCH_FN_${run_id}' must be declared"
+          },
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "TY_BAD_${run_id}",
+            "POSITION": "92",
+            "TYPE": "TYPE BODY",
+            "TEXT": "PL/SQL: Statement ignored"
+          }
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TY_BAD_${run_id}' AND OBJECT_TYPE = 'TYPE BODY'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'TY_BAD_${run_id}' AND TYPE = 'TYPE BODY'",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "TYPE_BODY",
+          "owner": "${owner}",
+          "name": "TY_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_create_or_replace_refused_at_read_write",
+    "tool": "oracle_create_or_replace",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source_code": "CREATE OR REPLACE PROCEDURE ${owner}.P_RW_${run_id} AS BEGIN NULL; END;",
+        "execute": true,
+        "confirm": "w4-forged-ddl-token"
+      }
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'P_RW_${run_id}'",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "w4_patch_source_happy_path",
+    "tool": "oracle_patch_source",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_A_${run_id} AS\n  v NUMBER := 1;\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_PATCH_A_${run_id}",
+        "old_text": "v NUMBER := 1;",
+        "new_text": "v NUMBER := 7;",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "applied": true,
+        "committed": true,
+        "owner": "${owner}",
+        "name": "P_PATCH_A_${run_id}",
+        "object_type": "PROCEDURE",
+        "error_count": 0,
+        "errors": [],
+        "diff": {
+          "start_line": 2,
+          "old_line_count": 1,
+          "new_line_count": 1
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'P_PATCH_A_${run_id}' AND OBJECT_TYPE = 'PROCEDURE'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_A_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v NUMBER := 7;') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_A_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v NUMBER := 1;') > 0",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT OWNER FROM ALL_OBJECTS WHERE OBJECT_NAME = 'P_PATCH_A_${run_id}'",
+        "rows": [
+          [
+            "${owner}"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_patch_source",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_patch_source",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_patch_source",
+        "arguments": {
+          "object_type": "PROCEDURE",
+          "owner": "${owner}",
+          "name": "P_PATCH_A_${run_id}",
+          "old_text": "v NUMBER := 1;",
+          "new_text": "v NUMBER := 7;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_patch_source"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_patch_source_anchor_not_found_typed_error",
+    "tool": "oracle_patch_source",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_C_${run_id} AS\n  v NUMBER := 1;\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_PATCH_C_${run_id}",
+        "old_text": "w4 anchor that is not in the source",
+        "new_text": "x"
+      }
+    },
+    "expect": {
+      "error_class": "OBJECT_NOT_FOUND"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_C_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v NUMBER := 1;') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT OWNER FROM ALL_OBJECTS WHERE OBJECT_NAME = 'P_PATCH_C_${run_id}'",
+        "rows": [
+          [
+            "${owner}"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_patch_source_ambiguous_anchor_refused",
+    "tool": "oracle_patch_source",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_PATCH_C_${run_id}",
+        "old_text": "v := v + 1;",
+        "new_text": "v := v + 2;"
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_C_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v := v + 1;') > 0",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT OWNER FROM ALL_OBJECTS WHERE OBJECT_NAME = 'P_PATCH_C_${run_id}'",
+        "rows": [
+          [
+            "${owner}"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_patch_source_readonly_refused",
+    "tool": "oracle_patch_source",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_PATCH_C_${run_id}",
+        "old_text": "v NUMBER := 1;",
+        "new_text": "v NUMBER := 9;",
+        "execute": true,
+        "confirm": "w4-forged-patch-token"
+      }
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_C_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v NUMBER := 1;') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT OWNER FROM ALL_OBJECTS WHERE OBJECT_NAME = 'P_PATCH_C_${run_id}'",
+        "rows": [
+          [
+            "${owner}"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "w4_patch_source_stale_preview_refused",
+    "tool": "oracle_patch_source",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_B_${run_id} AS\n  v NUMBER := 1;\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_PATCH_B_${run_id}",
+        "old_text": "v NUMBER := 1;",
+        "new_text": "v NUMBER := 8;",
+        "execute": true,
+        "confirm": "${cap:patch}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "error_class": "REPREVIEW_REQUIRED"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_B_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'changed-under-preview') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_B_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v NUMBER := 1;') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_B_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v NUMBER := 8;') > 0",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT OWNER FROM ALL_OBJECTS WHERE OBJECT_NAME = 'P_PATCH_B_${run_id}'",
+        "rows": [
+          [
+            "${owner}"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_patch_source",
+        "arguments": {
+          "object_type": "PROCEDURE",
+          "owner": "${owner}",
+          "name": "P_PATCH_B_${run_id}",
+          "old_text": "v NUMBER := 1;",
+          "new_text": "v NUMBER := 8;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_patch_source"
+            }
+          }
+        },
+        "capture": {
+          "patch": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_B_${run_id} AS\n  v NUMBER := 1;\nBEGIN\n  v := v + 3; -- w4src:changed-under-preview\n  v := v + 1;\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_B_${run_id} AS\n  v NUMBER := 1;\nBEGIN\n  v := v + 3; -- w4src:changed-under-preview\n  v := v + 1;\nEND;",
+          "execute": true,
+          "confirm": "${cap:token}"
+        },
+        "expect": {
+          "json_subset": {
+            "applied": true
+          }
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_patch_source_stale_preview_anchor_removed_refused",
+    "tool": "oracle_patch_source",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_D_${run_id} AS\n  v NUMBER := 1;\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "PROCEDURE",
+        "owner": "${owner}",
+        "name": "P_PATCH_D_${run_id}",
+        "old_text": "v NUMBER := 1;",
+        "new_text": "v NUMBER := 8;",
+        "execute": true,
+        "confirm": "${cap:patch}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "error_class": "OBJECT_NOT_FOUND"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_D_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'changed-under-preview') > 0",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'P_PATCH_D_${run_id}' AND TYPE = 'PROCEDURE' AND INSTR(TEXT, 'v NUMBER := 8;') > 0",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT OWNER FROM ALL_OBJECTS WHERE OBJECT_NAME = 'P_PATCH_D_${run_id}'",
+        "rows": [
+          [
+            "${owner}"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_patch_source",
+        "arguments": {
+          "object_type": "PROCEDURE",
+          "owner": "${owner}",
+          "name": "P_PATCH_D_${run_id}",
+          "old_text": "v NUMBER := 1;",
+          "new_text": "v NUMBER := 8;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_patch_source"
+            }
+          }
+        },
+        "capture": {
+          "patch": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_D_${run_id} AS\n  v NUMBER := 5; -- w4src:changed-under-preview\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_create_or_replace"
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {
+          "source_code": "CREATE OR REPLACE PROCEDURE ${owner}.P_PATCH_D_${run_id} AS\n  v NUMBER := 5; -- w4src:changed-under-preview\nBEGIN\n  v := v + 1;\n  v := v + 1;\nEND;",
+          "execute": true,
+          "confirm": "${cap:token}"
+        },
+        "expect": {
+          "json_subset": {
+            "applied": true
+          }
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_compile_errors_lists_exact_line_and_text",
+    "tool": "oracle_compile_errors",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "name": "P_BAD_${run_id}"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "P_BAD_${run_id}",
+            "POSITION": "56",
+            "TYPE": "PROCEDURE",
+            "TEXT": "PLS-00201: identifier 'W4_NO_SUCH_PROC_${run_id}' must be declared"
+          },
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "P_BAD_${run_id}",
+            "POSITION": "56",
+            "TYPE": "PROCEDURE",
+            "TEXT": "PL/SQL: Statement ignored"
+          }
+        ],
+        "name": "P_BAD_${run_id}",
+        "owner": "${owner}",
+        "truncated": false
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT LINE, POSITION, TEXT FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'P_BAD_${run_id}' ORDER BY SEQUENCE",
+        "rows": [
+          [
+            1,
+            56,
+            "PLS-00201: identifier 'W4_NO_SUCH_PROC_${run_id}' must be declared"
+          ],
+          [
+            1,
+            56,
+            "PL/SQL: Statement ignored"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_compile_errors_none_for_valid_object",
+    "tool": "oracle_compile_errors",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "name": "F_SRC_${run_id}"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "errors": [],
+        "name": "F_SRC_${run_id}",
+        "owner": "${owner}",
+        "truncated": false
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F_SRC_${run_id}' AND OBJECT_TYPE = 'FUNCTION'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_source_package_body_line_range",
+    "tool": "oracle_get_source",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "name": "PKG_SRC_${run_id}",
+        "object_type": "PACKAGE_BODY",
+        "from_line": 2,
+        "to_line": 4
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "range": {
+          "requested": {
+            "from_line": 2,
+            "to_line": 4
+          },
+          "returned": {
+            "from_line": 2,
+            "to_line": 4
+          }
+        },
+        "source": {
+          "line_count": 3,
+          "name": "PKG_SRC_${run_id}",
+          "object_type": "PACKAGE BODY",
+          "owner": "${owner}",
+          "truncated": false,
+          "source": "  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_ID * 2; -- w4src:package_body\n"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT LINE, TEXT FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'PKG_SRC_${run_id}' AND TYPE = 'PACKAGE BODY' AND LINE BETWEEN 2 AND 4 ORDER BY LINE",
+        "rows": [
+          [
+            2,
+            "  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n"
+          ],
+          [
+            3,
+            "  BEGIN\n"
+          ],
+          [
+            4,
+            "    RETURN P_ID * 2; -- w4src:package_body\n"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_source_view_text",
+    "tool": "oracle_get_source",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "name": "V_SRC_${run_id}",
+        "object_type": "VIEW"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "source": {
+          "object_type": "VIEW",
+          "name": "V_SRC_${run_id}",
+          "owner": "${owner}",
+          "source": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_VIEWS WHERE OWNER = '${owner}' AND VIEW_NAME = 'V_SRC_${run_id}'",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_source_missing_object_not_found",
+    "tool": "oracle_get_source",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "name": "W4_NO_SUCH_UNIT_${run_id}",
+        "object_type": "PROCEDURE"
+      }
+    },
+    "expect": {
+      "error_class": "OBJECT_NOT_FOUND"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_table",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "TABLE",
+        "owner": "${owner}",
+        "name": "T_PARENT_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_table.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_view",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "VIEW",
+        "owner": "${owner}",
+        "name": "V_TYPES_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_view.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_index",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "INDEX",
+        "owner": "${owner}",
+        "name": "IX_TYPES_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_index.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_trigger",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "TRIGGER",
+        "owner": "${owner}",
+        "name": "TRG_CHILD_AUDIT_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_trigger.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_sequence",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "SEQUENCE",
+        "owner": "${owner}",
+        "name": "SEQ_W4_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_sequence.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_type",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "TYPE",
+        "owner": "${owner}",
+        "name": "TY_POINT_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_type.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_package",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "PACKAGE",
+        "owner": "${owner}",
+        "name": "PKG_SRC_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_package.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_cross_owner",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "TABLE",
+        "owner": "${cross}",
+        "name": "T_CROSS_${run_id}"
+      }
+    },
+    "expect": {
+      "golden": "source-tools.get_ddl_cross_owner.${lane}.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_get_ddl_unsupported_type_invalid_arguments",
+    "tool": "oracle_get_ddl",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "object_type": "DATABASE LINK",
+        "owner": "${owner}",
+        "name": "T_PARENT_${run_id}"
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  }
+]

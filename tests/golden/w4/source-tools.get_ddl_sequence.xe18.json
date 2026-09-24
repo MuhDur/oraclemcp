@@ -1,0 +1,13 @@
+{
+  "ddl": "\n   CREATE SEQUENCE  \"W4O_<run_id>\".\"SEQ_W4_<run_id>\"  MINVALUE 1 MAXVALUE 9999999999999999999999999999 INCREMENT BY 1 START WITH 100 CACHE 20 NOORDER  NOCYCLE  NOKEEP  NOSCALE  GLOBAL ",
+  "ddl_char_count": 193,
+  "name": "SEQ_W4_<run_id>",
+  "next_step": "DDL is complete",
+  "owner": "W4O_<run_id>",
+  "returned_ddl_char_count": 193,
+  "truncated": false,
+  "truncation": {
+    "ddl_prefix": false,
+    "kind": "complete"
+  }
+}

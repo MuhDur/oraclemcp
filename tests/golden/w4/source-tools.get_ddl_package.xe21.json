@@ -1,0 +1,13 @@
+{
+  "ddl": "\n  CREATE OR REPLACE EDITIONABLE PACKAGE \"W4O_<run_id>\".\"PKG_SRC_<run_id>\" AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER; -- w4src:package\nEND;\nCREATE OR REPLACE EDITIONABLE PACKAGE BODY \"W4O_<run_id>\".\"PKG_SRC_<run_id>\" AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_ID * 2; -- w4src:package_body\n  END;\nEND;",
+  "ddl_char_count": 350,
+  "name": "PKG_SRC_<run_id>",
+  "next_step": "DDL is complete",
+  "owner": "W4O_<run_id>",
+  "returned_ddl_char_count": 350,
+  "truncated": false,
+  "truncation": {
+    "ddl_prefix": false,
+    "kind": "complete"
+  }
+}

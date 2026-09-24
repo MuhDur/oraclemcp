@@ -68,9 +68,12 @@ def sha256(value):
     return hashlib.sha256(compact(value).encode()).hexdigest()
 
 
-def expand_case(value, run_id, transport):
+def expand_case(value, run_id, transport, lane=None):
     replacements = {"${run_id}": run_id, "${owner}": "W4O_" + run_id,
                     "${cross}": "W4X_" + run_id, "${transport}": transport}
+    if lane is not None:
+        # Version-specific output (DBMS_METADATA DDL text) has one golden per lane.
+        replacements["${lane}"] = lane
     if isinstance(value, str):
         for key, replacement in replacements.items():
             value = value.replace(key, replacement)
@@ -78,9 +81,9 @@ def expand_case(value, run_id, transport):
         require("${" not in CAPTURE.sub("", value), "unresolved W4 case placeholder")
         return value
     if isinstance(value, list):
-        return [expand_case(item, run_id, transport) for item in value]
+        return [expand_case(item, run_id, transport, lane) for item in value]
     if isinstance(value, dict):
-        return {key: expand_case(item, run_id, transport) for key, item in value.items()}
+        return {key: expand_case(item, run_id, transport, lane) for key, item in value.items()}
     return value
 
 
@@ -437,9 +440,14 @@ def verify_expect_shape(expect):
                 "json_subset must be a nonempty object")
     if "golden" in expect:
         name = expect["golden"]
-        require(isinstance(name, str) and re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name),
+        require(isinstance(name, str) and name.count("${lane}") <= 1
+                and re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name.replace("${lane}", "lane")),
                 "invalid golden filename")
-        require((ROOT / "tests/golden/w4" / name).is_file(), "golden file is missing")
+        lanes = (("free23", "xe18", "xe21") if "${lane}" in name else (None,))
+        for lane in lanes:
+            concrete = name if lane is None else name.replace("${lane}", lane)
+            require(re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", concrete) is not None, "invalid golden filename")
+            require((ROOT / "tests/golden/w4" / concrete).is_file(), f"golden file {concrete} is missing")
 
 
 def load_cases():
@@ -1542,7 +1550,7 @@ def run_lane(args):
                                      owner=owner)
                 client_env = {**env, "XDG_STATE_HOME": str(state)}
                 expanded_family = ([] if args.contract_only else [
-                    freshen_vsql_marker(expand_case(case, fixture_id, transport)) for case in family_cases
+                    freshen_vsql_marker(expand_case(case, fixture_id, transport, args.lane)) for case in family_cases
                     if transport in case["transports"]])
                 for case in expanded_family:
                     if (case.get("setup_phase") == "before_server"
