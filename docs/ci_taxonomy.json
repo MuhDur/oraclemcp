@@ -386,6 +386,30 @@
       "path_filtered": false
     },
     {
+      "check_name": "fuzz oraclemcp-guard / grant_scope_match shard 0/2",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz oraclemcp-guard / grant_scope_match shard 1/2",
+      "tier": "scheduled",
+      "workflow": "Fuzz Campaign",
+      "workflow_file": "fuzz.yml",
+      "job_id": "fuzz",
+      "triggers": [
+        "schedule",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "guard + audit BMC proofs",
       "tier": "release",
       "workflow": "Kani Safety",
@@ -720,7 +744,9 @@
         "fuzz oraclemcp-guard / alter_session_parse shard 1/4",
         "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
         "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
-        "fuzz oraclemcp-guard / classify_fuzz shard 0/1"
+        "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
+        "fuzz oraclemcp-guard / grant_scope_match shard 0/2",
+        "fuzz oraclemcp-guard / grant_scope_match shard 1/2"
       ]
     },
     "kani-safety.yml": {
@@ -859,6 +885,8 @@
       "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
       "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
       "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
+      "fuzz oraclemcp-guard / grant_scope_match shard 0/2",
+      "fuzz oraclemcp-guard / grant_scope_match shard 1/2",
       "watch required + scheduled lanes (server + driver)"
     ]
   }
