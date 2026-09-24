@@ -370,6 +370,9 @@ impl OracleConnection for SemanticGuardMock {
             .expect("read events lock")
             .push(format!("query:{sql}"));
         let normalized = sql.to_ascii_lowercase();
+        if normalized.contains("dbms_flashback.get_system_change_number") {
+            return Ok(vec![semantic_row(&[("OBSERVED_SCN", Some("424242"))])]);
+        }
         if normalized.contains("sys_context('userenv', 'session_user')") {
             return Ok(vec![semantic_row(&[
                 ("SESSION_USER", Some("APP")),
@@ -409,6 +412,7 @@ impl OracleConnection for SemanticGuardMock {
             let name = string_bind(binds, 1).unwrap_or_default();
             let kind = match name {
                 "ORDERS" | "POLICY_TABLE" => "TABLE",
+                "ORDERS_ALIAS" => "SYNONYM",
                 "SIDE_VIEW" => "VIEW",
                 "DANGEROUS_FN" => "FUNCTION",
                 _ => return Ok(Vec::new()),
@@ -423,6 +427,19 @@ impl OracleConnection for SemanticGuardMock {
             ])]);
         }
         if normalized.contains("from all_synonyms") {
+            if string_bind(binds, 0) == Some("APP") && string_bind(binds, 1) == Some("ORDERS_ALIAS")
+            {
+                return Ok(vec![semantic_row(&[
+                    ("OWNER", Some("APP")),
+                    ("SYNONYM_NAME", Some("ORDERS_ALIAS")),
+                    ("TABLE_OWNER", Some("APP")),
+                    ("TABLE_NAME", Some("ORDERS")),
+                    ("DB_LINK", None),
+                    ("OBJECT_ID", Some("43")),
+                    ("STATUS", Some("VALID")),
+                    ("EDITION_NAME", None),
+                ])]);
+            }
             return Ok(Vec::new());
         }
         if normalized.contains("from all_arguments") {
@@ -12427,6 +12444,9 @@ mod qa85_terminal_boundaries {
 /// paren-less qualified-callable guard, and K8 structured reasons) live in
 /// `tests/gate_refusal_reasons.rs` after the C6 split (bead `oraclemcp-z3oit`).
 mod gate_refusal_reasons;
+
+mod guard_bypass_corpus;
+mod guard_metamorphic;
 
 /// A8: the hash-chained, keyed-MAC auditor is wired into the SERVED dispatch
 /// path (not just the standalone `oracle_query_execute` helper). These prove the

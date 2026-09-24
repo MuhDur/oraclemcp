@@ -54,9 +54,64 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use oraclemcp_guard::{
     Classifier, ClassifierConfig, DangerLevel, GuardDecision, ObjectRef, OperatingLevel, Purity,
-    SideEffectOracle,
+    SideEffectOracle, semantic_read_plan_checked,
 };
 use proptest::prelude::*;
+
+/// A wrapper may add relations, but it cannot hide a base relation from the
+/// exact plan sent to the served catalog proof. This is a plan-level check;
+/// the dispatch suite tests the same relation through the served gate.
+#[test]
+fn mr_wrap_preserves_relation_set() {
+    let base = "SELECT id FROM APP.SIDE_VIEW";
+    let base_plan = semantic_read_plan_checked(base).expect("base plan");
+    let wrapped = [
+        (
+            "exists",
+            format!("SELECT o.id FROM APP.ORDERS o WHERE EXISTS ({base})"),
+        ),
+        (
+            "in",
+            format!("SELECT o.id FROM APP.ORDERS o WHERE o.id IN ({base})"),
+        ),
+        ("cte", format!("WITH w AS ({base}) SELECT id FROM w")),
+        (
+            "union",
+            format!("SELECT id FROM APP.ORDERS UNION ALL {base}"),
+        ),
+        ("derived", format!("SELECT d.id FROM ({base}) d")),
+        (
+            "not_exists",
+            format!("SELECT o.id FROM APP.ORDERS o WHERE NOT EXISTS ({base})"),
+        ),
+    ];
+    for (wrapper, sql) in &wrapped {
+        let plan = semantic_read_plan_checked(sql)
+            .unwrap_or_else(|error| panic!("{wrapper} should have a plan: {error:?}: {sql}"));
+        for relation in &base_plan.relations {
+            assert!(
+                plan.relations.contains(relation),
+                "{wrapper} lost {relation:?} from exact plan: {sql}"
+            );
+        }
+        // Planted pre-per-block mutant: only the root block is consulted.
+        // At least one nested wrapper must break the same relation under it.
+    }
+    let derived = semantic_read_plan_checked(&wrapped[4].1).expect("derived plan");
+    let root_only_relations: Vec<_> = derived
+        .blocks
+        .iter()
+        .filter(|block| matches!(block.kind, oraclemcp_guard::resolver::QueryBlockKind::Root))
+        .flat_map(|block| block.relations.iter())
+        .collect();
+    assert!(
+        base_plan
+            .relations
+            .iter()
+            .any(|relation| !root_only_relations.contains(&relation)),
+        "root-only planted mutant must lose the nested relation"
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Severity ranks (fail-closed on any future variant)

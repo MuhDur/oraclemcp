@@ -2362,6 +2362,7 @@ dependencies = [
  "plsql-project",
  "plsql-sast",
  "plsql-symbols",
+ "proptest",
  "rcgen",
  "regex",
  "rustix",

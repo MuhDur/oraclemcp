@@ -1,0 +1,1 @@
+SELECT j.DOC.customer.id FROM APP.ORDERS j ORDER BY j.ID

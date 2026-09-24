@@ -1,0 +1,26 @@
+{"case_id":"i28_order_alias","sql":"SELECT ID AS N FROM APP.ORDERS ORDER BY N","profile":"ordinary","expected":"admitted"}
+{"case_id":"i28_alias_unsafe_callable","sql":"SELECT APP.DANGEROUS_FN AS N FROM APP.ORDERS ORDER BY N","profile":"ordinary","expected":"refused:ForbiddenStatement"}
+{"case_id":"i29_using","sql":"SELECT ID FROM APP.ORDERS o JOIN APP.ORDERS p USING (ID)","profile":"ordinary","expected":"admitted"}
+{"case_id":"i29_natural","sql":"SELECT ID FROM APP.ORDERS o NATURAL JOIN APP.ORDERS p","profile":"ordinary","expected":"admitted"}
+{"case_id":"i29_qualified_using_unsafe","sql":"SELECT o.ID FROM APP.ORDERS o JOIN APP.ORDERS p USING (ID)","profile":"ordinary","expected":"refused:ObjectNotFound"}
+{"case_id":"i30_hidden_builtin_virtual","sql":"SELECT ID FROM APP.ORDERS","profile":"virtual_builtin","expected":"admitted"}
+{"case_id":"i30_hidden_user_function_virtual","sql":"SELECT ID FROM APP.ORDERS","profile":"virtual_user_function","expected":"refused:ForbiddenStatement"}
+{"case_id":"i31_owner_table_column","sql":"SELECT APP.ORDERS.ID FROM APP.ORDERS","profile":"ordinary","expected":"admitted"}
+{"case_id":"i31_wrong_owner","sql":"SELECT OTHER.ORDERS.ID FROM APP.ORDERS","profile":"ordinary","expected":"refused:ObjectNotFound"}
+{"case_id":"i32_json_dot","sql":"SELECT j.DOC.customer.id FROM APP.ORDERS j","profile":"ordinary","expected":"admitted"}
+{"case_id":"i32_object_attribute","sql":"SELECT e.ADDRESS.CITY FROM APP.ORDERS e","profile":"ordinary","expected":"admitted"}
+{"case_id":"i32_object_method_unsafe","sql":"SELECT e.ADDRESS.CITY() FROM APP.ORDERS e","profile":"ordinary","expected":"refused:OperatingLevelTooLow"}
+{"case_id":"i33_orarowscn","sql":"SELECT ORA_ROWSCN FROM APP.ORDERS","profile":"ordinary","expected":"admitted"}
+{"case_id":"i33_nextval_unsafe","sql":"SELECT APP.SEQ.NEXTVAL FROM APP.ORDERS","profile":"ordinary","expected":"refused:OperatingLevelTooLow"}
+{"case_id":"i34_cte","sql":"WITH a AS (SELECT id FROM APP.ORDERS) SELECT id FROM a","profile":"ordinary","expected":"admitted"}
+{"case_id":"i34_union","sql":"SELECT id FROM APP.ORDERS UNION ALL SELECT id FROM APP.ORDERS","profile":"ordinary","expected":"admitted"}
+{"case_id":"i34_derived","sql":"SELECT x.id FROM (SELECT id FROM APP.ORDERS) x","profile":"ordinary","expected":"admitted"}
+{"case_id":"i35_dictionary_view_unmodelled","sql":"SELECT object_name FROM USER_OBJECTS WHERE object_name = :1","profile":"ordinary","expected":"refused:ObjectNotFound"}
+{"case_id":"i52_exists_view","sql":"SELECT id FROM APP.ORDERS WHERE EXISTS (SELECT 1 FROM APP.SIDE_VIEW)","profile":"ordinary","expected":"refused:ForbiddenStatement"}
+{"case_id":"i52_in_vpd","sql":"SELECT id FROM APP.ORDERS WHERE id IN (SELECT id FROM APP.POLICY_TABLE)","profile":"ordinary","expected":"refused:ForbiddenStatement"}
+{"case_id":"i52_scalar_view","sql":"SELECT (SELECT MAX(id) FROM APP.SIDE_VIEW) FROM APP.ORDERS","profile":"ordinary","expected":"refused:ForbiddenStatement"}
+{"case_id":"i53_sample_vpd","sql":"SELECT id FROM APP.POLICY_TABLE","profile":"sample_rows","expected":"refused:ForbiddenStatement"}
+{"case_id":"i53_sample_view","sql":"SELECT id FROM APP.SIDE_VIEW","profile":"sample_rows","expected":"refused:ForbiddenStatement"}
+{"case_id":"i53_sample_mask","sql":"SELECT id FROM APP.ORDERS","profile":"sample_rows_masked","expected":"admitted"}
+{"case_id":"fga_handler","sql":"SELECT id FROM APP.ORDERS","profile":"fga_handler","expected":"refused:ForbiddenStatement"}
+{"case_id":"db_link","sql":"SELECT id FROM APP.ORDERS@REMOTE_LINK","profile":"ordinary","expected":"refused:ForbiddenStatement"}
