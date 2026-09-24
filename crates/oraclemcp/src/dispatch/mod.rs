@@ -9932,16 +9932,142 @@ fn find_unique_patch_match(
     Ok(first_idx)
 }
 
-fn create_or_replace_ddl_from_source(source: &str) -> String {
-    if source
-        .trim_start()
-        .to_ascii_uppercase()
-        .starts_with("CREATE OR REPLACE ")
-    {
-        source.to_owned()
-    } else {
-        format!("CREATE OR REPLACE {source}")
+/// Re-emit a patched stored unit as `CREATE OR REPLACE` bound to the previewed
+/// owner and name.
+///
+/// ALL_SOURCE never stores the schema: Oracle blanks the qualifier on line 1
+/// (`PROCEDURE        NAME AS`). Prepending `CREATE OR REPLACE` to that text
+/// created the unit in the session's current schema while the response named
+/// the previewed owner (oraclemcp-nqauq). The header is parsed instead and the
+/// resolved identity written back as `"OWNER"."NAME"`; a header that names any
+/// other owner or object, including one the patch itself edited, is refused.
+/// The confirmation is minted over this exact DDL, so a grant previewed for one
+/// target can never validate another.
+fn owner_qualified_patch_ddl(
+    source: &str,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    tool_name: &str,
+) -> Result<String, ErrorEnvelope> {
+    let refuse = |why: String| {
+        invalid_args(format!(
+            "invalid arguments for {tool_name}: {why}; a source patch must keep the header of {object_type} {owner}.{name}"
+        ))
+        .with_suggested_tool("oracle_get_source")
+        .with_next_step("patch the body only; renaming or re-homing a unit is not a source patch")
+    };
+    let trimmed = source.trim_start();
+    let body = match strip_header_keyword(trimmed, "CREATE") {
+        Some(rest) => strip_header_keyword(rest, "OR")
+            .and_then(|rest| strip_header_keyword(rest, "REPLACE"))
+            .ok_or_else(|| refuse("the stored header is not CREATE OR REPLACE".to_owned()))?,
+        None => trimmed,
+    };
+    let body = body.trim_start();
+    let mut rest = body;
+    if object_type == "VIEW" {
+        // DBMS_METADATA view DDL: CREATE OR REPLACE [NO]FORCE [NON]EDITIONABLE [EDITIONING] VIEW.
+        for force in ["FORCE", "NOFORCE"] {
+            if let Some(after) = strip_header_keyword(rest, force) {
+                rest = after;
+                break;
+            }
+        }
     }
+    for editionability in ["EDITIONABLE", "NONEDITIONABLE"] {
+        if let Some(after) = strip_header_keyword(rest, editionability) {
+            rest = after;
+            break;
+        }
+    }
+    if object_type == "VIEW"
+        && let Some(after) = strip_header_keyword(rest, "EDITIONING")
+    {
+        rest = after;
+    }
+    for keyword in object_type.split(' ') {
+        rest = strip_header_keyword(rest, keyword).ok_or_else(|| {
+            refuse(format!(
+                "the stored header does not start with {object_type}"
+            ))
+        })?;
+    }
+    let keywords = &body[..body.len() - rest.len()];
+    let (first, after_first) = parse_header_identifier(rest.trim_start())
+        .ok_or_else(|| refuse("the stored header has no object name".to_owned()))?;
+    let (stated_owner, stated_name, tail) = match after_first.trim_start().strip_prefix('.') {
+        Some(qualified) => {
+            let (second, after_second) = parse_header_identifier(qualified.trim_start())
+                .ok_or_else(|| {
+                    refuse("the stored header has a malformed qualified name".to_owned())
+                })?;
+            (Some(first), second, after_second)
+        }
+        None => (None, first, after_first),
+    };
+    if let Some(stated_owner) = stated_owner
+        && stated_owner != owner
+    {
+        return Err(refuse(format!("the header names owner {stated_owner}")));
+    }
+    if stated_name != name {
+        return Err(refuse(format!("the header names {stated_name}")));
+    }
+    Ok(format!(
+        "CREATE OR REPLACE {} {}.{}{tail}",
+        keywords.trim_end(),
+        quote_header_identifier(owner).map_err(refuse)?,
+        quote_header_identifier(name).map_err(refuse)?,
+    ))
+}
+
+/// Strip one case-insensitive keyword that must end at an identifier boundary.
+fn strip_header_keyword<'a>(text: &'a str, keyword: &str) -> Option<&'a str> {
+    let text = text.trim_start();
+    let head = text.get(..keyword.len())?;
+    if !head.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &text[keyword.len()..];
+    match rest.chars().next() {
+        Some(next) if next.is_ascii_alphanumeric() || matches!(next, '_' | '$' | '#') => None,
+        _ => Some(rest),
+    }
+}
+
+/// Parse one Oracle identifier: a quoted name is exact, an unquoted one is
+/// folded to upper case as Oracle stores it.
+fn parse_header_identifier(text: &str) -> Option<(String, &str)> {
+    if let Some(quoted) = text.strip_prefix('"') {
+        let end = quoted.find('"')?;
+        let name = &quoted[..end];
+        return (!name.is_empty()).then(|| (name.to_owned(), &quoted[end + 1..]));
+    }
+    let end = text
+        .char_indices()
+        .find(|(_, c)| !(c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#')))
+        .map_or(text.len(), |(index, _)| index);
+    let name = &text[..end];
+    (name.chars().next()?.is_ascii_alphabetic()).then(|| (name.to_ascii_uppercase(), &text[end..]))
+}
+
+/// Write a dictionary identifier back into DDL: a plain upper-case name stays
+/// unquoted (the form the stored-unit classifier matches against the unit's
+/// END label), anything else is quoted exactly.
+fn quote_header_identifier(identifier: &str) -> Result<String, String> {
+    if identifier.is_empty() || identifier.contains('"') {
+        return Err(format!("cannot quote the identifier {identifier:?}"));
+    }
+    let plain = identifier.starts_with(|c: char| c.is_ascii_uppercase())
+        && identifier
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '_' | '$' | '#'));
+    Ok(if plain {
+        identifier.to_owned()
+    } else {
+        format!("\"{identifier}\"")
+    })
 }
 
 fn line_number_at(source: &str, byte_idx: usize) -> usize {
@@ -10181,11 +10307,13 @@ async fn patch_source_inner(
     let match_idx = find_unique_patch_match(&document.text, &old_text, tool_name)?;
     let mut patched_source = document.text.clone();
     patched_source.replace_range(match_idx..match_idx + old_text.len(), &new_text);
-    let patched_ddl = if object_type == "VIEW" {
-        patched_source.clone()
-    } else {
-        create_or_replace_ddl_from_source(&patched_source)
-    };
+    let patched_ddl = owner_qualified_patch_ddl(
+        &patched_source,
+        &owner,
+        &object_name,
+        &object_type,
+        tool_name,
+    )?;
     let patched_ddl = create_or_replace_source_arg(tool_name, Some(patched_ddl))?;
     let action_material =
         ddl_action_material(&patched_ddl, ActionKind::PatchSource, args.timeout_seconds);
@@ -10486,6 +10614,13 @@ async fn patch_source_inner(
             "owner": owner,
             "name": object_name,
             "object_type": object_type,
+            // What actually ran: the statement is bound to this owner and name.
+            "executed_target": {
+                "owner": owner,
+                "name": object_name,
+                "object_type": object_type,
+                "statement_head": patched_ddl.lines().next().unwrap_or_default(),
+            },
             "source_kind": document.source_kind,
             "required_level": OperatingLevel::Ddl,
             "danger": decision.danger,

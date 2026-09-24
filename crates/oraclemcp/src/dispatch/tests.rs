@@ -5489,7 +5489,7 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
         out["patched_ddl_preview"]["text"]
             .as_str()
             .expect("preview text")
-            .contains("CREATE OR REPLACE PACKAGE BODY EMP_API")
+            .contains("CREATE OR REPLACE PACKAGE BODY APP.EMP_API")
     );
     assert_eq!(out["confirmation"]["tool"], json!("oracle_patch_source"));
     assert_eq!(out["next_actions"][0]["tool"], json!("oracle_patch_source"));
@@ -5620,7 +5620,7 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
     assert!(
         executed[0]
             .0
-            .contains("CREATE OR REPLACE PACKAGE BODY EMP_API")
+            .contains("CREATE OR REPLACE PACKAGE BODY APP.EMP_API")
     );
     assert!(executed[0].0.contains("BEGIN 1; END;"));
     assert_eq!(state.commits.load(Ordering::SeqCst), 1);
@@ -5690,7 +5690,7 @@ fn read_patch_preview_lists_and_reads_last_preview() {
         read["ddl_preview"]["text"]
             .as_str()
             .expect("preview text")
-            .starts_with("CREATE OR REPLACE PACKAGE BODY EMP_API")
+            .starts_with("CREATE OR REPLACE PACKAGE BODY APP.EMP_API")
     );
 }
 
@@ -12454,6 +12454,8 @@ mod guard_metamorphic;
 mod audit_wiring;
 
 mod write_authorization;
+
+mod patch_source_owner;
 
 #[path = "tests/action_envelope.rs"]
 mod action_envelope;
