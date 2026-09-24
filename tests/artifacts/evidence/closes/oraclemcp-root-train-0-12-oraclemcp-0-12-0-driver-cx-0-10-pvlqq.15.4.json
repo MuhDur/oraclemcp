@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T10:30:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.15.4",
+  "scope": {
+    "summary": "AND-only typed grant predicate DSL with server-bound values (never inlined), refusal of OR/NOT/subquery/function/column-to-column/oversized or empty IN/type mismatch/unknown column, and compose_where of caller WHERE, policy Q and grant P as three parenthesised conjuncts (473aeb5b, 8f53a609, c09ecf94).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/scoped_grant/predicate.rs",
+      "crates/oraclemcp-guard/tests/scoped_grant_predicate.rs",
+      "crates/oraclemcp-guard/fuzz/fuzz_targets/grant_predicate.rs",
+      ".github/workflows/fuzz.yml"
+    ],
+    "out_of_scope": [
+      "Live refusal through MCP (T13.8) and resolver correctness (T1.1): bead no-claim."
+    ]
+  },
+  "source": {
+    "sha": "adb29133d965e1ae1b3ce7a663076d2c9eb36c7f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at adb29133 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3559 passed, 0 failed; cargo deny OK; every fuzz crate compiles (cargo check)."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "grant_predicate_* (incl. grant_predicate_number_in_and_equality_render_as_four_typed_binds rendering (\"ID\" IN (:omcp_g1, :omcp_g2, :omcp_g3)) AND (\"TENANT_ID\" = :omcp_g4)), compose_where_emits_three_nested_conjuncts and prop_composed_where_implies_p_and_q (10_000 cases) ok in the gate log."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "The injection property generates nested AND/OR caller expressions with identifiers and values containing \")\" and \"OR 1=1\", re-parses the RENDERED SQL and requires both the three-conjunct structure and an exact round trip (rework 8f53a609 after the first version only used a string literal)."
+      },
+      {
+        "name": "fuzz (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "cargo +nightly-2026-05-11 fuzz run grant_predicate -max_total_time=60 -seed=7001 at adb29133: Done 2430395 runs in 61 second(s), exit 0, no findings. fuzz.yml carries grant_predicate (c09ecf94)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit/offline + fuzz per the bead; re-executed by the orchestrator, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

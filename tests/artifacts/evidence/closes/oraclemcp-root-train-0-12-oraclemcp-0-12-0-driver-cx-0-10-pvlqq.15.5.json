@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T10:30:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.15.5",
+  "scope": {
+    "summary": "Fail-closed scoped grant matcher: exact target identity, verbs, granted columns, restricted SET expressions; typed refusals; 10k-case out-of-scope mutation proptest; fuzz target grant_scope_match in the tier-B fuzz lane (53c54411, 5c52430f, 14c281eb, 2a6f4021, a5527543, 2a593c92).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/scoped_grant/matcher.rs",
+      "crates/oraclemcp-guard/tests/scoped_grant_matcher.rs",
+      "crates/oraclemcp-guard/fuzz/fuzz_targets/grant_scope_match.rs",
+      ".github/workflows/fuzz.yml"
+    ],
+    "out_of_scope": [
+      "Live refusal through MCP (T13.8) and resolver correctness (T1.1): bead no-claim."
+    ]
+  },
+  "source": {
+    "sha": "adb29133d965e1ae1b3ce7a663076d2c9eb36c7f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at adb29133 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3559 passed, 0 failed; cargo deny OK; every fuzz crate compiles (cargo check)."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "24 scope_match_* tests and prop_out_of_scope_mutation_never_admitted (ProptestConfig 10_000 cases) ok in the gate log."
+      },
+      {
+        "name": "fuzz (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "cargo +nightly-2026-05-11 fuzz run grant_scope_match -max_total_time=60 -seed=7001 at adb29133: Done 124428 runs in 61 second(s), exit 0, no crash/sanitizer findings. fuzz.yml carries grant_scope_match shards 0/1 (seeds 6001/6002)."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "The fuzz shape oracle asserts matched.target() equals both the grant target and resolved.identity (2a593c92); a mutated target must be refused. An earlier fixed-target assertion was removed because approved synonym/quoted variants legitimately grant a different identity (reason in commit body). Earlier iterations of this bead broke main (fuzz target did not compile; CI taxonomy drift; shard-count test); all were fixed before this close."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit/offline + fuzz per the bead; re-executed by the orchestrator, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
