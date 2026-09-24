@@ -1822,6 +1822,47 @@ impl OracleConnection for OneRowMock {
                 )],
             }]);
         }
+        if sql_lower.contains("from all_tab_cols")
+            && sql_lower.contains("where owner = :1 and table_name = :2")
+            && sql_lower.contains("order by column_id")
+        {
+            return Ok(match (string_bind(binds, 0), string_bind(binds, 1)) {
+                (Some(_owner), Some(_table)) => vec![OracleRow {
+                    columns: vec![
+                        (
+                            "COLUMN_NAME".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("EMPLOYEE_ID".to_owned())),
+                        ),
+                        (
+                            "DATA_TYPE".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("NUMBER".to_owned())),
+                        ),
+                        (
+                            "DATA_LENGTH".to_owned(),
+                            OracleCell::new("NUMBER", Some("22".to_owned())),
+                        ),
+                        (
+                            "NULLABLE".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("N".to_owned())),
+                        ),
+                        ("DATA_DEFAULT".to_owned(), OracleCell::new("VARCHAR2", None)),
+                        (
+                            "VIRTUAL_COLUMN".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("NO".to_owned())),
+                        ),
+                        (
+                            "HIDDEN_COLUMN".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("NO".to_owned())),
+                        ),
+                        (
+                            "USER_GENERATED".to_owned(),
+                            OracleCell::new("VARCHAR2", Some("YES".to_owned())),
+                        ),
+                    ],
+                }],
+                _ => Vec::new(),
+            });
+        }
         if catalog_extract_empty_rowset(&sql_lower) {
             return Ok(Vec::new());
         }

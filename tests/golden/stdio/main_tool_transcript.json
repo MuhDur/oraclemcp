@@ -190,7 +190,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "profile"
+                ],
                 "type": "object"
               },
               "name": "oracle_switch_profile",
@@ -209,6 +211,12 @@
                 "properties": {
                   "action": {
                     "description": "Optional action: preview, apply, drop, or status. Omit for preview/apply based on execute.",
+                    "enum": [
+                      "preview",
+                      "apply",
+                      "drop",
+                      "status"
+                    ],
                     "type": "string"
                   },
                   "confirm": {
@@ -225,10 +233,22 @@
                   },
                   "level": {
                     "description": "Target level: READ_WRITE, DDL, or ADMIN. READ_ONLY drops any active elevation.",
+                    "enum": [
+                      "READ_WRITE",
+                      "DDL",
+                      "ADMIN",
+                      "READ_ONLY"
+                    ],
                     "type": "string"
                   },
                   "target_level": {
                     "description": "Alias for level.",
+                    "enum": [
+                      "READ_WRITE",
+                      "DDL",
+                      "ADMIN",
+                      "READ_ONLY"
+                    ],
                     "type": "string"
                   },
                   "token": {
@@ -242,7 +262,9 @@
                     "type": "integer"
                   }
                 },
-                "required": [],
+                "required": [
+                  "level"
+                ],
                 "type": "object"
               },
               "name": "oracle_set_session_level",
@@ -854,7 +876,8 @@
                   }
                 },
                 "required": [
-                  "over"
+                  "over",
+                  "query_vector"
                 ],
                 "type": "object"
               },
@@ -1100,7 +1123,9 @@
                   }
                 },
                 "required": [
-                  "sql"
+                  "sql",
+                  "scn_a",
+                  "scn_b"
                 ],
                 "type": "object"
               },
@@ -1868,7 +1893,7 @@
                     "type": "integer"
                   },
                   "name": {
-                    "description": "Alias for table. Prefer table.",
+                    "description": "Runtime compatibility alias for table; schema clients should supply table.",
                     "type": "string"
                   },
                   "owner": {
@@ -1876,15 +1901,17 @@
                     "type": "string"
                   },
                   "table": {
-                    "description": "Table or view name. May be OWNER.TABLE. Required unless table_name or name is supplied.",
+                    "description": "Required table or view name. May be OWNER.TABLE.",
                     "type": "string"
                   },
                   "table_name": {
-                    "description": "Alias for table for compatibility with older clients. Prefer table.",
+                    "description": "Runtime compatibility alias for table; schema clients should supply table.",
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "table"
+                ],
                 "type": "object"
               },
               "name": "oracle_describe",
@@ -1902,11 +1929,11 @@
                 "additionalProperties": false,
                 "properties": {
                   "index_name": {
-                    "description": "Alias for name for compatibility with older clients. Prefer name.",
+                    "description": "Runtime compatibility alias for name; schema clients should supply name.",
                     "type": "string"
                   },
                   "name": {
-                    "description": "Index name (case-insensitive). Required unless index_name is supplied.",
+                    "description": "Required index name (case-insensitive).",
                     "type": "string"
                   },
                   "owner": {
@@ -1914,7 +1941,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "name"
+                ],
                 "type": "object"
               },
               "name": "oracle_describe_index",
@@ -1932,7 +1961,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "name": {
-                    "description": "Trigger name (case-insensitive). Required unless trigger_name is supplied.",
+                    "description": "Required trigger name (case-insensitive).",
                     "type": "string"
                   },
                   "owner": {
@@ -1940,11 +1969,13 @@
                     "type": "string"
                   },
                   "trigger_name": {
-                    "description": "Alias for name for compatibility with older clients. Prefer name.",
+                    "description": "Runtime compatibility alias for name; schema clients should supply name.",
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "name"
+                ],
                 "type": "object"
               },
               "name": "oracle_describe_trigger",
@@ -1962,7 +1993,7 @@
                 "additionalProperties": false,
                 "properties": {
                   "name": {
-                    "description": "View name (case-insensitive). Required unless view_name is supplied.",
+                    "description": "Required view name (case-insensitive).",
                     "type": "string"
                   },
                   "owner": {
@@ -1970,11 +2001,13 @@
                     "type": "string"
                   },
                   "view_name": {
-                    "description": "Alias for name for compatibility with older clients. Prefer name.",
+                    "description": "Runtime compatibility alias for name; schema clients should supply name.",
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "name"
+                ],
                 "type": "object"
               },
               "name": "oracle_describe_view",
@@ -1992,15 +2025,29 @@
                 "additionalProperties": false,
                 "properties": {
                   "name": {
-                    "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied.",
+                    "description": "Required object name. May be OWNER.NAME.",
                     "type": "string"
                   },
                   "object_name": {
-                    "description": "Alias for name for compatibility with older clients. Prefer name.",
+                    "description": "Runtime compatibility alias for name; schema clients should supply name.",
                     "type": "string"
                   },
                   "object_type": {
-                    "description": "Allowlisted type, e.g. TABLE, VIEW, PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, SEQUENCE, INDEX, SYNONYM.",
+                    "description": "Allowlisted type for DBMS_METADATA.GET_DDL.",
+                    "enum": [
+                      "TABLE",
+                      "VIEW",
+                      "PACKAGE",
+                      "PACKAGE_BODY",
+                      "PROCEDURE",
+                      "FUNCTION",
+                      "TRIGGER",
+                      "TYPE",
+                      "TYPE_BODY",
+                      "SEQUENCE",
+                      "INDEX",
+                      "SYNONYM"
+                    ],
                     "type": "string"
                   },
                   "owner": {
@@ -2009,7 +2056,8 @@
                   }
                 },
                 "required": [
-                  "object_type"
+                  "object_type",
+                  "name"
                 ],
                 "type": "object"
               },
@@ -2038,11 +2086,11 @@
                     "type": "integer"
                   },
                   "name": {
-                    "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied.",
+                    "description": "Required object name. May be OWNER.NAME.",
                     "type": "string"
                   },
                   "object_name": {
-                    "description": "Alias for name for compatibility with older clients. Prefer name.",
+                    "description": "Runtime compatibility alias for name; schema clients should supply name.",
                     "type": "string"
                   },
                   "object_type": {
@@ -2059,7 +2107,9 @@
                     "type": "integer"
                   }
                 },
-                "required": [],
+                "required": [
+                  "name"
+                ],
                 "type": "object"
               },
               "name": "oracle_get_source",
@@ -2093,15 +2143,17 @@
                     "type": "string"
                   },
                   "table": {
-                    "description": "Table or view name. May be OWNER.TABLE. Required unless table_name is supplied.",
+                    "description": "Required table or view name. May be OWNER.TABLE.",
                     "type": "string"
                   },
                   "table_name": {
-                    "description": "Alias for table for compatibility with older clients. Prefer table.",
+                    "description": "Runtime compatibility alias for table; schema clients should supply table.",
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "table"
+                ],
                 "type": "object"
               },
               "name": "oracle_sample_rows",
@@ -2119,11 +2171,11 @@
                 "additionalProperties": false,
                 "properties": {
                   "clob_col": {
-                    "description": "Alias for clob_column. Prefer clob_column.",
+                    "description": "Runtime compatibility alias for clob_column; schema clients should supply clob_column.",
                     "type": "string"
                   },
                   "clob_column": {
-                    "description": "CLOB/NCLOB/text column name (case-insensitive). Required unless clob_col is supplied.",
+                    "description": "Required CLOB/NCLOB/text column name (case-insensitive).",
                     "type": "string"
                   },
                   "max_chars": {
@@ -2136,31 +2188,36 @@
                     "type": "string"
                   },
                   "pk_col": {
-                    "description": "Alias for pk_column. Prefer pk_column.",
+                    "description": "Runtime compatibility alias for pk_column; schema clients should supply pk_column.",
                     "type": "string"
                   },
                   "pk_column": {
-                    "description": "Key column name (case-insensitive). Required unless pk_col is supplied.",
+                    "description": "Required key column name (case-insensitive).",
                     "type": "string"
                   },
                   "pk_val": {
-                    "description": "Alias for pk_value. Prefer pk_value.",
+                    "description": "Runtime compatibility alias for pk_value; schema clients should supply pk_value.",
                     "type": "string"
                   },
                   "pk_value": {
-                    "description": "Key value bound as :1. Required unless pk_val is supplied.",
+                    "description": "Required key value bound as :1.",
                     "type": "string"
                   },
                   "table": {
-                    "description": "Table or view name. May be OWNER.TABLE. Required unless table_name is supplied.",
+                    "description": "Required table or view name. May be OWNER.TABLE.",
                     "type": "string"
                   },
                   "table_name": {
-                    "description": "Alias for table for compatibility with older clients. Prefer table.",
+                    "description": "Runtime compatibility alias for table; schema clients should supply table.",
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "table",
+                  "clob_column",
+                  "pk_column",
+                  "pk_value"
+                ],
                 "type": "object"
               },
               "name": "oracle_read_clob",
@@ -2298,7 +2355,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "name"
+                ],
                 "type": "object"
               },
               "name": "oracle_plscope_inspect",
@@ -2465,7 +2524,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "db"
+                ],
                 "type": "object"
               },
               "name": "switch_database",
@@ -3230,7 +3291,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "table_name"
+                ],
                 "type": "object"
               },
               "name": "describe_table",
@@ -3260,7 +3323,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "index_name"
+                ],
                 "type": "object"
               },
               "name": "describe_index",
@@ -3290,7 +3355,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "trigger_name"
+                ],
                 "type": "object"
               },
               "name": "describe_trigger",
@@ -3320,7 +3387,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "view_name"
+                ],
                 "type": "object"
               },
               "name": "describe_view",
@@ -3346,7 +3415,21 @@
                     "type": "string"
                   },
                   "object_type": {
-                    "description": "Allowlisted object type.",
+                    "description": "Allowlisted type for DBMS_METADATA.GET_DDL.",
+                    "enum": [
+                      "TABLE",
+                      "VIEW",
+                      "PACKAGE",
+                      "PACKAGE_BODY",
+                      "PROCEDURE",
+                      "FUNCTION",
+                      "TRIGGER",
+                      "TYPE",
+                      "TYPE_BODY",
+                      "SEQUENCE",
+                      "INDEX",
+                      "SYNONYM"
+                    ],
                     "type": "string"
                   },
                   "owner": {
@@ -3355,7 +3438,8 @@
                   }
                 },
                 "required": [
-                  "object_type"
+                  "object_type",
+                  "object_name"
                 ],
                 "type": "object"
               },
@@ -3395,7 +3479,9 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "object_name"
+                ],
                 "type": "object"
               },
               "name": "get_object_source",
@@ -3494,7 +3580,12 @@
                     "type": "string"
                   }
                 },
-                "required": [],
+                "required": [
+                  "table",
+                  "clob_col",
+                  "pk_col",
+                  "pk_val"
+                ],
                 "type": "object"
               },
               "name": "get_clob",
