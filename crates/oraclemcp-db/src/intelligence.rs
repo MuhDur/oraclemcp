@@ -86,7 +86,7 @@ pub fn semantic_search_query(
 ) -> Result<String, DbError> {
     for (label, value) in [("owner", owner), ("table", table), ("column", column)] {
         if !is_simple_identifier(value) {
-            return Err(DbError::Query(format!(
+            return Err(DbError::InvalidArgument(format!(
                 "invalid semantic-search {label} identifier: {value:?}"
             )));
         }
@@ -123,7 +123,7 @@ pub fn semantic_search_query_with_filter(
         ("filter column", filter_column),
     ] {
         if !is_simple_identifier(value) {
-            return Err(DbError::Query(format!(
+            return Err(DbError::InvalidArgument(format!(
                 "invalid semantic-search {label} identifier: {value:?}"
             )));
         }
@@ -160,7 +160,7 @@ pub fn semantic_search_text_query(
         ("model", model),
     ] {
         if !is_simple_identifier(value) {
-            return Err(DbError::Query(format!(
+            return Err(DbError::InvalidArgument(format!(
                 "invalid semantic-search {label} identifier: {value:?}"
             )));
         }
@@ -196,7 +196,7 @@ pub fn semantic_search_text_query_with_filter(
         ("filter column", filter_column),
     ] {
         if !is_simple_identifier(value) {
-            return Err(DbError::Query(format!(
+            return Err(DbError::InvalidArgument(format!(
                 "invalid semantic-search {label} identifier: {value:?}"
             )));
         }
@@ -914,11 +914,12 @@ pub async fn orient_schema_page(
 }
 
 fn page_upper_bound(offset: usize, max_rows: usize) -> Result<i64, DbError> {
-    let upper_bound = offset
-        .checked_add(max_rows.max(1))
-        .ok_or_else(|| DbError::Query("bounded metadata page offset overflowed".to_owned()))?;
-    i64::try_from(upper_bound)
-        .map_err(|_| DbError::Query("bounded metadata page exceeds Oracle limit".to_owned()))
+    let upper_bound = offset.checked_add(max_rows.max(1)).ok_or_else(|| {
+        DbError::InvalidArgument("bounded metadata page offset overflowed".to_owned())
+    })?;
+    i64::try_from(upper_bound).map_err(|_| {
+        DbError::InvalidArgument("bounded metadata page exceeds Oracle limit".to_owned())
+    })
 }
 
 /// Read bounded child-to-parent foreign-key topology for `oracle_orient`.
@@ -1422,7 +1423,7 @@ pub async fn get_ddl(
     name: &str,
 ) -> Result<Option<DdlText>, DbError> {
     if !is_ddl_object_type(object_type) {
-        return Err(DbError::Query(format!(
+        return Err(DbError::InvalidArgument(format!(
             "unsupported DDL object type: {object_type:?}"
         )));
     }
@@ -1502,10 +1503,9 @@ pub async fn search_source(
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
     let source_type = match object_type {
-        Some(t) => Some(
-            normalize_source_object_type(t)
-                .ok_or_else(|| DbError::Query(format!("unsupported source object type: {t:?}")))?,
-        ),
+        Some(t) => Some(normalize_source_object_type(t).ok_or_else(|| {
+            DbError::InvalidArgument(format!("unsupported source object type: {t:?}"))
+        })?),
         None => None,
     };
     let owner_bind = owner.map_or(OracleBind::Null, |o| {
@@ -1540,7 +1540,7 @@ pub async fn get_source(
     options: SourceReadOptions,
 ) -> Result<SourceText, DbError> {
     let Some(source_type) = normalize_source_object_type(object_type) else {
-        return Err(DbError::Query(format!(
+        return Err(DbError::InvalidArgument(format!(
             "unsupported source object type: {object_type:?}"
         )));
     };
@@ -1991,7 +1991,7 @@ pub async fn explain_plan(
     read_only_standby: bool,
 ) -> Result<Vec<OracleRow>, DbError> {
     if read_only_standby {
-        return Err(DbError::Query(
+        return Err(DbError::InvalidArgument(
             "EXPLAIN PLAN writes PLAN_TABLE and is disabled on a read-only standby; \
              use DBMS_XPLAN.DISPLAY_CURSOR against an existing cursor"
                 .to_owned(),
@@ -2750,7 +2750,66 @@ mod tests {
                 .await
                 .expect_err("TABLE is not an ALL_SOURCE type")
         });
+        let envelope = err.clone().into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::InvalidArguments
+        );
+        assert_eq!(
+            envelope.suggested_tool.as_deref(),
+            Some("oracle_get_source")
+        );
         assert!(err.to_string().contains("unsupported source object type"));
+    }
+
+    #[test]
+    fn get_source_view_validation_is_invalid_arguments_issue_38() {
+        let mock = CaptureMock::default();
+        let m = &mock;
+        let err = run_with_cx(|cx| async move {
+            get_source(
+                &cx,
+                m,
+                "hr",
+                "view_demo",
+                "VIEW",
+                SourceReadOptions {
+                    from_line: None,
+                    to_line: None,
+                    max_chars: 100,
+                },
+            )
+            .await
+            .expect_err("VIEW is not an ALL_SOURCE object type")
+        });
+        let envelope = err.into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::InvalidArguments
+        );
+        assert_eq!(
+            envelope.suggested_tool.as_deref(),
+            Some("oracle_get_source")
+        );
+        assert!(mock.calls.lock().expect("capture lock").is_empty());
+    }
+
+    #[test]
+    fn get_ddl_unsupported_type_is_invalid_arguments_issue_38() {
+        let mock = CaptureMock::default();
+        let m = &mock;
+        let err = run_with_cx(|cx| async move {
+            get_ddl(&cx, m, "DATABASE LINK", "hr", "remote_db")
+                .await
+                .expect_err("unsupported DDL type must be rejected before SQL")
+        });
+        let envelope = err.into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::InvalidArguments
+        );
+        assert_eq!(envelope.suggested_tool.as_deref(), Some("oracle_get_ddl"));
+        assert!(mock.calls.lock().expect("capture lock").is_empty());
     }
 
     #[test]

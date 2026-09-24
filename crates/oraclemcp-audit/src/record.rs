@@ -20,6 +20,7 @@ const AUDIT_SCHEMA_V8: u16 = 8;
 const AUDIT_SCHEMA_V9: u16 = 9;
 const AUDIT_SCHEMA_V10: u16 = 10;
 const AUDIT_SCHEMA_V11: u16 = 11;
+const AUDIT_SCHEMA_V12: u16 = 12;
 
 /// Application-domain label prefixing every v11+ entry-hash preimage.
 ///
@@ -36,6 +37,7 @@ const AUDIT_SCHEMA_V11: u16 = 11;
 /// label-free computation, and only newly written records adopt the labeled
 /// form.
 const AUDIT_ENTRY_HASH_DOMAIN: &[u8] = b"oraclemcp:audit-entry-hash:v11\n";
+const AUDIT_ENTRY_HASH_DOMAIN_V12: &[u8] = b"oraclemcp:audit-entry-hash:v12\n";
 
 /// Stable, non-secret replacement for the historical raw-SQL preview field.
 ///
@@ -47,7 +49,100 @@ const AUDIT_ENTRY_HASH_DOMAIN: &[u8] = b"oraclemcp:audit-entry-hash:v11\n";
 pub(crate) const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V11;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V12;
+
+/// Redaction-safe cause attached to a failed tool operation. The values are
+/// constrained category names only; message text, SQL, binds, and identifiers
+/// are never accepted here.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditFailureCause {
+    /// Stable wire error class, such as `INVALID_ARGUMENTS`.
+    error_class: String,
+    /// Numeric Oracle error code, when the failure came from Oracle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ora_code: Option<i32>,
+    /// Stable structured reason category, when the envelope has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason_category: Option<String>,
+}
+
+impl AuditFailureCause {
+    /// Construct a cause from category tokens, rejecting strings that could
+    /// carry free-form error or SQL text into the signed record.
+    pub fn new(
+        error_class: impl Into<String>,
+        ora_code: Option<i32>,
+        reason_category: Option<&str>,
+    ) -> Result<Self, AuditFailureCauseError> {
+        let error_class = error_class.into();
+        let reason_category = reason_category.map(str::to_owned);
+        if !is_category_token(&error_class) {
+            return Err(AuditFailureCauseError::InvalidCategory);
+        }
+        if reason_category
+            .as_deref()
+            .is_some_and(|category| !is_category_token(category))
+        {
+            return Err(AuditFailureCauseError::InvalidCategory);
+        }
+        if ora_code.is_some_and(|code| !(1..=99_999).contains(&code)) {
+            return Err(AuditFailureCauseError::InvalidOraCode);
+        }
+        Ok(Self {
+            error_class,
+            ora_code,
+            reason_category,
+        })
+    }
+
+    /// Stable wire error class.
+    #[must_use]
+    pub fn error_class(&self) -> &str {
+        &self.error_class
+    }
+
+    /// Parsed numeric Oracle code, when present.
+    #[must_use]
+    pub const fn ora_code(&self) -> Option<i32> {
+        self.ora_code
+    }
+
+    /// Structured reason category, when present.
+    #[must_use]
+    pub fn reason_category(&self) -> Option<&str> {
+        self.reason_category.as_deref()
+    }
+
+    pub(crate) fn is_redaction_safe(&self) -> bool {
+        is_category_token(&self.error_class)
+            && self
+                .reason_category
+                .as_deref()
+                .is_none_or(is_category_token)
+            && self
+                .ora_code
+                .is_none_or(|code| (1..=99_999).contains(&code))
+    }
+}
+
+fn is_category_token(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+/// Invalid redaction-safe cause category or Oracle code.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum AuditFailureCauseError {
+    /// Category fields must be uppercase enum-style tokens.
+    #[error("audit failure cause category is not a safe token")]
+    InvalidCategory,
+    /// Oracle codes must be positive numeric ORA codes.
+    #[error("audit failure cause ORA code is outside the valid range")]
+    InvalidOraCode,
+}
 
 /// The guard decision being audited.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -758,6 +853,9 @@ pub struct AuditRecord {
     pub rows_affected: Option<u64>,
     /// The outcome.
     pub outcome: AuditOutcome,
+    /// Redaction-safe cause for a failed operation, covered by the v12 hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<AuditFailureCause>,
     /// Hash of the previous entry (`"genesis"` for the first).
     pub prev_hash: String,
     /// Hash of this entry (covers seq + content + prev_hash).
@@ -799,6 +897,7 @@ impl std::fmt::Debug for AuditRecord {
             .field("decision", &self.decision)
             .field("rows_affected", &self.rows_affected)
             .field("outcome", &self.outcome)
+            .field("failure", &self.failure)
             .field("prev_hash", &self.prev_hash)
             .field("entry_hash", &self.entry_hash)
             .field("key_id", &self.key_id)
@@ -1022,16 +1121,44 @@ impl AuditRecord {
         observed_scn: Option<u64>,
         verdict_certificate_core_hash: Option<String>,
     ) -> Self {
-        let mut record =
-            Self::chained_unsigned_correlated_with_observed_scn_and_certificate_core_hash(
-                draft,
-                seq,
-                prev_hash,
-                timestamp,
-                correlation,
-                observed_scn,
-                verdict_certificate_core_hash,
-            );
+        Self::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+            draft,
+            seq,
+            prev_hash,
+            timestamp,
+            key,
+            correlation,
+            observed_scn,
+            verdict_certificate_core_hash,
+            None,
+        )
+    }
+
+    /// Build and sign a current-schema record with a redaction-safe failure
+    /// cause included in its canonical hash.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+        key: &SigningKey,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate_core_hash: Option<String>,
+        failure: Option<AuditFailureCause>,
+    ) -> Self {
+        let mut record = Self::chained_unsigned_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+            draft,
+            seq,
+            prev_hash,
+            timestamp,
+            correlation,
+            observed_scn,
+            verdict_certificate_core_hash,
+            failure,
+        );
         record.signature = Some(key.sign(&record.entry_hash));
         record.key_id = Some(key.key_id().to_owned());
         record
@@ -1103,11 +1230,37 @@ impl AuditRecord {
         observed_scn: Option<u64>,
         verdict_certificate_core_hash: Option<String>,
     ) -> Self {
+        Self::chained_unsigned_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+            draft,
+            seq,
+            prev_hash,
+            timestamp,
+            correlation,
+            observed_scn,
+            verdict_certificate_core_hash,
+            None,
+        )
+    }
+
+    /// Build an unsigned current-schema record with an optional redaction-safe
+    /// failure cause covered by the entry hash.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    pub fn chained_unsigned_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+        draft: &AuditEntryDraft,
+        seq: u64,
+        prev_hash: &str,
+        timestamp: String,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate_core_hash: Option<String>,
+        failure: Option<AuditFailureCause>,
+    ) -> Self {
         let sql_sha256 = sha256_hex(draft.sql.as_bytes());
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview = REDACTED_SQL_PREVIEW.to_owned();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v11(
+        let entry_hash = compute_entry_hash_v12(
             seq,
             &timestamp,
             &agent_identity,
@@ -1127,6 +1280,7 @@ impl AuditRecord {
             draft.rows_affected,
             draft.outcome,
             prev_hash,
+            failure.as_ref(),
         );
         AuditRecord {
             schema_version: AUDIT_SCHEMA_VERSION,
@@ -1148,6 +1302,7 @@ impl AuditRecord {
             decision: draft.decision,
             rows_affected: draft.rows_affected,
             outcome: draft.outcome,
+            failure,
             prev_hash: prev_hash.to_owned(),
             entry_hash,
             key_id: None,
@@ -1344,6 +1499,29 @@ impl AuditRecord {
                 self.rows_affected,
                 self.outcome,
                 &self.prev_hash,
+            )
+        } else if self.schema_version == AUDIT_SCHEMA_V12 {
+            compute_entry_hash_v12(
+                self.seq,
+                &self.timestamp,
+                &self.agent_identity,
+                &self.subject,
+                self.db_evidence.as_ref(),
+                self.cancel.as_ref(),
+                self.correlation.as_ref(),
+                self.result_masking.as_ref(),
+                self.observed_scn,
+                self.verdict_certificate_core_hash.as_deref(),
+                &self.tool,
+                &self.sql_sha256,
+                &self.sql_normalized_sha256,
+                &self.sql_preview,
+                &self.danger_level,
+                self.decision,
+                self.rows_affected,
+                self.outcome,
+                &self.prev_hash,
+                self.failure.as_ref(),
             )
         } else if self.schema_version == AUDIT_SCHEMA_V11 {
             compute_entry_hash_v11(
@@ -2247,6 +2425,82 @@ fn compute_entry_hash_v11(
     sha256_hex(&canonical)
 }
 
+/// Deterministically hash a v12 entry, extending v11 with the optional
+/// redaction-safe failure cause while retaining all previous fields.
+#[allow(clippy::too_many_arguments)]
+fn compute_entry_hash_v12(
+    seq: u64,
+    timestamp: &str,
+    agent_identity: &str,
+    subject: &AuditSubject,
+    db_evidence: Option<&DbEvidence>,
+    cancel: Option<&AuditCancel>,
+    correlation: Option<&AuditCorrelation>,
+    result_masking: Option<&AuditResultMaskingCertificate>,
+    observed_scn: Option<u64>,
+    verdict_certificate_core_hash: Option<&str>,
+    tool: &str,
+    sql_sha256: &str,
+    sql_normalized_sha256: &str,
+    sql_preview: &str,
+    danger_level: &str,
+    decision: AuditDecision,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    prev_hash: &str,
+    failure: Option<&AuditFailureCause>,
+) -> String {
+    let mut canonical = Vec::with_capacity(AUDIT_ENTRY_HASH_DOMAIN_V12.len());
+    canonical.extend_from_slice(AUDIT_ENTRY_HASH_DOMAIN_V12);
+    canonical.extend_from_slice(&canonical_entry(
+        AUDIT_SCHEMA_V12,
+        seq,
+        timestamp,
+        agent_identity,
+        subject,
+        db_evidence,
+        cancel,
+        tool,
+        sql_sha256,
+        sql_normalized_sha256,
+        sql_preview,
+        danger_level,
+        decision,
+        rows_affected,
+        outcome,
+        prev_hash,
+    ));
+    canonical_push_correlation(&mut canonical, correlation);
+    canonical_push_result_masking(&mut canonical, result_masking);
+    canonical_push_observed_scn(&mut canonical, observed_scn);
+    canonical_push_verdict_certificate_core_hash(&mut canonical, verdict_certificate_core_hash);
+    canonical_push_failure(&mut canonical, failure);
+    sha256_hex(&canonical)
+}
+
+fn canonical_push_failure(out: &mut Vec<u8>, failure: Option<&AuditFailureCause>) {
+    let Some(failure) = failure else {
+        out.push(0);
+        return;
+    };
+    out.push(1);
+    canonical_push_str(out, &failure.error_class);
+    match failure.ora_code {
+        Some(code) => {
+            out.push(1);
+            out.extend_from_slice(&code.to_be_bytes());
+        }
+        None => out.push(0),
+    }
+    match failure.reason_category.as_deref() {
+        Some(category) => {
+            out.push(1);
+            canonical_push_str(out, category);
+        }
+        None => out.push(0),
+    }
+}
+
 /// The genesis prev-hash for the first entry.
 pub const GENESIS_HASH: &str = "genesis";
 
@@ -2275,6 +2529,7 @@ mod kani_proofs {
             decision: AuditDecision::Allowed,
             rows_affected: None,
             outcome: AuditOutcome::Pending,
+            failure: None,
             prev_hash: prev_hash.to_owned(),
             entry_hash: entry_hash.to_owned(),
             key_id: Some("kani-key".to_owned()),
@@ -2600,6 +2855,28 @@ mod tests {
                 d.outcome,
                 prev_hash,
             ),
+            AUDIT_SCHEMA_V12 => compute_entry_hash_v12(
+                seq,
+                &timestamp,
+                &agent_identity,
+                &d.subject,
+                d.db_evidence.as_ref(),
+                d.cancel.as_ref(),
+                None,
+                d.result_masking.as_ref(),
+                None,
+                None,
+                &d.tool,
+                &sql_sha256,
+                &sql_normalized_sha256,
+                &sql_preview,
+                &d.danger_level,
+                d.decision,
+                d.rows_affected,
+                d.outcome,
+                prev_hash,
+                None,
+            ),
             other => panic!("unsupported test schema {other}"),
         };
         AuditRecord {
@@ -2626,6 +2903,7 @@ mod tests {
             decision: d.decision,
             rows_affected: d.rows_affected,
             outcome: d.outcome,
+            failure: None,
             prev_hash: prev_hash.to_owned(),
             signature: Some(key.sign(&entry_hash)),
             key_id: Some(key.key_id().to_owned()),
@@ -3261,6 +3539,7 @@ mod tests {
             decision: d.decision,
             rows_affected: d.rows_affected,
             outcome: d.outcome,
+            failure: None,
             prev_hash: GENESIS_HASH.to_owned(),
             entry_hash: String::new(),
             key_id: None,
@@ -3698,6 +3977,7 @@ mod tests {
             decision: d.decision,
             rows_affected: d.rows_affected,
             outcome: d.outcome,
+            failure: None,
             prev_hash: GENESIS_HASH.to_owned(),
             entry_hash,
             key_id: None,
@@ -4384,6 +4664,107 @@ mod tests {
     }
 
     #[test]
+    fn failed_entry_records_error_class_and_ora_code_issue_45() {
+        let mut failed = draft();
+        failed.outcome = AuditOutcome::Failed;
+        let failure = AuditFailureCause::new("SNAPSHOT_TOO_OLD", Some(1555), Some("UNDO_LIMIT"))
+            .expect("category fields are safe tokens");
+        let record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+            &failed,
+            1,
+            GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+            None,
+            None,
+            None,
+            Some(failure),
+        );
+        assert_eq!(
+            record.failure.as_ref().map(AuditFailureCause::error_class),
+            Some("SNAPSHOT_TOO_OLD")
+        );
+        assert_eq!(
+            record
+                .failure
+                .as_ref()
+                .and_then(AuditFailureCause::ora_code),
+            Some(1555)
+        );
+        assert!(record.hash_is_valid());
+        assert!(record.signature_is_valid(&key()));
+    }
+
+    #[test]
+    fn tampered_failure_cause_breaks_chain() {
+        let mut failed = draft();
+        failed.outcome = AuditOutcome::Failed;
+        let failure = AuditFailureCause::new("INVALID_ARGUMENTS", None, Some("OBJECT_TYPE"))
+            .expect("category fields are safe tokens");
+        let signing_key = key();
+        let mut record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+            &failed,
+            1,
+            GENESIS_HASH,
+            "t1".to_owned(),
+            &signing_key,
+            None,
+            None,
+            None,
+            Some(failure),
+        );
+        assert_eq!(
+            crate::verify_records(&[record.clone()], std::slice::from_ref(&signing_key)),
+            crate::VerifyOutcome::Ok { records: 1 }
+        );
+        record.failure.as_mut().expect("failure cause").error_class = "INTERNAL".to_owned();
+        assert!(matches!(
+            crate::verify_records(&[record], &[signing_key]),
+            crate::VerifyOutcome::Broken {
+                reason: crate::BrokenReason::HashMismatch,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn failure_cause_never_contains_message_or_sql() {
+        let mut failed = draft();
+        failed.sql = "SELECT PRIVATE_COLUMN FROM SYNTHETIC_TABLE".to_owned();
+        failed.outcome = AuditOutcome::Failed;
+        let failure = AuditFailureCause::new("INVALID_ARGUMENTS", None, Some("OBJECT_TYPE"))
+            .expect("category fields are safe tokens");
+        let record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
+            &failed,
+            1,
+            GENESIS_HASH,
+            "t1".to_owned(),
+            &key(),
+            None,
+            None,
+            None,
+            Some(failure),
+        );
+        let serialized = serde_json::to_string(&record).expect("record serializes");
+        assert!(!serialized.contains("PRIVATE_COLUMN"));
+        assert!(!serialized.contains("SYNTHETIC_TABLE"));
+        assert!(!serialized.contains("invalid identifier"));
+        assert!(serialized.contains("INVALID_ARGUMENTS"));
+    }
+
+    #[test]
+    fn previous_schema_version_still_verifies() {
+        let signing_key = key();
+        let record = signed_record_for_schema(AUDIT_SCHEMA_V11, 1, GENESIS_HASH, &signing_key);
+        assert!(record.hash_is_valid());
+        assert!(record.signature_is_valid(&signing_key));
+        assert_eq!(
+            crate::verify_records(&[record], &[signing_key]),
+            crate::VerifyOutcome::Ok { records: 1 }
+        );
+    }
+
+    #[test]
     fn v11_domain_label_changes_the_digest_and_old_chains_still_verify() {
         let d = draft();
         let k = key();
@@ -4408,21 +4789,23 @@ mod tests {
             "the v11 domain label must change the digest of identical content"
         );
 
-        // A record produced by the current constructor is v11 and verifies, and
-        // reproduces exactly the v11 entry hash for the same inputs.
+        // A record produced by the current constructor is v12 and verifies, and
+        // reproduces exactly the v12 entry hash for the same inputs.
         let current = AuditRecord::chained_signed(&d, 7, GENESIS_HASH, "t7".to_owned(), &k);
-        assert_eq!(current.schema_version, AUDIT_SCHEMA_V11);
+        assert_eq!(current.schema_version, AUDIT_SCHEMA_VERSION);
         assert!(current.hash_is_valid());
         assert!(current.signature_is_valid(&k));
         assert_eq!(
-            current.entry_hash, v11.entry_hash,
-            "the constructor's v11 hash matches the versioned recomputation"
+            current.entry_hash,
+            signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V12, 7, GENESIS_HASH, &k)
+                .entry_hash,
+            "the constructor's v12 hash matches the versioned recomputation"
         );
 
         // A record tagged with an unknown future schema fails closed rather than
         // being accepted under some nearest computation.
         let mut future = current.clone();
-        future.schema_version = AUDIT_SCHEMA_V11 + 1;
+        future.schema_version = AUDIT_SCHEMA_VERSION + 1;
         assert!(
             !future.hash_is_valid(),
             "an unknown schema version must fail closed"
@@ -4536,10 +4919,10 @@ mod tests {
         );
         // Forge the redacted field and recompute the (unkeyed) hash so the
         // bare-hash check would pass — but leave the old MAC in place. Recompute
-        // under the record's current schema (v11) so the bare-hash check really
+        // under the record's current schema (v12) so the bare-hash check really
         // would pass; the MAC is what still catches the forgery.
         forged.sql_preview = "SELECT 1".to_owned();
-        forged.entry_hash = compute_entry_hash_v11(
+        forged.entry_hash = compute_entry_hash_v12(
             forged.seq,
             &forged.timestamp,
             &forged.agent_identity,
@@ -4559,6 +4942,7 @@ mod tests {
             forged.rows_affected,
             forged.outcome,
             &forged.prev_hash,
+            forged.failure.as_ref(),
         );
         assert!(
             forged.hash_is_valid(),

@@ -1537,6 +1537,9 @@ impl OracleMcpServer {
         let request = match crate::strict_json::decode_strict_value(frame) {
             Ok(value) => value,
             Err(error) => {
+                if let Some(response) = self.duplicate_tools_call_argument_response(frame, &error) {
+                    return Some(response);
+                }
                 return Some(if error.duplicate_pointer().is_some() {
                     error.jsonrpc_parse_error_response()
                 } else {
@@ -1545,6 +1548,42 @@ impl OracleMcpServer {
             }
         };
         self.handle_jsonrpc_request(request, Some(auth))
+    }
+
+    /// Turn duplicate members inside a valid `tools/call` arguments object
+    /// into the same typed refusal clients receive from ordinary argument
+    /// validation. Duplicate or malformed JSON-RPC envelope fields remain
+    /// protocol parse errors because their request identity is ambiguous.
+    pub(crate) fn duplicate_tools_call_argument_response(
+        &self,
+        frame: &[u8],
+        error: &crate::strict_json::StrictJsonError,
+    ) -> Option<Value> {
+        let duplicates = error.duplicate_pointers();
+        if duplicates.is_empty()
+            || duplicates.iter().any(|pointer| {
+                pointer != "/params/arguments" && !pointer.starts_with("/params/arguments/")
+            })
+        {
+            return None;
+        }
+
+        let request: Value = serde_json::from_slice(frame).ok()?;
+        if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+            || request.get("method").and_then(Value::as_str) != Some("tools/call")
+        {
+            return None;
+        }
+        let id = request.get("id")?;
+        if !(id.is_string() || id.is_number()) {
+            return None;
+        }
+        let pointer_list = duplicates.join(", ");
+        let envelope = ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!("duplicate JSON member in tools/call arguments at {pointer_list}"),
+        );
+        Some(self.jsonrpc_tool_response_from_outcome(id.clone(), Outcome::Err(envelope)))
     }
 
     /// Handle one parsed JSON-RPC request. `auth` is provided by stdio, where
@@ -3476,9 +3515,21 @@ mod tests {
             bytes.push(b'\n');
             let replies = run_stdio_raw(&server, bytes);
             assert_eq!(replies.len(), 1);
-            assert_eq!(replies[0]["id"], Value::Null);
-            assert_eq!(replies[0]["error"]["code"], json!(-32700));
-            assert_eq!(replies[0]["error"]["data"]["json_pointer"], pointer);
+            if pointer == "/id" {
+                assert_eq!(replies[0]["id"], Value::Null);
+                assert_eq!(replies[0]["error"]["code"], json!(-32700));
+                assert_eq!(replies[0]["error"]["data"]["json_pointer"], pointer);
+            } else {
+                assert_eq!(replies[0]["id"], json!(1));
+                assert_eq!(replies[0]["result"]["isError"], json!(true));
+                assert_eq!(
+                    replies[0]["result"]["structuredContent"]["error_class"],
+                    json!("INVALID_ARGUMENTS")
+                );
+                assert!(replies[0]["result"]["structuredContent"]["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains(pointer)));
+            }
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
     }

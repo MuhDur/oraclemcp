@@ -100,7 +100,7 @@ pub use catalog_extract::{
 };
 pub use catalog_query::{
     BindSchema, CatalogAuditClass, CatalogBindKind, CatalogOutputPolicy, CatalogQueryId,
-    CatalogReadSpec, run_catalog_query,
+    CatalogReadSpec, ReadQueryProvenance, run_catalog_query,
 };
 pub use catalog_resolver::{
     CatalogInvalidation, FgaAppliesTo, FgaClosure, FgaEvidence, FgaEvidencePolicy,

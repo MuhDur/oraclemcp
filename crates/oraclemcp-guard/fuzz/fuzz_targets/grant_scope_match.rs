@@ -10,7 +10,7 @@ use oraclemcp_guard::action_envelope::OracleBindType;
 use oraclemcp_guard::resolver::{
     CatalogGeneration, CatalogObjectKind, QuoteSemantics, RawName, RawNamePart, SyntacticRole,
 };
-use oraclemcp_guard::scoped_grant::{match_sql, GrantMatch, ResolvedDmlTarget};
+use oraclemcp_guard::scoped_grant::{GrantMatch, ResolvedDmlTarget, match_sql};
 use oraclemcp_guard::{
     ClosureFingerprints, ColumnIdent, EffectiveCeiling, ExecGrantBinding, GrantComparison,
     GrantContainer, GrantLimits, GrantOp, GrantOperand, GrantPredicateV1, GrantTargetIdentity,
@@ -233,18 +233,18 @@ fuzz_target!(|data: &[u8]| {
 
     // Every input also selects a known one-axis mutation, so the harness
     // exercises actual scope refusals even when random bytes are not SQL.
-    let mut resolved = resolved();
+    let mut mutated_target = resolved();
     let sql = match data.first().copied().unwrap_or_default() % 12 {
         0 => {
-            resolved.identity.object_id += 1;
+            mutated_target.identity.object_id += 1;
             VALID
         }
         1 => {
-            resolved.identity.container.con_uid += 1;
+            mutated_target.identity.container.con_uid += 1;
             VALID
         }
         2 => {
-            resolved.identity.resolved_via = Some(SynonymIdentity {
+            mutated_target.identity.resolved_via = Some(SynonymIdentity {
                 owner: "APP".into(),
                 name: "ORDERS".into(),
                 object_id: 99,
@@ -252,11 +252,11 @@ fuzz_target!(|data: &[u8]| {
             VALID
         }
         3 => {
-            resolved.object_kind = CatalogObjectKind::View;
+            mutated_target.object_kind = CatalogObjectKind::View;
             VALID
         }
         4 => {
-            resolved.raw_name = resolved
+            mutated_target.raw_name = mutated_target
                 .raw_name
                 .clone()
                 .with_db_link(RawNamePart::unquoted("LINK"));
@@ -269,13 +269,13 @@ fuzz_target!(|data: &[u8]| {
         9 => "DELETE FROM APP.ORDERS WHERE ID = :id",
         10 => "INSERT INTO APP.ORDERS (ID) VALUES (1)",
         _ => {
-            resolved
+            mutated_target
                 .bind_types
                 .insert("EXTRA".into(), OracleBindType::I64);
             VALID
         }
     };
-    assert!(match_sql(grant(), sql, &resolved).is_err());
+    assert!(match_sql(grant(), sql, &mutated_target).is_err());
 
     // Exercise successful case-folding, exact quoted spelling, and approved
     // synonym paths. The oracle checks the parsed target spelling independently.

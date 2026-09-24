@@ -945,8 +945,8 @@ pub fn tool_registry() -> ToolRegistry {
                 json!({
                     "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
-                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                    "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
+                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
+                    "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
                     "plscope": { "type": "boolean", "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "warnings": { "type": "boolean", "description": "Apply PLSQL_WARNINGS='ENABLE:ALL' to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
@@ -957,7 +957,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &["object_type"],
+            &["object_type", "name"],
         ))
         .destructive(),
     );
@@ -971,9 +971,9 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
-                    "sql": { "type": "string", "description": "Alias for source_code." },
-                    "ddl": { "type": "string", "description": "Alias for source_code." },
+                    "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement." },
+                    "sql": { "type": "string", "description": "Runtime compatibility alias for source_code." },
+                    "ddl": { "type": "string", "description": "Runtime compatibility alias for source_code." },
                     "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
                     "include_errors": { "type": "boolean", "description": "After execute, include current compile errors for the detected object when possible. Default true." }
                 }),
@@ -982,7 +982,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &[],
+            &["source_code"],
         ))
         .destructive(),
     );
@@ -997,8 +997,8 @@ pub fn tool_registry() -> ToolRegistry {
             props_with(
                 json!({
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
-                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
+                    "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
                     "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
                     "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
                     "search_text": { "type": "string", "description": "Alias for old_text." },
@@ -1013,7 +1013,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &["object_type"],
+            &["object_type", "name", "old_text", "new_text"],
         ))
         .destructive(),
     );
@@ -1102,13 +1102,13 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name or name is supplied." },
-                "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
-                "name": { "type": "string", "description": "Alias for table. Prefer table." },
+                "table": { "type": "string", "description": "Required table or view name. May be OWNER.TABLE." },
+                "table_name": { "type": "string", "description": "Runtime compatibility alias for table; schema clients should supply table." },
+                "name": { "type": "string", "description": "Runtime compatibility alias for table; schema clients should supply table." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum constraint rows to return (default 200, hard cap 5000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows. Prefer max_rows." }
             }),
-            &[],
+            &["table"],
         )),
     );
 
@@ -1121,10 +1121,10 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "name": { "type": "string", "description": "Index name (case-insensitive). Required unless index_name is supplied." },
-                "index_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
+                "name": { "type": "string", "description": "Required index name (case-insensitive)." },
+                "index_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." }
             }),
-            &[],
+            &["name"],
         )),
     );
 
@@ -1137,10 +1137,10 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "name": { "type": "string", "description": "Trigger name (case-insensitive). Required unless trigger_name is supplied." },
-                "trigger_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
+                "name": { "type": "string", "description": "Required trigger name (case-insensitive)." },
+                "trigger_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." }
             }),
-            &[],
+            &["name"],
         )),
     );
 
@@ -1153,10 +1153,10 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "name": { "type": "string", "description": "View name (case-insensitive). Required unless view_name is supplied." },
-                "view_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
+                "name": { "type": "string", "description": "Required view name (case-insensitive)." },
+                "view_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." }
             }),
-            &[],
+            &["name"],
         )),
     );
 
@@ -1168,12 +1168,12 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "object_type": { "type": "string", "description": "Allowlisted type, e.g. TABLE, VIEW, PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, SEQUENCE, INDEX, SYNONYM." },
+                "object_type": { "type": "string", "enum": ["TABLE", "VIEW", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "SEQUENCE", "INDEX", "SYNONYM"], "description": "Allowlisted type for DBMS_METADATA.GET_DDL." },
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." }
+                "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
+                "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." }
             }),
-            &["object_type"],
+            &["object_type", "name"],
         )),
     );
 
@@ -1186,14 +1186,14 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                "object_name": { "type": "string", "description": "Alias for name for compatibility with older clients. Prefer name." },
+                "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
+                "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
                 "object_type": { "type": "string", "description": "Optional supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY. When omitted, all visible source types for this name are returned." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." },
                 "from_line": { "type": "integer", "minimum": 1, "description": "Optional first ALL_SOURCE line to return, inclusive. Pair with oracle_search_source's LINE result." },
                 "to_line": { "type": "integer", "minimum": 1, "description": "Optional last ALL_SOURCE line to return, inclusive. Must not be lower than from_line." }
             }),
-            &[],
+            &["name"],
         )),
     );
 
@@ -1206,12 +1206,12 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name is supplied." },
-                "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
+                "table": { "type": "string", "description": "Required table or view name. May be OWNER.TABLE." },
+                "table_name": { "type": "string", "description": "Runtime compatibility alias for table; schema clients should supply table." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 50, hard cap 1000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
             }),
-            &[],
+            &["table"],
         )),
     );
 
@@ -1224,17 +1224,17 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
-                "table": { "type": "string", "description": "Table or view name. May be OWNER.TABLE. Required unless table_name is supplied." },
-                "table_name": { "type": "string", "description": "Alias for table for compatibility with older clients. Prefer table." },
-                "clob_column": { "type": "string", "description": "CLOB/NCLOB/text column name (case-insensitive). Required unless clob_col is supplied." },
-                "clob_col": { "type": "string", "description": "Alias for clob_column. Prefer clob_column." },
-                "pk_column": { "type": "string", "description": "Key column name (case-insensitive). Required unless pk_col is supplied." },
-                "pk_col": { "type": "string", "description": "Alias for pk_column. Prefer pk_column." },
-                "pk_value": { "type": "string", "description": "Key value bound as :1. Required unless pk_val is supplied." },
-                "pk_val": { "type": "string", "description": "Alias for pk_value. Prefer pk_value." },
+                "table": { "type": "string", "description": "Required table or view name. May be OWNER.TABLE." },
+                "table_name": { "type": "string", "description": "Runtime compatibility alias for table; schema clients should supply table." },
+                "clob_column": { "type": "string", "description": "Required CLOB/NCLOB/text column name (case-insensitive)." },
+                "clob_col": { "type": "string", "description": "Runtime compatibility alias for clob_column; schema clients should supply clob_column." },
+                "pk_column": { "type": "string", "description": "Required key column name (case-insensitive)." },
+                "pk_col": { "type": "string", "description": "Runtime compatibility alias for pk_column; schema clients should supply pk_column." },
+                "pk_value": { "type": "string", "description": "Required key value bound as :1." },
+                "pk_val": { "type": "string", "description": "Runtime compatibility alias for pk_value; schema clients should supply pk_value." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum characters to return (default 1000000)." }
             }),
-            &[],
+            &["table", "clob_column", "pk_column", "pk_value"],
         )),
     );
 
@@ -1519,8 +1519,8 @@ pub fn tool_registry() -> ToolRegistry {
                 json!({
                     "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
+                    "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
                     "plscope": { "type": "boolean", "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "warnings": { "type": "boolean", "description": "Apply PLSQL_WARNINGS='ENABLE:ALL' to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "enable_warnings": { "type": "boolean", "description": "Alias for warnings." },
@@ -1531,7 +1531,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &["object_type"],
+            &["object_type", "name"],
         ))
         .destructive(),
     );
@@ -1547,8 +1547,8 @@ pub fn tool_registry() -> ToolRegistry {
                 json!({
                     "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                    "name": { "type": "string", "description": "Object name. May be OWNER.NAME. Required unless object_name is supplied." },
-                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
+                    "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
                     "plscope": { "type": "boolean", "description": "Apply PL/Scope identifier and statement collection to this PL/SQL unit only. Invalid for VIEW. Default false." },
                     "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to compile." }
                 }),
@@ -1557,7 +1557,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &["object_type"],
+            &["object_type", "name"],
         ))
         .destructive(),
     );
@@ -1571,7 +1571,7 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "source_code": { "type": "string", "description": "Full CREATE OR REPLACE statement. Required unless sql or ddl is supplied." },
+                    "source_code": { "type": "string", "description": "Required full CREATE OR REPLACE statement." },
                     "sql": { "type": "string", "description": "Alias for source_code." },
                     "ddl": { "type": "string", "description": "Alias for source_code." },
                     "execute": { "type": "boolean", "description": "Default false previews only. Set true with confirm to apply." },
@@ -1582,7 +1582,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &[],
+            &["source_code"],
         ))
         .destructive(),
     );
@@ -1597,8 +1597,8 @@ pub fn tool_registry() -> ToolRegistry {
             props_with(
                 json!({
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                    "name": { "type": "string", "description": "Package name. May be OWNER.NAME. Required unless object_name is supplied." },
-                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "name": { "type": "string", "description": "Required package name. May be OWNER.NAME." },
+                    "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
                     "object_type": { "type": "string", "description": "Optional override, usually PACKAGE or PACKAGE_BODY. Defaults to PACKAGE_BODY." },
                     "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
                     "search_text": { "type": "string", "description": "Alias for old_text." },
@@ -1613,7 +1613,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &[],
+            &["name", "old_text", "new_text"],
         ))
         .destructive(),
     );
@@ -1628,8 +1628,8 @@ pub fn tool_registry() -> ToolRegistry {
             props_with(
                 json!({
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
-                    "name": { "type": "string", "description": "View name. May be OWNER.NAME. Required unless object_name is supplied." },
-                    "object_name": { "type": "string", "description": "Alias for name." },
+                    "name": { "type": "string", "description": "Required view name. May be OWNER.NAME." },
+                    "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
                     "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current view DDL exactly once." },
                     "search_text": { "type": "string", "description": "Alias for old_text." },
                     "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
@@ -1643,7 +1643,7 @@ pub fn tool_registry() -> ToolRegistry {
                     timeout_seconds_prop(),
                 ],
             ),
-            &[],
+            &["name", "old_text", "new_text"],
         ))
         .destructive(),
     );
@@ -1759,7 +1759,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "max_rows": { "type": "integer", "minimum": 1, "description": "Maximum columns and constraints returned." },
                 "limit": { "type": "integer", "minimum": 1, "description": "Alias for max_rows." }
             }),
-            &[],
+            &["table_name"],
         )),
     );
 
@@ -1775,7 +1775,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "index_name": { "type": "string", "description": "Index name. May be OWNER.INDEX_NAME." },
                 "name": { "type": "string", "description": "Alias for index_name." }
             }),
-            &[],
+            &["index_name"],
         )),
     );
 
@@ -1791,7 +1791,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "trigger_name": { "type": "string", "description": "Trigger name. May be OWNER.TRIGGER_NAME." },
                 "name": { "type": "string", "description": "Alias for trigger_name." }
             }),
-            &[],
+            &["trigger_name"],
         )),
     );
 
@@ -1807,7 +1807,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "view_name": { "type": "string", "description": "View name. May be OWNER.VIEW_NAME." },
                 "name": { "type": "string", "description": "Alias for view_name." }
             }),
-            &[],
+            &["view_name"],
         )),
     );
 
@@ -1819,12 +1819,12 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "object_type": { "type": "string", "description": "Allowlisted object type." },
+                "object_type": { "type": "string", "enum": ["TABLE", "VIEW", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "SEQUENCE", "INDEX", "SYNONYM"], "description": "Allowlisted type for DBMS_METADATA.GET_DDL." },
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "object_name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                 "name": { "type": "string", "description": "Alias for object_name." }
             }),
-            &["object_type"],
+            &["object_type", "object_name"],
         )),
     );
 
@@ -1842,7 +1842,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "object_type": { "type": "string", "description": "Optional source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, or TYPE_BODY. When omitted, all visible source types for this name are returned." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return." }
             }),
-            &[],
+            &["object_name"],
         )),
     );
 
@@ -1883,7 +1883,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "pk_value": { "type": "string", "description": "Alias for pk_val." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum characters to return." }
             }),
-            &[],
+            &["table", "clob_col", "pk_col", "pk_val"],
         )),
     );
 
@@ -2142,6 +2142,70 @@ mod tests {
                 schema.get("required").is_some(),
                 "{} schema declares required args",
                 tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn alias_backed_required_arguments_are_required_by_json_schema() {
+        const REQUIRED: &[(&str, &[&str])] = &[
+            ("oracle_compile_object", &["object_type", "name"]),
+            ("oracle_create_or_replace", &["source_code"]),
+            (
+                "oracle_patch_source",
+                &["object_type", "name", "old_text", "new_text"],
+            ),
+            ("oracle_describe", &["table"]),
+            ("oracle_describe_index", &["name"]),
+            ("oracle_describe_trigger", &["name"]),
+            ("oracle_describe_view", &["name"]),
+            ("oracle_get_ddl", &["name"]),
+            ("oracle_get_source", &["name"]),
+            ("oracle_sample_rows", &["table"]),
+            (
+                "oracle_read_clob",
+                &["table", "clob_column", "pk_column", "pk_value"],
+            ),
+            ("compile_object", &["object_type", "name"]),
+            ("compile_with_warnings", &["object_type", "name"]),
+            ("create_or_replace", &["source_code"]),
+            ("patch_package", &["name", "old_text", "new_text"]),
+            ("patch_view", &["name", "old_text", "new_text"]),
+            ("describe_table", &["table_name"]),
+            ("describe_index", &["index_name"]),
+            ("describe_trigger", &["trigger_name"]),
+            ("describe_view", &["view_name"]),
+            ("get_ddl", &["object_type", "object_name"]),
+            ("get_object_source", &["object_name"]),
+            ("get_clob", &["table", "clob_col", "pk_col", "pk_val"]),
+        ];
+
+        let registry = tool_registry();
+        for (name, required_alias_fields) in REQUIRED {
+            let descriptor = registry
+                .tools
+                .iter()
+                .find(|tool| tool.name == *name)
+                .unwrap_or_else(|| panic!("{name} is registered"));
+            let schema = descriptor
+                .input_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{name} publishes an input schema"));
+            let declared = schema["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name} has a required array"));
+            for field in *required_alias_fields {
+                assert!(
+                    declared.iter().any(|entry| entry == field),
+                    "{name} must declare canonical alias-backed field {field} as required"
+                );
+            }
+            let validator = jsonschema::validator_for(schema)
+                .unwrap_or_else(|error| panic!("{name} schema is valid JSON Schema: {error}"));
+            assert!(
+                !validator.is_valid(&json!({})),
+                "{} schema must reject an empty arguments object",
+                name
             );
         }
     }

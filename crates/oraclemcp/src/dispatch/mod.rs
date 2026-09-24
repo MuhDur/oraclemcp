@@ -35,9 +35,9 @@ use asupersync::combinator::try_commit_section;
 use asupersync::sync::Mutex as AsyncMutex;
 use asupersync::{Budget, CancelReason, Cx, Outcome, Time};
 use oraclemcp_audit::{
-    AuditCancel, AuditDecision, AuditEntryDraft, AuditOutcome, AuditResultMaskingAction,
-    AuditResultMaskingCertificate, AuditResultMaskingColumnDecision, AuditResultMaskingSource,
-    AuditSubject, Auditor, DbEvidence,
+    AuditCancel, AuditDecision, AuditEntryDraft, AuditFailureCause, AuditOutcome,
+    AuditResultMaskingAction, AuditResultMaskingCertificate, AuditResultMaskingColumnDecision,
+    AuditResultMaskingSource, AuditSubject, Auditor, DbEvidence,
 };
 use oraclemcp_auth::apply_oauth_scopes;
 use oraclemcp_config::{
@@ -58,18 +58,18 @@ use oraclemcp_db::{
     MaskComparabilityBreak, OracleBackend, OracleBind, OracleCatalogResolverCache,
     OracleConnection, OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome,
     QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart,
-    ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingDecisionAction,
-    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, SemanticSearchMetric,
-    SerializeOptions, SourceReadOptions, StructuredDecodeCaps, compile_errors,
-    compile_object_statements, describe_columns, describe_constraints, describe_index,
-    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
-    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
-    incomparable_masked_columns, list_objects, list_objects_page, list_schema_projection_page,
-    list_schemas, observe_vpd_rls_for_relations, paginated_sql, plan_cost_estimate,
-    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents, read_query,
-    read_query_as_of, run_catalog_query, search_objects, search_source, semantic_search_query,
-    semantic_search_query_with_filter, semantic_search_text_query,
-    semantic_search_text_query_with_filter, serialize_row,
+    ReadQueryProvenance, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
+    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
+    ResultMaskingRule, SemanticSearchMetric, SerializeOptions, SourceReadOptions,
+    StructuredDecodeCaps, compile_errors, compile_object_statements, describe_columns,
+    describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
+    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
+    get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
+    list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, paginated_sql,
+    plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
+    probe_dependents, read_query, read_query_as_of, run_catalog_query, search_objects,
+    search_source, semantic_search_query, semantic_search_query_with_filter,
+    semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{
     FgaEvidence, FgaEvidencePolicy, SearchDetailLevel, SourceText, StatementOutcome,
@@ -85,10 +85,10 @@ use oraclemcp_guard::{
     ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, CatalogObjectKind, Classifier,
     ClassifierConfig, DangerLevel, EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql,
     EscalationError, ExecGrantBinding, ExecGrantError, ExecGrantStore, ExecLimits, GuardDecision,
-    ImpactV1, LevelDecision, ObjectRef, OperatingLevel, OperatorStatementClass, OutputCapture,
-    PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity, QuoteSemantics,
-    RawName, ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig,
-    VerdictCertificate, enforce_sql_policy, is_allowed_alter_session, parse_edition_lifecycle_sql,
+    ImpactV1, LevelDecision, OperatingLevel, OperatorStatementClass, OutputCapture, PolicyGate,
+    PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, QuoteSemantics, RawName,
+    ResolvedObject, SessionLevelState, SqlPolicyConfig, VerdictCertificate, enforce_sql_policy,
+    is_allowed_alter_session, parse_edition_lifecycle_sql,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -1138,6 +1138,7 @@ impl OracleDispatcher {
             let observed = ReadUncertaintyConn {
                 inner: conn.as_ref(),
                 quarantine: None,
+                provenance: ReadQueryProvenance::ServerRead,
             };
             let connection = describe_conn(cx, &observed).await?;
             let catalog_revision = OracleCatalogResolverCache::new().generation().0;
@@ -1210,6 +1211,7 @@ impl OracleDispatcher {
             let observed = ReadUncertaintyConn {
                 inner: conn.as_ref(),
                 quarantine: None,
+                provenance: ReadQueryProvenance::ServerRead,
             };
             let objects = search_objects(
                 cx,
@@ -1251,7 +1253,7 @@ impl OracleDispatcher {
                 &mut audit_response,
             )
             .await
-            .map_err(db_internal_from_envelope)?;
+            .map_err(|error| DbError::Refused(Box::new(error)))?;
             Ok::<_, DbError>(FleetCatalogProfileResult {
                 profile,
                 results: objects
@@ -1561,28 +1563,6 @@ static READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
 /// live catalog for every lexical occurrence.
 static SEMANTIC_READ_PRECHECK_CLASSIFIER: LazyLock<Classifier> =
     LazyLock::new(|| Classifier::engine_free_baseline(ClassifierConfig::new()));
-
-/// Classifier used for server-generated read SQL. It is deliberately separate
-/// from [`DEFAULT_CLASSIFIER`] so only this internal surface gets a tiny purity
-/// oracle for Oracle-owned read-only package routines used by dictionary tools.
-static GENERATED_READ_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
-    Classifier::new(ClassifierConfig::new()).with_oracle(Arc::new(GeneratedReadPurityOracle))
-});
-
-struct GeneratedReadPurityOracle;
-
-impl SideEffectOracle for GeneratedReadPurityOracle {
-    fn routine_purity(&self, routine: &ObjectRef) -> Purity {
-        let schema = routine.schema.as_deref().unwrap_or("").to_ascii_uppercase();
-        let name = routine.name.to_ascii_uppercase();
-        match (schema.as_str(), name.as_str()) {
-            ("DBMS_LOB", "SUBSTR") | ("DBMS_METADATA", "GET_DDL") | ("DBMS_XPLAN", "DISPLAY") => {
-                Purity::ProvenReadOnly
-            }
-            _ => Purity::Unknown,
-        }
-    }
-}
 
 /// Serialize a slice of rows to a JSON array via the canonical row serializer.
 fn rows_to_json(rows: &[oraclemcp_db::OracleRow]) -> Value {
@@ -7307,19 +7287,79 @@ fn append_audit_with_observed_scn(
     outcome: AuditOutcome,
     observed_scn: Option<u64>,
 ) -> Result<(), ErrorEnvelope> {
+    append_audit_with_observed_scn_and_failure(
+        ctx,
+        tool,
+        sql,
+        danger_level,
+        rows_affected,
+        outcome,
+        observed_scn,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_audit_with_observed_scn_and_failure(
+    ctx: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    danger_level: &str,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    observed_scn: Option<u64>,
+    failure: Option<&ErrorEnvelope>,
+) -> Result<(), ErrorEnvelope> {
     if let Some(auditor) = ctx.auditor {
         let draft = audit_draft(ctx, tool, sql, danger_level, rows_affected, outcome);
-        auditor
-            .append_correlated_with_observed_scn(
+        let result = if let Some(failure) = failure {
+            let cause = audit_failure_cause(failure)?;
+            auditor.append_correlated_with_observed_scn_and_verdict_certificate_and_failure(
+                &draft,
+                audit_timestamp(),
+                true,
+                None,
+                observed_scn,
+                None,
+                cause,
+            )
+        } else {
+            auditor.append_correlated_with_observed_scn(
                 &draft,
                 audit_timestamp(),
                 true,
                 None,
                 observed_scn,
             )
-            .map_err(audit_error_to_envelope)?;
+        };
+        result.map_err(audit_error_to_envelope)?;
     }
     Ok(())
+}
+
+fn audit_failure_cause(failure: &ErrorEnvelope) -> Result<AuditFailureCause, ErrorEnvelope> {
+    let error_class = serde_json::to_value(failure.error_class)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .ok_or_else(|| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "cannot encode the typed audit failure class",
+            )
+        })?;
+    let reason_category = failure.structured_reason.as_ref().and_then(|reason| {
+        serde_json::to_value(reason.category)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+    });
+    AuditFailureCause::new(error_class, failure.ora_code, reason_category.as_deref()).map_err(
+        |_| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "cannot encode a redaction-safe audit failure cause",
+            )
+        },
+    )
 }
 
 /// Fixed, server-owned marker recorded when the `DBMS_FLASHBACK`-backed
@@ -7338,19 +7378,18 @@ const SCN_CAPABILITY_PROBE_TOOL: &str = "scn_capability_probe";
 /// SQL the agent actually ran.
 fn append_scn_capability_degraded_audit(
     ctx: AuditEntryCtx<'_>,
-    detail: &str,
+    failure: &ErrorEnvelope,
 ) -> Result<(), ErrorEnvelope> {
-    append_audit_with_observed_scn(
+    append_audit_with_observed_scn_and_failure(
         ctx,
         SCN_CAPABILITY_PROBE_TOOL,
-        &format!(
-            "-- SCN-capture probe: DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER capability \
-             unavailable; the surrounding read proceeds without an observed SCN ({detail})"
-        ),
+        "-- SCN-capture probe: DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER capability \
+         unavailable; the surrounding read proceeds without an observed SCN",
         "READ_ONLY",
         None,
         AuditOutcome::Failed,
         None,
+        Some(failure),
     )
 }
 
@@ -7415,10 +7454,16 @@ async fn observed_scn_for_audit(
         Err(DbError::FlashbackRefusal {
             kind: FlashbackRefusalKind::CapabilityUnavailable,
             message,
-            ..
+            ora_code,
         }) => {
-            append_scn_capability_degraded_audit(ctx, &message)
-                .map_err(db_internal_from_envelope)?;
+            let failure = DbError::FlashbackRefusal {
+                kind: FlashbackRefusalKind::CapabilityUnavailable,
+                message,
+                ora_code,
+            }
+            .into_envelope();
+            append_scn_capability_degraded_audit(ctx, &failure)
+                .map_err(|error| DbError::Refused(Box::new(error)))?;
             Ok(None)
         }
         Err(error) => Err(error),
@@ -7479,6 +7524,7 @@ fn audit_result_masking_certificate(
 /// case (the `DBMS_FLASHBACK` capability probe found it unavailable and
 /// [`observed_scn_for_audit`] already recorded that fact); the read is still
 /// durably audited, just without a captured snapshot.
+#[allow(clippy::too_many_arguments)]
 fn append_query_read_audit(
     ctx: AuditEntryCtx<'_>,
     tool: &str,
@@ -7487,6 +7533,7 @@ fn append_query_read_audit(
     verdict_certificate: &oraclemcp_audit::AuditVerdictCertificate,
     outcome: AuditOutcome,
     response: Option<&mut QueryResponse>,
+    failure: Option<&ErrorEnvelope>,
 ) -> Result<(), ErrorEnvelope> {
     let Some(auditor) = ctx.auditor else {
         return Ok(());
@@ -7510,8 +7557,18 @@ fn append_query_read_audit(
         rows_affected,
         outcome,
     };
-    let record = auditor
-        .append_correlated_with_observed_scn_and_verdict_certificate(
+    let record = if let Some(failure) = failure {
+        auditor.append_correlated_with_observed_scn_and_verdict_certificate_and_failure(
+            &draft,
+            audit_timestamp(),
+            true,
+            None,
+            observed_scn,
+            Some(verdict_certificate),
+            audit_failure_cause(failure)?,
+        )
+    } else {
+        auditor.append_correlated_with_observed_scn_and_verdict_certificate(
             &draft,
             audit_timestamp(),
             true,
@@ -7519,7 +7576,8 @@ fn append_query_read_audit(
             observed_scn,
             Some(verdict_certificate),
         )
-        .map_err(audit_error_to_envelope)?;
+    }
+    .map_err(audit_error_to_envelope)?;
     if let Some(certificate) = response.and_then(|response| response.mask_certificate.as_mut()) {
         certificate.audit_entry_hash = Some(record.entry_hash);
     }
@@ -7606,81 +7664,6 @@ async fn bind_result_masking_audit(
 
 fn system_generated_read_subject() -> AuditSubject {
     AuditSubject::new("system", "generated-read").with_authn_method("server")
-}
-
-fn db_internal_from_envelope(err: ErrorEnvelope) -> DbError {
-    DbError::Internal(format!("{:?}: {}", err.error_class, err.message))
-}
-
-fn normalized_generated_sql(sql: &str) -> String {
-    sql.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_ascii_uppercase()
-}
-
-fn generated_read_sql_is_allowlisted(sql: &str) -> bool {
-    let normalized = normalized_generated_sql(sql);
-    if normalized.contains(';') || !normalized.starts_with("SELECT ") {
-        return false;
-    }
-
-    const ALLOWED_SURFACE_TOKENS: &[&str] = &[
-        " FROM ALL_",
-        " JOIN ALL_",
-        " FROM DBA_",
-        " JOIN DBA_",
-        " FROM USER_",
-        " JOIN USER_",
-        " FROM V$",
-        " JOIN V$",
-        " FROM GV$",
-        " JOIN GV$",
-        " FROM PERFSTAT.",
-        " JOIN PERFSTAT.",
-        " FROM STATS$",
-        " JOIN STATS$",
-        " DBMS_LOB.SUBSTR(",
-        " DBMS_METADATA.GET_DDL(",
-        " TABLE(DBMS_XPLAN.DISPLAY",
-    ];
-    if ALLOWED_SURFACE_TOKENS
-        .iter()
-        .any(|token| normalized.contains(token))
-    {
-        return true;
-    }
-
-    let sample_shape = normalized.starts_with("SELECT * FROM (SELECT * FROM ")
-        && normalized.ends_with(") WHERE ROWNUM <= :1");
-    let lob_lookup_shape = normalized.contains(" AS LOB_VALUE FROM ")
-        && normalized.ends_with(" = :1 FETCH FIRST 1 ROW ONLY");
-    sample_shape || lob_lookup_shape
-}
-
-fn ensure_generated_read_sql_allowed(sql: &str) -> Result<DangerLevel, ErrorEnvelope> {
-    let baseline = GENERATED_READ_CLASSIFIER.classify(sql);
-    if matches!(baseline.danger, DangerLevel::Forbidden) {
-        return ensure_read_only_decision(baseline).map(|()| DangerLevel::Safe);
-    }
-    if !generated_read_sql_is_allowlisted(sql) {
-        return Err(ErrorEnvelope::new(
-            ErrorClass::PolicyDenied,
-            "server-generated read SQL is not on the built-in metadata/monitor allowlist",
-        )
-        .with_next_step(
-            "route ad-hoc SQL through oracle_query so the caller-supplied SQL gate owns it",
-        ));
-    }
-    if ensure_read_only_decision(baseline.clone()).is_ok() {
-        return Ok(baseline.danger);
-    }
-    let decision = Classifier::new(ClassifierConfig::new().with_allow(sql))
-        .with_oracle(Arc::new(GeneratedReadPurityOracle))
-        .classify(sql);
-    let danger = decision.danger;
-    ensure_read_only_decision(decision)?;
-    Ok(danger)
 }
 
 fn generated_read_tool(tool: &str) -> bool {
@@ -7890,6 +7873,44 @@ fn append_terminal_audit(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
+fn append_terminal_audit_with_failure(
+    ctx: &DbToolCtx<'_>,
+    audit_entry: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    danger_level: &str,
+    rows_affected: Option<u64>,
+    outcome: AuditOutcome,
+    failure: &ErrorEnvelope,
+) -> Result<(), ErrorEnvelope> {
+    if let Err(err) = append_audit_with_observed_scn_and_failure(
+        audit_entry,
+        tool,
+        sql,
+        danger_level,
+        rows_affected,
+        outcome,
+        None,
+        Some(failure),
+    ) {
+        let message = format!(
+            "database outcome is {}, but mandatory terminal audit finalization failed; do not retry the database operation: {}",
+            audit_outcome_label(outcome),
+            err.message
+        );
+        mark_connection_quarantined(ctx.quarantine, outcome, message.clone())?;
+        return Err(
+            ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
+                .with_next_step("switch to a fresh profile connection or restart the server")
+                .with_next_step(
+                    "verify the database outcome and repair the audit sink before retrying",
+                ),
+        );
+    }
+    Ok(())
+}
+
 fn mark_connection_quarantined(
     quarantine: &SyncMutex<Option<ConnectionQuarantine>>,
     outcome: AuditOutcome,
@@ -8069,6 +8090,7 @@ async fn run_workspace_statement(
             Ok(())
         }
         Err(error) => {
+            let failure = error.clone().into_envelope();
             // An uncertain boundary means we cannot prove whether Oracle moved
             // the savepoint stack, so the session is no longer trustworthy.
             let outcome = if error.is_uncertain_session_state() {
@@ -8081,11 +8103,23 @@ async fn run_workspace_statement(
             } else {
                 AuditOutcome::Failed
             };
-            let terminal =
-                append_terminal_audit(ctx, audit_entry, tool, statement, &danger, None, outcome);
+            let terminal = if outcome == AuditOutcome::Failed {
+                append_terminal_audit_with_failure(
+                    ctx,
+                    audit_entry,
+                    tool,
+                    statement,
+                    &danger,
+                    None,
+                    outcome,
+                    &failure,
+                )
+            } else {
+                append_terminal_audit(ctx, audit_entry, tool, statement, &danger, None, outcome)
+            };
             if outcome == AuditOutcome::Failed {
                 terminal?;
-                return Err(DbError::into_envelope(error));
+                return Err(failure);
             }
             if let Err(audit_error) = terminal {
                 tracing::error!(error = %audit_error.message, "terminal audit failed after an uncertain workspace statement");
@@ -8356,7 +8390,8 @@ async fn preview_dml_inner(
 
     let sandbox = workspace::savepoint_statement(workspace::PREVIEW_SANDBOX);
     if let Err(error) = execute_conn(cx, conn, &sandbox, &[] as &[OracleBind]).await {
-        append_terminal_audit(
+        let failure = error.clone().into_envelope();
+        append_terminal_audit_with_failure(
             &ctx,
             audit_entry,
             "oracle_preview_dml",
@@ -8364,8 +8399,9 @@ async fn preview_dml_inner(
             &danger_str,
             None,
             AuditOutcome::Failed,
+            &failure,
         )?;
-        return Err(DbError::into_envelope(error));
+        return Err(failure);
     }
 
     // Everything from here rolls back to the sandbox savepoint, whatever happens.
@@ -8440,7 +8476,7 @@ async fn preview_dml_inner(
     let (before, rows_affected, after) = match sandboxed {
         Ok(result) => result,
         Err(error) => {
-            append_terminal_audit(
+            append_terminal_audit_with_failure(
                 &ctx,
                 audit_entry,
                 "oracle_preview_dml",
@@ -8448,6 +8484,7 @@ async fn preview_dml_inner(
                 &danger_str,
                 None,
                 AuditOutcome::Failed,
+                &error,
             )?;
             return Err(error);
         }
@@ -8876,6 +8913,7 @@ async fn execute_sql_inner(
     let dbms_output_limits = if args.capture_dbms_output {
         let (max_lines, max_chars, buffer_bytes) = dbms_output_limits(&args);
         if let Err(error) = enable_dbms_output_conn(cx, conn, Some(buffer_bytes)).await {
+            let failure = error.clone().into_envelope();
             let outcome = if error.is_uncertain_session_state() {
                 mark_connection_quarantined(
                     ctx.quarantine,
@@ -8888,15 +8926,28 @@ async fn execute_sql_inner(
             } else {
                 AuditOutcome::Failed
             };
-            let terminal_audit = append_terminal_audit(
-                &ctx,
-                audit_entry,
-                audit_tool,
-                &executed_sql,
-                &danger_str,
-                None,
-                outcome,
-            );
+            let terminal_audit = if outcome == AuditOutcome::Failed {
+                append_terminal_audit_with_failure(
+                    &ctx,
+                    audit_entry,
+                    audit_tool,
+                    &executed_sql,
+                    &danger_str,
+                    None,
+                    outcome,
+                    &failure,
+                )
+            } else {
+                append_terminal_audit(
+                    &ctx,
+                    audit_entry,
+                    audit_tool,
+                    &executed_sql,
+                    &danger_str,
+                    None,
+                    outcome,
+                )
+            };
             if outcome == AuditOutcome::Failed {
                 terminal_audit?;
             } else if let Err(audit_error) = terminal_audit {
@@ -8918,7 +8969,7 @@ async fn execute_sql_inner(
                 )
                 .into_envelope());
             }
-            return Err(DbError::into_envelope(error));
+            return Err(failure);
         }
         Some((max_lines, max_chars))
     } else {
@@ -8940,6 +8991,7 @@ async fn execute_sql_inner(
     let rows_affected = match execute_conn(cx, conn, &executed_sql, &binds).await {
         Ok(rows) => rows,
         Err(e) => {
+            let failure = e.clone().into_envelope();
             // Arc I: a held statement runs inside the agent's open workspace, and
             // `hold` already refused everything whose effect can escape rollback,
             // so Oracle's statement-level atomicity has undone this failed
@@ -8949,7 +9001,7 @@ async fn execute_sql_inner(
             // asked us to keep. Only an uncertain DB boundary forces one, because
             // then we cannot prove what the session did.
             if args.hold && !e.is_uncertain_session_state() {
-                append_terminal_audit(
+                append_terminal_audit_with_failure(
                     &ctx,
                     audit_entry,
                     audit_tool,
@@ -8957,13 +9009,14 @@ async fn execute_sql_inner(
                     &danger_str,
                     None,
                     AuditOutcome::Failed,
+                    &failure,
                 )?;
                 resolve_write_intent(
                     &ctx,
                     write_intent_id.as_deref(),
                     WriteIntentOutcome::AbortedBeforeExecute,
                 )?;
-                return Err(DbError::into_envelope(e));
+                return Err(failure);
             }
             let rollback = rollback_conn_cleanup(cx, conn).await;
             if rollback.is_ok() {
@@ -9498,6 +9551,7 @@ async fn compile_object_inner(
         match execute_conn(cx, conn, stmt, &[]).await {
             Ok(rows) => rows_affected.push(rows),
             Err(e) => {
+                let failure = e.clone().into_envelope();
                 let outcome = if e.is_uncertain_session_state() {
                     mark_connection_quarantined(
                         ctx.quarantine,
@@ -9508,15 +9562,28 @@ async fn compile_object_inner(
                 } else {
                     AuditOutcome::Failed
                 };
-                let terminal_audit = append_terminal_audit(
-                    &ctx,
-                    audit_entry,
-                    tool_name,
-                    &audited_sql,
-                    &danger_str,
-                    None,
-                    outcome,
-                );
+                let terminal_audit = if outcome == AuditOutcome::Failed {
+                    append_terminal_audit_with_failure(
+                        &ctx,
+                        audit_entry,
+                        tool_name,
+                        &audited_sql,
+                        &danger_str,
+                        None,
+                        outcome,
+                        &failure,
+                    )
+                } else {
+                    append_terminal_audit(
+                        &ctx,
+                        audit_entry,
+                        tool_name,
+                        &audited_sql,
+                        &danger_str,
+                        None,
+                        outcome,
+                    )
+                };
                 if outcome == AuditOutcome::Failed {
                     terminal_audit?;
                     resolve_write_intent_after_db(
@@ -9534,7 +9601,7 @@ async fn compile_object_inner(
                     )
                     .into_envelope());
                 }
-                return Err(DbError::into_envelope(e));
+                return Err(failure);
             }
         }
     }
@@ -10564,6 +10631,7 @@ async fn patch_source_inner(
     let rows_affected = match execute_conn(cx, conn, &patched_ddl, &[]).await {
         Ok(rows) => rows,
         Err(e) => {
+            let failure = e.clone().into_envelope();
             let rollback = rollback_conn_cleanup(cx, conn).await;
             let outcome = if !e.is_uncertain_session_state() && rollback.is_ok() {
                 // A definite Oracle DDL failure means the requested object
@@ -10584,15 +10652,28 @@ async fn patch_source_inner(
                 )?;
                 AuditOutcome::UnknownDiscarded
             };
-            let terminal_audit = append_terminal_audit(
-                &ctx,
-                audit_entry,
-                tool_name,
-                &patched_ddl,
-                &danger_str,
-                None,
-                outcome,
-            );
+            let terminal_audit = if outcome == AuditOutcome::Failed {
+                append_terminal_audit_with_failure(
+                    &ctx,
+                    audit_entry,
+                    tool_name,
+                    &patched_ddl,
+                    &danger_str,
+                    None,
+                    outcome,
+                    &failure,
+                )
+            } else {
+                append_terminal_audit(
+                    &ctx,
+                    audit_entry,
+                    tool_name,
+                    &patched_ddl,
+                    &danger_str,
+                    None,
+                    outcome,
+                )
+            };
             if outcome == AuditOutcome::Failed {
                 terminal_audit?;
                 resolve_write_intent_after_db(
@@ -10621,7 +10702,7 @@ async fn patch_source_inner(
                 )
                 .into_envelope());
             }
-            return Err(DbError::into_envelope(e));
+            return Err(failure);
         }
     };
     if let Err(e) = commit_conn(cx, conn).await {
@@ -11688,6 +11769,7 @@ impl OracleDispatcher {
             let observed_conn = ReadUncertaintyConn {
                 inner: state.conn.as_ref(),
                 quarantine: Some(&self.quarantine),
+                provenance: ReadQueryProvenance::ServerRead,
             };
             match observe_connection_info(cx, &observed_conn).await {
                 Ok(info) => {
@@ -12284,6 +12366,7 @@ impl OracleDispatcher {
                     current_schema,
                     &scoped_level,
                     tool,
+                    ReadQueryProvenance::CallerRead,
                 )
                 .await;
         }
@@ -12470,10 +12553,12 @@ impl OracleDispatcher {
         let observed_conn = ReadUncertaintyConn {
             inner: conn,
             quarantine: Some(&self.quarantine),
+            provenance: ReadQueryProvenance::ServerRead,
         };
         let observed_metadata_conn = ReadUncertaintyConn {
             inner: metadata_conn,
             quarantine: std::ptr::eq(conn, metadata_conn).then_some(&self.quarantine),
+            provenance: ReadQueryProvenance::ServerRead,
         };
         let generated_read_subject = system_generated_read_subject();
         let (generated_read_db_evidence, generated_read_evidence_error) = if generated_read {
@@ -14287,5 +14372,8 @@ impl OracleDispatcher {
     }
 }
 
+#[cfg(test)]
+#[path = "h6r4w_contract_tests.rs"]
+mod h6r4w_contract_tests;
 #[cfg(test)]
 mod tests;

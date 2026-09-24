@@ -122,6 +122,45 @@ check_served_path_no_stdout() {
   echo "OK[served-path-no-stdout]: served request paths use no direct stdout writes."
 }
 
+# The only served SQL call sites are the read executor and the closed catalog
+# runner. pool.rs/query.rs are low-level adapters, but a served caller of their
+# raw methods is still scanned here and refused. A test module may appear
+# before later product code, so skip only its column-zero-braced body.
+scan_read_executor_seam_source() {
+  local path="$1" line source
+  while IFS=$'\t' read -r line source; do
+    [ -n "$line" ] || continue
+    echo "ARCH-FITNESS VIOLATION[read-executor-seam]: $path:$line: $source" >&2
+    violations=$((violations + 1))
+  done < <(
+    awk '
+      pending && /^mod[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]*\{/ { in_test=1; pending=0; next }
+      pending && /^mod[[:space:]]+[A-Za-z_][A-Za-z_0-9]*[[:space:]]*;/ { pending=0; next }
+      in_test && /^}$/ { in_test=0; next }
+      in_test { next }
+      { print; pending=($0 == "#[cfg(test)]") }
+    ' "$path" |
+      (rg -U --json -e '\b(query_rows(_[a-z_]+)?|query_row|query_optional_row|query_row_stream|query_bounded_page(_named)?|read_query(_named|_as_of)?)\s*\(' || true) |
+      jq -r 'select(.type == "match") | .data as $match | $match.submatches[] | [$match.line_number, (.match.text | gsub("\n"; " "))] | @tsv'
+  )
+}
+
+check_read_executor_seam() {
+  local path
+  while IFS= read -r path; do
+    case "$path" in
+      crates/oraclemcp/src/dispatch/read_executor.rs|crates/oraclemcp/src/dispatch/tests.rs|crates/oraclemcp/src/dispatch/tests/*|\
+      crates/oraclemcp-db/src/catalog_query.rs|crates/oraclemcp-db/src/connection.rs|crates/oraclemcp-db/src/oracledb_backend.rs|\
+      crates/oraclemcp-db/src/pool.rs|crates/oraclemcp-db/src/query.rs)
+        continue ;;
+    esac
+    scan_read_executor_seam_source "$path"
+  done < <(rg --files crates/oraclemcp/src/dispatch crates/oraclemcp-db/src |
+    rg '\.rs$' | rg -v '/tests?/|/benches/')
+  scan_read_executor_seam_source crates/oraclemcp/src/plsql_tools.rs
+  echo "OK[read-executor-seam]: served SQL paths use only the executor or closed catalog runner."
+}
+
 need cargo
 need jq
 need rg
@@ -134,6 +173,23 @@ if [ "${1:-}" = --selftest ]; then
     exit 1
   fi
   echo "oraclemcp-arch-fitness-lint: selftest caught planted stdout write."
+  violations=0
+  scan_read_executor_seam_source - <<'EOF'
+fn planted(conn: &dyn OracleConnection, pool: &OraclePool) {
+    conn.query_rows(cx, "SELECT 1 FROM dual", &[]);
+    pool.read_query(cx, "SELECT 1 FROM dual", vec![], caps, 0, options);
+}
+#[cfg(test)]
+mod allowed_test {
+    fn mock(conn: &dyn OracleConnection) { conn.query_rows(cx, "SELECT 1", &[]); }
+}
+fn product_after_test(conn: &dyn OracleConnection) { conn.query_rows(cx, "SELECT 2", &[]); }
+EOF
+  if [ "$violations" -ne 3 ]; then
+    echo "oraclemcp-arch-fitness-lint: selftest failed to catch planted raw read calls" >&2
+    exit 1
+  fi
+  echo "oraclemcp-arch-fitness-lint: selftest caught planted raw read calls."
   exit 0
 fi
 
@@ -225,6 +281,7 @@ done
 
 check_max_file_size_ratchet
 check_served_path_no_stdout
+check_read_executor_seam
 
 if [ "$violations" -ne 0 ]; then
   echo "" >&2

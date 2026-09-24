@@ -36,6 +36,51 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
 }
 
 #[test]
+fn generated_read_guard_refusal_keeps_forbidden_statement_issue_42() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        let subject = system_generated_read_subject();
+        let guarded = GuardedGeneratedReadConn {
+            inner: &OneRowMock,
+            audit: GeneratedReadAuditCtx {
+                entry: AuditEntryCtx {
+                    auditor: None,
+                    subject: &subject,
+                    db_evidence: None,
+                },
+                tool: "oracle_describe",
+            },
+        };
+        let error = guarded
+            .query_rows_with_provenance(
+                &cx,
+                "SELECT 1 FROM dual",
+                &[],
+                ReadQueryProvenance::ServerRead,
+                None,
+            )
+            .await
+            .expect_err("metadata boundary refuses application SQL");
+        let envelope = error.into_envelope();
+        assert_eq!(envelope.error_class, ErrorClass::PolicyDenied);
+        assert_eq!(
+            envelope.next_steps,
+            ["use a CatalogQueryId for server-owned dictionary reads"]
+        );
+        assert_eq!(
+            envelope
+                .structured_reason
+                .as_ref()
+                .map(|reason| reason.category),
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+    });
+}
+
+#[test]
 fn impact_attached_to_every_minting_preview() {
     // Discover the preview surface from its advertised result schema. The
     // argument fixtures below only supply valid inputs; they do not select
@@ -1568,26 +1613,6 @@ fn read_path_handler_work_runs_under_narrowed_read_cx() {
         fn assert_read_path(_: &Cx<oraclemcp_core::ReadPathCaps>) {}
         assert_read_path(&read_cx);
     });
-}
-
-#[test]
-fn generated_read_gate_allows_known_metadata_sql_and_rejects_unknown_functions() {
-    let ddl_sql =
-        "SELECT DBMS_LOB.SUBSTR(DBMS_METADATA.GET_DDL('TABLE', :1, :2), 4000, 1) AS ddl FROM dual";
-    assert_eq!(
-        ensure_generated_read_sql_allowed(ddl_sql).expect("DBMS_METADATA read is allowed"),
-        DangerLevel::Safe
-    );
-
-    let (_, health_sql) = oraclemcp_db::invalid_objects_sql(oraclemcp_db::ViewTier::All);
-    assert_eq!(
-        ensure_generated_read_sql_allowed(&health_sql).expect("health dictionary read is allowed"),
-        DangerLevel::Safe
-    );
-
-    let err = ensure_generated_read_sql_allowed("SELECT billing.purge_old_rows() FROM dual")
-        .expect_err("unknown qualified routine must not clear the generated-read gate");
-    assert_eq!(err.error_class, ErrorClass::PolicyDenied);
 }
 
 fn read_write_level() -> SessionLevelState {
@@ -12472,6 +12497,7 @@ mod write_authorization;
 
 mod fga_evidence_r36;
 mod patch_source_owner;
+mod read_path_registry;
 
 #[path = "tests/action_envelope.rs"]
 mod action_envelope;

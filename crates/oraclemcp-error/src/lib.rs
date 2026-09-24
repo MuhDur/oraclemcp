@@ -116,6 +116,9 @@ pub enum ErrorClass {
     /// terminal for the selected profile and version; the server must never
     /// silently substitute a current read.
     FlashbackCapabilityUnavailable,
+    /// Oracle could not reconstruct the requested read because its undo
+    /// snapshot aged out (ORA-01555). Retrying with a narrower read may help.
+    SnapshotTooOld,
     /// An unexpected internal error; the agent cannot fix it by changing input.
     Internal,
 }
@@ -130,6 +133,7 @@ impl ErrorClass {
             ErrorClass::OperatingLevelTooLow | ErrorClass::ChallengeRequired => {
                 Some("oracle_set_session_level")
             }
+            ErrorClass::InvalidArguments => None,
             ErrorClass::RuntimeStateRequired | ErrorClass::ConnectionFailed => {
                 Some("oracle_connect")
             }
@@ -144,7 +148,11 @@ impl ErrorClass {
     pub fn is_retryable(self) -> bool {
         matches!(
             self,
-            ErrorClass::Busy | ErrorClass::AtCapacity | ErrorClass::Transient | ErrorClass::Timeout
+            ErrorClass::Busy
+                | ErrorClass::AtCapacity
+                | ErrorClass::Transient
+                | ErrorClass::Timeout
+                | ErrorClass::SnapshotTooOld
         )
     }
 }
@@ -517,8 +525,9 @@ pub const CONNECTION_LOST_ORA_CODES: &[i32] = &[
 
 /// Driver transient codes that are safe to retry on the same connection for an
 /// idempotent read.
-const RETRY_SAME_CONNECTION_ORA_CODES: &[i32] =
-    &[54, 60, 104, 257, 12516, 12520, 12526, 12528, 30006, 51535];
+const RETRY_SAME_CONNECTION_ORA_CODES: &[i32] = &[
+    54, 60, 104, 257, 12516, 12520, 12526, 12528, 1466, 30006, 51535,
+];
 
 /// Oracle package-state reset: the session remains connected, and a plain
 /// re-call may succeed after Oracle discards package state.
@@ -555,6 +564,9 @@ pub fn classify_ora_code(code: i32) -> ErrorClass {
         // Object resolution (handled before the 900..=999 syntax range so
         // ORA-00942 classifies as a missing object, not a syntax error).
         942 | 4043 | 31603 => ErrorClass::ObjectNotFound,
+        // ORA-01555 means the read's undo snapshot is no longer available.
+        // It is a retryable data-retention condition, not a dead connection.
+        1555 => ErrorClass::SnapshotTooOld,
         // Privilege / authentication — all TERMINAL (never auto-retried; not in
         // the shared retry taxonomy), so a wrong password or a locked account
         // can never drive a reconnect loop that locks the account harder.
@@ -759,6 +771,9 @@ mod tests {
         assert_eq!(classify_ora_code(3113), ErrorClass::Transient);
         assert_eq!(classify_ora_code(12519), ErrorClass::Busy);
         assert_eq!(classify_ora_code(923), ErrorClass::SyntaxError);
+        assert_eq!(classify_ora_code(1466), ErrorClass::Transient);
+        assert_eq!(classify_ora_code(1555), ErrorClass::SnapshotTooOld);
+        assert!(classify_ora_code(1555).is_retryable());
         assert_eq!(classify_ora_code(7777), ErrorClass::Internal);
     }
 
@@ -778,6 +793,10 @@ mod tests {
             "ORA-04068 resets package state but does not kill the session"
         );
         assert_eq!(classify_ora_code(4068), ErrorClass::Transient);
+        assert_eq!(
+            oracle_retry_action(1466),
+            OracleRetryAction::RetrySameConnection
+        );
         for code in [12514, 12541, 12543, 12170] {
             assert_eq!(oracle_retry_action(code), OracleRetryAction::Never);
             assert_eq!(classify_ora_code(code), ErrorClass::ConnectionFailed);

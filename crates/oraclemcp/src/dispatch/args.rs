@@ -17,6 +17,30 @@ pub(super) enum QueryFormat {
     Arrow,
 }
 
+/// Export representation, decoded as an enum so an unsupported wire value is
+/// refused by the normal typed argument decoder.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum ExportFormat {
+    Csv,
+    Json,
+}
+
+impl<'de> Deserialize<'de> for ExportFormat {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "csv" => Ok(Self::Csv),
+            "json" => Ok(Self::Json),
+            _ => Err(serde::de::Error::custom(
+                "export_format must be \"csv\" or \"json\"",
+            )),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct QueryArgs {
@@ -73,7 +97,7 @@ pub(super) struct QueryArgs {
     /// Export serialization format: `csv` (default) or `json`. Only meaningful
     /// with `export=true`.
     #[serde(default)]
-    pub(super) export_format: Option<String>,
+    pub(super) export_format: Option<ExportFormat>,
     /// K10: when true, deliver the (bounded) result as an ordered sequence of
     /// resumable page `chunks` instead of a single inline page — "incremental
     /// fetch" made first-class. The server drives successive cursor pages
@@ -860,31 +884,53 @@ mod strict_contract_tests {
         placeholder(schema)
     }
 
-    fn minimal_for_tool(name: &str, schema: &Value) -> Value {
-        let mut value = minimal(schema);
-        let args = value.as_object_mut().expect("object schema");
-        // Function adapters reject a top-level anyOf. These schemas describe
-        // "name or old alias" in property text, so choose the canonical arm
-        // to construct an actually valid minimal request for the DTO test.
-        match canonical_tool_name(name) {
-            "oracle_describe_index"
-            | "oracle_describe_trigger"
-            | "oracle_describe_view"
-            | "oracle_get_ddl"
-            | "oracle_get_source" => {
-                args.insert("name".to_owned(), json!("X"));
+    fn minimal_for_tool(_name: &str, schema: &Value) -> Value {
+        // Required fields are now expressed in each tool's published schema,
+        // including the canonical name selected for compatibility aliases.
+        // Construct exactly that contract so this DTO differential catches
+        // mismatches instead of silently filling fields the schema omitted.
+        minimal(schema)
+    }
+
+    fn alias_canonical_field(tool: &str, property: &str) -> Option<&'static str> {
+        match (tool, property) {
+            (
+                "oracle_compile_object" | "compile_object" | "compile_with_warnings",
+                "object_name",
+            ) => Some("name"),
+            ("oracle_create_or_replace" | "create_or_replace", "sql" | "ddl") => {
+                Some("source_code")
             }
-            "oracle_sample_rows" | "oracle_read_clob" => {
-                args.insert("table".to_owned(), json!("X"));
+            ("oracle_patch_source" | "patch_package" | "patch_view", "object_name") => Some("name"),
+            ("oracle_patch_source" | "patch_package" | "patch_view", "search_text") => {
+                Some("old_text")
             }
-            _ => {}
+            ("oracle_patch_source" | "patch_package" | "patch_view", "replacement") => {
+                Some("new_text")
+            }
+            ("oracle_describe", "table_name" | "name") => Some("table"),
+            ("describe_table", "table" | "name") => Some("table_name"),
+            ("oracle_describe_index", "index_name") => Some("name"),
+            ("describe_index", "name") => Some("index_name"),
+            ("oracle_describe_trigger", "trigger_name") => Some("name"),
+            ("describe_trigger", "name") => Some("trigger_name"),
+            ("oracle_describe_view", "view_name") => Some("name"),
+            ("describe_view", "name") => Some("view_name"),
+            ("oracle_get_ddl", "object_name") => Some("name"),
+            ("get_ddl", "name") => Some("object_name"),
+            ("oracle_get_source", "object_name") => Some("name"),
+            ("get_object_source", "name") => Some("object_name"),
+            ("oracle_sample_rows", "table_name") => Some("table"),
+            ("oracle_read_clob", "table_name") => Some("table"),
+            ("oracle_read_clob", "clob_col") => Some("clob_column"),
+            ("oracle_read_clob", "pk_col") => Some("pk_column"),
+            ("oracle_read_clob", "pk_val") => Some("pk_value"),
+            ("get_clob", "table_name") => Some("table"),
+            ("get_clob", "clob_column") => Some("clob_col"),
+            ("get_clob", "pk_column") => Some("pk_col"),
+            ("get_clob", "pk_value") => Some("pk_val"),
+            _ => None,
         }
-        if canonical_tool_name(name) == "oracle_read_clob" {
-            for field in ["clob_column", "pk_column", "pk_value"] {
-                args.insert(field.to_owned(), json!("X"));
-            }
-        }
-        value
     }
 
     fn log_case(case_id: &str, tool: &str, expected: &Value, actual: &Value) {
@@ -1009,17 +1055,9 @@ mod strict_contract_tests {
             for (property, property_schema) in accepted {
                 let mut args = minimal.clone();
                 let fields = args.as_object_mut().expect("object schema");
-                // Test a legacy alias in place of its canonical field. Sending
-                // both is a duplicate-field conflict, which T3.3 handles.
-                let canonical = match property.as_str() {
-                    "index_name" | "trigger_name" | "view_name" | "object_name" => Some("name"),
-                    "table_name" => Some("table"),
-                    "clob_col" => Some("clob_column"),
-                    "pk_col" => Some("pk_column"),
-                    "pk_val" => Some("pk_value"),
-                    _ => None,
-                };
-                if let Some(canonical) = canonical {
+                // Test an alias in place of its canonical field. Sending both
+                // is a duplicate-field conflict, which T3.3 handles.
+                if let Some(canonical) = alias_canonical_field(&tool.name, property) {
                     fields.remove(canonical);
                 }
                 fields.insert(property.clone(), placeholder(property_schema));

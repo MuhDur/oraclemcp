@@ -648,6 +648,15 @@ pub fn cef_line(record: &AuditRecord) -> String {
     push_cef_kv(&mut ext, "cs1", &record.seq.to_string());
     push_cef_kv(&mut ext, "act", &format!("{:?}", record.decision));
     push_cef_kv(&mut ext, "outcome", &format!("{:?}", record.outcome));
+    if let Some(failure) = record.failure.as_ref() {
+        push_cef_kv(&mut ext, "errorClass", failure.error_class());
+        if let Some(code) = failure.ora_code() {
+            push_cef_kv(&mut ext, "oraCode", &code.to_string());
+        }
+        if let Some(category) = failure.reason_category() {
+            push_cef_kv(&mut ext, "reasonCategory", category);
+        }
+    }
     if let Some(correlation) = record.correlation.as_ref() {
         push_cef_kv(&mut ext, "requestSha256", &correlation.request_sha256);
         if let Some(parent_seq) = correlation.parent_seq {
@@ -697,6 +706,15 @@ pub fn syslog_line(record: &AuditRecord) -> String {
     push_sd_param(&mut sd, "subjectStableId", &record.subject.stable_id);
     push_sd_param(&mut sd, "decision", &format!("{:?}", record.decision));
     push_sd_param(&mut sd, "outcome", &format!("{:?}", record.outcome));
+    if let Some(failure) = record.failure.as_ref() {
+        push_sd_param(&mut sd, "errorClass", failure.error_class());
+        if let Some(code) = failure.ora_code() {
+            push_sd_param(&mut sd, "oraCode", &code.to_string());
+        }
+        if let Some(category) = failure.reason_category() {
+            push_sd_param(&mut sd, "reasonCategory", category);
+        }
+    }
     if let Some(correlation) = record.correlation.as_ref() {
         push_sd_param(&mut sd, "requestSha256", &correlation.request_sha256);
         if let Some(parent_seq) = correlation.parent_seq {
@@ -862,10 +880,10 @@ fn push_sd_param(sd: &mut String, key: &str, value: &str) {
 mod tests {
     use super::*;
     use crate::record::{
-        AuditCorrelation, AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, AuditVerdict,
-        AuditVerdictCertificate, AuditVerdictConstruct, AuditVerdictDerivationStep,
-        AuditVerdictOperatingLevel, AuditVerdictRuleId, BoundAuditVerdictCertificate, SigningKey,
-        compute_entry_hash_v1,
+        AuditCorrelation, AuditDecision, AuditEntryDraft, AuditFailureCause, AuditOutcome,
+        AuditSubject, AuditVerdict, AuditVerdictCertificate, AuditVerdictConstruct,
+        AuditVerdictDerivationStep, AuditVerdictOperatingLevel, AuditVerdictRuleId,
+        BoundAuditVerdictCertificate, SigningKey, compute_entry_hash_v1,
     };
     use crate::sink::{Auditor, MemoryAuditSink};
     use crate::test_tempfile as tempfile;
@@ -933,6 +951,7 @@ mod tests {
             decision,
             rows_affected,
             outcome,
+            failure: None,
             prev_hash: crate::record::GENESIS_HASH.to_owned(),
             entry_hash: entry_hash.clone(),
             key_id: Some(signing_key.key_id().to_owned()),
@@ -2063,13 +2082,18 @@ mod tests {
         failed.decision = AuditDecision::Blocked;
         failed.outcome = AuditOutcome::Failed;
         failed.rows_affected = None;
-        let record = AuditRecord::chained_signed_correlated(
+        let failure = AuditFailureCause::new("POLICY_DENIED", Some(1031), Some("PRIVILEGE"))
+            .expect("safe cause categories");
+        let record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
             &failed,
             12,
             crate::record::GENESIS_HASH,
             "2026-07-11T00:00:00Z".to_owned(),
             &key(),
             Some(AuditCorrelation::terminal("sha256:request-12", 11)),
+            None,
+            None,
+            Some(failure),
         );
 
         let cef = cef_line(&record);
@@ -2077,12 +2101,18 @@ mod tests {
         assert!(cef.contains("outcome=Failed"));
         assert!(cef.contains("requestSha256=sha256:request-12"));
         assert!(cef.contains("parentSeq=11"));
+        assert!(cef.contains("errorClass=POLICY_DENIED"));
+        assert!(cef.contains("oraCode=1031"));
+        assert!(cef.contains("reasonCategory=PRIVILEGE"));
 
         let syslog = syslog_line(&record);
         assert!(syslog.starts_with("<132>1 "), "local0.warning PRI");
         assert!(syslog.contains("outcome=\"Failed\""));
         assert!(syslog.contains("requestSha256=\"sha256:request-12\""));
         assert!(syslog.contains("parentSeq=\"11\""));
+        assert!(syslog.contains("errorClass=\"POLICY_DENIED\""));
+        assert!(syslog.contains("oraCode=\"1031\""));
+        assert!(syslog.contains("reasonCategory=\"PRIVILEGE\""));
     }
 
     #[test]

@@ -40,8 +40,8 @@ use std::os::windows::fs::OpenOptionsExt;
 use crate::anchor::{AnchorFile, ChainAnchor};
 use crate::keyring::AuditKeyring;
 use crate::record::{
-    AuditCorrelation, AuditEntryDraft, AuditRecord, AuditVerdictCertificate,
-    BoundAuditVerdictCertificate, GENESIS_HASH, SigningKey,
+    AuditCorrelation, AuditEntryDraft, AuditFailureCause, AuditFailureCauseError, AuditRecord,
+    AuditVerdictCertificate, BoundAuditVerdictCertificate, GENESIS_HASH, SigningKey,
 };
 use crate::rekor::{AsyncRekorAnchor, AuditChainHead};
 use crate::verify::{BrokenReason, ChainVerifier, JsonlError, JsonlReader, VerifyOutcome};
@@ -166,6 +166,12 @@ pub enum AuditError {
     /// certificate.
     #[error("invalid verdict certificate core hash")]
     InvalidVerdictCertificateCoreHash,
+    /// A failure cause failed the category-token/ORA-code redaction checks.
+    #[error(transparent)]
+    InvalidFailureCause(#[from] AuditFailureCauseError),
+    /// A cause may only be attached to an entry whose outcome is FAILED.
+    #[error("audit failure cause requires a FAILED outcome")]
+    FailureCauseOnNonFailure,
     /// The configured sink cannot durably persist a certificate beside its
     /// signed record. Refuse rather than emit an uninspectable proof.
     #[error("audit sink cannot persist verdict certificates")]
@@ -3251,6 +3257,69 @@ impl Auditor {
         self.append_correlated_with_observed_scn(draft, timestamp, durable, None, None)
     }
 
+    /// Append a failed tool record with its redaction-safe typed cause covered
+    /// by the signed hash chain.
+    pub fn append_with_failure(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        failure: AuditFailureCause,
+    ) -> Result<AuditRecord, AuditError> {
+        if draft.outcome != crate::AuditOutcome::Failed {
+            return Err(AuditError::FailureCauseOnNonFailure);
+        }
+        if !failure.is_redaction_safe() {
+            return Err(AuditError::InvalidFailureCause(
+                AuditFailureCauseError::InvalidCategory,
+            ));
+        }
+        self.append_correlated_with_observed_scn_and_certificate_internal(
+            draft,
+            timestamp,
+            durable,
+            None,
+            None,
+            None,
+            None,
+            Some(failure),
+        )
+    }
+
+    /// Append a failed record while preserving its read SCN, correlation and
+    /// verdict certificate alongside the typed cause.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_correlated_with_observed_scn_and_verdict_certificate_and_failure(
+        &self,
+        draft: &AuditEntryDraft,
+        timestamp: String,
+        durable: bool,
+        correlation: Option<AuditCorrelation>,
+        observed_scn: Option<u64>,
+        verdict_certificate: Option<&AuditVerdictCertificate>,
+        failure: AuditFailureCause,
+    ) -> Result<AuditRecord, AuditError> {
+        if draft.outcome != crate::AuditOutcome::Failed {
+            return Err(AuditError::FailureCauseOnNonFailure);
+        }
+        if !failure.is_redaction_safe() {
+            return Err(AuditError::InvalidFailureCause(
+                AuditFailureCauseError::InvalidCategory,
+            ));
+        }
+        let core_hash = verdict_certificate.map(AuditVerdictCertificate::core_hash);
+        self.append_correlated_with_observed_scn_and_certificate_internal(
+            draft,
+            timestamp,
+            durable,
+            correlation,
+            observed_scn,
+            core_hash.as_deref(),
+            verdict_certificate,
+            Some(failure),
+        )
+    }
+
     /// Append a chained record carrying optional attempt/terminal correlation.
     /// Durability and poisoning semantics are identical to [`Self::append`].
     pub fn append_correlated(
@@ -3306,6 +3375,7 @@ impl Auditor {
             observed_scn,
             verdict_certificate_core_hash,
             None,
+            None,
         )
     }
 
@@ -3331,6 +3401,7 @@ impl Auditor {
             observed_scn,
             core_hash.as_deref(),
             verdict_certificate,
+            None,
         )
     }
 
@@ -3344,6 +3415,7 @@ impl Auditor {
         observed_scn: Option<u64>,
         verdict_certificate_core_hash: Option<&str>,
         verdict_certificate: Option<&AuditVerdictCertificate>,
+        failure: Option<AuditFailureCause>,
     ) -> Result<AuditRecord, AuditError> {
         if verdict_certificate_core_hash.is_some_and(|hash| !is_canonical_sha256(hash)) {
             return Err(AuditError::InvalidVerdictCertificateCoreHash);
@@ -3357,7 +3429,7 @@ impl Auditor {
         }
         let seq = state.seq + 1;
         let record =
-            AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash(
+            AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
                 draft,
                 seq,
                 &state.last_hash,
@@ -3366,6 +3438,7 @@ impl Auditor {
                 correlation,
                 observed_scn,
                 verdict_certificate_core_hash.map(str::to_owned),
+                failure,
             );
         let bound_certificate = verdict_certificate
             .cloned()
@@ -3473,7 +3546,7 @@ mod open_tests;
 mod tests {
     use super::*;
     use crate::load_anchor;
-    use crate::record::{AuditDecision, AuditOutcome, AuditSubject};
+    use crate::record::{AuditDecision, AuditFailureCause, AuditOutcome, AuditSubject};
     use crate::test_tempfile as tempfile;
     use crate::verify::{parse_jsonl, verify_records};
     use std::sync::Arc;
@@ -3515,6 +3588,39 @@ mod tests {
             .expect("append");
         assert_eq!(sink.records().len(), 1, "record written");
         assert_eq!(sink.flush_count(), 1, "fsynced before returning");
+    }
+
+    #[test]
+    fn append_with_failure_signs_the_redaction_safe_cause() {
+        let sink = Arc::new(MemoryAuditSink::new());
+        let auditor = Auditor::new(Box::new(SharedSink(sink.clone())), test_key());
+        let mut failed = draft("SELECT private_value FROM synthetic_table", "READ_ONLY");
+        failed.outcome = AuditOutcome::Failed;
+        let cause = AuditFailureCause::new("INVALID_ARGUMENTS", Some(904), Some("OBJECT_TYPE"))
+            .expect("cause tokens are valid");
+        let record = auditor
+            .append_with_failure(&failed, "t0".to_owned(), true, cause)
+            .expect("failure cause append");
+        assert_eq!(
+            record.failure.as_ref().map(AuditFailureCause::error_class),
+            Some("INVALID_ARGUMENTS")
+        );
+        assert_eq!(
+            record
+                .failure
+                .as_ref()
+                .and_then(AuditFailureCause::ora_code),
+            Some(904)
+        );
+        assert!(record.hash_is_valid());
+        assert!(record.signature_is_valid(&test_key()));
+        let serialized = serde_json::to_string(&record).expect("serialized record");
+        assert!(!serialized.contains("private_value"));
+        assert!(!serialized.contains("synthetic_table"));
+        assert_eq!(
+            verify_records(&sink.records(), &[test_key()]),
+            VerifyOutcome::Ok { records: 1 }
+        );
     }
 
     #[test]

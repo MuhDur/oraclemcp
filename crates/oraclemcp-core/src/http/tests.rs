@@ -467,11 +467,21 @@ fn http_duplicate_member_body_is_refused_before_dispatch() {
             body.to_vec(),
         );
         let response = handle_http_request(&server, &config, request);
-        assert_eq!(response.status, 400);
+        assert_eq!(response.status, if pointer == "/id" { 400 } else { 200 });
         let response = response_json(&response);
-        assert_eq!(response["id"], Value::Null);
-        assert_eq!(response["error"]["code"], serde_json::json!(-32700));
-        assert_eq!(response["error"]["data"]["json_pointer"], pointer);
+        if pointer == "/id" {
+            assert_eq!(response["error"]["code"], serde_json::json!(-32700));
+            assert_eq!(response["error"]["data"]["json_pointer"], pointer);
+        } else {
+            assert_eq!(response["result"]["isError"], serde_json::json!(true));
+            assert_eq!(
+                response["result"]["structuredContent"]["error_class"],
+                serde_json::json!("INVALID_ARGUMENTS")
+            );
+            assert!(response["result"]["structuredContent"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains(pointer)));
+        }
         assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
     }
 }
