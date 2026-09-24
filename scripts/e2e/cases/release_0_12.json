@@ -437,7 +437,7 @@
     "symbols": [
       "classify_ora_code"
     ],
-    "test_id": "oraclemcp_error::tests::snapshot_too_old_is_transient_issue_38",
+    "test_id": "oraclemcp_db::error::tests::ora_01555_is_snapshot_too_old_not_connection_failed",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i38_snapshot_class.jsonl"
   },
@@ -467,7 +467,7 @@
       "CURRENT_SCN_SQL",
       "classify_ora_code"
     ],
-    "test_id": "oraclemcp::dispatch::tests::server_sql_error_not_caller_syntax_issue_38",
+    "test_id": "oraclemcp_db::error::tests::server_origin_ora_00904_is_not_syntax_error",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i38_server_sql_class.jsonl"
   },
@@ -705,6 +705,34 @@
     "evidence_path": "target/e2e/w4/{lane}/rel012_i42_generated_refusal.jsonl"
   },
   {
+    "case_id": "rel012_i42_generated_refusal_unit",
+    "issue": 42,
+    "title": "Generated-read refusal preserves typed guard envelope",
+    "reproducible": "unit",
+    "input": {
+      "guard_refusal": "FORBIDDEN_STATEMENT"
+    },
+    "tool_or_path": "GuardedGeneratedReadConn::before_query",
+    "pre_fix_outcome": "Guard refusal was collapsed into INTERNAL",
+    "post_fix_expected": "Original refusal class, next steps and structured reason are preserved",
+    "assertions": [
+      "generated-read refusal keeps FORBIDDEN_STATEMENT and refusal metadata"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "generated_read_guard_refusal_keeps_forbidden_statement_issue_42"
+    ],
+    "test_id": "oraclemcp::dispatch::tests::generated_read_guard_refusal_keeps_forbidden_statement_issue_42",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i42_generated_refusal_unit.jsonl"
+  },
+  {
     "case_id": "rel012_i43_missing_view",
     "issue": 43,
     "title": "Missing view is not success",
@@ -792,6 +820,37 @@
     "test_id": "w4_query_audit_failure_cause",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i45_audit_failure_cause.jsonl"
+  },
+  {
+    "case_id": "rel012_i45_audit_failure_cause_unit",
+    "issue": 45,
+    "title": "FAILED audit entries retain a redaction-safe error cause",
+    "reproducible": "unit",
+    "input": {
+      "failure": {
+        "error_class": "OBJECT_NOT_FOUND",
+        "ora_code": 4043
+      }
+    },
+    "tool_or_path": "AuditRecord failure cause",
+    "pre_fix_outcome": "FAILED audit entries omitted error class and ORA code",
+    "post_fix_expected": "FAILED entries record error class and numeric ORA code within the signed chain",
+    "assertions": [
+      "failure cause carries error class and numeric ORA code without message or SQL text"
+    ],
+    "versions": [
+      "version:18",
+      "version:21",
+      "version:23"
+    ],
+    "capabilities": [],
+    "repo": "oraclemcp",
+    "symbols": [
+      "failed_entry_records_error_class_and_ora_code_issue_45"
+    ],
+    "test_id": "oraclemcp_audit::record::tests::failed_entry_records_error_class_and_ora_code_issue_45",
+    "confidentiality_reviewed": true,
+    "evidence_path": "target/e2e/w4/{lane}/rel012_i45_audit_failure_cause_unit.jsonl"
   },
   {
     "case_id": "rel012_i46_scn_cache",
