@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T02:20:00Z",
+  "bead_id": "oraclemcp-taqm5",
+  "scope": {
+    "summary": "Windows staging-entry substitution blocked by a held handle; test proves the Windows-equivalent refusal (bdd6c213).",
+    "in_scope": [
+      "crates/oraclemcp-core/src/incident.rs"
+    ],
+    "out_of_scope": [
+      "Files changed again after the gate are excluded from the clean-scope claim."
+    ]
+  },
+  "source": {
+    "sha": "d46d8c0374f5170b8343832e488f5b8c305d6b32",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "native Windows",
+        "kind": "cli",
+        "trace": "Native Windows workflow \"Windows audit native proof\" run 35942680207 read by the orchestrator: status completed, conclusion success, headSha 02f1d76878dbcb484e90dbb75e700f3e8b66e19d; job \"Windows audit native workspace\" success."
+      },
+      {
+        "name": "linux gate",
+        "kind": "cli",
+        "trace": "Orchestrator Linux batch gate at d46d8c03 (contains 02f1d768; clean worktree, lease): fmt/clippy/deny OK; 3447 passed, 1 failed \u2014 the single failure is the unrelated ImpactBindingV1 proptest counterexample tracked as .16.12."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Windows proof is the GitHub-hosted native run (read, not re-run, by the orchestrator); run log referenced by id, not committed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
