@@ -1382,10 +1382,14 @@ pub async fn describe_columns(
     owner: &str,
     table: &str,
 ) -> Result<Vec<OracleRow>, DbError> {
+    let data_default_vc_available =
+        !run_catalog_query(cx, conn, CatalogQueryId::DescribeDefaultVcProbe, &[])
+            .await?
+            .is_empty();
     run_catalog_query(
         cx,
         conn,
-        CatalogQueryId::DescribeColumns,
+        CatalogQueryId::describe_columns_query(data_default_vc_available),
         &[OracleBind::from(owner), OracleBind::from(table)],
     )
     .await
@@ -2186,6 +2190,7 @@ mod tests {
     #[derive(Default)]
     struct CaptureMock {
         calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
+        data_default_vc_available: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -2216,7 +2221,11 @@ mod tests {
                 .lock()
                 .expect("capture lock")
                 .push((sql.to_owned(), binds.to_vec()));
-            Ok(vec![])
+            if self.data_default_vc_available && sql.contains("column_name = 'DATA_DEFAULT_VC'") {
+                Ok(vec![OracleRow { columns: vec![] }])
+            } else {
+                Ok(vec![])
+            }
         }
 
         async fn execute(
@@ -2908,9 +2917,15 @@ mod tests {
         assert!(view.metadata.is_none());
         assert!(view.columns.is_empty());
         let calls = view_mock.calls.lock().expect("capture lock");
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 3);
         assert!(calls[0].0.contains("FROM all_views"));
-        assert!(calls[1].0.contains("FROM all_tab_cols"));
+        assert!(calls[1].0.contains("FROM all_tab_columns"));
+        assert!(
+            calls[2]
+                .0
+                .contains("CAST(NULL AS VARCHAR2(4000)) AS data_default")
+        );
+        assert!(calls[2].0.contains("FROM all_tab_cols"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -2918,11 +2933,32 @@ mod tests {
                 OracleBind::String("EMP_V".to_owned()),
             ]
         );
+        assert_eq!(calls[1].1, vec![]);
         assert_eq!(
-            calls[1].1,
+            calls[2].1,
             vec![
                 OracleBind::String("HR".to_owned()),
                 OracleBind::String("EMP_V".to_owned()),
+            ]
+        );
+        drop(calls);
+
+        let modern_mock = CaptureMock {
+            data_default_vc_available: true,
+            ..CaptureMock::default()
+        };
+        let mm = &modern_mock;
+        run_with_cx(|cx| async move { describe_columns(&cx, mm, "hr", "emp_v").await.unwrap() });
+        let calls = modern_mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 2);
+        assert!(calls[0].0.contains("FROM all_tab_columns"));
+        assert!(calls[1].0.contains("data_default_vc AS data_default"));
+        assert_eq!(calls[0].1, vec![]);
+        assert_eq!(
+            calls[1].1,
+            vec![
+                OracleBind::String("hr".to_owned()),
+                OracleBind::String("emp_v".to_owned()),
             ]
         );
     }

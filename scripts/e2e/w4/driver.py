@@ -41,7 +41,7 @@ MANIFEST = ROOT / "scripts/e2e/cases/validate_manifest.py"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
-                        "steps"}
+                        "steps", "expect_by_version"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "protected", "capped_rw"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
@@ -289,6 +289,12 @@ def validate_case(case, filename):
     require(isinstance(case["requires"], list) and all(isinstance(x, str) for x in case["requires"]),
             "invalid requires")
     require(len(case["requires"]) == len(set(case["requires"])), "duplicate capability requirement")
+    if "expect_by_version" in case:
+        by_version = case["expect_by_version"]
+        require(isinstance(by_version, dict) and set(by_version) == {"23", "pre23"},
+                "expect_by_version must define both 23 and pre23 projections")
+        for expectation in by_version.values():
+            verify_expect_shape(expectation)
     require(isinstance(case["setup"], list), "setup must be an array")
     require(case.get("setup_phase", "before_call") in {"before_call", "before_server"},
             "setup_phase must be before_call or before_server")
@@ -448,6 +454,28 @@ def verify_expect_shape(expect):
             concrete = name if lane is None else name.replace("${lane}", lane)
             require(re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", concrete) is not None, "invalid golden filename")
             require((ROOT / "tests/golden/w4" / concrete).is_file(), f"golden file {concrete} is missing")
+
+
+def merge_expectation(base, overlay):
+    if isinstance(base, dict) and isinstance(overlay, dict):
+        merged = dict(base)
+        for key, value in overlay.items():
+            merged[key] = merge_expectation(merged[key], value) if key in merged else value
+        return merged
+    if isinstance(base, list) and isinstance(overlay, list):
+        require(len(base) == len(overlay), "version expectation list lengths differ")
+        return [merge_expectation(left, right) for left, right in zip(base, overlay)]
+    return overlay
+
+
+def expected_for_case(case, capabilities):
+    if not set(case["requires"]) <= capabilities:
+        return case["on_unsupported"]
+    by_version = case.get("expect_by_version")
+    if by_version is None:
+        return case["expect"]
+    version = "23" if "version:23" in capabilities else "pre23"
+    return merge_expectation(case["expect"], by_version[version])
 
 
 def load_cases():
@@ -1236,7 +1264,7 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
              binary, audit_path, env, descriptor=None):
     start = time.monotonic()
     supported = set(case["requires"]) <= capabilities
-    expected = case["expect"] if supported else case["on_unsupported"]
+    expected = expected_for_case(case, capabilities)
     input_value = {"tool": case["tool"], "arguments": case["call"]["arguments"]}
     input_value["profile_variant"] = case.get("profile_variant", "masked")
     if "raw_arguments" in case["call"]:
@@ -1701,6 +1729,21 @@ def run_lane(args):
 
 def selftest():
     load_cases()
+    version_case = {
+        "requires": [],
+        "expect": {"json_subset": {"columns": [
+            {"COLUMN_NAME": "LABEL", "DATA_DEFAULT": "'w4' "}]}},
+        "expect_by_version": {
+            "23": {"json_subset": {"columns": [
+                {"COLUMN_NAME": "LABEL", "DATA_DEFAULT": "'w4' "}]}},
+            "pre23": {"json_subset": {"columns": [
+                {"COLUMN_NAME": "LABEL", "DATA_DEFAULT": None}]}}},
+        "on_unsupported": {"error_class": "INVALID_ARGUMENTS"},
+    }
+    require(expected_for_case(version_case, {"version:23"})["json_subset"]["columns"][0]
+            ["DATA_DEFAULT"] == "'w4' ", "23ai expectation did not retain bounded default text")
+    require(expected_for_case(version_case, {"version:18"})["json_subset"]["columns"][0]
+            ["DATA_DEFAULT"] is None, "pre-23 expectation did not require a null default")
     original_marker = "W4MARK_FGAHANDLER000001"
     marker_case = {"call": {"arguments": {"sql": f"SELECT 1 /* {original_marker} */"},
                             "vsql_absent_marker": original_marker}}

@@ -278,6 +278,10 @@ pub enum CatalogQueryId {
     SearchIndexColumns,
     /// Detailed column metadata for one relation.
     DescribeColumns,
+    /// Detailed column metadata without a default expression on older Oracle releases.
+    DescribeColumnsLegacy,
+    /// Whether ALL_TAB_COLS exposes DATA_DEFAULT_VC in this database release.
+    DescribeDefaultVcProbe,
     /// Constraint and constrained-column metadata for one relation.
     DescribeConstraints,
     /// Visible PL/SQL source types for one object.
@@ -476,7 +480,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 131] = [
+    pub const ALL: [Self; 133] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -518,6 +522,8 @@ impl CatalogQueryId {
         Self::SearchIndexes,
         Self::SearchIndexColumns,
         Self::DescribeColumns,
+        Self::DescribeColumnsLegacy,
+        Self::DescribeDefaultVcProbe,
         Self::DescribeConstraints,
         Self::SourceTypes,
         Self::PrimaryKeyColumns,
@@ -979,6 +985,26 @@ impl CatalogQueryId {
                 TT,
                 "describe relation columns",
                 DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::DescribeColumnsLegacy => (
+                "SELECT column_name, data_type, data_length, nullable, \
+                        CAST(NULL AS VARCHAR2(4000)) AS data_default, \
+                        virtual_column, hidden_column, user_generated \
+                 FROM all_tab_cols WHERE owner = :1 AND table_name = :2 \
+                 ORDER BY column_id",
+                TT,
+                "describe relation columns without long defaults on older Oracle releases",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::DescribeDefaultVcProbe => (
+                "SELECT 1 FROM all_tab_columns \
+                 WHERE owner = 'SYS' AND table_name = 'ALL_TAB_COLS' \
+                   AND column_name = 'DATA_DEFAULT_VC' AND ROWNUM = 1",
+                EMPTY,
+                "probe whether ALL_TAB_COLS exposes bounded default text",
+                InternalProof,
                 Diagnostic,
             ),
             Self::DescribeConstraints => (
@@ -2018,6 +2044,16 @@ order by owner, object_name, line, col"#
             purpose,
             output_policy,
             audit_class,
+        }
+    }
+
+    /// Choose the fixed describe projection supported by the live data dictionary.
+    #[must_use]
+    pub(crate) const fn describe_columns_query(has_data_default_vc: bool) -> Self {
+        if has_data_default_vc {
+            Self::DescribeColumns
+        } else {
+            Self::DescribeColumnsLegacy
         }
     }
 }

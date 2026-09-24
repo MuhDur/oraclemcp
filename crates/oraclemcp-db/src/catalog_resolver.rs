@@ -3695,7 +3695,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 131);
+        assert_eq!(specs.len(), 133);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -3708,15 +3708,39 @@ mod tests {
     }
 
     #[test]
-    fn describe_columns_projects_default_without_returning_a_long() {
-        let sql = CatalogQueryId::DescribeColumns
-            .spec()
-            .sql
-            .to_ascii_lowercase();
+    fn describe_columns_23ai_projection_uses_bounded_default_text() {
+        let id = CatalogQueryId::describe_columns_query(true);
+        assert_eq!(id, CatalogQueryId::DescribeColumns);
+        let sql = id.spec().sql.to_ascii_lowercase();
         assert!(sql.contains("data_default_vc as data_default"));
         assert!(sql.contains("from all_tab_cols"));
         assert!(sql.contains("virtual_column, hidden_column, user_generated"));
         assert!(!sql.contains(", data_default "));
+    }
+
+    #[test]
+    fn describe_columns_18c_and_21c_projection_avoids_default_long() {
+        let id = CatalogQueryId::describe_columns_query(false);
+        assert_eq!(id, CatalogQueryId::DescribeColumnsLegacy);
+        let sql = id.spec().sql.to_ascii_lowercase();
+        assert!(sql.contains("cast(null as varchar2(4000)) as data_default"));
+        assert!(sql.contains("from all_tab_cols"));
+        assert!(sql.contains("virtual_column, hidden_column, user_generated"));
+        assert!(!sql.contains("data_default_vc"));
+        assert!(!sql.contains(", data_default "));
+    }
+
+    #[test]
+    fn describe_default_vc_probe_uses_only_supported_all_dictionary_metadata() {
+        let sql = CatalogQueryId::DescribeDefaultVcProbe
+            .spec()
+            .sql
+            .to_ascii_lowercase();
+        assert!(sql.contains("from all_tab_columns"));
+        assert!(sql.contains("table_name = 'all_tab_cols'"));
+        assert!(sql.contains("column_name = 'data_default_vc'"));
+        assert!(sql.contains("rownum = 1"));
+        assert!(!sql.contains("data_default "));
     }
 
     #[test]

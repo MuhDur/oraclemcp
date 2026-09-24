@@ -433,8 +433,16 @@
    "http"
   ],
   "requires": [],
-  "setup": [],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.D7_SESS_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_SESS_${run_id} PRIMARY KEY)"
+   },
+   {
+    "sql": "CREATE OR REPLACE VIEW ${owner}.V_TYPES_${run_id} AS SELECT ID FROM ${owner}.D7_SESS_${run_id}"
+   }
+  ],
   "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT 1 FROM ALL_VIEWS WHERE OWNER = '${owner}' AND VIEW_NAME = 'V_TYPES_${run_id}'",
   "call": {
    "arguments": {
     "owner": "${owner}",
@@ -457,12 +465,12 @@
     "tool": "oracle_describe",
     "arguments": {
      "owner": "${owner}",
-     "table": "D7_DESC_${run_id}"
+     "table": "D7_SESS_${run_id}"
     },
     "expect": {
      "json_subset": {
       "owner": "${owner}",
-      "table": "D7_DESC_${run_id}"
+      "table": "D7_SESS_${run_id}"
      }
     }
    }
@@ -563,6 +571,30 @@
       "STATUS": "ENABLED"
      }
     ]
+   }
+  },
+  "expect_by_version": {
+   "23": {
+    "json_subset": {
+     "columns": [
+      {"COLUMN_NAME": "ID", "DATA_DEFAULT": null},
+      {"COLUMN_NAME": "LABEL", "DATA_DEFAULT": "'w4' "},
+      {"COLUMN_NAME": "TWICE", "DATA_DEFAULT": "\"ID\"*2"},
+      {"COLUMN_NAME": "PARENT_ID", "DATA_DEFAULT": null},
+      {"COLUMN_NAME": "HIDDEN_NOTE", "DATA_DEFAULT": null}
+     ]
+    }
+   },
+   "pre23": {
+    "json_subset": {
+     "columns": [
+      {"COLUMN_NAME": "ID", "DATA_DEFAULT": null},
+      {"COLUMN_NAME": "LABEL", "DATA_DEFAULT": null},
+      {"COLUMN_NAME": "TWICE", "DATA_DEFAULT": null},
+      {"COLUMN_NAME": "PARENT_ID", "DATA_DEFAULT": null},
+      {"COLUMN_NAME": "HIDDEN_NOTE", "DATA_DEFAULT": null}
+     ]
+    }
    }
   },
   "db_reread": [

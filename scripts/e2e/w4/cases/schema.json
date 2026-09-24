@@ -31,6 +31,10 @@
             "properties": {"arguments": {"type": "object"}, "expect": {"type": "object"}}}}
       }},
       "expect": {"type": "object", "minProperties": 1},
+      "expect_by_version": {"type": "object", "additionalProperties": false,
+        "required": ["23", "pre23"], "properties": {
+          "23": {"type": "object", "minProperties": 1},
+          "pre23": {"type": "object", "minProperties": 1}}},
       "db_reread": {"type": "array", "items": {"type": "object", "required": ["sql", "rows"]}},
       "audit_expect": {"type": "array", "items": {"type": "object", "required": ["tool", "decision", "outcome"]}},
       "audit_zero_executions": {"type": "boolean"},
