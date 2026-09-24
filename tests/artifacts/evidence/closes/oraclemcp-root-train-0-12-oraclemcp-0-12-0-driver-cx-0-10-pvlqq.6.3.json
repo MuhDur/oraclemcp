@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T11:00:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.3",
+  "scope": {
+    "summary": "Every SQL path goes through the read executor with type-level provenance (#53 sample_rows): catalog query registry, privileged-path reclassification at apply, arch-fitness seam lint (1cc68e57), and a registry test that dispatches every runtime tool through the real dispatcher (e87ec6a1).",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests/read_path_registry.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "scripts/oraclemcp_arch_fitness_lint.sh"
+    ],
+    "out_of_scope": [
+      "External-client reachability of the #53 fix (T4.6) and EXPLAIN side-effect freedom (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "e87ec6a121f1912aca08f83ba915d91e1f59506b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at e87ec6a1 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3559 passed, 0 failed; cargo deny OK; every fuzz crate compiles; scripts/oraclemcp_arch_fitness_lint.sh --selftest catches planted raw read calls."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "every_sql_path_goes_through_the_read_executor, unregistered_sql_path_fails_the_registry, every_catalog_query_id_is_registered, privileged_paths_reclassify_at_apply, synthetic_privileged_path_without_reclassification_fails, issue53_sample_rows_refuses_vpd_table_before_execution, issue53_sample_rows_refuses_view_before_execution, issue53_sample_rows_masked_and_certified, read_clob_masked_and_certified: all ok in the gate log."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "First submission (1cc68e57) was sent back: the coverage test never executed a tool. The rework dispatches every name in tool_names() through OracleDispatcher against ProvenanceCheckingConn, fails on any untagged SQL and on a read/catalog route issuing no tagged query, and a planted raw query_rows route is rejected by the same validator."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit + in-process dispatch + lint per the bead; re-executed by the orchestrator, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
