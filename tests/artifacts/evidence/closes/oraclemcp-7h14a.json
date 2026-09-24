@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T21:10:00Z",
+  "bead_id": "oraclemcp-7h14a",
+  "scope": {
+    "summary": "Driver pyshim ThinConnImpl.clear_end_user_security_context no longer returns a silent Ok(()); it returns the same typed PyNotImplementedError as set_end_user_security_context (rust-oracledb b0b88c5). The async delegate (async_conn.rs:495) calls the sync method, so both refuse.",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "Implementing end-user security contexts (unsupported surface, typed refusal)."
+    ]
+  },
+  "source": {
+    "sha": "0f80877c859785efa0628982fce5184bdccddc14",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "driver test (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean rust-oracledb worktree detached at b0b88c5, build lease: cargo test -p oracledb-pyshim --lib clearing_unsupported_end_user_security_context: conn::end_user_security_context_tests::clearing_unsupported_end_user_security_context_refuses_explicitly ok (1 passed). The test expects Err, asserts PyNotImplementedError and the method name in the message - fails against the old Ok(())."
+      },
+      {
+        "name": "diff review",
+        "kind": "cli",
+        "trace": "b0b88c5 changes conn.rs: Ok(()) -> Err(not_implemented(\"ThinConnImpl.clear_end_user_security_context\")) plus the test; async_conn.rs:495 delegates to self.inner.clear_end_user_security_context()."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Unit-level only; the method never reaches the network."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
