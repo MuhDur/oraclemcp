@@ -1412,8 +1412,8 @@ pub async fn describe_constraints(
     .await
 }
 
-/// `get_ddl`: `DBMS_METADATA.GET_DDL` for an object. `object_type` is validated
-/// against the allowlist (it cannot be bound); name + owner are bound.
+/// `get_ddl`: `DBMS_METADATA.GET_DDL` for an object. The type stays allowlisted,
+/// and all three scalar arguments are bound.
 pub async fn get_ddl(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -1429,21 +1429,17 @@ pub async fn get_ddl(
     // DBMS_METADATA returns a CLOB. The thin-driver path intentionally reads a
     // bounded VARCHAR2 prefix, and carries GETLENGTH alongside it so the MCP
     // surface can never silently present a partial document as complete.
-    let sql = format!(
-        "SELECT DBMS_LOB.SUBSTR(ddl, 4000, 1) AS ddl, DBMS_LOB.GETLENGTH(ddl) AS ddl_length \
-         FROM (SELECT DBMS_METADATA.GET_DDL('{}', :1, :2) AS ddl FROM dual)",
-        object_type.to_ascii_uppercase()
-    );
-    let rows = conn
-        .query_rows(
-            cx,
-            &sql,
-            &[
-                OracleBind::from(name.to_ascii_uppercase()),
-                OracleBind::from(owner.to_ascii_uppercase()),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::GetDdl,
+        &[
+            OracleBind::from(object_type.to_ascii_uppercase()),
+            OracleBind::from(name.to_ascii_uppercase()),
+            OracleBind::from(owner.to_ascii_uppercase()),
+        ],
+    )
+    .await?;
     Ok(rows.first().and_then(ddl_text_from_row))
 }
 
@@ -2769,9 +2765,11 @@ mod tests {
         assert_eq!(calls.len(), 1);
         assert!(calls[0].0.contains("DBMS_LOB.SUBSTR(ddl, 4000, 1)"));
         assert!(calls[0].0.contains("DBMS_LOB.GETLENGTH(ddl)"));
+        assert!(calls[0].0.contains("DBMS_METADATA.GET_DDL(:1, :2, :3)"));
         assert_eq!(
             calls[0].1,
             vec![
+                OracleBind::String("PACKAGE".to_owned()),
                 OracleBind::String("PKG_DEMO".to_owned()),
                 OracleBind::String("HR".to_owned()),
             ]

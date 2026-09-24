@@ -189,11 +189,13 @@ pub enum CatalogQueryId {
     SearchSource,
     /// Source lines for one object with nullable line bounds.
     GetSource,
+    /// Bounded DDL text for one allowlisted object type.
+    GetDdl,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 61] = [
+    pub const ALL: [Self; 62] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -255,6 +257,7 @@ impl CatalogQueryId {
         Self::CompileErrors,
         Self::SearchSource,
         Self::GetSource,
+        Self::GetDdl,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -941,6 +944,14 @@ impl CatalogQueryId {
                     CatalogBindKind::NullableInteger,
                 ]),
                 "read source lines for one visible object",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::GetDdl => (
+                "SELECT DBMS_LOB.SUBSTR(ddl, 4000, 1) AS ddl, DBMS_LOB.GETLENGTH(ddl) AS ddl_length \
+         FROM (SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) AS ddl FROM dual)",
+                TTT,
+                "fetch bounded metadata DDL for one allowlisted object",
                 DictionaryMetadata,
                 Diagnostic,
             ),
