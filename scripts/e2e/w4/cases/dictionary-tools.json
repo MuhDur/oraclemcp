@@ -122,78 +122,72 @@
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "object_type": "TABLE"
+    "name_like": "D7%"
    }
   },
   "expect": {
    "json_subset": {
-    "object_type": "TABLE",
     "owner": "${owner}",
+    "name_like": "D7%",
     "truncated": false,
     "objects": [
      {
-      "OBJECT_NAME": "T_AUTO_${run_id}",
+      "OBJECT_NAME": "D7_F_SIDE_${run_id}",
+      "OBJECT_TYPE": "FUNCTION",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_PK_DESC_${run_id}",
+      "OBJECT_TYPE": "INDEX",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_PK_MASK_${run_id}",
+      "OBJECT_TYPE": "INDEX",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_PK_STATS_${run_id}",
+      "OBJECT_TYPE": "INDEX",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_PKG_${run_id}",
+      "OBJECT_TYPE": "PACKAGE",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_PKG_${run_id}",
+      "OBJECT_TYPE": "PACKAGE BODY",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_DESC_${run_id}",
       "OBJECT_TYPE": "TABLE",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      },
      {
-      "OBJECT_NAME": "T_CHILD_AUD_${run_id}",
+      "OBJECT_NAME": "D7_MASKLOB_${run_id}",
       "OBJECT_TYPE": "TABLE",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      },
      {
-      "OBJECT_NAME": "T_CHILD_${run_id}",
+      "OBJECT_NAME": "D7_STATS_${run_id}",
       "OBJECT_TYPE": "TABLE",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      },
      {
-      "OBJECT_NAME": "T_DESC_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_FGA_CANARY_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_FGA_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_MASK_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_PARENT_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_RUN_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_SECURE_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_TYPES_${run_id}",
-      "OBJECT_TYPE": "TABLE",
+      "OBJECT_NAME": "D7_V_SIDE_${run_id}",
+      "OBJECT_TYPE": "VIEW",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      }
@@ -202,40 +196,92 @@
   },
   "db_reread": [
    {
-    "sql": "SELECT OBJECT_NAME FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_TYPE = 'TABLE' ORDER BY OBJECT_NAME",
+    "sql": "SELECT OBJECT_TYPE, OBJECT_NAME FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME LIKE 'D7%' ORDER BY OBJECT_TYPE, OBJECT_NAME",
     "rows": [
      [
-      "T_AUTO_${run_id}"
+      "FUNCTION",
+      "D7_F_SIDE_${run_id}"
      ],
      [
-      "T_CHILD_AUD_${run_id}"
+      "INDEX",
+      "D7_PK_DESC_${run_id}"
      ],
      [
-      "T_CHILD_${run_id}"
+      "INDEX",
+      "D7_PK_MASK_${run_id}"
      ],
      [
-      "T_DESC_${run_id}"
+      "INDEX",
+      "D7_PK_STATS_${run_id}"
      ],
      [
-      "T_FGA_CANARY_${run_id}"
+      "PACKAGE",
+      "D7_PKG_${run_id}"
      ],
      [
-      "T_FGA_${run_id}"
+      "PACKAGE BODY",
+      "D7_PKG_${run_id}"
      ],
      [
-      "T_MASK_${run_id}"
+      "TABLE",
+      "D7_DESC_${run_id}"
      ],
      [
-      "T_PARENT_${run_id}"
+      "TABLE",
+      "D7_MASKLOB_${run_id}"
      ],
      [
-      "T_RUN_${run_id}"
+      "TABLE",
+      "D7_STATS_${run_id}"
      ],
      [
-      "T_SECURE_${run_id}"
-     ],
+      "VIEW",
+      "D7_V_SIDE_${run_id}"
+     ]
+    ]
+   }
+  ],
+  "audit_expect": [],
+  "on_unsupported": {
+   "error_class": "INVALID_ARGUMENTS"
+  }
+ },
+ {
+  "case_id": "w4_schema_inspect_fixture_sequence_by_type",
+  "tool": "oracle_schema_inspect",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [],
+  "setup": [],
+  "call": {
+   "arguments": {
+    "owner": "${owner}",
+    "object_type": "SEQUENCE"
+   }
+  },
+  "expect": {
+   "json_subset": {
+    "object_type": "SEQUENCE",
+    "truncated": false,
+    "objects": [
+     {
+      "OBJECT_NAME": "SEQ_W4_${run_id}",
+      "OBJECT_TYPE": "SEQUENCE",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     }
+    ]
+   }
+  },
+  "db_reread": [
+   {
+    "sql": "SELECT LAST_NUMBER FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER = '${owner}' AND SEQUENCE_NAME = 'SEQ_W4_${run_id}'",
+    "rows": [
      [
-      "T_TYPES_${run_id}"
+      100
      ]
     ]
    }
@@ -258,7 +304,8 @@
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "object_type": "VIEW"
+    "object_type": "VIEW",
+    "name_like": "D7%"
    }
   },
   "expect": {
@@ -267,13 +314,7 @@
     "truncated": false,
     "objects": [
      {
-      "OBJECT_NAME": "V_SIDE_${run_id}",
-      "OBJECT_TYPE": "VIEW",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "V_TYPES_${run_id}",
+      "OBJECT_NAME": "D7_V_SIDE_${run_id}",
       "OBJECT_TYPE": "VIEW",
       "OWNER": "${owner}",
       "STATUS": "VALID"
@@ -301,7 +342,8 @@
    "arguments": {
     "owner": "${owner}",
     "object_type": "TABLE",
-    "max_rows": 3,
+    "name_like": "D7%",
+    "max_rows": 2,
     "cursor": "${cap:cursor}"
    }
   },
@@ -309,25 +351,13 @@
    "json_subset": {
     "objects": [
      {
-      "OBJECT_NAME": "T_DESC_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_FGA_CANARY_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "T_FGA_${run_id}",
+      "OBJECT_NAME": "D7_STATS_${run_id}",
       "OBJECT_TYPE": "TABLE",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      }
     ],
-    "truncated": true
+    "truncated": false
    }
   },
   "db_reread": [],
@@ -341,25 +371,20 @@
     "arguments": {
      "owner": "${owner}",
      "object_type": "TABLE",
-     "max_rows": 3
+     "name_like": "D7%",
+     "max_rows": 2
     },
     "expect": {
      "json_subset": {
       "objects": [
        {
-        "OBJECT_NAME": "T_AUTO_${run_id}",
+        "OBJECT_NAME": "D7_DESC_${run_id}",
         "OBJECT_TYPE": "TABLE",
         "OWNER": "${owner}",
         "STATUS": "VALID"
        },
        {
-        "OBJECT_NAME": "T_CHILD_AUD_${run_id}",
-        "OBJECT_TYPE": "TABLE",
-        "OWNER": "${owner}",
-        "STATUS": "VALID"
-       },
-       {
-        "OBJECT_NAME": "T_CHILD_${run_id}",
+        "OBJECT_NAME": "D7_MASKLOB_${run_id}",
         "OBJECT_TYPE": "TABLE",
         "OWNER": "${owner}",
         "STATUS": "VALID"
@@ -410,19 +435,19 @@
   "requires": [],
   "setup": [
    {
-    "sql": "CREATE TABLE ${owner}.T_DESC_${run_id} (ID NUMBER(10) CONSTRAINT PK_DESC_${run_id} PRIMARY KEY, LABEL VARCHAR2(40) DEFAULT 'w4' NOT NULL, TWICE NUMBER GENERATED ALWAYS AS (ID * 2) VIRTUAL, HIDDEN_NOTE VARCHAR2(10) INVISIBLE, PARENT_ID NUMBER(10) CONSTRAINT FK_DESC_${run_id} REFERENCES ${owner}.T_PARENT_${run_id}(ID), CONSTRAINT CK_DESC_${run_id} CHECK (ID > 0))"
+    "sql": "CREATE TABLE ${owner}.D7_DESC_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_DESC_${run_id} PRIMARY KEY, LABEL VARCHAR2(40) DEFAULT 'w4' NOT NULL, TWICE NUMBER GENERATED ALWAYS AS (ID * 2) VIRTUAL, HIDDEN_NOTE VARCHAR2(10) INVISIBLE, PARENT_ID NUMBER(10) CONSTRAINT D7_FK_DESC_${run_id} REFERENCES ${owner}.T_PARENT_${run_id}(ID), CONSTRAINT D7_CK_DESC_${run_id} CHECK (ID > 0))"
    }
   ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "table": "T_DESC_${run_id}"
+    "table": "D7_DESC_${run_id}"
    }
   },
   "expect": {
    "json_subset": {
     "owner": "${owner}",
-    "table": "T_DESC_${run_id}",
+    "table": "D7_DESC_${run_id}",
     "constraints_truncated": false,
     "columns": [
      {
@@ -463,7 +488,7 @@
     ],
     "constraints": [
      {
-      "CONSTRAINT_NAME": "CK_DESC_${run_id}",
+      "CONSTRAINT_NAME": "D7_CK_DESC_${run_id}",
       "CONSTRAINT_TYPE": "C",
       "COLUMN_NAME": "ID",
       "GENERATED": "USER NAME",
@@ -471,7 +496,7 @@
       "VALIDATED": "VALIDATED"
      },
      {
-      "CONSTRAINT_NAME": "FK_DESC_${run_id}",
+      "CONSTRAINT_NAME": "D7_FK_DESC_${run_id}",
       "CONSTRAINT_TYPE": "R",
       "COLUMN_NAME": "PARENT_ID",
       "R_OWNER": "${owner}",
@@ -480,7 +505,7 @@
       "STATUS": "ENABLED"
      },
      {
-      "CONSTRAINT_NAME": "PK_DESC_${run_id}",
+      "CONSTRAINT_NAME": "D7_PK_DESC_${run_id}",
       "CONSTRAINT_TYPE": "P",
       "COLUMN_NAME": "ID",
       "POSITION": "1",
@@ -498,7 +523,7 @@
   },
   "db_reread": [
    {
-    "sql": "SELECT COLUMN_NAME, VIRTUAL_COLUMN, HIDDEN_COLUMN FROM ALL_TAB_COLS WHERE OWNER = '${owner}' AND TABLE_NAME = 'T_DESC_${run_id}' AND COLUMN_NAME IN ('TWICE', 'HIDDEN_NOTE') ORDER BY COLUMN_NAME",
+    "sql": "SELECT COLUMN_NAME, VIRTUAL_COLUMN, HIDDEN_COLUMN FROM ALL_TAB_COLS WHERE OWNER = '${owner}' AND TABLE_NAME = 'D7_DESC_${run_id}' AND COLUMN_NAME IN ('TWICE', 'HIDDEN_NOTE') ORDER BY COLUMN_NAME",
     "rows": [
      [
       "HIDDEN_NOTE",
@@ -533,7 +558,7 @@
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "table": "T_DESC_${run_id}"
+    "table": "D7_DESC_${run_id}"
    }
   },
   "expect": {
@@ -975,16 +1000,16 @@
   "requires": [],
   "setup": [
    {
-    "sql": "CREATE TABLE ${owner}.T_MASK_${run_id} (ID NUMBER(10) CONSTRAINT PK_MASK_${run_id} PRIMARY KEY, SECRET_TEXT CLOB)"
+    "sql": "CREATE TABLE ${owner}.D7_MASKLOB_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_MASK_${run_id} PRIMARY KEY, SECRET_TEXT CLOB)"
    },
    {
-    "sql": "INSERT INTO ${owner}.T_MASK_${run_id} (ID, SECRET_TEXT) VALUES (1, 'W4_MASK_CANARY_' || '${run_id}')"
+    "sql": "INSERT INTO ${owner}.D7_MASKLOB_${run_id} (ID, SECRET_TEXT) VALUES (1, 'W4_MASK_CANARY_' || '${run_id}')"
    }
   ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "table": "T_MASK_${run_id}",
+    "table": "D7_MASKLOB_${run_id}",
     "max_rows": 5
    }
   },
@@ -1020,7 +1045,7 @@
   },
   "db_reread": [
    {
-    "sql": "SELECT COUNT(*) FROM ${owner}.T_MASK_${run_id} WHERE DBMS_LOB.INSTR(SECRET_TEXT, 'W4_MASK_CANARY_') = 1",
+    "sql": "SELECT COUNT(*) FROM ${owner}.D7_MASKLOB_${run_id} WHERE DBMS_LOB.INSTR(SECRET_TEXT, 'W4_MASK_CANARY_') = 1",
     "rows": [
      [
       1
@@ -1046,16 +1071,16 @@
   "requires": [],
   "setup": [
    {
-    "sql": "CREATE OR REPLACE FUNCTION ${owner}.F_SIDE_${run_id}(P_ID NUMBER) RETURN NUMBER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (P_ID); COMMIT; RETURN P_ID; END;"
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.D7_F_SIDE_${run_id}(P_ID NUMBER) RETURN NUMBER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (P_ID); COMMIT; RETURN P_ID; END;"
    },
    {
-    "sql": "CREATE OR REPLACE VIEW ${owner}.V_SIDE_${run_id} AS SELECT ID, ${owner}.F_SIDE_${run_id}(ID) AS SIDE_ID FROM ${owner}.T_PARENT_${run_id}"
+    "sql": "CREATE OR REPLACE VIEW ${owner}.D7_V_SIDE_${run_id} AS SELECT ID, ${owner}.D7_F_SIDE_${run_id}(ID) AS SIDE_ID FROM ${owner}.T_PARENT_${run_id}"
    }
   ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "table": "V_SIDE_${run_id}",
+    "table": "D7_V_SIDE_${run_id}",
     "max_rows": 5
    }
   },
@@ -1163,16 +1188,16 @@
   ],
   "setup": [
    {
-    "sql": "CREATE TABLE ${cross}.T_VEC_${run_id} (ID NUMBER(10) CONSTRAINT PK_VEC_${run_id} PRIMARY KEY, J_VAL JSON, VEC_VAL VECTOR(3, FLOAT32))"
+    "sql": "CREATE TABLE ${cross}.D7_VEC_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_VEC_${run_id} PRIMARY KEY, J_VAL JSON, VEC_VAL VECTOR(3, FLOAT32))"
    },
    {
-    "sql": "INSERT INTO ${cross}.T_VEC_${run_id} (ID, J_VAL, VEC_VAL) VALUES (1, JSON('{\"kind\":\"fixture\"}'), TO_VECTOR('[1,0,0]', 3, FLOAT32))"
+    "sql": "INSERT INTO ${cross}.D7_VEC_${run_id} (ID, J_VAL, VEC_VAL) VALUES (1, JSON('{\"kind\":\"fixture\"}'), TO_VECTOR('[1,0,0]', 3, FLOAT32))"
    }
   ],
   "call": {
    "arguments": {
     "owner": "${cross}",
-    "table": "T_VEC_${run_id}",
+    "table": "D7_VEC_${run_id}",
     "max_rows": 1
    }
   },
@@ -1415,7 +1440,7 @@
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "table": "T_MASK_${run_id}",
+    "table": "D7_MASKLOB_${run_id}",
     "clob_column": "SECRET_TEXT",
     "pk_column": "ID",
     "pk_value": "1",
@@ -1462,33 +1487,39 @@
   "requires": [],
   "setup": [
    {
-    "sql": "ALTER PACKAGE ${owner}.PKG_W4_${run_id} COMPILE PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL'"
+    "sql": "CREATE OR REPLACE PACKAGE ${owner}.D7_PKG_${run_id} AS\n  FUNCTION TWICE(P_N NUMBER) RETURN NUMBER;\n  PROCEDURE PING;\nEND;"
+   },
+   {
+    "sql": "CREATE OR REPLACE PACKAGE BODY ${owner}.D7_PKG_${run_id} AS\n  FUNCTION TWICE(P_N NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_N * 2;\n  END;\n  PROCEDURE PING IS BEGIN EXECUTE IMMEDIATE 'SELECT 1 FROM DUAL'; END;\nEND;"
+   },
+   {
+    "sql": "ALTER PACKAGE ${owner}.D7_PKG_${run_id} COMPILE PLSCOPE_SETTINGS = 'IDENTIFIERS:ALL'"
    }
   ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "name": "PKG_W4_${run_id}",
+    "name": "D7_PKG_${run_id}",
     "max_rows": 200
    }
   },
   "expect": {
    "json_subset": {
     "owner": "${owner}",
-    "name": "PKG_W4_${run_id}",
-    "identifier_count": 60,
+    "name": "D7_PKG_${run_id}",
+    "identifier_count": 13,
     "dynamic_sql_lines": [
-     14
+     6
     ],
     "identifiers_truncated": false
    }
   },
   "db_reread": [
    {
-    "sql": "SELECT COUNT(*) FROM ALL_IDENTIFIERS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'PKG_W4_${run_id}'",
+    "sql": "SELECT COUNT(*) FROM ALL_IDENTIFIERS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'D7_PKG_${run_id}'",
     "rows": [
      [
-      60
+      13
      ]
     ]
    }
@@ -1498,7 +1529,7 @@
    "error_class": "INVALID_ARGUMENTS"
   },
   "setup_phase": "before_server",
-  "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ROWNUM <= 1"
+  "setup_ready_sql": "SELECT COUNT(*) FROM ALL_IDENTIFIERS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'D7_PKG_${run_id}'"
  },
  {
   "case_id": "w4_plscope_inspect_no_plscope_data_typed_result",
@@ -1553,13 +1584,22 @@
   "requires": [],
   "setup": [
    {
-    "sql": "BEGIN DBMS_STATS.GATHER_TABLE_STATS('${owner}', 'T_PARENT_${run_id}'); END;"
+    "sql": "CREATE TABLE ${owner}.D7_STATS_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_STATS_${run_id} PRIMARY KEY, LABEL VARCHAR2(40))"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.D7_STATS_${run_id} (ID, LABEL) SELECT LEVEL, 'd7-' || LEVEL FROM DUAL CONNECT BY LEVEL <= 2"
+   },
+   {
+    "sql": "COMMENT ON TABLE ${owner}.D7_STATS_${run_id} IS 'W4 dictionary stats ${run_id}'"
+   },
+   {
+    "sql": "BEGIN DBMS_STATS.GATHER_TABLE_STATS('${owner}', 'D7_STATS_${run_id}'); END;"
    }
   ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "name_like": "T_PARENT_${run_id}",
+    "name_like": "D7_STATS_${run_id}",
     "detail_level": "full"
    }
   },
@@ -1569,12 +1609,12 @@
     "detail_level": "full",
     "results": [
      {
-      "object_name": "T_PARENT_${run_id}",
+      "object_name": "D7_STATS_${run_id}",
       "object_type": "TABLE",
       "owner": "${owner}",
       "status": "VALID",
       "column_count": 2,
-      "comment": "W4 run ${run_id}",
+      "comment": "W4 dictionary stats ${run_id}",
       "num_rows": 2,
       "row_count_is_estimate": true,
       "stats_stale": false,
@@ -1595,6 +1635,7 @@
         "columns": [
          "ID"
         ],
+        "name": "D7_PK_STATS_${run_id}",
         "uniqueness": "UNIQUE"
        }
       ]
@@ -1604,11 +1645,11 @@
   },
   "db_reread": [
    {
-    "sql": "SELECT T.NUM_ROWS, C.COMMENTS FROM ALL_TABLES T JOIN ALL_TAB_COMMENTS C ON C.OWNER = T.OWNER AND C.TABLE_NAME = T.TABLE_NAME WHERE T.OWNER = '${owner}' AND T.TABLE_NAME = 'T_PARENT_${run_id}'",
+    "sql": "SELECT T.NUM_ROWS, C.COMMENTS FROM ALL_TABLES T JOIN ALL_TAB_COMMENTS C ON C.OWNER = T.OWNER AND C.TABLE_NAME = T.TABLE_NAME WHERE T.OWNER = '${owner}' AND T.TABLE_NAME = 'D7_STATS_${run_id}'",
     "rows": [
      [
       2,
-      "W4 run ${run_id}"
+      "W4 dictionary stats ${run_id}"
      ]
     ]
    }
@@ -1618,7 +1659,7 @@
    "error_class": "INVALID_ARGUMENTS"
   },
   "setup_phase": "before_server",
-  "setup_ready_sql": "SELECT NUM_ROWS FROM ALL_TABLES WHERE OWNER = '${owner}' AND TABLE_NAME = 'T_PARENT_${run_id}'"
+  "setup_ready_sql": "SELECT NUM_ROWS FROM ALL_TABLES WHERE OWNER = '${owner}' AND TABLE_NAME = 'D7_STATS_${run_id}'"
  },
  {
   "case_id": "w4_search_objects_detail_summary_view",
@@ -1669,7 +1710,7 @@
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "name_like": "%_${run_id}",
+    "name_like": "D7%",
     "object_type": "INDEX",
     "detail_level": "names"
    }
@@ -1679,19 +1720,19 @@
     "count": 3,
     "results": [
      {
-      "object_name": "IX_TYPES_${run_id}",
+      "object_name": "D7_PK_DESC_${run_id}",
       "object_type": "INDEX",
       "owner": "${owner}",
       "status": "VALID"
      },
      {
-      "object_name": "PK_DESC_${run_id}",
+      "object_name": "D7_PK_MASK_${run_id}",
       "object_type": "INDEX",
       "owner": "${owner}",
       "status": "VALID"
      },
      {
-      "object_name": "PK_MASK_${run_id}",
+      "object_name": "D7_PK_STATS_${run_id}",
       "object_type": "INDEX",
       "owner": "${owner}",
       "status": "VALID"
