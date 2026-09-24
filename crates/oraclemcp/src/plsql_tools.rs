@@ -400,7 +400,7 @@ impl PlsqlSideEffectOracle {
     }
 
     fn routine_edge_purity(&self, edge: &Edge, stack: &mut HashSet<WalkKey>) -> Purity {
-        if is_write_edge(edge.kind) {
+        if is_proven_side_effect_edge(edge.kind) {
             return Purity::ProvenSideEffecting;
         }
         if !is_high_confidence(edge) {
@@ -426,15 +426,25 @@ impl PlsqlSideEffectOracle {
             | EdgeKind::Constrains
             | EdgeKind::OpaqueDynamic
             | EdgeKind::DbLink => Purity::Unknown,
+            EdgeKind::UnresolvedDynamicSql | EdgeKind::UnresolvedCallee => Purity::Unknown,
             EdgeKind::Writes
             | EdgeKind::WritesColumn
             | EdgeKind::WritesUnknownColumnOfTable
-            | EdgeKind::DerivesColumn => Purity::ProvenSideEffecting,
+            | EdgeKind::DerivesColumn
+            | EdgeKind::TransactionControl
+            | EdgeKind::Autonomous
+            | EdgeKind::SequenceAdvance
+            | EdgeKind::RowLock
+            | EdgeKind::SessionState
+            | EdgeKind::Ddl
+            | EdgeKind::Admin
+            | EdgeKind::OperatorOnly
+            | EdgeKind::ExternalIo => Purity::ProvenSideEffecting,
         }
     }
 
     fn statement_edge_purity(&self, edge: &Edge, stack: &mut HashSet<WalkKey>) -> Purity {
-        if is_write_edge(edge.kind) {
+        if is_proven_side_effect_edge(edge.kind) {
             return Purity::ProvenSideEffecting;
         }
         if !is_high_confidence(edge) {
@@ -451,10 +461,20 @@ impl PlsqlSideEffectOracle {
             | EdgeKind::Constrains
             | EdgeKind::OpaqueDynamic
             | EdgeKind::DbLink => Purity::Unknown,
+            EdgeKind::UnresolvedDynamicSql | EdgeKind::UnresolvedCallee => Purity::Unknown,
             EdgeKind::Writes
             | EdgeKind::WritesColumn
             | EdgeKind::WritesUnknownColumnOfTable
-            | EdgeKind::DerivesColumn => Purity::ProvenSideEffecting,
+            | EdgeKind::DerivesColumn
+            | EdgeKind::TransactionControl
+            | EdgeKind::Autonomous
+            | EdgeKind::SequenceAdvance
+            | EdgeKind::RowLock
+            | EdgeKind::SessionState
+            | EdgeKind::Ddl
+            | EdgeKind::Admin
+            | EdgeKind::OperatorOnly
+            | EdgeKind::ExternalIo => Purity::ProvenSideEffecting,
         }
     }
 
@@ -610,13 +630,22 @@ fn combine_purity(left: Purity, right: Purity) -> Purity {
     }
 }
 
-fn is_write_edge(kind: EdgeKind) -> bool {
+fn is_proven_side_effect_edge(kind: EdgeKind) -> bool {
     matches!(
         kind,
         EdgeKind::Writes
             | EdgeKind::WritesColumn
             | EdgeKind::WritesUnknownColumnOfTable
             | EdgeKind::DerivesColumn
+            | EdgeKind::TransactionControl
+            | EdgeKind::Autonomous
+            | EdgeKind::SequenceAdvance
+            | EdgeKind::RowLock
+            | EdgeKind::SessionState
+            | EdgeKind::Ddl
+            | EdgeKind::Admin
+            | EdgeKind::OperatorOnly
+            | EdgeKind::ExternalIo
     )
 }
 
@@ -3143,6 +3172,67 @@ mod tests {
             DangerLevel::Guarded,
             "an unresolved routine remains Unknown and guarded"
         );
+    }
+
+    #[test]
+    fn new_engine_effect_edges_never_prove_a_routine_read_only() {
+        let side_effecting = [
+            EdgeKind::TransactionControl,
+            EdgeKind::Autonomous,
+            EdgeKind::SequenceAdvance,
+            EdgeKind::RowLock,
+            EdgeKind::SessionState,
+            EdgeKind::Ddl,
+            EdgeKind::Admin,
+            EdgeKind::OperatorOnly,
+            EdgeKind::ExternalIo,
+        ];
+        for (index, kind) in side_effecting.into_iter().enumerate() {
+            let mut graph = DepGraph::new();
+            add_node(
+                &mut graph,
+                1,
+                "APP.CALLER",
+                NodeIdentityKind::StandaloneFunction,
+            );
+            add_node(&mut graph, 2, "APP.DEPENDENCY", NodeIdentityKind::Table);
+            add_edge(&mut graph, 1, 1, 2, kind);
+
+            let oracle = PlsqlSideEffectOracle::from_analysis_run(&analysis_run(
+                graph,
+                Some(empty_catalog()),
+            ));
+            assert_eq!(
+                oracle.routine_purity(&ObjectRef::parse("APP.CALLER")),
+                Purity::ProvenSideEffecting,
+                "{kind:?} must tighten routine purity (case {index})"
+            );
+        }
+
+        for (index, kind) in [EdgeKind::UnresolvedDynamicSql, EdgeKind::UnresolvedCallee]
+            .into_iter()
+            .enumerate()
+        {
+            let mut graph = DepGraph::new();
+            add_node(
+                &mut graph,
+                1,
+                "APP.CALLER",
+                NodeIdentityKind::StandaloneFunction,
+            );
+            add_node(&mut graph, 2, "APP.DEPENDENCY", NodeIdentityKind::Table);
+            add_edge(&mut graph, 1, 1, 2, kind);
+
+            let oracle = PlsqlSideEffectOracle::from_analysis_run(&analysis_run(
+                graph,
+                Some(empty_catalog()),
+            ));
+            assert_eq!(
+                oracle.routine_purity(&ObjectRef::parse("APP.CALLER")),
+                Purity::Unknown,
+                "{kind:?} must remain unknown (case {index})"
+            );
+        }
     }
 
     #[test]
