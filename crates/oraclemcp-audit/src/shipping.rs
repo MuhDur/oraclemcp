@@ -91,7 +91,7 @@ fn run_worm_parent_open_hook() {
     });
 }
 
-#[cfg(not(all(test, unix)))]
+#[cfg(all(unix, not(test)))]
 fn run_worm_parent_open_hook() {}
 
 /// A shipping (forwarding) failure. Distinct from [`AuditError`] because a

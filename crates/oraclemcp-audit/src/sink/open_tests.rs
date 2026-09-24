@@ -1,6 +1,5 @@
 use super::*;
 
-#[cfg(unix)]
 #[test]
 fn recreated_audit_and_lock_entries_fsync_the_parent_from_actual_open_outcomes() {
     use std::os::unix::fs::PermissionsExt as _;
