@@ -4958,6 +4958,15 @@ fn ensure_read_only(sql: &str) -> Result<(), ErrorEnvelope> {
         .map_err(|envelope| attach_parameterization_hint(envelope, sql))
 }
 
+fn is_read_query_candidate(sql: &str) -> bool {
+    let sql_head = sql.trim_start();
+    ["SELECT", "WITH"].iter().any(|keyword| {
+        sql_head
+            .get(..keyword.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(keyword))
+    })
+}
+
 fn unresolved_semantic_read(reason: &'static str) -> ErrorEnvelope {
     ErrorEnvelope::new(
         ErrorClass::ForbiddenStatement,
@@ -14194,13 +14203,7 @@ impl OracleDispatcher {
             }
             "oracle_explain_plan" => {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
-                let sql_head = a.sql.trim_start();
-                let is_query_candidate = ["SELECT", "WITH"].iter().any(|keyword| {
-                    sql_head
-                        .get(..keyword.len())
-                        .is_some_and(|head| head.eq_ignore_ascii_case(keyword))
-                });
-                if !is_query_candidate {
+                if !is_read_query_candidate(&a.sql) {
                     ensure_read_only(&a.sql)?;
                 }
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;

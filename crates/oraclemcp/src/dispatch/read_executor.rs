@@ -1023,7 +1023,10 @@ impl<'a> GuardedReadExecutor<'a> {
             let cost_gate_requested = parsed.max_query_cost.is_some()
                 || self.max_query_cost()?.is_some()
                 || self.cumulative_query_cost_budget()?.is_some();
-            if cost_gate_requested && base_decision.danger != DangerLevel::Safe {
+            if cost_gate_requested
+                && super::is_read_query_candidate(&executed_sql)
+                && base_decision.danger != DangerLevel::Safe
+            {
                 let relations = resolve_hard_parse_relations(
                     cx,
                     state.conn.as_ref(),
