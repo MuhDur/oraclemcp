@@ -35,4 +35,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "grant_scope_match"
+path = "fuzz_targets/grant_scope_match.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

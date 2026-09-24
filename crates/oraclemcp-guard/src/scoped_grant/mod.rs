@@ -40,6 +40,7 @@
 //! status serialization or error text; they are zeroized when dropped.
 
 mod authorization;
+pub mod matcher;
 mod signed_ref;
 mod store;
 
@@ -57,6 +58,10 @@ use crate::levels::OperatingLevel;
 use crate::resolver::CatalogGeneration;
 
 pub use authorization::{ScopedGrantId, WriteAuthRefusal, WriteAuthorization, authorize_level};
+pub use matcher::{
+    AssignedValue, GrantMatch, GrantMismatch, ResolvedDmlTarget, SetExpressionKind, match_sql,
+    match_statement,
+};
 pub use signed_ref::{SCOPED_GRANT_TOKEN_SCOPE, SignedGrantRef};
 pub use store::{
     GrantState, MAX_LIVE_SCOPED_GRANTS, ScopedGrantLookupError, ScopedGrantStore,
