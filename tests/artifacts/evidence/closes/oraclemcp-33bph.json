@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T06:55:00Z",
+  "bead_id": "oraclemcp-33bph",
+  "scope": {
+    "summary": "Typed resolved local SYS-owner proof in fga_closure: SYS-owned local relations need no FGA catalog probe (Oracle refuses FGA policies on SYS objects, ORA-46399); non-SYS, mixed, lowercase-spoofed, remote or unresolved identities keep the existing probe/refusal (555864bd).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs"
+    ],
+    "out_of_scope": [
+      "External-client proof of SELECT 1 FROM DUAL for a least-privilege account (R36 .6.12 already admits it with an observation; this bead removes the observation for SYS-only reads)."
+    ]
+  },
+  "source": {
+    "sha": "2a6f4021c9a2563cb3a2f8f6691fa01d9c45992f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 2a6f4021 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3551 passed, 1 failed; cargo deny OK. The single failure is http::tests::current_multi_job_taxonomy_maps_only_exact_per_job_heartbeat_evidence (hard-coded fuzz shard count, .15.5), unrelated to this bead."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "catalog_resolver::tests::fga_sys_owned_local_relation_needs_no_catalog_probe, fga_mixed_sys_and_non_sys_relations_still_probe_non_sys, fga_sys_owner_without_exact_local_identity_stays_unknown, fga_owner_spelled_like_sys_is_not_the_sys_owner_proof: all ok in the gate log."
+      },
+      {
+        "name": "live premise (implementer)",
+        "kind": "cli",
+        "trace": "Implementer-reported live FREE23 23.0: DBMS_FGA.ADD_POLICY on SYS.DUAL returned ORA-46399 and DBA_AUDIT_POLICIES held 0 rows for the probe name. Not re-executed by the orchestrator; it is the documented Oracle rule the code relies on, not the bead's proof."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Unit proof re-executed by the orchestrator in the batch gate; the ORA-46399 premise is implementer-reported."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
