@@ -141,7 +141,12 @@ fn scalar_rhs(expr: &Expr) -> bool {
 
 /// Independent structural assertions over the original AST and match output.
 /// This does not reuse the matcher's helper functions.
-fn admitted_shape_oracle(sql: &str, matched: &GrantMatch, resolved: &ResolvedDmlTarget) {
+fn admitted_shape_oracle(
+    sql: &str,
+    matched: &GrantMatch,
+    resolved: &ResolvedDmlTarget,
+    grant: &ScopedGrant,
+) {
     let parsed = Parser::parse_sql(&OracleDialect {}, sql).expect("matched SQL must parse");
     assert_eq!(parsed.len(), 1);
     let statement = match &parsed[0] {
@@ -167,6 +172,7 @@ fn admitted_shape_oracle(sql: &str, matched: &GrantMatch, resolved: &ResolvedDml
         panic!("grant carried only UPDATE but matched another verb");
     };
     assert_eq!(matched.verb(), GrantVerb::Update);
+    assert_eq!(matched.target(), grant.target());
     assert_eq!(matched.target(), &resolved.identity);
     assert_eq!(resolved.object_kind, CatalogObjectKind::Table);
     assert!(update.returning.is_none());
@@ -225,8 +231,9 @@ fn admitted_shape_oracle(sql: &str, matched: &GrantMatch, resolved: &ResolvedDml
 fuzz_target!(|data: &[u8]| {
     if let Ok(sql) = std::str::from_utf8(data) {
         let resolved = resolved();
-        if let Ok(matched) = match_sql(grant(), sql, &resolved) {
-            admitted_shape_oracle(sql, &matched, &resolved);
+        let grant = grant();
+        if let Ok(matched) = match_sql(grant, sql, &resolved) {
+            admitted_shape_oracle(sql, &matched, &resolved, grant);
         }
     }
 
@@ -322,5 +329,5 @@ fuzz_target!(|data: &[u8]| {
     };
     let grant = grant_for(resolved.identity.clone());
     let matched = match_sql(&grant, sql, &resolved).expect("approved identifier variant");
-    admitted_shape_oracle(sql, &matched, &resolved);
+    admitted_shape_oracle(sql, &matched, &resolved, &grant);
 });
