@@ -51,7 +51,7 @@ scan_paths() {
     printf '%s\0' "$SECRET_SCAN_SELFTEST_PATH"
     return
   fi
-  if [[ -d .git ]]; then
+  if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git ls-files -z
   else
     find . -type f \
