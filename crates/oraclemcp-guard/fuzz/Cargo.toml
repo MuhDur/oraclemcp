@@ -42,4 +42,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "grant_predicate"
+path = "fuzz_targets/grant_predicate.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]

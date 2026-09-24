@@ -41,6 +41,7 @@
 
 mod authorization;
 pub mod matcher;
+pub mod predicate;
 mod signed_ref;
 mod store;
 
@@ -61,6 +62,11 @@ pub use authorization::{ScopedGrantId, WriteAuthRefusal, WriteAuthorization, aut
 pub use matcher::{
     AssignedValue, GrantMatch, GrantMismatch, ResolvedDmlTarget, SetExpressionKind, match_sql,
     match_statement,
+};
+pub use predicate::{
+    GrantBind, GrantPredicateBuilder, PredicateColumnType, PredicateConjunctRequest,
+    PredicateExpressionRequest, PredicateInputValue, PredicateOperator, PredicateRefusal,
+    ResolvedColumns, compose_where, render_ast,
 };
 pub use signed_ref::{SCOPED_GRANT_TOKEN_SCOPE, SignedGrantRef};
 pub use store::{
@@ -481,6 +487,8 @@ pub enum GrantValueKind {
     Text,
     /// Oracle `DATE`, canonical `YYYY-MM-DDTHH:MM:SS`.
     Date,
+    /// Oracle `TIMESTAMP`, canonical local ISO-8601 wall time.
+    Timestamp,
 }
 
 impl GrantValueKind {
@@ -491,6 +499,7 @@ impl GrantValueKind {
             GrantValueKind::Number => "NUMBER",
             GrantValueKind::Text => "TEXT",
             GrantValueKind::Date => "DATE",
+            GrantValueKind::Timestamp => "TIMESTAMP",
         }
     }
 }
@@ -549,6 +558,22 @@ impl GrantValue {
         }
         Ok(GrantValue {
             kind: GrantValueKind::Date,
+            text,
+        })
+    }
+
+    /// An Oracle `TIMESTAMP` in canonical local ISO-8601 form. The value has
+    /// no time-zone suffix; a `TIMESTAMP WITH TIME ZONE` is a different type.
+    pub fn timestamp(canonical: impl Into<String>) -> Result<Self, ScopedGrantError> {
+        let mut text = canonical.into();
+        if !is_canonical_timestamp(&text) {
+            text.zeroize();
+            return Err(ScopedGrantError::InvalidValue {
+                kind: GrantValueKind::Timestamp,
+            });
+        }
+        Ok(GrantValue {
+            kind: GrantValueKind::Timestamp,
             text,
         })
     }
@@ -619,6 +644,48 @@ fn is_canonical_date(text: &str) -> bool {
             13 | 16 => *b == b':',
             _ => b.is_ascii_digit(),
         })
+}
+
+fn is_canonical_timestamp(text: &str) -> bool {
+    let (date, time) = match text.split_once('T') {
+        Some(parts) => parts,
+        None => return false,
+    };
+    let date_bytes = date.as_bytes();
+    if date_bytes.len() != 10
+        || date_bytes[4] != b'-'
+        || date_bytes[7] != b'-'
+        || !date_bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let (clock, fraction) = match time.split_once('.') {
+        Some((clock, fraction)) => (clock, Some(fraction)),
+        None => (time, None),
+    };
+    let clock_bytes = clock.as_bytes();
+    if clock_bytes.len() != 8
+        || clock_bytes[2] != b':'
+        || clock_bytes[5] != b':'
+        || !clock_bytes
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| matches!(index, 2 | 5) || byte.is_ascii_digit())
+    {
+        return false;
+    }
+    match fraction {
+        Some(fraction) => {
+            !fraction.is_empty()
+                && fraction.len() <= 9
+                && fraction.bytes().all(|byte| byte.is_ascii_digit())
+                && !fraction.ends_with('0')
+        }
+        None => true,
+    }
 }
 
 /// The operand of one comparison.
