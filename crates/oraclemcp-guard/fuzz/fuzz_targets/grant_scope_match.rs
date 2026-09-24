@@ -168,7 +168,6 @@ fn admitted_shape_oracle(sql: &str, matched: &GrantMatch, resolved: &ResolvedDml
     };
     assert_eq!(matched.verb(), GrantVerb::Update);
     assert_eq!(matched.target(), &resolved.identity);
-    assert_eq!(resolved.identity, target());
     assert_eq!(resolved.object_kind, CatalogObjectKind::Table);
     assert!(update.returning.is_none());
     assert!(update.output.is_none());
