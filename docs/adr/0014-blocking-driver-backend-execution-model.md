@@ -357,5 +357,26 @@ exact baseline; `successful_official_setup_releases_its_connect_guard_slot` and
 `actor_spawn_failure_returns_the_reserved_connect_guard_slot` cover the healthy
 and spawn-failure releases. `exhausted_official_connect_guard_falls_back_to_driver_cx_once`
 proves the driver-cx-primary, official-alternate, and one-fresh-driver-cx
-sequence. No query, execute, transaction, guard, audit, or dispatch call site
-changes.
+sequence. A caller with an absolute request deadline races the actor reply
+against its remaining budget; when that deadline expires during the synchronous
+handshake, the caller receives a typed cancellation and quarantines the actor
+without releasing the connect slot early.
+
+### Residual upstream limit (mitigated)
+
+The pinned upstream connect still cannot be cancelled once it is blocked in a
+TCP/TNS/TLS handshake. The adapter contains that limit: at most **two** official
+connect threads can remain stuck process-wide; waiting for a slot is capped at
+**250 ms** (or the shorter caller deadline); a saturated router acquisition
+makes exactly one fresh driver-cx fallback. A timed-out actor keeps its slot
+until the peer closes or the operating system's TCP timeout retires the
+upstream call. The request caller returns at its deadline without waiting for
+that thread, and its actor is discarded rather than reused.
+
+Real loopback TCP blackhole regressions are
+`official_connect_blackhole_returns_within_deadline`,
+`official_connect_blackhole_caps_stuck_actors_at_two`,
+`official_connect_blackhole_third_acquire_falls_back_to_driver_cx_once`,
+`official_connect_blackhole_slots_recover_after_peer_close`, and
+`official_connect_blackhole_never_reuses_stuck_session`. These tests do not
+claim that an individual upstream connect can be cancelled.

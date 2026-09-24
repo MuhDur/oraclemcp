@@ -310,7 +310,40 @@ where
             .await
             .map_err(|error| self.send_error(error))?;
 
-        match reply_rx.recv(cx).await {
+        let reply = if let Some(deadline) = deadline {
+            let now = cx.now();
+            let remaining =
+                Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos()));
+            let receive_cx = cx.clone();
+            match cx
+                .race_timeout(
+                    remaining,
+                    vec![Box::pin(async move { reply_rx.recv(&receive_cx).await })],
+                )
+                .await
+            {
+                Ok(reply) => reply,
+                Err(_) => {
+                    let deadline_elapsed = cx.now() >= deadline;
+                    let reason = if deadline_elapsed {
+                        "official Oracle actor caller deadline elapsed while the operation was in flight"
+                    } else {
+                        "official Oracle actor caller cancelled while the operation was in flight"
+                    };
+                    self.state.quarantine(reason);
+                    let message = if deadline_elapsed {
+                        "official Oracle actor request deadline exceeded"
+                    } else {
+                        "official Oracle actor caller cancelled"
+                    };
+                    return Err(DbError::Cancelled(message.to_owned()));
+                }
+            }
+        } else {
+            reply_rx.recv(cx).await
+        };
+
+        match reply {
             Ok(ActorReply::Completed(result)) => {
                 if checkpoint_after_completion
                     && let Err(error) =

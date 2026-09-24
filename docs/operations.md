@@ -655,6 +655,14 @@ own reactor and Oracle connection. The local pool's operating posture:
   string; on a dead connection the pool discards dirty and the next checkout
   opens a fresh session against the (failed-over) listener. A read-only standby
   forces the session ceiling to `READ_ONLY` (§3.5, §5.8).
+- **Official-driver handshake stalls.** The experimental password-only
+  official alternate returns the request with a typed timeout at its absolute
+  deadline and discards that actor. The upstream synchronous handshake itself
+  cannot be cancelled: at most two such threads remain blocked, and new
+  official attempts wait no more than 250 ms before one fresh driver-cx
+  fallback. Closing the peer socket or the operating system's TCP timeout
+  releases the held slot; a timed-out actor session is never reused. See
+  [ADR 0014](adr/0014-blocking-driver-backend-execution-model.md#residual-upstream-limit-mitigated).
 - **Upstream `EXPIRE_TIME` status.** The pinned `oraclemcp-driver-cx` 0.9.3 stack parses
   `EXPIRE_TIME` into `Description::expire_time`, and `TRANSPORT_CONNECT_TIMEOUT`
   is honored for bounded connect handshakes, but rust-oracledb#14 still tracks

@@ -1668,8 +1668,15 @@ impl OracleConnection for OfficialOracleConnection {
 mod tests {
     use super::*;
     use crate::serialize::serialize_cell;
+    use asupersync::{Budget, Cx};
     use serde_json::json;
+    use std::io;
+    use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::str::FromStr;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+    use std::sync::{Condvar, OnceLock};
+    use std::thread;
+    use std::time::Instant;
 
     fn block_on_backend<T>(future: impl std::future::Future<Output = T>) -> T {
         let reactor = asupersync::runtime::reactor::create_reactor()
@@ -1679,6 +1686,448 @@ mod tests {
             .build()
             .expect("current-thread runtime must build for official backend test");
         runtime.block_on(future)
+    }
+
+    static BLACKHOLE_TEST_LOCK: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
+
+    fn blackhole_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        BLACKHOLE_TEST_LOCK
+            .get_or_init(|| std::sync::Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    #[derive(Clone, Copy)]
+    enum AcceptedSocketMode {
+        Hold,
+        Reject,
+    }
+
+    struct BlackholeListener {
+        addr: SocketAddr,
+        accepted: Arc<(std::sync::Mutex<usize>, Condvar)>,
+        stop: Arc<AtomicBool>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+
+    impl BlackholeListener {
+        fn bind(mode: AcceptedSocketMode) -> io::Result<Self> {
+            let listener = TcpListener::bind(("127.0.0.1", 0))?;
+            listener.set_nonblocking(true)?;
+            let addr = listener.local_addr()?;
+            let accepted = Arc::new((std::sync::Mutex::new(0), Condvar::new()));
+            let accepted_thread = Arc::clone(&accepted);
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_thread = Arc::clone(&stop);
+            let join = thread::Builder::new()
+                .name("oraclemcp-blackhole-listener".to_owned())
+                .spawn(move || {
+                    let mut held_streams: Vec<TcpStream> = Vec::new();
+                    while !stop_thread.load(AtomicOrdering::Acquire) {
+                        match listener.accept() {
+                            Ok((stream, _)) => {
+                                let (count, changed) = &*accepted_thread;
+                                *count
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                                changed.notify_all();
+                                match mode {
+                                    AcceptedSocketMode::Hold => held_streams.push(stream),
+                                    AcceptedSocketMode::Reject => {
+                                        let _ = stream.shutdown(Shutdown::Both);
+                                    }
+                                }
+                            }
+                            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    drop(held_streams);
+                })?;
+            Ok(Self {
+                addr,
+                accepted,
+                stop,
+                join: Some(join),
+            })
+        }
+
+        fn accepted_count(&self) -> usize {
+            *self
+                .accepted
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        }
+
+        fn wait_for_connections(&self, expected: usize, timeout: Duration) -> bool {
+            let started = Instant::now();
+            let (count, changed) = &*self.accepted;
+            let mut count = count
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            while *count < expected {
+                let Some(remaining) = timeout.checked_sub(started.elapsed()) else {
+                    return false;
+                };
+                let (next, wait) = changed
+                    .wait_timeout(count, remaining)
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                count = next;
+                if wait.timed_out() && *count < expected {
+                    return false;
+                }
+            }
+            true
+        }
+
+        fn connect_string(&self) -> String {
+            format!("127.0.0.1:{}/FREEPDB1", self.addr.port())
+        }
+    }
+
+    impl Drop for BlackholeListener {
+        fn drop(&mut self) {
+            self.stop.store(true, AtomicOrdering::Release);
+            // Wake the nonblocking accept loop so Drop has a deterministic,
+            // bounded path to dropping every held peer socket.
+            let _ = TcpStream::connect(self.addr);
+            if let Some(join) = self.join.take() {
+                join.join()
+                    .expect("blackhole accept loop exits without panicking");
+            }
+        }
+    }
+
+    fn blackhole_options(listener: &BlackholeListener) -> OracleConnectOptions {
+        OracleConnectOptions {
+            connect_string: listener.connect_string(),
+            username: Some("BLACKHOLE_TEST".to_owned()),
+            password: Some("synthetic-blackhole-password".to_owned()),
+            ..OracleConnectOptions::default()
+        }
+    }
+
+    fn run_official_connect(
+        options: OracleConnectOptions,
+        deadline: Duration,
+    ) -> Result<OfficialOracleConnection, DbError> {
+        block_on_backend(async move {
+            let runtime_cx = Cx::current().expect("test runtime installs a current Cx");
+            let request_cx =
+                Cx::for_testing_with_budget(Budget::new().with_timeout(runtime_cx.now(), deadline));
+            OfficialOracleConnection::connect(&request_cx, options).await
+        })
+    }
+
+    fn run_router_connect(
+        options: OracleConnectOptions,
+        deadline: Duration,
+    ) -> Result<(), DbError> {
+        block_on_backend(async move {
+            let runtime_cx = Cx::current().expect("test runtime installs a current Cx");
+            let request_cx =
+                Cx::for_testing_with_budget(Budget::new().with_timeout(runtime_cx.now(), deadline));
+            crate::connection::connect_oracle(&request_cx, options)
+                .await
+                .map(drop)
+        })
+    }
+
+    fn wait_for_shared_guard_slots(expected: usize, timeout: Duration) -> bool {
+        let started = Instant::now();
+        while started.elapsed() < timeout {
+            if OfficialConnectGuard::shared().available_for_test() == expected {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        OfficialConnectGuard::shared().available_for_test() == expected
+    }
+
+    fn emit_blackhole_case(
+        case_id: &str,
+        deadline_ms: u64,
+        elapsed: Duration,
+        stuck_actors: usize,
+        fallback_attempts: usize,
+        expected: &str,
+        actual: &str,
+    ) {
+        eprintln!(
+            "{}",
+            json!({
+                "case_id": case_id,
+                "deadline_ms": deadline_ms,
+                "elapsed_ms": elapsed.as_millis(),
+                "stuck_actors": stuck_actors,
+                "fallback_attempts": fallback_attempts,
+                "expected": expected,
+                "actual": actual,
+            })
+        );
+    }
+
+    fn assert_typed_connect_timeout(result: Result<OfficialOracleConnection, DbError>) {
+        match result {
+            Err(DbError::Cancelled(_) | DbError::Quarantined { .. }) => {}
+            Err(error) => {
+                panic!("deadline must return a typed cancellation/quarantine error, got {error}")
+            }
+            Ok(_) => panic!("deadline-expired official connect must not return a session"),
+        }
+    }
+
+    #[test]
+    fn official_connect_blackhole_returns_within_deadline() {
+        let _serial = blackhole_test_lock();
+        let endpoint = BlackholeListener::bind(AcceptedSocketMode::Hold)
+            .expect("bind real loopback TNS blackhole");
+        let start = Instant::now();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let options = blackhole_options(&endpoint);
+        thread::spawn(move || {
+            let _ = result_tx.send(run_official_connect(options, Duration::from_secs(2)));
+        });
+        assert!(
+            endpoint.wait_for_connections(1, Duration::from_secs(5)),
+            "the official driver must establish TCP before blocking on its TNS handshake"
+        );
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the official connect caller must not hang beyond the watchdog");
+        let elapsed = start.elapsed();
+        assert_typed_connect_timeout(result);
+        assert!(elapsed <= Duration::from_secs(3), "elapsed {elapsed:?}");
+        let stuck_actors = 2 - OfficialConnectGuard::shared().available_for_test();
+        assert_eq!(stuck_actors, 1);
+        emit_blackhole_case(
+            "official_connect_blackhole_returns_within_deadline",
+            2_000,
+            elapsed,
+            stuck_actors,
+            0,
+            "typed timeout <= 3000ms",
+            "typed deadline error returned",
+        );
+        drop(endpoint);
+        assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn official_connect_blackhole_caps_stuck_actors_at_two() {
+        let _serial = blackhole_test_lock();
+        let official_endpoint = BlackholeListener::bind(AcceptedSocketMode::Hold)
+            .expect("bind real loopback TNS blackhole");
+        let driver_endpoint = BlackholeListener::bind(AcceptedSocketMode::Reject)
+            .expect("bind loopback driver-cx refusal endpoint");
+        let start = Instant::now();
+        let (stuck_tx, stuck_rx) = std::sync::mpsc::channel();
+        for _ in 0..2 {
+            let tx = stuck_tx.clone();
+            let options = blackhole_options(&official_endpoint);
+            thread::spawn(move || {
+                let result = run_official_connect(options, Duration::from_secs(2));
+                let _ = tx.send(result);
+            });
+        }
+        drop(stuck_tx);
+        assert!(official_endpoint.wait_for_connections(2, Duration::from_secs(5)));
+        assert_eq!(OfficialConnectGuard::shared().available_for_test(), 0);
+
+        let (router_tx, router_rx) = std::sync::mpsc::channel();
+        for _ in 0..2 {
+            let tx = router_tx.clone();
+            let mut options = blackhole_options(&official_endpoint);
+            options.connect_string = driver_endpoint.connect_string();
+            thread::spawn(move || {
+                let result = run_router_connect(options, Duration::from_secs(2));
+                let _ = tx.send(result);
+            });
+        }
+        drop(router_tx);
+        let router_results: Vec<_> = (0..2)
+            .map(|_| {
+                router_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("each saturated router caller returns by the 10s watchdog")
+            })
+            .collect();
+        assert!(router_results.iter().all(Result::is_err));
+        assert!(driver_endpoint.wait_for_connections(4, Duration::from_secs(1)));
+        let fallback_attempts = driver_endpoint.accepted_count().saturating_sub(2);
+        assert_eq!(
+            fallback_attempts, 2,
+            "each saturated official alternate gets one driver-cx retry"
+        );
+
+        let stuck_results: Vec<_> = (0..2)
+            .map(|_| {
+                stuck_rx
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("both original official callers return at their request deadlines")
+            })
+            .collect();
+        assert!(stuck_results.into_iter().all(|result| matches!(
+            result,
+            Err(DbError::Cancelled(_) | DbError::Quarantined { .. })
+        )));
+        let elapsed = start.elapsed();
+        let stuck_actors = 2 - OfficialConnectGuard::shared().available_for_test();
+        assert_eq!(
+            stuck_actors, 2,
+            "guard permits account for every stuck official actor"
+        );
+        emit_blackhole_case(
+            "official_connect_blackhole_caps_stuck_actors_at_two",
+            2_000,
+            elapsed,
+            stuck_actors,
+            fallback_attempts,
+            "at most two stuck actors; next two router acquisitions fall back once each",
+            "two official sockets held; two saturated router requests each used one driver-cx retry",
+        );
+        drop(official_endpoint);
+        assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn official_connect_blackhole_third_acquire_falls_back_to_driver_cx_once() {
+        let _serial = blackhole_test_lock();
+        let official_endpoint = BlackholeListener::bind(AcceptedSocketMode::Hold)
+            .expect("bind real loopback TNS blackhole");
+        let driver_endpoint = BlackholeListener::bind(AcceptedSocketMode::Reject)
+            .expect("bind loopback driver-cx refusal endpoint");
+        let (stuck_tx, stuck_rx) = std::sync::mpsc::channel();
+        for _ in 0..2 {
+            let tx = stuck_tx.clone();
+            let options = blackhole_options(&official_endpoint);
+            thread::spawn(move || {
+                let _ = tx.send(run_official_connect(options, Duration::from_secs(20)));
+            });
+        }
+        drop(stuck_tx);
+        assert!(official_endpoint.wait_for_connections(2, Duration::from_secs(5)));
+        assert_eq!(OfficialConnectGuard::shared().available_for_test(), 0);
+
+        let start = Instant::now();
+        let mut options = blackhole_options(&official_endpoint);
+        // The two actual official connects are already stuck on the first
+        // listener. This third router request targets the refusal listener:
+        // its primary driver-cx attempt fails, official admission waits for
+        // the saturated production guard, then exactly one driver-cx fallback
+        // is observable as the second accepted TCP connection.
+        options.connect_string = driver_endpoint.connect_string();
+        let result = run_router_connect(options, Duration::from_secs(5));
+        let elapsed = start.elapsed();
+        assert!(
+            result.is_err(),
+            "both driver-cx attempts hit a reset endpoint"
+        );
+        assert!(driver_endpoint.wait_for_connections(2, Duration::from_secs(1)));
+        let fallback_attempts = driver_endpoint.accepted_count().saturating_sub(1);
+        assert_eq!(fallback_attempts, 1);
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "250ms acquire plus bounded slack: {elapsed:?}"
+        );
+        emit_blackhole_case(
+            "official_connect_blackhole_third_acquire_falls_back_to_driver_cx_once",
+            250,
+            elapsed,
+            2,
+            fallback_attempts,
+            "one driver-cx fallback after <=250ms guard acquisition plus slack",
+            "router made one primary and exactly one fallback driver-cx socket attempt",
+        );
+        drop(official_endpoint);
+        for _ in 0..2 {
+            let _late_result = stuck_rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("closing the peer lets each late official connect retire");
+        }
+        assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
+    }
+
+    #[test]
+    fn official_connect_blackhole_slots_recover_after_peer_close() {
+        let _serial = blackhole_test_lock();
+        let endpoint = BlackholeListener::bind(AcceptedSocketMode::Hold)
+            .expect("bind real loopback TNS blackhole");
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let options = blackhole_options(&endpoint);
+        thread::spawn(move || {
+            let _ = result_tx.send(run_official_connect(options, Duration::from_secs(2)));
+        });
+        assert!(endpoint.wait_for_connections(1, Duration::from_secs(5)));
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("deadline returns before peer cleanup");
+        assert_typed_connect_timeout(result);
+        assert_eq!(OfficialConnectGuard::shared().available_for_test(), 1);
+        drop(endpoint);
+        let start = Instant::now();
+        assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
+        let elapsed = start.elapsed();
+        emit_blackhole_case(
+            "official_connect_blackhole_slots_recover_after_peer_close",
+            2_000,
+            elapsed,
+            0,
+            0,
+            "both production slots reacquirable within 10000ms after peer close",
+            "both production slots reacquirable",
+        );
+    }
+
+    #[test]
+    fn official_connect_blackhole_never_reuses_stuck_session() {
+        let _serial = blackhole_test_lock();
+        let start = Instant::now();
+        let first_endpoint = BlackholeListener::bind(AcceptedSocketMode::Hold)
+            .expect("bind first real loopback TNS blackhole");
+        let first_options = blackhole_options(&first_endpoint);
+        let (first_tx, first_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = first_tx.send(run_official_connect(first_options, Duration::from_secs(2)));
+        });
+        assert!(first_endpoint.wait_for_connections(1, Duration::from_secs(5)));
+        let late_result = first_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("caller receives its deadline before late connect completion");
+        assert_typed_connect_timeout(late_result);
+        assert_eq!(OfficialConnectGuard::shared().available_for_test(), 1);
+        drop(first_endpoint);
+        assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
+
+        let second_endpoint = BlackholeListener::bind(AcceptedSocketMode::Hold)
+            .expect("bind fresh loopback endpoint for a new actor");
+        let second_options = blackhole_options(&second_endpoint);
+        let (second_tx, second_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = second_tx.send(run_official_connect(second_options, Duration::from_secs(2)));
+        });
+        assert!(second_endpoint.wait_for_connections(1, Duration::from_secs(5)));
+        let fresh_result = second_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("fresh actor also returns its own deadline error");
+        assert_typed_connect_timeout(fresh_result);
+        assert_eq!(second_endpoint.accepted_count(), 1);
+        assert_eq!(OfficialConnectGuard::shared().available_for_test(), 1);
+        drop(second_endpoint);
+        assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
+        let elapsed = start.elapsed();
+        emit_blackhole_case(
+            "official_connect_blackhole_never_reuses_stuck_session",
+            2_000,
+            elapsed,
+            1,
+            0,
+            "late completion is discarded and fresh attempt owns a distinct accepted socket",
+            "timed-out results were errors; next connect reached a new endpoint exactly once",
+        );
     }
 
     #[test]
