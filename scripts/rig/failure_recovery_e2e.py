@@ -29,8 +29,8 @@ COMMIT_IN_DOUBT_ROWS = 20000
 
 
 def e5_db_params() -> tuple[str, str, str]:
-    container = os.environ.get("ORACLEMCP_RIG_E5_CONTAINER", os.environ.get("ORACLEMCP_RIG_D10_CONTAINER", "rust-oracledb-free"))
-    host_port = os.environ.get("ORACLEMCP_RIG_E5_HOST_PORT", os.environ.get("ORACLEMCP_RIG_D10_HOST_PORT", "1522"))
+    container = os.environ.get("ORACLEMCP_RIG_E5_CONTAINER", os.environ.get("ORACLEMCP_RIG_D10_CONTAINER", "oraclemcp-free23-rel"))
+    host_port = os.environ.get("ORACLEMCP_RIG_E5_HOST_PORT", os.environ.get("ORACLEMCP_RIG_D10_HOST_PORT", "1523"))
     pdb = os.environ.get("ORACLEMCP_RIG_E5_PDB", os.environ.get("ORACLEMCP_RIG_D10_PDB", "FREEPDB1"))
     return container, host_port, pdb
 
@@ -197,7 +197,7 @@ def install_artifact(work: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path, st
 
 
 def write_config(config: pathlib.Path, audit: pathlib.Path, port: int, operator_subjects: list[str] | None = None) -> None:
-    host_port = os.environ.get("ORACLEMCP_RIG_E5_HOST_PORT", os.environ.get("ORACLEMCP_RIG_D10_HOST_PORT", "1522"))
+    host_port = os.environ.get("ORACLEMCP_RIG_E5_HOST_PORT", os.environ.get("ORACLEMCP_RIG_D10_HOST_PORT", "1523"))
     pdb = os.environ.get("ORACLEMCP_RIG_E5_PDB", os.environ.get("ORACLEMCP_RIG_D10_PDB", "FREEPDB1"))
     subjects = operator_subjects or []
     allowed_subjects = "[" + ", ".join(json.dumps(subject) for subject in subjects) + "]"

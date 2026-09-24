@@ -41,7 +41,7 @@ lane_container() {
   case "$1" in
     xe18) printf '%s\n' 'oracle-xe18-1518' ;;
     xe21) printf '%s\n' 'oracle-xe21-1520' ;;
-    free23) printf '%s\n' 'rust-oracledb-free' ;;
+    free23) printf '%s\n' 'oraclemcp-free23-rel' ;;
     *) return 1 ;;
   esac
 }

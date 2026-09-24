@@ -32,9 +32,9 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-CONTAINER="${ORACLEMCP_D7_CONTAINER:-rust-oracledb-free}"
+CONTAINER="${ORACLEMCP_D7_CONTAINER:-oraclemcp-free23-rel}"
 PDB="${ORACLEMCP_D7_PDB:-FREEPDB1}"
-HOST_PORT="${ORACLEMCP_D7_HOST_PORT:-1522}"
+HOST_PORT="${ORACLEMCP_D7_HOST_PORT:-1523}"
 FIXTURE_USER="ORACLEMCP_D9_TARGET"
 FIXTURE_PW="D9_Governance_Test_42"
 BIN="${ORACLEMCP_D7_BIN:-$ROOT/target/debug/oraclemcp}"

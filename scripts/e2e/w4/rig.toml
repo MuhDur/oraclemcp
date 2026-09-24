@@ -12,5 +12,5 @@ container = "oraclemcp-xe21-rel"
 
 [lanes.free23]
 lab = true
-dsn = "localhost:1522/FREEPDB1"
-container = "rust-oracledb-free"
+dsn = "localhost:1523/FREEPDB1"
+container = "oraclemcp-free23-rel"

@@ -551,6 +551,19 @@ down_lanes() {
   done
 }
 
+# The database version the lane actually runs (V$INSTANCE), read as SYSDBA
+# with the password passed by environment-variable name. Empty if unknown.
+lane_db_version() {
+  local lane="$1" container="$2" password pdb
+  password="$(lane_admin_password "$lane")"
+  pdb="$(lane_pdb "$lane")"
+  [ -n "$password" ] || return 0
+  printf 'set heading off feedback off pagesize 0\nselect version from v$instance;\nexit\n' |
+    ORACLE_PASSWORD="$password" PDB="$pdb" timeout -k 5 60 docker exec -i -e ORACLE_PASSWORD -e PDB \
+      "$container" bash -c 'sqlplus -S -L "sys/\"$ORACLE_PASSWORD\"@localhost:1521/$PDB as sysdba"' 2>/dev/null |
+    awk 'NF { print $1; exit }' || true
+}
+
 # One JSON line per lane (rig.sh doctor consumes this).
 status_lanes() {
   local lane container image port present running owned digest version
@@ -565,7 +578,9 @@ status_lanes() {
       container_is_owned "$container" && owned=true
       digest="$(docker image inspect --format '{{join .RepoDigests ","}}' \
         "$(docker inspect --format '{{.Image}}' "$container")" 2>/dev/null || true)"
-      version="$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' "$container" 2>/dev/null || true)"
+      if [ "$running" = true ]; then
+        version="$(lane_db_version "$lane" "$container")"
+      fi
     fi
     python3 -c 'import json, sys; keys = ["lane", "container", "pinned_image", "port", "present", "healthy", "owned", "image_digests", "version"]; vals = sys.argv[1:]; row = dict(zip(keys, vals)); [row.__setitem__(k, row[k] == "true") for k in ("present", "healthy", "owned")]; row["port"] = int(row["port"]); print(json.dumps(row, sort_keys=True))' \
       "$lane" "$container" "$image" "$port" "$present" "$running" "$owned" "$digest" "$version"

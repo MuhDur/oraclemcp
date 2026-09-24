@@ -113,7 +113,7 @@ def hs256_jwt(*, sub: str, client_id: str, exp: int, jti: str, scope: str = "ora
 
 
 def write_config(config: pathlib.Path, audit: pathlib.Path, port: int, operator_subjects: list[str] | None = None) -> None:
-    host_port = os.environ.get("ORACLEMCP_RFAIL_HOST_PORT", os.environ.get("ORACLEMCP_RIG_D10_HOST_PORT", "1522"))
+    host_port = os.environ.get("ORACLEMCP_RFAIL_HOST_PORT", os.environ.get("ORACLEMCP_RIG_D10_HOST_PORT", "1523"))
     pdb = os.environ.get("ORACLEMCP_RFAIL_PDB", os.environ.get("ORACLEMCP_RIG_D10_PDB", "FREEPDB1"))
     subjects = "[" + ", ".join(json.dumps(subject) for subject in (operator_subjects or [])) + "]"
     config.write_text(
@@ -466,7 +466,7 @@ def main() -> int:
         if not any(os.access(pathlib.Path(p) / tool, os.X_OK) for p in os.environ.get("PATH", "").split(os.pathsep)):
             raise AssertionError(f"{tool} is required for R-fail")
 
-    container = os.environ.get("ORACLEMCP_RFAIL_CONTAINER", os.environ.get("ORACLEMCP_RIG_D10_CONTAINER", "rust-oracledb-free"))
+    container = os.environ.get("ORACLEMCP_RFAIL_CONTAINER", os.environ.get("ORACLEMCP_RIG_D10_CONTAINER", "oraclemcp-free23-rel"))
     e5.ensure_container_ready(container, int(os.environ.get("ORACLEMCP_RFAIL_READY_TIMEOUT_SECS", "300")))
     work = e5.artifact_dir()
     run_id = f"local-{work.name}-rfail-failure-injection"

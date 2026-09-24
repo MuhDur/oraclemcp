@@ -81,7 +81,7 @@ lane_dsn() {
   case "$1" in
     xe18) printf '%s\n' "${ORACLE_MATRIX_XE18_DSN:-localhost:1518/XEPDB1}" ;;
     xe21) printf '%s\n' "${ORACLE_MATRIX_XE21_DSN:-localhost:1520/XEPDB1}" ;;
-    free23) printf '%s\n' "${ORACLE_MATRIX_FREE23_DSN:-localhost:1522/FREEPDB1}" ;;
+    free23) printf '%s\n' "${ORACLE_MATRIX_FREE23_DSN:-localhost:1523/FREEPDB1}" ;;
     *) return 1 ;;
   esac
 }
