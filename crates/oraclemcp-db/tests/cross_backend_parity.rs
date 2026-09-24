@@ -10,7 +10,7 @@
 //!
 //! ```text
 //! ORACLEMCP_DUAL_BACKEND_LAB=1 \
-//! ORACLEMCP_TEST_DSN=//localhost:1522/FREEPDB1 \
+//! ORACLEMCP_TEST_DSN=//localhost:1523/FREEPDB1 \
 //! ORACLEMCP_TEST_USER=pythontest \
 //! ORACLEMCP_TEST_PASSWORD=<local-lab-password> \
 //! ORACLEMCP_PARITY_RUN_ID=<registered W4 run id> \
@@ -44,8 +44,8 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
     DbError, OfficialOracleConnection, OracleBackend, OracleConnectOptions, OracleConnection,
-    RustOracleConnection, SerializeOptions, select_connection_backend, selected_endpoint_uses_tcps,
-    serialize_row,
+    QueryRowStreamStart, RustOracleConnection, SerializeOptions, select_connection_backend,
+    selected_endpoint_uses_tcps, serialize_row,
 };
 use oraclemcp_guard::{Classifier, DangerLevel, OperatingLevel};
 use serde_json::{Value, json};
@@ -341,7 +341,7 @@ fn transaction_count_value(
     Ok(serialize_row(&rows[0], &SerializeOptions::default()).to_string())
 }
 
-fn parity_table(run_id: &str, family: &str) -> String {
+fn validate_parity_run_id(run_id: &str) {
     assert!(
         run_id.len() == 12
             && run_id.starts_with("W4")
@@ -351,6 +351,10 @@ fn parity_table(run_id: &str, family: &str) -> String {
                 .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_lowercase()),
         "parity needs the exact W4 run id of a registered, disposable fixture"
     );
+}
+
+fn parity_table(run_id: &str, family: &str) -> String {
+    validate_parity_run_id(run_id);
     format!("W4O_{run_id}.ORACLEMCP_PARITY_{family}_{run_id}")
 }
 
@@ -408,6 +412,443 @@ async fn assert_parity_cell(
         *official_value, expected,
         "{case_id}: official independent expectation"
     );
+}
+
+async fn number_value_and_oracle_text(
+    cx: &Cx,
+    connection: &dyn OracleConnection,
+    sql: &str,
+    label: &str,
+) -> (Value, Value) {
+    let rows = connection
+        .query_rows(cx, sql, &[])
+        .await
+        .unwrap_or_else(|error| panic!("{label} NUMBER query: {error}"));
+    let row = serialized_single_row(rows, label);
+    (row["V"].clone(), row["EXPECTED"].clone())
+}
+
+fn canonicalize_oracle_number(text: &str) -> String {
+    let (sign, unsigned) = match text.strip_prefix('-') {
+        Some(unsigned) => ("-", unsigned),
+        None => ("", text),
+    };
+    let (mantissa, exponent) = unsigned
+        .split_once(['E', 'e'])
+        .map(|(mantissa, exponent)| {
+            (
+                mantissa,
+                exponent
+                    .parse::<i32>()
+                    .expect("Oracle TO_CHAR exponent is an integer"),
+            )
+        })
+        .unwrap_or((unsigned, 0));
+    let decimal_position = mantissa.find('.').unwrap_or(mantissa.len()) as i32 + exponent;
+    let digits = mantissa.replace('.', "");
+    let expanded = if decimal_position <= 0 {
+        format!("0.{}{}", "0".repeat((-decimal_position) as usize), digits)
+    } else if decimal_position as usize >= digits.len() {
+        format!(
+            "{}{}",
+            digits,
+            "0".repeat(decimal_position as usize - digits.len())
+        )
+    } else {
+        let position = decimal_position as usize;
+        format!("{}.{}", &digits[..position], &digits[position..])
+    };
+    format!("{sign}{expanded}")
+}
+
+async fn assert_number_parity(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    case_id: &str,
+    expression: &str,
+) {
+    let sql = format!(
+        "SELECT {expression} AS V, \
+         CASE WHEN TO_CHAR({expression}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''') LIKE '.%' \
+              THEN '0' || TO_CHAR({expression}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''') \
+              WHEN TO_CHAR({expression}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''') LIKE '-.%' \
+              THEN '-0' || SUBSTR(TO_CHAR({expression}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,'''), 2) \
+              ELSE TO_CHAR({expression}, 'TM9', 'NLS_NUMERIC_CHARACTERS=''.,''') END AS EXPECTED \
+         FROM dual"
+    );
+    let (driver_value, driver_expected) =
+        number_value_and_oracle_text(cx, driver, &sql, case_id).await;
+    let (official_value, official_expected) =
+        number_value_and_oracle_text(cx, official, &sql, case_id).await;
+    let expected = canonicalize_oracle_number(
+        driver_expected
+            .as_str()
+            .expect("Oracle TO_CHAR must return JSON text"),
+    );
+    let official_canonical = canonicalize_oracle_number(
+        official_expected
+            .as_str()
+            .expect("Oracle TO_CHAR must return JSON text"),
+    );
+    assert!(
+        driver_value.is_string(),
+        "{case_id}: driver-cx NUMBER must be JSON text"
+    );
+    assert!(
+        official_value.is_string(),
+        "{case_id}: official NUMBER must be JSON text"
+    );
+    assert!(
+        driver_expected.is_string(),
+        "{case_id}: Oracle TO_CHAR must be text"
+    );
+    assert!(
+        official_expected.is_string(),
+        "{case_id}: Oracle TO_CHAR must be text"
+    );
+    assert_eq!(
+        expected, official_canonical,
+        "{case_id}: canonical Oracle TO_CHAR parity"
+    );
+    let expected_value = json!(expected);
+    parity_record(
+        case_id,
+        "NUMBER",
+        "driver-cx",
+        &expected_value,
+        &driver_value,
+    );
+    parity_record(
+        case_id,
+        "NUMBER",
+        "official",
+        &expected_value,
+        &official_value,
+    );
+    for (backend, expected, actual) in [
+        ("driver-cx", &expected_value, &driver_value),
+        ("official", &expected_value, &official_value),
+    ] {
+        assert_eq!(
+            actual, expected,
+            "{case_id}: {backend} NUMBER equals Oracle TO_CHAR"
+        );
+    }
+}
+
+/// Exercises NUMBER precision, scale, signed zero, and exponent boundaries
+/// with typed Oracle expressions, leaving no lab objects behind.
+async fn run_number_boundary_scenario(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    run_id: &str,
+) {
+    validate_parity_run_id(run_id);
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_pos_38_digits",
+        "CAST(99999999999999999999999999999999999999 AS NUMBER(38,0))",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_neg_38_digits",
+        "CAST(-99999999999999999999999999999999999999 AS NUMBER(38,0))",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_zero_and_neg_zero",
+        "CAST(0 AS NUMBER)",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_zero_and_neg_zero",
+        "CAST(-0 AS NUMBER)",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_scale_rounding",
+        "CAST(0.0001 AS NUMBER)",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_scale_rounding",
+        "CAST(123.4567 AS NUMBER)",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_scale_rounding",
+        "CAST(1.23455 AS NUMBER(10,4))",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_extreme_exponents",
+        "CAST(1E-130 AS NUMBER)",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_extreme_exponents",
+        "CAST(9.999999999999999999999999999999999999E125 AS NUMBER)",
+    )
+    .await;
+    assert_number_parity(
+        cx,
+        driver,
+        official,
+        "parity_number_is_exact_json_string",
+        "CAST(12345678901234567890123456789012345678 AS NUMBER(38,0))",
+    )
+    .await;
+
+    let sql = "SELECT CAST(1.5 AS BINARY_DOUBLE) AS V FROM dual";
+    let driver_bd = serialized_single_row(
+        driver
+            .query_rows(cx, sql, &[])
+            .await
+            .expect("driver BINARY_DOUBLE query"),
+        "driver BINARY_DOUBLE",
+    );
+    let official_bd = serialized_single_row(
+        official
+            .query_rows(cx, sql, &[])
+            .await
+            .expect("official BINARY_DOUBLE query"),
+        "official BINARY_DOUBLE",
+    );
+    assert_eq!(
+        driver_bd, official_bd,
+        "BINARY_DOUBLE remains a separate floating type"
+    );
+}
+
+async fn collect_streamed_values(
+    cx: &Cx,
+    connection: &dyn OracleConnection,
+    sql: &str,
+    label: &str,
+) -> Vec<Value> {
+    let start = connection
+        .query_row_stream(cx, sql, &[], 32, &SerializeOptions::default())
+        .await
+        .unwrap_or_else(|error| panic!("{label} stream start: {error}"));
+    let QueryRowStreamStart::Stream(mut stream) = start else {
+        panic!("{label} unexpectedly fell back from row streaming");
+    };
+    let mut rows = Vec::new();
+    while let Some(row) = stream
+        .next_row(cx)
+        .await
+        .unwrap_or_else(|error| panic!("{label} stream fetch: {error}"))
+    {
+        rows.push(serialize_row(&row, &SerializeOptions::default()));
+    }
+    stream
+        .recover(cx)
+        .await
+        .unwrap_or_else(|error| panic!("{label} stream recovery: {error}"));
+    rows
+}
+
+async fn assert_stream_parity(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    case_id: &str,
+    sql: &str,
+    expected: Vec<Value>,
+) {
+    let driver_rows = collect_streamed_values(cx, driver, sql, "driver-cx").await;
+    let official_rows = collect_streamed_values(cx, official, sql, "official").await;
+    for (backend, actual) in [("driver-cx", &driver_rows), ("official", &official_rows)] {
+        let compact = |rows: &[Value]| {
+            let encoded = serde_json::to_vec(rows).expect("serialize streamed rows");
+            let digest = digest_bytes(&encoded);
+            json!({
+                "count": rows.len(),
+                "first": rows.first(),
+                "last": rows.last(),
+                "sha256": digest["sha256"].clone(),
+            })
+        };
+        parity_record(
+            case_id,
+            "stream rows",
+            backend,
+            &compact(&expected),
+            &compact(actual),
+        );
+        assert_eq!(
+            *actual, expected,
+            "{case_id}: {backend} row count, order, and values"
+        );
+    }
+}
+
+async fn followup_after_abandoned_stream(
+    cx: &Cx,
+    connection: &dyn OracleConnection,
+    options: &OracleConnectOptions,
+    case_id: &str,
+    cancel: bool,
+) {
+    let start = connection
+        .query_row_stream(
+            cx,
+            "SELECT level AS V FROM dual CONNECT BY level <= 1000 ORDER BY level",
+            &[],
+            4,
+            &SerializeOptions::default(),
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{case_id} stream start: {error}"));
+    let QueryRowStreamStart::Stream(mut stream) = start else {
+        panic!("{case_id} unexpectedly fell back from row streaming");
+    };
+    let prefix_rows = if cancel { 12 } else { 10 };
+    for expected in 1..=prefix_rows {
+        let row = stream
+            .next_row(cx)
+            .await
+            .unwrap_or_else(|error| panic!("{case_id} prefix fetch: {error}"))
+            .unwrap_or_else(|| panic!("{case_id} ended before row {expected}"));
+        let value = serialize_row(&row, &SerializeOptions::default())["V"].clone();
+        assert_eq!(
+            value,
+            json!(expected.to_string()),
+            "{case_id}: streamed prefix"
+        );
+    }
+    if cancel {
+        cx.set_cancel_requested(true);
+        let result = stream.next_row(cx).await;
+        assert!(
+            matches!(result, Err(DbError::Cancelled(_))),
+            "{case_id}: Cx cancellation must stop the next stream fetch"
+        );
+        cx.set_cancel_requested(false);
+    }
+    drop(stream);
+
+    let followup = match connection
+        .query_rows(cx, "SELECT 42 AS V FROM dual", &[])
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            eprintln!(
+                "{case_id}: abandoned stream made its connection unavailable ({error}); reconnecting the same backend"
+            );
+            let replacement = connect_backend(cx, options, connection.backend()).await;
+            let rows = replacement
+                .query_rows(cx, "SELECT 42 AS V FROM dual", &[])
+                .await
+                .expect("replacement follow-up query");
+            replacement
+                .close(cx)
+                .await
+                .expect("close replacement connection");
+            rows
+        }
+    };
+    let actual = serialized_single_row(followup, case_id)["V"].clone();
+    let backend = match connection.backend() {
+        OracleBackend::RustOracle => "driver-cx",
+        OracleBackend::OfficialOracle => "official",
+        _ => panic!("streaming connection backend is unsupported"),
+    };
+    parity_record(case_id, "NUMBER", backend, &json!("42"), &actual);
+    assert_eq!(
+        actual,
+        json!("42"),
+        "{case_id}: no leftover stream row may be reused"
+    );
+}
+
+async fn connect_backend(
+    cx: &Cx,
+    options: &OracleConnectOptions,
+    backend: OracleBackend,
+) -> Box<dyn OracleConnection> {
+    match backend {
+        OracleBackend::RustOracle => Box::new(
+            RustOracleConnection::connect(cx, options.clone())
+                .await
+                .expect("connect driver-cx backend"),
+        ),
+        OracleBackend::OfficialOracle => Box::new(
+            OfficialOracleConnection::connect(cx, options.clone())
+                .await
+                .expect("connect official backend"),
+        ),
+        _ => panic!("unsupported row-stream backend"),
+    }
+}
+
+async fn run_streaming_scenario(
+    cx: &Cx,
+    driver: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    options: &OracleConnectOptions,
+) {
+    assert_stream_parity(
+        cx,
+        driver,
+        official,
+        "parity_stream_empty",
+        "SELECT level AS V FROM dual START WITH 1=0 CONNECT BY level <= 1",
+        Vec::new(),
+    )
+    .await;
+    let expected = (1..=1000)
+        .map(|value| json!({"V": value.to_string()}))
+        .collect();
+    assert_stream_parity(
+        cx,
+        driver,
+        official,
+        "parity_stream_ordered_1000_rows",
+        "SELECT level AS V FROM dual CONNECT BY level <= 1000 ORDER BY level",
+        expected,
+    )
+    .await;
+    for (case_id, cancel) in [
+        ("parity_stream_early_drop_no_stale_reuse", false),
+        ("parity_stream_cancel_no_stale_reuse", true),
+    ] {
+        let abandoned_driver = connect_backend(cx, options, OracleBackend::RustOracle).await;
+        followup_after_abandoned_stream(cx, &*abandoned_driver, options, case_id, cancel).await;
+        drop(abandoned_driver);
+        let abandoned_official = connect_backend(cx, options, OracleBackend::OfficialOracle).await;
+        followup_after_abandoned_stream(cx, &*abandoned_official, options, case_id, cancel).await;
+        drop(abandoned_official);
+    }
 }
 
 fn serialized_single_row_with_options(
@@ -586,13 +1027,36 @@ async fn run_lob_null_scenario(
 /// than self-skipping: an operator must opt into the lab and capture its output.
 #[test]
 #[ignore = "requires explicit local Oracle Free23 lab credentials and DDL/DML acknowledgement"]
+fn live_cross_backend_number_and_streaming_parity() {
+    run_with_cx(|cx| async move {
+        let options = local_lab_options();
+        let driver_cx = RustOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("driver-cx must connect to the explicit local lab");
+        let official = OfficialOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("official adapter must connect to the explicit local lab");
+        let run_id = required_lab_env("ORACLEMCP_PARITY_RUN_ID");
+
+        assert_eq!(driver_cx.backend(), OracleBackend::RustOracle);
+        assert_eq!(official.backend(), OracleBackend::OfficialOracle);
+        run_number_boundary_scenario(&cx, &driver_cx, &official, &run_id).await;
+        run_streaming_scenario(&cx, &driver_cx, &official, &options).await;
+
+        driver_cx.close(&cx).await.expect("driver-cx close");
+        official.close(&cx).await.expect("official close");
+    });
+}
+
+#[test]
+#[ignore = "requires explicit local Oracle Free23 lab credentials and DDL/DML acknowledgement"]
 fn live_cross_backend_parity_for_supported_basic_auth() {
     run_with_cx(|cx| async move {
         let options = local_lab_options();
         let driver_cx = RustOracleConnection::connect(&cx, options.clone())
             .await
             .expect("driver-cx must connect to the explicit local lab");
-        let official = OfficialOracleConnection::connect(&cx, options)
+        let official = OfficialOracleConnection::connect(&cx, options.clone())
             .await
             .expect("official adapter must connect to the explicit local lab");
 
@@ -663,6 +1127,8 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
         );
 
         let run_id = required_lab_env("ORACLEMCP_PARITY_RUN_ID");
+        run_number_boundary_scenario(&cx, &driver_cx, &official, &run_id).await;
+        run_streaming_scenario(&cx, &driver_cx, &official, &options).await;
         run_datetime_interval_scenario(&cx, &driver_cx, &official, &run_id).await;
         run_lob_null_scenario(&cx, &driver_cx, &official, &run_id).await;
         let suffix = run_id;
