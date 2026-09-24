@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T12:00:00Z",
+  "bead_id": "oraclemcp-brsya",
+  "scope": {
+    "summary": "oracle_describe no longer leaves the pinned session broken: describe metadata avoids fetching the LONG DATA_DEFAULT (ab19390d), with a version-aware projection probed per database so 18c/21c work (c0059bbc, 33eb2188).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_query.rs",
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "scripts/e2e/w4/cases/dictionary-tools.json"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "33eb21882614062a876444109cc0c249b2a369b3",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 33eb2188 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3562 passed, 0 failed; cargo deny OK; every fuzz crate compiles. catalog_resolver::tests::describe_columns_23ai_projection_uses_bounded_default_text and describe_columns_18c_and_21c_projection_avoids_default_long ok."
+      },
+      {
+        "name": "live W4 three lanes (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary built in the clean gate worktree at 33eb2188 (sha256 eaba90f5d9a6a8ef36c3d727043d12fb0c58b821d3ee62a18e87ad82f8405b5a); scripts/e2e/w4/driver.py --case w4_describe_view_after_describe_keeps_session_usable --case w4_describe_table_virtual_invisible_flags --case w4_sample_rows_bounded_max_rows on free23, xe21 and xe18: all 18 rows pass (3 cases x 3 lanes x stdio/HTTP). At 020deb99 the same run failed on xe21/xe18 with ORA-00904 DATA_DEFAULT_VC and the session case failed at step 0 on all lanes; this close follows the version-aware fix c0059bbc/33eb2188. Bead case: w4_describe_view_after_describe_keeps_session_usable."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Re-executed by the orchestrator, independent of the implementing pane; live trace recorded in integration_evidence."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
