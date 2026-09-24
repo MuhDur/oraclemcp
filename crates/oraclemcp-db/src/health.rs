@@ -261,8 +261,9 @@ fn is_dictionary_access_error(error: &DbError) -> bool {
 }
 
 fn dictionary_access_code(error: &DbError) -> Option<i32> {
-    let DbError::Query(message) = error else {
-        return None;
+    let message = match error {
+        DbError::Query(message) | DbError::ServerQuery(message) => message,
+        _ => return None,
     };
     parse_ora_code(message).filter(|code| matches!(code, 942 | 1031))
 }
@@ -1397,6 +1398,22 @@ mod tests {
             assert!(calls[0].contains("dba_objects"));
             assert!(calls[1].contains("all_objects"));
         }
+    }
+
+    #[test]
+    fn server_origin_dictionary_access_errors_still_degrade() {
+        assert_eq!(
+            dictionary_access_code(&DbError::ServerQuery(
+                "ORA-00942: table or view does not exist".to_owned()
+            )),
+            Some(942)
+        );
+        assert_eq!(
+            dictionary_access_code(&DbError::ServerQuery(
+                "ORA-01031: insufficient privileges".to_owned()
+            )),
+            Some(1031)
+        );
     }
 
     #[test]

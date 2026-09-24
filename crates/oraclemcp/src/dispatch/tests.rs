@@ -42,29 +42,7 @@ fn generated_read_guard_refusal_keeps_forbidden_statement_issue_42() {
         .expect("asupersync test runtime builds");
     runtime.block_on(async {
         let cx = Cx::current().expect("block_on installs a current Cx");
-        let subject = system_generated_read_subject();
-        let guarded = GuardedGeneratedReadConn {
-            inner: &OneRowMock,
-            audit: GeneratedReadAuditCtx {
-                entry: AuditEntryCtx {
-                    auditor: None,
-                    subject: &subject,
-                    db_evidence: None,
-                },
-                tool: "oracle_describe",
-            },
-        };
-        let error = guarded
-            .query_rows_with_provenance(
-                &cx,
-                "SELECT 1 FROM dual",
-                &[],
-                ReadQueryProvenance::ServerRead,
-                None,
-            )
-            .await
-            .expect_err("metadata boundary refuses application SQL");
-        let envelope = error.into_envelope();
+        let (envelope, records) = audit_wiring::generated_read_guard_refusal_with_audit(&cx).await;
         assert_eq!(envelope.error_class, ErrorClass::PolicyDenied);
         assert_eq!(
             envelope.next_steps,
@@ -77,6 +55,17 @@ fn generated_read_guard_refusal_keeps_forbidden_statement_issue_42() {
                 .map(|reason| reason.category),
             Some(ReasonCategory::UnprovenSideEffect)
         );
+        assert_eq!(records.len(), 1, "refusal creates a signed FAILED record");
+        let record = &records[0];
+        assert_eq!(record.outcome, oraclemcp_audit::AuditOutcome::Failed);
+        assert!(record.signature.is_some());
+        let cause = record
+            .failure
+            .as_ref()
+            .expect("FAILED refusal record retains its typed cause");
+        assert_eq!(cause.error_class(), "POLICY_DENIED");
+        assert_eq!(cause.ora_code(), None);
+        assert_eq!(cause.reason_category(), Some("UNPROVEN_SIDE_EFFECT"));
     });
 }
 
@@ -15419,7 +15408,7 @@ mod qa97_health_failure_boundaries {
         assert_eq!(out["findings"][0]["detail"]["status"], json!("failed"));
         assert_eq!(
             out["findings"][0]["detail"]["error_class"],
-            json!("SYNTAX_ERROR")
+            json!("INTERNAL")
         );
         assert_eq!(out["findings"][0]["detail"]["ora_code"], json!(904));
         let rendered = out.to_string();

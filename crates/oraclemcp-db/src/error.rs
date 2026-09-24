@@ -1448,8 +1448,9 @@ mod tests {
         assert_eq!(caller.error_class, ErrorClass::SyntaxError);
         assert_eq!(caller.ora_code, Some(904));
 
-        let server =
-            DbError::ServerQuery("ORA-00904: invalid identifier".to_owned()).into_envelope();
+        let server = DbError::Query("ORA-00904: invalid identifier".to_owned())
+            .server_sql_origin()
+            .into_envelope();
         assert_eq!(server.error_class, ErrorClass::Internal);
         assert_eq!(server.ora_code, Some(904));
         assert!(server.message.contains("your input did not cause this"));

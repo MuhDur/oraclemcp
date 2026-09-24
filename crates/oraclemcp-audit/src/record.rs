@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::hmac::{HmacSha256Key, HmacSha256KeyError};
+use oraclemcp_error::{ErrorClass, ReasonCategory};
 
 const AUDIT_SCHEMA_V5: u16 = 5;
 const AUDIT_SCHEMA_V6: u16 = 6;
@@ -76,12 +77,12 @@ impl AuditFailureCause {
     ) -> Result<Self, AuditFailureCauseError> {
         let error_class = error_class.into();
         let reason_category = reason_category.map(str::to_owned);
-        if !is_category_token(&error_class) {
+        if !is_error_class_name(&error_class) {
             return Err(AuditFailureCauseError::InvalidCategory);
         }
         if reason_category
             .as_deref()
-            .is_some_and(|category| !is_category_token(category))
+            .is_some_and(|category| !is_reason_category_name(category))
         {
             return Err(AuditFailureCauseError::InvalidCategory);
         }
@@ -114,22 +115,23 @@ impl AuditFailureCause {
     }
 
     pub(crate) fn is_redaction_safe(&self) -> bool {
-        is_category_token(&self.error_class)
+        is_error_class_name(&self.error_class)
             && self
                 .reason_category
                 .as_deref()
-                .is_none_or(is_category_token)
+                .is_none_or(is_reason_category_name)
             && self
                 .ora_code
                 .is_none_or(|code| (1..=99_999).contains(&code))
     }
 }
 
-fn is_category_token(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+fn is_error_class_name(value: &str) -> bool {
+    serde_json::from_value::<ErrorClass>(serde_json::Value::String(value.to_owned())).is_ok()
+}
+
+fn is_reason_category_name(value: &str) -> bool {
+    serde_json::from_value::<ReasonCategory>(serde_json::Value::String(value.to_owned())).is_ok()
 }
 
 /// Invalid redaction-safe cause category or Oracle code.
@@ -4667,7 +4669,7 @@ mod tests {
     fn failed_entry_records_error_class_and_ora_code_issue_45() {
         let mut failed = draft();
         failed.outcome = AuditOutcome::Failed;
-        let failure = AuditFailureCause::new("SNAPSHOT_TOO_OLD", Some(1555), Some("UNDO_LIMIT"))
+        let failure = AuditFailureCause::new("SNAPSHOT_TOO_OLD", Some(1555), Some("OTHER"))
             .expect("category fields are safe tokens");
         let record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
             &failed,
@@ -4699,7 +4701,7 @@ mod tests {
     fn tampered_failure_cause_breaks_chain() {
         let mut failed = draft();
         failed.outcome = AuditOutcome::Failed;
-        let failure = AuditFailureCause::new("INVALID_ARGUMENTS", None, Some("OBJECT_TYPE"))
+        let failure = AuditFailureCause::new("INVALID_ARGUMENTS", None, Some("OTHER"))
             .expect("category fields are safe tokens");
         let signing_key = key();
         let mut record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
@@ -4728,11 +4730,11 @@ mod tests {
     }
 
     #[test]
-    fn failure_cause_never_contains_message_or_sql() {
+    fn serialized_failure_cause_contains_only_typed_fields() {
         let mut failed = draft();
         failed.sql = "SELECT PRIVATE_COLUMN FROM SYNTHETIC_TABLE".to_owned();
         failed.outcome = AuditOutcome::Failed;
-        let failure = AuditFailureCause::new("INVALID_ARGUMENTS", None, Some("OBJECT_TYPE"))
+        let failure = AuditFailureCause::new("INVALID_ARGUMENTS", None, Some("OTHER"))
             .expect("category fields are safe tokens");
         let record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
             &failed,
@@ -4743,13 +4745,42 @@ mod tests {
             None,
             None,
             None,
-            Some(failure),
+            Some(failure.clone()),
         );
-        let serialized = serde_json::to_string(&record).expect("record serializes");
-        assert!(!serialized.contains("PRIVATE_COLUMN"));
-        assert!(!serialized.contains("SYNTHETIC_TABLE"));
-        assert!(!serialized.contains("invalid identifier"));
-        assert!(serialized.contains("INVALID_ARGUMENTS"));
+        assert_eq!(record.failure, Some(failure));
+        let serialized_cause = serde_json::to_value(record.failure.as_ref().unwrap())
+            .expect("failure cause serializes");
+        assert_eq!(
+            serialized_cause,
+            serde_json::json!({
+                "error_class": "INVALID_ARGUMENTS",
+                "reason_category": "OTHER"
+            })
+        );
+    }
+
+    #[test]
+    fn failure_cause_rejects_free_text() {
+        assert_eq!(
+            AuditFailureCause::new("INVALID IDENTIFIER from SELECT secret_column", None, None),
+            Err(AuditFailureCauseError::InvalidCategory)
+        );
+        assert_eq!(
+            AuditFailureCause::new("INVALID_ARGUMENTS", None, Some("ORA-00904 secret_column")),
+            Err(AuditFailureCauseError::InvalidCategory)
+        );
+        assert_eq!(
+            AuditFailureCause::new("SELECT_PRIVATE_COLUMN_FROM_SECRET_TABLE", None, None),
+            Err(AuditFailureCauseError::InvalidCategory)
+        );
+        assert_eq!(
+            AuditFailureCause::new(
+                "INVALID_ARGUMENTS",
+                None,
+                Some("SELECT_SECRET_COLUMN_FROM_SECRET_TABLE")
+            ),
+            Err(AuditFailureCauseError::InvalidCategory)
+        );
     }
 
     #[test]

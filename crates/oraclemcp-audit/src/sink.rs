@@ -3596,7 +3596,7 @@ mod tests {
         let auditor = Auditor::new(Box::new(SharedSink(sink.clone())), test_key());
         let mut failed = draft("SELECT private_value FROM synthetic_table", "READ_ONLY");
         failed.outcome = AuditOutcome::Failed;
-        let cause = AuditFailureCause::new("INVALID_ARGUMENTS", Some(904), Some("OBJECT_TYPE"))
+        let cause = AuditFailureCause::new("INVALID_ARGUMENTS", Some(904), Some("OTHER"))
             .expect("cause tokens are valid");
         let record = auditor
             .append_with_failure(&failed, "t0".to_owned(), true, cause)

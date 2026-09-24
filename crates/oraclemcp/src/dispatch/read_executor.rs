@@ -378,6 +378,10 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
                 Ok(rows)
             }
             Err(err) => {
+                // `before_query` admitted only a closed CatalogQueryId, so
+                // this failure came from server-composed SQL rather than the
+                // caller's statement and must not be classified as caller syntax.
+                let err = err.server_sql_origin();
                 let envelope = err.clone().into_envelope();
                 self.after_query(
                     sql,

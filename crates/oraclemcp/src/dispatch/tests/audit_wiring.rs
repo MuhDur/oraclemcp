@@ -56,6 +56,35 @@ fn dispatcher_with_conn(
     .with_auditor(auditor)
 }
 
+pub(super) async fn generated_read_guard_refusal_with_audit(
+    cx: &Cx,
+) -> (ErrorEnvelope, Vec<AuditRecord>) {
+    let (auditor, sink) = auditor_with_sink();
+    let subject = system_generated_read_subject();
+    let guarded = GuardedGeneratedReadConn {
+        inner: &OneRowMock,
+        audit: GeneratedReadAuditCtx {
+            entry: AuditEntryCtx {
+                auditor: Some(&auditor),
+                subject: &subject,
+                db_evidence: None,
+            },
+            tool: "oracle_describe",
+        },
+    };
+    let error = guarded
+        .query_rows_with_provenance(
+            cx,
+            "SELECT 1 FROM dual",
+            &[],
+            ReadQueryProvenance::ServerRead,
+            None,
+        )
+        .await
+        .expect_err("metadata boundary refuses application SQL");
+    (error.into_envelope(), sink.records())
+}
+
 struct FailingSink;
 impl AuditSink for FailingSink {
     fn append(&self, _r: &AuditRecord) -> Result<(), AuditError> {
@@ -232,6 +261,128 @@ fn served_read_is_audited_with_a_replay_scn() {
                     .is_some_and(|certificate| certificate.matches_record(record))
             })
     );
+}
+
+#[test]
+fn serialized_audit_failure_cause_omits_error_sql_and_identifiers() {
+    let (auditor, sink) = auditor_with_sink();
+    let subject = system_generated_read_subject();
+    let failure = ErrorEnvelope::new(
+        ErrorClass::Internal,
+        "ORA-00904: SELECT SECRET_COLUMN_SENTINEL FROM PRIVATE_TABLE_SENTINEL",
+    )
+    .with_ora_code(904)
+    .with_structured_reason(
+        StructuredReason::new(ReasonCategory::Other)
+            .with_offending_construct("IDENTIFIER_SENTINEL"),
+    );
+
+    append_audit_with_observed_scn_and_failure(
+        AuditEntryCtx {
+            auditor: Some(&auditor),
+            subject: &subject,
+            db_evidence: None,
+        },
+        "oracle_describe",
+        "SELECT 1 FROM dual",
+        "READ_ONLY",
+        None,
+        AuditOutcome::Failed,
+        None,
+        Some(&failure),
+    )
+    .expect("failed operation appends a signed audit record");
+
+    let records = sink.records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].outcome, AuditOutcome::Failed);
+    let cause = records[0]
+        .failure
+        .as_ref()
+        .expect("failed record carries a typed cause");
+    assert_eq!(cause.error_class(), "INTERNAL");
+    assert_eq!(cause.ora_code(), Some(904));
+    assert_eq!(cause.reason_category(), Some("OTHER"));
+
+    let serialized = serde_json::to_string(&records[0]).expect("record serializes");
+    for secret in [
+        "SECRET_COLUMN_SENTINEL",
+        "PRIVATE_TABLE_SENTINEL",
+        "IDENTIFIER_SENTINEL",
+    ] {
+        assert!(!serialized.contains(secret), "audit record leaked {secret}");
+    }
+}
+
+struct GeneratedCatalogInvalidIdentifier {
+    generated_queries: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for GeneratedCatalogInvalidIdentifier {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if sql.to_ascii_lowercase().contains("all_tab_cols") {
+            self.generated_queries.fetch_add(1, Ordering::SeqCst);
+            Err(DbError::Query(
+                "ORA-00904: \"GENERATED_COLUMN_SENTINEL\": invalid identifier".to_owned(),
+            ))
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn dispatcher_catalog_ora_00904_is_not_caller_syntax_error() {
+    let generated_queries = Arc::new(AtomicUsize::new(0));
+    let connection = GeneratedCatalogInvalidIdentifier {
+        generated_queries: Arc::clone(&generated_queries),
+    };
+    let dispatcher = OracleDispatcher::new(Box::new(connection));
+    let error = dispatcher
+        .dispatch("oracle_describe", json!({"owner": "APP", "table": "T"}))
+        .expect_err("generated dictionary SQL returns the mock Oracle failure");
+
+    assert!(generated_queries.load(Ordering::SeqCst) > 0);
+    assert_eq!(error.error_class, ErrorClass::Internal);
+    assert_eq!(error.ora_code, Some(904));
+    assert!(!error.message.contains("GENERATED_COLUMN_SENTINEL"));
 }
 
 /// F-S1 discriminating fixture: a profile whose Oracle account lacks

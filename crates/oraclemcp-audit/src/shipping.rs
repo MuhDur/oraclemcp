@@ -2082,7 +2082,7 @@ mod tests {
         failed.decision = AuditDecision::Blocked;
         failed.outcome = AuditOutcome::Failed;
         failed.rows_affected = None;
-        let failure = AuditFailureCause::new("POLICY_DENIED", Some(1031), Some("PRIVILEGE"))
+        let failure = AuditFailureCause::new("POLICY_DENIED", Some(1031), Some("POLICY_DENIED"))
             .expect("safe cause categories");
         let record = AuditRecord::chained_signed_correlated_with_observed_scn_and_certificate_core_hash_and_failure(
             &failed,
@@ -2103,7 +2103,7 @@ mod tests {
         assert!(cef.contains("parentSeq=11"));
         assert!(cef.contains("errorClass=POLICY_DENIED"));
         assert!(cef.contains("oraCode=1031"));
-        assert!(cef.contains("reasonCategory=PRIVILEGE"));
+        assert!(cef.contains("reasonCategory=POLICY_DENIED"));
 
         let syslog = syslog_line(&record);
         assert!(syslog.starts_with("<132>1 "), "local0.warning PRI");
@@ -2112,7 +2112,7 @@ mod tests {
         assert!(syslog.contains("parentSeq=\"11\""));
         assert!(syslog.contains("errorClass=\"POLICY_DENIED\""));
         assert!(syslog.contains("oraCode=\"1031\""));
-        assert!(syslog.contains("reasonCategory=\"PRIVILEGE\""));
+        assert!(syslog.contains("reasonCategory=\"POLICY_DENIED\""));
     }
 
     #[test]
