@@ -40,7 +40,13 @@ CASES = HERE / "cases"
 MANIFEST = ROOT / "scripts/e2e/cases/validate_manifest.py"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
-OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions"}
+OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
+                        "steps"}
+PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "protected", "capped_rw"}
+LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
+# A multi-step case captures structured values from one step and feeds them
+# to later ones (a confirmation token from a preview, for example).
+CAPTURE = re.compile(r"\$\{cap:([a-z][a-z0-9_]{0,31})\}")
 EXPECT_KINDS = {"rows", "error_class", "json_subset", "golden"}
 CURRENT_SESSION = object()
 
@@ -68,13 +74,50 @@ def expand_case(value, run_id, transport):
     if isinstance(value, str):
         for key, replacement in replacements.items():
             value = value.replace(key, replacement)
-        require("${" not in value, "unresolved W4 case placeholder")
+        # ${cap:name} is filled at run time from an earlier step's capture.
+        require("${" not in CAPTURE.sub("", value), "unresolved W4 case placeholder")
         return value
     if isinstance(value, list):
         return [expand_case(item, run_id, transport) for item in value]
     if isinstance(value, dict):
         return {key: expand_case(item, run_id, transport) for key, item in value.items()}
     return value
+
+
+def fill_captures(value, captures):
+    """Substitute ${cap:name} from earlier steps; an unknown capture fails the case."""
+    if isinstance(value, str):
+        whole = CAPTURE.fullmatch(value)
+        if whole:
+            require(whole.group(1) in captures, f"capture {whole.group(1)} was never recorded")
+            return captures[whole.group(1)]
+
+        def replace(match):
+            require(match.group(1) in captures, f"capture {match.group(1)} was never recorded")
+            require(isinstance(captures[match.group(1)], str),
+                    f"capture {match.group(1)} is not a string and cannot be embedded")
+            return captures[match.group(1)]
+        return CAPTURE.sub(replace, value)
+    if isinstance(value, list):
+        return [fill_captures(item, captures) for item in value]
+    if isinstance(value, dict):
+        return {key: fill_captures(item, captures) for key, item in value.items()}
+    return value
+
+
+def json_pointer(document, pointer):
+    require(pointer.startswith("/"), f"capture pointer {pointer!r} must start with /")
+    node = document
+    for raw in pointer[1:].split("/"):
+        part = raw.replace("~1", "/").replace("~0", "~")
+        if isinstance(node, list):
+            require(part.isdigit() and int(part) < len(node), f"capture pointer {pointer} missing")
+            node = node[int(part)]
+        else:
+            require(isinstance(node, dict) and part in node, f"capture pointer {pointer} missing")
+            node = node[part]
+    require(node is not None and node != "", f"capture pointer {pointer} resolved to an empty value")
+    return node
 
 
 def freshen_vsql_marker(case):
@@ -225,11 +268,18 @@ def validate_case(case, filename):
     require(re.fullmatch(r"(?:w4|rel012)_[a-z0-9_]+", case["case_id"]), "invalid case_id")
     require(isinstance(case["tool"], str) and case["tool"], "missing tool name")
     require(case["level"] in {"READ_ONLY", "READ_WRITE", "DDL", "ADMIN"}, "invalid level")
-    require(case.get("profile_variant", "masked") in {"masked", "synthetic_raw", "synthetic_owner"},
-            "profile_variant must be masked, synthetic_raw, or synthetic_owner")
+    require(case.get("profile_variant", "masked") in PROFILE_VARIANTS,
+            f"profile_variant must be one of {sorted(PROFILE_VARIANTS)}")
     if case.get("profile_variant") in {"synthetic_raw", "synthetic_owner"}:
         require(case["level"] == "READ_ONLY" and case.get("setup_phase") == "before_server",
                 "synthetic fixture profiles require precreated READ_ONLY fixtures")
+    if case.get("profile_variant") == "protected":
+        require(case["level"] == "READ_ONLY", "a protected profile is pinned at READ_ONLY")
+    if case.get("profile_variant") == "capped_rw":
+        require(case["level"] in {"READ_ONLY", "READ_WRITE"},
+                "the capped_rw profile's ceiling is READ_WRITE")
+    if "steps" in case:
+        validate_steps(case)
     require(isinstance(case["transports"], list) and case["transports"]
             and set(case["transports"]) <= {"stdio", "http"}
             and len(case["transports"]) == len(set(case["transports"])), "invalid transports")
@@ -317,6 +367,57 @@ def validate_case(case, filename):
     verify_expect_shape(case["expect"])
     verify_expect_shape(case["on_unsupported"])
     return case
+
+
+def validate_steps(case):
+    """Steps run in order on the case's own session before its `call`.
+
+    A step is exactly one of: a tool call {tool, arguments, expect, capture?};
+    {wait_level, deadline_seconds} which polls the session status until the
+    level is reached (an event barrier with a deadline, never a bare sleep);
+    or {audit_report: {contains: [...]}} which renders this run's audit file.
+    """
+    steps = case["steps"]
+    require(isinstance(steps, list) and 1 <= len(steps) <= 8, "steps needs 1..8 entries")
+    require(not ({"parallel", "cancel_marker", "retry", "raw_arguments", "baseline_arguments"}
+                 & case["call"].keys()),
+            "steps cannot be combined with parallel, cancel, retry or raw calls")
+    require(case.get("profile_variant", "masked") not in {"synthetic_raw", "synthetic_owner"},
+            "steps need a writable lab profile")
+    require(not case["requires"],
+            "steps cases run on every lane; an unsupported lane would skip the steps unasserted")
+    known = set()
+    for step in steps:
+        require(isinstance(step, dict), "step must be an object")
+        if "tool" in step:
+            require(set(step) <= {"tool", "arguments", "expect", "capture"}
+                    and {"tool", "arguments", "expect"} <= step.keys(),
+                    "tool step needs tool, arguments, expect and optional capture")
+            require(isinstance(step["tool"], str) and step["tool"]
+                    and isinstance(step["arguments"], dict), "tool step needs a name and arguments")
+            verify_expect_shape(step["expect"])
+            for name in CAPTURE.findall(compact(step["arguments"])):
+                require(name in known, f"step uses capture {name} before it is recorded")
+            capture = step.get("capture", {})
+            require(isinstance(capture, dict)
+                    and all(re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name) and isinstance(pointer, str)
+                            and pointer.startswith("/") for name, pointer in capture.items()),
+                    "capture maps names to JSON pointers into structuredContent")
+            known |= set(capture)
+        elif "wait_level" in step:
+            require(set(step) == {"wait_level", "deadline_seconds"}
+                    and step["wait_level"] in LEVELS
+                    and type(step["deadline_seconds"]) is int and 1 <= step["deadline_seconds"] <= 120,
+                    "wait_level step needs a level and a 1..120 s deadline")
+        else:
+            require(set(step) == {"audit_report"} and isinstance(step["audit_report"], dict)
+                    and set(step["audit_report"]) == {"contains"}
+                    and isinstance(step["audit_report"]["contains"], list)
+                    and step["audit_report"]["contains"]
+                    and all(isinstance(item, str) and item for item in step["audit_report"]["contains"]),
+                    "audit_report step needs a nonempty contains list")
+    for name in CAPTURE.findall(compact(case["call"]["arguments"])):
+        require(name in known, f"call uses capture {name} that no step records")
 
 
 def verify_expect_shape(expect):
@@ -685,6 +786,28 @@ action = "mask"
 tag = "w4.synthetic.mask"
 
 [[profiles]]
+name = "{lane}_protected"
+description = "synthetic W4 protected profile: pinned at READ_ONLY"
+connect_string = "{dsn}"
+username = "system"
+credential_ref = "env:W4_DB_PASSWORD"
+protected = true
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+
+[[profiles]]
+name = "{lane}_capped"
+description = "synthetic W4 writable profile whose ceiling is READ_WRITE"
+connect_string = "{dsn}"
+username = "system"
+credential_ref = "env:W4_DB_PASSWORD"
+max_level = "READ_WRITE"
+default_level = "READ_ONLY"
+
+[profiles.masking]
+mask_unknown_default = true
+
+[[profiles]]
 name = "{lane}_raw"
 description = "synthetic W4 type-fidelity fixtures only"
 connect_string = "{dsn}"
@@ -1011,6 +1134,52 @@ def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
     return result["reply"]
 
 
+def session_level(client):
+    status = tool_payload(client.rpc("tools/call", {
+        "name": "oracle_set_session_level", "arguments": {"action": "status"}}))
+    require(status.get("isError") is not True, "session level status call refused")
+    return status.get("structuredContent", {}).get("session", {}).get("current_level")
+
+
+def run_steps(client, case, row, binary, audit_path, env):
+    """Run a multi-step case's steps in order; every step is verified, none is skipped."""
+    captures, observed = {}, []
+    for index, step in enumerate(case["steps"]):
+        if "tool" in step:
+            reply = client.rpc("tools/call", {"name": step["tool"],
+                                               "arguments": fill_captures(step["arguments"], captures)})
+            verify_envelope(reply)
+            observed.append({"step": index, "tool": step["tool"], "actual": scrub(tool_payload(reply))})
+            row["steps"] = observed
+            try:
+                verify_expect(step["expect"], reply, ROOT / "tests/golden/w4")
+            except DriverError as exc:
+                raise DriverError(f"step {index} ({step['tool']}): {exc}") from exc
+            structured = tool_payload(reply).get("structuredContent", {})
+            for name, pointer in step.get("capture", {}).items():
+                captures[name] = json_pointer(structured, pointer)
+        elif "wait_level" in step:
+            deadline = time.monotonic() + step["deadline_seconds"]
+            level = session_level(client)
+            while level != step["wait_level"]:
+                require(time.monotonic() < deadline,
+                        f"step {index}: session stayed {level}, never reached {step['wait_level']}")
+                time.sleep(0.5)
+                level = session_level(client)
+            observed.append({"step": index, "wait_level": level})
+        else:
+            report = subprocess.run([str(binary), "audit", "report", str(audit_path)], cwd=ROOT,
+                                    env=env, text=True, capture_output=True, timeout=60)
+            observed.append({"step": index, "audit_report_exit": report.returncode})
+            row["steps"] = observed
+            require(report.returncode == 0,
+                    f"step {index}: audit report exited {report.returncode}: {report.stderr.strip()[:160]}")
+            missing = [item for item in step["audit_report"]["contains"] if item not in report.stdout]
+            require(not missing, f"step {index}: audit report lacks {missing}")
+    row["steps"] = observed
+    return captures
+
+
 def verify_case_rereads(connection, case, row):
     actual_rows = []
     for reread in case["db_reread"]:
@@ -1044,6 +1213,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         input_value["vsql_absent_marker"] = case["call"]["vsql_absent_marker"]
     if "cancel_marker" in case["call"]:
         input_value["cancel_marker"] = case["call"]["cancel_marker"]
+    if "steps" in case:
+        input_value["steps"] = case["steps"]
     row = {"case_id": case["case_id"], "test_id": case.get("test_id", case["case_id"]),
            "tool": case["tool"], "level": case["level"], "lane": lane,
            "transport": transport, "input_sha256": sha256(input_value),
@@ -1065,6 +1236,7 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             require(vsql_marker_count(connection, marker) == 0,
                     "V$SQL marker already present before refusal test")
         before = len(audit_records(audit_path))
+        captures = run_steps(client, case, row, binary, audit_path, env) if "steps" in case else {}
         if "cancel_marker" in case["call"] and supported:
             reply = cancelled_call(client, case, connection)
         elif "parallel" in case["call"] and supported:
@@ -1072,7 +1244,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             reply = parallel_http_call(client, case, barriers)
         else:
             reply = client.rpc("tools/call", {"name": case["tool"],
-                                               "arguments": case["call"]["arguments"]},
+                                               "arguments": fill_captures(case["call"]["arguments"],
+                                                                          captures)},
                                raw_arguments=case["call"].get("raw_arguments"))
         verify_envelope(reply, descriptor)
         row["actual"] = scrub(tool_payload(reply))
@@ -1409,6 +1582,8 @@ def run_lane(args):
                     variant = case.get("profile_variant")
                     desired_profile = (args.lane + "_raw" if variant == "synthetic_raw"
                                        else args.lane + "_owner" if variant == "synthetic_owner"
+                                       else args.lane + "_protected" if variant == "protected"
+                                       else args.lane + "_capped" if variant == "capped_rw"
                                        else args.lane)
                     if desired_profile != current_profile:
                         if current_level != "READ_ONLY":
@@ -1433,6 +1608,14 @@ def run_lane(args):
                     rows.append(run_case(client, case, transport, args.lane, capabilities, connection,
                                          barriers, binary, audit_path, client_env,
                                          discovered.get(case["tool"])))
+                    if "steps" in case:
+                        # Steps may elevate, expire or drop the session level on
+                        # their own; re-establish the tracked READ_ONLY baseline.
+                        dropped = tool_payload(client.rpc("tools/call", {
+                            "name": "oracle_set_session_level", "arguments": {"action": "drop"}}))
+                        require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
+                                "failed to drop after a multi-step case")
+                        current_level = "READ_ONLY"
                 if not args.case:
                     restart_row, replacement = run_restart_recovery(
                         client, binary, args.lane, client_env, transport, port,
@@ -1570,6 +1753,87 @@ def selftest():
                          BarrierPool(), Path("unused"), Path("unused"), {})
     require(retry_stub.calls == 2 and retry_row["verdict"] == "pass",
             "retry path failed to issue two independently verified calls")
+    class StepStub:
+        """Plays a server for the preview -> confirm -> replay sequence."""
+
+        def __init__(self, replay_accepted=False, status_level="READ_ONLY"):
+            self.replay_accepted = replay_accepted
+            self.status_level = status_level
+            self.executions = 0
+            self.sent = []
+
+        def rpc(self, method, params, raw_arguments=None):
+            self.sent.append(params)
+            args = params["arguments"]
+            if params["name"] == "oracle_preview_sql":
+                structured = {"execute_confirmation": {"confirm": "tok-synthetic-1"}}
+                return {"jsonrpc": "2.0", "id": 1, "result": {
+                    "content": [], "isError": False, "structuredContent": structured}}
+            if params["name"] == "oracle_set_session_level":
+                return {"jsonrpc": "2.0", "id": 1, "result": {
+                    "content": [], "isError": False,
+                    "structuredContent": {"session": {"current_level": self.status_level}}}}
+            self.executions += 1
+            accepted = self.executions == 1 or self.replay_accepted
+            require(args.get("confirm") == "tok-synthetic-1", "stub received an unfilled capture")
+            structured = ({"executed": True, "committed": True} if accepted
+                          else {"error_class": "CHALLENGE_REQUIRED"})
+            return {"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [], "isError": not accepted, "structuredContent": structured}}
+
+    replay_case = {"case_id": "w4_selftest_token_replay", "tool": "oracle_execute",
+                   "level": "READ_WRITE", "transports": ["stdio"], "requires": [], "setup": [],
+                   "steps": [
+                       {"tool": "oracle_preview_sql", "arguments": {"sql": "UPDATE T SET X = 1"},
+                        "expect": {"json_subset": {"execute_confirmation": {}}},
+                        "capture": {"token": "/execute_confirmation/confirm"}},
+                       {"tool": "oracle_execute",
+                        "arguments": {"sql": "UPDATE T SET X = 1", "commit": True, "confirm": "${cap:token}"},
+                        "expect": {"json_subset": {"committed": True}}}],
+                   "call": {"arguments": {"sql": "UPDATE T SET X = 1", "commit": True,
+                                          "confirm": "${cap:token}"}},
+                   "expect": {"error_class": "CHALLENGE_REQUIRED"},
+                   "db_reread": [], "audit_expect": [],
+                   "on_unsupported": {"error_class": "CHALLENGE_REQUIRED"}}
+    validate_case(replay_case, "selftest")
+
+    def step_row(stub, case):
+        return run_case(stub, case, "stdio", "free23", set(), object(), BarrierPool(),
+                        Path("unused"), Path("unused"), {})
+
+    honest = StepStub()
+    honest_row = step_row(honest, replay_case)
+    require(honest_row["verdict"] == "pass" and honest.executions == 2
+            and honest.sent[-1]["arguments"]["confirm"] == "tok-synthetic-1",
+            "multi-step replay case did not run preview, apply and replay with the captured token")
+    print(compact({"selftest": "multi_step_token_replay_refused", "verdict": "pass"}))
+
+    def step_failed(label, stub, case):
+        row = step_row(stub, case)
+        require(row["verdict"] == "fail", f"selftest accepted planted {label}")
+        print(compact({"selftest": label, "verdict": "rejected",
+                       "detail": row["verification_failure"]["detail"][:80]}))
+
+    step_failed("replayed_token_accepted", StepStub(replay_accepted=True), replay_case)
+    wrong_step = json.loads(json.dumps(replay_case))
+    wrong_step["steps"][1]["expect"] = {"json_subset": {"committed": False}}
+    step_failed("wrong_step_expectation", StepStub(), wrong_step)
+    missing_pointer = json.loads(json.dumps(replay_case))
+    missing_pointer["steps"][0]["capture"] = {"token": "/execute_confirmation/absent"}
+    step_failed("missing_capture_pointer", StepStub(), missing_pointer)
+    expiry_case = {**replay_case, "case_id": "w4_selftest_expiry",
+                   "steps": [{"wait_level": "READ_ONLY", "deadline_seconds": 1}],
+                   "call": {"arguments": {"sql": "UPDATE T SET X = 1"}},
+                   "expect": {"json_subset": {"committed": True}}}
+    validate_case(expiry_case, "selftest")
+    step_failed("level_never_reached", StepStub(status_level="READ_WRITE"), expiry_case)
+    early_capture = json.loads(json.dumps(replay_case))
+    early_capture["steps"][0]["arguments"]["sql"] = "${cap:token}"
+    rejected("capture_used_before_recorded", lambda: validate_case(early_capture, "selftest"))
+    rejected("unknown_profile_variant", lambda: validate_case(
+        {**replay_case, "profile_variant": "writable_everything"}, "selftest"))
+    rejected("protected_profile_elevated", lambda: validate_case(
+        {**replay_case, "profile_variant": "protected"}, "selftest"))
     class ParallelStub:
         def __init__(self):
             self.next_session = 0

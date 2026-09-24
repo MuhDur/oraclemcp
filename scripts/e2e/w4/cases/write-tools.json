@@ -1372,6 +1372,762 @@
     }
   },
   {
+    "case_id": "w4_execute_update_confirmed_commit",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "INSERT INTO ${owner}.T_CHILD_AUD_${run_id} (CHILD_ID) VALUES (402)"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_CHILD_AUD_${run_id} SET CHILD_ID = 403 WHERE CHILD_ID = 402",
+        "commit": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": true,
+        "rolled_back": false,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT CHILD_ID FROM ${owner}.T_CHILD_AUD_${run_id} WHERE CHILD_ID IN (402, 403) ORDER BY CHILD_ID",
+        "rows": [
+          [
+            403
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_preview_sql",
+        "arguments": {
+          "sql": "UPDATE ${owner}.T_CHILD_AUD_${run_id} SET CHILD_ID = 403 WHERE CHILD_ID = 402",
+          "commit": true
+        },
+        "expect": {
+          "json_subset": {
+            "execute_confirmation": {}
+          }
+        },
+        "capture": {
+          "token": "/execute_confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_execute_token_replay_refused",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "INSERT INTO ${owner}.T_CHILD_AUD_${run_id} (CHILD_ID) VALUES (404)"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_CHILD_AUD_${run_id} SET CHILD_ID = CHILD_ID + 1 WHERE CHILD_ID >= 404 AND CHILD_ID < 410",
+        "commit": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "error_class": "CHALLENGE_REQUIRED"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT CHILD_ID FROM ${owner}.T_CHILD_AUD_${run_id} WHERE CHILD_ID >= 404 AND CHILD_ID < 410",
+        "rows": [
+          [
+            405
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_preview_sql",
+        "arguments": {
+          "sql": "UPDATE ${owner}.T_CHILD_AUD_${run_id} SET CHILD_ID = CHILD_ID + 1 WHERE CHILD_ID >= 404 AND CHILD_ID < 410",
+          "commit": true
+        },
+        "expect": {
+          "json_subset": {
+            "execute_confirmation": {}
+          }
+        },
+        "capture": {
+          "token": "/execute_confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_execute",
+        "arguments": {
+          "sql": "UPDATE ${owner}.T_CHILD_AUD_${run_id} SET CHILD_ID = CHILD_ID + 1 WHERE CHILD_ID >= 404 AND CHILD_ID < 410",
+          "commit": true,
+          "confirm": "${cap:token}"
+        },
+        "expect": {
+          "json_subset": {
+            "committed": true,
+            "rows_affected": 1
+          }
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_execute_ddl_preview_token_apply",
+    "tool": "oracle_execute",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "CREATE TABLE ${owner}.T_W4DDL_${run_id} (ID NUMBER)",
+        "commit": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": true
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_TABLES WHERE OWNER = '${owner}' AND TABLE_NAME = 'T_W4DDL_${run_id}'",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_preview_sql",
+        "arguments": {
+          "sql": "CREATE TABLE ${owner}.T_W4DDL_${run_id} (ID NUMBER)",
+          "commit": true
+        },
+        "expect": {
+          "json_subset": {
+            "execute_confirmation": {}
+          }
+        },
+        "capture": {
+          "token": "/execute_confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_execute_protected_profile_refused",
+    "tool": "oracle_execute",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-protected' WHERE ID = 1"
+      }
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_set_session_level",
+        "arguments": {
+          "level": "READ_WRITE"
+        },
+        "expect": {
+          "json_subset": {
+            "changed": false,
+            "confirmation": null,
+            "gate": {
+              "decision": "blocked",
+              "reason": {
+                "type": "exceeds_ceiling",
+                "ceiling": "READ_ONLY"
+              }
+            }
+          }
+        }
+      }
+    ],
+    "audit_zero_executions": true,
+    "profile_variant": "protected"
+  },
+  {
+    "case_id": "w4_set_session_level_elevate_confirm",
+    "tool": "oracle_execute",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_PARENT_${run_id} (ID, LABEL) VALUES (111, 'w4-after-elevation')"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "rolled_back": true,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_set_session_level",
+        "decision": "STEP_UP_REQUIRED",
+        "outcome": "SUCCEEDED"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_set_session_level",
+        "arguments": {
+          "level": "READ_WRITE"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {}
+          }
+        },
+        "capture": {
+          "elevation": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_set_session_level",
+        "arguments": {
+          "level": "READ_WRITE",
+          "execute": true,
+          "confirm": "${cap:elevation}"
+        },
+        "expect": {
+          "json_subset": {
+            "session": {
+              "current_level": "READ_WRITE"
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_set_session_level_ttl_expiry_returns_readonly",
+    "tool": "oracle_execute",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_PARENT_${run_id} (ID, LABEL) VALUES (112, 'w4-after-expiry')"
+      }
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_set_session_level",
+        "decision": "STEP_UP_REQUIRED",
+        "outcome": "SUCCEEDED"
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_set_session_level",
+        "arguments": {
+          "level": "READ_WRITE",
+          "ttl_seconds": 3
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {}
+          }
+        },
+        "capture": {
+          "elevation": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_set_session_level",
+        "arguments": {
+          "level": "READ_WRITE",
+          "execute": true,
+          "confirm": "${cap:elevation}",
+          "ttl_seconds": 3
+        },
+        "expect": {
+          "json_subset": {
+            "session": {
+              "current_level": "READ_WRITE"
+            }
+          }
+        }
+      },
+      {
+        "wait_level": "READ_ONLY",
+        "deadline_seconds": 60
+      }
+    ]
+  },
+  {
+    "case_id": "w4_enable_disable_writes_alias_route",
+    "tool": "oracle_set_session_level",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "action": "status"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "session": {
+          "current_level": "READ_ONLY"
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_set_session_level",
+        "decision": "STEP_UP_REQUIRED",
+        "outcome": "SUCCEEDED"
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "enable_writes",
+        "arguments": {},
+        "expect": {
+          "json_subset": {
+            "confirmation": {}
+          }
+        },
+        "capture": {
+          "elevation": "/confirmation/confirm"
+        }
+      },
+      {
+        "tool": "enable_writes",
+        "arguments": {
+          "execute": true,
+          "confirm": "${cap:elevation}"
+        },
+        "expect": {
+          "json_subset": {
+            "session": {
+              "current_level": "READ_WRITE"
+            }
+          }
+        }
+      },
+      {
+        "tool": "disable_writes",
+        "arguments": {},
+        "expect": {
+          "json_subset": {
+            "session": {
+              "current_level": "READ_ONLY"
+            }
+          }
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_checkpoint_then_undo_to_restores_rows",
+    "tool": "oracle_undo_to",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {}
+    },
+    "expect": {
+      "json_subset": {
+        "undone_to": null,
+        "discarded_statements": 0,
+        "workspace": {
+          "open": false,
+          "checkpoints": [],
+          "held_statements": 0
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_checkpoint",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_checkpoint",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "HELD_UNCOMMITTED",
+        "rows_affected": 1
+      },
+      {
+        "tool": "oracle_query",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_query",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
+      },
+      {
+        "tool": "oracle_undo_to",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_undo_to",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED"
+      },
+      {
+        "tool": "oracle_query",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_query",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      },
+      {
+        "tool": "oracle_undo_to",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_undo_to",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED"
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_checkpoint",
+        "arguments": {
+          "name": "W4CP1"
+        },
+        "expect": {
+          "json_subset": {
+            "checkpoint": "W4CP1"
+          }
+        }
+      },
+      {
+        "tool": "oracle_preview_sql",
+        "arguments": {
+          "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-held' WHERE ID = 1",
+          "hold": true
+        },
+        "expect": {
+          "json_subset": {
+            "execute_confirmation": {}
+          }
+        },
+        "capture": {
+          "token": "/execute_confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_execute",
+        "arguments": {
+          "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-held' WHERE ID = 1",
+          "hold": true,
+          "confirm": "${cap:token}"
+        },
+        "expect": {
+          "json_subset": {
+            "executed": true,
+            "committed": false,
+            "rolled_back": false,
+            "rows_affected": 1
+          }
+        }
+      },
+      {
+        "tool": "oracle_query",
+        "arguments": {
+          "sql": "SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p WHERE p.LABEL = 'w4-held'"
+        },
+        "expect": {
+          "json_subset": {
+            "row_count": 1
+          }
+        }
+      },
+      {
+        "tool": "oracle_undo_to",
+        "arguments": {
+          "name": "W4CP1"
+        },
+        "expect": {
+          "json_subset": {
+            "undone_to": "W4CP1",
+            "discarded_statements": 1
+          }
+        }
+      },
+      {
+        "tool": "oracle_query",
+        "arguments": {
+          "sql": "SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p WHERE p.LABEL = 'w4-held'"
+        },
+        "expect": {
+          "json_subset": {
+            "row_count": 0
+          }
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_audit_report_after_ladder",
+    "tool": "oracle_set_session_level",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "action": "status"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "session": {
+          "current_level": "READ_ONLY"
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "audit_report": {
+          "contains": [
+            "oracle_execute",
+            "oracle_set_session_level",
+            "ROLLED_BACK"
+          ]
+        }
+      }
+    ]
+  },
+  {
     "case_id": "w4_query_sees_rows_committed_between_calls",
     "tool": "oracle_query",
     "level": "READ_ONLY",
