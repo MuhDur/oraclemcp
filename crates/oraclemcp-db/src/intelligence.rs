@@ -949,60 +949,21 @@ pub async fn orient_fks_page(
     // Keep the outermost statement a SELECT. Besides matching the generated
     // read-path contract, the thin driver recognizes this shape consistently
     // when the dictionary query contains a CTE.
-    let sql = "SELECT * FROM ( \
-               WITH args AS ( \
-                   SELECT :1 owner_filter FROM dual \
-               ), selected_foreign_keys AS ( \
-                   SELECT child_owner, child_table, constraint_name, parent_owner, parent_constraint_name \
-                   FROM ( \
-                       SELECT ordered_foreign_keys.*, ROWNUM AS page_row FROM ( \
-                           SELECT child.owner AS child_owner, \
-                                  child.table_name AS child_table, \
-                                  child.constraint_name, \
-                                  child.r_owner AS parent_owner, \
-                                  child.r_constraint_name AS parent_constraint_name \
-                           FROM all_constraints child CROSS JOIN args \
-                           WHERE child.constraint_type = 'R' \
-                             AND (args.owner_filter IS NULL OR child.owner = args.owner_filter) \
-                           ORDER BY child.owner, child.table_name, child.constraint_name \
-                       ) ordered_foreign_keys WHERE ROWNUM <= :2 \
-                   ) WHERE page_row > :3 \
-               ) \
-               SELECT foreign_key.child_owner, foreign_key.child_table, \
-                      foreign_key.constraint_name, foreign_key.parent_owner, \
-                      parent.table_name AS parent_table, \
-                      child_columns.column_name AS child_column, \
-                      parent_columns.column_name AS parent_column, \
-                      child_columns.position AS column_position \
-               FROM selected_foreign_keys foreign_key \
-               JOIN all_constraints parent \
-                 ON parent.owner = foreign_key.parent_owner \
-                AND parent.constraint_name = foreign_key.parent_constraint_name \
-               JOIN all_cons_columns child_columns \
-                 ON child_columns.owner = foreign_key.child_owner \
-                AND child_columns.constraint_name = foreign_key.constraint_name \
-               JOIN all_cons_columns parent_columns \
-                 ON parent_columns.owner = parent.owner \
-                AND parent_columns.constraint_name = parent.constraint_name \
-                AND parent_columns.position = child_columns.position \
-               ORDER BY foreign_key.child_owner, foreign_key.child_table, \
-                        foreign_key.constraint_name, child_columns.position \
-               )";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
     let upper_bound = page_upper_bound(offset, max_rows)?;
-    let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::OrientForeignKeysPage,
+        &[
+            owner_bind,
+            OracleBind::from(upper_bound),
+            OracleBind::from(offset as i64),
+        ],
+    )
+    .await?;
 
     let mut foreign_keys: Vec<OrientForeignKey> = Vec::new();
     for row in rows {
@@ -1094,46 +1055,21 @@ pub async fn orient_hot_objects_page(
     offset: usize,
     max_rows: usize,
 ) -> Result<Vec<OrientHotObject>, DbError> {
-    let sql = "SELECT owner, object_name, inserts, updates, deletes, last_modified, truncated, drop_segments FROM ( \
-                   SELECT selected.*, ROWNUM AS page_row FROM ( \
-                       WITH args AS ( \
-                           SELECT :1 owner_filter FROM dual \
-                       ) \
-                       SELECT modifications.table_owner AS owner, \
-                              modifications.table_name AS object_name, \
-                              NVL(modifications.inserts, 0) AS inserts, \
-                              NVL(modifications.updates, 0) AS updates, \
-                              NVL(modifications.deletes, 0) AS deletes, \
-                              modifications.timestamp AS last_modified, \
-                              NVL(modifications.truncated, 'NO') AS truncated, \
-                              NVL(modifications.drop_segments, 0) AS drop_segments \
-                       FROM all_tab_modifications modifications CROSS JOIN args \
-                       WHERE (args.owner_filter IS NULL \
-                              OR modifications.table_owner = args.owner_filter) \
-                         AND modifications.partition_name IS NULL \
-                         AND modifications.subpartition_name IS NULL \
-                       ORDER BY (NVL(modifications.inserts, 0) \
-                                 + NVL(modifications.updates, 0) \
-                                 + NVL(modifications.deletes, 0)) DESC, \
-                                modifications.timestamp DESC NULLS LAST, \
-                                modifications.table_owner, modifications.table_name \
-                   ) selected WHERE ROWNUM <= :2 \
-               ) WHERE page_row > :3";
     let owner_bind = owner.map_or(OracleBind::Null, |value| {
         OracleBind::from(value.to_ascii_uppercase())
     });
     let upper_bound = page_upper_bound(offset, max_rows)?;
-    let rows = conn
-        .query_rows(
-            cx,
-            sql,
-            &[
-                owner_bind,
-                OracleBind::from(upper_bound),
-                OracleBind::from(offset as i64),
-            ],
-        )
-        .await?;
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::OrientHotObjectsPage,
+        &[
+            owner_bind,
+            OracleBind::from(upper_bound),
+            OracleBind::from(offset as i64),
+        ],
+    )
+    .await?;
 
     Ok(rows
         .into_iter()
