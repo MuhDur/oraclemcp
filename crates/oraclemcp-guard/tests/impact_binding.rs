@@ -29,6 +29,11 @@ fn sample() -> ImpactBindingV1 {
             compiler_facts: computed("PLSQL_OPTIMIZE_LEVEL=2".into()),
             engine_version: computed("0.8.0".into()),
             ruleset_digest: computed([0; 32]),
+            effective_plan_digest: computed([0; 32]),
+            policy_schema_digest: computed([0; 32]),
+            policy_ruleset_digest: computed([0; 32]),
+            matched_policy_rule_ids: computed(vec!["P1".into(), "P2".into()]),
+            rewrite_algorithm_version: computed(1),
             db_identity: computed(DbIdentity {
                 dbid: 1,
                 con_uid: 2,
@@ -66,6 +71,11 @@ fn impact_every_field_serialized_with_status() {
         "compiler_facts",
         "engine_version",
         "ruleset_digest",
+        "effective_plan_digest",
+        "policy_schema_digest",
+        "policy_ruleset_digest",
+        "matched_policy_rule_ids",
+        "rewrite_algorithm_version",
         "db_identity",
         "current_schema",
         "profile_generation",
@@ -239,9 +249,20 @@ fn field_eight_change_one_changes_dbid_and_decisive_digest() {
     assert_ne!(original.decisive_digest(), changed.decisive_digest());
 }
 
+#[test]
+fn policy_rule_order_and_identity_are_decisive_even_at_smallest_mutation() {
+    let original = sample();
+    let mut changed = original.clone();
+    changed.decisive.matched_policy_rule_ids = computed(vec!["P3".into(), "P2".into()]);
+    assert_ne!(original.decisive, changed.decisive);
+    assert_ne!(original.decisive_digest(), changed.decisive_digest());
+    changed.decisive.matched_policy_rule_ids = computed(vec!["P2".into(), "P1".into()]);
+    assert_ne!(original.decisive_digest(), changed.decisive_digest());
+}
+
 proptest! {
     #[test]
-    fn prop_decisive_digest_changes_on_each_decisive_field(field in 0usize..19, change in 1u8..=255) {
+    fn prop_decisive_digest_changes_on_each_decisive_field(field in 0usize..24, change in 1u8..=255) {
         let original = sample();
         let mut changed = original.clone();
         let facts = &mut changed.decisive;
@@ -260,6 +281,11 @@ proptest! {
             11 => facts.lane_generation = computed(u64::from(change) + 1),
             12 => facts.scope_digest = computed(Some([change; 32])),
             18 => facts.db_identity = computed(DbIdentity { dbid: 1, con_uid: u64::from(change) + 2 }),
+            19 => facts.effective_plan_digest = computed([change; 32]),
+            20 => facts.policy_schema_digest = computed([change; 32]),
+            21 => facts.policy_ruleset_digest = computed([change; 32]),
+            22 => facts.matched_policy_rule_ids = computed(vec![format!("P{}", u16::from(change) + 2), "P2".into()]),
+            23 => facts.rewrite_algorithm_version = computed(u16::from(change) + 1),
             13..=17 => {
                 let FieldStatus::Computed { value: objects } = &mut facts.objects else { unreachable!() };
                 let object = &mut objects[0];

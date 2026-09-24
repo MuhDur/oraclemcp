@@ -9,6 +9,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::effective_dml_plan::{DML_REWRITE_ALGORITHM_VERSION, EffectiveDmlPlanV1};
+
 const IMPACT_DOMAIN: &[u8] = b"omcp/impact-binding/decisive/v1";
 pub const IMPACT_BINDING_VERSION: u8 = 1;
 
@@ -116,6 +118,13 @@ pub struct DecisiveFacts {
     pub compiler_facts: FieldStatus<String>,
     pub engine_version: FieldStatus<String>,
     pub ruleset_digest: FieldStatus<[u8; 32]>,
+    /// The W13 plan that later preview/count/classification/apply consumers must share.
+    pub effective_plan_digest: FieldStatus<[u8; 32]>,
+    pub policy_schema_digest: FieldStatus<[u8; 32]>,
+    pub policy_ruleset_digest: FieldStatus<[u8; 32]>,
+    /// Ordered: removal, addition and reordering all require a new preview.
+    pub matched_policy_rule_ids: FieldStatus<Vec<String>>,
+    pub rewrite_algorithm_version: FieldStatus<u16>,
     pub db_identity: FieldStatus<DbIdentity>,
     pub current_schema: FieldStatus<String>,
     pub profile_generation: FieldStatus<u64>,
@@ -135,6 +144,11 @@ impl Default for DecisiveFacts {
             compiler_facts: FieldStatus::not_wired(),
             engine_version: FieldStatus::not_wired(),
             ruleset_digest: FieldStatus::not_wired(),
+            effective_plan_digest: FieldStatus::not_wired(),
+            policy_schema_digest: FieldStatus::not_wired(),
+            policy_ruleset_digest: FieldStatus::not_wired(),
+            matched_policy_rule_ids: FieldStatus::not_wired(),
+            rewrite_algorithm_version: FieldStatus::not_wired(),
             db_identity: FieldStatus::not_wired(),
             current_schema: FieldStatus::not_wired(),
             profile_generation: FieldStatus::not_wired(),
@@ -315,6 +329,37 @@ fn put_status<T>(out: &mut Vec<u8>, status: &FieldStatus<T>, encode: impl Fn(&mu
 }
 
 impl DecisiveFacts {
+    /// Bind one immutable plan for the later grant runtime to count and
+    /// execute. Revalidation must compare all decisive facts.
+    pub fn bind_effective_plan(&mut self, plan: &EffectiveDmlPlanV1) {
+        self.effective_plan_digest = FieldStatus::Computed {
+            value: plan.digest(),
+        };
+        self.policy_schema_digest = FieldStatus::Computed {
+            value: plan.policy_schema_digest(),
+        };
+        self.policy_ruleset_digest = FieldStatus::Computed {
+            value: plan.policy_ruleset_digest(),
+        };
+        self.matched_policy_rule_ids = FieldStatus::Computed {
+            value: plan.matched_rule_ids().to_vec(),
+        };
+        self.rewrite_algorithm_version = FieldStatus::Computed {
+            value: DML_REWRITE_ALGORITHM_VERSION,
+        };
+    }
+
+    /// All W13-specific commitments must still match at apply. Unknown or
+    /// estimated statuses never admit an apply.
+    #[must_use]
+    pub fn matches_effective_plan(&self, plan: &EffectiveDmlPlanV1) -> bool {
+        matches!(&self.effective_plan_digest, FieldStatus::Computed { value } if value == &plan.digest())
+            && matches!(&self.policy_schema_digest, FieldStatus::Computed { value } if value == &plan.policy_schema_digest())
+            && matches!(&self.policy_ruleset_digest, FieldStatus::Computed { value } if value == &plan.policy_ruleset_digest())
+            && matches!(&self.matched_policy_rule_ids, FieldStatus::Computed { value } if value == plan.matched_rule_ids())
+            && matches!(&self.rewrite_algorithm_version, FieldStatus::Computed { value } if *value == DML_REWRITE_ALGORITHM_VERSION)
+    }
+
     fn encode(&self, out: &mut Vec<u8>) {
         put_status(out, &self.envelope_digest, |out, v| put_bytes(out, v));
         put_status(out, &self.statement_digest, |out, v| put_bytes(out, v));
@@ -346,6 +391,18 @@ impl DecisiveFacts {
         put_status(out, &self.compiler_facts, |out, v| put_text(out, v));
         put_status(out, &self.engine_version, |out, v| put_text(out, v));
         put_status(out, &self.ruleset_digest, |out, v| put_bytes(out, v));
+        put_status(out, &self.effective_plan_digest, |out, v| put_bytes(out, v));
+        put_status(out, &self.policy_schema_digest, |out, v| put_bytes(out, v));
+        put_status(out, &self.policy_ruleset_digest, |out, v| put_bytes(out, v));
+        put_status(out, &self.matched_policy_rule_ids, |out, ids| {
+            out.extend_from_slice(&(ids.len() as u64).to_be_bytes());
+            for id in ids {
+                put_text(out, id);
+            }
+        });
+        put_status(out, &self.rewrite_algorithm_version, |out, v| {
+            out.extend_from_slice(&v.to_be_bytes());
+        });
         put_status(out, &self.db_identity, |out, v| {
             out.extend_from_slice(&v.dbid.to_be_bytes());
             out.extend_from_slice(&v.con_uid.to_be_bytes());

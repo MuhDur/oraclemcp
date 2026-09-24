@@ -19,6 +19,7 @@ pub mod classifier;
 pub mod clock;
 pub mod corpus;
 pub mod edition_lifecycle;
+pub mod effective_dml_plan;
 pub mod enforcement;
 pub mod exec_grant;
 pub mod impact_binding;
@@ -39,6 +40,10 @@ pub use action_envelope::{
 };
 pub use edition_lifecycle::{
     EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql, parse_edition_lifecycle_sql,
+};
+pub use effective_dml_plan::{
+    DML_REWRITE_ALGORITHM_VERSION, DmlCallerPredicateV1, DmlCallerStatementV1, DmlPlanError,
+    EffectiveDmlPlanV1,
 };
 pub use enforcement::{
     SET_TRANSACTION_READ_ONLY, is_allowed_alter_session, read_only_setup_statements,
