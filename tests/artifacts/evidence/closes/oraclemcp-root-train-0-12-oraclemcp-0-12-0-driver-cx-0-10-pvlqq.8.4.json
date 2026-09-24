@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T23:08:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.4",
+  "scope": {
+    "summary": "Error classes true end to end and FAILED audit cause (#38, #42, #45): INVALID_ARGUMENTS for unsupported get_ddl/get_source types; ORA-01555 -> SNAPSHOT_TOO_OLD; server-owned ORA-00904 on guarded generated/catalog reads -> not SYNTAX_ERROR (server_sql_origin wired at read_executor.rs:384) while caller ORA-00904 stays SYNTAX_ERROR; generated-read guard refusal keeps FORBIDDEN_STATEMENT/POLICY_DENIED; FAILED audit entries carry redaction-safe error_class + numeric ora_code in the signed chain; AWR/Statspack/FGA probes accept Query|ServerQuery so non-DBA degrade paths still work. Commits incl. 3371fd7c, 41ddcc1e, 0f80877c, d3efee3a.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/error.rs",
+      "crates/oraclemcp-db/src/awr.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "crates/oraclemcp-audit/src/record.rs"
+    ],
+    "out_of_scope": [
+      "Classification of ORA codes outside the table (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "3614b90666cd0a8a00bd57fe96a9216fa210fa17",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "unit tests (gate log + orchestrator re-run)",
+        "kind": "cli",
+        "trace": "AC-named tests passed in the orchestrator gate log; at origin/main 3614b906 (clean worktree, lease): dispatch::tests::top_queries::guarded_ora_00942_historical_probes_degrade_without_internal_error ok; oraclemcp-db catalog_resolver 69 passed."
+      },
+      {
+        "name": "live W4 (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary at origin/main 0f80877c (sha256 484b7953...), driver.py fresh cases.jsonl, python-oracledb 4.0.2: w4_get_source_argument_class, w4_get_ddl_unsupported_type_invalid_arguments, w4_sample_rows_generated_refusal, w4_query_audit_failure_cause PASS stdio+HTTP on free23/xe21/xe18. d3efee3a changes only AWR/FGA probe degrade classification (no W4 case path)."
+      },
+      {
+        "name": "independent test-body reviews",
+        "kind": "cli",
+        "trace": "Round 1 (1ba44b84): REWORK - server_sql_origin had zero callers, #42 live case not revert-sensitive, vacuous audit canary. Round 2 (0f80877c): items MET (dispatcher_catalog_ora_00904_is_not_caller_syntax_error revert-sensitive; #42 through real Auditor; canary through production cause builder, failure_cause_rejects_free_text) plus one regression found (awr.rs matched only DbError::Query) - fixed in d3efee3a (Query|ServerQuery) with a guarded ORA-00942 dispatcher regression test. Fail-closed check: no refusal became an admission."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live W4 was run at 0f80877c; d3efee3a (probe degrade classification) is covered by unit tests only.",
+    "w4_sample_rows_generated_refusal is not revert-sensitive for #42 on its own; the revert-sensitive proof is the unit test through GuardedGeneratedReadConn with a real Auditor."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
