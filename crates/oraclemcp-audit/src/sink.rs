@@ -420,7 +420,7 @@ thread_local! {
 // The hook lands exactly between the historical stale path-existence probes
 // and the secure opens. It proves that parent-directory durability follows
 // the actual create outcome, rather than a pre-open pathname observation.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static FILE_AUDIT_OPEN_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
@@ -455,12 +455,12 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn set_file_audit_open_hook(hook: impl FnOnce() + 'static) {
     FILE_AUDIT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_file_audit_open_hook() {
     FILE_AUDIT_OPEN_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
@@ -511,16 +511,16 @@ fn run_audit_resume_anchor_hook() {
     });
 }
 
-#[cfg(not(all(test, unix)))]
+#[cfg(all(unix, not(test)))]
 fn run_file_audit_parent_sync_hook() {}
 
-#[cfg(not(all(test, unix)))]
+#[cfg(all(unix, not(test)))]
 fn run_file_audit_parent_handle_hook() {}
 
 #[cfg(not(all(test, unix)))]
 fn run_audit_resume_anchor_hook() {}
 
-#[cfg(not(test))]
+#[cfg(not(all(test, unix)))]
 fn run_file_audit_open_hook() {}
 
 struct OpenedPrivateAuditFile {
@@ -3466,7 +3466,7 @@ impl Auditor {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod open_tests;
 
 #[cfg(test)]

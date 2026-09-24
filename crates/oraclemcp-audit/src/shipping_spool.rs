@@ -909,18 +909,18 @@ fn verify_held_spool_directory(held: &CapDir, path: &Path) -> Result<(), Shippin
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 thread_local! {
     static SPOOL_DIRECTORY_HARDENING_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn set_spool_directory_hardening_hook(hook: impl FnOnce() + 'static) {
     SPOOL_DIRECTORY_HARDENING_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn run_spool_directory_hardening_hook() {
     SPOOL_DIRECTORY_HARDENING_HOOK.with(|slot| {
         if let Some(hook) = slot.borrow_mut().take() {
@@ -929,7 +929,7 @@ fn run_spool_directory_hardening_hook() {
     });
 }
 
-#[cfg(not(test))]
+#[cfg(not(all(test, unix)))]
 fn run_spool_directory_hardening_hook() {}
 
 fn bind_destination_at(
@@ -2290,17 +2290,9 @@ fn acknowledged_path(directory: &Path, seq: u64) -> PathBuf {
     directory.join(acknowledged_name(seq))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn sync_directory(directory: &Path) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        File::open(directory)?.sync_all()
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = directory;
-        Ok(())
-    }
+    File::open(directory)?.sync_all()
 }
 
 #[cfg(test)]

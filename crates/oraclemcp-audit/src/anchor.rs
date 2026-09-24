@@ -264,7 +264,7 @@ fn run_anchor_parent_open_hook() {
     });
 }
 
-#[cfg(not(all(test, unix)))]
+#[cfg(all(unix, not(test)))]
 fn run_anchor_parent_open_hook() {}
 
 /// Process-wide counter feeding [`anchor_tmp_path`] for collision-free,
