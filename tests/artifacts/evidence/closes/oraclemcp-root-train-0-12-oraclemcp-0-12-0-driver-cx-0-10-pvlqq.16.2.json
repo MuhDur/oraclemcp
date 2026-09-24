@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T01:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.16.2",
+  "scope": {
+    "summary": "ImpactBindingV1 seam: canonical encoding and field statuses on every confirmation-minting preview (all seven impact fields present as unavailable(not_wired) until W14 wiring beads) (313b9458); protocol goldens refreshed for the added outputSchema (6f0a6c58).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/impact_binding.rs",
+      "crates/oraclemcp-guard/tests/impact_binding.rs",
+      "crates/oraclemcp/src/registry.rs"
+    ],
+    "out_of_scope": [
+      "Files changed again after the gate by later beads (catalog_query.rs, catalog_resolver.rs, dispatch/mod.rs, read_executor.rs, dispatch/tests.rs, guard lib.rs) are excluded from the clean-scope claim; their state at 5b5b93f7 is covered by the gate.",
+      "Correctness of impact values (later W14 beads)."
+    ]
+  },
+  "source": {
+    "sha": "5b5b93f7dc9f86a0c595efb61d8d7236dc0eb181",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 5b5b93f7 (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 117 suites, 3436 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "9 named tests ok by exact name in the gate log (guard impact_binding suite + in-process preview presence)."
+      },
+      {
+        "name": "golden review",
+        "kind": "cli",
+        "trace": "6f0a6c58 golden hunks all add outputSchema for the impact field; no search_objects hunk (the separate search_objects regression was a harness-fake call-shape gap fixed in f3147dd7 with expected output unchanged)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane; live runs on local lab containers, not committed as artifacts."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

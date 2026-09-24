@@ -1,0 +1,59 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T01:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.9",
+  "scope": {
+    "summary": "Reads over tables with autonomous FGA handlers are refused before execution (fga_handler_autonomous); FGA evidence is proven from ALL_AUDIT_POLICIES with successful-empty admitting and query failure refusing (fga_evidence_unknown); local SYS-owned objects are proven FGA-free (ORA-46399 on DBMS_FGA.ADD_POLICY against SYS.DUAL, live FREE23); in-process harnesses answer FGA probes truthfully; W4 FGA canary cases (b3f3f360, 0f618dea, 555864bd, 4e1c7f13).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp-db/src/query.rs",
+      "scripts/e2e/w4/cases/fga.json",
+      "scripts/e2e/w4/driver.py",
+      "scripts/e2e/w4/fixture/04_policy.sql",
+      "crates/oraclemcp/tests/rls_vpd_visibility.rs"
+    ],
+    "out_of_scope": [
+      "Files changed again after the gate by later beads (catalog_query.rs, catalog_resolver.rs, dispatch/mod.rs, read_executor.rs, dispatch/tests.rs, guard lib.rs) are excluded from the clean-scope claim; their state at 5b5b93f7 is covered by the gate.",
+      "An operator override for accounts without FGA catalog visibility is an open operator decision (not part of this bead)."
+    ]
+  },
+  "source": {
+    "sha": "5b5b93f7dc9f86a0c595efb61d8d7236dc0eb181",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 5b5b93f7 (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 117 suites, 3436 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "live W4 FGA canary (orchestrator)",
+        "kind": "cli",
+        "trace": "Release build at bba22feb, W4 free23 external client: w4_query_fga_handler_canary_refused and w4_sample_rows_fga_handler_canary_refused pass on stdio AND http (FORBIDDEN_STATEMENT fga_handler_autonomous; canary 0). An earlier orchestrator run at 819c6d7e had the stdio query case fail with actual=null in 22ms: root-caused to a reused V$SQL refusal marker in the driver (fixed 4e1c7f13), not a server defect."
+      },
+      {
+        "name": "live FGA catalog version matrix (orchestrator)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-db --features live-xe --test live_catalog_resolver fga_catalog_columns_match_on_every_version with ORACLEMCP_LIVE_XE=1 against XE18, XE21, FREE23: ok (catalog columns and handler identity verified per lane)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane; live runs on local lab containers, not committed as artifacts."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

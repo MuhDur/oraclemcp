@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T01:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.11",
+  "scope": {
+    "summary": "Doctor reports fga_catalog_unreadable (view, ORA code, grant); fga_evidence_unknown refusals point at the fix; docs state that reads including over DUAL need FGA catalog visibility (43c40964, 2a6f0483). Admission rule unchanged.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/doctor.rs",
+      "docs/operations.md"
+    ],
+    "out_of_scope": [
+      "Files changed again after the gate by later beads (catalog_query.rs, catalog_resolver.rs, dispatch/mod.rs, read_executor.rs, dispatch/tests.rs, guard lib.rs) are excluded from the clean-scope claim; their state at 5b5b93f7 is covered by the gate.",
+      "The SYS-object proof (555864bd) later removed the DUAL over-refusal; the docs correction 2a6f0483 predates it and is superseded in effect for SYS objects."
+    ]
+  },
+  "source": {
+    "sha": "5b5b93f7dc9f86a0c595efb61d8d7236dc0eb181",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 5b5b93f7 (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 117 suites, 3436 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "doctor::tests::fga_catalog_unreadable_names_the_view_the_ora_code_and_the_grant ok; doctor::tests::fga_catalog_readable_passes_without_a_fix ok (orchestrator re-run at 5b5b93f7)."
+      },
+      {
+        "name": "live proof (implementer)",
+        "kind": "cli",
+        "trace": "Disposable FREE23 account: without SELECT ANY DICTIONARY doctor reports fga_catalog_unreadable and a read refuses with the hint; with the grant doctor is clean and the read succeeds; account dropped."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution, independent of the implementing pane; live runs on local lab containers, not committed as artifacts."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
