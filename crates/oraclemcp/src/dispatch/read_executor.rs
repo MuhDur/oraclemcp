@@ -178,6 +178,204 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct GeneratedReadAuditCtx<'a> {
+    pub(super) entry: AuditEntryCtx<'a>,
+    pub(super) tool: &'a str,
+}
+
+pub(super) struct GuardedGeneratedReadConn<'a> {
+    pub(super) inner: &'a dyn OracleConnection,
+    pub(super) audit: GeneratedReadAuditCtx<'a>,
+}
+
+impl GuardedGeneratedReadConn<'_> {
+    async fn before_query(&self, cx: &Cx, sql: &str) -> Result<(String, Option<u64>), DbError> {
+        let danger = ensure_generated_read_sql_allowed(sql).map_err(db_internal_from_envelope)?;
+        let danger = audit_danger_string(danger);
+        let observed_scn = match self.audit.entry.auditor {
+            Some(_) => observed_scn_for_audit(cx, self.inner, self.audit.entry).await?,
+            None => None,
+        };
+        append_audit_with_observed_scn(
+            self.audit.entry,
+            self.audit.tool,
+            sql,
+            &danger,
+            None,
+            AuditOutcome::Pending,
+            observed_scn,
+        )
+        .map_err(db_internal_from_envelope)?;
+        Ok((danger, observed_scn))
+    }
+
+    fn after_query(
+        &self,
+        sql: &str,
+        danger: &str,
+        outcome: AuditOutcome,
+        observed_scn: Option<u64>,
+    ) -> Result<(), DbError> {
+        append_audit_with_observed_scn(
+            self.audit.entry,
+            self.audit.tool,
+            sql,
+            danger,
+            None,
+            outcome,
+            observed_scn,
+        )
+        .map_err(db_internal_from_envelope)
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for GuardedGeneratedReadConn<'_> {
+    fn backend(&self) -> OracleBackend {
+        self.inner.backend()
+    }
+
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.close(cx).await
+    }
+
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.ping(cx).await
+    }
+
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.inner.describe(cx).await
+    }
+
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
+        match self.inner.query_rows(cx, sql, binds).await {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_rows_with_serialize_options(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
+        match self
+            .inner
+            .query_rows_with_serialize_options(cx, sql, binds, serialize_opts)
+            .await
+        {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_rows_named(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
+        match self.inner.query_rows_named(cx, sql, binds).await {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_rows_named_with_serialize_options(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[(String, OracleBind)],
+        serialize_opts: &SerializeOptions,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
+        match self
+            .inner
+            .query_rows_named_with_serialize_options(cx, sql, binds, serialize_opts)
+            .await
+        {
+            Ok(rows) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
+                Ok(rows)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn query_optional_row(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Option<OracleRow>, DbError> {
+        let (danger, observed_scn) = self.before_query(cx, sql).await?;
+        match self.inner.query_optional_row(cx, sql, binds).await {
+            Ok(row) => {
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
+                Ok(row)
+            }
+            Err(err) => {
+                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
+                Err(err)
+            }
+        }
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Err(DbError::Internal(
+            "generated-read connection refuses execute on a read-only tool path".to_owned(),
+        ))
+    }
+
+    fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+        self.inner.call_timeout()
+    }
+
+    fn set_call_timeout(&self, timeout: Option<Duration>) -> Result<(), DbError> {
+        self.inner.set_call_timeout(timeout)
+    }
+
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.commit(cx).await
+    }
+
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.rollback(cx).await
+    }
+}
+
 mod read_only_backstop;
 pub(super) use read_only_backstop::ReadOnlyBackstop;
 
