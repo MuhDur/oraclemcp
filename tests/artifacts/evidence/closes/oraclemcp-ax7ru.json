@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T13:10:00Z",
+  "bead_id": "oraclemcp-ax7ru",
+  "scope": {
+    "summary": "check_build_lease.sh accepts a nested Cargo (e.g. cargo-deny fetch or a rustc probe with a sanitized env) only when an actual process ancestor is the repository scripts/build_lease.sh, alive, recorded in the slot file and still holding its flock (62cbb42a).",
+    "in_scope": [
+      "scripts/check_build_lease.sh"
+    ],
+    "out_of_scope": [
+      "Slot count and target-dir rules (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "1c5f13716124efd53a762a04390f1749d0bc551c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "fresh-target workspace test (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean detached gate worktree at 1c5f1371 (contains 62cbb42a), brand-new CARGO_TARGET_DIR target-ax7ru-fresh-141144: scripts/build_lease.sh --slots 2 -- timeout 3000 cargo test --workspace --no-fail-fast -> rc 0, 3563 passed, 0 failed, 0 REFUSING lines; scripts/build_lease.sh --slots 2 -- cargo deny check -> rc 0 (advisories/bans/licenses/sources ok). Before the fix the same fresh-target run exited 101 at the rustc probe (reported on .11.8)."
+      },
+      {
+        "name": "guard selftest (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "scripts/check_build_lease.sh --selftest at 62cbb42a: selftest OK (10 checks), incl. nested cargo-deny fetch accepted only under a live ancestor lease, forged ancestor with a held flock refused (75), un-leased heavy build refused, shared/tmpfs target dirs refused (78)."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "Orchestrator read the diff as a safety-control change: the fallback walks the /proc parent chain (max depth 64), requires the ancestor argv[1] to resolve to this repository scripts/build_lease.sh, a slot record naming that pid, kill -0, and a held flock; a caller-supplied PID or env marker alone is not trusted. Genuinely un-leased builds keep the existing refusal."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Re-executed by the orchestrator, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
