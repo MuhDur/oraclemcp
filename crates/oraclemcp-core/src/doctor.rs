@@ -193,6 +193,9 @@ pub struct DoctorProfileCaps {
     pub read_only_standby: bool,
     /// R36: whether reads refuse when the FGA catalog is unreadable.
     pub require_fga_evidence: bool,
+    /// R36 extension: whether EXPLAIN/cost gates refuse unreadable hard-parse
+    /// or PLAN_TABLE evidence.
+    pub require_hard_parse_evidence: bool,
 }
 
 /// Service-manager caps as configured by `oraclemcp service install`, and as
@@ -1395,6 +1398,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_configuration(ctx),
         check_rls_vpd_visibility(cx, ctx).await,
         check_fga_catalog_visibility(cx, ctx).await,
+        check_hard_parse_evidence_policy(ctx.profile_caps.as_ref()),
     ];
     DoctorReport {
         checks,
@@ -2679,6 +2683,34 @@ account (or have a DBA GRANT SELECT ON SYS.ALL_AUDIT_POLICIES to it), then rerun
 
 const FGA_CATALOG_CHECK_ID: u8 = 18;
 const FGA_CATALOG_CHECK_NAME: &str = "FGA catalog visibility";
+const HARD_PARSE_POLICY_CHECK_ID: u8 = 19;
+
+fn check_hard_parse_evidence_policy(caps: Option<&DoctorProfileCaps>) -> CheckResult {
+    let Some(caps) = caps else {
+        return CheckResult::new(
+            HARD_PARSE_POLICY_CHECK_ID,
+            "Hard-parse evidence policy",
+            CheckStatus::Skip,
+            "no selected profile; standalone dispatch uses its explicit runtime policy",
+        );
+    };
+    if caps.require_hard_parse_evidence {
+        CheckResult::new(
+            HARD_PARSE_POLICY_CHECK_ID,
+            "Hard-parse evidence policy",
+            CheckStatus::Pass,
+            "profile refuses EXPLAIN and decisive cost admission when hard-parse or PLAN_TABLE evidence is unreadable",
+        )
+    } else {
+        CheckResult::new(
+            HARD_PARSE_POLICY_CHECK_ID,
+            "Hard-parse evidence policy",
+            CheckStatus::Warn,
+            "profile may admit EXPLAIN or decisive cost reads when hard-parse or PLAN_TABLE evidence is unreadable; admitted results carry an observation and a separate audit record; set require_hard_parse_evidence = true to refuse them",
+        )
+        .with_fix("set require_hard_parse_evidence = true in this profile to require complete evidence")
+    }
+}
 
 /// .6.11/R36: the read guard proves that no fine-grained-audit handler runs by
 /// querying ALL_AUDIT_POLICIES (`CatalogQueryId::FgaCatalogProof`, the exact
@@ -3450,6 +3482,33 @@ mod tests {
         OracleConnectionInfo, OracleRow,
     };
 
+    #[test]
+    fn hard_parse_evidence_default_warns_and_strict_profile_passes() {
+        let caps = |required| DoctorProfileCaps {
+            profile: "synthetic".to_owned(),
+            configured: DoctorLevelCaps {
+                default_level: OperatingLevel::ReadOnly,
+                max_level: OperatingLevel::ReadOnly,
+            },
+            effective: DoctorLevelCaps {
+                default_level: OperatingLevel::ReadOnly,
+                max_level: OperatingLevel::ReadOnly,
+            },
+            protected: false,
+            read_only_standby: false,
+            require_fga_evidence: false,
+            require_hard_parse_evidence: required,
+        };
+        assert_eq!(
+            check_hard_parse_evidence_policy(Some(&caps(false))).status,
+            CheckStatus::Warn
+        );
+        assert_eq!(
+            check_hard_parse_evidence_policy(Some(&caps(true))).status,
+            CheckStatus::Pass
+        );
+    }
+
     /// Run `run_doctor` on a fresh current-thread runtime with an installed `Cx`.
     fn doctor(ctx: &DoctorContext<'_>) -> DoctorReport {
         let runtime = RuntimeBuilder::current_thread()
@@ -3807,9 +3866,9 @@ mod tests {
     }
 
     #[test]
-    fn report_has_seventeen_checks_and_classifier_self_test_passes() {
+    fn report_has_nineteen_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 18);
+        assert_eq!(report.checks.len(), 19);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
         // The IAM-token near-expiry check (14) skips cleanly when no token is set.
@@ -4554,7 +4613,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 18);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 19);
         assert_eq!(j["exit_code"], json!(0));
     }
 

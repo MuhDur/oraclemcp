@@ -239,6 +239,7 @@ struct ProfileDispatchPolicy {
     /// R36: whether a read may proceed when the principal cannot read the FGA
     /// catalog (`require_fga_evidence`).
     fga_evidence_policy: FgaEvidencePolicy,
+    require_hard_parse_evidence: bool,
 }
 
 struct PreparedProfileSwitch {
@@ -253,6 +254,7 @@ struct PreparedProfileSwitch {
     result_masking: Option<ResultMaskingPolicy>,
     sql_policy: Option<SqlPolicyConfig>,
     fga_evidence_policy: FgaEvidencePolicy,
+    require_hard_parse_evidence: bool,
     custom_catalog: CustomToolCatalog,
     response: Value,
 }
@@ -274,6 +276,7 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         result_masking: None,
         sql_policy: None,
         fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
+        require_hard_parse_evidence: false,
     }
 }
 
@@ -283,10 +286,16 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
 /// cannot produce a dispatch policy keeps the strict rule.
 fn install_bound_fga_evidence_policy(state: &mut DispatcherState) {
     if let Some(lease) = state.profile_generation.as_ref() {
-        state.fga_evidence_policy = profile_dispatch_policy(lease)
-            .map_or(FgaEvidencePolicy::RequireProof, |policy| {
-                policy.fga_evidence_policy
-            });
+        match profile_dispatch_policy(lease) {
+            Ok(policy) => {
+                state.fga_evidence_policy = policy.fga_evidence_policy;
+                state.require_hard_parse_evidence = policy.require_hard_parse_evidence;
+            }
+            Err(_) => {
+                state.fga_evidence_policy = FgaEvidencePolicy::RequireProof;
+                state.require_hard_parse_evidence = true;
+            }
+        }
     }
 }
 
@@ -411,6 +420,7 @@ fn profile_dispatch_policy(
         // It is validated at config load and can only ever restrict.
         sql_policy: profile.sql_policy.clone(),
         fga_evidence_policy: fga_evidence_policy_for(profile),
+        require_hard_parse_evidence: profile.require_hard_parse_evidence(),
     })
 }
 
@@ -482,6 +492,7 @@ struct DispatcherState {
     /// R36: the active profile's FGA evidence rule for reads. Swapped with the
     /// pinned session on a profile switch.
     fga_evidence_policy: FgaEvidencePolicy,
+    require_hard_parse_evidence: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -653,6 +664,7 @@ impl OracleDispatcher {
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
                 fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
+                require_hard_parse_evidence: false,
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -744,6 +756,7 @@ impl OracleDispatcher {
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
                 fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
+                require_hard_parse_evidence: false,
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -1385,6 +1398,7 @@ impl OracleDispatcher {
             result_masking,
             sql_policy,
             fga_evidence_policy,
+            require_hard_parse_evidence,
         } = profile_dispatch_policy(&profile_generation)?;
         let new_custom_catalog = match &self.custom_loader {
             Some(loader) => loader(&profile_generation, &level)?,
@@ -1456,6 +1470,7 @@ impl OracleDispatcher {
                 state.current_schema = None;
                 state.level = level;
                 state.fga_evidence_policy = fga_evidence_policy;
+                state.require_hard_parse_evidence = require_hard_parse_evidence;
                 state.custom_catalog = custom_catalog;
                 state.grant_generation = state.grant_generation.saturating_add(1);
                 state.execute_grants.clear();
@@ -3227,10 +3242,18 @@ fn explain_plan_unavailable(reason: &str) -> ErrorEnvelope {
     )
 }
 
-fn hard_parse_closure_error(closure: HardParseEffectClosureV1) -> Option<ErrorEnvelope> {
+fn hard_parse_closure_error(
+    closure: HardParseEffectClosureV1,
+    require_evidence: bool,
+) -> Option<ErrorEnvelope> {
     match closure {
-        HardParseEffectClosureV1::Proven
-        | HardParseEffectClosureV1::AdmittedWithObservation { .. } => None,
+        HardParseEffectClosureV1::Proven => None,
+        HardParseEffectClosureV1::AdmittedWithObservation { reason: _ } if !require_evidence => {
+            None
+        }
+        HardParseEffectClosureV1::AdmittedWithObservation { reason } => {
+            Some(explain_plan_unavailable(reason))
+        }
         HardParseEffectClosureV1::Refused { reason } => Some(
             ErrorEnvelope::new(
                 ErrorClass::ForbiddenStatement,
@@ -3427,6 +3450,7 @@ struct QueryCostGateCtx<'a> {
     session: &'a SessionLevelState,
     request_budget: &'a RequestBudget,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
+    require_hard_parse_evidence: bool,
 }
 
 /// Server-derived cumulative accounting inputs. Profile/principal are copied
@@ -3505,6 +3529,26 @@ mod explain_plan_audit_transcript_tests {
             "; AUDIT OBSERVATION: plan_table_verification_no_privilege"
         );
     }
+
+    #[test]
+    fn hard_parse_observation_obeys_the_profile_strict_key() {
+        let admitted = HardParseEffectClosureV1::AdmittedWithObservation {
+            reason: "no_privilege",
+        };
+        assert!(hard_parse_closure_error(admitted.clone(), false).is_none());
+        let refused = hard_parse_closure_error(admitted, true).expect("strict profile refusal");
+        assert_eq!(refused.error_class, ErrorClass::RuntimeStateRequired);
+    }
+
+    #[test]
+    fn admitted_query_observation_is_attached_to_the_result() {
+        let mut response = json!({"rows": []});
+        attach_hard_parse_evidence(&mut response, &["hard_parse_evidence_no_privilege"]);
+        assert_eq!(
+            response["verification_observations"],
+            json!(["hard_parse_evidence_no_privilege"])
+        );
+    }
 }
 
 async fn rollback_explain_savepoint(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
@@ -3525,9 +3569,9 @@ async fn enforce_query_cost_gate(
     configured_plan_table: Option<&str>,
     max_query_cost: Option<u64>,
     cumulative: CumulativeQueryCostGate<'_>,
-) -> Result<(), ErrorEnvelope> {
+) -> Result<Vec<&'static str>, ErrorEnvelope> {
     if max_query_cost.is_none() && cumulative.policy.is_none() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     // A configured cumulative policy without its durable store must refuse
     // before any database I/O. Falling back to an unmetered query would widen
@@ -3540,7 +3584,8 @@ async fn enforce_query_cost_gate(
         .enforce(ctx.cx)
         .map_err(DbError::into_envelope)?;
     let closure = prove_hard_parse_effect_closure(ctx.cx, ctx.conn, executed_sql, relations).await;
-    if !closure.is_admitted() {
+    if !closure.is_admitted() || (closure.requires_observation() && ctx.require_hard_parse_evidence)
+    {
         return Err(query_cost_unavailable(
             closure.reason().unwrap_or("callback_unprovable"),
         ));
@@ -3548,6 +3593,18 @@ async fn enforce_query_cost_gate(
     let table = resolve_plan_table(ctx.cx, ctx.conn, configured_plan_table)
         .await
         .map_err(|error| query_cost_unavailable(error.reason()))?;
+    let hard_parse_observation = closure.requires_observation();
+    let plan_table_observation = table.verification_observation();
+    if ctx.require_hard_parse_evidence && plan_table_observation.is_some() {
+        return Err(query_cost_unavailable("no_privilege"));
+    }
+    let mut verification_observations = Vec::new();
+    if hard_parse_observation {
+        verification_observations.push("hard_parse_evidence_no_privilege");
+    }
+    if let Some(observation) = plan_table_observation {
+        verification_observations.push(observation);
+    }
     let statement_id = PlanStatementId::generate().map_err(DbError::into_envelope)?;
     let audit_db_evidence = collect_read_audit_db_evidence(ctx.cx, ctx.auditor, ctx.conn).await?;
     let audit_entry = AuditEntryCtx {
@@ -3555,12 +3612,8 @@ async fn enforce_query_cost_gate(
         subject: ctx.subject,
         db_evidence: audit_db_evidence.as_ref(),
     };
-    let audit_transcript = explain_plan_audit_transcript(
-        executed_sql,
-        &table,
-        &statement_id,
-        closure.requires_observation(),
-    );
+    let audit_transcript =
+        explain_plan_audit_transcript(executed_sql, &table, &statement_id, hard_parse_observation);
     append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Pending)?;
     if let Err(error) = ctx.conn.execute(ctx.cx, EXPLAIN_SAVEPOINT_SQL, &[]).await {
         append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Failed)?;
@@ -3690,7 +3743,19 @@ async fn enforce_query_cost_gate(
             ) => return Err(cumulative_query_cost_budget_unavailable()),
         }
     }
-    Ok(())
+    if !verification_observations.is_empty() {
+        append_hard_parse_evidence_unavailable_audit(
+            AuditEntryCtx {
+                auditor: ctx.auditor,
+                subject: ctx.subject,
+                db_evidence: None,
+            },
+            "oracle_query",
+            hard_parse_observation,
+            plan_table_observation,
+        )?;
+    }
+    Ok(verification_observations)
 }
 
 #[cfg(test)]
@@ -7556,6 +7621,38 @@ fn append_scn_capability_degraded_audit(
 /// marker, it is never a real tool name or caller SQL: the durable, signed
 /// record says which served tool was admitted on `fga_evidence: unavailable`.
 const FGA_EVIDENCE_UNAVAILABLE_TOOL: &str = "fga_evidence_unavailable";
+const HARD_PARSE_EVIDENCE_UNAVAILABLE_TOOL: &str = "hard_parse_evidence_unavailable";
+
+/// R36 extension: write a readable, independent record when the served SQL
+/// transcript cannot explain why hard-parse or PLAN_TABLE evidence was
+/// incomplete. The record contains fixed observation codes only, never SQL.
+fn append_hard_parse_evidence_unavailable_audit(
+    ctx: AuditEntryCtx<'_>,
+    served_tool: &str,
+    hard_parse_unavailable: bool,
+    plan_table_observation: Option<&'static str>,
+) -> Result<(), ErrorEnvelope> {
+    let mut observations = Vec::new();
+    if hard_parse_unavailable {
+        observations.push("hard_parse_evidence_no_privilege");
+    }
+    if let Some(observation) = plan_table_observation {
+        observations.push(observation);
+    }
+    append_audit_with_observed_scn(
+        ctx,
+        HARD_PARSE_EVIDENCE_UNAVAILABLE_TOOL,
+        &format!(
+            "-- hard_parse_evidence: unavailable; {served_tool} admitted with observation={} \
+             profile require_hard_parse_evidence = false",
+            observations.join(",")
+        ),
+        "READ_ONLY",
+        None,
+        AuditOutcome::Succeeded,
+        None,
+    )
+}
 
 /// R36: durably record that `served_tool` was admitted without FGA proof,
 /// before its caller SQL executes. A no-op without a configured auditor.
@@ -7583,6 +7680,14 @@ fn attach_fga_evidence(response: &mut Value, evidence: FgaEvidence) {
         && let Value::Object(map) = response
     {
         map.insert("fga_evidence".to_owned(), json!("unavailable"));
+    }
+}
+
+fn attach_hard_parse_evidence(response: &mut Value, observations: &[&'static str]) {
+    if !observations.is_empty()
+        && let Value::Object(map) = response
+    {
+        map.insert("verification_observations".to_owned(), json!(observations));
     }
 }
 
@@ -12124,6 +12229,7 @@ impl OracleDispatcher {
                 result_masking: new_policy.result_masking,
                 sql_policy: new_policy.sql_policy,
                 fga_evidence_policy: new_policy.fga_evidence_policy,
+                require_hard_parse_evidence: new_policy.require_hard_parse_evidence,
                 custom_catalog: new_custom_catalog,
                 response,
             };
@@ -12153,6 +12259,7 @@ impl OracleDispatcher {
                 result_masking,
                 sql_policy,
                 fga_evidence_policy,
+                require_hard_parse_evidence,
                 custom_catalog,
                 mut response,
             } = prepared;
@@ -12232,6 +12339,7 @@ impl OracleDispatcher {
                     retired_generation = state.profile_generation.replace(profile_generation);
                     state.level = level;
                     state.fga_evidence_policy = fga_evidence_policy;
+                    state.require_hard_parse_evidence = require_hard_parse_evidence;
                     state.custom_catalog = custom_catalog;
                     state.grant_generation = state.grant_generation.saturating_add(1);
                     state.execute_grants.clear();
@@ -14266,7 +14374,10 @@ impl OracleDispatcher {
                 )
                 .await;
                 let hard_parse_observation = closure.requires_observation();
-                if let Some(error) = hard_parse_closure_error(closure) {
+                if let Some(error) = hard_parse_closure_error(
+                    closure.clone(),
+                    state.require_hard_parse_evidence,
+                ) {
                     return Err(error);
                 }
                 // Prefer the typed hard-parse refusal when catalog evidence
@@ -14310,6 +14421,11 @@ impl OracleDispatcher {
                 )
                 .await
                 .map_err(|error: PlanTableUnavailable| explain_plan_unavailable(error.reason()))?;
+                if state.require_hard_parse_evidence
+                    && table.verification_observation().is_some()
+                {
+                    return Err(explain_plan_unavailable("no_privilege"));
+                }
                 let statement_id = PlanStatementId::generate().map_err(DbError::into_envelope)?;
                 let audit_db_evidence =
                     collect_read_audit_db_evidence(cx, self.auditor.as_deref(), conn).await?;
@@ -14423,6 +14539,18 @@ impl OracleDispatcher {
                     }
                     Err(error) => return Err(DbError::into_envelope(error)),
                 };
+                if closure.requires_observation() || table.verification_observation().is_some() {
+                    append_hard_parse_evidence_unavailable_audit(
+                        AuditEntryCtx {
+                            auditor: self.auditor.as_deref(),
+                            subject: &request_subject,
+                            db_evidence: None,
+                        },
+                        "oracle_explain_plan",
+                        closure.requires_observation(),
+                        table.verification_observation(),
+                    )?;
+                }
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
                 attach_fga_evidence(&mut response, fga_evidence);
                 Ok(response)

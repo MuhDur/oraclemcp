@@ -90,20 +90,21 @@
     "level": "READ_WRITE",
     "transports": ["stdio", "http"],
     "requires": [],
-    "profile_variant": "synthetic_owner_rw",
+    "profile_variant": "synthetic_cross_rw",
     "setup": [
       {"sql": "CREATE TABLE ${owner}.T_ODCI_CANARY_${run_id} (ID NUMBER)"},
       {"sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_ODCI_${run_id} (P NUMBER) RETURN NUMBER DETERMINISTIC IS BEGIN RETURN P; END;"},
       {"sql": "CREATE TYPE ${owner}.TY_ODCI_${run_id} AS OBJECT (dummy NUMBER, STATIC FUNCTION ODCIGetInterfaces(ifclist OUT SYS.ODCIObjectList) RETURN NUMBER, STATIC FUNCTION ODCIStatsSelectivity(pred SYS.ODCIPredInfo, sel OUT NUMBER, args SYS.ODCIArgDescList, start_value NUMBER, stop_value NUMBER, p NUMBER, env SYS.ODCIEnv) RETURN NUMBER)"},
       {"sql": "CREATE TYPE BODY ${owner}.TY_ODCI_${run_id} AS STATIC FUNCTION ODCIGetInterfaces(ifclist OUT SYS.ODCIObjectList) RETURN NUMBER IS BEGIN ifclist := SYS.ODCIObjectList(SYS.ODCIObject('SYS', 'ODCISTATS2')); RETURN SYS.ODCICONST.SUCCESS; END; STATIC FUNCTION ODCIStatsSelectivity(pred SYS.ODCIPredInfo, sel OUT NUMBER, args SYS.ODCIArgDescList, start_value NUMBER, stop_value NUMBER, p NUMBER, env SYS.ODCIEnv) RETURN NUMBER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_ODCI_CANARY_${run_id} VALUES (1); COMMIT; sel := 50; RETURN SYS.ODCICONST.SUCCESS; END; END;"},
       {"sql": "DECLARE compile_errors VARCHAR2(2000); BEGIN SELECT LISTAGG(line || ':' || position || ' ' || text, ' | ') WITHIN GROUP (ORDER BY sequence) INTO compile_errors FROM ALL_ERRORS WHERE owner = '${owner}' AND name = 'TY_ODCI_${run_id}'; IF compile_errors IS NOT NULL THEN RAISE_APPLICATION_ERROR(-20001, compile_errors); END IF; END;"},
-      {"sql": "ASSOCIATE STATISTICS WITH FUNCTIONS ${owner}.FN_ODCI_${run_id} USING ${owner}.TY_ODCI_${run_id}"}
+      {"sql": "ASSOCIATE STATISTICS WITH FUNCTIONS ${owner}.FN_ODCI_${run_id} USING ${owner}.TY_ODCI_${run_id}"},
+      {"sql": "GRANT EXECUTE ON ${owner}.FN_ODCI_${run_id} TO ${cross}"}
     ],
     "steps": [
       {"tool": "oracle_explain_plan", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "allow_plan_table_write": true}, "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "odci_stats_callback"}}
     ],
     "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "max_query_cost": 1, "allow_plan_table_write": true}},
-    "expect": {"error_classes": ["FORBIDDEN_STATEMENT", "POLICY_DENIED"]},
+    "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "odci_stats_callback"},
     "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_ODCI_CANARY_${run_id}", "rows": [[0]]}],
     "cleanup": [
       {"sql": "DROP FUNCTION ${owner}.FN_ODCI_${run_id}"},
@@ -119,14 +120,54 @@
     "level": "READ_WRITE",
     "transports": ["stdio", "http"],
     "requires": [],
+    "profile_variant": "synthetic_cross_rw",
     "setup": [],
     "steps": [
-      {"tool": "oracle_query", "arguments": {"sql": "SELECT 1 AS ID FROM dual", "max_rows": 1}, "expect": {"rows": [{"ID": "<masked>"}]}}
+      {"tool": "oracle_set_session_level", "arguments": {"action": "drop"}, "expect": {"json_subset": {"session": {"current_level": "READ_ONLY"}}}},
+      {"tool": "oracle_query", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1}, "expect": {"rows": [{"ID": "1"}]}},
+      {"tool": "oracle_set_session_level", "arguments": {"level": "READ_WRITE"}, "expect": {"json_subset": {"confirmation": {}}}, "capture": {"elevation": "/confirmation/confirm"}},
+      {"tool": "oracle_set_session_level", "arguments": {"level": "READ_WRITE", "execute": true, "confirm": "${cap:elevation}"}, "expect": {"json_subset": {"session": {"current_level": "READ_WRITE"}}}}
     ],
-    "call": {"arguments": {"sql": "SELECT 1 AS ID FROM dual", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}},
-    "expect": {"rows": [{"ID": "<masked>"}]},
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}},
+    "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "read_only_txn"},
+    "expect_by_version": {
+      "23": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "read_only_txn"},
+      "pre23": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "read_only_txn"}
+    },
     "db_reread": [],
     "audit_expect": [],
-    "on_unsupported": {"error_class": "POLICY_DENIED"}
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
+  },
+  {
+    "case_id": "w4_explain_plan_privilege_limited_evidence_observed",
+    "tool": "oracle_query",
+    "level": "READ_WRITE",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "profile_variant": "synthetic_cross_rw",
+    "setup": [],
+    "steps": [
+      {"tool": "oracle_query", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}, "expect": {"json_subset": {"rows": [{"ID": "1"}], "verification_observations": ["hard_parse_evidence_no_privilege"]}}},
+      {"audit_report": {"contains": ["hard_parse_evidence_unavailable", "hard_parse_evidence_no_privilege", "require_hard_parse_evidence = false"]}}
+    ],
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}},
+    "expect": {"json_subset": {"rows": [{"ID": "1"}], "verification_observations": ["hard_parse_evidence_no_privilege"]}},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
+  },
+  {
+    "case_id": "w4_explain_plan_privilege_limited_strict_refuses",
+    "tool": "oracle_query",
+    "level": "READ_WRITE",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "profile_variant": "synthetic_cross_rw_strict",
+    "setup": [],
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}},
+    "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "no_privilege"},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
   }
 ]

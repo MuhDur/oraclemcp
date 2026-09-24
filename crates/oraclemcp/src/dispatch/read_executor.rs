@@ -608,6 +608,8 @@ pub(super) struct ReadExecutionPlan {
     /// R36: the FGA evidence the gate admitted this read on. Meaningful only
     /// when `gate` is `Ok`.
     pub(super) fga_evidence: FgaEvidence,
+    /// R36 evidence admitted under the profile observation policy.
+    pub(super) hard_parse_observations: Vec<&'static str>,
 }
 
 /// A read admitted by the current semantic and catalog proof.
@@ -939,7 +941,7 @@ impl<'a> GuardedReadExecutor<'a> {
         tool: &str,
         provenance: ReadQueryProvenance,
     ) -> Result<Value, ErrorEnvelope> {
-        let (prepared, semantic_metadata) = {
+        let (mut prepared, semantic_metadata) = {
             let audit_tool = tool.to_owned();
             let (parsed, semantic_metadata) = if tool == "oracle_semantic_search" {
                 let result_masking = self.result_masking_policy()?;
@@ -1041,7 +1043,9 @@ impl<'a> GuardedReadExecutor<'a> {
                     &relations,
                 )
                 .await;
-                if !closure.is_proven() {
+                if !closure.is_admitted()
+                    || (closure.requires_observation() && state.require_hard_parse_evidence)
+                {
                     return Err(query_cost_unavailable(
                         closure.reason().unwrap_or("callback_unprovable"),
                     ));
@@ -1088,6 +1092,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     hard_parse_relations,
                     policy: policy.attachment.clone(),
                     fga_evidence,
+                    hard_parse_observations: Vec::new(),
                 },
                 semantic_metadata,
             )
@@ -1130,13 +1135,14 @@ impl<'a> GuardedReadExecutor<'a> {
                     .and_then(|profile| config.profile(profile))
                     .and_then(|profile| profile.explain_plan_table.clone())
             });
+            let require_hard_parse_evidence = state.require_hard_parse_evidence;
             let DispatcherState {
                 conn,
                 read_only_backstop,
                 checkpoints,
                 ..
             } = &mut *state;
-            enforce_query_cost_gate(
+            prepared.hard_parse_observations = enforce_query_cost_gate(
                 QueryCostGateCtx {
                     cx,
                     conn: conn.as_ref(),
@@ -1145,6 +1151,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     session: scoped_level,
                     request_budget: &request_budget,
                     quarantine: &self.quarantine,
+                    require_hard_parse_evidence,
                 },
                 &prepared.args,
                 &prepared.executed_sql,
@@ -1205,6 +1212,7 @@ impl<'a> GuardedReadExecutor<'a> {
         };
         let conn: &dyn OracleConnection = state.conn.as_ref();
         let policy_attachment = prepared.policy.clone();
+        let hard_parse_observations = prepared.hard_parse_observations.clone();
         let admitted = AdmittedRead::new(prepared, provenance)?;
         let mut response = self
             .run_prepared_query(
@@ -1223,6 +1231,7 @@ impl<'a> GuardedReadExecutor<'a> {
         if let (Some(tightening), Value::Object(map)) = (policy_attachment, &mut response) {
             map.insert("policy".to_owned(), tightening);
         }
+        attach_hard_parse_evidence(&mut response, &hard_parse_observations);
         if let (Some(metadata), Value::Object(map)) = (semantic_metadata, &mut response) {
             map.insert(
                 "metric".to_owned(),
@@ -1282,7 +1291,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     Some(_) => {}
                 }
             }
-            let prepared = {
+            let mut prepared = {
                 let parsed = parse_args::<QueryArgs>(name, args)?;
                 if !parsed.streaming {
                     return Err(invalid_args(
@@ -1355,6 +1364,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     hard_parse_relations,
                     policy: policy.attachment.clone(),
                     fga_evidence,
+                    hard_parse_observations: Vec::new(),
                 }
             };
             request_budget = query_budget_with_cost_limit(
@@ -1386,6 +1396,7 @@ impl<'a> GuardedReadExecutor<'a> {
                             .and_then(|profile| config.profile(profile))
                             .and_then(|profile| profile.explain_plan_table.clone())
                     });
+                let require_hard_parse_evidence = state.require_hard_parse_evidence;
                 let DispatcherState {
                     conn,
                     read_only_backstop,
@@ -1393,7 +1404,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     ..
                 } = &mut *state;
                 let cost_audit_subject = audit_subject(context, &self.default_audit_subject);
-                enforce_query_cost_gate(
+                prepared.hard_parse_observations = enforce_query_cost_gate(
                     QueryCostGateCtx {
                         cx,
                         conn: conn.as_ref(),
@@ -1402,6 +1413,7 @@ impl<'a> GuardedReadExecutor<'a> {
                         session: &scoped_level,
                         request_budget: &request_budget,
                         quarantine: &self.quarantine,
+                        require_hard_parse_evidence,
                     },
                     &prepared.args,
                     &prepared.executed_sql,
@@ -1439,6 +1451,7 @@ impl<'a> GuardedReadExecutor<'a> {
             let conn: &dyn OracleConnection = state.conn.as_ref();
             let policy_attachment = prepared.policy.clone();
             let fga_evidence = prepared.fga_evidence;
+            let hard_parse_observations = prepared.hard_parse_observations.clone();
             let admitted = AdmittedRead::new(prepared, ReadQueryProvenance::CallerRead)?;
             if fga_evidence == FgaEvidence::Unavailable {
                 append_fga_evidence_unavailable_audit(
@@ -1453,9 +1466,14 @@ impl<'a> GuardedReadExecutor<'a> {
             let delivery = self
                 .prepare_query_stream_delivery(cx, conn, request_budget, active_profile, admitted)
                 .await?;
-            (delivery, policy_attachment, fga_evidence)
+            (
+                delivery,
+                policy_attachment,
+                fga_evidence,
+                hard_parse_observations,
+            )
         };
-        let (delivery, policy_attachment, fga_evidence) = delivery;
+        let (delivery, policy_attachment, fga_evidence, hard_parse_observations) = delivery;
 
         let mut response = match delivery {
             QueryStreamDelivery::Rows(plan) => self.drive_query_row_stream(cx, *plan, frames).await,
@@ -1467,6 +1485,7 @@ impl<'a> GuardedReadExecutor<'a> {
             map.insert("policy".to_owned(), tightening);
         }
         attach_fga_evidence(&mut response, fga_evidence);
+        attach_hard_parse_evidence(&mut response, &hard_parse_observations);
         Ok(response)
     }
 
@@ -1499,6 +1518,7 @@ impl<'a> GuardedReadExecutor<'a> {
             hard_parse_relations: _,
             policy: _,
             fga_evidence,
+            hard_parse_observations: _,
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
         let exports = self.exports.clone();
@@ -1971,6 +1991,7 @@ impl OracleDispatcher {
             hard_parse_relations: _,
             policy: _,
             fga_evidence: _,
+            hard_parse_observations: _,
         } = prepared;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
         gate?;

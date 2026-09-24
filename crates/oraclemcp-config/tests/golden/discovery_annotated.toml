@@ -76,6 +76,8 @@ default_level = "READ_ONLY"
 # allow_change_notification = false
 # Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.
 # require_fga_evidence = true
+# Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.
+# require_hard_parse_evidence = true
 # Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
 # max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.
@@ -175,6 +177,8 @@ default_level = "READ_ONLY"
 # allow_change_notification = false
 # Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.
 # require_fga_evidence = true
+# Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.
+# require_hard_parse_evidence = true
 # Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
 # max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.

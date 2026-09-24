@@ -109,6 +109,12 @@ pub async fn prove_hard_parse_effect_closure(
         objects.insert((owner.to_owned(), call.name.clone()));
     }
 
+    // R36 permits a least-privilege account to proceed with an explicit
+    // observation, but a denied catalog view is not evidence that later
+    // relations or evidence families are safe. Keep scanning every readable
+    // source and let any positive callback/policy row take precedence.
+    let mut privilege_limited = false;
+
     for (owner, name) in &objects {
         let associations = match run_catalog_query(
             cx,
@@ -123,6 +129,10 @@ pub async fn prove_hard_parse_effect_closure(
         .await
         {
             Ok(rows) => rows,
+            Err(error) if is_privilege_denial(&error) => {
+                privilege_limited = true;
+                Vec::new()
+            }
             Err(error) => return catalog_unavailable(error),
         };
         if associations.len() as i64 >= PROBE_LIMIT {
@@ -151,6 +161,10 @@ pub async fn prove_hard_parse_effect_closure(
         .await
         {
             Ok(rows) => rows,
+            Err(error) if is_privilege_denial(&error) => {
+                privilege_limited = true;
+                Vec::new()
+            }
             Err(error) => return catalog_unavailable(error),
         };
         if column_types.len() as i64 >= PROBE_LIMIT {
@@ -172,6 +186,10 @@ pub async fn prove_hard_parse_effect_closure(
         .await
         {
             Ok(rows) => rows,
+            Err(error) if is_privilege_denial(&error) => {
+                privilege_limited = true;
+                Vec::new()
+            }
             Err(error) => return catalog_unavailable(error),
         };
         if indexes.len() as i64 >= PROBE_LIMIT {
@@ -199,6 +217,10 @@ pub async fn prove_hard_parse_effect_closure(
                 .await
                 {
                     Ok(rows) => rows,
+                    Err(error) if is_privilege_denial(&error) => {
+                        privilege_limited = true;
+                        Vec::new()
+                    }
                     Err(error) => return catalog_unavailable(error),
                 };
                 if rows.len() as i64 >= PROBE_LIMIT {
@@ -234,6 +256,10 @@ pub async fn prove_hard_parse_effect_closure(
             };
             let rows = match run_catalog_query(cx, conn, query, &binds).await {
                 Ok(rows) => rows,
+                Err(error) if is_privilege_denial(&error) => {
+                    privilege_limited = true;
+                    Vec::new()
+                }
                 Err(error) => return catalog_unavailable(error),
             };
             if rows.len() as i64 >= PROBE_LIMIT {
@@ -245,7 +271,13 @@ pub async fn prove_hard_parse_effect_closure(
         }
     }
 
-    HardParseEffectClosureV1::Proven
+    if privilege_limited {
+        HardParseEffectClosureV1::AdmittedWithObservation {
+            reason: "no_privilege",
+        }
+    } else {
+        HardParseEffectClosureV1::Proven
+    }
 }
 
 fn association_has_statistics_type(row: &OracleRow) -> bool {
@@ -253,14 +285,13 @@ fn association_has_statistics_type(row: &OracleRow) -> bool {
 }
 
 fn catalog_unavailable(error: DbError) -> HardParseEffectClosureV1 {
+    let _ = error;
+    unavailable("callback_unprovable")
+}
+
+fn is_privilege_denial(error: &DbError) -> bool {
     let message = error.to_string();
-    if message.contains("ORA-00942") || message.contains("ORA-01031") {
-        HardParseEffectClosureV1::AdmittedWithObservation {
-            reason: "no_privilege",
-        }
-    } else {
-        unavailable("callback_unprovable")
-    }
+    message.contains("ORA-00942") || message.contains("ORA-01031")
 }
 
 const fn refused(reason: &'static str) -> HardParseEffectClosureV1 {
@@ -312,6 +343,8 @@ mod tests {
     struct ClosureMock {
         association: Option<OracleRow>,
         association_denied: bool,
+        association_denied_first: bool,
+        association_calls: Mutex<usize>,
         domain_index: bool,
         user_defined_column_type: bool,
         policy_sql_fragment: Option<&'static str>,
@@ -342,7 +375,13 @@ mod tests {
         ) -> Result<Vec<OracleRow>, DbError> {
             self.queries.lock().expect("query log").push(sql.to_owned());
             if sql.contains("FROM all_associations") {
-                if self.association_denied {
+                let call = {
+                    let mut calls = self.association_calls.lock().expect("association calls");
+                    let call = *calls;
+                    *calls += 1;
+                    call
+                };
+                if self.association_denied || (self.association_denied_first && call == 0) {
                     return Err(DbError::ServerQuery(
                         "ORA-01031: insufficient privileges".into(),
                     ));
@@ -617,5 +656,34 @@ mod tests {
         );
         assert!(result.is_admitted());
         assert!(result.requires_observation());
+    }
+
+    #[test]
+    fn denied_probe_then_positive_evidence_on_later_relation_refuses() {
+        let mock = ClosureMock {
+            association: Some(row(&[
+                ("STATSTYPE_SCHEMA", "APP"),
+                ("STATSTYPE_NAME", "CANARY_STATS"),
+            ])),
+            association_denied_first: true,
+            ..ClosureMock::default()
+        };
+        let mut later_relation = relation();
+        later_relation.name = "Z_LATER".into();
+        let result = run(|cx| async move {
+            prove_hard_parse_effect_closure(
+                &cx,
+                &mock,
+                "SELECT id FROM APP.ORDERS JOIN APP.Z_LATER USING (id)",
+                &[relation(), later_relation],
+            )
+            .await
+        });
+        assert_eq!(
+            result,
+            HardParseEffectClosureV1::Refused {
+                reason: "odci_stats_callback"
+            }
+        );
     }
 }

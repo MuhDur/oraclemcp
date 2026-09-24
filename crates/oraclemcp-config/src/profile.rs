@@ -885,6 +885,11 @@ pub struct ConnectionProfile {
     /// doctor warning. A proven FGA handler refuses either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_fga_evidence: Option<bool>,
+    /// R36 extension: refuse EXPLAIN/cost admission when any hard-parse
+    /// callback evidence is unreadable. Defaults to `false`; the doctor warns
+    /// and admitted least-privilege paths emit an observation and audit row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_hard_parse_evidence: Option<bool>,
     /// Maximum live subscriptions per server-derived principal. Defaults to 4;
     /// `0` deliberately disables new subscriptions for this profile. Each
     /// admitted subscription also consumes one EMON notification connection
@@ -985,6 +990,10 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("read_only_standby", &self.read_only_standby)
             .field("allow_change_notification", &self.allow_change_notification)
             .field("require_fga_evidence", &self.require_fga_evidence)
+            .field(
+                "require_hard_parse_evidence",
+                &self.require_hard_parse_evidence,
+            )
             .field("max_subscriptions", &self.max_subscriptions)
             .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
@@ -1068,6 +1077,13 @@ impl ConnectionProfile {
         self.require_fga_evidence == Some(true)
     }
 
+    /// Whether EXPLAIN and decisive cost gates require complete hard-parse
+    /// callback evidence from the active Oracle principal.
+    #[must_use]
+    pub fn require_hard_parse_evidence(&self) -> bool {
+        self.require_hard_parse_evidence == Some(true)
+    }
+
     /// Whether this profile explicitly permits CQN registration.
     ///
     /// This is a fail-closed capability switch, not an authorization bypass:
@@ -1146,6 +1162,7 @@ impl ConnectionProfile {
             explain_plan_table,
             allow_change_notification,
             require_fga_evidence,
+            require_hard_parse_evidence,
             max_subscriptions,
             mcp_exposed,
             dashboard_ddl_workbench,
@@ -1361,6 +1378,7 @@ mod tests {
             explain_plan_table: None,
             allow_change_notification: None,
             require_fga_evidence: None,
+            require_hard_parse_evidence: None,
             max_subscriptions: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,

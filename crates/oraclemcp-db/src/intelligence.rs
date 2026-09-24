@@ -107,14 +107,18 @@ impl VerifiedPlanTable {
         }
     }
 
-    fn safe_fallback() -> Self {
+    fn safe_fallback(configured_table_unavailable: bool) -> Self {
         Self {
             owner: "SYS".to_owned(),
             name: "PLAN_TABLE$".to_owned(),
             // The fixed SYS-qualified identity bypasses caller synonyms. Its
             // object id is unknown when the account cannot read the catalog.
             object_id: 0,
-            verification_observation: Some("plan_table_verification_no_privilege"),
+            verification_observation: Some(if configured_table_unavailable {
+                "configured_plan_table_unavailable_sys_fallback"
+            } else {
+                "plan_table_verification_no_privilege_sys_fallback"
+            }),
         }
     }
 
@@ -186,7 +190,7 @@ pub async fn resolve_plan_table(
 ) -> Result<VerifiedPlanTable, PlanTableUnavailable> {
     let info = match conn.describe(cx).await {
         Ok(info) => info,
-        Err(error) => return safe_plan_table_fallback(error),
+        Err(error) => return safe_plan_table_fallback(error, configured.is_some()),
     };
     let current_schema = info
         .current_schema
@@ -219,7 +223,7 @@ pub async fn resolve_plan_table(
         .await
         {
             Ok(rows) => rows,
-            Err(error) => return safe_plan_table_fallback(error),
+            Err(error) => return safe_plan_table_fallback(error, true),
         };
         if rows.len() != 1
             || rows[0].text("TEMPORARY") != Some("Y")
@@ -244,7 +248,7 @@ pub async fn resolve_plan_table(
         .await
         {
             Ok(rows) => rows,
-            Err(error) => return safe_plan_table_fallback(error),
+            Err(error) => return safe_plan_table_fallback(error, true),
         };
         if !triggers.is_empty() {
             return Err(PlanTableUnavailable {
@@ -271,7 +275,7 @@ pub async fn resolve_plan_table(
     .await
     {
         Ok(rows) => rows,
-        Err(error) => return safe_plan_table_fallback(error),
+        Err(error) => return safe_plan_table_fallback(error, false),
     };
     let private_synonyms = match run_catalog_query(
         cx,
@@ -282,7 +286,7 @@ pub async fn resolve_plan_table(
     .await
     {
         Ok(rows) => rows,
-        Err(error) => return safe_plan_table_fallback(error),
+        Err(error) => return safe_plan_table_fallback(error, false),
     };
     if !local_objects.is_empty() || !private_synonyms.is_empty() {
         return Err(PlanTableUnavailable {
@@ -292,7 +296,7 @@ pub async fn resolve_plan_table(
     let synonym =
         match run_catalog_query(cx, conn, CatalogQueryId::PlanTablePublicSynonym, &[]).await {
             Ok(rows) => rows,
-            Err(error) => return safe_plan_table_fallback(error),
+            Err(error) => return safe_plan_table_fallback(error, false),
         };
     if synonym.len() != 1
         || synonym[0].text("TABLE_OWNER") != Some("SYS")
@@ -306,7 +310,7 @@ pub async fn resolve_plan_table(
     let table = match run_catalog_query(cx, conn, CatalogQueryId::PlanTableSysTemporary, &[]).await
     {
         Ok(rows) => rows,
-        Err(error) => return safe_plan_table_fallback(error),
+        Err(error) => return safe_plan_table_fallback(error, false),
     };
     if table.len() != 1
         || table[0].text("TEMPORARY") != Some("Y")
@@ -324,9 +328,14 @@ pub async fn resolve_plan_table(
     Ok(VerifiedPlanTable::new("SYS", "PLAN_TABLE$", object_id))
 }
 
-fn safe_plan_table_fallback(error: DbError) -> Result<VerifiedPlanTable, PlanTableUnavailable> {
+fn safe_plan_table_fallback(
+    error: DbError,
+    configured_table_unavailable: bool,
+) -> Result<VerifiedPlanTable, PlanTableUnavailable> {
     match plan_table_catalog_error(&error).reason() {
-        "no_privilege" => Ok(VerifiedPlanTable::safe_fallback()),
+        "no_privilege" => Ok(VerifiedPlanTable::safe_fallback(
+            configured_table_unavailable,
+        )),
         reason => Err(PlanTableUnavailable { reason }),
     }
 }
@@ -2884,7 +2893,7 @@ mod tests {
         assert_eq!(table.object_id(), 0);
         assert_eq!(
             table.verification_observation(),
-            Some("plan_table_verification_no_privilege")
+            Some("plan_table_verification_no_privilege_sys_fallback")
         );
     }
 
@@ -2900,7 +2909,24 @@ mod tests {
         assert!(table.is_standard_plan_table());
         assert_eq!(
             table.verification_observation(),
-            Some("plan_table_verification_no_privilege")
+            Some("plan_table_verification_no_privilege_sys_fallback")
+        );
+    }
+
+    #[test]
+    fn configured_plan_table_privilege_gap_names_sys_fallback() {
+        let mut mock = PlanResolverMock::new(unique_plan_service());
+        mock.denied_query_fragment = Some("FROM all_tables");
+        let table = run_with_cx(|cx| async move {
+            resolve_plan_table(&cx, &mock, Some("APP.PLAN_TABLE"))
+                .await
+                .expect("fixed SYS fallback under R36")
+        });
+        assert_eq!(table.owner(), "SYS");
+        assert_eq!(table.name(), "PLAN_TABLE$");
+        assert_eq!(
+            table.verification_observation(),
+            Some("configured_plan_table_unavailable_sys_fallback")
         );
     }
 

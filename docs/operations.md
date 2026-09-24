@@ -316,6 +316,20 @@ then reports the check as a failure. A table with a proven FGA handler is
 refused either way, and any other failure of the catalog query (a lost
 session, a cancelled call) still refuses with `fga_evidence_unknown`.
 
+Optimizer hard-parse evidence has a separate R36 policy. Before EXPLAIN or a
+decisive `max_query_cost` estimate, the server probes callback and policy
+catalogs for every resolved relation and callable. A privilege-denied probe is
+recorded while the remaining probes continue; any readable positive evidence
+still refuses. When no readable probe finds a callback, the default may admit
+with a `verification_observations` field and a separate readable
+`hard_parse_evidence_unavailable` audit record. The doctor reports check 19,
+"Hard-parse evidence policy", as WARN while
+`require_hard_parse_evidence = false`; setting it to `true` restores refusal
+when hard-parse or PLAN_TABLE verification is incomplete. A configured
+`explain_plan_table` whose verification is denied for lack of privilege uses
+the fixed SYS plan table only with an explicit
+`configured_plan_table_unavailable_sys_fallback` observation.
+
 Grant **no** write-implying system privileges. Specifically avoid:
 `CREATE TABLE`, `CREATE ANY TABLE`, `INSERT/UPDATE/DELETE ANY TABLE`,
 `CREATE/ALTER ANY PROCEDURE`, `CREATE/DROP ANY ...`, `ALTER SYSTEM`,

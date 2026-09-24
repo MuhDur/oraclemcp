@@ -425,6 +425,9 @@ def setup(lane, settings, requested_id=None, owner_password_sink=None,
         for filename in ADMIN_FILES:
             execute_sql_file(admin, filename, run_id, version)
         seed_fixture(owner, cross, run_id, version)
+        owner.cursor().execute(f"GRANT SELECT ON T_RUN_{run_id} TO {cross_name(run_id)}")
+        owner.cursor().execute(f"GRANT SELECT ON T_TYPES_{run_id} TO {cross_name(run_id)}")
+        cross.commit()
         prove_fga_handler_canary(owner, run_id)
         run = recorded_run(admin, run_id)
         inventory = inventory_status(admin, run, version)

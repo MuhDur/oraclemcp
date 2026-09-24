@@ -42,8 +42,8 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "plan_contains"}
-PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw",
-                    "protected", "capped_rw"}
+PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
+                    "synthetic_cross_rw_strict", "protected", "capped_rw"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
@@ -298,6 +298,9 @@ def validate_case(case, filename):
     if case.get("profile_variant") == "synthetic_owner_rw":
         require(case["level"] == "READ_WRITE",
                 "synthetic owner write profile is restricted to explicit READ_WRITE cases")
+    if case.get("profile_variant") in {"synthetic_cross_rw", "synthetic_cross_rw_strict"}:
+        require(case["level"] == "READ_WRITE",
+                "least-privilege cross-schema profile is restricted to explicit READ_WRITE cases")
     require("plan_contains" not in case
             or (isinstance(case["plan_contains"], str) and case["plan_contains"]),
             "plan_contains must be a nonempty string")
@@ -832,7 +835,7 @@ def pick_port():
         return sock.getsockname()[1]
 
 
-def write_lab_config(path, lane, dsn, port, owner=None):
+def write_lab_config(path, lane, dsn, port, owner=None, cross=None):
     audience = f"http://127.0.0.1:{port}/mcp"
     content = f'''schema_version = 2
 default_profile = "{lane}"
@@ -914,6 +917,30 @@ username = "{owner}"
 credential_ref = "env:W4_OWNER_PASSWORD"
 max_level = "ADMIN"
 default_level = "READ_ONLY"
+'''
+    if cross is not None:
+        require(re.fullmatch(r"W4X_W4[0-9]{4}[A-F0-9]{6}", cross) is not None,
+                "cross profile must name the exact W4 fixture")
+        content += f'''
+[[profiles]]
+name = "{lane}_cross_rw"
+description = "synthetic W4 least-privilege cross-schema reader for EXPLAIN evidence tests"
+connect_string = "{dsn}"
+username = "{cross}"
+credential_ref = "env:W4_CROSS_PASSWORD"
+max_level = "ADMIN"
+default_level = "READ_ONLY"
+'''
+        content += f'''
+[[profiles]]
+name = "{lane}_cross_rw_strict"
+description = "synthetic W4 least-privilege cross-schema reader requiring complete hard-parse evidence"
+connect_string = "{dsn}"
+username = "{cross}"
+credential_ref = "env:W4_CROSS_PASSWORD"
+max_level = "ADMIN"
+default_level = "READ_ONLY"
+require_hard_parse_evidence = true
 '''
     path.write_text(content)
     return audience
@@ -1665,8 +1692,8 @@ def run_lane(args):
                     with (work / "fixture.jsonl").open("a") as fixture_log:
                         with contextlib.redirect_stdout(fixture_log):
                             fixture_setup(args.lane, settings, fixture_id,
-                                          owner_password_sink=lambda value: env.__setitem__(
-                                              "W4_OWNER_PASSWORD", value))
+                                          owner_password_sink=lambda value: env.__setitem__("W4_OWNER_PASSWORD", value),
+                                          cross_password_sink=lambda value: env.__setitem__("W4_CROSS_PASSWORD", value))
                     fixture_runs[transport] = fixture_id
                     owner = "W4O_" + fixture_id
                     wait_for_setup_ready(
@@ -1678,7 +1705,7 @@ def run_lane(args):
                         # that every served relation read requires.
                         connection.cursor().execute(f"GRANT SELECT ANY DICTIONARY TO {owner}")
                     write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
-                                     owner=owner)
+                                     owner=owner, cross="W4X_" + fixture_id)
                 client_env = {**env, "XDG_STATE_HOME": str(state)}
                 expanded_family = ([] if args.contract_only else [
                     freshen_vsql_marker(expand_case(case, fixture_id, transport, args.lane)) for case in family_cases
@@ -1722,6 +1749,8 @@ def run_lane(args):
                     desired_profile = (args.lane + "_raw" if variant == "synthetic_raw"
                                        else args.lane + "_owner" if variant == "synthetic_owner"
                                        else args.lane + "_owner_rw" if variant == "synthetic_owner_rw"
+                                       else args.lane + "_cross_rw" if variant == "synthetic_cross_rw"
+                                       else args.lane + "_cross_rw_strict" if variant == "synthetic_cross_rw_strict"
                                        else args.lane + "_protected" if variant == "protected"
                                        else args.lane + "_capped" if variant == "capped_rw"
                                        else args.lane)

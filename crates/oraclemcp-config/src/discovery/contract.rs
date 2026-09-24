@@ -223,6 +223,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.",
     },
     FieldDisposition {
+        field: "require_hard_parse_evidence",
+        disposition: Disposition::Commented,
+        help: "Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.",
+    },
+    FieldDisposition {
         field: "max_subscriptions",
         disposition: Disposition::Commented,
         help: "Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.",
@@ -359,6 +364,7 @@ mod tests {
             explain_plan_table: None,
             allow_change_notification: Some(false),
             require_fga_evidence: Some(true),
+            require_hard_parse_evidence: Some(true),
             max_subscriptions: Some(4),
             mcp_exposed: Some(true),
             dashboard_ddl_workbench: Some(false),
@@ -406,11 +412,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 36 (R36 added require_fga_evidence).
+        // R36 added the hard-parse evidence key, bringing this table to 37.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            36,
-            "the design spec fixes ConnectionProfile at 36 serde fields"
+            37,
+            "the design spec fixes ConnectionProfile at 37 serde fields"
         );
     }
 
