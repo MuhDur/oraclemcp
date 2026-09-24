@@ -8529,13 +8529,21 @@ async fn preview_dml_inner(
     {
         Some(witness) => {
             let marked = with_audit_marker(witness, ctx.active_profile, "oracle_preview_dml");
-            ensure_resolved_read_only(cx, conn, ctx.catalog_cache, &marked).await?;
             let binds = args
                 .witness_binds
                 .iter()
                 .map(json_to_bind)
                 .collect::<Result<Vec<_>, _>>()?;
-            Some((marked, binds))
+            Some(
+                read_executor::AdmittedWitnessRead::admit(
+                    cx,
+                    conn,
+                    ctx.catalog_cache,
+                    marked,
+                    binds,
+                )
+                .await?,
+            )
         }
         None => None,
     };
@@ -8612,22 +8620,14 @@ async fn preview_dml_inner(
     // Everything from here rolls back to the sandbox savepoint, whatever happens.
     let sandboxed = async {
         let before = match &witness {
-            Some((sql, binds)) => Some(
-                read_query(cx, conn, sql, binds, caps, 0, &SerializeOptions::default())
-                    .await
-                    .map_err(DbError::into_envelope)?,
-            ),
+            Some(witness) => Some(witness.fetch(cx, conn, caps).await?),
             None => None,
         };
         let rows_affected = execute_conn(cx, conn, &executed_sql, &binds)
             .await
             .map_err(DbError::into_envelope)?;
         let after = match &witness {
-            Some((sql, binds)) => Some(
-                read_query(cx, conn, sql, binds, caps, 0, &SerializeOptions::default())
-                    .await
-                    .map_err(DbError::into_envelope)?,
-            ),
+            Some(witness) => Some(witness.fetch(cx, conn, caps).await?),
             None => None,
         };
         Ok::<_, ErrorEnvelope>((before, rows_affected, after))

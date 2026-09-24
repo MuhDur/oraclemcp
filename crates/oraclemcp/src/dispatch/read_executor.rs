@@ -163,6 +163,46 @@ impl ServerSql {
     }
 }
 
+/// A preview-DML witness whose exact SQL passed the same semantic read proof
+/// as a caller query before the sandbox starts. Only this module can construct
+/// it, and both before/after fetches use its unchanged SQL and binds.
+pub(super) struct AdmittedWitnessRead {
+    sql: String,
+    binds: Vec<OracleBind>,
+}
+
+impl AdmittedWitnessRead {
+    pub(super) async fn admit(
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        cache: &OracleCatalogResolverCache,
+        sql: String,
+        binds: Vec<OracleBind>,
+    ) -> Result<Self, ErrorEnvelope> {
+        resolve_query_block_read(cx, conn, cache, &sql, false).await?;
+        Ok(Self { sql, binds })
+    }
+
+    pub(super) async fn fetch(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        caps: QueryCaps,
+    ) -> Result<oraclemcp_db::QueryResponse, ErrorEnvelope> {
+        read_query(
+            cx,
+            conn,
+            &self.sql,
+            &self.binds,
+            caps,
+            0,
+            &SerializeOptions::default(),
+        )
+        .await
+        .map_err(DbError::into_envelope)
+    }
+}
+
 /// E3/E3b: materialize the bounded full result of a read query as an
 /// `oracle-export://{id}` resource and return a `resource_link` result (no
 /// inlined rows). Fetches up to [`MAX_QUERY_EXPORT_ROWS`] at `offset`; rows
