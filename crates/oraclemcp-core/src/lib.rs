@@ -29,6 +29,7 @@ pub mod admission;
 pub mod audit_shipping;
 pub mod capabilities;
 pub mod capability;
+pub mod catalog_facts;
 pub mod change_proposal;
 pub mod client_credentials;
 pub mod config_ops;

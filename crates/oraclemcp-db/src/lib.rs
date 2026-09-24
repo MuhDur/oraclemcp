@@ -62,6 +62,7 @@ mod auth_adapter;
 mod awr;
 mod catalog_editions;
 mod catalog_extract;
+pub mod catalog_facts;
 mod catalog_query;
 mod catalog_resolver;
 mod connection;
@@ -104,6 +105,14 @@ pub use catalog_editions::{
 pub use catalog_extract::{
     CatalogExtractReport, CatalogExtractRequest, CatalogExtractWarning, CatalogRowBatch,
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
+};
+pub use catalog_facts::{
+    CLOSURE_FACT_SCHEMA_VERSION, ClosureFactKey, ClosureFactStore, ClosureFacts, ClosureMember,
+    DependencyFact, DmlTarget, MAX_CLOSURE_DEPENDENCIES, MAX_CLOSURE_DML_TARGETS,
+    MAX_CLOSURE_MEMBERS, MAX_CLOSURE_SOURCE_BYTES, MAX_CLOSURE_SOURCE_ROWS,
+    MAX_CLOSURE_TOTAL_DEPENDENCIES, MAX_CLOSURE_TOTAL_SOURCE_ROWS, MAX_CLOSURE_TOTAL_TRIGGERS,
+    MAX_CLOSURE_TRIGGERS, MemberFact, Revalidation, RoutineClosure, TriggerFact,
+    extract_closure_facts, fact_record_valid, revalidate,
 };
 pub use catalog_query::{
     BindSchema, CatalogAuditClass, CatalogBindKind, CatalogOutputPolicy, CatalogQueryId,

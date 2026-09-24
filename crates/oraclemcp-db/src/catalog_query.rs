@@ -262,6 +262,20 @@ pub enum CatalogQueryId {
     PlscopeIdentifiers,
     /// Bounded PL/Scope statement map.
     PlscopeStatements,
+    /// Stable database, container and edition identity for persisted facts.
+    ClosureIdentity,
+    /// Exact identity and validity for one closure member.
+    ClosureMemberObject,
+    /// AUTHID of one exact standalone routine or package member.
+    ClosureRoutineAuthid,
+    /// Compiler settings, including conditional compilation flags.
+    ClosureCompilerSettings,
+    /// Bounded dependencies and their current target identities.
+    ClosureDependencies,
+    /// Bounded triggers for one DML target.
+    ClosureTriggers,
+    /// Bounded source lines for one exact closure object.
+    ClosureSource,
     /// Gathered optimizer statistics for one table.
     TableStats,
     /// Staleness of gathered table statistics.
@@ -680,6 +694,13 @@ impl CatalogQueryId {
         Self::ExtractDependencies,
         Self::ExtractPlscopeAvailability,
         Self::ExtractPlscopeIdentifiers,
+        Self::ClosureIdentity,
+        Self::ClosureMemberObject,
+        Self::ClosureRoutineAuthid,
+        Self::ClosureCompilerSettings,
+        Self::ClosureDependencies,
+        Self::ClosureTriggers,
+        Self::ClosureSource,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -697,6 +718,7 @@ impl CatalogQueryId {
         const TT: BindSchema = BindSchema(&[Text, Text]);
         const TI: BindSchema = BindSchema(&[Text, Integer]);
         const TTI: BindSchema = BindSchema(&[Text, Text, Integer]);
+        const TTNNI: BindSchema = BindSchema(&[Text, Text, NullableText, NullableText, Integer]);
         const TTTI: BindSchema = BindSchema(&[Text, Text, Text, Integer]);
         const TTT: BindSchema = BindSchema(&[Text, Text, Text]);
         const T32: BindSchema = BindSchema(&[Text; 64]);
@@ -2238,6 +2260,83 @@ order by owner, name, referenced_owner, referenced_name"#
                 ),
                 OWNER32,
                 "extract dependencies for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ClosureIdentity => (
+                "SELECT SYS_CONTEXT('USERENV','DBID') AS dbid, \
+                        SYS_CONTEXT('USERENV','CON_NAME') AS container_name, \
+                        SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS edition_name FROM dual",
+                EMPTY,
+                "read stable database, container and edition identity",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::ClosureMemberObject => (
+                "SELECT object_id, TO_CHAR(last_ddl_time,'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_ddl_time, status \
+                   FROM (SELECT object_id, last_ddl_time, status FROM all_objects \
+                         WHERE owner = :1 AND object_name = :2 AND object_type = :3 \
+                         ORDER BY object_id) WHERE ROWNUM <= :4",
+                TTTI,
+                "read one bounded exact closure member identity",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ClosureRoutineAuthid => (
+                "SELECT authid, overload FROM (SELECT authid, overload FROM all_procedures \
+                   WHERE owner = :1 AND object_name = :2 \
+                     AND ((:3 IS NULL AND procedure_name IS NULL) OR procedure_name = :4) \
+                   ORDER BY overload) WHERE ROWNUM <= :5",
+                TTNNI,
+                "read one bounded exact routine AUTHID",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ClosureCompilerSettings => (
+                "SELECT plsql_optimize_level, plsql_code_type, plsql_debug, plsql_warnings, \
+                        plsql_ccflags, nls_length_semantics, plscope_settings \
+                   FROM (SELECT plsql_optimize_level, plsql_code_type, plsql_debug, plsql_warnings, \
+                                plsql_ccflags, nls_length_semantics, plscope_settings \
+                         FROM all_plsql_object_settings WHERE owner = :1 AND name = :2 AND type = :3) \
+                  WHERE ROWNUM <= :4",
+                TTTI,
+                "read bounded compiler settings for one exact object",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ClosureDependencies => (
+                "SELECT referenced_owner, referenced_name, referenced_type, dependency_type, \
+                        target_object_id, target_last_ddl_time, target_status \
+                   FROM (SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.dependency_type, \
+                                o.object_id AS target_object_id, \
+                                TO_CHAR(o.last_ddl_time,'YYYY-MM-DD\"T\"HH24:MI:SS') AS target_last_ddl_time, \
+                                o.status AS target_status \
+                         FROM all_dependencies d LEFT JOIN all_objects o \
+                           ON o.owner=d.referenced_owner AND o.object_name=d.referenced_name \
+                          AND o.object_type=d.referenced_type \
+                         WHERE d.owner=:1 AND d.name=:2 AND d.type=:3 \
+                         ORDER BY d.referenced_owner,d.referenced_name,d.referenced_type,d.dependency_type) \
+                  WHERE ROWNUM <= :4",
+                TTTI,
+                "read bounded closure dependencies and current target identities",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ClosureTriggers => (
+                "SELECT owner, trigger_name, trigger_type, triggering_event, status, action_type, when_clause \
+                   FROM (SELECT owner, trigger_name, trigger_type, triggering_event, status, action_type, when_clause \
+                         FROM all_triggers WHERE table_owner=:1 AND table_name=:2 \
+                         ORDER BY owner,trigger_name) WHERE ROWNUM <= :3",
+                TTI,
+                "read bounded triggers for a closure DML target",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ClosureSource => (
+                "SELECT line, text FROM (SELECT line, text FROM all_source \
+                   WHERE owner=:1 AND name=:2 AND type=:3 ORDER BY line) WHERE ROWNUM <= :4",
+                TTTI,
+                "read bounded source lines for a closure member",
                 DictionaryMetadata,
                 Diagnostic,
             ),
