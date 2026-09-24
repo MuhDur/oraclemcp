@@ -7,7 +7,7 @@
 use super::*;
 use oraclemcp_db::{
     FgaEvidence, FgaEvidencePolicy, ReadPlanProofError, ReadQueryProvenance,
-    prove_semantic_read_plan,
+    prove_semantic_read_plan, resolve_semantic_read_relations,
 };
 use oraclemcp_guard::semantic_read_plan_checked;
 
@@ -473,6 +473,28 @@ pub(super) struct ResolvedRead {
     pub(super) relations: Vec<ResolvedObject>,
     pub(super) decision: GuardDecision,
     pub(super) fga_evidence: FgaEvidence,
+}
+
+/// Resolve relation identities for EXPLAIN's hard-parse closure before the
+/// ordinary purity proof can return a less specific policy refusal.
+pub(super) async fn resolve_hard_parse_relations(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+) -> Result<Vec<ResolvedObject>, ErrorEnvelope> {
+    let plan = semantic_read_plan_checked(sql)
+        .map_err(|error| unresolved_semantic_read(error.as_str()))?;
+    resolve_semantic_read_relations(cx, conn, cache, &plan)
+        .await
+        .map_err(|error| match error {
+            ReadPlanProofError::Database(error) => error.into_envelope(),
+            ReadPlanProofError::MissingRelation(name) => missing_semantic_relation(&name),
+            ReadPlanProofError::MissingColumn(name) => missing_semantic_column(&name),
+            ReadPlanProofError::Unproven(reason) => unresolved_semantic_read(reason),
+            ReadPlanProofError::FgaHandlerAutonomous => fga_refusal("fga_handler_autonomous"),
+            ReadPlanProofError::FgaEvidenceUnknown => fga_refusal("fga_evidence_unknown"),
+        })
 }
 
 /// Resolve each lexical read block under its own live catalog scope. The

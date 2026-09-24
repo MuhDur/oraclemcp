@@ -10932,6 +10932,7 @@ pub const fn oraclemcp_db::redacted_named_oracle_binds(&[(alloc::string::String,
 pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) -> oraclemcp_db::RedactedOracleBinds<'_>
 pub fn oraclemcp_db::requirement_matrix() -> &'static [oraclemcp_db::ToolRequirement]
 pub async fn oraclemcp_db::resolve_plan_table(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::VerifiedPlanTable, oraclemcp_db::PlanTableUnavailable>
+pub async fn oraclemcp_db::resolve_semantic_read_relations(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::OracleCatalogResolverCache, &oraclemcp_guard::resolver::SemanticReadPlan) -> core::result::Result<alloc::vec::Vec<oraclemcp_guard::resolver::ResolvedObject>, oraclemcp_db::ReadPlanProofError>
 pub async fn oraclemcp_db::resolve_top_sql_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> core::result::Result<oraclemcp_db::DiagnosticsSource, oraclemcp_db::DbError>
 pub fn oraclemcp_db::resolve_wallet_choice(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletResolutionReport, oraclemcp_db::WalletResolveError>
 pub async fn oraclemcp_db::resolved_relations_read_purity(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject], &[oraclemcp_guard::resolver::RawName]) -> core::result::Result<oraclemcp_guard::purity::Purity, oraclemcp_db::DbError>

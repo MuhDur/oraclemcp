@@ -7,7 +7,7 @@
     "requires": [],
     "profile_variant": "synthetic_owner_rw",
     "setup": [],
-    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "allow_plan_table_write": true}},
+    "call": {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "allow_plan_table_write": true}},
     "expect": {"json_subset": {"diagnostic_write": {"statement": "EXPLAIN PLAN", "writes": "PLAN_TABLE", "required_level": "READ_WRITE", "explicitly_allowed": true, "savepoint": "OMCP_EXPLAIN_PLAN", "rolled_back": true}}},
     "plan_contains": "T_RUN_${run_id}",
     "db_reread": [],
@@ -27,7 +27,7 @@
     "call": {
       "arguments": {},
       "parallel": [
-        {"arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "allow_plan_table_write": true}, "expect": {"json_subset": {"diagnostic_write": {"statement": "EXPLAIN PLAN", "savepoint": "OMCP_EXPLAIN_PLAN", "rolled_back": true}}}, "plan_contains": "T_RUN_${run_id}"},
+        {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "allow_plan_table_write": true}, "expect": {"json_subset": {"diagnostic_write": {"statement": "EXPLAIN PLAN", "savepoint": "OMCP_EXPLAIN_PLAN", "rolled_back": true}}}, "plan_contains": "T_RUN_${run_id}"},
         {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "allow_plan_table_write": true}, "expect": {"json_subset": {"diagnostic_write": {"statement": "EXPLAIN PLAN", "savepoint": "OMCP_EXPLAIN_PLAN", "rolled_back": true}}}, "plan_contains": "T_TYPES_${run_id}"}
       ]
     },
@@ -48,7 +48,7 @@
       {"sql": "CREATE TABLE ${owner}.T_PLAN_CANARY_${run_id} (ID NUMBER)"},
       {"sql": "CREATE OR REPLACE TRIGGER ${owner}.TR_PLAN_CANARY_${run_id} BEFORE INSERT ON ${owner}.PLAN_TABLE FOR EACH ROW DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_PLAN_CANARY_${run_id} VALUES (1); COMMIT; END;"}
     ],
-    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id}", "allow_plan_table_write": true}},
+    "call": {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id}", "allow_plan_table_write": true}},
     "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "callback_unprovable"},
     "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_PLAN_CANARY_${run_id}", "rows": [[0]]}],
     "cleanup": [{"sql": "DROP TABLE ${owner}.PLAN_TABLE PURGE"}, {"sql": "DROP TABLE ${owner}.T_PLAN_CANARY_${run_id} PURGE"}],
@@ -63,7 +63,7 @@
     "requires": [],
     "profile_variant": "synthetic_owner_rw",
     "setup": [{"sql": "CREATE SYNONYM ${owner}.PLAN_TABLE FOR ${owner}.T_RUN_${run_id}"}],
-    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id}", "allow_plan_table_write": true}},
+    "call": {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id}", "allow_plan_table_write": true}},
     "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "callback_unprovable"},
     "db_reread": [],
     "cleanup": [{"sql": "DROP SYNONYM ${owner}.PLAN_TABLE"}],
@@ -78,7 +78,7 @@
     "requires": ["feature:VPD"],
     "profile_variant": "synthetic_owner_rw",
     "setup": [],
-    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_SECURE_${run_id}", "allow_plan_table_write": true}},
+    "call": {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_SECURE_${run_id}", "allow_plan_table_write": true}},
     "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "policy_code"},
     "db_reread": [],
     "audit_expect": [],
@@ -94,16 +94,22 @@
     "setup": [
       {"sql": "CREATE TABLE ${owner}.T_ODCI_CANARY_${run_id} (ID NUMBER)"},
       {"sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_ODCI_${run_id} (P NUMBER) RETURN NUMBER DETERMINISTIC IS BEGIN RETURN P; END;"},
-      {"sql": "CREATE TYPE ${owner}.TY_ODCI_${run_id} AS OBJECT (STATIC FUNCTION ODCIStatsSelectivity(pred SYS.ODCIPredInfo, sel OUT NUMBER, args SYS.ODCIArgDescList, start_value NUMBER, stop_value NUMBER, p NUMBER) RETURN NUMBER)"},
-      {"sql": "CREATE TYPE BODY ${owner}.TY_ODCI_${run_id} AS STATIC FUNCTION ODCIStatsSelectivity(pred SYS.ODCIPredInfo, sel OUT NUMBER, args SYS.ODCIArgDescList, start_value NUMBER, stop_value NUMBER, p NUMBER) RETURN NUMBER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_ODCI_CANARY_${run_id} VALUES (1); COMMIT; sel := 50; RETURN SYS.ODCICONST.SUCCESS; END; END;"},
+      {"sql": "CREATE TYPE ${owner}.TY_ODCI_${run_id} AS OBJECT (STATIC FUNCTION ODCIGetInterfaces(ifclist OUT SYS.ODCIObjectList) RETURN NUMBER, STATIC FUNCTION ODCIStatsSelectivity(pred SYS.ODCIPredInfo, sel OUT NUMBER, args SYS.ODCIArgDescList, start_value NUMBER, stop_value NUMBER, p NUMBER, env SYS.ODCIEnv) RETURN NUMBER)"},
+      {"sql": "CREATE TYPE BODY ${owner}.TY_ODCI_${run_id} AS STATIC FUNCTION ODCIGetInterfaces(ifclist OUT SYS.ODCIObjectList) RETURN NUMBER IS BEGIN ifclist := SYS.ODCIObjectList('SYS.ODCISTATS2'); RETURN SYS.ODCICONST.SUCCESS; END; STATIC FUNCTION ODCIStatsSelectivity(pred SYS.ODCIPredInfo, sel OUT NUMBER, args SYS.ODCIArgDescList, start_value NUMBER, stop_value NUMBER, p NUMBER, env SYS.ODCIEnv) RETURN NUMBER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_ODCI_CANARY_${run_id} VALUES (1); COMMIT; sel := 50; RETURN SYS.ODCICONST.SUCCESS; END; END;"},
       {"sql": "ASSOCIATE STATISTICS WITH FUNCTIONS ${owner}.FN_ODCI_${run_id} USING ${owner}.TY_ODCI_${run_id}"}
     ],
     "steps": [
-      {"tool": "oracle_explain_plan", "arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "allow_plan_table_write": true}, "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "odci_stats_callback"}}
+      {"tool": "oracle_explain_plan", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "allow_plan_table_write": true}, "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "odci_stats_callback"}}
     ],
-    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "max_query_cost": 1, "allow_plan_table_write": true}},
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "max_query_cost": 1, "allow_plan_table_write": true}},
     "expect": {"error_classes": ["FORBIDDEN_STATEMENT", "POLICY_DENIED"]},
     "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_ODCI_CANARY_${run_id}", "rows": [[0]]}],
+    "cleanup": [
+      {"sql": "DISASSOCIATE STATISTICS FROM FUNCTIONS ${owner}.FN_ODCI_${run_id}"},
+      {"sql": "DROP TYPE ${owner}.TY_ODCI_${run_id} FORCE"},
+      {"sql": "DROP FUNCTION ${owner}.FN_ODCI_${run_id}"},
+      {"sql": "DROP TABLE ${owner}.T_ODCI_CANARY_${run_id} PURGE"}
+    ],
     "audit_expect": [],
     "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
   },
@@ -115,9 +121,9 @@
     "requires": [],
     "setup": [],
     "steps": [
-      {"tool": "oracle_query", "arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "max_rows": 1}, "expect": {"rows": [{"ID": "1"}]}}
+      {"tool": "oracle_query", "arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "max_rows": 1}, "expect": {"rows": [{"ID": "1"}]}}
     ],
-    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "max_rows": 1, "max_query_cost": 1, "allow_plan_table_write": true}},
+    "call": {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "max_rows": 1, "max_query_cost": 1, "allow_plan_table_write": true}},
     "expect": {"error_class": "POLICY_DENIED", "reason_code": "read_only_txn"},
     "db_reread": [],
     "audit_expect": [],

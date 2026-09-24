@@ -990,6 +990,97 @@ fn projected_from_local_source(
     matching == 1 && (qualifier.is_some() || block.statement_scope.relations.is_empty())
 }
 
+/// Resolve the exact base-relation identities needed by EXPLAIN hard-parse
+/// effect analysis, without applying the ordinary read-purity decision.
+///
+/// Callers must still run the complete semantic read proof before executing
+/// the submitted SQL. This split lets EXPLAIN report a precise callback or
+/// policy refusal before a more general read-purity refusal obscures it.
+pub async fn resolve_semantic_read_relations(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    plan: &SemanticReadPlan,
+) -> Result<Vec<ResolvedObject>, ReadPlanProofError> {
+    if plan.blocks.len() > 128 || plan.relations.len() > 256 {
+        return Err(ReadPlanProofError::Unproven("relation_plan_cap_exceeded"));
+    }
+    if plan
+        .blocks
+        .iter()
+        .any(|block| block.kind == QueryBlockKind::TableFunction)
+    {
+        return Err(ReadPlanProofError::Unproven(
+            "table-function callee has no complete routine effect proof",
+        ));
+    }
+
+    cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
+    let mut session: Option<ResolveCtx> = None;
+    let mut contexts = Vec::with_capacity(plan.blocks.len());
+    for block in &plan.blocks {
+        let mut names = block.relations.clone();
+        names.extend(
+            block
+                .values
+                .iter()
+                .filter(|name| {
+                    !projected_from_local_source(plan, block, name)
+                        && !block.correlated_outer_refs.contains(name)
+                })
+                .cloned(),
+        );
+        let mut context = None;
+        for chunk in names.chunks(MAX_CATALOG_NAMES) {
+            let loaded = cache
+                .preload(cx, conn, chunk, block.statement_scope.clone())
+                .await
+                .map_err(ReadPlanProofError::Database)?;
+            if session
+                .as_ref()
+                .is_some_and(|first| !same_session(first, &loaded))
+                || context
+                    .as_ref()
+                    .is_some_and(|first| !same_session(first, &loaded))
+            {
+                return Err(ReadPlanProofError::Unproven(
+                    "session context changed during proof",
+                ));
+            }
+            session.get_or_insert_with(|| loaded.clone());
+            context = Some(loaded);
+        }
+        if context.is_none() {
+            let loaded = cache
+                .preload(cx, conn, &[], block.statement_scope.clone())
+                .await
+                .map_err(ReadPlanProofError::Database)?;
+            if session
+                .as_ref()
+                .is_some_and(|first| !same_session(first, &loaded))
+            {
+                return Err(ReadPlanProofError::Unproven(
+                    "session context changed during proof",
+                ));
+            }
+            session.get_or_insert_with(|| loaded.clone());
+            context = Some(loaded);
+        }
+        contexts.push(context.expect("every block has a context"));
+    }
+
+    let mut relations = Vec::new();
+    for (block, context) in plan.blocks.iter().zip(&contexts) {
+        for name in &block.relations {
+            let Resolution::Resolved(object) = cache.resolve(name, context) else {
+                return Err(ReadPlanProofError::MissingRelation(name.clone()));
+            };
+            relations.push(*object);
+        }
+    }
+    Ok(relations)
+}
+
 /// Resolve every lexical block in its own scope, then bind the recursive
 /// classifier's base-object consult to the exact identities just proved.
 pub async fn prove_semantic_read_plan(
@@ -4421,6 +4512,37 @@ mod tests {
             inner.correlated_outer_refs.contains(outer_value),
             "outer o reference remains eligible for ancestor resolution"
         );
+    }
+
+    #[test]
+    fn hard_parse_relation_resolution_precedes_read_purity_veto() {
+        run_with_cx(|cx| async move {
+            let plan = oraclemcp_guard::semantic_read_plan_checked("SELECT 1 FROM APP.ORDERS")
+                .expect("bounded semantic plan");
+            let session = || {
+                vec![row(&[
+                    ("SESSION_USER", Some("APP")),
+                    ("CURRENT_SCHEMA", Some("APP")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])]
+            };
+            let conn = ScriptedRows::new([
+                session(),
+                Vec::new(),
+                session(),
+                Vec::new(),
+                vec![table_catalog_row("APP", "ORDERS", "42")],
+            ]);
+            let relations = resolve_semantic_read_relations(
+                &cx,
+                &conn,
+                &OracleCatalogResolverCache::default(),
+                &plan,
+            )
+            .await
+            .expect("relation identity is available independently of purity");
+            assert_eq!(relations, vec![table_object()]);
+        });
     }
 
     #[test]

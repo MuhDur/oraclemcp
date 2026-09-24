@@ -14165,6 +14165,23 @@ impl OracleDispatcher {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;
+                let relations = read_executor::resolve_hard_parse_relations(
+                    cx,
+                    conn,
+                    &state.catalog_cache,
+                    &a.sql,
+                )
+                .await?;
+                let closure = prove_hard_parse_effect_closure(
+                    cx,
+                    conn,
+                    &a.sql,
+                    &relations,
+                )
+                .await;
+                if let Some(error) = hard_parse_closure_error(closure) {
+                    return Err(error);
+                }
                 let read = read_executor::resolve_query_block_read(
                     cx,
                     conn,
@@ -14184,16 +14201,6 @@ impl OracleDispatcher {
                         },
                         "oracle_explain_plan",
                     )?;
-                }
-                let closure = prove_hard_parse_effect_closure(
-                    cx,
-                    conn,
-                    &a.sql,
-                    &read.relations,
-                )
-                .await;
-                if let Some(error) = hard_parse_closure_error(closure) {
-                    return Err(error);
                 }
                 let configured_plan_table = self
                     .profile_drain

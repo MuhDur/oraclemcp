@@ -111,7 +111,7 @@ pub use catalog_resolver::{
     OracleVpdRlsObservationStatus, OracleVpdRlsPolicy, ReadPlanProof, ReadPlanProofError,
     fga_closure, observe_vpd_rls_for_relations, observe_vpd_rls_for_schema,
     prove_semantic_read_plan, read_catalog_resolve_context, read_session_security_context,
-    resolved_relations_read_purity,
+    resolve_semantic_read_relations, resolved_relations_read_purity,
 };
 pub use connection::{
     CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,
