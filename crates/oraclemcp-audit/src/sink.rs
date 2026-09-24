@@ -1042,6 +1042,8 @@ const FILE_SHARE_READ_WRITE: u32 = 0x0000_0001 | 0x0000_0002;
 
 #[cfg(windows)]
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+#[cfg(windows)]
+const FILE_READ_DATA: u32 = 0x0000_0001;
 
 /// Retained no-follow handles for every lexical component of a Windows audit
 /// directory. Each handle denies delete/rename sharing, so once a component is
@@ -1265,6 +1267,13 @@ fn windows_security_handle(
 
     let mut access =
         (AccessRights::ReadControl | AccessRights::WriteDac).bits() | FILE_READ_ATTRIBUTES;
+    // ACL-only access does not conflict with another process's data handle,
+    // even when share_mode is zero. Request data access while taking an
+    // exclusive file handle so a pre-existing reader/writer makes hardening
+    // fail closed before its already-open access can outlive a DACL change.
+    if exclusive && !directory {
+        access |= FILE_READ_DATA;
+    }
     if freshly_created {
         access |= AccessRights::WriteOwner.bits();
     }
@@ -4698,7 +4707,7 @@ mod tests {
             .iter()
             .map(|r| serde_json::to_string(r).expect("serialize") + "\n")
             .collect();
-        std::fs::write(&path, body).unwrap();
+        tempfile::write_new_file(&path, body.as_bytes()).unwrap();
 
         // Sanity: the forged chain is structurally intact (hashes recompute and
         // link), so ONLY the keyed body check can catch it.
@@ -4753,7 +4762,7 @@ mod tests {
             .iter()
             .map(|r| serde_json::to_string(r).expect("serialize") + "\n")
             .collect();
-        std::fs::write(&path, body).unwrap();
+        tempfile::write_new_file(&path, body.as_bytes()).unwrap();
 
         let refused = Auditor::new(
             Box::new(FileAuditSink::open(&path).expect("open")),

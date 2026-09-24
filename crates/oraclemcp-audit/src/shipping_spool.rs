@@ -3050,15 +3050,16 @@ mod tests {
             .append(&second)
             .expect("append second primary record");
         primary.flush().expect("flush primary");
-        std::fs::write(
+        tempfile::write_new_file(
             &mirror_path,
             format!(
                 "{}\n",
                 serde_json::to_string(&first).expect("serialize mirror prefix")
-            ),
+            )
+            .as_bytes(),
         )
         .expect("seed mirror prefix");
-        std::fs::create_dir(&spool_path).expect("create spool");
+        tempfile::create_dir(&spool_path).expect("create spool");
         write_new_file(
             &record_path(&spool_path, second.seq),
             &serde_json::to_vec(&second).expect("serialize pending suffix"),
@@ -3102,15 +3103,16 @@ mod tests {
             primary.append(record).expect("append primary record");
         }
         primary.flush().expect("flush primary");
-        std::fs::write(
+        tempfile::write_new_file(
             &mirror_path,
             format!(
                 "{}\n",
                 serde_json::to_string(&first).expect("serialize mirror prefix")
-            ),
+            )
+            .as_bytes(),
         )
         .expect("seed mirror prefix");
-        std::fs::create_dir(&spool_path).expect("create spool");
+        tempfile::create_dir(&spool_path).expect("create spool");
         write_new_file(
             &record_path(&spool_path, third.seq),
             &serde_json::to_vec(&third).expect("serialize gapped suffix"),
@@ -3391,8 +3393,8 @@ mod tests {
         let bytes = serde_json::to_vec(&record(1)).expect("serialize");
         let final_path = record_path(directory.path(), 1);
         let tmp_path = temp_record_path(directory.path(), 1);
-        std::fs::write(&final_path, &bytes).expect("seed final");
-        std::fs::write(&tmp_path, &bytes).expect("seed identical tmp");
+        tempfile::write_new_file(&final_path, &bytes).expect("seed final");
+        tempfile::write_new_file(&tmp_path, &bytes).expect("seed identical tmp");
         let pending = recover_pending(directory.path(), 32, &[key()])
             .expect("identical temp+final content must recover cleanly, not conflict");
         assert!(
@@ -3766,7 +3768,7 @@ mod tests {
             .expect("append primary record two");
         primary.flush().expect("flush primary");
         let spool = root.path().join("spool");
-        std::fs::create_dir(&spool).expect("create spool");
+        tempfile::create_dir(&spool).expect("create spool");
         let second_path = record_path(&spool, 2);
         write_new_file(
             &second_path,
@@ -3818,7 +3820,7 @@ mod tests {
             }
 
             let spool = root.path().join("spool");
-            std::fs::create_dir(&spool).expect("create spool");
+            tempfile::create_dir(&spool).expect("create spool");
             let residue = temp_record_path(&spool, 1);
             write_new_file(&residue, b"unchanged-spool-residue").expect("seed residue");
             let residue_before = std::fs::read(&residue).expect("read residue");
@@ -3856,7 +3858,7 @@ mod tests {
             .expect("append primary record two");
         primary.flush().expect("flush primary");
         let spool = root.path().join("spool");
-        std::fs::create_dir(&spool).expect("create spool");
+        tempfile::create_dir(&spool).expect("create spool");
         let first_path = record_path(&spool, 1);
         write_new_file(
             &first_path,

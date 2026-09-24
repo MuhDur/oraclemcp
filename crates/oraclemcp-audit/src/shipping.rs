@@ -321,6 +321,14 @@ impl WormFileForwarder {
             })?;
         #[cfg(not(unix))]
         let file = open_private_append_file(path).map_err(|error| {
+            #[cfg(windows)]
+            if let Ok(candidate) = File::open(path)
+                && open_file_identity(&candidate).ok().as_ref() == Some(&primary_identity)
+            {
+                // This lookup only classifies an existing refusal. The
+                // descriptor-based open above still controls admission.
+                return ShippingError::AliasedPrimaryAuditLog;
+            }
             ShippingError::Transport(format!(
                 "cannot securely open WORM destination {}: {error}",
                 path.display()
@@ -1523,7 +1531,7 @@ mod tests {
                 .iter()
                 .map(|record| serde_json::to_string(record).expect("serialize") + "\n")
                 .collect::<String>();
-            std::fs::write(&worm_path, body).expect("seed malformed WORM");
+            tempfile::write_new_file(&worm_path, body.as_bytes()).expect("seed malformed WORM");
             let error = match WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]) {
                 Err(error) => error,
                 Ok(_) => panic!("malformed existing WORM mirror must fail closed"),
@@ -1555,9 +1563,10 @@ mod tests {
 
         let mut tampered = first.clone();
         tampered.signature = Some("hmac-sha256:00".to_owned());
-        std::fs::write(
+        tempfile::write_new_file(
             &worm_path,
-            serde_json::to_string(&tampered).expect("serialize tampered mirror") + "\n",
+            (serde_json::to_string(&tampered).expect("serialize tampered mirror") + "\n")
+                .as_bytes(),
         )
         .expect("seed tampered mirror");
 
@@ -1874,7 +1883,9 @@ mod tests {
         let primary_path = dir.path().join("audit.jsonl");
         let worm_path = dir.path().join("worm.jsonl");
         let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
-        let mut output = BufWriter::new(File::create(&worm_path).expect("create large mirror"));
+        let mut output = BufWriter::new(
+            crate::sink::create_new_private_file(&worm_path).expect("create large mirror"),
+        );
         let mut previous_hash = crate::GENESIS_HASH.to_owned();
         for seq in 1..=2_048_u64 {
             let mut record = AuditRecord::chained_signed(
@@ -1911,7 +1922,7 @@ mod tests {
         let primary = crate::FileAuditSink::open(&primary_path).expect("open primary");
         let mut oversized = vec![b'x'; crate::MAX_AUDIT_LINE_LEN + 1];
         oversized.push(b'\n');
-        std::fs::write(&worm_path, oversized).expect("seed oversized line");
+        tempfile::write_new_file(&worm_path, &oversized).expect("seed oversized line");
 
         let error = match WormFileForwarder::open_distinct(&worm_path, &primary, &[key()]) {
             Err(error) => error,
@@ -1955,12 +1966,13 @@ mod tests {
         assert!(empty_error.to_string().contains("mirror tail: empty"));
 
         let lagging_path = dir.path().join("lagging-worm.jsonl");
-        std::fs::write(
+        tempfile::write_new_file(
             &lagging_path,
             format!(
                 "{}\n",
                 serde_json::to_string(&first).expect("serialize first")
-            ),
+            )
+            .as_bytes(),
         )
         .expect("seed lagging mirror");
         let lagging_error =
@@ -1994,12 +2006,13 @@ mod tests {
         );
         primary.append(&first).expect("append first primary");
         primary.flush().expect("flush first primary");
-        std::fs::write(
+        tempfile::write_new_file(
             &worm_path,
             format!(
                 "{}\n",
                 serde_json::to_string(&first).expect("serialize first")
-            ),
+            )
+            .as_bytes(),
         )
         .expect("seed caught-up mirror");
 

@@ -82,6 +82,8 @@ pub use oraclemcp_error as error;
 
 #[cfg(test)]
 mod test_tempfile {
+    use std::io::Write as _;
+
     /// Test-owned roots are fresh and empty, so Windows can normalize their
     /// owner before any audit fixture creates a child beneath them.
     pub(crate) fn tempdir() -> std::io::Result<::tempfile::TempDir> {
@@ -90,5 +92,24 @@ mod test_tempfile {
         crate::sink::harden_fresh_windows_private_directory(dir.path())
             .map_err(|error| std::io::Error::other(error.to_string()))?;
         Ok(dir)
+    }
+
+    pub(crate) fn write_new_file(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+        let mut file = crate::sink::create_new_private_file(path)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    }
+
+    pub(crate) fn create_dir(path: &std::path::Path) -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            crate::sink::create_windows_private_audit_directory(path)
+                .map_err(|error| std::io::Error::other(error.to_string()))
+        }
+        #[cfg(not(windows))]
+        {
+            std::fs::create_dir(path)
+        }
     }
 }
