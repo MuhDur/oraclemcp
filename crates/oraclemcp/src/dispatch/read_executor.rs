@@ -1015,6 +1015,35 @@ impl<'a> GuardedReadExecutor<'a> {
                 .unwrap_or_else(|| parsed.sql.clone());
             let executed_sql =
                 with_audit_marker(&policy_sql, state.active_profile.as_deref(), &audit_tool);
+            // A guarded UDF may be refused by the ordinary READ_ONLY
+            // classifier before the configured cost gate is reached. When a
+            // caller explicitly asks for a decisive cost, prove the hard-parse
+            // closure first so callback risk is reported as unavailable and
+            // cannot be mistaken for a cost-backed read.
+            let cost_gate_requested = parsed.max_query_cost.is_some()
+                || self.max_query_cost()?.is_some()
+                || self.cumulative_query_cost_budget()?.is_some();
+            if cost_gate_requested && base_decision.danger != DangerLevel::Safe {
+                let relations = resolve_hard_parse_relations(
+                    cx,
+                    state.conn.as_ref(),
+                    &state.catalog_cache,
+                    &executed_sql,
+                )
+                .await?;
+                let closure = super::prove_hard_parse_effect_closure(
+                    cx,
+                    state.conn.as_ref(),
+                    &executed_sql,
+                    &relations,
+                )
+                .await;
+                if !closure.is_proven() {
+                    return Err(query_cost_unavailable(
+                        closure.reason().unwrap_or("callback_unprovable"),
+                    ));
+                }
+            }
             let classified = if verified_local_vector_embedding {
                 resolve_read_only_relations_with_verified_local_vector_embedding(
                     cx,

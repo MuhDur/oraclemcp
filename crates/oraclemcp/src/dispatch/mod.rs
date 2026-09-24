@@ -14194,7 +14194,15 @@ impl OracleDispatcher {
             }
             "oracle_explain_plan" => {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
-                ensure_read_only(&a.sql)?;
+                let sql_head = a.sql.trim_start();
+                let is_query_candidate = ["SELECT", "WITH"].iter().any(|keyword| {
+                    sql_head
+                        .get(..keyword.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(keyword))
+                });
+                if !is_query_candidate {
+                    ensure_read_only(&a.sql)?;
+                }
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;
                 let relations = read_executor::resolve_hard_parse_relations(
                     cx,
@@ -14213,6 +14221,10 @@ impl OracleDispatcher {
                 if let Some(error) = hard_parse_closure_error(closure) {
                     return Err(error);
                 }
+                // Prefer the typed hard-parse refusal when catalog evidence
+                // proves a callback could run. The ordinary read-only guard
+                // still rejects every non-READ_ONLY statement before EXPLAIN.
+                ensure_read_only(&a.sql)?;
                 let read = read_executor::resolve_query_block_read(
                     cx,
                     conn,
