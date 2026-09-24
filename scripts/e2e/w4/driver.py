@@ -38,6 +38,7 @@ MAX_RESPONSE_BYTES = 1_048_576
 CAPABILITIES = HERE / "capabilities.json"
 CASES = HERE / "cases"
 MANIFEST = ROOT / "scripts/e2e/cases/validate_manifest.py"
+RELEASE_MANIFEST = ROOT / "scripts/e2e/cases/release_0_12.json"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
@@ -1589,9 +1590,27 @@ def manifest_required(lane, transport, capabilities):
     return set(result.stdout.splitlines())
 
 
+def map_live_manifest_case_ids(results, release_cases, required_ids):
+    case_id_by_test_id = {
+        case["test_id"]: case["case_id"]
+        for case in release_cases
+        if case.get("reproducible") == "live"
+    }
+    changed = False
+    for row in results["cases"]:
+        manifest_case_id = case_id_by_test_id.get(row.get("test_id"))
+        if manifest_case_id in required_ids and row.get("case_id") == row.get("test_id"):
+            row["case_id"] = manifest_case_id
+            changed = True
+    return changed
+
+
 def enforce_manifest(results_path, lane, transport, capabilities):
     required = manifest_required(lane, transport, capabilities)
     results = json.loads(results_path.read_text())
+    release_cases = json.loads(RELEASE_MANIFEST.read_text())
+    if map_live_manifest_case_ids(results, release_cases, required):
+        results_path.write_text(json.dumps(results, indent=2, sort_keys=True) + "\n")
     present = {row["case_id"] for row in results["cases"]
                if row["transport"] == transport and row["verdict"] == "pass"}
     missing = sorted(required - present)
@@ -1830,6 +1849,21 @@ def run_lane(args):
 
 def selftest():
     load_cases()
+    expected_live_ids = {
+        "w4_get_source_argument_class": "rel012_i38_argument_class",
+        "w4_sample_rows_generated_refusal": "rel012_i42_generated_refusal",
+        "w4_query_audit_failure_cause": "rel012_i45_audit_failure_cause",
+    }
+    mapped_results = {"cases": [
+        {"case_id": test_id, "test_id": test_id, "lane": "free23",
+         "transport": "stdio", "verdict": "pass"}
+        for test_id in expected_live_ids
+    ]}
+    mapped = map_live_manifest_case_ids(mapped_results, json.loads(RELEASE_MANIFEST.read_text()),
+                                        set(expected_live_ids.values()))
+    require(mapped and {row["case_id"] for row in mapped_results["cases"]}
+            == set(expected_live_ids.values()),
+            "live manifest test_ids were not normalized to their release case_ids")
     version_case = {
         "requires": [],
         "expect": {"json_subset": {"columns": [
