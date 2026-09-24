@@ -290,8 +290,38 @@ pub enum CatalogQueryId {
     PrimaryKeyColumns,
     /// Output from the diagnostic EXPLAIN PLAN just issued.
     ExplainPlanDisplay,
-    /// Optimizer estimates from the latest plan root.
+    /// Optimizer estimates scoped to one server-generated plan statement id.
     PlanCostEstimate,
+    /// Current-schema objects that could shadow the standard plan table.
+    PlanTableCurrentObjects,
+    /// Current-schema private synonyms that could shadow the standard plan table.
+    PlanTablePrivateSynonym,
+    /// The public PLAN_TABLE synonym target.
+    PlanTablePublicSynonym,
+    /// SYS.PLAN_TABLE$ temporary-table and object identity evidence.
+    PlanTableSysTemporary,
+    /// A configured server-owned table's temporary-table and object identity evidence.
+    PlanTableConfigured,
+    /// Enabled triggers that could run on writes to a configured plan table.
+    PlanTableTriggers,
+    /// Associated statistics callbacks for one exact object, capped at 256 rows.
+    HardParseAssociations,
+    /// Index identities and domain index metadata for one exact table.
+    HardParseIndexes,
+    /// Enabled SELECT VPD policies for one exact table.
+    HardParseVpdPolicies,
+    /// Enabled Oracle Label Security table policies for one exact table.
+    HardParseOlsTablePolicies,
+    /// Enabled Oracle Label Security schema policies for one exact owner.
+    HardParseOlsSchemaPolicies,
+    /// Enabled Real Application Security policies for one exact table.
+    HardParseRasPolicies,
+    /// Enabled Oracle Data Redaction policies for one exact table.
+    HardParseRedactionPolicies,
+    /// A visible user-defined operator with the supplied name.
+    HardParseOperator,
+    /// User-defined SQL types referenced by columns of one exact table.
+    HardParseColumnTypes,
     /// Bounded object listing with optional filters.
     ListObjects,
     /// Deterministic object listing page with optional filters.
@@ -480,7 +510,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 133] = [
+    pub const ALL: [Self; 148] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -529,6 +559,21 @@ impl CatalogQueryId {
         Self::PrimaryKeyColumns,
         Self::ExplainPlanDisplay,
         Self::PlanCostEstimate,
+        Self::PlanTableCurrentObjects,
+        Self::PlanTablePrivateSynonym,
+        Self::PlanTablePublicSynonym,
+        Self::PlanTableSysTemporary,
+        Self::PlanTableConfigured,
+        Self::PlanTableTriggers,
+        Self::HardParseAssociations,
+        Self::HardParseIndexes,
+        Self::HardParseVpdPolicies,
+        Self::HardParseOlsTablePolicies,
+        Self::HardParseOlsSchemaPolicies,
+        Self::HardParseRasPolicies,
+        Self::HardParseRedactionPolicies,
+        Self::HardParseOperator,
+        Self::HardParseColumnTypes,
         Self::ListObjects,
         Self::ListObjectsPage,
         Self::SchemaProjectionPage,
@@ -625,6 +670,7 @@ impl CatalogQueryId {
             DictionaryMetadata, InternalProof, SessionContext, VisibilityObservation,
         };
         const EMPTY: BindSchema = BindSchema(&[]);
+        const T: BindSchema = BindSchema(&[Text]);
         const I: BindSchema = BindSchema(&[Integer]);
         const II: BindSchema = BindSchema(&[Integer, Integer]);
         const TT: BindSchema = BindSchema(&[Text, Text]);
@@ -1065,17 +1111,122 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::ExplainPlanDisplay => (
-                "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY)",
-                EMPTY,
-                "read current diagnostic plan output",
+                "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(:1, :2))",
+                TT,
+                "read diagnostic plan output for one verified table and statement id",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::PlanCostEstimate => (
                 crate::intelligence::PLAN_COST_SQL,
-                EMPTY,
-                "read latest diagnostic plan estimates",
+                T,
+                "read estimates for one server-generated plan statement id",
                 DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::PlanTableCurrentObjects => (
+                "SELECT object_type FROM all_objects WHERE owner = :1 AND object_name = 'PLAN_TABLE' AND ROWNUM <= 2",
+                T,
+                "check current-schema object shadows for PLAN_TABLE",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::PlanTablePrivateSynonym => (
+                "SELECT table_owner, table_name, db_link FROM all_synonyms WHERE owner = :1 AND synonym_name = 'PLAN_TABLE' AND ROWNUM <= 2",
+                T,
+                "check current-schema private synonym shadows for PLAN_TABLE",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::PlanTablePublicSynonym => (
+                "SELECT table_owner, table_name, db_link FROM all_synonyms WHERE owner = 'PUBLIC' AND synonym_name = 'PLAN_TABLE' AND ROWNUM <= 2",
+                EMPTY,
+                "verify the public PLAN_TABLE synonym target",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::PlanTableSysTemporary => (
+                "SELECT t.temporary, t.duration, o.object_id FROM all_tables t JOIN all_objects o ON o.owner = t.owner AND o.object_name = t.table_name AND o.object_type = 'TABLE' WHERE t.owner = 'SYS' AND t.table_name = 'PLAN_TABLE$' AND ROWNUM <= 2",
+                EMPTY,
+                "verify the standard SYS plan table is session-private temporary and identify it",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::PlanTableConfigured => (
+                "SELECT t.temporary, t.duration, o.object_id FROM all_tables t JOIN all_objects o ON o.owner = t.owner AND o.object_name = t.table_name AND o.object_type = 'TABLE' WHERE t.owner = :1 AND t.table_name = :2 AND ROWNUM <= 2",
+                TT,
+                "verify the configured plan table is session-private temporary and identify it",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::PlanTableTriggers => (
+                "SELECT trigger_name FROM all_triggers WHERE table_owner = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= 1",
+                TT,
+                "refuse configured plan tables with enabled write triggers",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseAssociations => (
+                "SELECT object_type, column_name, statstype_schema, statstype_name FROM all_associations WHERE object_owner = :1 AND object_name = :2 AND ROWNUM <= :3",
+                TTI,
+                "discover optimizer statistics callbacks associated with one object",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseIndexes => (
+                "SELECT owner AS index_owner, index_name, index_type, ityp_owner, ityp_name FROM all_indexes WHERE table_owner = :1 AND table_name = :2 AND ROWNUM <= :3",
+                TTI,
+                "discover indexes and domain index callbacks for one table",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseVpdPolicies => (
+                "SELECT policy_name FROM all_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= :3",
+                TTI,
+                "discover enabled SELECT VPD policies for one table",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseOlsTablePolicies => (
+                "SELECT policy_name FROM all_sa_table_policies WHERE schema_name = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= :3",
+                TTI,
+                "discover enabled Oracle Label Security table policies",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseOlsSchemaPolicies => (
+                "SELECT policy_name FROM all_sa_schema_policies WHERE schema_name = :1 AND status = 'ENABLED' AND ROWNUM <= :2",
+                TI,
+                "discover enabled Oracle Label Security schema policies",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseRasPolicies => (
+                "SELECT policy FROM all_xs_applied_policies WHERE schema = :1 AND object = :2 AND status = 'ENABLED' AND sel = 'YES' AND ROWNUM <= :3",
+                TTI,
+                "discover enabled SELECT Real Application Security policies",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseRedactionPolicies => (
+                "SELECT policy_name FROM redaction_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND ROWNUM <= :3",
+                TTI,
+                "discover enabled data-redaction policies",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseOperator => (
+                "SELECT operator_name FROM all_operators WHERE operator_name = :1 AND ROWNUM <= :2",
+                TI,
+                "resolve a user-defined SQL operator before optimizer hard parse",
+                InternalProof,
+                Diagnostic,
+            ),
+            Self::HardParseColumnTypes => (
+                "SELECT data_type_owner, data_type FROM all_tab_columns WHERE owner = :1 AND table_name = :2 AND data_type_owner IS NOT NULL AND ROWNUM <= :3",
+                TTI,
+                "discover user-defined SQL types in a referenced table's columns",
+                InternalProof,
                 Diagnostic,
             ),
             Self::ListObjects => (

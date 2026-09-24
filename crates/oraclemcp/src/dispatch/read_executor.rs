@@ -577,6 +577,9 @@ pub(super) struct ReadExecutionPlan {
     /// Resolved relation evidence from the same semantic gate that admitted the
     /// read. Used only to attach VPD/RLS observation metadata to the result.
     pub(super) rls_vpd_relations: Vec<ResolvedObject>,
+    /// Exact object identities used by the admitted SQL, retained for the
+    /// optimizer hard-parse callback closure before any EXPLAIN.
+    pub(super) hard_parse_relations: Vec<ResolvedObject>,
     /// Arc N: the proof of what the profile's policy took away, attached to the
     /// response so a client (and the operator console) can see that it applied.
     pub(super) policy: Option<Value>,
@@ -1018,6 +1021,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 ),
                 Err(error) => (Err(error), None, Vec::new(), FgaEvidence::Proven),
             };
+            let hard_parse_relations = rls_vpd_relations.clone();
             (
                 ReadExecutionPlan {
                     args: parsed,
@@ -1027,6 +1031,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     verdict_certificate,
                     as_of,
                     rls_vpd_relations,
+                    hard_parse_relations,
                     policy: policy.attachment.clone(),
                     fga_evidence,
                 },
@@ -1064,6 +1069,13 @@ impl<'a> GuardedReadExecutor<'a> {
                 .principal_key()
                 .unwrap_or(oraclemcp_core::STDIO_EXPORT_PRINCIPAL)
                 .to_owned();
+            let configured_plan_table = self.profile_drain.accepted_config().and_then(|config| {
+                state
+                    .active_profile
+                    .as_deref()
+                    .and_then(|profile| config.profile(profile))
+                    .and_then(|profile| profile.explain_plan_table.clone())
+            });
             let DispatcherState {
                 conn,
                 read_only_backstop,
@@ -1074,14 +1086,16 @@ impl<'a> GuardedReadExecutor<'a> {
                 QueryCostGateCtx {
                     cx,
                     conn: conn.as_ref(),
-                    read_only_backstop,
-                    checkpoints,
+                    auditor: self.auditor.as_deref(),
+                    subject: request_subject,
                     session: scoped_level,
                     request_budget: &request_budget,
                     quarantine: &self.quarantine,
                 },
                 &prepared.args,
                 &prepared.executed_sql,
+                &prepared.hard_parse_relations,
+                configured_plan_table.as_deref(),
                 cost_limit,
                 CumulativeQueryCostGate {
                     profile: &budget_profile,
@@ -1257,22 +1271,25 @@ impl<'a> GuardedReadExecutor<'a> {
                     .unwrap_or_else(|| parsed.sql.clone());
                 let executed_sql =
                     with_audit_marker(&policy_sql, state.active_profile.as_deref(), "oracle_query");
-                let classified = ensure_resolved_read_only(
+                let classified = resolve_query_block_read(
                     cx,
                     state.conn.as_ref(),
                     &state.catalog_cache,
                     &executed_sql,
+                    false,
                     state.fga_evidence_policy,
                 )
                 .await;
-                let (gate, verdict_certificate, fga_evidence) = match classified {
-                    Ok((decision, fga_evidence)) => (
-                        Ok(()),
-                        Some(decision.verdict_certificate().clone()),
-                        fga_evidence,
-                    ),
-                    Err(error) => (Err(error), None, FgaEvidence::Proven),
-                };
+                let (gate, verdict_certificate, fga_evidence, hard_parse_relations) =
+                    match classified {
+                        Ok(read) => (
+                            Ok(()),
+                            Some(read.decision.verdict_certificate().clone()),
+                            read.fga_evidence,
+                            read.relations,
+                        ),
+                        Err(error) => (Err(error), None, FgaEvidence::Proven, Vec::new()),
+                    };
                 ReadExecutionPlan {
                     args: parsed,
                     audit_tool: "oracle_query".to_owned(),
@@ -1281,6 +1298,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     verdict_certificate,
                     as_of,
                     rls_vpd_relations: Vec::new(),
+                    hard_parse_relations,
                     policy: policy.attachment.clone(),
                     fga_evidence,
                 }
@@ -1306,24 +1324,35 @@ impl<'a> GuardedReadExecutor<'a> {
                     .principal_key()
                     .unwrap_or(oraclemcp_core::STDIO_EXPORT_PRINCIPAL)
                     .to_owned();
+                let configured_plan_table =
+                    self.profile_drain.accepted_config().and_then(|config| {
+                        state
+                            .active_profile
+                            .as_deref()
+                            .and_then(|profile| config.profile(profile))
+                            .and_then(|profile| profile.explain_plan_table.clone())
+                    });
                 let DispatcherState {
                     conn,
                     read_only_backstop,
                     checkpoints,
                     ..
                 } = &mut *state;
+                let cost_audit_subject = audit_subject(context, &self.default_audit_subject);
                 enforce_query_cost_gate(
                     QueryCostGateCtx {
                         cx,
                         conn: conn.as_ref(),
-                        read_only_backstop,
-                        checkpoints,
+                        auditor: self.auditor.as_deref(),
+                        subject: &cost_audit_subject,
                         session: &scoped_level,
                         request_budget: &request_budget,
                         quarantine: &self.quarantine,
                     },
                     &prepared.args,
                     &prepared.executed_sql,
+                    &prepared.hard_parse_relations,
+                    configured_plan_table.as_deref(),
                     cost_limit,
                     CumulativeQueryCostGate {
                         profile: &budget_profile,
@@ -1413,6 +1442,7 @@ impl<'a> GuardedReadExecutor<'a> {
             verdict_certificate,
             as_of,
             rls_vpd_relations,
+            hard_parse_relations: _,
             policy: _,
             fga_evidence,
         } = prepared;
@@ -1884,6 +1914,7 @@ impl OracleDispatcher {
             verdict_certificate: _,
             as_of,
             rls_vpd_relations: _,
+            hard_parse_relations: _,
             policy: _,
             fga_evidence: _,
         } = prepared;

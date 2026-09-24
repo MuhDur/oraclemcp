@@ -356,6 +356,7 @@ mod tests {
             protected: Some(false),
             require_signed_tools: Some(false),
             read_only_standby: Some(false),
+            explain_plan_table: None,
             allow_change_notification: Some(false),
             require_fga_evidence: Some(true),
             max_subscriptions: Some(4),

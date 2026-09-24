@@ -1938,6 +1938,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.protected == after.protected
         && before.require_signed_tools == after.require_signed_tools
         && before.read_only_standby == after.read_only_standby
+        && before.explain_plan_table == after.explain_plan_table
         && before.allow_change_notification == after.allow_change_notification
         && before.require_fga_evidence == after.require_fga_evidence
         && before.mcp_exposed == after.mcp_exposed

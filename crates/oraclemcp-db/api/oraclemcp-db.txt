@@ -441,7 +441,9 @@ pub oraclemcp_db::CatalogQueryId::CurrentScn
 pub oraclemcp_db::CatalogQueryId::DbaObjectsProbe
 pub oraclemcp_db::CatalogQueryId::Dependents
 pub oraclemcp_db::CatalogQueryId::DescribeColumns
+pub oraclemcp_db::CatalogQueryId::DescribeColumnsLegacy
 pub oraclemcp_db::CatalogQueryId::DescribeConstraints
+pub oraclemcp_db::CatalogQueryId::DescribeDefaultVcProbe
 pub oraclemcp_db::CatalogQueryId::DiagnosticsPackProbe
 pub oraclemcp_db::CatalogQueryId::EditionChildren
 pub oraclemcp_db::CatalogQueryId::ExplainPlanDisplay
@@ -472,6 +474,15 @@ pub oraclemcp_db::CatalogQueryId::FgaCatalogProof
 pub oraclemcp_db::CatalogQueryId::FgaPoliciesForRelations32
 pub oraclemcp_db::CatalogQueryId::GetDdl
 pub oraclemcp_db::CatalogQueryId::GetSource
+pub oraclemcp_db::CatalogQueryId::HardParseAssociations
+pub oraclemcp_db::CatalogQueryId::HardParseColumnTypes
+pub oraclemcp_db::CatalogQueryId::HardParseIndexes
+pub oraclemcp_db::CatalogQueryId::HardParseOlsSchemaPolicies
+pub oraclemcp_db::CatalogQueryId::HardParseOlsTablePolicies
+pub oraclemcp_db::CatalogQueryId::HardParseOperator
+pub oraclemcp_db::CatalogQueryId::HardParseRasPolicies
+pub oraclemcp_db::CatalogQueryId::HardParseRedactionPolicies
+pub oraclemcp_db::CatalogQueryId::HardParseVpdPolicies
 pub oraclemcp_db::CatalogQueryId::HealthBufferCacheStats
 pub oraclemcp_db::CatalogQueryId::HealthDisabledConstraintsAll
 pub oraclemcp_db::CatalogQueryId::HealthDisabledConstraintsDba
@@ -512,6 +523,12 @@ pub oraclemcp_db::CatalogQueryId::OrientRecentDdlPage
 pub oraclemcp_db::CatalogQueryId::OrientSchemaPage
 pub oraclemcp_db::CatalogQueryId::PlanCostEstimate
 pub oraclemcp_db::CatalogQueryId::PlanCostTimeline
+pub oraclemcp_db::CatalogQueryId::PlanTableConfigured
+pub oraclemcp_db::CatalogQueryId::PlanTableCurrentObjects
+pub oraclemcp_db::CatalogQueryId::PlanTablePrivateSynonym
+pub oraclemcp_db::CatalogQueryId::PlanTablePublicSynonym
+pub oraclemcp_db::CatalogQueryId::PlanTableSysTemporary
+pub oraclemcp_db::CatalogQueryId::PlanTableTriggers
 pub oraclemcp_db::CatalogQueryId::PlscopeIdentifiers
 pub oraclemcp_db::CatalogQueryId::PlscopeStatements
 pub oraclemcp_db::CatalogQueryId::PolicyCatalogProof
@@ -563,7 +580,7 @@ pub oraclemcp_db::CatalogQueryId::VirtualColumnsForRelations32
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesByObject
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesBySchema
 impl oraclemcp_db::CatalogQueryId
-pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 131]
+pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 148]
 pub const fn oraclemcp_db::CatalogQueryId::spec(self) -> oraclemcp_db::CatalogReadSpec
 impl core::clone::Clone for oraclemcp_db::CatalogQueryId
 pub fn oraclemcp_db::CatalogQueryId::clone(&self) -> oraclemcp_db::CatalogQueryId
@@ -966,6 +983,9 @@ pub fn oraclemcp_db::CqnNotificationOutcome::vzip(self) -> V
 #[non_exhaustive] pub enum oraclemcp_db::DbError
 pub oraclemcp_db::DbError::BackendNotCompiled
 pub oraclemcp_db::DbError::BackendNotCompiled::backend: oraclemcp_db::OracleBackend
+pub oraclemcp_db::DbError::CallTimeout
+pub oraclemcp_db::DbError::CallTimeout::operation: alloc::string::String
+pub oraclemcp_db::DbError::CallTimeout::retry_action: oraclemcp_error::OracleRetryAction
 pub oraclemcp_db::DbError::Cancelled(alloc::string::String)
 pub oraclemcp_db::DbError::Connect(alloc::string::String)
 pub oraclemcp_db::DbError::ConnectHandshake
@@ -978,6 +998,7 @@ pub oraclemcp_db::DbError::FlashbackRefusal::kind: oraclemcp_db::FlashbackRefusa
 pub oraclemcp_db::DbError::FlashbackRefusal::message: alloc::string::String
 pub oraclemcp_db::DbError::FlashbackRefusal::ora_code: core::option::Option<i32>
 pub oraclemcp_db::DbError::Internal(alloc::string::String)
+pub oraclemcp_db::DbError::InvalidArgument(alloc::string::String)
 pub oraclemcp_db::DbError::NamedBindMismatch
 pub oraclemcp_db::DbError::NamedBindMismatch::missing: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::DbError::NamedBindMismatch::unexpected: alloc::vec::Vec<alloc::string::String>
@@ -990,6 +1011,9 @@ pub oraclemcp_db::DbError::QueryRowTooLarge
 pub oraclemcp_db::DbError::QueryRowTooLarge::max_result_bytes: usize
 pub oraclemcp_db::DbError::QueryRowTooLarge::row_bytes: usize
 pub oraclemcp_db::DbError::QueryRowTooLarge::row_offset: usize
+pub oraclemcp_db::DbError::Refused(alloc::boxed::Box<oraclemcp_error::ErrorEnvelope>)
+pub oraclemcp_db::DbError::ServerExecute(alloc::string::String)
+pub oraclemcp_db::DbError::ServerQuery(alloc::string::String)
 pub oraclemcp_db::DbError::UnsupportedAuth(alloc::string::String)
 pub oraclemcp_db::DbError::UnsupportedFeature(alloc::string::String)
 impl oraclemcp_db::DbError
@@ -997,6 +1021,7 @@ pub fn oraclemcp_db::DbError::into_envelope(self) -> oraclemcp_error::ErrorEnvel
 pub fn oraclemcp_db::DbError::is_connection_lost(&self) -> bool
 pub fn oraclemcp_db::DbError::is_uncertain_session_state(&self) -> bool
 pub fn oraclemcp_db::DbError::retry_action(&self) -> oraclemcp_error::OracleRetryAction
+pub fn oraclemcp_db::DbError::server_sql_origin(self) -> Self
 impl core::clone::Clone for oraclemcp_db::DbError
 pub fn oraclemcp_db::DbError::clone(&self) -> oraclemcp_db::DbError
 impl core::convert::From<oraclemcp_db::DbError> for oraclemcp_db::NativeRedactionApplyError
@@ -1539,6 +1564,67 @@ pub type oraclemcp_db::FlashbackRefusalKind::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::FlashbackRefusalKind where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::FlashbackRefusalKind where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::FlashbackRefusalKind::vzip(self) -> V
+pub enum oraclemcp_db::HardParseEffectClosureV1
+pub oraclemcp_db::HardParseEffectClosureV1::Proven
+pub oraclemcp_db::HardParseEffectClosureV1::Refused
+pub oraclemcp_db::HardParseEffectClosureV1::Refused::reason: &'static str
+pub oraclemcp_db::HardParseEffectClosureV1::Unavailable
+pub oraclemcp_db::HardParseEffectClosureV1::Unavailable::reason: &'static str
+impl oraclemcp_db::HardParseEffectClosureV1
+pub const fn oraclemcp_db::HardParseEffectClosureV1::is_proven(&self) -> bool
+pub const fn oraclemcp_db::HardParseEffectClosureV1::reason(&self) -> core::option::Option<&'static str>
+impl core::clone::Clone for oraclemcp_db::HardParseEffectClosureV1
+pub fn oraclemcp_db::HardParseEffectClosureV1::clone(&self) -> oraclemcp_db::HardParseEffectClosureV1
+impl core::cmp::Eq for oraclemcp_db::HardParseEffectClosureV1
+impl core::cmp::PartialEq for oraclemcp_db::HardParseEffectClosureV1
+pub fn oraclemcp_db::HardParseEffectClosureV1::eq(&self, &oraclemcp_db::HardParseEffectClosureV1) -> bool
+impl core::fmt::Debug for oraclemcp_db::HardParseEffectClosureV1
+pub fn oraclemcp_db::HardParseEffectClosureV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::HardParseEffectClosureV1
+impl core::marker::Freeze for oraclemcp_db::HardParseEffectClosureV1
+impl core::marker::Send for oraclemcp_db::HardParseEffectClosureV1
+impl core::marker::Sync for oraclemcp_db::HardParseEffectClosureV1
+impl core::marker::Unpin for oraclemcp_db::HardParseEffectClosureV1
+impl core::marker::UnsafeUnpin for oraclemcp_db::HardParseEffectClosureV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::HardParseEffectClosureV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::HardParseEffectClosureV1
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::HardParseEffectClosureV1 where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::HardParseEffectClosureV1 where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::HardParseEffectClosureV1 where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::HardParseEffectClosureV1::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::HardParseEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::HardParseEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::HardParseEffectClosureV1 where U: core::convert::From<T>
+pub fn oraclemcp_db::HardParseEffectClosureV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::HardParseEffectClosureV1 where U: core::convert::Into<T>
+pub type oraclemcp_db::HardParseEffectClosureV1::Error = core::convert::Infallible
+pub fn oraclemcp_db::HardParseEffectClosureV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::HardParseEffectClosureV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::HardParseEffectClosureV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::HardParseEffectClosureV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::HardParseEffectClosureV1 where T: core::clone::Clone
+pub type oraclemcp_db::HardParseEffectClosureV1::Owned = T
+pub fn oraclemcp_db::HardParseEffectClosureV1::clone_into(&self, &mut T)
+pub fn oraclemcp_db::HardParseEffectClosureV1::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::HardParseEffectClosureV1
+impl<T> core::any::Any for oraclemcp_db::HardParseEffectClosureV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::HardParseEffectClosureV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::HardParseEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_db::HardParseEffectClosureV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::HardParseEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_db::HardParseEffectClosureV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::HardParseEffectClosureV1 where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::HardParseEffectClosureV1::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::HardParseEffectClosureV1
+pub fn oraclemcp_db::HardParseEffectClosureV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::HardParseEffectClosureV1
+impl<T> tracing::instrument::Instrument for oraclemcp_db::HardParseEffectClosureV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::HardParseEffectClosureV1
+impl<T> typenum::type_operators::Same for oraclemcp_db::HardParseEffectClosureV1
+pub type oraclemcp_db::HardParseEffectClosureV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::HardParseEffectClosureV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::HardParseEffectClosureV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::HardParseEffectClosureV1::vzip(self) -> V
 pub enum oraclemcp_db::HealthSubcheck
 pub oraclemcp_db::HealthSubcheck::BufferCacheHitRatio
 pub oraclemcp_db::HealthSubcheck::DisabledConstraints
@@ -7423,6 +7509,126 @@ pub type oraclemcp_db::PlanCostTimelinePoint::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanCostTimelinePoint where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanCostTimelinePoint where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::PlanCostTimelinePoint::vzip(self) -> V
+pub struct oraclemcp_db::PlanStatementId(_)
+impl oraclemcp_db::PlanStatementId
+pub fn oraclemcp_db::PlanStatementId::as_str(&self) -> &str
+pub fn oraclemcp_db::PlanStatementId::generate() -> core::result::Result<Self, oraclemcp_db::DbError>
+pub fn oraclemcp_db::PlanStatementId::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, oraclemcp_db::DbError>
+impl core::clone::Clone for oraclemcp_db::PlanStatementId
+pub fn oraclemcp_db::PlanStatementId::clone(&self) -> oraclemcp_db::PlanStatementId
+impl core::cmp::Eq for oraclemcp_db::PlanStatementId
+impl core::cmp::PartialEq for oraclemcp_db::PlanStatementId
+pub fn oraclemcp_db::PlanStatementId::eq(&self, &oraclemcp_db::PlanStatementId) -> bool
+impl core::fmt::Debug for oraclemcp_db::PlanStatementId
+pub fn oraclemcp_db::PlanStatementId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_db::PlanStatementId
+pub fn oraclemcp_db::PlanStatementId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for oraclemcp_db::PlanStatementId
+impl core::marker::Freeze for oraclemcp_db::PlanStatementId
+impl core::marker::Send for oraclemcp_db::PlanStatementId
+impl core::marker::Sync for oraclemcp_db::PlanStatementId
+impl core::marker::Unpin for oraclemcp_db::PlanStatementId
+impl core::marker::UnsafeUnpin for oraclemcp_db::PlanStatementId
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PlanStatementId
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PlanStatementId
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PlanStatementId where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PlanStatementId where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PlanStatementId where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PlanStatementId::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PlanStatementId where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PlanStatementId where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PlanStatementId where U: core::convert::From<T>
+pub fn oraclemcp_db::PlanStatementId::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PlanStatementId where U: core::convert::Into<T>
+pub type oraclemcp_db::PlanStatementId::Error = core::convert::Infallible
+pub fn oraclemcp_db::PlanStatementId::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PlanStatementId where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PlanStatementId::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PlanStatementId::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PlanStatementId where T: core::clone::Clone
+pub type oraclemcp_db::PlanStatementId::Owned = T
+pub fn oraclemcp_db::PlanStatementId::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PlanStatementId::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PlanStatementId
+impl<T> core::any::Any for oraclemcp_db::PlanStatementId where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PlanStatementId::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PlanStatementId where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanStatementId::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PlanStatementId where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanStatementId::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PlanStatementId where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PlanStatementId::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PlanStatementId
+pub fn oraclemcp_db::PlanStatementId::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlanStatementId
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlanStatementId
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlanStatementId
+impl<T> typenum::type_operators::Same for oraclemcp_db::PlanStatementId
+pub type oraclemcp_db::PlanStatementId::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanStatementId where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanStatementId where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PlanStatementId::vzip(self) -> V
+pub struct oraclemcp_db::PlanTableUnavailable
+impl oraclemcp_db::PlanTableUnavailable
+pub const fn oraclemcp_db::PlanTableUnavailable::reason(self) -> &'static str
+impl core::clone::Clone for oraclemcp_db::PlanTableUnavailable
+pub fn oraclemcp_db::PlanTableUnavailable::clone(&self) -> oraclemcp_db::PlanTableUnavailable
+impl core::cmp::Eq for oraclemcp_db::PlanTableUnavailable
+impl core::cmp::PartialEq for oraclemcp_db::PlanTableUnavailable
+pub fn oraclemcp_db::PlanTableUnavailable::eq(&self, &oraclemcp_db::PlanTableUnavailable) -> bool
+impl core::error::Error for oraclemcp_db::PlanTableUnavailable
+impl core::fmt::Debug for oraclemcp_db::PlanTableUnavailable
+pub fn oraclemcp_db::PlanTableUnavailable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_db::PlanTableUnavailable
+pub fn oraclemcp_db::PlanTableUnavailable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::PlanTableUnavailable
+impl core::marker::StructuralPartialEq for oraclemcp_db::PlanTableUnavailable
+impl core::marker::Freeze for oraclemcp_db::PlanTableUnavailable
+impl core::marker::Send for oraclemcp_db::PlanTableUnavailable
+impl core::marker::Sync for oraclemcp_db::PlanTableUnavailable
+impl core::marker::Unpin for oraclemcp_db::PlanTableUnavailable
+impl core::marker::UnsafeUnpin for oraclemcp_db::PlanTableUnavailable
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::PlanTableUnavailable
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::PlanTableUnavailable
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::PlanTableUnavailable where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::PlanTableUnavailable where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::PlanTableUnavailable where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::PlanTableUnavailable::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::PlanTableUnavailable where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::PlanTableUnavailable where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::PlanTableUnavailable where U: core::convert::From<T>
+pub fn oraclemcp_db::PlanTableUnavailable::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::PlanTableUnavailable where U: core::convert::Into<T>
+pub type oraclemcp_db::PlanTableUnavailable::Error = core::convert::Infallible
+pub fn oraclemcp_db::PlanTableUnavailable::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::PlanTableUnavailable where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::PlanTableUnavailable::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::PlanTableUnavailable::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::PlanTableUnavailable where T: core::clone::Clone
+pub type oraclemcp_db::PlanTableUnavailable::Owned = T
+pub fn oraclemcp_db::PlanTableUnavailable::clone_into(&self, &mut T)
+pub fn oraclemcp_db::PlanTableUnavailable::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_db::PlanTableUnavailable where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_db::PlanTableUnavailable::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::PlanTableUnavailable
+impl<T> core::any::Any for oraclemcp_db::PlanTableUnavailable where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::PlanTableUnavailable::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::PlanTableUnavailable where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanTableUnavailable::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::PlanTableUnavailable where T: ?core::marker::Sized
+pub fn oraclemcp_db::PlanTableUnavailable::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::PlanTableUnavailable where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::PlanTableUnavailable::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::PlanTableUnavailable
+pub fn oraclemcp_db::PlanTableUnavailable::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::PlanTableUnavailable
+impl<T> tracing::instrument::Instrument for oraclemcp_db::PlanTableUnavailable
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::PlanTableUnavailable
+impl<T> typenum::type_operators::Same for oraclemcp_db::PlanTableUnavailable
+pub type oraclemcp_db::PlanTableUnavailable::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::PlanTableUnavailable where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::PlanTableUnavailable where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::PlanTableUnavailable::vzip(self) -> V
 pub struct oraclemcp_db::PlscopeIdentifier
 pub oraclemcp_db::PlscopeIdentifier::col: i64
 pub oraclemcp_db::PlscopeIdentifier::line: i64
@@ -10073,6 +10279,63 @@ pub type oraclemcp_db::TriggerDescription::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::TriggerDescription where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::TriggerDescription where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::TriggerDescription::vzip(self) -> V
+pub struct oraclemcp_db::VerifiedPlanTable
+impl oraclemcp_db::VerifiedPlanTable
+pub fn oraclemcp_db::VerifiedPlanTable::name(&self) -> &str
+pub const fn oraclemcp_db::VerifiedPlanTable::object_id(&self) -> i64
+pub fn oraclemcp_db::VerifiedPlanTable::owner(&self) -> &str
+impl core::clone::Clone for oraclemcp_db::VerifiedPlanTable
+pub fn oraclemcp_db::VerifiedPlanTable::clone(&self) -> oraclemcp_db::VerifiedPlanTable
+impl core::cmp::Eq for oraclemcp_db::VerifiedPlanTable
+impl core::cmp::PartialEq for oraclemcp_db::VerifiedPlanTable
+pub fn oraclemcp_db::VerifiedPlanTable::eq(&self, &oraclemcp_db::VerifiedPlanTable) -> bool
+impl core::fmt::Debug for oraclemcp_db::VerifiedPlanTable
+pub fn oraclemcp_db::VerifiedPlanTable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::VerifiedPlanTable
+impl core::marker::Freeze for oraclemcp_db::VerifiedPlanTable
+impl core::marker::Send for oraclemcp_db::VerifiedPlanTable
+impl core::marker::Sync for oraclemcp_db::VerifiedPlanTable
+impl core::marker::Unpin for oraclemcp_db::VerifiedPlanTable
+impl core::marker::UnsafeUnpin for oraclemcp_db::VerifiedPlanTable
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::VerifiedPlanTable
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::VerifiedPlanTable
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::VerifiedPlanTable where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::VerifiedPlanTable where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::VerifiedPlanTable where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::VerifiedPlanTable::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::VerifiedPlanTable where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::VerifiedPlanTable where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::VerifiedPlanTable where U: core::convert::From<T>
+pub fn oraclemcp_db::VerifiedPlanTable::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::VerifiedPlanTable where U: core::convert::Into<T>
+pub type oraclemcp_db::VerifiedPlanTable::Error = core::convert::Infallible
+pub fn oraclemcp_db::VerifiedPlanTable::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::VerifiedPlanTable where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::VerifiedPlanTable::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::VerifiedPlanTable::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::VerifiedPlanTable where T: core::clone::Clone
+pub type oraclemcp_db::VerifiedPlanTable::Owned = T
+pub fn oraclemcp_db::VerifiedPlanTable::clone_into(&self, &mut T)
+pub fn oraclemcp_db::VerifiedPlanTable::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::VerifiedPlanTable
+impl<T> core::any::Any for oraclemcp_db::VerifiedPlanTable where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::VerifiedPlanTable::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::VerifiedPlanTable where T: ?core::marker::Sized
+pub fn oraclemcp_db::VerifiedPlanTable::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::VerifiedPlanTable where T: ?core::marker::Sized
+pub fn oraclemcp_db::VerifiedPlanTable::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::VerifiedPlanTable where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::VerifiedPlanTable::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::VerifiedPlanTable
+pub fn oraclemcp_db::VerifiedPlanTable::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::VerifiedPlanTable
+impl<T> tracing::instrument::Instrument for oraclemcp_db::VerifiedPlanTable
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::VerifiedPlanTable
+impl<T> typenum::type_operators::Same for oraclemcp_db::VerifiedPlanTable
+pub type oraclemcp_db::VerifiedPlanTable::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::VerifiedPlanTable where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::VerifiedPlanTable where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::VerifiedPlanTable::vzip(self) -> V
 pub struct oraclemcp_db::ViewDescription
 pub oraclemcp_db::ViewDescription::columns: alloc::vec::Vec<oraclemcp_db::OracleRow>
 pub oraclemcp_db::ViewDescription::metadata: core::option::Option<oraclemcp_db::OracleRow>
@@ -10611,7 +10874,7 @@ pub fn oraclemcp_db::disabled_constraints_sql(oraclemcp_db::ViewTier) -> (&'stat
 pub fn oraclemcp_db::discover_wallet(&std::path::Path) -> core::result::Result<oraclemcp_db::WalletContents, oraclemcp_db::OciError>
 pub fn oraclemcp_db::ensure_fresh_token(core::option::Option<&oraclemcp_db::IamToken>, &dyn oraclemcp_db::IamTokenSource, i64, i64) -> core::result::Result<oraclemcp_db::IamToken, oraclemcp_db::OciError>
 pub fn oraclemcp_db::execute_immediate_audit(&[oraclemcp_db::PlscopeStatement]) -> alloc::vec::Vec<i64>
-pub async fn oraclemcp_db::explain_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, bool) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::explain_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &oraclemcp_db::VerifiedPlanTable, &oraclemcp_db::PlanStatementId, bool) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::extract_catalog_rowsets(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::CatalogExtractRequest) -> core::result::Result<oraclemcp_db::CatalogExtractReport, oraclemcp_db::DbError>
 pub fn oraclemcp_db::extract_hints(&str) -> oraclemcp_db::TnsDescriptorHints
 pub async fn oraclemcp_db::fga_closure(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject], oraclemcp_db::FgaStatementKind) -> oraclemcp_db::FgaClosure
@@ -10646,7 +10909,7 @@ pub async fn oraclemcp_db::orient_schema_page(&asupersync::cx::cx::Cx, &dyn orac
 pub fn oraclemcp_db::paginated_sql(&str, usize, usize) -> alloc::string::String
 pub fn oraclemcp_db::parse_health_request(&str) -> oraclemcp_db::ParsedHealthRequest
 pub fn oraclemcp_db::parse_tnsnames_dir(&std::path::Path) -> core::result::Result<oraclemcp_db::TnsParseResult, oraclemcp_db::TnsParseError>
-pub async fn oraclemcp_db::plan_cost_estimate(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<core::option::Option<oraclemcp_db::PlanCostEstimate>, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::plan_cost_estimate(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::VerifiedPlanTable, &oraclemcp_db::PlanStatementId) -> core::result::Result<core::option::Option<oraclemcp_db::PlanCostEstimate>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::plan_cost_timeline(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, u32) -> core::result::Result<oraclemcp_db::PlanCostTimeline, oraclemcp_error::ErrorEnvelope>
 pub async fn oraclemcp_db::plscope_identifiers(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeIdentifier>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::plscope_statements(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &str, usize) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::PlscopeStatement>, oraclemcp_db::DbError>
@@ -10656,6 +10919,7 @@ pub async fn oraclemcp_db::probe_dependents(&asupersync::cx::cx::Cx, &dyn oracle
 pub async fn oraclemcp_db::probe_native_redaction(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::NativeRedactionAvailability, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::probe_privileges(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::PrivilegeProfile
 pub async fn oraclemcp_db::probe_write_posture(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> oraclemcp_db::WritePosture
+pub async fn oraclemcp_db::prove_hard_parse_effect_closure(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_guard::resolver::ResolvedObject]) -> oraclemcp_db::HardParseEffectClosureV1
 pub async fn oraclemcp_db::prove_semantic_read_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::OracleCatalogResolverCache, &oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_db::FgaEvidencePolicy) -> core::result::Result<oraclemcp_db::ReadPlanProof, oraclemcp_db::ReadPlanProofError>
 pub async fn oraclemcp_db::read_catalog_resolve_context(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, oraclemcp_guard::resolver::CatalogGeneration, oraclemcp_guard::resolver::StatementScope) -> core::result::Result<oraclemcp_guard::resolver::ResolveCtx, oraclemcp_db::DbError>
 pub fn oraclemcp_db::read_lob_sql(&str, &str, &str, &str) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>
@@ -10667,6 +10931,7 @@ pub fn oraclemcp_db::recompile_with_plscope_statements(&str, &str, &str) -> core
 pub const fn oraclemcp_db::redacted_named_oracle_binds(&[(alloc::string::String, oraclemcp_db::OracleBind)]) -> oraclemcp_db::RedactedNamedOracleBinds<'_>
 pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) -> oraclemcp_db::RedactedOracleBinds<'_>
 pub fn oraclemcp_db::requirement_matrix() -> &'static [oraclemcp_db::ToolRequirement]
+pub async fn oraclemcp_db::resolve_plan_table(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::VerifiedPlanTable, oraclemcp_db::PlanTableUnavailable>
 pub async fn oraclemcp_db::resolve_top_sql_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> core::result::Result<oraclemcp_db::DiagnosticsSource, oraclemcp_db::DbError>
 pub fn oraclemcp_db::resolve_wallet_choice(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletResolutionReport, oraclemcp_db::WalletResolveError>
 pub async fn oraclemcp_db::resolved_relations_read_purity(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject], &[oraclemcp_guard::resolver::RawName]) -> core::result::Result<oraclemcp_guard::purity::Purity, oraclemcp_db::DbError>

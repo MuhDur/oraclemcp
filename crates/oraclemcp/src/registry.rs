@@ -532,10 +532,13 @@ fn explain_plan_output_schema() -> Value {
                 "properties": {
                     "statement": { "type": "string", "enum": ["EXPLAIN PLAN"] },
                     "writes": { "type": "string", "enum": ["PLAN_TABLE"] },
+                    "statement_id": { "type": "string", "pattern": "^OMCP_[A-Z0-9]{24}$" },
                     "required_level": { "type": "string", "enum": ["READ_WRITE"] },
-                    "explicitly_allowed": { "type": "boolean" }
+                    "explicitly_allowed": { "type": "boolean" },
+                    "savepoint": { "type": "string", "enum": ["OMCP_EXPLAIN_PLAN"] },
+                    "rolled_back": { "type": "boolean", "const": true }
                 },
-                "required": ["statement", "writes", "required_level", "explicitly_allowed"],
+                "required": ["statement", "writes", "statement_id", "required_level", "explicitly_allowed", "savepoint", "rolled_back"],
                 "additionalProperties": false
             },
             "cost_estimate": {
@@ -2090,6 +2093,17 @@ mod tests {
         assert_eq!(
             explain["properties"]["diagnostic_write"]["properties"]["required_level"]["enum"],
             json!(["READ_WRITE"])
+        );
+        assert_eq!(
+            explain["properties"]["diagnostic_write"]["properties"]["statement_id"]["pattern"],
+            json!("^OMCP_[A-Z0-9]{24}$")
+        );
+        assert!(
+            explain["properties"]["diagnostic_write"]["required"]
+                .as_array()
+                .expect("diagnostic write required fields")
+                .iter()
+                .any(|field| field == "rolled_back")
         );
         assert!(
             tool("oracle_execute").output_schema.is_none(),

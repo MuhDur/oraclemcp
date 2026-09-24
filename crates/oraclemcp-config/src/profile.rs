@@ -868,6 +868,11 @@ pub struct ConnectionProfile {
     /// Force `READ_ONLY` regardless of profile (Active Data Guard standby).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_only_standby: Option<bool>,
+    /// Optional server-owned global temporary table for EXPLAIN PLAN, written
+    /// as an unquoted `OWNER.TABLE` identity and pinned to its first verified
+    /// Oracle object id for the lifetime of this server process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explain_plan_table: Option<String>,
     /// Explicitly permit Continuous Query Notification (CQN) registration for
     /// this profile. Defaults to `false`; a permitted registration still needs
     /// a classifier-proven query, an active confirmed step-up, and an audit
@@ -1138,6 +1143,7 @@ impl ConnectionProfile {
             protected,
             require_signed_tools,
             read_only_standby,
+            explain_plan_table,
             allow_change_notification,
             require_fga_evidence,
             max_subscriptions,
@@ -1352,6 +1358,7 @@ mod tests {
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,
+            explain_plan_table: None,
             allow_change_notification: None,
             require_fga_evidence: None,
             max_subscriptions: None,

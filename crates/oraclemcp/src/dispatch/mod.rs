@@ -54,22 +54,24 @@ use oraclemcp_core::{
 };
 use oraclemcp_db::{
     AsOf, CatalogInvalidation, CatalogQueryId, DbError, DbRequestQuota, DbmsOutput,
-    DependentObject, DependentsProbe, FlashbackRefusalKind, IncomparableMaskedColumn,
-    MaskComparabilityBreak, OracleBackend, OracleBind, OracleCatalogResolverCache,
-    OracleConnection, OracleConnectionInfo, OracleRow, PlanCostEstimate, QuarantineOutcome,
-    QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart,
-    ReadQueryProvenance, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
-    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
-    ResultMaskingRule, SemanticSearchMetric, SerializeOptions, SourceReadOptions,
-    StructuredDecodeCaps, compile_errors, compile_object_statements, describe_columns,
-    describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
-    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
-    get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
-    list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations, paginated_sql,
-    plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
-    probe_dependents, read_query, read_query_as_of, run_catalog_query, search_objects,
-    search_source, semantic_search_query, semantic_search_query_with_filter,
-    semantic_search_text_query, semantic_search_text_query_with_filter, serialize_row,
+    DependentObject, DependentsProbe, FlashbackRefusalKind, HardParseEffectClosureV1,
+    IncomparableMaskedColumn, MaskComparabilityBreak, OracleBackend, OracleBind,
+    OracleCatalogResolverCache, OracleConnection, OracleConnectionInfo, OracleRow,
+    PlanCostEstimate, PlanStatementId, PlanTableUnavailable, QuarantineOutcome, QueryCaps,
+    QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart, ReadQueryProvenance,
+    ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingDecisionAction,
+    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, SemanticSearchMetric,
+    SerializeOptions, SourceReadOptions, StructuredDecodeCaps, VerifiedPlanTable, compile_errors,
+    compile_object_statements, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
+    incomparable_masked_columns, list_objects, list_objects_page, list_schema_projection_page,
+    list_schemas, observe_vpd_rls_for_relations, paginated_sql, plan_cost_estimate,
+    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents,
+    prove_hard_parse_effect_closure, read_query, read_query_as_of, resolve_plan_table,
+    run_catalog_query, search_objects, search_source, semantic_search_query,
+    semantic_search_query_with_filter, semantic_search_text_query,
+    semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{
     FgaEvidence, FgaEvidencePolicy, SearchDetailLevel, SourceText, StatementOutcome,
@@ -1545,7 +1547,7 @@ static DEFAULT_CLASSIFIER: LazyLock<Classifier> = LazyLock::new(|| {
 });
 
 /// The deliberately narrow text-only precheck for a served read that will
-/// immediately pass through [`ensure_resolved_read_only`]. The semantic phase
+/// immediately pass through [`resolve_read_only_relations`]. The semantic phase
 /// binds the exact live relation/VPD/virtual-column proof into a strict
 /// classifier before Oracle sees caller SQL. This explicit opt-out preserves
 /// that two-phase protocol after the guard library default became fail-closed;
@@ -3187,15 +3189,59 @@ fn query_budget_with_cost_limit(
 }
 
 fn query_cost_unavailable(reason: impl Into<String>) -> ErrorEnvelope {
-    ErrorEnvelope::new(
+    let reason = reason.into();
+    let mut error = ErrorEnvelope::new(
         ErrorClass::PolicyDenied,
         format!(
             "oracle_query cost gate refused before execution: cost_unavailable ({})",
-            reason.into()
+            reason
         ),
     )
     .with_suggested_tool("oracle_explain_plan")
-    .with_next_step("refresh optimizer statistics or retry without max_query_cost only if an unbounded read is acceptable")
+    .with_next_step("refresh optimizer statistics or retry without max_query_cost only if an unbounded read is acceptable");
+    if matches!(
+        reason.as_str(),
+        "read_only_txn"
+            | "no_privilege"
+            | "truncated"
+            | "callback_unprovable"
+            | "odci_stats_callback"
+            | "domain_index_callback"
+            | "policy_code"
+    ) {
+        error = error.with_structured_reason(
+            StructuredReason::new(ReasonCategory::UnprovenSideEffect)
+                .with_offending_construct(reason),
+        );
+    }
+    error
+}
+
+fn explain_plan_unavailable(reason: &str) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::RuntimeStateRequired,
+        format!("oracle_explain_plan unavailable ({reason})"),
+    )
+    .with_structured_reason(
+        StructuredReason::new(ReasonCategory::UnprovenSideEffect).with_offending_construct(reason),
+    )
+}
+
+fn hard_parse_closure_error(closure: HardParseEffectClosureV1) -> Option<ErrorEnvelope> {
+    match closure {
+        HardParseEffectClosureV1::Proven => None,
+        HardParseEffectClosureV1::Refused { reason } => Some(
+            ErrorEnvelope::new(
+                ErrorClass::ForbiddenStatement,
+                format!("EXPLAIN PLAN refused: hard-parse callback risk ({reason})"),
+            )
+            .with_structured_reason(
+                StructuredReason::new(ReasonCategory::UnprovenSideEffect)
+                    .with_offending_construct(reason),
+            ),
+        ),
+        HardParseEffectClosureV1::Unavailable { reason } => Some(explain_plan_unavailable(reason)),
+    }
 }
 
 const QUERY_COST_REFUSAL_PLAN_ROW_LIMIT: usize = 25;
@@ -3375,8 +3421,8 @@ fn sanitize_plan_text(input: &str) -> String {
 struct QueryCostGateCtx<'a> {
     cx: &'a Cx,
     conn: &'a dyn OracleConnection,
-    read_only_backstop: &'a mut ReadOnlyBackstop,
-    checkpoints: &'a CheckpointWorkspace,
+    auditor: Option<&'a Auditor>,
+    subject: &'a AuditSubject,
     session: &'a SessionLevelState,
     request_budget: &'a RequestBudget,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
@@ -3391,10 +3437,53 @@ struct CumulativeQueryCostGate<'a> {
     store: Option<&'a QueryCostBudgetStore>,
 }
 
+const EXPLAIN_SAVEPOINT_SQL: &str = "SAVEPOINT OMCP_EXPLAIN_PLAN";
+const EXPLAIN_ROLLBACK_SQL: &str = "ROLLBACK TO SAVEPOINT OMCP_EXPLAIN_PLAN";
+
+fn explain_plan_audit_transcript(
+    sql: &str,
+    table: &VerifiedPlanTable,
+    statement_id: &PlanStatementId,
+) -> String {
+    format!(
+        "{EXPLAIN_SAVEPOINT_SQL}; EXPLAIN PLAN SET STATEMENT_ID = '{}' INTO {}.{} FOR {sql}; {EXPLAIN_ROLLBACK_SQL}",
+        statement_id.as_str(),
+        table.owner(),
+        table.name(),
+    )
+}
+
+fn append_explain_plan_audit(
+    audit_entry: AuditEntryCtx<'_>,
+    transcript: &str,
+    outcome: AuditOutcome,
+) -> Result<(), ErrorEnvelope> {
+    append_audit(
+        audit_entry,
+        "oracle_explain_plan",
+        transcript,
+        &audit_danger_string(DangerLevel::Guarded),
+        None,
+        outcome,
+    )
+}
+
+async fn rollback_explain_savepoint(cx: &Cx, conn: &dyn OracleConnection) -> Result<(), DbError> {
+    conn.execute(cx, EXPLAIN_ROLLBACK_SQL, &[])
+        .await
+        .map(|_| ())
+}
+
+fn is_read_only_transaction_error(error: &DbError) -> bool {
+    error.to_string().contains("ORA-01456")
+}
+
 async fn enforce_query_cost_gate(
     ctx: QueryCostGateCtx<'_>,
     args: &QueryArgs,
     executed_sql: &str,
+    relations: &[ResolvedObject],
+    configured_plan_table: Option<&str>,
     max_query_cost: Option<u64>,
     cumulative: CumulativeQueryCostGate<'_>,
 ) -> Result<(), ErrorEnvelope> {
@@ -3408,56 +3497,81 @@ async fn enforce_query_cost_gate(
         return Err(cumulative_query_cost_budget_unavailable());
     }
     ensure_query_cost_plan_write_allowed(args, ctx.session)?;
-    // The cost estimate writes PLAN_TABLE and rolls the transaction back to
-    // clean it up — which would erase the reversible workspace's savepoints and
-    // every statement held above them (Arc I).
-    ensure_workspace_closed(
-        ctx.checkpoints,
-        "oracle_query cost estimation (its PLAN_TABLE cleanup rolls the transaction back)",
-    )?;
-    if let Err(error) = ctx
-        .read_only_backstop
-        .clear_before_write(ctx.cx, ctx.conn)
+    ctx.request_budget
+        .enforce(ctx.cx)
+        .map_err(DbError::into_envelope)?;
+    let closure = prove_hard_parse_effect_closure(ctx.cx, ctx.conn, executed_sql, relations).await;
+    if !closure.is_proven() {
+        return Err(query_cost_unavailable(
+            closure.reason().unwrap_or("callback_unprovable"),
+        ));
+    }
+    let table = resolve_plan_table(ctx.cx, ctx.conn, configured_plan_table)
         .await
-    {
+        .map_err(|error| query_cost_unavailable(error.reason()))?;
+    let statement_id = PlanStatementId::generate().map_err(DbError::into_envelope)?;
+    let audit_db_evidence = collect_read_audit_db_evidence(ctx.cx, ctx.auditor, ctx.conn).await?;
+    let audit_entry = AuditEntryCtx {
+        auditor: ctx.auditor,
+        subject: ctx.subject,
+        db_evidence: audit_db_evidence.as_ref(),
+    };
+    let audit_transcript = explain_plan_audit_transcript(executed_sql, &table, &statement_id);
+    append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Pending)?;
+    if let Err(error) = ctx.conn.execute(ctx.cx, EXPLAIN_SAVEPOINT_SQL, &[]).await {
+        append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::Failed)?;
+        return Err(if is_read_only_transaction_error(&error) {
+            query_cost_unavailable("read_only_txn")
+        } else {
+            DbError::into_envelope(error)
+        });
+    }
+    let execution = async {
+        explain_plan(
+            ctx.cx,
+            ctx.conn,
+            executed_sql,
+            &table,
+            &statement_id,
+            args.read_only_standby,
+        )
+        .await?;
+        ctx.request_budget.enforce(ctx.cx)?;
+        plan_cost_estimate(ctx.cx, ctx.conn, &table, &statement_id).await
+    }
+    .await;
+    if let Err(cleanup_err) = rollback_explain_savepoint(ctx.cx, ctx.conn).await {
         let message = format!(
-            "could not end the armed read-only transaction before oracle_query cost estimation; the query was not executed and the session was quarantined: {error}"
+            "oracle_query cost estimation finished, but EXPLAIN savepoint rollback failed: {cleanup_err}"
         );
         mark_connection_quarantined(
             ctx.quarantine,
             AuditOutcome::UnknownDiscarded,
             message.clone(),
         )?;
+        append_explain_plan_audit(
+            audit_entry,
+            &audit_transcript,
+            AuditOutcome::UnknownDiscarded,
+        )?;
         return Err(
             quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
         );
     }
-    ctx.request_budget
-        .enforce(ctx.cx)
-        .map_err(DbError::into_envelope)?;
-
-    if let Err(primary) = explain_plan(ctx.cx, ctx.conn, executed_sql, args.read_only_standby).await
-    {
-        if let Err(cleanup_err) = rollback_conn_cleanup(ctx.cx, ctx.conn).await {
-            let message = format!(
-                "oracle_query cost estimation failed and PLAN_TABLE rollback cleanup failed: {cleanup_err}"
-            );
-            mark_connection_quarantined(
-                ctx.quarantine,
-                AuditOutcome::UnknownDiscarded,
-                message.clone(),
-            )?;
-            return Err(
-                quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message).into_envelope(),
-            );
+    append_explain_plan_audit(audit_entry, &audit_transcript, AuditOutcome::RolledBack)?;
+    let estimate_result = match execution {
+        Err(error) if is_read_only_transaction_error(&error) => {
+            return Err(query_cost_unavailable("read_only_txn"));
         }
-        return Err(DbError::into_envelope(primary));
-    }
+        Err(error) => Err(error),
+        Ok(estimate) => Ok(estimate),
+    };
+
     ctx.request_budget
         .enforce(ctx.cx)
         .map_err(DbError::into_envelope)?;
 
-    let decision = match plan_cost_estimate(ctx.cx, ctx.conn).await {
+    let decision = match estimate_result {
         Ok(Some(estimate)) => match estimate.summary.total_cost {
             Some(total_cost) => match u64::try_from(total_cost) {
                 Ok(observed) if max_query_cost.is_none_or(|limit| observed <= limit) => {
@@ -3479,6 +3593,9 @@ async fn enforce_query_cost_gate(
         Ok(None) => Err(query_cost_unavailable(
             "PLAN_TABLE returned no scoped plan-root (id=0) row",
         )),
+        Err(err) if is_read_only_transaction_error(&err) => {
+            Err(query_cost_unavailable("read_only_txn"))
+        }
         Err(err) => Err(query_cost_unavailable(format!(
             "PLAN_TABLE cost estimate query failed: {err}"
         ))),
@@ -4906,18 +5023,6 @@ fn missing_semantic_column(name: &RawName) -> ErrorEnvelope {
 /// Resolve every caller-controlled read dependency against the exact live
 /// session before the submitted statement can execute. Dictionary lookup is
 /// observational I/O; the caller's SQL remains untouched until this returns.
-async fn ensure_resolved_read_only(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    cache: &OracleCatalogResolverCache,
-    sql: &str,
-    fga_policy: FgaEvidencePolicy,
-) -> Result<(GuardDecision, FgaEvidence), ErrorEnvelope> {
-    resolve_read_only_relations(cx, conn, cache, sql, fga_policy)
-        .await
-        .map(|read| (read.decision, read.fga_evidence))
-}
-
 async fn resolve_read_only_relations(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -8255,7 +8360,7 @@ async fn preview_dml_inner(
     let conn = ctx.conn;
     // This selects the sandbox protocol, not whether a read may execute: every
     // read is refused from this write-only tool before database I/O, while a
-    // supplied witness goes through `ensure_resolved_read_only` below. Preserve
+    // supplied witness goes through `resolve_read_only_relations` below. Preserve
     // the explicit text precheck so an ordinary SELECT is not misclassified as
     // sandboxable DML by the guard library's strict admission default.
     let decision = READ_PRECHECK_CLASSIFIER.classify(&args.sql);
@@ -14060,20 +14165,16 @@ impl OracleDispatcher {
                 let a: ExplainPlanArgs = parse_args(name, args)?;
                 ensure_read_only(&a.sql)?;
                 ensure_explain_plan_write_allowed(&a, &scoped_level)?;
-                // Arc I: EXPLAIN PLAN writes PLAN_TABLE and rolls the transaction
-                // back to clean it up, erasing the reversible workspace with it.
-                ensure_workspace_closed(
-                    &state.checkpoints,
-                    "oracle_explain_plan (its PLAN_TABLE cleanup rolls the transaction back)",
-                )?;
-                let (_, fga_evidence) = ensure_resolved_read_only(
+                let read = read_executor::resolve_query_block_read(
                     cx,
                     conn,
                     &state.catalog_cache,
                     &a.sql,
+                    false,
                     state.fga_evidence_policy,
                 )
                 .await?;
+                let fga_evidence = read.fga_evidence;
                 if fga_evidence == FgaEvidence::Unavailable {
                     append_fga_evidence_unavailable_audit(
                         AuditEntryCtx {
@@ -14084,72 +14185,131 @@ impl OracleDispatcher {
                         "oracle_explain_plan",
                     )?;
                 }
-                dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
-                let rows = match explain_plan(cx, conn, &a.sql, a.read_only_standby).await {
-                    Ok(rows) => rows,
-                    Err(primary) => {
-                        if let Err(cleanup_err) = rollback_conn_cleanup(cx, conn).await {
-                            let message = format!(
-                                "EXPLAIN PLAN failed and PLAN_TABLE rollback cleanup failed: {cleanup_err}"
-                            );
-                            mark_connection_quarantined(
-                                &self.quarantine,
-                                AuditOutcome::UnknownDiscarded,
-                                message.clone(),
-                            )?;
-                            return Err(quarantined_db_error(
-                                QuarantineOutcome::UnknownDiscarded,
-                                message,
-                            )
-                            .into_envelope());
-                        }
-                        return Err(DbError::into_envelope(primary));
-                    }
-                };
-                let mut response = json!({
-                    "plan": rows_to_json(&rows),
-                    "diagnostic_write": {
-                        "statement": "EXPLAIN PLAN",
-                        "writes": "PLAN_TABLE",
-                        "required_level": OperatingLevel::ReadWrite,
-                        "explicitly_allowed": a.allow_plan_table_write,
-                        "rolled_back": true,
-                    },
-                });
-                // ADDITIVE / observational: surface the optimizer's relative
-                // cost/cardinality for the plan we just wrote. A missing cost
-                // column, table, or plan (ancient/RULE-mode DBs) degrades to an
-                // omitted block with a note — it must never fail the EXPLAIN.
-                match plan_cost_estimate(cx, conn).await {
-                    Ok(Some(estimate)) => {
-                        if let Ok(value) = serde_json::to_value(&estimate) {
-                            response["cost_estimate"] = value;
-                        }
-                    }
-                    Ok(None) => {
-                        response["cost_estimate_unavailable"] = json!(
-                            "PLAN_TABLE returned no scoped plan-root (id=0) row for a cost estimate"
-                        );
-                    }
-                    Err(err) => {
-                        response["cost_estimate_unavailable"] =
-                            json!(format!("cost estimate unavailable: {err}"));
-                    }
+                let closure = prove_hard_parse_effect_closure(
+                    cx,
+                    conn,
+                    &a.sql,
+                    &read.relations,
+                )
+                .await;
+                if let Some(error) = hard_parse_closure_error(closure) {
+                    return Err(error);
                 }
-                if let Err(cleanup_err) = rollback_conn_cleanup(cx, conn).await {
+                let configured_plan_table = self
+                    .profile_drain
+                    .accepted_config()
+                    .and_then(|config| {
+                        state
+                            .active_profile
+                            .as_deref()
+                            .and_then(|profile| config.profile(profile))
+                            .and_then(|profile| profile.explain_plan_table.clone())
+                    });
+                let table = resolve_plan_table(
+                    cx,
+                    conn,
+                    configured_plan_table.as_deref(),
+                )
+                .await
+                .map_err(|error: PlanTableUnavailable| explain_plan_unavailable(error.reason()))?;
+                let statement_id = PlanStatementId::generate().map_err(DbError::into_envelope)?;
+                let audit_db_evidence =
+                    collect_read_audit_db_evidence(cx, self.auditor.as_deref(), conn).await?;
+                let audit_entry = AuditEntryCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &request_subject,
+                    db_evidence: audit_db_evidence.as_ref(),
+                };
+                let audit_transcript = explain_plan_audit_transcript(&a.sql, &table, &statement_id);
+                dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
+                append_explain_plan_audit(
+                    audit_entry,
+                    &audit_transcript,
+                    AuditOutcome::Pending,
+                )?;
+                if let Err(error) = conn.execute(cx, EXPLAIN_SAVEPOINT_SQL, &[]).await {
+                    append_explain_plan_audit(
+                        audit_entry,
+                        &audit_transcript,
+                        AuditOutcome::Failed,
+                    )?;
+                    if is_read_only_transaction_error(&error) {
+                        return Err(explain_plan_unavailable("read_only_txn"));
+                    }
+                    return Err(DbError::into_envelope(error));
+                }
+                let operation = async {
+                    let rows = explain_plan(
+                        cx,
+                        conn,
+                        &a.sql,
+                        &table,
+                        &statement_id,
+                        a.read_only_standby,
+                    )
+                    .await?;
+                    let mut response = json!({
+                        "plan": rows_to_json(&rows),
+                        "diagnostic_write": {
+                            "statement": "EXPLAIN PLAN",
+                            "writes": "PLAN_TABLE",
+                            "statement_id": statement_id.as_str(),
+                            "required_level": OperatingLevel::ReadWrite,
+                            "savepoint": "OMCP_EXPLAIN_PLAN",
+                            "explicitly_allowed": a.allow_plan_table_write,
+                            "rolled_back": true,
+                        },
+                    });
+                    match plan_cost_estimate(cx, conn, &table, &statement_id).await {
+                        Ok(Some(estimate)) => {
+                            if let Ok(value) = serde_json::to_value(&estimate) {
+                                response["cost_estimate"] = value;
+                            }
+                        }
+                        Ok(None) => {
+                            response["cost_estimate_unavailable"] = json!(
+                                "PLAN_TABLE returned no scoped plan-root (id=0) row for a cost estimate"
+                            );
+                        }
+                        Err(error) => {
+                            response["cost_estimate_unavailable"] =
+                                json!(format!("cost estimate unavailable: {error}"));
+                        }
+                    }
+                    Ok::<Value, DbError>(response)
+                }
+                .await;
+                if let Err(cleanup_err) = rollback_explain_savepoint(cx, conn).await {
                     let message = format!(
-                        "EXPLAIN PLAN completed, but PLAN_TABLE rollback cleanup failed: {cleanup_err}"
+                        "EXPLAIN PLAN completed, but savepoint rollback failed: {cleanup_err}"
                     );
                     mark_connection_quarantined(
                         &self.quarantine,
                         AuditOutcome::UnknownDiscarded,
                         message.clone(),
                     )?;
+                    append_explain_plan_audit(
+                        audit_entry,
+                        &audit_transcript,
+                        AuditOutcome::UnknownDiscarded,
+                    )?;
                     return Err(
                         quarantined_db_error(QuarantineOutcome::UnknownDiscarded, message)
-                            .into_envelope(),
+                        .into_envelope(),
                     );
                 }
+                append_explain_plan_audit(
+                    audit_entry,
+                    &audit_transcript,
+                    AuditOutcome::RolledBack,
+                )?;
+                let mut response = match operation {
+                    Ok(response) => response,
+                    Err(error) if is_read_only_transaction_error(&error) => {
+                        return Err(explain_plan_unavailable("read_only_txn"));
+                    }
+                    Err(error) => return Err(DbError::into_envelope(error)),
+                };
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
                 attach_fga_evidence(&mut response, fga_evidence);
                 Ok(response)

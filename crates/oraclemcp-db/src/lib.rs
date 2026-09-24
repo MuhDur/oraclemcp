@@ -67,6 +67,7 @@ mod connection;
 mod doctor;
 mod drcp;
 mod error;
+mod hard_parse_closure;
 mod health;
 mod intelligence;
 mod masking;
@@ -128,6 +129,7 @@ pub use error::{
     RetryDecision, RetryPolicy, StatementClass, StatementOutcome, is_transient_error,
     retry_decision,
 };
+pub use hard_parse_closure::{HardParseEffectClosureV1, prove_hard_parse_effect_closure};
 pub use health::{
     Finding, HealthSubcheck, ParsedHealthRequest, PreflightReport, Severity, SubcheckPreflight,
     ViewTier, buffer_cache_hit_ratio_sql, detect_view_tier, disabled_constraints_sql,
@@ -149,6 +151,9 @@ pub use intelligence::{
     orient_schema, orient_schema_page, plan_cost_estimate, primary_key_columns, probe_dependents,
     search_objects, search_source, semantic_search_query, semantic_search_query_with_filter,
     semantic_search_text_query, semantic_search_text_query_with_filter,
+};
+pub use intelligence::{
+    PlanStatementId, PlanTableUnavailable, VerifiedPlanTable, resolve_plan_table,
 };
 pub use masking::{
     IncomparableMaskedColumn, MASKED_RESULT_VALUE, MIN_PROFILE_MASKING_SALT_BYTES,

@@ -41,13 +41,14 @@ MANIFEST = ROOT / "scripts/e2e/cases/validate_manifest.py"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
-                        "steps", "expect_by_version"}
-PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "protected", "capped_rw"}
+                        "steps", "expect_by_version", "cleanup", "plan_contains"}
+PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw",
+                    "protected", "capped_rw"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
 CAPTURE = re.compile(r"\$\{cap:([a-z][a-z0-9_]{0,31})\}")
-EXPECT_KINDS = {"rows", "error_class", "json_subset", "golden"}
+EXPECT_KINDS = {"rows", "error_class", "error_classes", "json_subset", "golden"}
 CURRENT_SESSION = object()
 
 
@@ -162,6 +163,20 @@ def tool_payload(reply):
     return reply["result"]
 
 
+def explain_statement_id(reply):
+    payload = tool_payload(reply)
+    structured = payload.get("structuredContent", {})
+    diagnostic = structured.get("diagnostic_write", {})
+    statement_id = diagnostic.get("statement_id")
+    require(isinstance(statement_id, str)
+            and re.fullmatch(r"OMCP_[A-Z0-9]{24}", statement_id) is not None,
+            "EXPLAIN did not return its validated server-generated statement id")
+    require(diagnostic.get("savepoint") == "OMCP_EXPLAIN_PLAN"
+            and diagnostic.get("rolled_back") is True,
+            "EXPLAIN response did not attest to savepoint rollback")
+    return statement_id
+
+
 def verify_envelope(reply, descriptor=None):
     require(isinstance(reply, dict) and reply.get("jsonrpc") == "2.0",
             "malformed JSON-RPC envelope")
@@ -214,6 +229,10 @@ def verify_expect(expect, reply, golden_root=None):
                     "wrong structured refusal reason")
         if "ora_code" in expect:
             require(structured.get("ora_code") == expect["ora_code"], "wrong ORA code")
+    elif "error_classes" in expect:
+        require(payload.get("isError") is True, "expected a typed tool refusal")
+        require(structured.get("error_class") in expect["error_classes"],
+                "wrong typed refusal class")
     elif "json_subset" in expect:
         require(deep_subset(expect["json_subset"], structured), "JSON subset differs")
     else:
@@ -276,6 +295,12 @@ def validate_case(case, filename):
     if case.get("profile_variant") in {"synthetic_raw", "synthetic_owner"}:
         require(case["level"] == "READ_ONLY" and case.get("setup_phase") == "before_server",
                 "synthetic fixture profiles require precreated READ_ONLY fixtures")
+    if case.get("profile_variant") == "synthetic_owner_rw":
+        require(case["level"] == "READ_WRITE",
+                "synthetic owner write profile is restricted to explicit READ_WRITE cases")
+    require("plan_contains" not in case
+            or (isinstance(case["plan_contains"], str) and case["plan_contains"]),
+            "plan_contains must be a nonempty string")
     if case.get("profile_variant") == "protected":
         require(case["level"] == "READ_ONLY", "a protected profile is pinned at READ_ONLY")
     if case.get("profile_variant") == "capped_rw":
@@ -351,11 +376,16 @@ def validate_case(case, filename):
         require(isinstance(workers, list) and 2 <= len(workers) <= 8,
                 "parallel call requires 2..8 workers")
         require(case["transports"] == ["http"], "parallel calls require HTTP transport")
-        require(all(isinstance(worker, dict) and set(worker) == {"arguments", "expect"}
+        require(all(isinstance(worker, dict)
+                    and set(worker) in ({"arguments", "expect"},
+                                       {"arguments", "expect", "plan_contains"})
                     and isinstance(worker["arguments"], dict) for worker in workers),
                 "parallel worker needs arguments and expect")
         for worker in workers:
             verify_expect_shape(worker["expect"])
+            require("plan_contains" not in worker
+                    or (isinstance(worker["plan_contains"], str) and worker["plan_contains"]),
+                    "parallel plan_contains must be a nonempty string")
         require("json_subset" in case["expect"], "parallel aggregate expects json_subset")
     require(isinstance(case["db_reread"], list) and isinstance(case["audit_expect"], list),
             "db_reread/audit_expect must be arrays")
@@ -367,6 +397,12 @@ def validate_case(case, filename):
         require(isinstance(item, dict) and {"tool", "decision", "outcome"} <= item.keys()
                 and all(isinstance(item[key], str) for key in ("tool", "decision", "outcome")),
                 "audit_expect needs tool, decision, outcome")
+    require("cleanup" not in case or isinstance(case["cleanup"], list),
+            "cleanup must be an array of run-owned DDL actions")
+    for action in case.get("cleanup", []):
+        require(isinstance(action, dict) and set(action) == {"sql"}
+                and isinstance(action["sql"], str) and action["sql"],
+                "cleanup action needs exact nonempty SQL")
     if case["call"].get("mutation"):
         require(case["db_reread"] and case["audit_expect"],
                 "mutating case needs independent DB re-read and audit expectations")
@@ -436,6 +472,10 @@ def verify_expect_shape(expect):
     require("ora_code" not in expect or "error_class" in expect, "ora_code needs error_class")
     require("reason_code" not in expect or ("error_class" in expect and isinstance(expect["reason_code"], str)),
             "reason_code needs error_class and a string value")
+    if "error_classes" in expect:
+        require(isinstance(expect["error_classes"], list) and expect["error_classes"]
+                and all(isinstance(item, str) and item for item in expect["error_classes"]),
+                "error_classes needs one or more exact class names")
     if "ora_code" in expect:
         require(type(expect["ora_code"]) is int and expect["ora_code"] > 0,
                 "ora_code must be a positive integer")
@@ -865,6 +905,16 @@ credential_ref = "env:W4_OWNER_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 '''
+        content += f'''
+[[profiles]]
+name = "{lane}_owner_rw"
+description = "synthetic W4 disposable owner fixture for explicit EXPLAIN write tests"
+connect_string = "{dsn}"
+username = "{owner}"
+credential_ref = "env:W4_OWNER_PASSWORD"
+max_level = "ADMIN"
+default_level = "READ_ONLY"
+'''
     path.write_text(content)
     return audience
 
@@ -1156,6 +1206,15 @@ def parallel_http_call(client, case, barriers):
     for worker, reply in zip(workers, replies):
         verify_envelope(reply)
         verify_expect(worker["expect"], reply, ROOT / "tests/golden/w4")
+        if case["tool"] == "oracle_explain_plan":
+            explain_statement_id(reply)
+            if "plan_contains" in worker:
+                plan = compact(tool_payload(reply).get("structuredContent", {}).get("plan", []))
+                require(worker["plan_contains"] in plan,
+                        "parallel EXPLAIN returned the other statement's plan")
+    if case["tool"] == "oracle_explain_plan":
+        ids = [explain_statement_id(reply) for reply in replies]
+        require(len(ids) == len(set(ids)), "parallel EXPLAIN requests reused a statement id")
     return {"jsonrpc": "2.0", "id": 0, "result": {"content": [], "isError": False,
             "structuredContent": {"parallel": [
                 tool_payload(reply).get("structuredContent", {}) for reply in replies]}}}
@@ -1315,7 +1374,16 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                                                "arguments": fill_captures(case["call"]["arguments"],
                                                                           captures)},
                                raw_arguments=case["call"].get("raw_arguments"))
-        verify_envelope(reply, descriptor)
+        verify_envelope(reply, None if "parallel" in case["call"] else descriptor)
+        if (case["tool"] == "oracle_explain_plan" and "parallel" not in case["call"]
+                and tool_payload(reply).get("isError") is not True):
+            explain_statement_id(reply)
+            structured = tool_payload(reply).get("structuredContent", {})
+            plan = compact(structured.get("plan", []))
+            require(structured.get("plan"), "EXPLAIN returned no plan rows")
+            if "plan_contains" in case:
+                require(case["plan_contains"] in plan,
+                        "EXPLAIN plan did not contain the requested statement's object")
         row["actual"] = scrub(tool_payload(reply))
         if supported and not case["call"].get("retry"):
             verify_case_rereads(connection, case, row)
@@ -1345,6 +1413,9 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         row["verdict"] = "pass"
     except Exception as exc:
         row["verification_failure"] = {"class": type(exc).__name__, "detail": str(exc)[:240]}
+    finally:
+        if case.get("cleanup"):
+            apply_setup(connection, case["cleanup"])
     row["duration_ms"] = round((time.monotonic() - start) * 1000)
     return row
 
@@ -1601,7 +1672,7 @@ def run_lane(args):
                     wait_for_setup_ready(
                         settings, password,
                         f"SELECT ID FROM {owner}.T_PARENT_{fixture_id} WHERE ROWNUM <= 1")
-                    if any(case.get("profile_variant") == "synthetic_owner"
+                    if any(case.get("profile_variant") in {"synthetic_owner", "synthetic_owner_rw"}
                            for case in family_cases if transport in case["transports"]):
                         # The disposable owner needs the same FGA catalog proof
                         # that every served relation read requires.
@@ -1650,6 +1721,7 @@ def run_lane(args):
                     variant = case.get("profile_variant")
                     desired_profile = (args.lane + "_raw" if variant == "synthetic_raw"
                                        else args.lane + "_owner" if variant == "synthetic_owner"
+                                       else args.lane + "_owner_rw" if variant == "synthetic_owner_rw"
                                        else args.lane + "_protected" if variant == "protected"
                                        else args.lane + "_capped" if variant == "capped_rw"
                                        else args.lane)
@@ -1833,6 +1905,17 @@ def selftest():
     error = {"jsonrpc": "2.0", "id": 1, "result": {"content": [], "isError": True,
              "structuredContent": {"error_class": "INVALID_ARGUMENTS"}}}
     rejected("wrong_error_class", lambda: verify_expect({"error_class": "FORBIDDEN_STATEMENT"}, error))
+    plan_reply = {"result": {"content": [], "isError": False, "structuredContent": {
+        "diagnostic_write": {"statement_id": "OMCP_" + "A" * 24,
+                             "savepoint": "OMCP_EXPLAIN_PLAN", "rolled_back": True}}}}
+    require(explain_statement_id(plan_reply) == "OMCP_" + "A" * 24,
+            "EXPLAIN statement-id verifier lost the generated identifier")
+    rejected("invalid_explain_statement_id", lambda: explain_statement_id({
+        "result": {"content": [], "isError": False, "structuredContent": {
+            "diagnostic_write": {"statement_id": "unsafe", "savepoint": "OMCP_EXPLAIN_PLAN",
+                                 "rolled_back": True}}}}))
+    rejected("untyped_error_class_family", lambda: verify_expect(
+        {"error_classes": ["FORBIDDEN_STATEMENT"]}, error))
     rejected("missing_audit_record", lambda: verify_audit([{"tool": "oracle_query"}], [], True))
     rejected("extra_audit_record", lambda: verify_audit(
         [{"tool": "oracle_query"}],

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "W4 external tool case family",
-  "description": "Use ${run_id}, ${owner}, ${cross}, and ${transport} in case strings; the driver expands them to the exact fixture run before execution.",
+  "description": "Use ${run_id}, ${owner}, ${cross}, and ${transport} in case strings; the driver expands them to the exact fixture run before execution. EXPLAIN cases may assert their dynamic server-generated statement id and plan ownership.",
   "type": "array",
   "items": {
     "type": "object",
@@ -11,7 +11,8 @@
       "case_id": {"type": "string", "pattern": "^(w4|rel012)_([a-z0-9_]+)$"},
       "tool": {"type": "string", "minLength": 1},
       "level": {"enum": ["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"]},
-      "profile_variant": {"enum": ["masked", "synthetic_raw", "synthetic_owner"]},
+      "profile_variant": {"enum": ["masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "protected", "capped_rw"]},
+      "plan_contains": {"type": "string", "minLength": 1},
       "transports": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["stdio", "http"]}},
       "requires": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
       "setup": {"type": "array", "items": {"type": "object", "additionalProperties": false,
@@ -28,9 +29,12 @@
         "mutation": {"type": "boolean"},
         "parallel": {"type": "array", "minItems": 2, "maxItems": 8,
           "items": {"type": "object", "required": ["arguments", "expect"],
-            "properties": {"arguments": {"type": "object"}, "expect": {"type": "object"}}}}
+            "properties": {"arguments": {"type": "object"}, "expect": {"type": "object"},
+              "plan_contains": {"type": "string", "minLength": 1}}}}
       }},
       "expect": {"type": "object", "minProperties": 1},
+      "cleanup": {"type": "array", "items": {"type": "object", "additionalProperties": false,
+        "required": ["sql"], "properties": {"sql": {"type": "string", "minLength": 1}}}},
       "expect_by_version": {"type": "object", "additionalProperties": false,
         "required": ["23", "pre23"], "properties": {
           "23": {"type": "object", "minProperties": 1},

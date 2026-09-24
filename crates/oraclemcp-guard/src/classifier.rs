@@ -1891,6 +1891,19 @@ fn user_defined_calls(sql: &str, verified_local_vector_embedding: bool) -> Vec<O
     calls
 }
 
+/// Collect the conservatively detected non-builtin calls from a SQL statement.
+///
+/// This is an observation helper for consumers that must inspect callback
+/// effects before asking Oracle to hard-parse the statement. Tokenization
+/// failures are surfaced so callers can refuse rather than treating an empty
+/// result as proof that the statement has no calls.
+pub fn hard_parse_user_calls(sql: &str) -> Result<Vec<ObjectRef>, PlanMismatch> {
+    Tokenizer::new(&OracleDialect {}, sql)
+        .tokenize()
+        .map_err(|_| PlanMismatch::UnsupportedShape)?;
+    Ok(user_defined_calls(sql, false))
+}
+
 /// Whether the submitted text immediately executes PL/SQL rather than merely
 /// defining stored code. Leading PL/SQL labels are allowed on anonymous blocks,
 /// so skip `<<label>>` prefixes before checking the first executable keyword.
@@ -9087,6 +9100,16 @@ mod tests {
                 .any(|call| call.name.eq_ignore_ascii_case("round")),
             "bare builtins must not be reported as user-defined calls: {calls:?}"
         );
+    }
+
+    #[test]
+    fn hard_parse_user_calls_refuses_tokenization_failures() {
+        let calls = hard_parse_user_calls("SELECT app.canary_fn(x), ROUND(x) FROM dual")
+            .expect("valid Oracle SQL tokenizes");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].schema.as_deref(), Some("app"));
+        assert_eq!(calls[0].name, "canary_fn");
+        assert!(hard_parse_user_calls("SELECT 'unterminated FROM dual").is_err());
     }
 
     #[test]

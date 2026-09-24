@@ -10,8 +10,9 @@
 //! identifier positions (schema/table/type in `DBMS_METADATA`, the sampled
 //! table) are validated as simple identifiers, never interpolated raw.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
+use std::sync::{Mutex, OnceLock};
 
 use asupersync::Cx;
 
@@ -30,6 +31,303 @@ pub fn is_simple_identifier(s: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '$' | '#'))
         && !s.is_empty()
         && s.len() <= 30
+}
+
+const PLAN_ID_PREFIX: &str = "OMCP_";
+const PLAN_ID_ALPHABET: &[u8; 36] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+/// A server-generated Oracle `STATEMENT_ID` with strict grammar validation.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PlanStatementId(String);
+
+impl PlanStatementId {
+    /// Generate an unpredictable, SQL-literal-safe plan statement id.
+    pub fn generate() -> Result<Self, DbError> {
+        let mut value = String::from(PLAN_ID_PREFIX);
+        while value.len() < PLAN_ID_PREFIX.len() + 24 {
+            let mut random = [0_u8; 32];
+            getrandom::getrandom(&mut random).map_err(|error| {
+                DbError::Internal(format!("plan statement id RNG failed: {error}"))
+            })?;
+            for byte in random {
+                if byte < 252 {
+                    value.push(PLAN_ID_ALPHABET[usize::from(byte % 36)] as char);
+                    if value.len() == PLAN_ID_PREFIX.len() + 24 {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(Self(value))
+    }
+
+    /// Validate an id received from a trusted internal boundary.
+    pub fn parse(value: impl Into<String>) -> Result<Self, DbError> {
+        let value = value.into();
+        if value.len() != PLAN_ID_PREFIX.len() + 24
+            || !value.starts_with(PLAN_ID_PREFIX)
+            || !value[PLAN_ID_PREFIX.len()..]
+                .bytes()
+                .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+        {
+            return Err(DbError::InvalidArgument(
+                "invalid server plan statement id".to_owned(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    /// Read the validated identifier without giving callers a SQL rendering path.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn sql_literal(&self) -> String {
+        format!("'{}'", self.0)
+    }
+}
+
+/// A verified, fixed Oracle table identity permitted for server-built EXPLAIN.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerifiedPlanTable {
+    owner: String,
+    name: String,
+    object_id: i64,
+}
+
+impl VerifiedPlanTable {
+    fn new(owner: impl Into<String>, name: impl Into<String>, object_id: i64) -> Self {
+        Self {
+            owner: owner.into(),
+            name: name.into(),
+            object_id,
+        }
+    }
+
+    /// Verified table owner.
+    #[must_use]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    /// Verified table name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Object identity pinned during verification.
+    #[must_use]
+    pub const fn object_id(&self) -> i64 {
+        self.object_id
+    }
+
+    fn qualified_name(&self) -> String {
+        format!("{}.{}", self.owner, self.name)
+    }
+
+    fn is_standard_plan_table(&self) -> bool {
+        self.owner == "SYS" && self.name == "PLAN_TABLE$"
+    }
+}
+
+/// Why a server-selected Oracle plan table could not be verified.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlanTableUnavailable {
+    reason: &'static str,
+}
+
+impl PlanTableUnavailable {
+    /// Stable machine-readable reason for this unavailable result.
+    #[must_use]
+    pub const fn reason(self) -> &'static str {
+        self.reason
+    }
+}
+
+impl fmt::Display for PlanTableUnavailable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.reason)
+    }
+}
+
+impl std::error::Error for PlanTableUnavailable {}
+
+static PLAN_TABLE_OBJECT_IDS: OnceLock<Mutex<HashMap<String, i64>>> = OnceLock::new();
+
+/// Resolve the standard PLAN_TABLE synonym or a configured server-owned GTT.
+/// Configured identities are pinned to their first observed `OBJECT_ID` for
+/// this server process and Oracle database identity.
+pub async fn resolve_plan_table(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    configured: Option<&str>,
+) -> Result<VerifiedPlanTable, PlanTableUnavailable> {
+    let info = conn.describe(cx).await.map_err(|_| PlanTableUnavailable {
+        reason: "no_privilege",
+    })?;
+    let current_schema = info
+        .current_schema
+        .as_deref()
+        .ok_or(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        })?
+        .to_ascii_uppercase();
+
+    if let Some(configured) = configured {
+        let (owner, name) = parse_plan_table_name(configured)?;
+        if info
+            .session_user
+            .as_deref()
+            .is_none_or(|session_user| !session_user.eq_ignore_ascii_case(&owner))
+        {
+            return Err(PlanTableUnavailable {
+                reason: "callback_unprovable",
+            });
+        }
+        let rows = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::PlanTableConfigured,
+            &[
+                OracleBind::String(owner.clone()),
+                OracleBind::String(name.clone()),
+            ],
+        )
+        .await
+        .map_err(|error| plan_table_catalog_error(&error))?;
+        if rows.len() != 1
+            || rows[0].text("TEMPORARY") != Some("Y")
+            || rows[0].text("DURATION") != Some("SYS$SESSION")
+        {
+            return Err(PlanTableUnavailable {
+                reason: "callback_unprovable",
+            });
+        }
+        let object_id = rows[0].parse_i64("OBJECT_ID").ok_or(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        })?;
+        let triggers = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::PlanTableTriggers,
+            &[
+                OracleBind::String(owner.clone()),
+                OracleBind::String(name.clone()),
+            ],
+        )
+        .await
+        .map_err(|error| plan_table_catalog_error(&error))?;
+        if !triggers.is_empty() {
+            return Err(PlanTableUnavailable {
+                reason: "callback_unprovable",
+            });
+        }
+        let database = info.db_unique_name.as_deref().ok_or(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        })?;
+        let key = format!(
+            "{database}\0{}\0{owner}.{name}",
+            info.service_name.as_deref().unwrap_or("")
+        );
+        pin_plan_table_identity(key, object_id)?;
+        return Ok(VerifiedPlanTable::new(owner, name, object_id));
+    }
+
+    let local_objects = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PlanTableCurrentObjects,
+        &[OracleBind::String(current_schema.clone())],
+    )
+    .await
+    .map_err(|error| plan_table_catalog_error(&error))?;
+    let private_synonyms = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PlanTablePrivateSynonym,
+        &[OracleBind::String(current_schema)],
+    )
+    .await
+    .map_err(|error| plan_table_catalog_error(&error))?;
+    if !local_objects.is_empty() || !private_synonyms.is_empty() {
+        return Err(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        });
+    }
+    let synonym = run_catalog_query(cx, conn, CatalogQueryId::PlanTablePublicSynonym, &[])
+        .await
+        .map_err(|error| plan_table_catalog_error(&error))?;
+    if synonym.len() != 1
+        || synonym[0].text("TABLE_OWNER") != Some("SYS")
+        || synonym[0].text("TABLE_NAME") != Some("PLAN_TABLE$")
+        || synonym[0].text("DB_LINK").is_some()
+    {
+        return Err(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        });
+    }
+    let table = run_catalog_query(cx, conn, CatalogQueryId::PlanTableSysTemporary, &[])
+        .await
+        .map_err(|error| plan_table_catalog_error(&error))?;
+    if table.len() != 1
+        || table[0].text("TEMPORARY") != Some("Y")
+        || table[0].text("DURATION") != Some("SYS$SESSION")
+    {
+        return Err(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        });
+    }
+    let object_id = table[0]
+        .parse_i64("OBJECT_ID")
+        .ok_or(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        })?;
+    Ok(VerifiedPlanTable::new("SYS", "PLAN_TABLE$", object_id))
+}
+
+fn parse_plan_table_name(value: &str) -> Result<(String, String), PlanTableUnavailable> {
+    let Some((owner, name)) = value.split_once('.') else {
+        return Err(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        });
+    };
+    if name.contains('.') || !is_simple_identifier(owner) || !is_simple_identifier(name) {
+        return Err(PlanTableUnavailable {
+            reason: "callback_unprovable",
+        });
+    }
+    Ok((owner.to_ascii_uppercase(), name.to_ascii_uppercase()))
+}
+
+fn plan_table_catalog_error(error: &DbError) -> PlanTableUnavailable {
+    if error.to_string().contains("ORA-00942") || error.to_string().contains("ORA-01031") {
+        PlanTableUnavailable {
+            reason: "no_privilege",
+        }
+    } else {
+        PlanTableUnavailable {
+            reason: "callback_unprovable",
+        }
+    }
+}
+
+fn pin_plan_table_identity(key: String, object_id: i64) -> Result<(), PlanTableUnavailable> {
+    let pins = PLAN_TABLE_OBJECT_IDS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut pins = pins.lock().map_err(|_| PlanTableUnavailable {
+        reason: "identity_drift",
+    })?;
+    match pins.get(&key) {
+        Some(expected) if *expected != object_id => Err(PlanTableUnavailable {
+            reason: "identity_drift",
+        }),
+        Some(_) => Ok(()),
+        None => {
+            pins.insert(key, object_id);
+            Ok(())
+        }
+    }
 }
 
 /// The Oracle `VECTOR_DISTANCE` metric keywords supported by the governed
@@ -1983,15 +2281,17 @@ pub fn diff_query_responses(
     })
 }
 
-/// `explain_plan`: on a primary, `EXPLAIN PLAN FOR <sql>` writes `PLAN_TABLE`
-/// and then reads `DBMS_XPLAN.DISPLAY`; on a read-only standby it is refused
-/// (route to `DISPLAY_CURSOR`). `sql` must already have passed the classifier
-/// as a vetted SELECT, and callers must separately gate the diagnostic
-/// `PLAN_TABLE` write.
+/// `explain_plan`: on a primary, `EXPLAIN PLAN` writes into the verified plan
+/// table with a unique server-generated statement id and reads that same plan
+/// through `DBMS_XPLAN.DISPLAY`; on a read-only standby it is refused (route
+/// to `DISPLAY_CURSOR`). `sql` must already have passed the classifier as a
+/// vetted SELECT, and callers must separately gate the diagnostic table write.
 pub async fn explain_plan(
     cx: &Cx,
     conn: &dyn OracleConnection,
     sql: &str,
+    table: &VerifiedPlanTable,
+    statement_id: &PlanStatementId,
     read_only_standby: bool,
 ) -> Result<Vec<OracleRow>, DbError> {
     if read_only_standby {
@@ -2001,11 +2301,33 @@ pub async fn explain_plan(
                 .to_owned(),
         ));
     }
-    // The inner SQL is appended (not bindable in EXPLAIN PLAN FOR); the caller
-    // guarantees it is a classifier-vetted SELECT.
-    conn.execute(cx, &format!("EXPLAIN PLAN FOR {sql}"), &[])
+    // Oracle's EXPLAIN PLAN grammar has no bind position for STATEMENT_ID or
+    // INTO. Both fragments come from validated server-only capability types;
+    // only the caller's already-admitted SELECT remains as SQL text.
+    conn.execute(cx, &explain_plan_sql(sql, table, statement_id), &[])
         .await?;
-    run_catalog_query(cx, conn, CatalogQueryId::ExplainPlanDisplay, &[]).await
+    run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::ExplainPlanDisplay,
+        &[
+            OracleBind::String(table.qualified_name()),
+            OracleBind::String(statement_id.as_str().to_owned()),
+        ],
+    )
+    .await
+}
+
+fn explain_plan_sql(
+    sql: &str,
+    table: &VerifiedPlanTable,
+    statement_id: &PlanStatementId,
+) -> String {
+    format!(
+        "EXPLAIN PLAN SET STATEMENT_ID = {} INTO {} FOR {sql}",
+        statement_id.sql_literal(),
+        table.qualified_name()
+    )
 }
 
 /// Reminder folded into every [`PlanCostEstimate`]: these numbers are the
@@ -2076,14 +2398,12 @@ pub struct PlanCostEstimate {
 }
 
 /// The scoped `PLAN_TABLE` read that surfaces per-line optimizer estimates for
-/// the plan the most recent `EXPLAIN PLAN` wrote. It is scoped to the latest
-/// `plan_id`, mirroring how `DBMS_XPLAN.DISPLAY` (with no explicit
-/// `statement_id`) selects the most recently explained statement — so the cost
-/// block describes exactly the plan the `DISPLAY` output above shows.
+/// one server-generated statement id. Concurrent explanations cannot select a
+/// different request's plan.
 pub(crate) const PLAN_COST_SQL: &str = "SELECT id, operation, options, object_owner, object_name, \
 cost, cardinality, bytes, access_predicates, filter_predicates \
-FROM plan_table \
-WHERE plan_id = (SELECT MAX(plan_id) FROM plan_table) \
+FROM SYS.PLAN_TABLE$ \
+WHERE statement_id = :1 \
 ORDER BY id";
 
 /// Parse an optional `PLAN_TABLE` numeric cell into `Option<i64>`. A SQL `NULL`
@@ -2147,23 +2467,38 @@ pub fn assemble_cost_estimate(rows: &[OracleRow]) -> Option<PlanCostEstimate> {
     })
 }
 
-/// Read the optimizer cost/cardinality estimates for the plan the most recent
-/// [`explain_plan`] just wrote (scoped to the latest `plan_id`, matching
-/// `DBMS_XPLAN.DISPLAY`). This is additive/observational — a plain read of
+/// Read the optimizer cost/cardinality estimates for the plan identified by
+/// the server-generated statement id used by [`explain_plan`]. This is
+/// additive/observational — a plain read of
 /// `PLAN_TABLE`, gated by the same diagnostic-write permission as the
 /// `EXPLAIN PLAN` that produced the rows; it never re-runs the statement and
 /// never touches the classifier.
 ///
 /// 11g-safe / graceful degradation: on databases whose `PLAN_TABLE` lacks a
-/// cost column (or the table/`plan_id` entirely) the `SELECT` fails; that error
+/// cost column (or the table/`statement_id` entirely) the `SELECT` fails; that error
 /// is returned so the caller can *omit* the block and note why — the surrounding
 /// `EXPLAIN PLAN` output must never be failed by a missing cost estimate.
 /// `Ok(None)` means the query ran but produced no scoped plan-root line.
 pub async fn plan_cost_estimate(
     cx: &Cx,
     conn: &dyn OracleConnection,
+    table: &VerifiedPlanTable,
+    statement_id: &PlanStatementId,
 ) -> Result<Option<PlanCostEstimate>, DbError> {
-    let rows = run_catalog_query(cx, conn, CatalogQueryId::PlanCostEstimate, &[]).await?;
+    // The fixed query ID addresses only Oracle's verified standard table. A
+    // configured table can still produce DISPLAY output; its optional numeric
+    // cost block is omitted until that table-specific read has a closed query
+    // provenance form of its own.
+    if !table.is_standard_plan_table() {
+        return Ok(None);
+    }
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PlanCostEstimate,
+        &[OracleBind::String(statement_id.as_str().to_owned())],
+    )
+    .await?;
     Ok(assemble_cost_estimate(&rows))
 }
 
@@ -2191,6 +2526,117 @@ mod tests {
     struct CaptureMock {
         calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
         data_default_vc_available: bool,
+    }
+
+    struct PlanResolverMock {
+        info: OracleConnectionInfo,
+        local_object: bool,
+        private_synonym: bool,
+        configured_object_id: i64,
+        duration: &'static str,
+        configured_enabled_trigger: bool,
+    }
+
+    impl PlanResolverMock {
+        fn new(service: String) -> Self {
+            Self {
+                info: OracleConnectionInfo {
+                    current_schema: Some("APP".to_owned()),
+                    session_user: Some("APP".to_owned()),
+                    db_unique_name: Some("PLAN_TEST_DB".to_owned()),
+                    service_name: Some(service),
+                    ..OracleConnectionInfo::default()
+                },
+                local_object: false,
+                private_synonym: false,
+                configured_object_id: 9001,
+                duration: "SYS$SESSION",
+                configured_enabled_trigger: false,
+            }
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for PlanResolverMock {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(self.info.clone())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            if sql.contains("FROM all_objects WHERE owner = :1") && self.local_object {
+                return Ok(vec![cell_row(&[("OBJECT_TYPE", "TABLE")])]);
+            }
+            if sql.contains("FROM all_synonyms WHERE owner = :1") && self.private_synonym {
+                return Ok(vec![cell_row(&[
+                    ("TABLE_OWNER", "APP"),
+                    ("TABLE_NAME", "OTHER"),
+                ])]);
+            }
+            if sql.contains("FROM all_synonyms WHERE owner = 'PUBLIC'") {
+                return Ok(vec![cell_row(&[
+                    ("TABLE_OWNER", "SYS"),
+                    ("TABLE_NAME", "PLAN_TABLE$"),
+                ])]);
+            }
+            if sql.contains("t.owner = 'SYS'") {
+                return Ok(vec![cell_row(&[
+                    ("TEMPORARY", "Y"),
+                    ("DURATION", self.duration),
+                    ("OBJECT_ID", "42"),
+                ])]);
+            }
+            if sql.contains("t.owner = :1") {
+                return Ok(vec![cell_row(&[
+                    ("TEMPORARY", "Y"),
+                    ("DURATION", self.duration),
+                    ("OBJECT_ID", &self.configured_object_id.to_string()),
+                ])]);
+            }
+            if sql.contains("FROM all_triggers") && self.configured_enabled_trigger {
+                return Ok(vec![cell_row(&[("TRIGGER_NAME", "PLAN_TABLE_TRIGGER")])]);
+            }
+            Ok(Vec::new())
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Ok(0)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+    }
+
+    fn unique_plan_service() -> String {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        format!(
+            "PLAN_TEST_{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        )
     }
 
     #[async_trait::async_trait(?Send)]
@@ -2258,6 +2704,118 @@ mod tests {
             rls_vpd: None,
             mask_certificate: None,
         }
+    }
+
+    #[test]
+    fn plan_statement_id_generator_and_validator_are_strict() {
+        let mut generated = std::collections::HashSet::new();
+        for _ in 0..256 {
+            let id = PlanStatementId::generate().expect("OS CSPRNG");
+            assert_eq!(id.as_str().len(), 29);
+            assert!(id.as_str().starts_with("OMCP_"));
+            assert!(
+                id.as_str()[5..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+            );
+            assert!(generated.insert(id.as_str().to_owned()));
+        }
+        assert!(PlanStatementId::parse("OMCP_ABCDEFGHIJKLMNOPQRSTUVWX").is_ok());
+        for invalid in [
+            "OMCP_abcdefghijklmnopqrstuvwx",
+            "OMCP_ABCDEFGHIJKLMNOPQRSTUVWX'",
+            "OMCP_ABCDEFGHIJKLMNOPQRSTUVW",
+            "NOTOMCPABCDEFGHIJKLMNOPQRSTUVWX",
+        ] {
+            assert!(PlanStatementId::parse(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn explain_sql_uses_statement_id_literal_and_never_max_plan_id() {
+        let table = VerifiedPlanTable::new("SYS", "PLAN_TABLE$", 42);
+        let statement_id =
+            PlanStatementId::parse("OMCP_ABCDEFGHIJKLMNOPQRSTUVWX").expect("valid id");
+        let sql = explain_plan_sql(
+            "SELECT employee_id FROM employees WHERE department_id = :1",
+            &table,
+            &statement_id,
+        );
+        assert_eq!(
+            sql,
+            "EXPLAIN PLAN SET STATEMENT_ID = 'OMCP_ABCDEFGHIJKLMNOPQRSTUVWX' INTO SYS.PLAN_TABLE$ FOR SELECT employee_id FROM employees WHERE department_id = :1"
+        );
+        assert!(!sql.contains("MAX(plan_id)"));
+    }
+
+    #[test]
+    fn plan_table_local_object_shadow_is_unavailable() {
+        let mut mock = PlanResolverMock::new(unique_plan_service());
+        mock.local_object = true;
+        let result = run_with_cx(|cx| async move { resolve_plan_table(&cx, &mock, None).await });
+        assert_eq!(result.unwrap_err().reason(), "callback_unprovable");
+    }
+
+    #[test]
+    fn plan_table_private_synonym_shadow_is_unavailable() {
+        let mut mock = PlanResolverMock::new(unique_plan_service());
+        mock.private_synonym = true;
+        let result = run_with_cx(|cx| async move { resolve_plan_table(&cx, &mock, None).await });
+        assert_eq!(result.unwrap_err().reason(), "callback_unprovable");
+    }
+
+    #[test]
+    fn plan_table_public_synonym_to_sys_plan_table_is_verified() {
+        let mock = PlanResolverMock::new(unique_plan_service());
+        let table = run_with_cx(|cx| async move {
+            resolve_plan_table(&cx, &mock, None)
+                .await
+                .expect("verified synonym")
+        });
+        assert!(table.is_standard_plan_table());
+        assert_eq!(table.object_id(), 42);
+    }
+
+    #[test]
+    fn plan_table_transaction_temporary_table_is_unavailable() {
+        let mut mock = PlanResolverMock::new(unique_plan_service());
+        mock.duration = "SYS$TRANSACTION";
+        let error =
+            run_with_cx(
+                |cx| async move { resolve_plan_table(&cx, &mock, None).await.unwrap_err() },
+            );
+        assert_eq!(error.reason(), "callback_unprovable");
+    }
+
+    #[test]
+    fn configured_plan_table_identity_drift_is_unavailable() {
+        let service = unique_plan_service();
+        let first = PlanResolverMock::new(service.clone());
+        run_with_cx(|cx| async move {
+            resolve_plan_table(&cx, &first, Some("APP.PLAN_TABLE"))
+                .await
+                .expect("first identity pinned");
+        });
+        let mut replacement = PlanResolverMock::new(service);
+        replacement.configured_object_id += 1;
+        let error = run_with_cx(|cx| async move {
+            resolve_plan_table(&cx, &replacement, Some("APP.PLAN_TABLE"))
+                .await
+                .unwrap_err()
+        });
+        assert_eq!(error.reason(), "identity_drift");
+    }
+
+    #[test]
+    fn configured_plan_table_enabled_trigger_is_unavailable() {
+        let mut mock = PlanResolverMock::new(unique_plan_service());
+        mock.configured_enabled_trigger = true;
+        let error = run_with_cx(|cx| async move {
+            resolve_plan_table(&cx, &mock, Some("APP.PLAN_TABLE"))
+                .await
+                .unwrap_err()
+        });
+        assert_eq!(error.reason(), "callback_unprovable");
     }
 
     #[test]

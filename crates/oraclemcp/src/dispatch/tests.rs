@@ -296,6 +296,48 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
     if normalized.contains("from session_roles") {
         return Some(Vec::new());
     }
+    if normalized.contains("data_type_owner is not null") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from all_synonyms where owner = 'public'")
+        && normalized.contains("synonym_name = 'plan_table'")
+    {
+        return Some(vec![semantic_row(&[
+            ("TABLE_OWNER", Some("SYS")),
+            ("TABLE_NAME", Some("PLAN_TABLE$")),
+            ("DB_LINK", None),
+        ])]);
+    }
+    if normalized.contains("from all_objects") && normalized.contains("object_name = 'plan_table'")
+    {
+        return Some(Vec::new());
+    }
+    if normalized.contains("from all_tab_cols")
+        && normalized.contains("where owner = :1 and table_name = :2")
+        && normalized.contains("order by column_id")
+    {
+        return Some(vec![semantic_row(&[
+            ("COLUMN_NAME", Some("ID")),
+            ("DATA_TYPE", Some("NUMBER")),
+            ("DATA_LENGTH", Some("22")),
+            ("NULLABLE", Some("N")),
+            ("DATA_DEFAULT", None),
+            ("VIRTUAL_COLUMN", Some("NO")),
+            ("HIDDEN_COLUMN", Some("NO")),
+            ("USER_GENERATED", Some("YES")),
+        ])]);
+    }
+    if normalized.contains("from all_indexes") && normalized.contains("ityp_owner") {
+        return Some(Vec::new());
+    }
+    if normalized.contains("t.owner = 'sys'") && normalized.contains("t.table_name = 'plan_table$'")
+    {
+        return Some(vec![semantic_row(&[
+            ("TEMPORARY", Some("Y")),
+            ("DURATION", Some("SYS$SESSION")),
+            ("OBJECT_ID", Some("901")),
+        ])]);
+    }
     if normalized.contains("from all_objects")
         && normalized.contains("object_id, status, edition_name")
     {
@@ -2070,6 +2112,12 @@ fn catalog_extract_empty_rowset(sql_lower: &str) -> bool {
         "from all_editions",
         "from all_editioning_views",
         "from all_policies",
+        "from all_associations",
+        "from all_sa_table_policies",
+        "from all_sa_schema_policies",
+        "from all_xs_applied_policies",
+        "from redaction_policies",
+        "from all_operators",
         "from all_dependencies",
         "from all_plsql_object_settings",
         "from all_identifiers",
@@ -2549,6 +2597,8 @@ struct ExecState {
     /// enforced if its predicate is in the SQL the database sees.
     queried: Mutex<Vec<String>>,
     execute_error: Mutex<Option<DbError>>,
+    explain_display_error: AtomicBool,
+    explain_read_only_transaction_error: AtomicBool,
     diagnostics: Mutex<Vec<OracleRow>>,
     dbms_output: Mutex<DbmsOutput>,
     describe_calls: AtomicUsize,
@@ -2933,6 +2983,13 @@ impl OracleConnection for ExecRecordingMock {
             .lock()
             .expect("query mutex")
             .push(sql.to_owned());
+        if sql.to_ascii_lowercase().contains("dbms_xplan.display")
+            && self.state.explain_display_error.load(Ordering::SeqCst)
+        {
+            return Err(DbError::ServerQuery(
+                "ORA-00942: diagnostic plan display unavailable".to_owned(),
+            ));
+        }
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
@@ -2968,6 +3025,17 @@ impl OracleConnection for ExecRecordingMock {
             .lock()
             .expect("exec mutex")
             .push((sql.to_owned(), b.to_vec()));
+        if sql.starts_with("EXPLAIN PLAN")
+            && self
+                .state
+                .explain_read_only_transaction_error
+                .load(Ordering::SeqCst)
+        {
+            return Err(DbError::ServerExecute(
+                "ORA-01456: may not perform a DDL, commit or rollback inside a READ ONLY transaction"
+                    .to_owned(),
+            ));
+        }
         if let Some(error) = self
             .state
             .execute_error
@@ -10002,7 +10070,13 @@ impl OracleConnection for QueryCostQuotaMock {
     }
 
     async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-        Ok(OracleConnectionInfo::default())
+        Ok(OracleConnectionInfo {
+            session_user: Some("APP".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            db_unique_name: Some("MOCKDB".to_owned()),
+            service_name: Some("MOCKSVC".to_owned()),
+            ..OracleConnectionInfo::default()
+        })
     }
 
     async fn query_rows(
@@ -10023,7 +10097,7 @@ impl OracleConnection for QueryCostQuotaMock {
                 )],
             }]);
         }
-        if normalized.contains("from plan_table") {
+        if normalized.contains("from sys.plan_table$") {
             return Ok(vec![plan_cost_row(Some("0"), Some("1"))]);
         }
         if sql.contains("SELECT 1 FROM dual") {
@@ -10227,7 +10301,13 @@ impl OracleConnection for QueryCostGateMock {
     }
 
     async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-        Ok(OracleConnectionInfo::default())
+        Ok(OracleConnectionInfo {
+            session_user: Some("APP".to_owned()),
+            current_schema: Some("APP".to_owned()),
+            db_unique_name: Some("MOCKDB".to_owned()),
+            service_name: Some("MOCKSVC".to_owned()),
+            ..OracleConnectionInfo::default()
+        })
     }
 
     async fn query_rows(
@@ -10248,7 +10328,7 @@ impl OracleConnection for QueryCostGateMock {
                 )],
             }]);
         }
-        if normalized.contains("from plan_table") {
+        if normalized.contains("from sys.plan_table$") {
             self.state.plan_cost_reads.fetch_add(1, Ordering::SeqCst);
             return match self.state.root {
                 PlanCostFixture::Root(cost) => Ok(vec![plan_cost_row(
@@ -10293,7 +10373,7 @@ impl OracleConnection for QueryCostGateMock {
     }
 
     async fn execute(&self, _cx: &Cx, sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
-        if sql.starts_with("EXPLAIN PLAN FOR") {
+        if sql.starts_with("EXPLAIN PLAN SET STATEMENT_ID") {
             self.state.explain_writes.fetch_add(1, Ordering::SeqCst);
         }
         Ok(0)
@@ -11558,21 +11638,176 @@ fn explain_plan_executes_only_with_read_write_and_explicit_allow() {
     assert_eq!(out["diagnostic_write"]["statement"], json!("EXPLAIN PLAN"));
     assert_eq!(out["diagnostic_write"]["writes"], json!("PLAN_TABLE"));
     assert_eq!(
+        out["diagnostic_write"]["savepoint"],
+        json!("OMCP_EXPLAIN_PLAN")
+    );
+    assert_eq!(
         out["diagnostic_write"]["required_level"],
         json!("READ_WRITE")
     );
     assert_eq!(out["diagnostic_write"]["explicitly_allowed"], json!(true));
     assert_eq!(out["diagnostic_write"]["rolled_back"], json!(true));
-    assert_eq!(
-        state.rollbacks.load(Ordering::SeqCst),
-        1,
-        "PLAN_TABLE diagnostic rows are always rolled back after capture"
+    let statement_id = out["diagnostic_write"]["statement_id"]
+        .as_str()
+        .expect("generated plan statement id");
+    assert_eq!(statement_id.len(), 29);
+    assert!(statement_id.starts_with("OMCP_"));
+    assert!(
+        statement_id[5..]
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
     );
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
 
     let executed = state.executed.lock().expect("exec mutex");
-    assert_eq!(executed.len(), 1);
-    assert_eq!(executed[0].0, "EXPLAIN PLAN FOR SELECT 1 FROM dual");
-    assert_eq!(executed[0].1, Vec::<OracleBind>::new());
+    assert_eq!(executed.len(), 3);
+    assert_eq!(executed[0].0, "SAVEPOINT OMCP_EXPLAIN_PLAN");
+    assert!(
+        executed[1]
+            .0
+            .starts_with("EXPLAIN PLAN SET STATEMENT_ID = 'OMCP_")
+    );
+    assert!(
+        executed[1]
+            .0
+            .ends_with(" INTO SYS.PLAN_TABLE$ FOR SELECT 1 FROM dual")
+    );
+    assert!(executed[1].1.is_empty());
+    assert_eq!(executed[2].0, "ROLLBACK TO SAVEPOINT OMCP_EXPLAIN_PLAN");
+}
+
+#[test]
+fn explain_plan_audit_binds_savepoint_and_rollback_transcript() {
+    use oraclemcp_audit::{AuditError, AuditOutcome, AuditRecord, AuditSink, MemoryAuditSink};
+
+    struct SharedSink(Arc<MemoryAuditSink>);
+    impl AuditSink for SharedSink {
+        fn append(&self, record: &AuditRecord) -> Result<(), AuditError> {
+            self.0.append(record)
+        }
+
+        fn append_with_verdict_certificate(
+            &self,
+            record: &AuditRecord,
+            certificate: &oraclemcp_audit::BoundAuditVerdictCertificate,
+        ) -> Result<(), AuditError> {
+            self.0.append_with_verdict_certificate(record, certificate)
+        }
+
+        fn flush(&self) -> Result<(), AuditError> {
+            self.0.flush()
+        }
+    }
+
+    let state = Arc::new(ExecState::default());
+    let sink = Arc::new(MemoryAuditSink::new());
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(Arc::clone(&sink))),
+        oraclemcp_audit::SigningKey::new(
+            "explain-savepoint-test",
+            b"explain-savepoint-audit-test-key-123".to_vec(),
+        )
+        .expect("valid signing key"),
+    ));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state)),
+        Some("dev".to_owned()),
+        read_write_level(),
+    )
+    .with_auditor(auditor);
+
+    let out = dispatcher
+        .dispatch(
+            "oracle_explain_plan",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect("READ_WRITE + explicit diagnostic write runs explain plan");
+    let statement_id = out["diagnostic_write"]["statement_id"]
+        .as_str()
+        .expect("generated plan statement id");
+    let transcript = format!(
+        "SAVEPOINT OMCP_EXPLAIN_PLAN; EXPLAIN PLAN SET STATEMENT_ID = '{statement_id}' INTO SYS.PLAN_TABLE$ FOR SELECT 1 FROM dual; ROLLBACK TO SAVEPOINT OMCP_EXPLAIN_PLAN"
+    );
+    let records = sink.records();
+    assert_eq!(records.len(), 2, "pending and terminal audit records");
+    assert!(records.iter().all(|record| {
+        record.tool == "oracle_explain_plan"
+            && record.decision == oraclemcp_audit::AuditDecision::Allowed
+            && record.sql_sha256 == oraclemcp_audit::sha256_hex(transcript.as_bytes())
+    }));
+    assert_eq!(records[0].outcome, AuditOutcome::Pending);
+    assert_eq!(records[1].outcome, AuditOutcome::RolledBack);
+}
+
+#[test]
+fn explain_always_rolls_back_to_savepoint_on_error() {
+    let state = Arc::new(ExecState::default());
+    state.explain_display_error.store(true, Ordering::SeqCst);
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let err = dispatcher
+        .dispatch(
+            "oracle_explain_plan",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect_err("a display error must be returned after rollback to the EXPLAIN savepoint");
+    assert!(err.message.contains("ORA-00942"));
+    let executed = state.executed.lock().expect("exec mutex");
+    assert_eq!(executed.len(), 3);
+    assert_eq!(executed[0].0, "SAVEPOINT OMCP_EXPLAIN_PLAN");
+    assert!(
+        executed[1]
+            .0
+            .starts_with("EXPLAIN PLAN SET STATEMENT_ID = 'OMCP_")
+    );
+    assert_eq!(executed[2].0, "ROLLBACK TO SAVEPOINT OMCP_EXPLAIN_PLAN");
+}
+
+#[test]
+fn explain_read_only_transaction_error_is_typed_and_keeps_backstop_armed() {
+    let state = Arc::new(ExecState::default());
+    state
+        .explain_read_only_transaction_error
+        .store(true, Ordering::SeqCst);
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+    let err = dispatcher
+        .dispatch(
+            "oracle_explain_plan",
+            json!({
+                "sql": "SELECT 1 FROM dual",
+                "allow_plan_table_write": true
+            }),
+        )
+        .expect_err("ORA-01456 must become typed unavailable");
+    assert_eq!(err.error_class, ErrorClass::RuntimeStateRequired);
+    assert_eq!(
+        err.structured_reason
+            .as_ref()
+            .and_then(|reason| reason.offending_construct.as_deref()),
+        Some("read_only_txn")
+    );
+    let executed = state.executed.lock().expect("exec mutex");
+    assert_eq!(executed.len(), 3);
+    assert_eq!(executed[0].0, "SAVEPOINT OMCP_EXPLAIN_PLAN");
+    assert!(
+        executed[1]
+            .0
+            .starts_with("EXPLAIN PLAN SET STATEMENT_ID = 'OMCP_")
+    );
+    assert_eq!(executed[2].0, "ROLLBACK TO SAVEPOINT OMCP_EXPLAIN_PLAN");
 }
 
 #[test]
@@ -15463,9 +15698,8 @@ fn an_open_workspace_refuses_every_committing_path() {
     assert_eq!(state.commits.load(Ordering::SeqCst), 1);
 }
 
-/// The other transaction-ending operations destroy held work rather than commit
-/// it, so they are refused for honesty: an agent's uncommitted work is never
-/// silently discarded by a diagnostic or a flashback read.
+/// EXPLAIN uses a savepoint and preserves held work; flashback reads that reset
+/// the transaction are refused while an agent has uncommitted work.
 #[test]
 fn an_open_workspace_refuses_the_paths_that_reset_the_transaction() {
     let state = Arc::new(ExecState::default());
@@ -15474,11 +15708,25 @@ fn an_open_workspace_refuses_the_paths_that_reset_the_transaction() {
         .dispatch("oracle_checkpoint", json!({ "name": "cp" }))
         .expect("checkpoint");
 
-    for (tool, args) in [
-        (
+    let held_confirm = preview_hold_confirm(&dispatcher, "DELETE FROM audit_log", json!([]));
+    dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": "DELETE FROM audit_log", "hold": true, "confirm": held_confirm }),
+        )
+        .expect("held DML");
+
+    let explained = dispatcher
+        .dispatch(
             "oracle_explain_plan",
             json!({ "sql": "SELECT 1 FROM dual", "allow_plan_table_write": true }),
-        ),
+        )
+        .expect("savepoint-scoped EXPLAIN preserves the open workspace");
+    assert_eq!(explained["diagnostic_write"]["rolled_back"], json!(true));
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+
+    for (tool, args) in [
         (
             "oracle_query",
             json!({ "sql": "SELECT 1 FROM dual", "as_of": { "scn": 42 } }),
@@ -15498,6 +15746,11 @@ fn an_open_workspace_refuses_the_paths_that_reset_the_transaction() {
             "{tool}"
         );
     }
+    let undo = dispatcher
+        .dispatch("oracle_undo_to", json!({}))
+        .expect("held work remains available to undo after EXPLAIN");
+    assert_eq!(undo["discarded_statements"], json!(1));
+    assert_eq!(undo["workspace"]["open"], json!(false));
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
 }
 
