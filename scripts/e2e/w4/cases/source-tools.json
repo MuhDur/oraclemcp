@@ -2498,6 +2498,32 @@
     }
   },
   {
+    "case_id": "w4_get_source_argument_class",
+    "tool": "oracle_get_source",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "name": "W4_${run_id}_VIEW",
+        "object_type": "VIEW"
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
     "case_id": "w4_get_ddl_table",
     "tool": "oracle_get_ddl",
     "level": "READ_ONLY",

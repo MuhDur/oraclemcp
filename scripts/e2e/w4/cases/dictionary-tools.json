@@ -1201,6 +1201,94 @@
   "audit_zero_executions": true
  },
  {
+  "case_id": "w4_sample_rows_generated_refusal",
+  "tool": "oracle_sample_rows",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [],
+  "setup": [
+   {
+    "sql": "CREATE OR REPLACE FUNCTION ${owner}.D7_GEN_F_${run_id}(P_ID NUMBER) RETURN NUMBER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (P_ID); COMMIT; RETURN P_ID; END;"
+   },
+   {
+    "sql": "CREATE OR REPLACE VIEW ${owner}.W4_${run_id}_POLICY AS SELECT ID, ${owner}.D7_GEN_F_${run_id}(ID) AS POLICY_VAL FROM ${owner}.T_PARENT_${run_id}"
+   }
+  ],
+  "call": {
+   "arguments": {
+    "owner": "${owner}",
+    "table": "W4_${run_id}_POLICY",
+    "max_rows": 5
+   }
+  },
+  "expect": {
+   "error_class": "FORBIDDEN_STATEMENT",
+   "reason_code": "unresolved semantic read dependency"
+  },
+  "db_reread": [
+   {
+    "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+    "rows": [
+     [
+      0
+     ]
+    ]
+   }
+  ],
+  "audit_expect": [],
+  "on_unsupported": {
+   "error_class": "INVALID_ARGUMENTS"
+  },
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ROWNUM <= 1",
+  "audit_zero_executions": true
+ },
+ {
+  "case_id": "w4_query_audit_failure_cause",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": [
+   "stdio",
+   "http"
+  ],
+  "requires": [],
+  "setup": [],
+  "call": {
+   "arguments": {
+    "sql": "SELECT 1 / 0 FROM ${owner}.T_PARENT_${run_id}"
+   }
+  },
+  "expect": {
+   "error_class": "INTERNAL",
+   "ora_code": 1476
+  },
+  "db_reread": [],
+  "audit_expect": [
+   {
+    "tool": "oracle_query",
+    "decision": "ALLOWED",
+    "outcome": "PENDING",
+    "sql_preview": "<sql text redacted; see sql_sha256>"
+   },
+   {
+    "tool": "oracle_query",
+    "decision": "ALLOWED",
+    "outcome": "FAILED",
+    "sql_preview": "<sql text redacted; see sql_sha256>",
+    "failure": {
+     "error_class": "INTERNAL",
+     "ora_code": 1476
+    }
+   }
+  ],
+  "on_unsupported": {
+   "error_class": "INVALID_ARGUMENTS"
+  }
+ },
+ {
   "case_id": "w4_sample_rows_types_exact_values",
   "tool": "oracle_sample_rows",
   "level": "READ_ONLY",
