@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T07:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.3",
+  "scope": {
+    "summary": "Engine (plsql-intelligence @ 27806fbeff15c73135df0e71d529d6bfa346a90e, on engine main): source-backed RoutineEffectsV1 and InvocationClosureV1, explicit Unknown on unresolved effects, exhaustive construct-to-effect mapping, typed depgraph edges, exact identity/overload/default closure. No oraclemcp files are changed by this bead.",
+    "in_scope": [],
+    "out_of_scope": [
+      "plsql-accretion crate tests were excluded from the orchestrator run: its usr_gate.sh-invoking tests recurse without bound through cargo-mutants on this host (filed oraclemcp-hxty7). The crate is untouched by 27806fb.",
+      "Runtime behaviour on Oracle and catalog freshness (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "54a563bec6f0789c89eb3ec8f2004cc9f468c691",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "engine workspace tests",
+        "kind": "cli",
+        "trace": "Orchestrator run in a clean detached engine worktree (plsql-intelligence-orch-verify) at 27806fb, build lease held: cargo test --workspace --exclude plsql-accretion --no-fail-fast -> 1738 passed, 6 failed. All 6 failures were plsql-cicd plsql_cli tests reporting \"read repository file: NotFound\". They were traced to test binaries that a runaway cargo-mutants process had built into the shared target dir with a since-deleted /tmp CARGO_MANIFEST_DIR. Re-run from a fresh target dir at 27806fb: cargo test -p plsql-cicd --test plsql_cli -> 11 passed, 0 failed."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "gap3_routine_without_edges_is_not_proven, construct_to_effect_mapping_is_exhaustive and explicit_argument_does_not_evaluate_default ok; invocation_effects suite 41 passed, 0 failed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Proof class unit (engine), per the bead. Verified by the orchestrator by re-execution, independent of the implementing pane. UBS triage findings were filed separately by the implementer (oraclemcp-puu28, oraclemcp-jcp1h)."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "oraclemcp-hxty7"
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
