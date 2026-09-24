@@ -117,9 +117,9 @@ pub use connection::{
     DRIVER_VERSION, DbRequestQuota, DbmsOutput, ExecuteOutcome, OracleBackendCapabilities,
     OracleBackendRegistration, OracleConnection, OracleConnectionCapability, OracleRoutineArg,
     QueryRowStream, QueryRowStreamStart, RustOracleConnection, WalletCertValidity,
-    WalletFileChoice, WalletResolutionReport, WalletResolveError, connect_oracle,
-    connection_backend_registry, resolve_wallet_choice, select_connection_backend,
-    selected_endpoint_uses_tcps, wallet_certificate_validity,
+    WalletFileChoice, WalletFileReadError, WalletResolutionReport, WalletResolveError,
+    connect_oracle, connection_backend_registry, read_wallet_file_bounded, resolve_wallet_choice,
+    select_connection_backend, selected_endpoint_uses_tcps, wallet_certificate_validity,
 };
 pub use doctor::{OracleDriverPosture, detect_oracle_driver, oracle_driver_compiled};
 pub use drcp::{DrcpConfig, SessionPurity};

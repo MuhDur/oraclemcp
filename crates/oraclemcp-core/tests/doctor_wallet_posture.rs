@@ -273,6 +273,91 @@ fn wallet_posture_rejects_an_oversized_sole_sso() {
     );
 }
 
+#[cfg(unix)]
+#[test]
+fn doctor_wallet_posture_refuses_fifo_wallet_without_hanging() {
+    for (filename, password) in [
+        ("ewallet.pem", None),
+        ("ewallet.p12", Some("synthetic-password")),
+        ("cwallet.sso", None),
+    ] {
+        let started = std::time::Instant::now();
+        let dir = tempdir().expect("temporary wallet directory");
+        let path = dir.path().join(filename);
+        let status = Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .expect("run mkfifo for blocking wallet fixture");
+        assert!(status.success(), "mkfifo must create {filename}");
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let wallet_dir = dir.path().to_owned();
+        let worker = std::thread::spawn(move || {
+            sender
+                .send(probe_wallet_posture(&wallet_dir, password))
+                .expect("test receiver remains available");
+        });
+        let report = match receiver.recv_timeout(Duration::from_secs(2)) {
+            Ok(report) => report,
+            Err(timeout) => {
+                drop(
+                    File::options()
+                        .write(true)
+                        .open(&path)
+                        .expect("open FIFO writer to release blocked reader"),
+                );
+                let _ = receiver.recv_timeout(Duration::from_secs(2));
+                worker.join().expect("reader exits after watchdog release");
+                panic!("doctor wallet posture blocked on {filename} FIFO: {timeout}");
+            }
+        };
+        worker.join().expect("doctor wallet probe exits");
+        assert_eq!(report.posture, DoctorWalletPosture::WalletLoadWouldFail);
+        assert_eq!(report.failed_file, Some(filename));
+        assert_eq!(
+            report.error_kind,
+            Some(DoctorWalletErrorKind::NotRegularFile)
+        );
+        assert_eq!(
+            report.summary,
+            "wallet load would fail: NotRegularFile, no auto-login fallback"
+        );
+        println!(
+            "{{\"case_id\":\"doctor_wallet_posture_refuses_fifo_without_hanging\",\"wallet_file\":\"{filename}\",\"file_kind\":\"fifo\",\"expected\":\"refused\",\"actual\":\"NotRegularFile\",\"elapsed_ms\":{}}}",
+            started.elapsed().as_millis()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_wallet_posture_refuses_symlinked_wallet() {
+    use std::os::unix::fs::symlink;
+
+    let started = std::time::Instant::now();
+    let dir = tempdir().expect("temporary wallet directory");
+    let target = wallet_fixture_dir("expired_cert").join("ewallet.pem");
+    let link = dir.path().join("ewallet.pem");
+    symlink(target, &link).expect("create symlink to a valid regular wallet");
+
+    let report = probe_wallet_posture(dir.path(), None);
+
+    assert_eq!(report.posture, DoctorWalletPosture::WalletLoadWouldFail);
+    assert_eq!(report.failed_file, Some("ewallet.pem"));
+    assert_eq!(
+        report.error_kind,
+        Some(DoctorWalletErrorKind::NotRegularFile)
+    );
+    assert_eq!(
+        report.summary,
+        "wallet load would fail: NotRegularFile, no auto-login fallback"
+    );
+    println!(
+        "{{\"case_id\":\"doctor_wallet_posture_refuses_symlinked_wallet\",\"wallet_file\":\"ewallet.pem\",\"file_kind\":\"symlink\",\"expected\":\"refused\",\"actual\":\"NotRegularFile\",\"elapsed_ms\":{}}}",
+        started.elapsed().as_millis()
+    );
+}
+
 fn run_doctor_blocking(ctx: &DoctorContext<'_>) -> oraclemcp_core::doctor::DoctorReport {
     let runtime = RuntimeBuilder::current_thread()
         .build()

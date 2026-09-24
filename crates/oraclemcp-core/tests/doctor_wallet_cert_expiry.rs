@@ -51,13 +51,15 @@ fn now_unix_secs() -> i64 {
 #[test]
 fn seam_reads_wallet_certificate_validity_offline() {
     let expired =
-        oraclemcp_db::wallet_certificate_validity(&wallet_fixture_dir("expired_cert"), None);
+        oraclemcp_db::wallet_certificate_validity(&wallet_fixture_dir("expired_cert"), None)
+            .expect("valid regular expired-cert fixture can be read");
     assert!(
         expired.iter().any(|c| c.not_after == EXPIRED_NOT_AFTER),
         "expired fixture must expose its minted notAfter (got {expired:?})"
     );
 
-    let healthy = oraclemcp_db::wallet_certificate_validity(&wallet_fixture_dir("good_sso"), None);
+    let healthy = oraclemcp_db::wallet_certificate_validity(&wallet_fixture_dir("good_sso"), None)
+        .expect("valid regular SSO fixture can be read");
     assert!(
         !healthy.is_empty(),
         "good_sso auto-login wallet must expose at least one certificate"

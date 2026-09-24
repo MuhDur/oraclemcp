@@ -1520,6 +1520,7 @@ fn now_unix_secs() -> i64 {
 /// `None` when the wallet holds no parseable certificate.
 fn wallet_cert_expiry(dir: &Path, password: Option<&str>) -> Option<DoctorWalletCertExpiry> {
     let earliest = oraclemcp_db::wallet_certificate_validity(dir, password)
+        .ok()?
         .into_iter()
         .map(|c| c.not_after)
         .min()?;
@@ -1657,6 +1658,8 @@ pub enum DoctorWalletErrorKind {
     FileMissing,
     /// The wallet file could not be read.
     Io,
+    /// The wallet path referred to a symlink or non-regular filesystem object.
+    NotRegularFile,
     /// `ewallet.pem` was present but malformed or held an unsupported key shape.
     Pem,
     /// The wallet had no usable trust-anchor certificate.
@@ -1781,6 +1784,21 @@ fn wallet_error_kind(
     }
 }
 
+/// Map the server-owned filesystem refusal into the same secret-free posture
+/// vocabulary without depending on an unreleased driver crate variant.
+fn wallet_read_error_kind(error: &oraclemcp_db::WalletFileReadError) -> DoctorWalletErrorKind {
+    use oraclemcp_db::WalletFileReadError;
+    match error {
+        WalletFileReadError::NotRegularFile { .. } => DoctorWalletErrorKind::NotRegularFile,
+        WalletFileReadError::FileMissing { .. } => DoctorWalletErrorKind::FileMissing,
+        WalletFileReadError::Io { source, .. } if source.kind() == std::io::ErrorKind::NotFound => {
+            DoctorWalletErrorKind::FileMissing
+        }
+        WalletFileReadError::Io { .. } => DoctorWalletErrorKind::Io,
+        WalletFileReadError::TooLarge { .. } => DoctorWalletErrorKind::TooLarge,
+    }
+}
+
 /// A present-but-unusable primary wallet is eligible to fall through to an
 /// auto-login `cwallet.sso` iff its failure class is one the driver's
 /// `load_wallet` treats as fallthrough-eligible. An I/O or malformed-container
@@ -1802,6 +1820,7 @@ fn wallet_error_label(kind: DoctorWalletErrorKind) -> &'static str {
     match kind {
         DoctorWalletErrorKind::FileMissing => "FileMissing",
         DoctorWalletErrorKind::Io => "Io",
+        DoctorWalletErrorKind::NotRegularFile => "NotRegularFile",
         DoctorWalletErrorKind::Pem => "Pem",
         DoctorWalletErrorKind::NoCertificates => "NoCertificates",
         DoctorWalletErrorKind::Sso => "Sso",
@@ -1838,8 +1857,7 @@ pub fn probe_wallet_posture(
 ) -> DoctorWalletPostureReport {
     use oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso;
     use oraclemcp_driver_cx_protocol::tls::wallet::{
-        p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, read_wallet_file,
-        sso_wallet_path,
+        p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, sso_wallet_path,
     };
 
     // The auto-login cwallet.sso is "usable" iff it exists AND parses end to end
@@ -1852,10 +1870,10 @@ pub fn probe_wallet_posture(
         if !sso_path.exists() {
             return Ok(None);
         }
-        read_wallet_file(&sso_path)
-            .and_then(|bytes| parse_cwallet_sso(&bytes))
+        oraclemcp_db::read_wallet_file_bounded(&sso_path)
+            .map_err(|error| wallet_read_error_kind(&error))
+            .and_then(|bytes| parse_cwallet_sso(&bytes).map_err(|error| wallet_error_kind(&error)))
             .map(|_| Some(()))
-            .map_err(|error| wallet_error_kind(&error))
     };
 
     // The primary wallet, in the driver's exact precedence order: ewallet.pem
@@ -1865,16 +1883,20 @@ pub fn probe_wallet_posture(
     let pem_path = pem_wallet_path(dir);
     let p12_path = p12_wallet_path(dir);
     let probe_pem = |password: Option<&str>| {
-        read_wallet_file(&pem_path)
-            .and_then(|bytes| parse_ewallet_pem(&bytes, password))
+        oraclemcp_db::read_wallet_file_bounded(&pem_path)
+            .map_err(|error| wallet_read_error_kind(&error))
+            .and_then(|bytes| {
+                parse_ewallet_pem(&bytes, password).map_err(|error| wallet_error_kind(&error))
+            })
             .map(|_| ())
-            .map_err(|error| wallet_error_kind(&error))
     };
     let probe_p12 = |password: Option<&str>| {
-        read_wallet_file(&p12_path)
-            .and_then(|bytes| parse_ewallet_p12(&bytes, password))
+        oraclemcp_db::read_wallet_file_bounded(&p12_path)
+            .map_err(|error| wallet_read_error_kind(&error))
+            .and_then(|bytes| {
+                parse_ewallet_p12(&bytes, password).map_err(|error| wallet_error_kind(&error))
+            })
             .map(|_| ())
-            .map_err(|error| wallet_error_kind(&error))
     };
     let primary: Option<(&'static str, Result<(), DoctorWalletErrorKind>)> = if pem_path.exists() {
         Some(("ewallet.pem", probe_pem(wallet_password)))
@@ -2064,6 +2086,8 @@ fn classify_wallet_error(error: &str) -> Option<DoctorWalletDiagnostic> {
         (DoctorWalletErrorKind::Sso, None)
     } else if lower.contains("wallet file is missing") {
         (DoctorWalletErrorKind::FileMissing, None)
+    } else if lower.contains("wallet file is not a regular file") {
+        (DoctorWalletErrorKind::NotRegularFile, None)
     } else if lower.contains("failed to read wallet file") {
         (DoctorWalletErrorKind::Io, None)
     } else if lower.contains("failed to parse wallet pem") {
@@ -2093,6 +2117,9 @@ fn wallet_connectivity_fix(wallet: &DoctorWalletDiagnostic) -> &'static str {
         }
         DoctorWalletErrorKind::Io => {
             "verify wallet file permissions and readability for the oraclemcp service user"
+        }
+        DoctorWalletErrorKind::NotRegularFile => {
+            "replace the symlink or special filesystem object with a regular wallet file"
         }
         DoctorWalletErrorKind::Pem => {
             "regenerate ewallet.pem with valid PEM certificate material and an unencrypted private key if mTLS is required"
@@ -2235,6 +2262,7 @@ fn connectivity_failure_class(error: &str) -> ErrorClass {
             | DoctorWalletErrorKind::TooLarge => ErrorClass::InvalidArguments,
             DoctorWalletErrorKind::FileMissing
             | DoctorWalletErrorKind::Io
+            | DoctorWalletErrorKind::NotRegularFile
             | DoctorWalletErrorKind::Pem
             | DoctorWalletErrorKind::NoCertificates
             | DoctorWalletErrorKind::Sso => ErrorClass::ConnectionFailed,
@@ -4345,6 +4373,7 @@ mod tests {
             match error {
                 WalletError::FileMissing(_) => DoctorWalletErrorKind::FileMissing,
                 WalletError::Io { .. } => DoctorWalletErrorKind::Io,
+                WalletError::NotRegularFile => DoctorWalletErrorKind::NotRegularFile,
                 WalletError::TooLarge { .. } => DoctorWalletErrorKind::TooLarge,
                 WalletError::Pem(_) => DoctorWalletErrorKind::Pem,
                 WalletError::NoCertificates => DoctorWalletErrorKind::NoCertificates,

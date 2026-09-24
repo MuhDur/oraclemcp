@@ -55,6 +55,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 #[cfg(feature = "test-utils")]
 use std::collections::VecDeque;
+use std::fmt;
+use std::io::Read;
 use std::path::PathBuf;
 #[cfg(feature = "test-utils")]
 use std::sync::atomic::AtomicUsize;
@@ -68,6 +70,7 @@ const CLEANUP_MASKED_POLLS: u32 = 100;
 /// standing query subscription has no server-side expiry. The subscription
 /// registry accounts its EMON connection before the receiver is opened.
 const CQN_SUBSCRIPTION_TIMEOUT_SECONDS: u32 = 0;
+const MAX_WALLET_FILE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Opaque Oracle identity for one QUERY-level CQN registration.
 ///
@@ -299,41 +302,53 @@ pub struct WalletCertValidity {
 ///
 /// Purely offline — it reads and parses the wallet files' bytes; it never opens
 /// a DB connection or touches the network. Returns an empty vector when no
-/// wallet file parses (there are then no certificates to age-check). Never
-/// surfaces a wallet path, password, or key material.
-#[must_use]
+/// wallet file parses (there are then no certificates to age-check). A typed
+/// error is returned for unreadable or non-regular wallet files, including
+/// symlinks and FIFOs. Never surfaces a path, password, or key material in the
+/// error's Display or Debug representation.
 pub fn wallet_certificate_validity(
     dir: &std::path::Path,
     password: Option<&str>,
-) -> Vec<WalletCertValidity> {
+) -> Result<Vec<WalletCertValidity>, WalletFileReadError> {
     use oraclemcp_driver_cx_protocol::tls::sso::parse_cwallet_sso;
     use oraclemcp_driver_cx_protocol::tls::wallet::{
-        p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path, sso_wallet_path,
+        WalletContents, p12_wallet_path, parse_ewallet_p12, parse_ewallet_pem, pem_wallet_path,
+        sso_wallet_path,
     };
+
+    fn read_candidate(path: &std::path::Path) -> Result<Option<Vec<u8>>, WalletFileReadError> {
+        match read_wallet_file_bounded(path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(WalletFileReadError::Io { source, .. })
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Ok(None)
+            }
+            Err(WalletFileReadError::FileMissing { .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
 
     // Precedence: the first wallet file that parses to usable contents supplies
     // the certificates (mirrors the driver's wallet precedence). A
     // password-less `ewallet.p12` is never selected as primary — matching
     // `load_wallet`'s `have_p12 && password.is_some()`.
-    let contents = std::fs::read(pem_wallet_path(dir))
-        .ok()
-        .and_then(|bytes| parse_ewallet_pem(&bytes, password).ok())
-        .or_else(|| {
-            if password.is_some() {
-                std::fs::read(p12_wallet_path(dir))
-                    .ok()
-                    .and_then(|bytes| parse_ewallet_p12(&bytes, password).ok())
-            } else {
-                None
-            }
-        })
-        .or_else(|| {
-            std::fs::read(sso_wallet_path(dir))
-                .ok()
-                .and_then(|bytes| parse_cwallet_sso(&bytes).ok())
-        });
+    let pem = read_candidate(&pem_wallet_path(dir))?
+        .and_then(|bytes| parse_ewallet_pem(&bytes, password).ok());
+    let p12 = if pem.is_none() && password.is_some() {
+        read_candidate(&p12_wallet_path(dir))?
+            .and_then(|bytes| parse_ewallet_p12(&bytes, password).ok())
+    } else {
+        None
+    };
+    let sso = if pem.is_none() && p12.is_none() {
+        read_candidate(&sso_wallet_path(dir))?.and_then(|bytes| parse_cwallet_sso(&bytes).ok())
+    } else {
+        None
+    };
+    let contents: Option<WalletContents> = pem.or(p12).or(sso);
 
-    match contents {
+    Ok(match contents {
         Some(contents) => contents
             .certificate_metadata()
             .into_iter()
@@ -343,8 +358,130 @@ pub fn wallet_certificate_validity(
             })
             .collect(),
         None => Vec::new(),
+    })
+}
+
+/// Typed error from the server-owned wallet file reader.
+#[derive(thiserror::Error)]
+pub enum WalletFileReadError {
+    /// The wallet path resolved to a symlink, directory, device, FIFO, or socket.
+    #[error("wallet file is not a regular file: {path}")]
+    NotRegularFile { path: String },
+    /// The wallet file does not exist.
+    #[error("wallet file is missing: {path}")]
+    FileMissing { path: String },
+    /// The wallet file could not be opened or read.
+    #[error("failed to read wallet file {path}: {source}")]
+    Io {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+    /// The wallet file exceeded its existing 16 MiB bound.
+    #[error("wallet file exceeds the maximum size of {maximum_bytes} bytes")]
+    TooLarge { maximum_bytes: usize },
+}
+
+impl fmt::Debug for WalletFileReadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        const REDACTED: &str = "***redacted***";
+        match self {
+            Self::NotRegularFile { .. } => f
+                .debug_struct("NotRegularFile")
+                .field("path", &REDACTED)
+                .finish(),
+            Self::FileMissing { .. } => f
+                .debug_struct("FileMissing")
+                .field("path", &REDACTED)
+                .finish(),
+            Self::Io { source, .. } => f
+                .debug_struct("Io")
+                .field("path", &REDACTED)
+                .field("kind", &source.kind())
+                .finish(),
+            Self::TooLarge { maximum_bytes } => f
+                .debug_struct("TooLarge")
+                .field("maximum_bytes", maximum_bytes)
+                .finish(),
+        }
     }
 }
+
+/// Open and read one wallet file using no-follow, non-blocking semantics.
+/// The opened handle is verified as a regular file before any bytes are read.
+/// This is the one server-owned reader shared by doctor and certificate
+/// diagnostics, with the same 16 MiB cap as the driver.
+pub fn read_wallet_file_bounded(path: &std::path::Path) -> Result<Vec<u8>, WalletFileReadError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS);
+    }
+
+    let path_text = path.display().to_string();
+    let file = options.open(path).map_err(|source| {
+        #[cfg(unix)]
+        if source.raw_os_error() == Some(libc::ELOOP) {
+            return WalletFileReadError::NotRegularFile {
+                path: path_text.clone(),
+            };
+        }
+        if source.kind() == std::io::ErrorKind::NotFound {
+            return WalletFileReadError::FileMissing {
+                path: path_text.clone(),
+            };
+        }
+        WalletFileReadError::Io {
+            path: path_text.clone(),
+            source,
+        }
+    })?;
+    let metadata = file.metadata().map_err(|source| WalletFileReadError::Io {
+        path: path_text.clone(),
+        source,
+    })?;
+    if !metadata.file_type().is_file() {
+        return Err(WalletFileReadError::NotRegularFile { path: path_text });
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt as _;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(WalletFileReadError::NotRegularFile {
+                path: path.display().to_string(),
+            });
+        }
+    }
+
+    let mut bounded = file.take((MAX_WALLET_FILE_BYTES as u64) + 1);
+    let mut bytes = Vec::with_capacity(MAX_WALLET_FILE_BYTES.min(64 * 1024));
+    bounded
+        .read_to_end(&mut bytes)
+        .map_err(|source| WalletFileReadError::Io {
+            path: path_text,
+            source,
+        })?;
+    if bytes.len() > MAX_WALLET_FILE_BYTES {
+        return Err(WalletFileReadError::TooLarge {
+            maximum_bytes: MAX_WALLET_FILE_BYTES,
+        });
+    }
+    Ok(bytes)
+}
+
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+#[cfg(windows)]
+const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+#[cfg(windows)]
+const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
 
 /// Which wallet file in a wallet directory won the precedence chain. Server-owned
 /// mirror of the driver's [`oraclemcp_driver_cx::WalletFile`] so no driver type crosses the
