@@ -1005,6 +1005,89 @@ fn owner_qualified_column_requires_exact_catalog_proof_before_read() {
     }
 }
 
+#[test]
+fn over_refusal_28_29_31_33_admitted_with_every_relation_proven() {
+    let mut cases = Vec::new();
+    for (issue, sql) in [
+        (
+            "28_order_alias",
+            "SELECT ID AS ORDER_ID FROM APP.ORDERS ORDER BY ORDER_ID",
+        ),
+        (
+            "29_join_using",
+            "SELECT ID FROM APP.ORDERS a JOIN APP.ORDERS b USING (ID) ORDER BY ID",
+        ),
+        (
+            "29_natural_join",
+            "SELECT ID FROM APP.ORDERS a NATURAL JOIN APP.ORDERS b ORDER BY ID",
+        ),
+        (
+            "31_owner_table_column",
+            "SELECT APP.ORDERS.ID FROM APP.ORDERS",
+        ),
+        (
+            "33_pseudocolumn",
+            "SELECT ID FROM APP.ORDERS WHERE ORA_ROWSCN > 0",
+        ),
+    ] {
+        let (dispatcher, state) = semantic_dispatcher();
+        let result = dispatcher
+            .dispatch("oracle_query", json!({"sql": sql}))
+            .unwrap_or_else(|error| panic!("{issue}: {error:?}"));
+        assert!(!result["rows"].as_array().expect("rows array").is_empty());
+        let caller_queries = state.caller_queries.load(Ordering::SeqCst);
+        assert_eq!(caller_queries, 1, "{issue}: one admitted caller read");
+        let events = state.read_events.lock().expect("read events lock");
+        let object_proof = events
+            .iter()
+            .any(|event| event.to_ascii_lowercase().contains("from all_objects"));
+        let fga_proof = events.iter().any(|event| {
+            event
+                .to_ascii_lowercase()
+                .contains("from all_audit_policies")
+        });
+        assert!(
+            object_proof,
+            "{issue}: exact object identity must be catalog-proven: {events:?}"
+        );
+        assert!(
+            fga_proof,
+            "{issue}: FGA proof must precede the caller read: {events:?}"
+        );
+        cases.push(json!({
+            "case_id": format!("over_refusal_{issue}"),
+            "expected": {"admitted": true, "caller_queries": 1, "object_proof": true, "fga_proof": true},
+            "actual": {"admitted": true, "caller_queries": caller_queries, "object_proof": object_proof, "fga_proof": fga_proof},
+        }));
+    }
+    write_executor_test_artifact(
+        "over_refusal_28_29_31_33_admitted_with_every_relation_proven",
+        &cases,
+    );
+}
+
+#[test]
+fn over_refusal_fix_does_not_admit_view_behind_alias() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let error = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "SELECT v.ID FROM APP.SIDE_VIEW v ORDER BY v.ID"}),
+        )
+        .expect_err("a view behind a relation alias is not an ordinary table");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+    let caller_queries = state.caller_queries.load(Ordering::SeqCst);
+    assert_eq!(caller_queries, 0);
+    write_executor_test_artifact(
+        "over_refusal_fix_does_not_admit_view_behind_alias",
+        &[json!({
+            "case_id": "over_refusal_fix_does_not_admit_view_behind_alias",
+            "expected": {"error_class": "ForbiddenStatement", "caller_queries": 0},
+            "actual": {"error_class": format!("{:?}", error.error_class), "caller_queries": caller_queries},
+        })],
+    );
+}
+
 fn assert_issue53_sample_refused(case_id: &str, table: &str) {
     let (dispatcher, state) = semantic_dispatcher();
     let error = dispatcher
