@@ -583,6 +583,16 @@ fn terminal_failing_operator_auditor() -> (Arc<Auditor>, Arc<FailTerminalAuditSi
 fn audit_tail_fixture_path(name: &str) -> PathBuf {
     let mut dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     dir.push("../../target/tmp/operator-audit-tail-tests");
+    #[cfg(windows)]
+    {
+        static PRIVATE_FIXTURE_DIR: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = PRIVATE_FIXTURE_DIR
+            .lock()
+            .expect("lock private Windows audit tail fixture dir");
+        oraclemcp_audit::create_windows_private_audit_directory(&dir)
+            .expect("create private Windows audit tail fixture dir");
+    }
+    #[cfg(not(windows))]
     std::fs::create_dir_all(&dir).expect("create audit tail fixture dir");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
