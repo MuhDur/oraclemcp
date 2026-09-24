@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T06:40:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.15.11",
+  "scope": {
+    "summary": "Closed caller-WHERE grammar (DmlCallerPredicateV1) plus one immutable EffectiveDmlPlanV1 binding caller predicate, policy Q, grant P, bind identities and row cap; impact count reuses the exact plan; ImpactBindingV1 binds plan digest, policy ruleset and rule identities/order (01db6b37, aadee535).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/effective_dml_plan.rs",
+      "crates/oraclemcp-guard/src/impact_binding.rs",
+      "crates/oraclemcp-guard/tests/effective_dml_plan.rs",
+      "crates/oraclemcp-guard/tests/impact_binding.rs"
+    ],
+    "out_of_scope": [
+      "Runtime scoped-grant dispatch consuming the plan (.15.6/.16.7); dispatch stays fail-closed until then.",
+      "Live Oracle execution (bead proof class is unit)."
+    ]
+  },
+  "source": {
+    "sha": "2a6f4021c9a2563cb3a2f8f6691fa01d9c45992f",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at 2a6f4021 (dirty=0, build lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 3551 passed, 1 failed; cargo deny OK; every fuzz crate compiles. The single failure is http::tests::current_multi_job_taxonomy_maps_only_exact_per_job_heartbeat_evidence (hard-coded fuzz shard count 8 vs 10 after .15.5 fuzz.yml shards), unrelated to this bead; routed to .15.5 rework."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "effective_dml_plan suite 9 passed and impact_binding suite 12 passed in the gate log, incl. refuses_functions_sequences_subqueries_relations_and_or (UDF, NEXTVAL, EXISTS, IN-subquery, second-table column, OR, column-to-column, tautology, multi-statement, SET function/subquery, RETURNING, FROM all refused), plan_and_impact_bind_policy_identity_order_and_final_template (changed/removed/reordered policy rules mismatch), impact_count_query_reuses_exact_effective_plan_predicate_and_binds, effective_plan_rejects_widening_policy_predicate_and_excess_grant_cap."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "Orchestrator read the Context-required test list against the test bodies: every required refusal and binding case is present. Refusals assert is_err (the typed reason is not asserted; the AC does not require it)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution in the batch gate, independent of the implementing pane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
