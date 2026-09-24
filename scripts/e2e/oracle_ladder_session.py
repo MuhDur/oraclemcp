@@ -449,8 +449,28 @@ class Ladder:
         )
         return content
 
-    def preview(self, sql):
-        return structured(self.session.call("oracle_preview_sql", {"sql": sql}))
+    def preview(self, sql, commit=False):
+        preview = structured(
+            self.session.call(
+                "oracle_preview_sql", {"sql": sql, "commit": commit}
+            )
+        )
+        return self.follow_preview_for_commit(preview) if commit else preview
+
+    def follow_preview_for_commit(self, preview):
+        preview_for_commit = next(
+            (
+                action
+                for action in preview.get("next_actions", [])
+                if action.get("intent") == "preview_for_commit"
+            ),
+            None,
+        )
+        if preview_for_commit is None:
+            return preview
+        return structured(
+            self.session.call(preview_for_commit["tool"], preview_for_commit["args"])
+        )
 
     def elevate(self, level, ttl_seconds=60):
         preview = structured(
@@ -542,13 +562,18 @@ class Ladder:
 
     def governed_execute(self, sql, commit, expect):
         """preview -> single-use confirmation grant -> oracle_execute."""
-        preview = self.preview(sql)
+        preview = self.preview(sql, commit=commit)
         require(
             preview.get("gate_decision") == "allow",
             "preview allows execution at the current level",
             preview,
         )
         confirmation = preview.get("execute_confirmation") or {}
+        require(
+            confirmation.get("commit") is commit,
+            f"preview grant is bound to commit={commit}",
+            preview,
+        )
         token = confirmation.get("confirm")
         require(token, "preview returns a single-use execution grant", preview)
         self.harness.grant = "execute"
@@ -1766,6 +1791,54 @@ class Ladder:
             result["row_count_after"] = count
             return result
 
+        def commit_intent_change_requires_repreview():
+            sql = f"INSERT INTO {table} (id, note) VALUES (99, 'intent-mismatch')"
+            preview = self.preview(sql)
+            confirmation = preview.get("execute_confirmation") or {}
+            require(
+                confirmation.get("commit") is False,
+                "rollback preview issues a grant bound to commit=false",
+                preview,
+            )
+            commit_action = next(
+                (
+                    action
+                    for action in preview.get("next_actions", [])
+                    if action.get("intent") == "preview_for_commit"
+                ),
+                None,
+            )
+            require(
+                commit_action is not None
+                and commit_action.get("args", {}).get("commit") is True,
+                "rollback preview offers a separate commit-intent preview",
+                preview,
+            )
+            commit_preview = self.follow_preview_for_commit(preview)
+            require(
+                (commit_preview.get("execute_confirmation") or {}).get("commit")
+                is True,
+                "following preview_for_commit returns a commit-bound grant",
+                commit_preview,
+            )
+            token = confirmation.get("confirm")
+            require(token, "rollback preview returns its single-use confirmation", preview)
+            self.harness.grant = "execute"
+            response = self.session.call(
+                "oracle_execute", {"sql": sql, "commit": True, "confirm": token}
+            )
+            self.harness.grant = "none"
+            refusal = structured(response)
+            require(
+                response.get("isError") is True
+                and refusal.get("error_class") == "REPREVIEW_REQUIRED",
+                "changing commit intent without re-preview is refused",
+                refusal,
+            )
+            count = self.count_rows(f"SELECT COUNT(*) AS n FROM {table} WHERE id = 99")
+            require(count == 0, "commit-intent refusal does not insert its row", count)
+            return {"error_class": refusal.get("error_class"), "row_count": count}
+
         def dml_commit():
             result = self.governed_execute(
                 f"INSERT INTO {table} (id, note) VALUES (2, 'commit-me')",
@@ -2188,6 +2261,10 @@ class Ladder:
                 opaque_plsql_ddl_call_refused_and_target_preserved,
             ),
             ("dml_rollback_by_default", dml_rollback_by_default),
+            (
+                "commit_intent_change_requires_repreview",
+                commit_intent_change_requires_repreview,
+            ),
             ("dml_commit", dml_commit),
             ("dml_commit_clob_row", dml_commit_clob_row),
             ("sample_rows_values_and_cap", sample_rows_values_and_cap),
