@@ -43,8 +43,8 @@ RUN test -f web/dist/index.html
 RUN cargo build --locked --release -p oraclemcp --features dashboard-bundle,oracledb
 
 # ---- optional builder: oraclemcp + PL/SQL intelligence engine ----
-# The feature build resolves published plsql-intelligence crates from crates.io.
-# No sibling checkout or named BuildKit context is required.
+# The train-0.12 dev pins resolve plsql-intelligence from its pushed sibling
+# revision. R.5 removes the patches and returns this build to crates.io.
 FROM builder-base AS builder-plsql-intelligence
 COPY . .
 RUN test -f web/dist/index.html
