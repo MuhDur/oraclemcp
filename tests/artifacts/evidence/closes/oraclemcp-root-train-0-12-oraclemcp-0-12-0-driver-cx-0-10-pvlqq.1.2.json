@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T04:35:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.1.2",
+  "scope": {
+    "summary": "T0.2 driver bootstrap: the two local driver commits were replayed across the rename and pushed; driver pin 4fa672cd8adbd025c88b589acdc538d652b4b496 = rust-oracledb origin/main (replayed SHAs: 4204676 -> 7ea1e4e, c467efd -> 4fa672c).",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "Switching the operator's local rust-oracledb checkout from master to main is local housekeeping, not part of the pinnable-revision deliverable; per the operator's delegation (\"do what's best\", 2026-09-24) it is not performed, so the checkout's uncommitted July edits are preserved untouched.",
+      "oraclemcp consuming the pin is .1.1/.1.7."
+    ]
+  },
+  "source": {
+    "sha": "458826d184c707e6fc87efebc24e75ec12686bbc",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "orchestrator re-verification (fresh detached driver worktree at 4fa672c, build lease)",
+        "kind": "cli",
+        "trace": "on origin/main (ls-remote refs/heads/main = 4fa672cd...); cargo fmt --check OK; cargo clippy --workspace --exclude oracledb-pyshim --all-targets -D warnings OK; cargo test --workspace --exclude oracledb-pyshim --no-fail-fast: 988 passed, 0 failed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Driver tests run by the orchestrator in its own worktree; no live Oracle claim for this bootstrap bead."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
