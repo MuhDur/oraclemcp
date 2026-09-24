@@ -1319,6 +1319,93 @@ pub(super) async fn stream_query_response(
 }
 
 impl OracleDispatcher {
+    /// Admit once, then fetch both SCNs through the guarded pinned read lane.
+    pub(super) async fn read_diff_time_pair(
+        &self,
+        cx: &Cx,
+        request: TimeDiffReadRequest<'_>,
+    ) -> Result<TimeDiffRead, ErrorEnvelope> {
+        let TimeDiffReadRequest {
+            conn,
+            observed_conn,
+            metadata_conn,
+            catalog_cache,
+            sql,
+            active_profile,
+            binds,
+            caps,
+            args,
+            explicit_key,
+            scn_a,
+            scn_b,
+            subject,
+        } = request;
+        let executed_sql = with_audit_marker(sql, active_profile, "oracle_diff");
+        let (relations, _) =
+            resolve_read_only_relations(cx, observed_conn, catalog_cache, &executed_sql).await?;
+        let key_columns = if explicit_key.is_empty() {
+            inferred_diff_key_columns(cx, metadata_conn, &relations).await?
+        } else {
+            explicit_key
+        };
+        let result_masking = self.result_masking_policy()?;
+        let serialize_opts =
+            diff_serialize_options_from_args_with_policy(args, result_masking.as_ref());
+        let read_conn = ReadUncertaintyConn {
+            inner: conn,
+            quarantine: Some(&self.quarantine),
+        };
+        let mut before = read_query_as_of(
+            cx,
+            &read_conn,
+            &executed_sql,
+            binds,
+            caps,
+            0,
+            &serialize_opts,
+            &AsOf::Scn(scn_a),
+        )
+        .await
+        .map_err(DbError::into_envelope)?;
+        let mut after = read_query_as_of(
+            cx,
+            &read_conn,
+            &executed_sql,
+            binds,
+            caps,
+            0,
+            &serialize_opts,
+            &AsOf::Scn(scn_b),
+        )
+        .await
+        .map_err(DbError::into_envelope)?;
+        bind_result_masking_audit(
+            cx,
+            &read_conn,
+            self.auditor.as_deref(),
+            subject,
+            "oracle_diff",
+            &executed_sql,
+            &mut before,
+        )
+        .await?;
+        bind_result_masking_audit(
+            cx,
+            &read_conn,
+            self.auditor.as_deref(),
+            subject,
+            "oracle_diff",
+            &executed_sql,
+            &mut after,
+        )
+        .await?;
+        Ok(TimeDiffRead {
+            before,
+            after,
+            key_columns,
+        })
+    }
+
     /// Read one side of a cross-database `oracle_diff` from a named profile, on
     /// a connection opened and closed inside this call.
     ///

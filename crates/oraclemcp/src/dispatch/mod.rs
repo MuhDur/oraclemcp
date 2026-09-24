@@ -5003,6 +5003,29 @@ struct DiffSideRead {
     inferred_key: Vec<String>,
 }
 
+/// Both flashback reads use one admission verdict for the exact SQL and binds.
+struct TimeDiffReadRequest<'a> {
+    conn: &'a dyn OracleConnection,
+    observed_conn: &'a dyn OracleConnection,
+    metadata_conn: &'a dyn OracleConnection,
+    catalog_cache: &'a OracleCatalogResolverCache,
+    sql: &'a str,
+    active_profile: Option<&'a str>,
+    binds: &'a [OracleBind],
+    caps: QueryCaps,
+    args: &'a DiffArgs,
+    explicit_key: Vec<String>,
+    scn_a: u64,
+    scn_b: u64,
+    subject: &'a AuditSubject,
+}
+
+struct TimeDiffRead {
+    before: QueryResponse,
+    after: QueryResponse,
+    key_columns: Vec<String>,
+}
+
 impl DiffSide {
     fn label(self) -> &'static str {
         match self {
@@ -12994,85 +13017,30 @@ impl OracleDispatcher {
 
                         let (before, after, key_columns, source_a, source_b) = match &mode {
                             DiffMode::Time { scn_a, scn_b } => {
-                                let executed_sql = with_audit_marker(
-                                    &a.sql,
-                                    active_profile.as_deref(),
-                                    "oracle_diff",
-                                );
-                                let (relations, _) = resolve_read_only_relations(
-                                    cx,
-                                    &observed_conn,
-                                    &state.catalog_cache,
-                                    &executed_sql,
-                                )
-                                .await?;
-                                let key_columns = if explicit_key.is_empty() {
-                                    inferred_diff_key_columns(
+                                let read = self
+                                    .read_diff_time_pair(
                                         cx,
-                                        &guarded_metadata_conn,
-                                        &relations,
+                                        TimeDiffReadRequest {
+                                            conn,
+                                            observed_conn: &observed_conn,
+                                            metadata_conn: &guarded_metadata_conn,
+                                            catalog_cache: &state.catalog_cache,
+                                            sql: &a.sql,
+                                            active_profile: active_profile.as_deref(),
+                                            binds: &binds,
+                                            caps,
+                                            args: &a,
+                                            explicit_key,
+                                            scn_a: *scn_a,
+                                            scn_b: *scn_b,
+                                            subject: &request_subject,
+                                        },
                                     )
-                                    .await?
-                                } else {
-                                    explicit_key
-                                };
-                                let result_masking = self.result_masking_policy()?;
-                                let serialize_opts = diff_serialize_options_from_args_with_policy(
-                                    &a,
-                                    result_masking.as_ref(),
-                                );
-                                let read_conn = ReadUncertaintyConn {
-                                    inner: conn,
-                                    quarantine: Some(&self.quarantine),
-                                };
-                                let mut before = read_query_as_of(
-                                    cx,
-                                    &read_conn,
-                                    &executed_sql,
-                                    &binds,
-                                    caps,
-                                    0,
-                                    &serialize_opts,
-                                    &AsOf::Scn(*scn_a),
-                                )
-                                .await
-                                .map_err(DbError::into_envelope)?;
-                                let mut after = read_query_as_of(
-                                    cx,
-                                    &read_conn,
-                                    &executed_sql,
-                                    &binds,
-                                    caps,
-                                    0,
-                                    &serialize_opts,
-                                    &AsOf::Scn(*scn_b),
-                                )
-                                .await
-                                .map_err(DbError::into_envelope)?;
-                                bind_result_masking_audit(
-                                    cx,
-                                    &read_conn,
-                                    self.auditor.as_deref(),
-                                    &request_subject,
-                                    "oracle_diff",
-                                    &executed_sql,
-                                    &mut before,
-                                )
-                                .await?;
-                                bind_result_masking_audit(
-                                    cx,
-                                    &read_conn,
-                                    self.auditor.as_deref(),
-                                    &request_subject,
-                                    "oracle_diff",
-                                    &executed_sql,
-                                    &mut after,
-                                )
-                                .await?;
+                                    .await?;
                                 (
-                                    before,
-                                    after,
-                                    key_columns,
+                                    read.before,
+                                    read.after,
+                                    read.key_columns,
                                     QueryDiffSource::scn(*scn_a),
                                     QueryDiffSource::scn(*scn_b),
                                 )
