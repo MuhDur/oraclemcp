@@ -189,6 +189,9 @@ struct SemanticGuardState {
     compatible: Mutex<Option<String>>,
     embedding_models: Mutex<Vec<String>>,
     fga_handler_table: Mutex<Option<String>>,
+    /// R36: ALL_AUDIT_POLICIES answers ORA-00942, as for a least-privilege
+    /// account without dictionary access.
+    fga_catalog_unreadable: Mutex<bool>,
     virtual_column_default: Mutex<Option<String>>,
 }
 
@@ -202,6 +205,7 @@ impl Default for SemanticGuardState {
             compatible: Mutex::new(Some("23.4.0.0.0".to_owned())),
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
             fga_handler_table: Mutex::new(None),
+            fga_catalog_unreadable: Mutex::new(false),
             virtual_column_default: Mutex::new(None),
         }
     }
@@ -515,6 +519,16 @@ impl OracleConnection for SemanticGuardMock {
             return Ok(semantic_policy_rows_for(sql, binds));
         }
         if normalized.contains("from all_audit_policies") {
+            if *self
+                .state
+                .fga_catalog_unreadable
+                .lock()
+                .expect("FGA catalog fixture lock")
+            {
+                return Err(DbError::Query(
+                    "ORA-00942: table or view does not exist".to_owned(),
+                ));
+            }
             if normalized.contains("(object_schema, object_name) in") {
                 let target = self
                     .state
@@ -806,6 +820,7 @@ fn executor_seam_preserves_adversarial_corpus_verdicts() {
                 &baseline_conn,
                 &OracleCatalogResolverCache::new(),
                 &marked,
+                FgaEvidencePolicy::AdmitUnavailable,
             )
             .await
             .map(|_| ())
@@ -12455,6 +12470,7 @@ mod audit_wiring;
 
 mod write_authorization;
 
+mod fga_evidence_r36;
 mod patch_source_owner;
 
 #[path = "tests/action_envelope.rs"]

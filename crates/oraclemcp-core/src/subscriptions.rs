@@ -452,9 +452,17 @@ async fn prove_cqn_live_read_only(
     query: &str,
 ) -> Result<(), CqnRegistrationError> {
     let plan = semantic_read_plan(query).ok_or(CqnRegistrationError::QueryScopeNotRepresentable)?;
-    let proof = prove_semantic_read_plan(cx, connection, cache, &plan)
-        .await
-        .map_err(|_| CqnRegistrationError::LiveReadProofUnavailable)?;
+    // A durable CQN registration keeps the strict rule: it needs proven FGA
+    // evidence whatever the profile's R36 read setting is.
+    let proof = prove_semantic_read_plan(
+        cx,
+        connection,
+        cache,
+        &plan,
+        oraclemcp_db::FgaEvidencePolicy::RequireProof,
+    )
+    .await
+    .map_err(|_| CqnRegistrationError::LiveReadProofUnavailable)?;
     let strict_classifier =
         Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
             .with_oracle(Arc::new(proof))

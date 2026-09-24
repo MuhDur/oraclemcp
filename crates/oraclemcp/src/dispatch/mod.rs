@@ -71,7 +71,9 @@ use oraclemcp_db::{
     semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter, serialize_row,
 };
-use oraclemcp_db::{SearchDetailLevel, SourceText, StatementOutcome};
+use oraclemcp_db::{
+    FgaEvidence, FgaEvidencePolicy, SearchDetailLevel, SourceText, StatementOutcome,
+};
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
 };
@@ -232,6 +234,9 @@ struct ProfileDispatchPolicy {
     result_masking: Option<ResultMaskingPolicy>,
     /// Arc N: the profile's tightening-only SQL policy, if it carries one.
     sql_policy: Option<SqlPolicyConfig>,
+    /// R36: whether a read may proceed when the principal cannot read the FGA
+    /// catalog (`require_fga_evidence`).
+    fga_evidence_policy: FgaEvidencePolicy,
 }
 
 struct PreparedProfileSwitch {
@@ -245,6 +250,7 @@ struct PreparedProfileSwitch {
     cumulative_query_cost_budget: Option<CumulativeQueryCostBudgetConfig>,
     result_masking: Option<ResultMaskingPolicy>,
     sql_policy: Option<SqlPolicyConfig>,
+    fga_evidence_policy: FgaEvidencePolicy,
     custom_catalog: CustomToolCatalog,
     response: Value,
 }
@@ -265,6 +271,29 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         cumulative_query_cost_budget: None,
         result_masking: None,
         sql_policy: None,
+        fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
+    }
+}
+
+/// R36: take the startup profile's FGA evidence rule from the same accepted
+/// config snapshot a profile switch reads, so the initially served profile is
+/// governed exactly as it would be after switching to it. A snapshot that
+/// cannot produce a dispatch policy keeps the strict rule.
+fn install_bound_fga_evidence_policy(state: &mut DispatcherState) {
+    if let Some(lease) = state.profile_generation.as_ref() {
+        state.fga_evidence_policy = profile_dispatch_policy(lease)
+            .map_or(FgaEvidencePolicy::RequireProof, |policy| {
+                policy.fga_evidence_policy
+            });
+    }
+}
+
+/// R36: the per-profile FGA evidence rule for reads.
+fn fga_evidence_policy_for(profile: &ConnectionProfile) -> FgaEvidencePolicy {
+    if profile.require_fga_evidence() {
+        FgaEvidencePolicy::RequireProof
+    } else {
+        FgaEvidencePolicy::AdmitUnavailable
     }
 }
 
@@ -379,6 +408,7 @@ fn profile_dispatch_policy(
         // Arc N: a configured policy now GOVERNS this profile's dispatch path.
         // It is validated at config load and can only ever restrict.
         sql_policy: profile.sql_policy.clone(),
+        fga_evidence_policy: fga_evidence_policy_for(profile),
     })
 }
 
@@ -447,6 +477,9 @@ struct DispatcherState {
     /// held-work count that makes every committing operation refuse while it is
     /// open. Cleared at every transaction boundary the dispatcher issues.
     checkpoints: CheckpointWorkspace,
+    /// R36: the active profile's FGA evidence rule for reads. Swapped with the
+    /// pinned session on a profile switch.
+    fga_evidence_policy: FgaEvidencePolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -617,6 +650,7 @@ impl OracleDispatcher {
                 orient_snapshots: SyncMutex::new(HashMap::new()),
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
+                fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -707,6 +741,7 @@ impl OracleDispatcher {
                 orient_snapshots: SyncMutex::new(HashMap::new()),
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
+                fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -749,6 +784,7 @@ impl OracleDispatcher {
                 .active_profile
                 .as_deref()
                 .and_then(|profile| state.bind_existing_profile(profile));
+            install_bound_fga_evidence_policy(dispatcher_state);
             self.profile_drain = state;
         }
         self
@@ -786,6 +822,7 @@ impl OracleDispatcher {
                 dispatcher_state.profile_generation = pending.take();
             })
             .map_err(|()| profile_draining_error(&profile))?;
+        install_bound_fga_evidence_policy(dispatcher_state);
         self.profile_drain = state;
         Ok(self)
     }
@@ -990,6 +1027,15 @@ impl OracleDispatcher {
         })?;
         *guard = result_masking;
         Ok(())
+    }
+
+    /// Install the startup profile's R36 FGA evidence rule (`require_fga_evidence`).
+    #[must_use]
+    pub fn with_fga_evidence_policy(mut self, policy: FgaEvidencePolicy) -> Self {
+        if let Ok(state) = self.state.get_mut() {
+            state.fga_evidence_policy = policy;
+        }
+        self
     }
 
     /// Install a profile's Arc N SQL policy on this lane (tests + profile switch).
@@ -1334,6 +1380,7 @@ impl OracleDispatcher {
             cumulative_query_cost_budget,
             result_masking,
             sql_policy,
+            fga_evidence_policy,
         } = profile_dispatch_policy(&profile_generation)?;
         let new_custom_catalog = match &self.custom_loader {
             Some(loader) => loader(&profile_generation, &level)?,
@@ -1404,6 +1451,7 @@ impl OracleDispatcher {
                 retired_generation = state.profile_generation.replace(profile_generation);
                 state.current_schema = None;
                 state.level = level;
+                state.fga_evidence_policy = fga_evidence_policy;
                 state.custom_catalog = custom_catalog;
                 state.grant_generation = state.grant_generation.saturating_add(1);
                 state.execute_grants.clear();
@@ -4883,10 +4931,11 @@ async fn ensure_resolved_read_only(
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     sql: &str,
-) -> Result<GuardDecision, ErrorEnvelope> {
-    resolve_read_only_relations(cx, conn, cache, sql)
+    fga_policy: FgaEvidencePolicy,
+) -> Result<(GuardDecision, FgaEvidence), ErrorEnvelope> {
+    resolve_read_only_relations(cx, conn, cache, sql, fga_policy)
         .await
-        .map(|(_, decision)| decision)
+        .map(|read| (read.decision, read.fga_evidence))
 }
 
 async fn resolve_read_only_relations(
@@ -4894,8 +4943,9 @@ async fn resolve_read_only_relations(
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     sql: &str,
-) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
-    resolve_read_only_relations_inner(cx, conn, cache, sql, false).await
+    fga_policy: FgaEvidencePolicy,
+) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
+    resolve_read_only_relations_inner(cx, conn, cache, sql, false, fga_policy).await
 }
 
 async fn resolve_read_only_relations_with_verified_local_vector_embedding(
@@ -4903,8 +4953,9 @@ async fn resolve_read_only_relations_with_verified_local_vector_embedding(
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     sql: &str,
-) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
-    resolve_read_only_relations_inner(cx, conn, cache, sql, true).await
+    fga_policy: FgaEvidencePolicy,
+) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
+    resolve_read_only_relations_inner(cx, conn, cache, sql, true, fga_policy).await
 }
 
 async fn resolve_read_only_relations_inner(
@@ -4913,9 +4964,17 @@ async fn resolve_read_only_relations_inner(
     cache: &OracleCatalogResolverCache,
     sql: &str,
     verified_local_vector_embedding: bool,
-) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
-    read_executor::resolve_query_block_read(cx, conn, cache, sql, verified_local_vector_embedding)
-        .await
+    fga_policy: FgaEvidencePolicy,
+) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
+    read_executor::resolve_query_block_read(
+        cx,
+        conn,
+        cache,
+        sql,
+        verified_local_vector_embedding,
+        fga_policy,
+    )
+    .await
 }
 
 fn normalize_diff_key_columns(raw: Vec<String>) -> Result<Vec<String>, ErrorEnvelope> {
@@ -5001,6 +5060,7 @@ struct DiffSideRequest<'a> {
 struct DiffSideRead {
     response: QueryResponse,
     inferred_key: Vec<String>,
+    fga_evidence: FgaEvidence,
 }
 
 /// Both flashback reads use one admission verdict for the exact SQL and binds.
@@ -5018,12 +5078,14 @@ struct TimeDiffReadRequest<'a> {
     scn_a: u64,
     scn_b: u64,
     subject: &'a AuditSubject,
+    fga_evidence_policy: FgaEvidencePolicy,
 }
 
 struct TimeDiffRead {
     before: QueryResponse,
     after: QueryResponse,
     key_columns: Vec<String>,
+    fga_evidence: FgaEvidence,
 }
 
 impl DiffSide {
@@ -7290,6 +7352,41 @@ fn append_scn_capability_degraded_audit(
         AuditOutcome::Failed,
         None,
     )
+}
+
+/// Fixed, server-owned marker recorded when a read was admitted although this
+/// principal cannot read the FGA catalog (R36). Like the SCN-capability
+/// marker, it is never a real tool name or caller SQL: the durable, signed
+/// record says which served tool was admitted on `fga_evidence: unavailable`.
+const FGA_EVIDENCE_UNAVAILABLE_TOOL: &str = "fga_evidence_unavailable";
+
+/// R36: durably record that `served_tool` was admitted without FGA proof,
+/// before its caller SQL executes. A no-op without a configured auditor.
+fn append_fga_evidence_unavailable_audit(
+    ctx: AuditEntryCtx<'_>,
+    served_tool: &str,
+) -> Result<(), ErrorEnvelope> {
+    append_audit_with_observed_scn(
+        ctx,
+        FGA_EVIDENCE_UNAVAILABLE_TOOL,
+        &format!(
+            "-- fga_evidence: unavailable; {served_tool} admitted although this principal \
+             cannot read ALL_AUDIT_POLICIES (profile require_fga_evidence = false)"
+        ),
+        "READ_ONLY",
+        None,
+        AuditOutcome::Succeeded,
+        None,
+    )
+}
+
+/// R36: the agent-visible observation on a read admitted without FGA proof.
+fn attach_fga_evidence(response: &mut Value, evidence: FgaEvidence) {
+    if evidence == FgaEvidence::Unavailable
+        && let Value::Object(map) = response
+    {
+        map.insert("fga_evidence".to_owned(), json!("unavailable"));
+    }
 }
 
 /// Capture the SCN of the current read snapshot for audit provenance without
@@ -11757,6 +11854,7 @@ impl OracleDispatcher {
                 cumulative_query_cost_budget: new_policy.cumulative_query_cost_budget,
                 result_masking: new_policy.result_masking,
                 sql_policy: new_policy.sql_policy,
+                fga_evidence_policy: new_policy.fga_evidence_policy,
                 custom_catalog: new_custom_catalog,
                 response,
             };
@@ -11785,6 +11883,7 @@ impl OracleDispatcher {
                 cumulative_query_cost_budget,
                 result_masking,
                 sql_policy,
+                fga_evidence_policy,
                 custom_catalog,
                 mut response,
             } = prepared;
@@ -11863,6 +11962,7 @@ impl OracleDispatcher {
                     state.current_schema = None;
                     retired_generation = state.profile_generation.replace(profile_generation);
                     state.level = level;
+                    state.fga_evidence_policy = fga_evidence_policy;
                     state.custom_catalog = custom_catalog;
                     state.grant_generation = state.grant_generation.saturating_add(1);
                     state.execute_grants.clear();
@@ -12781,7 +12881,8 @@ impl OracleDispatcher {
                         let explicit_key = normalize_diff_key_columns(a.key.clone())?;
                         let caps = diff_query_caps_from_args(&a);
 
-                        let (before, after, key_columns, source_a, source_b) = match &mode {
+                        let (before, after, key_columns, source_a, source_b, fga_evidence) =
+                            match &mode {
                             DiffMode::Time { scn_a, scn_b } => {
                                 let read = self
                                     .read_diff_time_pair(
@@ -12800,6 +12901,7 @@ impl OracleDispatcher {
                                             scn_a: *scn_a,
                                             scn_b: *scn_b,
                                             subject: &request_subject,
+                                            fga_evidence_policy: state.fga_evidence_policy,
                                         },
                                     )
                                     .await?;
@@ -12809,6 +12911,7 @@ impl OracleDispatcher {
                                     read.key_columns,
                                     QueryDiffSource::scn(*scn_a),
                                     QueryDiffSource::scn(*scn_b),
+                                    read.fga_evidence,
                                 )
                             }
                             DiffMode::Fleet {
@@ -12895,12 +12998,20 @@ impl OracleDispatcher {
                                 } else {
                                     explicit_key
                                 };
+                                let fga_evidence = if side_a.fga_evidence == FgaEvidence::Proven
+                                    && side_b.fga_evidence == FgaEvidence::Proven
+                                {
+                                    FgaEvidence::Proven
+                                } else {
+                                    FgaEvidence::Unavailable
+                                };
                                 (
                                     before,
                                     after,
                                     key_columns,
                                     QueryDiffSource::profile(profile_a).at_scn(*scn_a),
                                     QueryDiffSource::profile(profile_b).at_scn(*scn_b),
+                                    fga_evidence,
                                 )
                             }
                         };
@@ -12929,6 +13040,7 @@ impl OracleDispatcher {
                                 }),
                             );
                         }
+                        attach_fga_evidence(&mut value, fga_evidence);
                         Ok(value)
                     },
                 )
@@ -13867,7 +13979,24 @@ impl OracleDispatcher {
                     &state.checkpoints,
                     "oracle_explain_plan (its PLAN_TABLE cleanup rolls the transaction back)",
                 )?;
-                ensure_resolved_read_only(cx, conn, &state.catalog_cache, &a.sql).await?;
+                let (_, fga_evidence) = ensure_resolved_read_only(
+                    cx,
+                    conn,
+                    &state.catalog_cache,
+                    &a.sql,
+                    state.fga_evidence_policy,
+                )
+                .await?;
+                if fga_evidence == FgaEvidence::Unavailable {
+                    append_fga_evidence_unavailable_audit(
+                        AuditEntryCtx {
+                            auditor: self.auditor.as_deref(),
+                            subject: &request_subject,
+                            db_evidence: None,
+                        },
+                        "oracle_explain_plan",
+                    )?;
+                }
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.before")?;
                 let rows = match explain_plan(cx, conn, &a.sql, a.read_only_standby).await {
                     Ok(rows) => rows,
@@ -13935,6 +14064,7 @@ impl OracleDispatcher {
                     );
                 }
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
+                attach_fga_evidence(&mut response, fga_evidence);
                 Ok(response)
             }
             other => {

@@ -302,17 +302,19 @@ above makes that view readable on the FREE 23ai lab. If you use narrower
 dictionary grants, a DBA with authority over the SYS view must also grant
 `SELECT ON SYS.ALL_AUDIT_POLICIES` to the served account. Verify with that
 account using `SELECT policy_name FROM all_audit_policies WHERE ROWNUM <= 1`;
-zero rows is acceptable, while `ORA-00942` means the guard will refuse
-relation reads with `fga_evidence_unknown`. A failed catalog query cannot prove
-that an FGA handler is absent.
+zero rows proves no handler runs.
 
-This is a hard requirement for any account that reads tables or views: without
-it every read that names a table or view is refused. That includes queries over
-`DUAL`, which is a relation to the guard like any other. `oraclemcp doctor --online` checks it up front
-by running the guard's own probe. Check 18, "FGA catalog visibility", fails
-with `fga_catalog_unreadable` (naming the ORA code) and prints this grant as
-its fix. The `fga_evidence_unknown` refusal carries the same remediation hint.
-There is no override that admits reads without this evidence.
+When the account cannot read the view (`ORA-00942` or `ORA-01031`), the guard
+cannot prove that no FGA handler runs, but it has not seen one either (R36).
+By default such a read is **admitted**: the result carries
+`"fga_evidence": "unavailable"`, a signed `fga_evidence_unavailable` audit
+record is chained before the read runs, and `oraclemcp doctor --online` check
+18, "FGA catalog visibility", warns with `fga_catalog_unreadable` (naming the
+ORA code) and prints this grant as its fix. Set `require_fga_evidence = true`
+on a profile to refuse those reads instead with `fga_evidence_unknown`; doctor
+then reports the check as a failure. A table with a proven FGA handler is
+refused either way, and any other failure of the catalog query (a lost
+session, a cancelled call) still refuses with `fga_evidence_unknown`.
 
 Grant **no** write-implying system privileges. Specifically avoid:
 `CREATE TABLE`, `CREATE ANY TABLE`, `INSERT/UPDATE/DELETE ANY TABLE`,

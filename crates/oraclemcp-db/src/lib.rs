@@ -103,11 +103,12 @@ pub use catalog_query::{
     CatalogReadSpec, run_catalog_query,
 };
 pub use catalog_resolver::{
-    CatalogInvalidation, FgaAppliesTo, FgaClosure, FgaPolicyEvidence, FgaStatementKind,
-    MAX_CATALOG_NAMES, MAX_VPD_RLS_POLICY_ROWS, OracleCatalogResolver, OracleCatalogResolverCache,
-    OraclePolicyCatalogProbe, OraclePolicyCatalogVisibility, OracleSessionSecurityContext,
-    OracleVpdRlsObservation, OracleVpdRlsObservationStatus, OracleVpdRlsPolicy, ReadPlanProof,
-    ReadPlanProofError, fga_closure, observe_vpd_rls_for_relations, observe_vpd_rls_for_schema,
+    CatalogInvalidation, FgaAppliesTo, FgaClosure, FgaEvidence, FgaEvidencePolicy,
+    FgaPolicyEvidence, FgaStatementKind, MAX_CATALOG_NAMES, MAX_VPD_RLS_POLICY_ROWS,
+    OracleCatalogResolver, OracleCatalogResolverCache, OraclePolicyCatalogProbe,
+    OraclePolicyCatalogVisibility, OracleSessionSecurityContext, OracleVpdRlsObservation,
+    OracleVpdRlsObservationStatus, OracleVpdRlsPolicy, ReadPlanProof, ReadPlanProofError,
+    fga_closure, observe_vpd_rls_for_relations, observe_vpd_rls_for_schema,
     prove_semantic_read_plan, read_catalog_resolve_context, read_session_security_context,
     resolved_relations_read_purity,
 };

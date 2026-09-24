@@ -190,6 +190,8 @@ pub struct DoctorProfileCaps {
     pub protected: bool,
     /// Whether config pins this profile as a read-only standby.
     pub read_only_standby: bool,
+    /// R36: whether reads refuse when the FGA catalog is unreadable.
+    pub require_fga_evidence: bool,
 }
 
 /// Service-manager caps as configured by `oraclemcp service install`, and as
@@ -2629,12 +2631,12 @@ account (or have a DBA GRANT SELECT ON SYS.ALL_AUDIT_POLICIES to it), then rerun
 const FGA_CATALOG_CHECK_ID: u8 = 18;
 const FGA_CATALOG_CHECK_NAME: &str = "FGA catalog visibility";
 
-/// .6.11: the read guard proves that no fine-grained-audit handler runs by
+/// .6.11/R36: the read guard proves that no fine-grained-audit handler runs by
 /// querying ALL_AUDIT_POLICIES (`CatalogQueryId::FgaCatalogProof`, the exact
-/// probe the guard uses). An account that cannot read it has every relation
-/// read refused with `fga_evidence_unknown`; report that up front instead of
-/// leaving the operator to discover it through refusals. Diagnostic only: the
-/// admission rule is unchanged.
+/// probe the guard uses). An account that cannot read it has relation reads
+/// admitted with `fga_evidence: unavailable` (a WARN here), or refused with
+/// `fga_evidence_unknown` when the profile sets `require_fga_evidence` (a FAIL).
+/// Diagnostic only: this check never changes admission.
 async fn check_fga_catalog_visibility(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     if ctx.connection_error.is_some() {
         return CheckResult::new(
@@ -2655,10 +2657,14 @@ async fn check_fga_catalog_visibility(cx: &Cx, ctx: &DoctorContext<'_>) -> Check
     let probe = run_catalog_query(cx, conn, CatalogQueryId::FgaCatalogProof, &[])
         .await
         .map(|_| ());
-    fga_catalog_check(probe)
+    let require_fga_evidence = ctx
+        .profile_caps
+        .as_ref()
+        .is_some_and(|caps| caps.require_fga_evidence);
+    fga_catalog_check(probe, require_fga_evidence)
 }
 
-fn fga_catalog_check(probe: Result<(), DbError>) -> CheckResult {
+fn fga_catalog_check(probe: Result<(), DbError>, require_fga_evidence: bool) -> CheckResult {
     match probe {
         Ok(()) => CheckResult::new(
             FGA_CATALOG_CHECK_ID,
@@ -2670,19 +2676,41 @@ fn fga_catalog_check(probe: Result<(), DbError>) -> CheckResult {
         Err(error) => {
             // Only the ORA code is rendered: the driver message can carry
             // object and principal names.
-            let cause = parse_ora_code(&error.to_string()).map_or_else(
+            let code = parse_ora_code(&error.to_string());
+            let cause = code.map_or_else(
                 || "the catalog query failed".to_owned(),
                 |code| format!("ORA-{code:05}"),
             );
+            // The same split as the read guard: only Oracle's own privilege
+            // answers are "unavailable"; any other failure still refuses reads.
+            let privilege = code.is_some_and(|code| matches!(code, 942 | 1031));
+            let (status, consequence) = if privilege && !require_fga_evidence {
+                (
+                    CheckStatus::Warn,
+                    "relation reads are admitted with fga_evidence: unavailable because \
+                     nothing proves that no fine-grained-audit handler runs; set \
+                     require_fga_evidence = true on the profile to refuse them instead",
+                )
+            } else if privilege {
+                (
+                    CheckStatus::Fail,
+                    "every relation read is refused with fga_evidence_unknown because the \
+                     profile sets require_fga_evidence = true",
+                )
+            } else {
+                (
+                    CheckStatus::Fail,
+                    "every relation read is refused with fga_evidence_unknown because a \
+                     failed catalog probe cannot prove that no fine-grained-audit handler runs",
+                )
+            };
             CheckResult::new(
                 FGA_CATALOG_CHECK_ID,
                 FGA_CATALOG_CHECK_NAME,
-                CheckStatus::Fail,
+                status,
                 format!(
                     "fga_catalog_unreadable: the connected account cannot read \
-                     ALL_AUDIT_POLICIES ({cause}); every relation read is refused with \
-                     fga_evidence_unknown because a failed catalog probe cannot prove that no \
-                     fine-grained-audit handler runs"
+                     ALL_AUDIT_POLICIES ({cause}); {consequence}"
                 ),
             )
             .with_fix(FGA_CATALOG_REMEDIATION)
@@ -5212,10 +5240,46 @@ mod tests {
     }
 
     #[test]
+    fn fga_catalog_unreadable_warns_by_default_and_names_the_observation() {
+        for code in ["ORA-00942", "ORA-01031"] {
+            let check = fga_catalog_check(
+                Err(DbError::Query(format!("{code}: insufficient privileges"))),
+                false,
+            );
+            assert_eq!(check.id, 18);
+            assert_eq!(check.status, CheckStatus::Warn, "{code}");
+            assert!(
+                check
+                    .detail
+                    .contains("admitted with fga_evidence: unavailable"),
+                "{}",
+                check.detail
+            );
+            assert!(
+                check.detail.contains("require_fga_evidence = true"),
+                "{}",
+                check.detail
+            );
+            assert_eq!(check.fix.as_deref(), Some(FGA_CATALOG_REMEDIATION));
+        }
+        // Any other failure still refuses reads at runtime, so doctor fails.
+        let opaque = fga_catalog_check(Err(DbError::Query("socket closed".to_owned())), false);
+        assert_eq!(opaque.status, CheckStatus::Fail);
+        assert!(
+            opaque.detail.contains("fga_evidence_unknown"),
+            "{}",
+            opaque.detail
+        );
+    }
+
+    #[test]
     fn fga_catalog_unreadable_names_the_view_the_ora_code_and_the_grant() {
-        let check = fga_catalog_check(Err(DbError::Query(
-            "ORA-00942: table or view \"APP_SECRET\".\"X\" does not exist".to_owned(),
-        )));
+        let check = fga_catalog_check(
+            Err(DbError::Query(
+                "ORA-00942: table or view \"APP_SECRET\".\"X\" does not exist".to_owned(),
+            )),
+            true,
+        );
         assert_eq!(check.id, 18);
         assert_eq!(check.name, "FGA catalog visibility");
         assert_eq!(check.status, CheckStatus::Fail);
@@ -5242,7 +5306,7 @@ mod tests {
         assert!(fix.contains("SELECT ON SYS.ALL_AUDIT_POLICIES"));
         assert!(fix.contains("docs/operations.md §3.1"));
 
-        let opaque = fga_catalog_check(Err(DbError::Query("socket closed".to_owned())));
+        let opaque = fga_catalog_check(Err(DbError::Query("socket closed".to_owned())), true);
         assert!(
             opaque.detail.contains("(the catalog query failed)"),
             "{}",
@@ -5253,7 +5317,7 @@ mod tests {
 
     #[test]
     fn fga_catalog_readable_passes_without_a_fix() {
-        let check = fga_catalog_check(Ok(()));
+        let check = fga_catalog_check(Ok(()), false);
         assert_eq!(check.status, CheckStatus::Pass);
         assert!(check.fix.is_none());
         assert!(!check.detail.contains("fga_catalog_unreadable"));

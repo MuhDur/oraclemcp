@@ -564,11 +564,18 @@ pub enum FgaClosure {
         /// Exact policy that can call an autonomous handler.
         policy: FgaPolicyEvidence,
     },
-    /// Catalog evidence was unavailable, truncated, or ambiguous.
+    /// Catalog evidence was truncated, ambiguous, or failed for a reason
+    /// other than the principal lacking access to the FGA catalog.
     Unknown {
         /// Stable internal evidence-gap reason.
         reason: &'static str,
     },
+    /// Oracle positively reported that this principal cannot read the FGA
+    /// catalog (ORA-00942 or ORA-01031). No policy row was seen, so nothing is
+    /// proven either way; R36 lets a read proceed on this evidence only with an
+    /// `fga_evidence: unavailable` observation, unless the profile requires
+    /// proof.
+    Unavailable,
 }
 
 impl FgaClosure {
@@ -578,9 +585,47 @@ impl FgaClosure {
         match self {
             Self::ProvenReadOnly => Purity::ProvenReadOnly,
             Self::Autonomous { .. } => Purity::ProvenSideEffecting,
-            Self::Unknown { .. } => Purity::Unknown,
+            Self::Unknown { .. } | Self::Unavailable => Purity::Unknown,
         }
     }
+}
+
+/// Map a failed FGA catalog read. Only Oracle's own "no such view" and
+/// "insufficient privileges" answers mean the catalog is unreadable to this
+/// principal; any other failure (cancellation, lost session, adapter error)
+/// stays unknown evidence and refuses.
+fn fga_catalog_failure(error: &DbError) -> FgaClosure {
+    let DbError::Query(message) = error else {
+        return FgaClosure::Unknown {
+            reason: "fga_catalog_query_failed",
+        };
+    };
+    if oraclemcp_error::parse_ora_code(message).is_some_and(|code| matches!(code, 942 | 1031)) {
+        FgaClosure::Unavailable
+    } else {
+        FgaClosure::Unknown {
+            reason: "fga_catalog_query_failed",
+        }
+    }
+}
+
+/// How a read treats FGA evidence that the principal cannot read (R36).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FgaEvidencePolicy {
+    /// Admit the read and report `fga_evidence: unavailable` (the default).
+    AdmitUnavailable,
+    /// Refuse the read with `fga_evidence_unknown` (`require_fga_evidence`).
+    RequireProof,
+}
+
+/// The FGA evidence a successful read proof rests on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FgaEvidence {
+    /// The catalog was readable and no matching policy can run user code.
+    Proven,
+    /// The principal cannot read the FGA catalog; admitted under
+    /// [`FgaEvidencePolicy::AdmitUnavailable`].
+    Unavailable,
 }
 
 fn fga_flag(row: &OracleRow, name: &str) -> Option<bool> {
@@ -690,11 +735,7 @@ pub async fn fga_closure(
                 .await
             {
                 Ok(rows) => rows,
-                Err(_) => {
-                    return FgaClosure::Unknown {
-                        reason: "fga_catalog_unavailable",
-                    };
-                }
+                Err(error) => return fga_catalog_failure(&error),
             };
         if rows.len() >= 257 {
             return FgaClosure::Unknown {
@@ -749,13 +790,8 @@ pub async fn fga_closure(
     // A successful empty probe establishes catalog readability even when no
     // FGA policy is visible. ALL_AUDIT_POLICIES covers accessible objects only
     // when the principal can query the view; a failed probe never proves absence.
-    if run_catalog_query(cx, conn, CatalogQueryId::FgaCatalogProof, &[])
-        .await
-        .is_err()
-    {
-        return FgaClosure::Unknown {
-            reason: "fga_catalog_unavailable",
-        };
+    if let Err(error) = run_catalog_query(cx, conn, CatalogQueryId::FgaCatalogProof, &[]).await {
+        return fga_catalog_failure(&error);
     }
     FgaClosure::ProvenReadOnly
 }
@@ -800,6 +836,8 @@ impl From<&ResolvedObject> for ReadObjectIdentity {
 pub struct ReadPlanProof {
     /// Every resolved base relation, retained for consumers that need its identity.
     pub relations: Vec<ResolvedObject>,
+    /// The FGA evidence this read was admitted on.
+    pub fga_evidence: FgaEvidence,
     by_source: HashMap<ObjectRef, Vec<ReadObjectIdentity>>,
     by_identity: HashMap<ReadObjectIdentity, Purity>,
     proved_value_columns: HashSet<RawName>,
@@ -959,6 +997,7 @@ pub async fn prove_semantic_read_plan(
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     plan: &SemanticReadPlan,
+    fga_policy: FgaEvidencePolicy,
 ) -> Result<ReadPlanProof, ReadPlanProofError> {
     if plan.blocks.len() > 128 || plan.relations.len() > 256 {
         return Err(ReadPlanProofError::Unproven("relation_plan_cap_exceeded"));
@@ -1041,11 +1080,17 @@ pub async fn prove_semantic_read_plan(
             relations.push(*object);
         }
     }
-    match fga_closure(cx, conn, &relations, FgaStatementKind::Select).await {
-        FgaClosure::ProvenReadOnly => {}
+    let fga_evidence = match fga_closure(cx, conn, &relations, FgaStatementKind::Select).await {
+        FgaClosure::ProvenReadOnly => FgaEvidence::Proven,
         FgaClosure::Autonomous { .. } => return Err(ReadPlanProofError::FgaHandlerAutonomous),
         FgaClosure::Unknown { .. } => return Err(ReadPlanProofError::FgaEvidenceUnknown),
-    }
+        FgaClosure::Unavailable => match fga_policy {
+            FgaEvidencePolicy::AdmitUnavailable => FgaEvidence::Unavailable,
+            FgaEvidencePolicy::RequireProof => {
+                return Err(ReadPlanProofError::FgaEvidenceUnknown);
+            }
+        },
+    };
     let values = plan
         .blocks
         .iter()
@@ -1125,6 +1170,7 @@ pub async fn prove_semantic_read_plan(
         .collect();
     Ok(ReadPlanProof {
         relations,
+        fga_evidence,
         by_source,
         by_identity,
         proved_value_columns,
@@ -3352,17 +3398,81 @@ mod tests {
         });
     }
 
+    /// R36: Oracle's own "no such view" / "insufficient privileges" answer on
+    /// either FGA catalog read means the principal cannot read the catalog.
     #[test]
-    fn fga_catalog_invisible_is_unknown() {
+    fn fga_catalog_invisible_is_unavailable() {
         run_with_cx(|cx| async move {
-            let conn = ScriptedRows::results([
+            for code in ["ORA-00942", "ORA-01031"] {
+                let message = format!("{code}: table or view does not exist");
+                let proof_fails =
+                    ScriptedRows::results([Ok(Vec::new()), Err(DbError::Query(message.clone()))]);
+                assert_eq!(
+                    fga_closure(
+                        &cx,
+                        &proof_fails,
+                        &[table_object()],
+                        FgaStatementKind::Select
+                    )
+                    .await,
+                    FgaClosure::Unavailable,
+                    "{code} on the catalog proof"
+                );
+                let policies_fail = ScriptedRows::results([Err(DbError::Query(message))]);
+                assert_eq!(
+                    fga_closure(
+                        &cx,
+                        &policies_fail,
+                        &[table_object()],
+                        FgaStatementKind::Select
+                    )
+                    .await,
+                    FgaClosure::Unavailable,
+                    "{code} on the policy rows"
+                );
+            }
+        });
+    }
+
+    /// Only the two privilege answers relax. Any other failure of either FGA
+    /// catalog read is unknown evidence and refuses, whatever the profile says.
+    #[test]
+    fn fga_catalog_failures_other_than_privilege_stay_unknown() {
+        run_with_cx(|cx| async move {
+            for error in [
+                DbError::Query("ORA-03113: end-of-file on communication channel".to_owned()),
+                DbError::Query("adapter decode failure".to_owned()),
+                DbError::Cancelled("request deadline".to_owned()),
+                DbError::ConnectionLost("socket closed".to_owned()),
+            ] {
+                let policies_fail = ScriptedRows::results([Err(error)]);
+                assert_eq!(
+                    fga_closure(
+                        &cx,
+                        &policies_fail,
+                        &[table_object()],
+                        FgaStatementKind::Select
+                    )
+                    .await,
+                    FgaClosure::Unknown {
+                        reason: "fga_catalog_query_failed"
+                    }
+                );
+            }
+            let proof_fails = ScriptedRows::results([
                 Ok(Vec::new()),
-                Err(DbError::Query("ORA-00942".to_owned())),
+                Err(DbError::Cancelled("request deadline".to_owned())),
             ]);
             assert_eq!(
-                fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await,
+                fga_closure(
+                    &cx,
+                    &proof_fails,
+                    &[table_object()],
+                    FgaStatementKind::Select
+                )
+                .await,
                 FgaClosure::Unknown {
-                    reason: "fga_catalog_unavailable"
+                    reason: "fga_catalog_query_failed"
                 }
             );
         });
@@ -3422,9 +3532,7 @@ mod tests {
             ]);
             assert_eq!(
                 fga_closure(&cx, &conn, &relations, FgaStatementKind::Select).await,
-                FgaClosure::Unknown {
-                    reason: "fga_catalog_unavailable"
-                }
+                FgaClosure::Unavailable
             );
             let queries = conn.queries.lock().unwrap();
             assert_eq!(queries.len(), 2);
@@ -3447,9 +3555,7 @@ mod tests {
             ]);
             assert_eq!(
                 fga_closure(&cx, &conn, &[quoted_other_owner], FgaStatementKind::Select).await,
-                FgaClosure::Unknown {
-                    reason: "fga_catalog_unavailable"
-                }
+                FgaClosure::Unavailable
             );
             assert_eq!(
                 conn.queries.lock().unwrap()[0].1[0],
@@ -4287,6 +4393,7 @@ mod tests {
         let source = ObjectRef::new(Some("app".to_owned()), "orders");
         let proof = ReadPlanProof {
             relations: vec![object.clone()],
+            fga_evidence: FgaEvidence::Proven,
             by_source: HashMap::from([(source.clone(), vec![ReadObjectIdentity::from(&object)])]),
             by_identity: HashMap::from([(
                 ReadObjectIdentity::from(&object),

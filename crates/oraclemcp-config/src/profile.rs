@@ -874,6 +874,12 @@ pub struct ConnectionProfile {
     /// record before the driver may register it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_change_notification: Option<bool>,
+    /// R36: refuse a read when this principal cannot read the FGA catalog
+    /// (`ALL_AUDIT_POLICIES`). Defaults to `false`: such a read is admitted
+    /// with an `fga_evidence: unavailable` observation, an audit record, and a
+    /// doctor warning. A proven FGA handler refuses either way.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_fga_evidence: Option<bool>,
     /// Maximum live subscriptions per server-derived principal. Defaults to 4;
     /// `0` deliberately disables new subscriptions for this profile. Each
     /// admitted subscription also consumes one EMON notification connection
@@ -973,6 +979,7 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("require_signed_tools", &self.require_signed_tools)
             .field("read_only_standby", &self.read_only_standby)
             .field("allow_change_notification", &self.allow_change_notification)
+            .field("require_fga_evidence", &self.require_fga_evidence)
             .field("max_subscriptions", &self.max_subscriptions)
             .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
@@ -1047,6 +1054,13 @@ impl ConnectionProfile {
     #[must_use]
     pub fn read_only_standby(&self) -> bool {
         self.read_only_standby.unwrap_or(false)
+    }
+
+    /// R36: whether reads on this profile require proven FGA evidence, refusing
+    /// when the principal cannot read the FGA catalog.
+    #[must_use]
+    pub fn require_fga_evidence(&self) -> bool {
+        self.require_fga_evidence == Some(true)
     }
 
     /// Whether this profile explicitly permits CQN registration.
@@ -1125,6 +1139,7 @@ impl ConnectionProfile {
             require_signed_tools,
             read_only_standby,
             allow_change_notification,
+            require_fga_evidence,
             max_subscriptions,
             mcp_exposed,
             dashboard_ddl_workbench,
@@ -1338,6 +1353,7 @@ mod tests {
             require_signed_tools: None,
             read_only_standby: None,
             allow_change_notification: None,
+            require_fga_evidence: None,
             max_subscriptions: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,

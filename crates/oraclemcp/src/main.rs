@@ -7008,6 +7008,7 @@ fn doctor_profile_caps(
         },
         protected: level.is_protected(),
         read_only_standby: profile.read_only_standby(),
+        require_fga_evidence: profile.require_fga_evidence(),
     }
 }
 

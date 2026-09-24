@@ -218,6 +218,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.",
     },
     FieldDisposition {
+        field: "require_fga_evidence",
+        disposition: Disposition::Commented,
+        help: "Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.",
+    },
+    FieldDisposition {
         field: "max_subscriptions",
         disposition: Disposition::Commented,
         help: "Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.",
@@ -352,6 +357,7 @@ mod tests {
             require_signed_tools: Some(false),
             read_only_standby: Some(false),
             allow_change_notification: Some(false),
+            require_fga_evidence: Some(true),
             max_subscriptions: Some(4),
             mcp_exposed: Some(true),
             dashboard_ddl_workbench: Some(false),
@@ -399,11 +405,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The spec fixes the count at 35.
+        // The spec fixes the count at 36 (R36 added require_fga_evidence).
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            35,
-            "the design spec fixes ConnectionProfile at 35 serde fields"
+            36,
+            "the design spec fixes ConnectionProfile at 36 serde fields"
         );
     }
 
