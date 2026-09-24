@@ -4510,6 +4510,13 @@ mod tests {
         assert_eq!(delivery.status_handle().snapshot().shutdown_timeouts, 1);
 
         release_destination_call(&state);
+        wait_until(Duration::from_secs(1), || {
+            delivery
+                .worker
+                .lock()
+                .as_ref()
+                .is_none_or(std::thread::JoinHandle::is_finished)
+        });
         assert_eq!(delivery.shutdown(), DurableShippingShutdownOutcome::Stopped);
     }
 

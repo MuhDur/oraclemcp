@@ -5848,6 +5848,7 @@ mod tests {
             None,
         )
         .expect("install broad fixture DACL");
+        let broad_dacl = redacted_windows_dacl_sddl(&path);
 
         let ready = root.path().join("foreign-ready");
         let release = root.path().join("foreign-release");
@@ -5872,13 +5873,11 @@ mod tests {
         assert!(child.try_wait().expect("poll holder").is_none());
         std::fs::write(&release, b"release").expect("release foreign holder");
         assert!(child.wait().expect("wait for holder").success());
-        let descriptor = windows_permissions::wrappers::GetNamedSecurityInfo(
-            path.as_os_str(),
-            SeObjectType::SE_FILE_OBJECT,
-            SecurityInformation::Dacl,
-        )
-        .expect("read DACL after refusal");
-        assert_eq!(descriptor.dacl().expect("DACL").len(), 2);
+        assert_eq!(
+            redacted_windows_dacl_sddl(&path),
+            broad_dacl,
+            "refusal must leave the pre-existing broad DACL untouched"
+        );
         eprintln!(
             "{}",
             serde_json::json!({
