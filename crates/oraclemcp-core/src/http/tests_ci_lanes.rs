@@ -195,8 +195,8 @@ fn durable_snapshot_loader_accepts_the_heartbeat_writer_schema() {
         .expect("current taxonomy parses");
     let watched = catalog
         .iter()
-        .find(|lane| lane.workflow_file == "mutation-safety.yml")
-        .expect("current mutation lane");
+        .find(|lane| lane.workflow_file == "fuzz.yml")
+        .expect("current fuzz lane");
     let raw = heartbeat_document(
         false,
         false,
@@ -227,21 +227,21 @@ fn durable_snapshot_loader_accepts_the_heartbeat_writer_schema() {
 fn current_multi_job_taxonomy_maps_only_exact_per_job_heartbeat_evidence() {
     let catalog = parse_ci_lane_catalog(include_str!("../../../../docs/ci_taxonomy.json"))
         .expect("current taxonomy parses");
-    let mutation = catalog
+    let fuzz = catalog
         .iter()
-        .filter(|lane| lane.workflow_file == "mutation-safety.yml")
+        .filter(|lane| lane.workflow_file == "fuzz.yml")
         .cloned()
         .collect::<Vec<_>>();
-    assert_eq!(mutation.len(), 10, "current scheduled mutation shards");
-    assert!(mutation.iter().all(|lane| !lane.whole_workflow));
+    assert_eq!(fuzz.len(), 8, "current scheduled fuzz shards");
+    assert!(fuzz.iter().all(|lane| !lane.whole_workflow));
     assert!(
         catalog
             .iter()
-            .all(|lane| lane.check_name != "manual mutation shard"),
-        "workflow-dispatch-only jobs are not scheduled heartbeat lanes"
+            .all(|lane| lane.check_name != "bounded loom model checks"),
+        "workflow-dispatch-only (tier C) jobs are not scheduled heartbeat lanes"
     );
 
-    let lanes = mutation
+    let lanes = fuzz
         .iter()
         .map(|lane| {
             heartbeat_job_lane(
@@ -268,7 +268,7 @@ fn current_multi_job_taxonomy_maps_only_exact_per_job_heartbeat_evidence() {
     for lane in snapshot
         .lanes
         .iter()
-        .filter(|lane| lane.catalog.workflow_file == "mutation-safety.yml")
+        .filter(|lane| lane.catalog.workflow_file == "fuzz.yml")
     {
         assert_eq!(
             ci_lane_health_json(lane, false)["state"],
@@ -278,24 +278,21 @@ fn current_multi_job_taxonomy_maps_only_exact_per_job_heartbeat_evidence() {
         );
     }
 
-    let legacy = heartbeat_document(
-        false,
-        false,
-        false,
-        heartbeat_lane(
-            "success",
-            Some("success"),
-            Some("https://github.com/MuhDur/oraclemcp/actions/runs/420"),
-            Some("2026-07-20T06:59:00Z"),
-        ),
+    let mut legacy_lane = heartbeat_lane(
+        "success",
+        Some("success"),
+        Some("https://github.com/MuhDur/oraclemcp/actions/runs/420"),
+        Some("2026-07-20T06:59:00Z"),
     );
+    legacy_lane["check_name"] = Value::from("scheduled:fuzz.yml");
+    let legacy = heartbeat_document(false, false, false, legacy_lane);
     let legacy_snapshot = ci_lane_snapshot_from_heartbeat(&catalog, &legacy)
         .expect("legacy workflow evidence is structurally valid");
     assert!(
         legacy_snapshot
             .lanes
             .iter()
-            .filter(|lane| lane.catalog.workflow_file == "mutation-safety.yml")
+            .filter(|lane| lane.catalog.workflow_file == "fuzz.yml")
             .all(|lane| ci_lane_health_json(lane, false)["state"] == "unknown"),
         "workflow-level green must never fan out over current per-job lanes"
     );

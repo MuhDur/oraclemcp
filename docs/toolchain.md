@@ -81,9 +81,9 @@ chase the newest nightly for its own sake. Trigger a bump when:
   a re-pin — the driver is stable-clean — but bump the pin if a coordinated
   `oraclemcp-driver-cx` upgrade rides along with an asupersync change that needs it.)
 - **The multi-nightly early-warning job has gone red and you have triaged it.**
-  CI runs an advisory `multi-nightly` matrix (pinned date + the floating
-  `nightly` channel, `continue-on-error: true`) precisely so an upcoming
-  toolchain break is visible *before* you are forced into it. A red square there
+  The tier-C `multi-nightly` job builds and tests on the floating `nightly`
+  channel for every release candidate precisely so an upcoming toolchain break
+  is visible *before* you are forced into it. A red result there
   is a signal to investigate, not an instruction to bump — confirm the breakage
   is real and unavoidable on the path you need, then schedule the re-pin.
 - **A security or soundness fix you need lands only in a newer nightly.**
@@ -110,9 +110,9 @@ the date is written. There are four:
 2. **`.github/workflows/ci.yml`** — the `env.RUST_TOOLCHAIN` value. Every gated
    job derives its toolchain from this one variable, so a single edit re-points
    fmt, clippy, test, the pinned-nightly build, docs, the boundary/seam/honesty
-   lints, `cargo deny`, the thin-db build, and `fuzz-build`. Also update the
-   *baseline* entry in the `multi-nightly` matrix (the date repeated as the
-   apples-to-apples comparison point alongside the floating `nightly`).
+   lints, `cargo deny`, the thin-driver build (a `pinned-nightly` step), and
+   `fuzz-build`. The tier-C `multi-nightly` job builds only the floating
+   `nightly`, so it has no date to update.
 
 3. **Other workflow pins.** Search the workflow tree for the old date and update
    any literal that does not read from `env.RUST_TOOLCHAIN`:
@@ -211,9 +211,11 @@ toolchain.
 
 ## 6. The multi-nightly early-warning, in brief
 
-`ci.yml` runs a `multi-nightly` matrix job that builds and tests on the pinned
-date **and** the floating `nightly` channel, marked `continue-on-error: true`.
-It is **advisory, not a gate**: because the line has no stable MSRV and builds
+`ci.yml` has a `multi-nightly` job that builds and tests on the floating
+`nightly` channel (the pinned date is covered by the tier-A jobs). It is tier C:
+it runs when the tier-C runner dispatches `ci.yml` on a release candidate, and
+its result is recorded in the release proof rather than on each push. Because
+the line has no stable MSRV and builds
 against specific nightly-only features (`try_trait_v2` + `try_trait_v2_residual`
 via asupersync's default `nightly-outcome-try`; `windows_by_handle` on
 Windows — §1), a future

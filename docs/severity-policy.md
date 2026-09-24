@@ -175,7 +175,7 @@ SHA, and it is **void the instant any byte changes**.
    clean on that SHA).
 4. **The tag points at the qualified SHA.** The pushed `vX.Y.Z` tag must resolve
    to the exact frozen SHA the qualification certified. `release_preflight.sh`
-   and the `release-metadata` gate confirm the tag/version alignment; this
+   (run by `release.yml` on the tag) confirms the tag/version alignment; this
    policy adds that the tag's *commit* is the certified one.
 
 Why exact-SHA: scheduled and CI runs slide across many commits and are

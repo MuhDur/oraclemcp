@@ -32,6 +32,13 @@ MATRIX_EXPRESSION = re.compile(r"\$\{\{\s*matrix\.([A-Za-z0-9_.-]+)\s*\}\}")
 EVENT_NAME_CONDITION = re.compile(
     r"^\s*github\.event_name\s*==\s*['\"]([A-Za-z0-9_-]+)['\"]\s*$"
 )
+# Tier C (plan §7): a dispatch-only lane whose workflow takes this input runs on
+# the exact release-candidate revision and reports into the release proof.
+RELEASE_CANDIDATE_INPUT = "candidate_sha"
+# Conclusions that say the runner or the platform broke, not the code under
+# test. They are never green, and they are reported apart from a real red.
+INFRASTRUCTURE_CONCLUSIONS = frozenset({"startup_failure", "cancelled", "timed_out"})
+SKIPPED_CONCLUSIONS = frozenset({"skipped", "neutral"})
 
 
 class WorkflowError(ValueError):
@@ -66,6 +73,7 @@ class Workflow:
     push_branches: bool = False
     push_tags: bool = False
     path_filtered: bool = False
+    dispatch_inputs: set[str] = field(default_factory=set)
 
 
 def strip_comment(text: str) -> str:
@@ -172,6 +180,8 @@ def parse_workflow(path: Path) -> Workflow:
     push_branches = False
     push_tags = False
     path_filtered = False
+    dispatch_inputs: set[str] = set()
+    in_dispatch_inputs = False
     in_on = False
     in_jobs = False
     active_trigger: str | None = None
@@ -221,6 +231,13 @@ def parse_workflow(path: Path) -> Workflow:
             if indent == 2:
                 active_trigger = key
                 triggers.add(key)
+                in_dispatch_inputs = False
+                continue
+            if indent == 4 and active_trigger == "workflow_dispatch":
+                in_dispatch_inputs = key == "inputs"
+                continue
+            if indent == 6 and in_dispatch_inputs:
+                dispatch_inputs.add(key)
                 continue
             if indent == 4 and active_trigger == "push":
                 if key == "branches":
@@ -313,6 +330,7 @@ def parse_workflow(path: Path) -> Workflow:
         push_branches=push_branches,
         push_tags=push_tags,
         path_filtered=path_filtered,
+        dispatch_inputs=dispatch_inputs,
     )
 
 
@@ -345,6 +363,8 @@ def job_tier(workflow: Workflow, job: Job) -> str:
     if "pull_request" in triggers or ("push" in triggers and workflow.push_branches):
         return "required"
     if "push" in triggers and workflow.push_tags:
+        return "release"
+    if triggers == {"workflow_dispatch"} and RELEASE_CANDIDATE_INPUT in workflow.dispatch_inputs:
         return "release"
     if "schedule" in triggers:
         return "scheduled"
@@ -454,21 +474,73 @@ def job_is_success(job: dict[str, Any]) -> bool:
     return job.get("status") == "completed" and job.get("conclusion") == "success"
 
 
-def status_report(taxonomy: dict[str, Any], sha: str, runs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return the shared ci-taxonomy/v1 report for exact GitHub check-runs."""
-    by_name = {job["check_name"]: job for job in taxonomy["jobs"]}
+# When one check name appears in several workflows (ci.yml and release.yml both
+# have `build on pinned nightly`), the check-run is judged by its strictest
+# tier: a red required build must never pass as a release-only job.
+TIER_STRICTNESS = ("required", "advisory", "release", "scheduled", "manual")
+
+
+def strictest_tier(tiers: Iterable[str]) -> str:
+    tiers = set(tiers)
+    if not tiers <= set(TIER_STRICTNESS):
+        # An unrecognised tier cannot be proven non-gating.
+        return "required"
+    return min(tiers, key=TIER_STRICTNESS.index)
+
+
+def is_infrastructure_failure(job: dict[str, Any]) -> bool:
+    """A crash of the runner or platform rather than a red result.
+
+    A job whose only failed step is GitHub's own "Set up job" never ran the
+    code under test either.
+    """
+
+    if job.get("conclusion") in INFRASTRUCTURE_CONCLUSIONS:
+        return True
+    if job.get("conclusion") != "failure":
+        return False
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return False
+    failed = [step.get("name") for step in steps if isinstance(step, dict) and step.get("conclusion") == "failure"]
+    return failed == ["Set up job"]
+
+
+def status_report(
+    taxonomy: dict[str, Any],
+    sha: str,
+    runs: list[dict[str, Any]],
+    workflow_runs: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Return the shared ci-taxonomy/v1 report for exact GitHub check-runs.
+
+    `runs` are check-runs (jobs); `workflow_runs` are the Actions runs for the
+    same SHA, which is the only place a `startup_failure` shows up: a workflow
+    that never started has no check-runs at all. Nothing here is green unless
+    every required job completed with `success`.
+    """
+    tiers_by_name: dict[str, set[str]] = {}
+    for job in taxonomy["jobs"]:
+        tiers_by_name.setdefault(job["check_name"], set()).add(job["tier"])
     actual_by_name = {str(run.get("name")): run for run in runs if isinstance(run.get("name"), str)}
     jobs: list[dict[str, Any]] = []
     unknown: list[str] = []
+    unexpanded: list[str] = []
     for name, run in sorted(actual_by_name.items()):
-        known = by_name.get(name)
-        if known is None:
+        if EXPRESSION.search(name):
+            # GitHub leaves `${{ ... }}` in a name it could not expand; no
+            # taxonomy entry can match it, so it is unknown, never green.
+            unexpanded.append(name)
+            unknown.append(name)
+            continue
+        tiers = tiers_by_name.get(name)
+        if tiers is None:
             unknown.append(name)
             continue
         jobs.append(
             {
                 "name": name,
-                "tier": known["tier"],
+                "tier": strictest_tier(tiers),
                 "status": run.get("status"),
                 "conclusion": run.get("conclusion"),
             }
@@ -480,20 +552,48 @@ def status_report(taxonomy: dict[str, Any], sha: str, runs: list[dict[str, Any]]
         for job in taxonomy["jobs"]
         if job["tier"] == "required" and job["check_name"] not in seen
     ]
-    missing_filtered = sorted(job["check_name"] for job in absent if job["path_filtered"])
-    missing_unexpected = sorted(job["check_name"] for job in absent if not job["path_filtered"])
+    missing_filtered = sorted({job["check_name"] for job in absent if job["path_filtered"]})
+    missing_unexpected = sorted({job["check_name"] for job in absent if not job["path_filtered"]})
     required_not_green = sorted(
         job["name"]
         for job in jobs
         if job["tier"] == "required" and not job_is_success(job)
     )
+    required_skipped = sorted(
+        job["name"]
+        for job in jobs
+        if job["tier"] == "required" and job["conclusion"] in SKIPPED_CONCLUSIONS
+    )
+    infrastructure_failed = sorted(
+        job["name"]
+        for job in jobs
+        if job["tier"] == "required" and is_infrastructure_failure(actual_by_name[job["name"]])
+    )
+    required_workflows = {
+        key
+        for job in taxonomy["jobs"]
+        if job["tier"] == "required"
+        for key in (job["workflow"], job["workflow_file"])
+    }
+    for run in workflow_runs or []:
+        workflow_file = Path(str(run.get("path") or "")).name
+        name = str(run.get("name") or "")
+        if run.get("conclusion") not in INFRASTRUCTURE_CONCLUSIONS:
+            continue
+        if name in required_workflows or workflow_file in required_workflows:
+            infrastructure_failed.append(f"workflow run: {name or workflow_file}")
+    infrastructure_failed = sorted(set(infrastructure_failed))
     advisory_not_green = sorted(
         job["name"]
         for job in jobs
         if job["tier"] == "advisory" and not job_is_success(job)
     )
     ci_green = not (
-        required_not_green or missing_filtered or missing_unexpected or unknown
+        required_not_green
+        or missing_filtered
+        or missing_unexpected
+        or unknown
+        or infrastructure_failed
     )
     return {
         "schema": SCHEMA,
@@ -503,8 +603,11 @@ def status_report(taxonomy: dict[str, Any], sha: str, runs: list[dict[str, Any]]
         "required_not_green": required_not_green,
         "required_missing_path_filtered": missing_filtered,
         "required_missing_unexpected": missing_unexpected,
+        "required_skipped": required_skipped,
+        "infrastructure_failed": infrastructure_failed,
         "advisory_not_green": advisory_not_green,
         "unknown_jobs": unknown,
+        "unexpanded_check_names": unexpanded,
     }
 
 
@@ -527,14 +630,42 @@ def fetch_check_runs(sha: str) -> list[dict[str, Any]]:
     return [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
 
 
-def load_run_fixture(path: Path) -> tuple[str, list[dict[str, Any]]]:
+def fetch_workflow_runs(sha: str) -> list[dict[str, Any]]:
+    completed = subprocess.run(
+        [
+            "gh",
+            "api",
+            "--paginate",
+            f"repos/MuhDur/oraclemcp/actions/runs?head_sha={sha}&per_page=100",
+            "--jq",
+            ".workflow_runs[] | {name, path, status, conclusion}",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    if completed.returncode:
+        raise WorkflowError(completed.stderr.strip() or "gh api actions/runs failed")
+    return [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+
+
+def load_run_fixture(path: Path) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read one `gh run view --json databaseId,headSha,workflowName,conclusion,jobs` object."""
+
     document = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(document, dict):
         raise WorkflowError(f"{path}: fixture must be one run object")
     jobs = document.get("jobs")
     if not isinstance(jobs, list):
         raise WorkflowError(f"{path}: fixture jobs must be a list")
-    return str(document.get("headSha", "fixture-sha")), jobs
+    workflow_runs = [
+        {
+            "name": document.get("workflowName"),
+            "status": document.get("status"),
+            "conclusion": document.get("conclusion"),
+        }
+    ]
+    return str(document.get("headSha", "fixture-sha")), jobs, workflow_runs
 
 
 def check_fixtures() -> None:
@@ -592,25 +723,103 @@ def check_fixtures() -> None:
     else:
         raise WorkflowError("duplicate with: fixture was accepted")
 
-    required_sha, required_jobs = load_run_fixture(FIXTURE_DIR / "required-failure-run.json")
-    required_failure = status_report(taxonomy, required_sha, required_jobs)
-    if required_failure["ci_green"] or len(required_failure["required_not_green"]) != 1:
-        raise WorkflowError("failed required job was called green")
+    release_candidate = Workflow(
+        path=Path("tier-c.yml"),
+        name="tier-c",
+        triggers={"workflow_dispatch"},
+        has_permissions=True,
+        jobs=[Job(identifier="proof", display_name="release-candidate proof")],
+        dispatch_inputs={RELEASE_CANDIDATE_INPUT},
+    )
+    repair = Workflow(
+        path=Path("repair.yml"),
+        name="repair",
+        triggers={"workflow_dispatch"},
+        has_permissions=True,
+        jobs=[Job(identifier="repair", display_name="manual repair")],
+        dispatch_inputs={"version"},
+    )
+    tiers = {job["job_id"]: job["tier"] for job in taxonomy_document([release_candidate, repair])["jobs"]}
+    if tiers != {"proof": "release", "repair": "manual"}:
+        raise WorkflowError(f"candidate_sha dispatch lanes were not classified as tier C: {tiers}")
 
-    advisory_sha, advisory_jobs = load_run_fixture(FIXTURE_DIR / "advisory-failure-run.json")
-    advisory_failure = status_report(taxonomy, advisory_sha, advisory_jobs)
-    if not advisory_failure["ci_green"] or len(advisory_failure["advisory_not_green"]) != 1:
-        raise WorkflowError("advisory failure did not stay separate from the required result")
+    # One check name in a required and a release-only workflow is judged as
+    # required: the release copy must not launder a red per-push build.
+    shared_name = Workflow(
+        path=Path("release-copy.yml"),
+        name="release-copy",
+        triggers={"push"},
+        has_permissions=True,
+        jobs=[Job(identifier="copy", display_name="required gate")],
+        push_tags=True,
+    )
+    shadowed = status_report(
+        taxonomy_document([workflow, shared_name]),
+        "shadow-sha",
+        [
+            {"name": "required gate", "status": "completed", "conclusion": "failure"},
+            {"name": "floating gate", "status": "completed", "conclusion": "success"},
+        ],
+    )
+    if shadowed["ci_green"] or shadowed["required_not_green"] != ["required gate"]:
+        raise WorkflowError("a release-tier twin downgraded a failing required check-run")
 
-    missing_sha, missing_jobs = load_run_fixture(FIXTURE_DIR / "required-missing-run.json")
-    missing_required = status_report(taxonomy, missing_sha, missing_jobs)
-    if missing_required["ci_green"] or missing_required["required_missing_unexpected"] != ["required gate"]:
-        raise WorkflowError("missing required job was called green or not reported precisely")
+    for fixture, expected_verdict, cause_field, expected_cause in RUN_FIXTURES:
+        sha, jobs, workflow_runs = load_run_fixture(FIXTURE_DIR / fixture)
+        report = status_report(taxonomy, sha, jobs, workflow_runs)
+        actual_verdict = report_verdict(report)
+        print(
+            json.dumps(
+                {
+                    "fixture": fixture,
+                    "expected_verdict": expected_verdict,
+                    "actual_verdict": actual_verdict,
+                },
+                sort_keys=True,
+            )
+        )
+        if actual_verdict != expected_verdict or report["ci_green"] != (expected_verdict == "green"):
+            raise WorkflowError(f"{fixture}: expected {expected_verdict}, derived {actual_verdict}")
+        if report[cause_field] != expected_cause:
+            raise WorkflowError(
+                f"{fixture}: {cause_field} is {report[cause_field]!r}, expected {expected_cause!r}"
+            )
 
-    unknown_sha, unknown_jobs = load_run_fixture(FIXTURE_DIR / "unknown-check-run.json")
-    unknown_check = status_report(taxonomy, unknown_sha, unknown_jobs)
-    if unknown_check["ci_green"] or unknown_check["unknown_jobs"] != ["new unclassified check"]:
-        raise WorkflowError("unknown check-run was called green or not reported precisely")
+
+# (fixture, verdict, the report field that must carry the cause, its value).
+RUN_FIXTURES: tuple[tuple[str, str, str, list[str]], ...] = (
+    ("required-failure-run.json", "red", "required_not_green", ["required gate"]),
+    ("advisory-failure-run.json", "green", "advisory_not_green", ["floating gate"]),
+    ("advisory-green-required-red-run.json", "red", "required_not_green", ["required gate"]),
+    ("required-missing-run.json", "missing", "required_missing_unexpected", ["required gate"]),
+    ("unknown-check-run.json", "unknown", "unknown_jobs", ["new unclassified check"]),
+    ("unexpanded-expression-run.json", "unknown", "unexpanded_check_names", ["build ${{ matrix.os }}"]),
+    ("crash-startup-failure-run.json", "crash", "infrastructure_failed", ["workflow run: Fixture CI"]),
+    (
+        "cancelled-required-run.json",
+        "crash",
+        "infrastructure_failed",
+        ["required gate", "workflow run: Fixture CI"],
+    ),
+    ("setup-job-failure-run.json", "crash", "infrastructure_failed", ["required gate"]),
+    ("skipped-required-run.json", "skipped", "required_skipped", ["required gate"]),
+)
+
+
+def report_verdict(report: dict[str, Any]) -> str:
+    """Name the first reason a report is not green, most severe first."""
+
+    if report["infrastructure_failed"]:
+        return "crash"
+    if report["unknown_jobs"]:
+        return "unknown"
+    if report["required_skipped"]:
+        return "skipped"
+    if report["required_not_green"]:
+        return "red"
+    if report["required_missing_unexpected"] or report["required_missing_path_filtered"]:
+        return "missing"
+    return "green"
 
 
 def check_taxonomy(workflows: list[Workflow]) -> None:
@@ -663,7 +872,12 @@ def main() -> int:
             TAXONOMY_PATH.write_text(json.dumps(taxonomy, indent=2) + "\n", encoding="utf-8")
             print(f"ci-taxonomy: wrote {TAXONOMY_PATH.relative_to(ROOT)}")
         elif arguments.status:
-            report = status_report(taxonomy, arguments.status, fetch_check_runs(arguments.status))
+            report = status_report(
+                taxonomy,
+                arguments.status,
+                fetch_check_runs(arguments.status),
+                fetch_workflow_runs(arguments.status),
+            )
             write_document(report)
             return 0 if report["ci_green"] else 1
         elif arguments.verify_names:

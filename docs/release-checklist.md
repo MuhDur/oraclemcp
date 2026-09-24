@@ -33,11 +33,35 @@ evidence is the CI run for that commit (linked below at release time).
 | Honesty framing | `scripts/oraclemcp_honesty_grep.sh` | `boundary` |
 | Sensitive-data lint | `scripts/secret_scan.sh` (structural + rendered surfaces) | `sensitive-data` |
 | Release acceptance suite | `scripts/release_acceptance_ci_suite.sh` | `release-acceptance` |
-| Release version surfaces (D3.1) | `scripts/release_surface_sync_check.sh` | `release-metadata` |
-| Release metadata sync | `scripts/release_preflight.sh` | `release-metadata` |
+| Release version surfaces (D3.1) | `scripts/release_surface_sync_check.sh` | `release-acceptance` (via `release_acceptance_ci_suite.sh`) |
+| Release metadata sync | `scripts/release_preflight.sh` | `release.yml` `checks` on the tag (no per-push job; run it locally first, step 2 below) |
 
 All thirteen run on the pinned nightly (every toolchain-bearing job derives its
 toolchain from `env.RUST_TOOLCHAIN` in `ci.yml`).
+
+### Tier C: dispatched on the frozen RC SHA
+
+These lanes do not run on push. The tier-C runner dispatches them with
+`candidate_sha=<full RC SHA>`; each job refuses a checkout that is not exactly
+that revision, and its result goes into the release proof. All four must be
+green on the RC:
+
+| Gate | Workflow / job |
+| --- | --- |
+| Kani BMC proofs over guard + audit | `kani-safety.yml` `kani-safety` |
+| Bounded loom model checks | `loom.yml` `loom` |
+| Feature powerset (`cargo hack clippy`) | `ci.yml` `feature-powerset` (dispatch) |
+| Floating-nightly build + tests | `ci.yml` `multi-nightly` (dispatch) |
+
+```sh
+sha=$(git rev-parse HEAD)
+gh workflow run kani-safety.yml --ref <rc-branch-or-tag> -f candidate_sha="$sha"
+gh workflow run loom.yml        --ref <rc-branch-or-tag> -f candidate_sha="$sha"
+gh workflow run ci.yml          --ref <rc-branch-or-tag> -f candidate_sha="$sha"
+```
+
+The loom job uploads `target/loom-invariant-results` as
+`loom-invariant-results`, including a machine-readable `result.json`.
 
 ### Required operator-run gate: Oracle version matrix (pre-23ai coverage)
 
@@ -81,16 +105,6 @@ investigate, not a blocker:
 
 - `fuzz-build` — compiles the cargo-fuzz targets so they cannot rot
   (`continue-on-error`; cargo-fuzz + `build-std` is churn-prone).
-- `multi-nightly` — builds/tests on the pinned date plus the floating `nightly`
-  channel as an early warning for an upcoming toolchain break
-  (`continue-on-error`; see [`toolchain.md`](toolchain.md) §6).
-
-The separate Tier-2 `.github/workflows/loom.yml` lane runs weekly and by manual
-dispatch. Its `loom` job is bounded to two Cargo build jobs, three loom
-preemptions, and 30 minutes; every run uploads
-`target/loom-invariant-results` as `loom-invariant-results`, including a
-machine-readable `result.json`. A failed loom result is a release investigation
-signal even though this scheduled workflow is not a per-commit required check.
 
 ---
 
@@ -101,7 +115,7 @@ signal even though this scheduled workflow is not a per-commit required check.
    may add one evidence-only commit containing only
    `tests/artifacts/local_gate/results-*.json`; tag that evidence commit.
 2. **Run the metadata preflight locally** as a fast pre-check
-   (it is also the `release-metadata` CI job):
+   (`release.yml`'s `checks` job runs it again on the tag):
    ```sh
    bash scripts/local_release_gate.sh --log --commit-proof
    git add tests/artifacts/local_gate/results-*.json
@@ -234,7 +248,8 @@ Required gates green on the RC commit:
 - [ ] boundary         (engine-free + forbidden-deps + driver-seam + honesty)
 - [ ] sensitive-data   (secret_scan.sh)
 - [ ] release-acceptance (B.12: DL-9 + ERG-10 + DOC-10 + E0 + feature-powerset + arch-fitness)
-- [ ] release-metadata (release_preflight.sh)
+- [ ] release preflight (release_preflight.sh; release.yml checks)
+- [ ] tier C on the RC SHA: kani-safety, loom, feature-powerset, multi-nightly
 - [ ] rollback dry-run (scripts/e2e/release_rollback_dry_run.sh --log --dry-run
       --broken-version X.Y.Z --previous-good A.B.C)
 - [ ] local-release-gate (scripts/local_release_gate.sh --log --commit-proof,

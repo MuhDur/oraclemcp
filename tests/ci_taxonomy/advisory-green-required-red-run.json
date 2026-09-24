@@ -1,0 +1,29 @@
+{
+  "databaseId": 1010,
+  "headSha": "4444444444444444444444444444444444444444",
+  "workflowName": "Fixture CI",
+  "status": "completed",
+  "conclusion": "failure",
+  "jobs": [
+    {
+      "name": "required gate",
+      "status": "completed",
+      "conclusion": "failure",
+      "steps": [
+        {
+          "name": "Set up job",
+          "conclusion": "success"
+        },
+        {
+          "name": "Run cargo test",
+          "conclusion": "failure"
+        }
+      ]
+    },
+    {
+      "name": "floating gate",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

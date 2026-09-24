@@ -12,6 +12,22 @@ Cancelled, skipped, neutral, missing, in-progress, and failed required jobs are
 all non-green. Advisory failures are reported separately and never upgrade or
 downgrade that required result.
 
+## Tiers (plan §7)
+
+| Tier | Taxonomy `tier` | When it runs | What it decides |
+|---|---|---|---|
+| A | `required` | every push to `main` and every PR | `ci_green`: every required check-run must be a completed `success` |
+| B | `scheduled` | cron (fuzz shards, the CI heartbeat) | watched by `scripts/ci_heartbeat.sh`; never part of `ci_green` |
+| C | `release` | the tag pipeline (`release.yml`) and `workflow_dispatch` with a `candidate_sha` input: `kani-safety.yml`, `loom.yml`, and the `feature-powerset` and `multi-nightly` jobs of `ci.yml` | run on the exact release-candidate revision (the job refuses any other checkout); the result enters the release proof, not the per-push check |
+
+`advisory` (`continue-on-error: true`) is reserved for the explicitly
+experimental `fuzz-build` and for the lanes other beads are restoring
+(`windows-rust`, `api-lock`, `plsql-intelligence`). `manual` is a
+`workflow_dispatch` lane without `candidate_sha` (repair and acceptance
+workflows). When one check name exists in two workflows (`ci.yml` and
+`release.yml` both build `build on pinned nightly`), a check-run is judged by
+its strictest tier, so the release copy can never launder a red per-push build.
+
 Run the offline contract checks:
 
 ```bash
@@ -43,11 +59,24 @@ workflow content differs by repository, but both documents use `schema`,
 triggers, path_filtered}`, derived `workflows`/`groups`, and status reports
 with `ci_green`, `required_not_green`, `advisory_not_green`,
 `required_missing_path_filtered`, `required_missing_unexpected`, and
-`unknown_jobs`.
+`unknown_jobs`. oraclemcp's report adds, without changing those fields:
 
-`--status` calls GitHub's check-runs endpoint, not run-level conclusions. It
-returns non-zero unless every required check is a completed success; a missing
-or unclassified check is non-green. `--verify-names` is the live reality check
+- `infrastructure_failed`: a required job that was `cancelled`, `timed_out` or
+  `startup_failure`, or whose only failed step is "Set up job", and any
+  workflow run owning required jobs that ended that way (a `startup_failure`
+  run has no check-runs at all). A crash, not a red result, and never green.
+- `required_skipped`: a required job concluded `skipped` or `neutral`.
+- `unexpanded_check_names`: a check-run name still containing `${{ ... }}`;
+  also listed in `unknown_jobs`.
+
+`--status` calls GitHub's check-runs endpoint plus the Actions runs for the
+SHA (for `startup_failure`). It returns non-zero unless every required check
+is a completed success; a missing, crashed, skipped or unclassified check is
+non-green. `--check-fixtures` replays one fixture per verdict under
+`tests/ci_taxonomy/` and logs `{fixture, expected_verdict, actual_verdict}`.
+The "Set up job" rule needs step data, which fixtures carry and the
+check-runs endpoint does not; live, such a job still counts in
+`required_not_green`. `--verify-names` is the live reality check
 for the derived labels, because plausible-looking YAML templates can otherwise
 remain unmatched forever.
 
@@ -61,7 +90,9 @@ limit, not a compiler or test regression. The later `main` run `29493263831`
 completed both the pinned and floating entries successfully (about fifteen and
 nine minutes respectively). The workflow now pins an explicit bounded timeout
 for that advisory job, so a future hang is reported as advisory evidence rather
-than consuming the platform default.
+than consuming the platform default. The job is now tier C: it runs when the
+tier-C runner dispatches `ci.yml` on a release candidate, and it no longer runs
+on pull requests.
 
 ## CI heartbeat (never discover red first)
 
@@ -82,8 +113,7 @@ The heartbeat snapshot separates gate posture from watched-lane posture.
 `blocked`, `any_red`, and `any_unknown` retain the required-lane exit-code
 contract: a required red or unknown lane fails the heartbeat job. The
 `watched_blocked`, `watched_red`, and `watched_unknown` fields cover every
-watched lane, including advisory scheduled lanes such as mutation shards and
-Loom. Those advisory lanes do not fail the heartbeat job, but a missing or red
+watched lane, including advisory scheduled lanes such as the fuzz shards. Those advisory lanes do not fail the heartbeat job, but a missing or red
 advisory lane must still render as red or unknown in the snapshot and warning
 output, never as "all watched lanes are green."
 

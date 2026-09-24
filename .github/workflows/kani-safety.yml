@@ -1,11 +1,14 @@
 name: Kani Safety
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  # Tier C (release-only, plan §7): the tier-C runner dispatches this workflow
+  # on the release-candidate ref; the job refuses any other checkout.
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact release-candidate revision to prove
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -32,6 +35,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Verify exact release-candidate revision
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          [ "$actual" = "$CANDIDATE_SHA" ] || {
+            echo "::error::tier-C checkout is $actual, expected $CANDIDATE_SHA" >&2
+            exit 1
+          }
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:

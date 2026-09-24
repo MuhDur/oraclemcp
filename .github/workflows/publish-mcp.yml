@@ -61,9 +61,6 @@ jobs:
         env:
           RELEASE_TAG: v${{ steps.release.outputs.version }}
           RELEASE_REQUIRE_MAIN: "true"
-          # Operator ruling 2026-07-21 (plan v8 §Z2): mutation seal advisory
-          # this train — loud warning, never a release blocker.
-          ALLOW_STALE_MUTATION_SEAL: "1"
         run: bash scripts/release_preflight.sh
 
   publish:

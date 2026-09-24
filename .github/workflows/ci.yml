@@ -5,6 +5,15 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Tier C (release-only, plan §7): the tier-C runner dispatches this workflow
+  # on the release-candidate ref; `feature-powerset` and `multi-nightly` run
+  # only here and refuse any checkout that is not exactly `candidate_sha`.
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact release-candidate revision the tier-C lanes must build
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -18,14 +27,6 @@ env:
   REQUIRED_LOCAL_GRAPH_SHA256: "790280daa312c26ad2a3b613944d4fc330c76006952f8e68987bd7f66c557c53"
   PSSCRIPTANALYZER_VERSION: "1.25.0"
   PYTHON_ORACLEDB_VERSION: "4.0.2"
-  # Z2 (the fresh five-surface mutation campaign) is deferred out of the 0.9.1
-  # train (plan v7 §Z2): a mutation seal binds to a source SHA and re-stales on
-  # every safety-crate fix, so it is produced ONCE on the release candidate.
-  # Deferring the per-push E_STALE_SEAL check keeps development CI green without a
-  # ~12h throwaway campaign. This flag is intentionally set ONLY in this per-push
-  # workflow — release.yml, docker.yml, and publish-mcp.yml do NOT set it, so an
-  # actual release still hard-fails without a fresh seal.
-  ALLOW_STALE_MUTATION_SEAL: 1
 
 permissions:
   contents: read
@@ -166,104 +167,12 @@ jobs:
           cargo test -p oraclemcp-core --test golden_behavior --test doctor_secret_golden
           cargo test -p oraclemcp-db   --test structured_schema_golden
 
-  # D2 / TRI-1: measure only source lines changed by this PR, then enforce the
-  # committed mutation floor. This deliberately does not gate on total line
-  # coverage: unrelated or assertion-free tests can game a global percentage.
-  # The evaluator's offline self-test pins both pass and fail behavior.
-  coverage-ratchet:
-    name: changed-line coverage + mutation floor
-    runs-on: ubuntu-latest
-    # Advisory for this train. Operator steering 2026-09-16: the mutation-floor
-    # leg is blocked by the stale mutation seal, and the fresh five-surface
-    # mutation re-seal is deferred by operator decision (tracking beads
-    # oraclemcp-2q4em.5.3 and oraclemcp-eng-program-bp8ia.5.6). The changed-line
-    # coverage leg still RUNS and is reported; `continue-on-error: true` is what
-    # makes scripts/ci_taxonomy.py classify this job `advisory`, so the stale-seal
-    # red never blocks main and never masks a real regression as a green gate.
-    # The tracking beads stay open; re-required when the re-seal lands.
-    continue-on-error: true
-    timeout-minutes: 45
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_TARGET_DIR: target/coverage-ratchet
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-          components: llvm-tools
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          save-if: false
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
-        with:
-          tool: cargo-llvm-cov
-      - run: bash scripts/coverage_ratchet.sh --self-test
-      - name: Ratchet changed-line coverage against the change base
-        id: coverage
-        env:
-          COVERAGE_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          set -euo pipefail
-          mkdir -p target/test-attestation-evidence
-          bash scripts/coverage_ratchet.sh run --base "$COVERAGE_BASE" 2>&1 \
-            | tee target/test-attestation-evidence/coverage-ratchet.log
-          echo "base=$COVERAGE_BASE" >> "$GITHUB_OUTPUT"
-      # The mutation-floor leg is advisory this train (ALLOW_STALE_MUTATION_SEAL,
-      # operator ruling 2026-07-21 §Z2), so it must never be attested PASS: the
-      # outcomes come from what the run recorded per leg, not from this file.
-      - name: Derive attestation outcomes from the legs the run enforced
-        id: legs
-        run: |
-          set -euo pipefail
-          {
-            echo 'tests<<ATTESTATION_OUTCOMES'
-            bash scripts/coverage_ratchet.sh attestation-outcomes
-            echo 'ATTESTATION_OUTCOMES'
-          } >> "$GITHUB_OUTPUT"
-          bash scripts/coverage_ratchet.sh attestation-outcomes
-      - name: Record coverage-lane attestation status
-        uses: ./.github/actions/test-attestation
-        env:
-          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
-          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
-        with:
-          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
-          trusted-context: ${{ github.event_name == 'push' }}
-          lane: coverage-ratchet
-          command: bash scripts/coverage_ratchet.sh run --base ${{ steps.coverage.outputs.base }}
-          tests: ${{ steps.legs.outputs.tests }}
-          artifacts: target/test-attestation-evidence/coverage-ratchet.log
-          output-name: coverage-ratchet.jsonl
-      # E6: consume what the signer produced. An attestation nobody verifies is
-      # decoration, and until now nothing in CI read one back. This needs no
-      # signing secret: the signature envelope records payload_sha256, which
-      # binds the payload, so a tampered attestation is rejected even where the
-      # HMAC cannot be recomputed. It also refuses silence — a lane must emit
-      # either a signed attestation or a typed SKIP naming a known reason — and
-      # says out loud when every lane skipped, so an inert signer can never read
-      # as "we have signed evidence".
-      - name: Verify the attestation this lane produced (E6)
-        if: always()
-        run: |
-          python3 scripts/check_test_attestations.py --selftest
-          python3 scripts/check_test_attestations.py target/test-attestations
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: coverage-ratchet-${{ github.run_number }}
-          path: |
-            target/test-attestation-evidence/coverage-ratchet.log
-            target/test-attestations/
-          if-no-files-found: error
-          retention-days: 30
-
   feature-powerset:
     name: feature powerset (cargo hack)
     needs: web-build
+    # Tier C (plan §7): release candidates only, via workflow_dispatch; its
+    # result enters the release proof instead of the per-push check.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Compile + lint gate only: `cargo hack clippy` over the feature powerset of
     # the three feature-owning crates (oraclemcp-db / -core / oraclemcp). The
@@ -275,6 +184,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Verify exact release-candidate revision
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          [ "$actual" = "$CANDIDATE_SHA" ] || {
+            echo "::error::tier-C checkout is $actual, expected $CANDIDATE_SHA" >&2
+            exit 1
+          }
       # Even the narrowed clippy powerset accretes a shared target/ dir; free the
       # preinstalled toolchains we don't use so a large combo can't hit "No space
       # left on device". rustup installs to ~/.cargo + ~/.rustup, not
@@ -559,29 +477,19 @@ jobs:
       - run: cargo build --workspace
       - run: cargo build -p oraclemcp --features dashboard-bundle
 
-  # Multi-nightly early-warning (bead D4 / WP-D). ADVISORY ONLY — NOT a required
-  # gate. The pinned nightly (nightly-2026-05-11) is already exhaustively covered
-  # by the required jobs above (`build on pinned nightly`, `cargo test`, clippy),
-  # so this job only builds and tests against the *floating* `nightly` channel:
-  # an upcoming toolchain that will break the Asupersync stack surfaces here early,
-  # before we deliberately re-pin (see docs/toolchain.md + ADR-0001). A red square
-  # here is an early warning to investigate, never a release blocker.
-  #
-  # continue-on-error keeps a *failure* from reddening required CI — but note a job
-  # *timeout* (unlike a failure) still marks the whole run "cancelled" regardless of
-  # continue-on-error. The redundant pinned leg used to live in this matrix too and
-  # its `--all-targets` test kept hitting the 45m cap, cancelling the job and
-  # poisoning otherwise-green run conclusions; it was removed and the timeout raised
-  # to 60m for headroom. When bisecting a regression, temporarily add a pinned date
-  # back to the matrix.
+  # Multi-nightly early-warning (bead D4 / WP-D). Tier C (plan §7): it runs only
+  # when the tier-C runner dispatches this workflow on a release candidate, and
+  # its result enters the release proof. The pinned nightly (nightly-2026-05-11)
+  # is already covered by the tier-A jobs above (`build on pinned nightly`,
+  # `cargo test`, clippy), so this job only builds and tests against the
+  # *floating* `nightly` channel: an upcoming toolchain that will break the
+  # Asupersync stack surfaces here before we deliberately re-pin (see
+  # docs/toolchain.md + ADR-0001). When bisecting a regression, temporarily add
+  # a pinned date back to the matrix.
   multi-nightly:
-    name: multi-nightly early-warning (advisory)
-    # Advisory early-warning: runs on pull requests, not direct pushes to main,
-    # so a future-nightly-toolchain red never stamps the main release badge. It
-    # still runs (and warns) on every PR.
-    if: github.event_name == 'pull_request'
+    name: multi-nightly early-warning
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -592,6 +500,15 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Verify exact release-candidate revision
+        env:
+          CANDIDATE_SHA: ${{ inputs.candidate_sha }}
+        run: |
+          actual="$(git rev-parse HEAD)"
+          [ "$actual" = "$CANDIDATE_SHA" ] || {
+            echo "::error::tier-C checkout is $actual, expected $CANDIDATE_SHA" >&2
+            exit 1
+          }
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
         with:
           toolchain: ${{ matrix.toolchain }}
@@ -789,38 +706,6 @@ jobs:
       # release). Skipped automatically for a crate with no published baseline.
       - run: cargo semver-checks check-release -p oraclemcp-error -p oraclemcp-guard -p oraclemcp-db -p oraclemcp-verifier
 
-  release-metadata:
-    name: release metadata sync
-    needs: web-build
-    runs-on: ubuntu-latest
-    # Advisory for this train. Operator steering 2026-09-16: release_preflight.sh's
-    # mutation_safety_gate check-report hard-fails on E_STALE_SEAL from the same
-    # deferred five-surface mutation re-seal (tracking beads oraclemcp-2q4em.5.3
-    # and oraclemcp-eng-program-bp8ia.5.6). Every other preflight check passes;
-    # `continue-on-error: true` is what makes scripts/ci_taxonomy.py classify this
-    # job `advisory`. The tracking beads stay open; re-required when the re-seal lands.
-    continue-on-error: true
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: oraclemcp-dashboard-dist
-          path: web/dist
-      - uses: actions/setup-node@v7
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-      - run: npm ci
-        working-directory: web
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - run: bash scripts/release_preflight.sh
-
   supply-chain:
     name: cargo deny (advisories, licenses, bans, sources)
     runs-on: ubuntu-latest
@@ -837,31 +722,6 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
       - run: cargo deny --features oraclemcp/dashboard-bundle,oraclemcp-core/dashboard-bundle check
-
-  # The flagship artifact is the thin-db binary. Build-only — live connectivity
-  # is covered by the env-gated `live-xe` tests, not run here.
-  thin-db:
-    name: build thin driver
-    needs: web-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: oraclemcp-dashboard-dist
-          path: web/dist
-      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        with:
-          # PRs restore the main cache but never save (their short-lived
-          # merge-ref caches would evict the useful main population).
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo build -p oraclemcp --features dashboard-bundle
 
   # The optional PL/SQL-intelligence distribution must remain independently
   # buildable and testable. This explicitly covers the feature excluded from

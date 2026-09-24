@@ -1408,7 +1408,7 @@ cosign download sbom "ghcr.io/muhdur/oraclemcp:${VERSION}"
 
 ### 6.7 Opt in to signed CI test attestations
 
-The coverage-ratchet, mutation-shard, and resource-bounded loom lanes can emit
+The resource-bounded loom lane and the `oracle-free23` lane can emit
 `test-attestation/v1` JSONL through the shared
 `.github/actions/test-attestation` action. Signing is deliberately off until an
 operator provisions both parts of the trust boundary:

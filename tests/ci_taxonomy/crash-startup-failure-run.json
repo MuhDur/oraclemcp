@@ -1,0 +1,8 @@
+{
+  "databaseId": 1005,
+  "headSha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "workflowName": "Fixture CI",
+  "status": "completed",
+  "conclusion": "startup_failure",
+  "jobs": []
+}

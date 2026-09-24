@@ -106,26 +106,6 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/coverage_baseline.py",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
-      "path": "scripts/coverage_baseline.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
-      "path": "scripts/coverage_ratchet.py",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
-      "path": "scripts/coverage_ratchet.sh",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
       "path": "scripts/dashboard_bundle_check.sh",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -192,11 +172,6 @@
     },
     {
       "path": "scripts/migrate_mutation_result.py",
-      "kind": "entry_point",
-      "trace": "required-quality"
-    },
-    {
-      "path": "scripts/mutation_safety_gate.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },

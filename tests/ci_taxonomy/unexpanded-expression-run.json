@@ -1,0 +1,24 @@
+{
+  "databaseId": 1008,
+  "headSha": "2222222222222222222222222222222222222222",
+  "workflowName": "Fixture CI",
+  "status": "completed",
+  "conclusion": "success",
+  "jobs": [
+    {
+      "name": "required gate",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "floating gate",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "name": "build ${{ matrix.os }}",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

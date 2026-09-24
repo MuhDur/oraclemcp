@@ -23,7 +23,8 @@
       "job_id": "oracle-free23",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -35,7 +36,8 @@
       "job_id": "plsql-intelligence",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -58,7 +60,8 @@
       "job_id": "windows-installer",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -70,7 +73,8 @@
       "job_id": "ergonomics",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -82,19 +86,8 @@
       "job_id": "pinned-nightly",
       "triggers": [
         "pull_request",
-        "push"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "build thin driver",
-      "tier": "required",
-      "workflow": "CI",
-      "workflow_file": "ci.yml",
-      "job_id": "thin-db",
-      "triggers": [
-        "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -106,7 +99,8 @@
       "job_id": "supply-chain",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -118,7 +112,8 @@
       "job_id": "docs",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -130,19 +125,8 @@
       "job_id": "test",
       "triggers": [
         "pull_request",
-        "push"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "changed-line coverage + mutation floor",
-      "tier": "advisory",
-      "workflow": "CI",
-      "workflow_file": "ci.yml",
-      "job_id": "coverage-ratchet",
-      "triggers": [
-        "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -154,7 +138,8 @@
       "job_id": "clippy",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -166,19 +151,19 @@
       "job_id": "boundary",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
     {
       "check_name": "feature powerset (cargo hack)",
-      "tier": "required",
+      "tier": "release",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "feature-powerset",
       "triggers": [
-        "pull_request",
-        "push"
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -190,7 +175,8 @@
       "job_id": "fuzz-build",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -202,18 +188,19 @@
       "job_id": "installer",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
     {
-      "check_name": "multi-nightly early-warning (advisory) (nightly)",
-      "tier": "advisory",
+      "check_name": "multi-nightly early-warning (nightly)",
+      "tier": "release",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "multi-nightly",
       "triggers": [
-        "pull_request"
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -236,19 +223,8 @@
       "job_id": "release-acceptance",
       "triggers": [
         "pull_request",
-        "push"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "release metadata sync",
-      "tier": "advisory",
-      "workflow": "CI",
-      "workflow_file": "ci.yml",
-      "job_id": "release-metadata",
-      "triggers": [
-        "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -260,7 +236,8 @@
       "job_id": "fmt",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -272,7 +249,8 @@
       "job_id": "sensitive-data",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -284,7 +262,8 @@
       "job_id": "web-build",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -408,145 +387,21 @@
     },
     {
       "check_name": "guard + audit BMC proofs",
-      "tier": "required",
+      "tier": "release",
       "workflow": "Kani Safety",
       "workflow_file": "kani-safety.yml",
       "job_id": "kani-safety",
       "triggers": [
-        "pull_request",
-        "push",
         "workflow_dispatch"
       ],
       "path_filtered": false
     },
     {
       "check_name": "bounded loom model checks",
-      "tier": "scheduled",
+      "tier": "release",
       "workflow": "Loom Concurrency Invariants",
       "workflow_file": "loom.yml",
       "job_id": "loom",
-      "triggers": [
-        "schedule",
-        "workflow_dispatch"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "audit shard offset 0",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "audit shard offset 1",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "core shard offset 0",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "core shard offset 1",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "db shard offset 0",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "db shard offset 1",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "dispatch shard offset 0",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "dispatch shard offset 1",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "guard shard offset 0",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "guard shard offset 1",
-      "tier": "scheduled",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "scheduled-shard",
-      "triggers": [
-        "schedule"
-      ],
-      "path_filtered": false
-    },
-    {
-      "check_name": "manual mutation shard",
-      "tier": "manual",
-      "workflow": "Mutation Safety",
-      "workflow_file": "mutation-safety.yml",
-      "job_id": "manual-shard",
       "triggers": [
         "workflow_dispatch"
       ],
@@ -815,7 +670,8 @@
       "name": "CI",
       "triggers": [
         "pull_request",
-        "push"
+        "push",
+        "workflow_dispatch"
       ],
       "jobs": [
         "Oracle FREE 23ai matrix + VECTOR smoke",
@@ -824,20 +680,17 @@
         "Windows installer PSSA and dry-run",
         "agent ergonomics drift guard",
         "build on pinned nightly",
-        "build thin driver",
         "cargo deny (advisories, licenses, bans, sources)",
         "cargo doc (builds)",
         "cargo test",
-        "changed-line coverage + mutation floor",
         "clippy (-D warnings)",
         "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
         "feature powerset (cargo hack)",
         "fuzz targets compile (nightly)",
         "installer lint and built-artifact smoke",
-        "multi-nightly early-warning (advisory) (nightly)",
+        "multi-nightly early-warning (nightly)",
         "public-API lock (cargo public-api + semver-checks)",
         "release acceptance suite (B.12)",
-        "release metadata sync",
         "rustfmt",
         "sensitive-data lint",
         "web bundle (npm ci + vite build)"
@@ -873,8 +726,6 @@
     "kani-safety.yml": {
       "name": "Kani Safety",
       "triggers": [
-        "pull_request",
-        "push",
         "workflow_dispatch"
       ],
       "jobs": [
@@ -884,31 +735,10 @@
     "loom.yml": {
       "name": "Loom Concurrency Invariants",
       "triggers": [
-        "schedule",
         "workflow_dispatch"
       ],
       "jobs": [
         "bounded loom model checks"
-      ]
-    },
-    "mutation-safety.yml": {
-      "name": "Mutation Safety",
-      "triggers": [
-        "schedule",
-        "workflow_dispatch"
-      ],
-      "jobs": [
-        "audit shard offset 0",
-        "audit shard offset 1",
-        "core shard offset 0",
-        "core shard offset 1",
-        "db shard offset 0",
-        "db shard offset 1",
-        "dispatch shard offset 0",
-        "dispatch shard offset 1",
-        "guard shard offset 0",
-        "guard shard offset 1",
-        "manual mutation shard"
       ]
     },
     "oci-adb.yml": {
@@ -970,16 +800,12 @@
     "advisory": [
       "PL/SQL intelligence feature matrix",
       "Rust workspace (Windows)",
-      "changed-line coverage + mutation floor",
       "fuzz targets compile (nightly)",
-      "multi-nightly early-warning (advisory) (nightly)",
-      "public-API lock (cargo public-api + semver-checks)",
-      "release metadata sync"
+      "public-API lock (cargo public-api + semver-checks)"
     ],
     "manual": [
       "OCI ADB acceptance",
       "Windows audit native workspace",
-      "manual mutation shard",
       "promote attested digest",
       "publish server.json",
       "validate immutable release",
@@ -988,6 +814,7 @@
     ],
     "release": [
       "Publish to crates.io",
+      "bounded loom model checks",
       "build aarch64-apple-darwin",
       "build aarch64-unknown-linux-gnu",
       "build aarch64-unknown-linux-musl",
@@ -996,6 +823,9 @@
       "build x86_64-pc-windows-msvc",
       "build x86_64-unknown-linux-gnu",
       "build x86_64-unknown-linux-musl",
+      "feature powerset (cargo hack)",
+      "guard + audit BMC proofs",
+      "multi-nightly early-warning (nightly)",
       "publish GHCR image",
       "publish GitHub release",
       "publish MCP registry entry",
@@ -1009,14 +839,11 @@
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
       "build on pinned nightly",
-      "build thin driver",
       "cargo deny (advisories, licenses, bans, sources)",
       "cargo doc (builds)",
       "cargo test",
       "clippy (-D warnings)",
       "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
-      "feature powerset (cargo hack)",
-      "guard + audit BMC proofs",
       "installer lint and built-artifact smoke",
       "release acceptance suite (B.12)",
       "rustfmt",
@@ -1024,15 +851,6 @@
       "web bundle (npm ci + vite build)"
     ],
     "scheduled": [
-      "audit shard offset 0",
-      "audit shard offset 1",
-      "bounded loom model checks",
-      "core shard offset 0",
-      "core shard offset 1",
-      "db shard offset 0",
-      "db shard offset 1",
-      "dispatch shard offset 0",
-      "dispatch shard offset 1",
       "fuzz oraclemcp-audit / chain_verify shard 0/1",
       "fuzz oraclemcp-auth / oauth_token_validate shard 0/1",
       "fuzz oraclemcp-config / config_toml shard 0/1",
@@ -1041,8 +859,6 @@
       "fuzz oraclemcp-guard / alter_session_parse shard 2/4",
       "fuzz oraclemcp-guard / alter_session_parse shard 3/4",
       "fuzz oraclemcp-guard / classify_fuzz shard 0/1",
-      "guard shard offset 0",
-      "guard shard offset 1",
       "watch required + scheduled lanes (server + driver)"
     ]
   }

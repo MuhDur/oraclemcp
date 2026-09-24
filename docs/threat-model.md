@@ -432,7 +432,7 @@ for crate in oraclemcp-guard oraclemcp-audit oraclemcp-auth; do
     --target x86_64-unknown-linux-gnu)
 done
 
-# Bounded concurrency model-checks (T2) — also weekly/dispatch in loom.yml
+# Bounded concurrency model-checks — also tier C (loom.yml, release candidates)
 RUSTFLAGS="--cfg loom" LOOM_MAX_PREEMPTIONS=3 CARGO_BUILD_JOBS=2 \
   cargo +nightly-2026-05-11 test -p oraclemcp-audit \
     --test loom_shipping_spool --release -- --test-threads=1
