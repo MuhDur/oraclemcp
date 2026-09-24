@@ -223,6 +223,22 @@ fn field_budget_cap_maps_to_truncated() {
     }
 }
 
+fn change_dbid(facts: &mut DecisiveFacts, change: u8) {
+    facts.db_identity = computed(DbIdentity {
+        dbid: u64::from(change) + 1,
+        con_uid: 2,
+    });
+}
+
+#[test]
+fn field_eight_change_one_changes_dbid_and_decisive_digest() {
+    let original = sample();
+    let mut changed = original.clone();
+    change_dbid(&mut changed.decisive, 1);
+    assert_ne!(original.decisive, changed.decisive);
+    assert_ne!(original.decisive_digest(), changed.decisive_digest());
+}
+
 proptest! {
     #[test]
     fn prop_decisive_digest_changes_on_each_decisive_field(field in 0usize..19, change in 1u8..=255) {
@@ -238,7 +254,7 @@ proptest! {
             5 => facts.compiler_facts = computed(format!("COMPILER_{change}")),
             6 => facts.engine_version = computed(format!("ENGINE_{change}")),
             7 => facts.ruleset_digest = computed([change; 32]),
-            8 => facts.db_identity = computed(DbIdentity { dbid: u64::from(change), con_uid: 2 }),
+            8 => change_dbid(facts, change),
             9 => facts.current_schema = computed(format!("SCHEMA_{change}")),
             10 => facts.profile_generation = computed(u64::from(change) + 1),
             11 => facts.lane_generation = computed(u64::from(change) + 1),
@@ -258,6 +274,7 @@ proptest! {
             }
             _ => unreachable!(),
         }
+        prop_assert_ne!(&original.decisive, &changed.decisive);
         prop_assert_ne!(original.decisive_digest(), changed.decisive_digest());
     }
 }
