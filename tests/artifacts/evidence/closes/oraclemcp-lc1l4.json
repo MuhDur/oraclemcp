@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T15:45:00Z",
+  "bead_id": "oraclemcp-lc1l4",
+  "scope": {
+    "summary": "Full tracked-tree secret_scan.sh was red because two bead records quoted the Oracle Cloud wildcard certificate-CN pattern literally; reworded (tracker text only, 07268071).",
+    "in_scope": [
+      ".beads/issues.jsonl"
+    ],
+    "out_of_scope": [
+      "No change to scripts/secret_scan.sh or its patterns (the scan was not weakened)."
+    ]
+  },
+  "source": {
+    "sha": "b048fd08e9fcacd2f6bb8ab6336d996550bb668a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "main CI verdict",
+        "kind": "cli",
+        "trace": "GitHub Actions ci.yml run 36014465053 on main at b048fd08 (contains 07268071): job \"sensitive-data lint\" (bash scripts/secret_scan.sh) conclusion success; it failed on earlier main runs with \"structural match (CN=... oraclecloud) in .beads/issues.jsonl\"."
+      },
+      {
+        "name": "local",
+        "kind": "cli",
+        "trace": "bash scripts/secret_scan.sh exits 0 locally after the rewording."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The orchestrator both made the tracker-text edit and verified it; the CI job verdict is the independent check."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
