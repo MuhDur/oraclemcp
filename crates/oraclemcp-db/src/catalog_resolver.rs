@@ -3795,7 +3795,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 148);
+        assert_eq!(specs.len(), 154);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;

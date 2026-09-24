@@ -368,6 +368,18 @@ pub enum CatalogQueryId {
     SemanticSearchOnnxModel,
     /// Existing child of a named edition before creating another.
     EditionChildren,
+    /// Columns exposed for the supported EBR evidence views in this session.
+    EditionsCatalogColumns,
+    /// Whether the connected schema has editions enabled, when exposed by USER_USERS.
+    EditionsEnabledOwnerSelf,
+    /// Whether one exact owner has editions enabled.
+    EditionsEnabledOwnerDba,
+    /// Object types enabled for the connected schema.
+    EditionedTypesSelf,
+    /// Object types enabled for one exact schema.
+    EditionedTypesDba,
+    /// Whether one exact object type is editionable in this database.
+    EditionableTypesCapability,
     /// Free live cursor cache ranked by elapsed time.
     TopSqlLiveElapsed,
     /// Free live cursor cache ranked by CPU time.
@@ -510,7 +522,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 148] = [
+    pub const ALL: [Self; 154] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -597,6 +609,12 @@ impl CatalogQueryId {
         Self::SemanticSearchCompatible,
         Self::SemanticSearchOnnxModel,
         Self::EditionChildren,
+        Self::EditionsCatalogColumns,
+        Self::EditionsEnabledOwnerSelf,
+        Self::EditionsEnabledOwnerDba,
+        Self::EditionedTypesSelf,
+        Self::EditionedTypesDba,
+        Self::EditionableTypesCapability,
         Self::TopSqlLiveElapsed,
         Self::TopSqlLiveCpu,
         Self::TopSqlLiveBufferGets,
@@ -1569,6 +1587,58 @@ impl CatalogQueryId {
                 BindSchema(&[Text]),
                 "prove a parent edition has no existing child",
                 InternalProof,
+                Diagnostic,
+            ),
+            Self::EditionsCatalogColumns => (
+                "SELECT table_name, column_name FROM all_tab_columns \
+                   WHERE owner = 'SYS' \
+                     AND ((table_name = 'USER_USERS' AND column_name = 'EDITIONS_ENABLED') \
+                       OR (table_name = 'DBA_USERS' AND column_name IN ('USERNAME', 'EDITIONS_ENABLED')) \
+                       OR (table_name = 'USER_EDITIONED_TYPES' AND column_name = 'OBJECT_TYPE') \
+                       OR (table_name = 'DBA_EDITIONED_TYPES' AND column_name IN ('SCHEMA', 'OBJECT_TYPE')) \
+                       OR (table_name = 'V_$EDITIONABLE_TYPES' AND column_name = 'EDITIONABLE_TYPE')) \
+                   ORDER BY table_name, column_name",
+                EMPTY,
+                "probe EBR evidence view columns before version-sensitive reads",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::EditionsEnabledOwnerSelf => (
+                "SELECT editions_enabled FROM user_users",
+                EMPTY,
+                "read connected schema editions-enabled flag when supported",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::EditionsEnabledOwnerDba => (
+                "SELECT editions_enabled FROM dba_users WHERE username = :1",
+                T,
+                "read one exact owner's editions-enabled flag",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::EditionedTypesSelf => (
+                "SELECT object_type FROM (SELECT object_type FROM user_editioned_types ORDER BY object_type) \
+                   WHERE ROWNUM <= :1",
+                I,
+                "read bounded edition-enabled object types for connected schema",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::EditionedTypesDba => (
+                "SELECT object_type FROM (SELECT object_type FROM dba_editioned_types \
+                   WHERE schema = :1 ORDER BY object_type) WHERE ROWNUM <= :2",
+                TI,
+                "read bounded edition-enabled object types for one exact schema",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::EditionableTypesCapability => (
+                "SELECT editionable_type FROM (SELECT editionable_type FROM v$editionable_types \
+                   WHERE editionable_type = :1) WHERE ROWNUM <= :2",
+                TI,
+                "prove database-level editionability only, not schema enablement",
+                DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveElapsed => (

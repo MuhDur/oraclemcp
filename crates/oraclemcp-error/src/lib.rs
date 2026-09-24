@@ -209,6 +209,10 @@ pub enum ReasonCategory {
     /// isolate only editionable objects; table and data state remain shared
     /// across every edition. The wire value is `NOT_EDITIONABLE`.
     NotEditionable,
+    /// Edition-Based Redefinition could not be proven enabled for the exact
+    /// schema and object type. The server never enables it on the caller's
+    /// behalf. The wire value is `EDITIONS_NOT_ENABLED`.
+    EditionsNotEnabled,
     /// A refusal that does not fit the categories above.
     Other,
 }
@@ -740,6 +744,15 @@ mod tests {
             serde_json::to_string(&ReasonCategory::OperatorOnlyStatement)
                 .expect("reason category serializes"),
             "\"OPERATOR_ONLY_STATEMENT\""
+        );
+    }
+
+    #[test]
+    fn editions_not_enabled_reason_has_stable_wire_name() {
+        assert_eq!(
+            serde_json::to_string(&ReasonCategory::EditionsNotEnabled)
+                .expect("reason category serializes"),
+            "\"EDITIONS_NOT_ENABLED\""
         );
     }
 

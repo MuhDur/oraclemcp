@@ -60,6 +60,7 @@
 
 mod auth_adapter;
 mod awr;
+mod catalog_editions;
 mod catalog_extract;
 mod catalog_query;
 mod catalog_resolver;
@@ -94,6 +95,10 @@ pub use awr::{
     DiagnosticsSource, PLAN_COST_TIMELINE_NOTE, PlanCostTimeline, PlanCostTimelinePoint,
     TopSqlMetric, detect_diagnostics_pack, detect_statspack, plan_cost_timeline,
     resolve_top_sql_source, select_diagnostics_source, top_sql_query,
+};
+pub use catalog_editions::{
+    EditionsCatalogCapabilities, EditionsCatalogColumn, EditionsEnabledProof, EditionsProofStatus,
+    MAX_EDITIONED_TYPES, probe_editions_catalog, probe_editions_enabled,
 };
 pub use catalog_extract::{
     CatalogExtractReport, CatalogExtractRequest, CatalogExtractWarning, CatalogRowBatch,
