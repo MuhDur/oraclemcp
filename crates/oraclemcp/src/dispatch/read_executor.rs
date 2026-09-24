@@ -163,6 +163,142 @@ impl ServerSql {
     }
 }
 
+/// E3/E3b: materialize the bounded full result of a read query as an
+/// `oracle-export://{id}` resource and return a `resource_link` result (no
+/// inlined rows). Fetches up to [`MAX_QUERY_EXPORT_ROWS`] at `offset`; rows
+/// beyond that are dropped and the export is flagged truncated with a next hint.
+#[allow(clippy::too_many_arguments)]
+async fn export_query_to_resource(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    executed_sql: &str,
+    a: &QueryArgs,
+    binds: &[OracleBind],
+    offset: usize,
+    active_profile: Option<&str>,
+    export_access: &QueryExportAccess,
+    exports: Option<&oraclemcp_core::ExportRegistry>,
+    as_of: Option<&AsOf>,
+    result_masking: Option<&ResultMaskingPolicy>,
+    auditor: Option<&Auditor>,
+    audit_subject: &AuditSubject,
+) -> Result<Value, ErrorEnvelope> {
+    let format = oraclemcp_core::ExportFormat::parse(a.export_format.as_deref())
+        .ok_or_else(|| invalid_args("export_format must be \"csv\" or \"json\""))?;
+    let Some(exports) = exports else {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            "result export is not enabled in this server instance",
+        )
+        .with_next_step("retry without export=true to page the result inline"));
+    };
+
+    // Fetch up to the export ceiling in one window. The byte cap is raised to
+    // the export ceiling so the row cap (not the inline byte cap) governs.
+    let caps = QueryCaps {
+        max_rows: MAX_QUERY_EXPORT_ROWS,
+        max_result_bytes: oraclemcp_core::export::MAX_EXPORT_BYTES,
+    };
+    let serialize_opts = query_serialize_options_from_args_with_policy(a, result_masking);
+    // K9: an export honors the flashback target too — the SAME proven SQL is
+    // materialized as of the requested snapshot.
+    let mut response = match as_of {
+        Some(as_of) => {
+            read_query_as_of(
+                cx,
+                conn,
+                executed_sql,
+                binds,
+                caps,
+                offset,
+                &serialize_opts,
+                as_of,
+            )
+            .await
+        }
+        None => read_query(cx, conn, executed_sql, binds, caps, offset, &serialize_opts).await,
+    }
+    .map_err(DbError::into_envelope)?;
+    bind_result_masking_audit(
+        cx,
+        conn,
+        auditor,
+        audit_subject,
+        "oracle_query",
+        executed_sql,
+        &mut response,
+    )
+    .await?;
+    let response_value = serde_json::to_value(&response).unwrap_or(Value::Null);
+    let more_rows = response.truncated;
+    let next_cursor = response.next_cursor.as_deref().map(|offset| {
+        let binding = query_cursor_binding(&a.sql, active_profile);
+        oraclemcp_core::sign_token(QUERY_CURSOR_SCOPE, offset, &[&binding])
+    });
+
+    let (columns, rows) = query_value_to_export_rows(&response_value);
+    let access = oraclemcp_core::ExportAccess::new(
+        active_profile,
+        &export_access.principal_key,
+        export_access.scopes.as_deref(),
+    );
+    let handle = exports
+        .create(
+            &columns,
+            &rows,
+            format,
+            access,
+            oraclemcp_core::export::DEFAULT_EXPORT_TTL,
+        )
+        .map_err(|_| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                "query result could not be materialized within export limits",
+            )
+            .with_next_step("retry with export=false and page the result inline")
+        })?;
+
+    tracing::info!(
+        export_uri = %handle.uri,
+        format = ?handle.format,
+        rows = handle.row_count,
+        bytes = handle.byte_size,
+        truncated = handle.truncated || more_rows,
+        profile = active_profile.unwrap_or(""),
+        "oracle_query materialized a large result as an export resource"
+    );
+
+    Ok(json!({
+        "export": {
+            "uri": handle.uri,
+            "mime_type": handle.mime_type,
+            "format": match handle.format {
+                oraclemcp_core::ExportFormat::Csv => "csv",
+                oraclemcp_core::ExportFormat::Json => "json",
+            },
+            "byte_size": handle.byte_size,
+            "row_count": handle.row_count,
+            "truncated": handle.truncated || more_rows,
+        },
+        "resource_link": {
+            "type": "resource_link",
+            "uri": handle.uri,
+            "name": "oracle_query export",
+            "mimeType": handle.mime_type,
+            "description": "Materialized query result. Fetch with resources/read; bound to the originating principal and exact scope grant, and expires.",
+        },
+        "columns": columns,
+        "row_count": handle.row_count,
+        "inlined": false,
+        "next_cursor": next_cursor,
+        "next_step": if handle.truncated || more_rows {
+            "The export was capped; re-run with the returned next_cursor to export the next window."
+        } else {
+            "Fetch the full result via resources/read on the export uri."
+        },
+    }))
+}
+
 pub(super) struct GuardedReadExecutor<'a> {
     dispatcher: &'a OracleDispatcher,
 }
