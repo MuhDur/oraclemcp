@@ -1220,6 +1220,7 @@ pub enum oraclemcp_db::FgaClosure
 pub oraclemcp_db::FgaClosure::Autonomous
 pub oraclemcp_db::FgaClosure::Autonomous::policy: oraclemcp_db::FgaPolicyEvidence
 pub oraclemcp_db::FgaClosure::ProvenReadOnly
+pub oraclemcp_db::FgaClosure::Unavailable
 pub oraclemcp_db::FgaClosure::Unknown
 pub oraclemcp_db::FgaClosure::Unknown::reason: &'static str
 impl oraclemcp_db::FgaClosure
@@ -1276,6 +1277,118 @@ pub type oraclemcp_db::FgaClosure::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::FgaClosure where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::FgaClosure where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::FgaClosure::vzip(self) -> V
+pub enum oraclemcp_db::FgaEvidence
+pub oraclemcp_db::FgaEvidence::Proven
+pub oraclemcp_db::FgaEvidence::Unavailable
+impl core::clone::Clone for oraclemcp_db::FgaEvidence
+pub fn oraclemcp_db::FgaEvidence::clone(&self) -> oraclemcp_db::FgaEvidence
+impl core::cmp::Eq for oraclemcp_db::FgaEvidence
+impl core::cmp::PartialEq for oraclemcp_db::FgaEvidence
+pub fn oraclemcp_db::FgaEvidence::eq(&self, &oraclemcp_db::FgaEvidence) -> bool
+impl core::fmt::Debug for oraclemcp_db::FgaEvidence
+pub fn oraclemcp_db::FgaEvidence::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::FgaEvidence
+impl core::marker::StructuralPartialEq for oraclemcp_db::FgaEvidence
+impl core::marker::Freeze for oraclemcp_db::FgaEvidence
+impl core::marker::Send for oraclemcp_db::FgaEvidence
+impl core::marker::Sync for oraclemcp_db::FgaEvidence
+impl core::marker::Unpin for oraclemcp_db::FgaEvidence
+impl core::marker::UnsafeUnpin for oraclemcp_db::FgaEvidence
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::FgaEvidence
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::FgaEvidence
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::FgaEvidence where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::FgaEvidence where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::FgaEvidence where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidence::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::FgaEvidence where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::FgaEvidence where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::FgaEvidence where U: core::convert::From<T>
+pub fn oraclemcp_db::FgaEvidence::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::FgaEvidence where U: core::convert::Into<T>
+pub type oraclemcp_db::FgaEvidence::Error = core::convert::Infallible
+pub fn oraclemcp_db::FgaEvidence::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::FgaEvidence where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::FgaEvidence::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::FgaEvidence::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::FgaEvidence where T: core::clone::Clone
+pub type oraclemcp_db::FgaEvidence::Owned = T
+pub fn oraclemcp_db::FgaEvidence::clone_into(&self, &mut T)
+pub fn oraclemcp_db::FgaEvidence::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::FgaEvidence
+impl<T> core::any::Any for oraclemcp_db::FgaEvidence where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidence::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::FgaEvidence where T: ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidence::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::FgaEvidence where T: ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidence::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::FgaEvidence where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::FgaEvidence::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::FgaEvidence
+pub fn oraclemcp_db::FgaEvidence::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::FgaEvidence
+impl<T> tracing::instrument::Instrument for oraclemcp_db::FgaEvidence
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::FgaEvidence
+impl<T> typenum::type_operators::Same for oraclemcp_db::FgaEvidence
+pub type oraclemcp_db::FgaEvidence::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::FgaEvidence where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::FgaEvidence where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::FgaEvidence::vzip(self) -> V
+pub enum oraclemcp_db::FgaEvidencePolicy
+pub oraclemcp_db::FgaEvidencePolicy::AdmitUnavailable
+pub oraclemcp_db::FgaEvidencePolicy::RequireProof
+impl core::clone::Clone for oraclemcp_db::FgaEvidencePolicy
+pub fn oraclemcp_db::FgaEvidencePolicy::clone(&self) -> oraclemcp_db::FgaEvidencePolicy
+impl core::cmp::Eq for oraclemcp_db::FgaEvidencePolicy
+impl core::cmp::PartialEq for oraclemcp_db::FgaEvidencePolicy
+pub fn oraclemcp_db::FgaEvidencePolicy::eq(&self, &oraclemcp_db::FgaEvidencePolicy) -> bool
+impl core::fmt::Debug for oraclemcp_db::FgaEvidencePolicy
+pub fn oraclemcp_db::FgaEvidencePolicy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::FgaEvidencePolicy
+impl core::marker::StructuralPartialEq for oraclemcp_db::FgaEvidencePolicy
+impl core::marker::Freeze for oraclemcp_db::FgaEvidencePolicy
+impl core::marker::Send for oraclemcp_db::FgaEvidencePolicy
+impl core::marker::Sync for oraclemcp_db::FgaEvidencePolicy
+impl core::marker::Unpin for oraclemcp_db::FgaEvidencePolicy
+impl core::marker::UnsafeUnpin for oraclemcp_db::FgaEvidencePolicy
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::FgaEvidencePolicy
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::FgaEvidencePolicy
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::FgaEvidencePolicy where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::FgaEvidencePolicy where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::FgaEvidencePolicy where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidencePolicy::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::FgaEvidencePolicy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::FgaEvidencePolicy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::FgaEvidencePolicy where U: core::convert::From<T>
+pub fn oraclemcp_db::FgaEvidencePolicy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::FgaEvidencePolicy where U: core::convert::Into<T>
+pub type oraclemcp_db::FgaEvidencePolicy::Error = core::convert::Infallible
+pub fn oraclemcp_db::FgaEvidencePolicy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::FgaEvidencePolicy where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::FgaEvidencePolicy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::FgaEvidencePolicy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::FgaEvidencePolicy where T: core::clone::Clone
+pub type oraclemcp_db::FgaEvidencePolicy::Owned = T
+pub fn oraclemcp_db::FgaEvidencePolicy::clone_into(&self, &mut T)
+pub fn oraclemcp_db::FgaEvidencePolicy::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::FgaEvidencePolicy
+impl<T> core::any::Any for oraclemcp_db::FgaEvidencePolicy where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidencePolicy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::FgaEvidencePolicy where T: ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidencePolicy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::FgaEvidencePolicy where T: ?core::marker::Sized
+pub fn oraclemcp_db::FgaEvidencePolicy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::FgaEvidencePolicy where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::FgaEvidencePolicy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::FgaEvidencePolicy
+pub fn oraclemcp_db::FgaEvidencePolicy::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::FgaEvidencePolicy
+impl<T> tracing::instrument::Instrument for oraclemcp_db::FgaEvidencePolicy
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::FgaEvidencePolicy
+impl<T> typenum::type_operators::Same for oraclemcp_db::FgaEvidencePolicy
+pub type oraclemcp_db::FgaEvidencePolicy::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::FgaEvidencePolicy where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::FgaEvidencePolicy where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::FgaEvidencePolicy::vzip(self) -> V
 pub enum oraclemcp_db::FgaStatementKind
 pub oraclemcp_db::FgaStatementKind::Delete
 pub oraclemcp_db::FgaStatementKind::Insert
@@ -8012,6 +8125,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::QueryRowStream where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::QueryRowStream::vzip(self) -> V
 pub struct oraclemcp_db::ReadPlanProof
+pub oraclemcp_db::ReadPlanProof::fga_evidence: oraclemcp_db::FgaEvidence
 pub oraclemcp_db::ReadPlanProof::relations: alloc::vec::Vec<oraclemcp_guard::resolver::ResolvedObject>
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_db::ReadPlanProof
 pub fn oraclemcp_db::ReadPlanProof::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
@@ -10448,7 +10562,7 @@ pub async fn oraclemcp_db::probe_dependents(&asupersync::cx::cx::Cx, &dyn oracle
 pub async fn oraclemcp_db::probe_native_redaction(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::NativeRedactionAvailability, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::probe_privileges(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::PrivilegeProfile
 pub async fn oraclemcp_db::probe_write_posture(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> oraclemcp_db::WritePosture
-pub async fn oraclemcp_db::prove_semantic_read_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::OracleCatalogResolverCache, &oraclemcp_guard::resolver::SemanticReadPlan) -> core::result::Result<oraclemcp_db::ReadPlanProof, oraclemcp_db::ReadPlanProofError>
+pub async fn oraclemcp_db::prove_semantic_read_plan(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &oraclemcp_db::OracleCatalogResolverCache, &oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_db::FgaEvidencePolicy) -> core::result::Result<oraclemcp_db::ReadPlanProof, oraclemcp_db::ReadPlanProofError>
 pub async fn oraclemcp_db::read_catalog_resolve_context(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, oraclemcp_guard::resolver::CatalogGeneration, oraclemcp_guard::resolver::StatementScope) -> core::result::Result<oraclemcp_guard::resolver::ResolveCtx, oraclemcp_db::DbError>
 pub fn oraclemcp_db::read_lob_sql(&str, &str, &str, &str) -> core::result::Result<alloc::string::String, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::read_query(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str, &[oraclemcp_db::OracleBind], oraclemcp_db::QueryCaps, usize, &oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>

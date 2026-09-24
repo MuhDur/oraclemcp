@@ -75,6 +75,7 @@ fn fully_populated_profile() -> ConnectionProfile {
         require_signed_tools: Some(false),
         read_only_standby: Some(false),
         allow_change_notification: Some(false),
+        require_fga_evidence: Some(true),
         max_subscriptions: Some(4),
         mcp_exposed: Some(true),
         dashboard_ddl_workbench: Some(false),

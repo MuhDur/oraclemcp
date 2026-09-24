@@ -95,6 +95,7 @@ in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
 | `profiles.require_signed_tools` | bool | false | yes | no | 1 | Require an HMAC signature for every operator-defined custom tool on this profile. |
 | `profiles.read_only_standby` | bool | false | yes | no | 1 | Force READ_ONLY regardless of max_level for an Active Data Guard standby. |
 | `profiles.allow_change_notification` | bool | false | yes | no | 2 | Permit CQN registration (still classifier/step-up/audit gated; never widens SQL admission). |
+| `profiles.require_fga_evidence` | bool | false | yes | no | 2 | Refuse reads when ALL_AUDIT_POLICIES is unreadable (default admits them with an fga_evidence: unavailable observation + audit record; a proven FGA handler always refuses). |
 | `profiles.max_subscriptions` | integer | 4 | yes | no | 2 | Per-principal live-subscription cap; 0 disables new subscriptions fail-closed. |
 | `profiles.mcp_exposed` | bool | true | yes | no | 1 | E5 per-profile MCP exposure opt-out (visibility, never access control). |
 | `profiles.dashboard_ddl_workbench` | bool | false | yes | no | 2 | Reserved profile metadata; browser DDL/Admin apply is refused in this release. |
@@ -315,6 +316,7 @@ field is unset after inheritance.
 | `require_signed_tools` | bool | `false` | no | Require a valid HMAC signature for every operator-defined custom tool loaded with this profile. A `protected` profile implies this even when unset. `ORACLEMCP_CUSTOM_TOOLS_HMAC_KEY` must resolve to at least 32 bytes. |
 | `read_only_standby` | bool | `false` | no | Mark the target as a read-only standby (Active Data Guard): forces `READ_ONLY` regardless of `max_level`. |
 | `allow_change_notification` | bool | `false` | no | Explicitly permit CQN registration for this profile. It does not widen SQL admission: each registration still requires a classifier-proven query, an active confirmed `READ_WRITE` step-up, and durable audit evidence; protected and standby profiles remain ineligible, and OBJECT-level registration is refused. |
+| `require_fga_evidence` | bool | `false` | no | Refuse relation reads when the account cannot read `ALL_AUDIT_POLICIES` (`fga_evidence_unknown`). The default admits them with an `fga_evidence: unavailable` result field, a signed audit record, and a doctor warning (R36). A proven FGA handler is refused either way; see [operations §3.1](operations.md). |
 | `max_subscriptions` | integer | `4` | no | Per-principal live-subscription cap. Each admitted subscription reserves one EMON notification connection from the profile's database connection ceiling; `0` disables new subscriptions fail-closed. This resource bound does not authorize CQN. |
 | `mcp_exposed` | bool | `true` | no | E5 per-profile MCP exposure (opt-out). See [The `mcp_exposed` opt-out](#the-mcp_exposed-opt-out). |
 | `dashboard_ddl_workbench` | bool | `false` | no | Reserved profile metadata. The current browser action policy refuses DDL/Admin apply even when this is `true`; use a non-browser operator path. It never raises `max_level`. |

@@ -74,6 +74,8 @@ default_level = "READ_ONLY"
 # read_only_standby = false
 # Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
 # allow_change_notification = false
+# Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.
+# require_fga_evidence = true
 # Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
 # max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.
@@ -171,6 +173,8 @@ default_level = "READ_ONLY"
 # read_only_standby = false
 # Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
 # allow_change_notification = false
+# Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.
+# require_fga_evidence = true
 # Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
 # max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.

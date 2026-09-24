@@ -455,6 +455,7 @@ default_level = "READ_ONLY"
 # | `profiles.require_signed_tools` | bool | false | yes | no | 1 | Require an HMAC signature for every operator-defined custom tool on this profile. |
 # | `profiles.read_only_standby` | bool | false | yes | no | 1 | Force READ_ONLY regardless of max_level for an Active Data Guard standby. |
 # | `profiles.allow_change_notification` | bool | false | yes | no | 2 | Permit CQN registration (still classifier/step-up/audit gated; never widens SQL admission). |
+# | `profiles.require_fga_evidence` | bool | false | yes | no | 2 | Refuse reads when ALL_AUDIT_POLICIES is unreadable (default admits them with an fga_evidence: unavailable observation + audit record; a proven FGA handler always refuses). |
 # | `profiles.max_subscriptions` | integer | 4 | yes | no | 2 | Per-principal live-subscription cap; 0 disables new subscriptions fail-closed. |
 # | `profiles.mcp_exposed` | bool | true | yes | no | 1 | E5 per-profile MCP exposure opt-out (visibility, never access control). |
 # | `profiles.dashboard_ddl_workbench` | bool | false | yes | no | 2 | Reserved profile metadata; browser DDL/Admin apply is refused in this release. |

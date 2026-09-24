@@ -5,7 +5,7 @@
 //! giving a served tool a raw query capability.
 
 use super::*;
-use oraclemcp_db::{ReadPlanProofError, prove_semantic_read_plan};
+use oraclemcp_db::{FgaEvidence, FgaEvidencePolicy, ReadPlanProofError, prove_semantic_read_plan};
 use oraclemcp_guard::semantic_read_plan_checked;
 
 /// Observe read failures at the connection-ownership boundary.
@@ -379,6 +379,14 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
 mod read_only_backstop;
 pub(super) use read_only_backstop::ReadOnlyBackstop;
 
+/// A read admitted by the semantic gate: the resolved relations, the final
+/// classifier decision, and the FGA evidence the admission rests on.
+pub(super) struct ResolvedRead {
+    pub(super) relations: Vec<ResolvedObject>,
+    pub(super) decision: GuardDecision,
+    pub(super) fga_evidence: FgaEvidence,
+}
+
 /// Resolve each lexical read block under its own live catalog scope. The
 /// classifier receives the exact per-object proof, so an inner view or VPD
 /// table cannot borrow a clean outer table's verdict.
@@ -388,7 +396,8 @@ pub(super) async fn resolve_query_block_read(
     cache: &OracleCatalogResolverCache,
     sql: &str,
     verified_local_vector_embedding: bool,
-) -> Result<(Vec<ResolvedObject>, GuardDecision), ErrorEnvelope> {
+    fga_policy: FgaEvidencePolicy,
+) -> Result<ResolvedRead, ErrorEnvelope> {
     let initial = if verified_local_vector_embedding {
         SEMANTIC_READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
     } else {
@@ -397,7 +406,7 @@ pub(super) async fn resolve_query_block_read(
     ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
     let plan = semantic_read_plan_checked(sql)
         .map_err(|error| unresolved_semantic_read(error.as_str()))?;
-    let proof = prove_semantic_read_plan(cx, conn, cache, &plan)
+    let proof = prove_semantic_read_plan(cx, conn, cache, &plan, fga_policy)
         .await
         .map_err(|error| match error {
             ReadPlanProofError::Database(error) => error.into_envelope(),
@@ -408,6 +417,7 @@ pub(super) async fn resolve_query_block_read(
             ReadPlanProofError::FgaEvidenceUnknown => fga_refusal("fga_evidence_unknown"),
         })?;
     let relations = proof.relations.clone();
+    let fga_evidence = proof.fga_evidence;
     let classifier =
         Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
             .with_oracle(Arc::new(proof))
@@ -419,18 +429,23 @@ pub(super) async fn resolve_query_block_read(
     };
     ensure_read_only_decision(decision.clone())
         .map_err(|error| attach_parameterization_hint(error, sql))?;
-    Ok((relations, decision))
+    Ok(ResolvedRead {
+        relations,
+        decision,
+        fga_evidence,
+    })
 }
 
 fn fga_refusal(code: &'static str) -> ErrorEnvelope {
-    // An autonomous handler is a property of the table; unknown evidence is
-    // most often an account that cannot read ALL_AUDIT_POLICIES, which doctor
-    // reports as fga_catalog_unreadable (.6.11). The refusal itself is the
-    // same either way: the admission rule does not change.
+    // An autonomous handler is a property of the table. Unknown evidence
+    // refuses either because the profile sets require_fga_evidence and the
+    // account cannot read ALL_AUDIT_POLICIES (doctor: fga_catalog_unreadable),
+    // or because the catalog read failed for another reason (R36).
     let next_step = match code {
         "fga_evidence_unknown" => format!(
             "FGA evidence could not be proven. If `oraclemcp doctor --online` reports \
-             fga_catalog_unreadable, the account cannot read ALL_AUDIT_POLICIES: {}",
+             fga_catalog_unreadable, the account cannot read ALL_AUDIT_POLICIES and this \
+             profile sets require_fga_evidence = true: {}",
             oraclemcp_core::doctor::FGA_CATALOG_REMEDIATION
         ),
         _ => "remove the FGA handler or use a different ordinary table without user-code \
@@ -477,6 +492,9 @@ pub(super) struct ReadExecutionPlan {
     /// Arc N: the proof of what the profile's policy took away, attached to the
     /// response so a client (and the operator console) can see that it applied.
     pub(super) policy: Option<Value>,
+    /// R36: the FGA evidence the gate admitted this read on. Meaningful only
+    /// when `gate` is `Ok`.
+    pub(super) fga_evidence: FgaEvidence,
 }
 
 /// A read admitted by the current semantic and catalog proof.
@@ -547,7 +565,17 @@ impl AdmittedWitnessRead {
         sql: String,
         binds: Vec<OracleBind>,
     ) -> Result<Self, ErrorEnvelope> {
-        resolve_query_block_read(cx, conn, cache, &sql, false).await?;
+        // A preview-DML witness belongs to the write ladder, which R36 leaves
+        // unchanged: it still requires proven FGA evidence.
+        resolve_query_block_read(
+            cx,
+            conn,
+            cache,
+            &sql,
+            false,
+            FgaEvidencePolicy::RequireProof,
+        )
+        .await?;
         Ok(Self { sql, binds })
     }
 
@@ -870,6 +898,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     state.conn.as_ref(),
                     &state.catalog_cache,
                     &executed_sql,
+                    state.fga_evidence_policy,
                 )
                 .await
             } else {
@@ -878,16 +907,18 @@ impl<'a> GuardedReadExecutor<'a> {
                     state.conn.as_ref(),
                     &state.catalog_cache,
                     &executed_sql,
+                    state.fga_evidence_policy,
                 )
                 .await
             };
-            let (gate, verdict_certificate, rls_vpd_relations) = match classified {
-                Ok((relations, decision)) => (
+            let (gate, verdict_certificate, rls_vpd_relations, fga_evidence) = match classified {
+                Ok(read) => (
                     Ok(()),
-                    Some(decision.verdict_certificate().clone()),
-                    relations,
+                    Some(read.decision.verdict_certificate().clone()),
+                    read.relations,
+                    read.fga_evidence,
                 ),
-                Err(error) => (Err(error), None, Vec::new()),
+                Err(error) => (Err(error), None, Vec::new(), FgaEvidence::Proven),
             };
             (
                 ReadExecutionPlan {
@@ -899,6 +930,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     as_of,
                     rls_vpd_relations,
                     policy: policy.attachment.clone(),
+                    fga_evidence,
                 },
                 semantic_metadata,
             )
@@ -1132,11 +1164,16 @@ impl<'a> GuardedReadExecutor<'a> {
                     state.conn.as_ref(),
                     &state.catalog_cache,
                     &executed_sql,
+                    state.fga_evidence_policy,
                 )
                 .await;
-                let (gate, verdict_certificate) = match classified {
-                    Ok(decision) => (Ok(()), Some(decision.verdict_certificate().clone())),
-                    Err(error) => (Err(error), None),
+                let (gate, verdict_certificate, fga_evidence) = match classified {
+                    Ok((decision, fga_evidence)) => (
+                        Ok(()),
+                        Some(decision.verdict_certificate().clone()),
+                        fga_evidence,
+                    ),
+                    Err(error) => (Err(error), None, FgaEvidence::Proven),
                 };
                 ReadExecutionPlan {
                     args: parsed,
@@ -1147,6 +1184,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     as_of,
                     rls_vpd_relations: Vec::new(),
                     policy: policy.attachment.clone(),
+                    fga_evidence,
                 }
             };
             request_budget = query_budget_with_cost_limit(
@@ -1219,13 +1257,24 @@ impl<'a> GuardedReadExecutor<'a> {
             let active_profile = state.active_profile.clone();
             let conn: &dyn OracleConnection = state.conn.as_ref();
             let policy_attachment = prepared.policy.clone();
+            let fga_evidence = prepared.fga_evidence;
             let admitted = AdmittedRead::new(prepared)?;
+            if fga_evidence == FgaEvidence::Unavailable {
+                append_fga_evidence_unavailable_audit(
+                    AuditEntryCtx {
+                        auditor: self.auditor.as_deref(),
+                        subject: &audit_subject(context, &self.default_audit_subject),
+                        db_evidence: None,
+                    },
+                    "oracle_query",
+                )?;
+            }
             let delivery = self
                 .prepare_query_stream_delivery(cx, conn, request_budget, active_profile, admitted)
                 .await?;
-            (delivery, policy_attachment)
+            (delivery, policy_attachment, fga_evidence)
         };
-        let (delivery, policy_attachment) = delivery;
+        let (delivery, policy_attachment, fga_evidence) = delivery;
 
         let mut response = match delivery {
             QueryStreamDelivery::Rows(plan) => self.drive_query_row_stream(cx, *plan, frames).await,
@@ -1236,6 +1285,7 @@ impl<'a> GuardedReadExecutor<'a> {
         if let (Some(tightening), Value::Object(map)) = (policy_attachment, &mut response) {
             map.insert("policy".to_owned(), tightening);
         }
+        attach_fga_evidence(&mut response, fga_evidence);
         Ok(response)
     }
 
@@ -1266,6 +1316,7 @@ impl<'a> GuardedReadExecutor<'a> {
             as_of,
             rls_vpd_relations,
             policy: _,
+            fga_evidence,
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
         let exports = self.exports.clone();
@@ -1408,6 +1459,9 @@ impl<'a> GuardedReadExecutor<'a> {
                     subject: &request_subject,
                     db_evidence: read_audit_evidence.as_ref(),
                 };
+                if fga_evidence == FgaEvidence::Unavailable {
+                    append_fga_evidence_unavailable_audit(read_audit, &audit_tool)?;
+                }
 
                 // Resolve every structured flashback target before execution,
                 // regardless of whether audit is configured. Timestamp input
@@ -1538,11 +1592,9 @@ impl<'a> GuardedReadExecutor<'a> {
                     QueryFormat::Json => serde_json::to_value(response).unwrap_or(Value::Null),
                     QueryFormat::Arrow => query_response_as_arrow(response)?,
                 };
-                Ok(reseal_query_cursor(
-                    response,
-                    &a.sql,
-                    active_profile.as_deref(),
-                ))
+                let mut response = reseal_query_cursor(response, &a.sql, active_profile.as_deref());
+                attach_fga_evidence(&mut response, fga_evidence);
+                Ok(response)
             },
         )
         .await
@@ -1730,6 +1782,7 @@ impl OracleDispatcher {
             as_of,
             rls_vpd_relations: _,
             policy: _,
+            fga_evidence: _,
         } = prepared;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
         gate?;
@@ -1899,10 +1952,28 @@ impl OracleDispatcher {
             scn_a,
             scn_b,
             subject,
+            fga_evidence_policy,
         } = request;
         let executed_sql = with_audit_marker(sql, active_profile, "oracle_diff");
-        let (relations, _) =
-            resolve_read_only_relations(cx, observed_conn, catalog_cache, &executed_sql).await?;
+        let admitted = resolve_read_only_relations(
+            cx,
+            observed_conn,
+            catalog_cache,
+            &executed_sql,
+            fga_evidence_policy,
+        )
+        .await?;
+        let relations = admitted.relations;
+        if admitted.fga_evidence == FgaEvidence::Unavailable {
+            append_fga_evidence_unavailable_audit(
+                AuditEntryCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject,
+                    db_evidence: None,
+                },
+                "oracle_diff",
+            )?;
+        }
         let key_columns = if explicit_key.is_empty() {
             inferred_diff_key_columns(cx, metadata_conn, &relations).await?
         } else {
@@ -1963,6 +2034,7 @@ impl OracleDispatcher {
             before,
             after,
             key_columns,
+            fga_evidence: admitted.fga_evidence,
         })
     }
 
@@ -2066,8 +2138,26 @@ impl OracleDispatcher {
             };
             let executed_sql = with_audit_marker(sql, Some(profile), "oracle_diff");
             let catalog_cache = OracleCatalogResolverCache::new();
-            let (relations, _) =
-                resolve_read_only_relations(cx, &observed, &catalog_cache, &executed_sql).await?;
+            // The side's own profile decides its FGA evidence rule.
+            let admitted = resolve_read_only_relations(
+                cx,
+                &observed,
+                &catalog_cache,
+                &executed_sql,
+                policy.fga_evidence_policy,
+            )
+            .await?;
+            let relations = admitted.relations;
+            if admitted.fga_evidence == FgaEvidence::Unavailable {
+                append_fga_evidence_unavailable_audit(
+                    AuditEntryCtx {
+                        auditor: self.auditor.as_deref(),
+                        subject,
+                        db_evidence: None,
+                    },
+                    "oracle_diff",
+                )?;
+            }
             let inferred_key = if infer_key {
                 inferred_diff_key_columns(cx, &observed, &relations).await?
             } else {
@@ -2118,6 +2208,7 @@ impl OracleDispatcher {
             Ok(DiffSideRead {
                 response,
                 inferred_key,
+                fga_evidence: admitted.fga_evidence,
             })
         }
         .await
@@ -2147,6 +2238,7 @@ mod fga_shape_tests {
         let hint = unknown.next_steps.join(" ");
         assert!(hint.contains("fga_catalog_unreadable"), "{hint}");
         assert!(hint.contains("oraclemcp doctor --online"), "{hint}");
+        assert!(hint.contains("require_fga_evidence = true"), "{hint}");
         assert!(hint.contains("GRANT SELECT ANY DICTIONARY"), "{hint}");
         assert!(hint.contains("docs/operations.md §3.1"), "{hint}");
 
