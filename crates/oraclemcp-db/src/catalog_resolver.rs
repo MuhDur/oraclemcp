@@ -413,16 +413,17 @@ impl CatalogResolver for OracleCatalogResolverCache {
 }
 
 /// Prove that exact resolved relations cannot invoke user-controlled code on a
-/// plain fetch under the currently visible catalog.
+/// plain fetch under the currently visible catalog and statement value names.
 ///
 /// The lean server deliberately proves only ordinary tables with no enabled
-/// SELECT VPD policy and no virtual columns. Views and every unknown object
+/// SELECT VPD policy or executable virtual-column dependency. Views and every unknown object
 /// kind remain `Unknown`: their defining query can hide function invocation and
 /// cannot be cleared by object-type syntax alone.
 pub async fn resolved_relations_read_purity(
     cx: &Cx,
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
+    values: &[RawName],
 ) -> Result<oraclemcp_guard::Purity, DbError> {
     if relations.is_empty() {
         return Ok(oraclemcp_guard::Purity::ProvenReadOnly);
@@ -450,14 +451,50 @@ pub async fn resolved_relations_read_purity(
         if !run_catalog_query(cx, conn, CatalogQueryId::PolicyRowsForRelations32, &binds)
             .await?
             .is_empty()
-            || !run_catalog_query(
-                cx,
-                conn,
-                CatalogQueryId::VirtualColumnsForRelations32,
-                &binds,
-            )
-            .await?
-            .is_empty()
+        {
+            return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+        let virtual_columns = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::VirtualColumnsForRelations32,
+            &binds,
+        )
+        .await?;
+        // The row cap must be strictly above the number processed. An exact
+        // hit may conceal a later unsafe virtual column.
+        if virtual_columns.len() >= 257
+            || virtual_columns.iter().any(|row| {
+                let Some(owner) = required_text(row, "OWNER") else {
+                    return true;
+                };
+                let Some(table) = required_text(row, "TABLE_NAME") else {
+                    return true;
+                };
+                let Some(column) = required_text(row, "COLUMN_NAME") else {
+                    return true;
+                };
+                let Some(expression) = required_text(row, "DATA_DEFAULT") else {
+                    return true;
+                };
+                !chunk
+                    .iter()
+                    .any(|relation| relation.owner == owner && relation.name == table)
+                    || row.text("HIDDEN_COLUMN") != Some("YES")
+                    || row.text("USER_GENERATED") != Some("NO")
+                    || row.cell("DATA_DEFAULT").is_some_and(|cell| {
+                        cell.source_length
+                            .is_some_and(|length| length > expression.chars().count())
+                    })
+                    || values.iter().any(|value| {
+                        normalize_parts(&value.parts)
+                            .is_some_and(|parts| parts.iter().any(|part| part == &column))
+                    })
+                    || !oraclemcp_guard::builtin_only_virtual_column_expression(
+                        &column,
+                        &expression,
+                    )
+            })
         {
             return Ok(oraclemcp_guard::Purity::Unknown);
         }
@@ -979,7 +1016,12 @@ pub async fn prove_semantic_read_plan(
         FgaClosure::Autonomous { .. } => return Err(ReadPlanProofError::FgaHandlerAutonomous),
         FgaClosure::Unknown { .. } => return Err(ReadPlanProofError::FgaEvidenceUnknown),
     }
-    let purity = resolved_relations_read_purity(cx, conn, &relations)
+    let values = plan
+        .blocks
+        .iter()
+        .flat_map(|block| block.values.iter().cloned())
+        .collect::<Vec<_>>();
+    let purity = resolved_relations_read_purity(cx, conn, &relations, &values)
         .await
         .map_err(ReadPlanProofError::Database)?;
     if !purity.permits_safe() {
@@ -1513,6 +1555,21 @@ impl DictionaryLookup<'_> {
 
     async fn resolve_value(&self, raw: &RawName, parts: &[String]) -> Result<Resolution, DbError> {
         let relations = &self.context.statement_scope.relations;
+        if parts.len() >= 3 {
+            let aliased = relations
+                .iter()
+                .filter(|relation| {
+                    relation.alias.is_some() && relation_matches_qualifier(relation, &parts[0])
+                })
+                .collect::<Vec<_>>();
+            if !aliased.is_empty() {
+                return if let [relation] = aliased.as_slice() {
+                    self.resolve_dotted_value_path(relation, raw, parts).await
+                } else {
+                    Ok(Resolution::Unresolved)
+                };
+            }
+        }
         let (candidate_relations, column, relation_qualified) = match parts {
             [column] => (relations.iter().collect::<Vec<_>>(), column.as_str(), false),
             [qualifier, column] => {
@@ -1645,6 +1702,109 @@ impl DictionaryLookup<'_> {
             return Ok(Resolution::Unresolved);
         }
         self.resolve_callable(raw, parts, true).await
+    }
+
+    async fn resolve_dotted_value_path(
+        &self,
+        relation: &oraclemcp_guard::StatementRelation,
+        raw: &RawName,
+        parts: &[String],
+    ) -> Result<Resolution, DbError> {
+        let Some(column) = self
+            .resolve_relation_column(relation, &parts[1], raw)
+            .await?
+        else {
+            return Ok(Resolution::Unresolved);
+        };
+        let Some(container) = column.container.as_ref() else {
+            return Ok(Resolution::Unresolved);
+        };
+        let type_rows = run_catalog_query(
+            self.cx,
+            self.conn,
+            CatalogQueryId::ColumnPathType,
+            &[
+                OracleBind::from(column.owner.as_str()),
+                OracleBind::from(container.name.as_str()),
+                OracleBind::from(column.name.as_str()),
+            ],
+        )
+        .await?;
+        let [type_row] = type_rows.as_slice() else {
+            return Ok(Resolution::Unresolved);
+        };
+        let Some(data_type) = required_text(type_row, "DATA_TYPE") else {
+            return Ok(Resolution::Unresolved);
+        };
+        if data_type == "JSON" {
+            return Ok(Resolution::Resolved(Box::new(column)));
+        }
+        if matches!(data_type.as_str(), "VARCHAR2" | "CLOB" | "BLOB") {
+            let binds = [
+                OracleBind::from(column.owner.as_str()),
+                OracleBind::from(container.name.as_str()),
+                OracleBind::from(column.name.as_str()),
+            ];
+            let json_rows =
+                run_catalog_query(self.cx, self.conn, CatalogQueryId::JsonColumn, &binds).await?;
+            if json_rows.len() != 1
+                || json_rows[0].text("COLUMN_NAME") != Some(column.name.as_str())
+            {
+                return Ok(Resolution::Unresolved);
+            }
+            // ALL_JSON_COLUMNS retains a text column after its check is
+            // disabled. Require a separate enabled, validated exact check.
+            let constraints =
+                run_catalog_query(self.cx, self.conn, CatalogQueryId::JsonConstraint, &binds)
+                    .await?;
+            return if constraints.len() < 65
+                && constraints.iter().any(|row| {
+                    row.text("SEARCH_CONDITION_VC")
+                        .is_some_and(|condition| exact_is_json_check(condition, &column.name))
+                }) {
+                Ok(Resolution::Resolved(Box::new(column)))
+            } else {
+                Ok(Resolution::Unresolved)
+            };
+        }
+        let Some(mut type_owner) = required_text(type_row, "DATA_TYPE_OWNER") else {
+            return Ok(Resolution::Unresolved);
+        };
+        let mut type_name = data_type;
+        for (index, attribute) in parts[2..].iter().enumerate() {
+            let rows = run_catalog_query(
+                self.cx,
+                self.conn,
+                CatalogQueryId::TypeAttribute,
+                &[
+                    OracleBind::from(type_owner.as_str()),
+                    OracleBind::from(type_name.as_str()),
+                    OracleBind::from(attribute.as_str()),
+                ],
+            )
+            .await?;
+            let [attr_row] = rows.as_slice() else {
+                return Ok(Resolution::Unresolved);
+            };
+            if attr_row.text("ATTR_NAME") != Some(attribute.as_str())
+                || optional_text(attr_row, "ATTR_TYPE_MOD").is_some()
+            {
+                // REF attributes and any unknown modifier may dereference or
+                // invoke code; neither is a plain stored attribute chain.
+                return Ok(Resolution::Unresolved);
+            }
+            if index + 1 < parts.len() - 2 {
+                let Some(next_owner) = required_text(attr_row, "ATTR_TYPE_OWNER") else {
+                    return Ok(Resolution::Unresolved);
+                };
+                let Some(next_type) = required_text(attr_row, "ATTR_TYPE_NAME") else {
+                    return Ok(Resolution::Unresolved);
+                };
+                type_owner = next_owner;
+                type_name = next_type;
+            }
+        }
+        Ok(Resolution::Resolved(Box::new(column)))
     }
 
     async fn resolve_relation_column(
@@ -2476,6 +2636,17 @@ fn optional_text(row: &OracleRow, name: &str) -> Option<String> {
     row.text(name)
         .filter(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+fn exact_is_json_check(condition: &str, column: &str) -> bool {
+    if condition.len() >= 4000 || column.is_empty() {
+        return false;
+    }
+    let compact = condition
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '(' && *ch != ')')
+        .collect::<String>();
+    compact == format!("\"{column}\"ISJSON") || compact == format!("{column}ISJSON")
 }
 
 /// Prove the principal can read `ALL_POLICIES`.
@@ -3388,7 +3559,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 62);
+        assert_eq!(specs.len(), 66);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -3680,6 +3851,217 @@ mod tests {
         ));
     }
 
+    fn issue32_context(alias: Option<&str>) -> ResolveCtx {
+        let mut context = ResolveCtx::new("APP", "APP", oraclemcp_guard::CatalogGeneration(1));
+        context
+            .statement_scope
+            .relations
+            .push(oraclemcp_guard::StatementRelation {
+                name: RawName::new([RawNamePart::unquoted("orders")], SyntacticRole::FromFactor),
+                alias: alias.map(RawNamePart::unquoted),
+            });
+        context
+    }
+
+    fn issue32_value(parts: &[&str]) -> RawName {
+        RawName::new(
+            parts.iter().map(|part| RawNamePart::unquoted(*part)),
+            SyntacticRole::ValuePosition,
+        )
+    }
+
+    #[test]
+    fn issue32_json_dot_path_resolves_to_json_column() {
+        run_with_cx(|cx| async move {
+            for (data_type, json_rows) in [
+                ("JSON", None),
+                ("CLOB", Some(vec![row(&[("COLUMN_NAME", Some("DOC"))])])),
+            ] {
+                let mut responses = vec![
+                    vec![table_catalog_row("APP", "ORDERS", "42")],
+                    vec![row(&[("COLUMN_ID", Some("2"))])],
+                    vec![row(&[
+                        ("DATA_TYPE", Some(data_type)),
+                        ("DATA_TYPE_OWNER", None),
+                    ])],
+                ];
+                if let Some(json_rows) = json_rows {
+                    responses.push(json_rows);
+                    responses.push(vec![row(&[(
+                        "SEARCH_CONDITION_VC",
+                        Some("\"DOC\" IS JSON"),
+                    )])]);
+                }
+                let conn = ScriptedRows::new(responses);
+                let context = issue32_context(Some("j"));
+                let raw = issue32_value(&["j", "doc", "customer", "id"]);
+                let lookup = DictionaryLookup {
+                    cx: &cx,
+                    conn: &conn,
+                    context: &context,
+                };
+                let Resolution::Resolved(column) =
+                    lookup.resolve_name(&raw).await.expect("JSON catalog proof")
+                else {
+                    panic!("aliased JSON path must bind to its exact column");
+                };
+                assert_eq!(column.name, "DOC");
+                assert_eq!(column.identity.object_id, 42);
+            }
+        });
+    }
+
+    #[test]
+    fn issue32_text_json_path_requires_enabled_exact_constraint() {
+        run_with_cx(|cx| async move {
+            for constraints in [
+                Vec::new(),
+                vec![row(&[(
+                    "SEARCH_CONDITION_VC",
+                    Some("\"DOC\" IS JSON OR 1 = 1"),
+                )])],
+            ] {
+                let conn = ScriptedRows::new([
+                    vec![table_catalog_row("APP", "ORDERS", "42")],
+                    vec![row(&[("COLUMN_ID", Some("2"))])],
+                    vec![row(&[("DATA_TYPE", Some("CLOB"))])],
+                    vec![row(&[("COLUMN_NAME", Some("DOC"))])],
+                    constraints,
+                ]);
+                let context = issue32_context(Some("j"));
+                let raw = issue32_value(&["j", "doc", "customer", "id"]);
+                let lookup = DictionaryLookup {
+                    cx: &cx,
+                    conn: &conn,
+                    context: &context,
+                };
+                assert!(matches!(
+                    lookup.resolve_name(&raw).await.expect("check evidence"),
+                    Resolution::Unresolved
+                ));
+            }
+        });
+    }
+
+    #[test]
+    fn issue32_object_attribute_chain_resolves() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                vec![table_catalog_row("APP", "ORDERS", "42")],
+                vec![row(&[("COLUMN_ID", Some("3"))])],
+                vec![row(&[
+                    ("DATA_TYPE", Some("ADDRESS_T")),
+                    ("DATA_TYPE_OWNER", Some("APP")),
+                ])],
+                vec![row(&[
+                    ("ATTR_NAME", Some("CITY")),
+                    ("ATTR_TYPE_OWNER", None),
+                    ("ATTR_TYPE_NAME", Some("VARCHAR2")),
+                    ("ATTR_TYPE_MOD", None),
+                ])],
+            ]);
+            let context = issue32_context(Some("e"));
+            let raw = issue32_value(&["e", "address", "city"]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            let Resolution::Resolved(column) = lookup.resolve_name(&raw).await.expect("type proof")
+            else {
+                panic!("plain object attribute must bind to the leading column");
+            };
+            assert_eq!(column.name, "ADDRESS");
+        });
+    }
+
+    #[test]
+    fn issue32_object_method_call_stays_refused() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                vec![table_catalog_row("APP", "ORDERS", "42")],
+                vec![row(&[("COLUMN_ID", Some("3"))])],
+                vec![row(&[
+                    ("DATA_TYPE", Some("ADDRESS_T")),
+                    ("DATA_TYPE_OWNER", Some("APP")),
+                ])],
+                Vec::new(),
+            ]);
+            let context = issue32_context(Some("e"));
+            let raw = issue32_value(&["e", "address", "get_city"]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            assert!(matches!(
+                lookup
+                    .resolve_name(&raw)
+                    .await
+                    .expect("missing method attribute"),
+                Resolution::Unresolved
+            ));
+        });
+    }
+
+    #[test]
+    fn issue32_ref_attribute_stays_refused() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                vec![table_catalog_row("APP", "ORDERS", "42")],
+                vec![row(&[("COLUMN_ID", Some("3"))])],
+                vec![row(&[
+                    ("DATA_TYPE", Some("ADDRESS_T")),
+                    ("DATA_TYPE_OWNER", Some("APP")),
+                ])],
+                vec![row(&[
+                    ("ATTR_NAME", Some("CITY")),
+                    ("ATTR_TYPE_OWNER", Some("APP")),
+                    ("ATTR_TYPE_NAME", Some("CITY_T")),
+                    ("ATTR_TYPE_MOD", Some("REF")),
+                ])],
+            ]);
+            let context = issue32_context(Some("e"));
+            let raw = issue32_value(&["e", "address", "city"]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            assert!(matches!(
+                lookup
+                    .resolve_name(&raw)
+                    .await
+                    .expect("REF attribute evidence"),
+                Resolution::Unresolved
+            ));
+        });
+    }
+
+    #[test]
+    fn issue32_unaliased_dotted_path_keeps_owner_table_column_meaning() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new(vec![Vec::new(); 16]);
+            let context = issue32_context(None);
+            let raw = issue32_value(&["orders", "doc", "customer"]);
+            let lookup = DictionaryLookup {
+                cx: &cx,
+                conn: &conn,
+                context: &context,
+            };
+            assert!(matches!(
+                lookup
+                    .resolve_name(&raw)
+                    .await
+                    .expect("unaliased resolution"),
+                Resolution::Unresolved
+            ));
+            assert!(conn.queries.lock().unwrap().iter().all(|(sql, _)| {
+                !sql.contains("all_json_columns") && !sql.contains("all_type_attrs")
+            }));
+        });
+    }
+
     fn merged_join_context(natural: bool) -> ResolveCtx {
         let left = oraclemcp_guard::StatementRelation {
             name: RawName::new([RawNamePart::unquoted("t1")], SyntacticRole::FromFactor),
@@ -3825,7 +4207,7 @@ mod tests {
                     .collect::<Vec<_>>();
                 let started = std::time::Instant::now();
                 assert_eq!(
-                    resolved_relations_read_purity(&cx, &conn, &relations)
+                    resolved_relations_read_purity(&cx, &conn, &relations, &[])
                         .await
                         .expect("clean batched proof"),
                     Purity::ProvenReadOnly
@@ -3855,7 +4237,7 @@ mod tests {
             // around), not blindness, so the proof is satisfied.
             let clean = ScriptedRows::new([Vec::new(), Vec::new(), Vec::new(), Vec::new()]);
             assert_eq!(
-                resolved_relations_read_purity(&cx, &clean, &[table_object()])
+                resolved_relations_read_purity(&cx, &clean, &[table_object()], &[])
                     .await
                     .expect("clean table proof"),
                 oraclemcp_guard::Purity::ProvenReadOnly
@@ -3871,7 +4253,7 @@ mod tests {
 
             let policy = ScriptedRows::new([vec![row(&[("POLICY_NAME", Some("P"))])]]);
             assert_eq!(
-                resolved_relations_read_purity(&cx, &policy, &[table_object()])
+                resolved_relations_read_purity(&cx, &policy, &[table_object()], &[])
                     .await
                     .expect("policy evidence"),
                 oraclemcp_guard::Purity::Unknown
@@ -3880,7 +4262,7 @@ mod tests {
             let virtual_column =
                 ScriptedRows::new([Vec::new(), vec![row(&[("COLUMN_NAME", Some("TOTAL"))])]]);
             assert_eq!(
-                resolved_relations_read_purity(&cx, &virtual_column, &[table_object()])
+                resolved_relations_read_purity(&cx, &virtual_column, &[table_object()], &[])
                     .await
                     .expect("virtual-column evidence"),
                 oraclemcp_guard::Purity::Unknown
@@ -3905,13 +4287,148 @@ mod tests {
             ] {
                 let no_io = ScriptedRows::new([]);
                 assert_eq!(
-                    resolved_relations_read_purity(&cx, &no_io, std::slice::from_ref(&object))
+                    resolved_relations_read_purity(&cx, &no_io, std::slice::from_ref(&object), &[])
                         .await
                         .expect("unsupported relation fails closed"),
                     oraclemcp_guard::Purity::Unknown
                 );
                 assert!(no_io.queries.lock().expect("queries lock").is_empty());
             }
+        });
+    }
+
+    fn issue30_virtual_column_row(
+        column: &str,
+        hidden: &str,
+        generated: &str,
+        expression: &str,
+    ) -> OracleRow {
+        row(&[
+            ("OWNER", Some("APP")),
+            ("TABLE_NAME", Some("ORDERS")),
+            ("COLUMN_NAME", Some(column)),
+            ("HIDDEN_COLUMN", Some(hidden)),
+            ("USER_GENERATED", Some(generated)),
+            ("DATA_DEFAULT", Some(expression)),
+        ])
+    }
+
+    #[test]
+    fn issue30_hidden_system_virtual_column_is_ignored_when_unreferenced() {
+        run_with_cx(|cx| async move {
+            for (column, expression) in [
+                ("SYS_NC00003$", "UPPER(\"LABEL\")"),
+                ("SYS_STU$123", "SYS_OP_COMBINED_HASH(\"LABEL\",\"ID\")"),
+                (
+                    "SYS_IME_OSON_123",
+                    "OSON(\"DOC\" FORMAT OSON , 'ime' RETURNING RAW(2000) NULL ON ERROR)",
+                ),
+            ] {
+                let conn = ScriptedRows::new([
+                    Vec::new(),
+                    vec![issue30_virtual_column_row(column, "YES", "NO", expression)],
+                    Vec::new(),
+                    Vec::new(),
+                ]);
+                assert_eq!(
+                    resolved_relations_read_purity(&cx, &conn, &[table_object()], &[])
+                        .await
+                        .expect("bounded complete built-in expression"),
+                    Purity::ProvenReadOnly,
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn issue30_user_visible_virtual_column_stays_unknown() {
+        run_with_cx(|cx| async move {
+            for (hidden, generated, values) in [
+                ("NO", "YES", Vec::new()),
+                (
+                    "YES",
+                    "NO",
+                    vec![RawName::new(
+                        [RawNamePart::unquoted("SYS_NC00003$")],
+                        SyntacticRole::ValuePosition,
+                    )],
+                ),
+            ] {
+                let conn = ScriptedRows::new([
+                    Vec::new(),
+                    vec![issue30_virtual_column_row(
+                        "SYS_NC00003$",
+                        hidden,
+                        generated,
+                        "UPPER(\"LABEL\")",
+                    )],
+                ]);
+                assert_eq!(
+                    resolved_relations_read_purity(&cx, &conn, &[table_object()], &values)
+                        .await
+                        .expect("visible or referenced virtual column"),
+                    Purity::Unknown,
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn issue30_hidden_column_calling_user_function_stays_unknown() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                Vec::new(),
+                vec![issue30_virtual_column_row(
+                    "SYS_NC00003$",
+                    "YES",
+                    "NO",
+                    "APP.CANARY_FN(\"LABEL\")",
+                )],
+            ]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &conn, &[table_object()], &[])
+                    .await
+                    .expect("user routine evidence"),
+                Purity::Unknown,
+            );
+        });
+    }
+
+    #[test]
+    fn issue30_truncated_data_default_stays_unknown() {
+        run_with_cx(|cx| async move {
+            let truncated = " ".repeat(4000);
+            let conn = ScriptedRows::new([
+                Vec::new(),
+                vec![issue30_virtual_column_row(
+                    "SYS_NC00003$",
+                    "YES",
+                    "NO",
+                    &truncated,
+                )],
+            ]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &conn, &[table_object()], &[])
+                    .await
+                    .expect("truncated expression evidence"),
+                Purity::Unknown,
+            );
+            let mut capped =
+                issue30_virtual_column_row("SYS_NC00004$", "YES", "NO", "UPPER(\"LABEL\")");
+            capped
+                .columns
+                .iter_mut()
+                .find(|(name, _)| name == "DATA_DEFAULT")
+                .expect("synthetic expression cell")
+                .1
+                .source_length = Some(5000);
+            let conn = ScriptedRows::new([Vec::new(), vec![capped]]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &conn, &[table_object()], &[])
+                    .await
+                    .expect("driver capped expression evidence"),
+                Purity::Unknown,
+            );
         });
     }
 
@@ -3925,14 +4442,14 @@ mod tests {
         run_with_cx(|cx| async move {
             let clean = ScriptedRows::new([Vec::new(), Vec::new(), Vec::new(), Vec::new()]);
             assert_eq!(
-                resolved_relations_read_purity(&cx, &clean, &[table_object()])
+                resolved_relations_read_purity(&cx, &clean, &[table_object()], &[])
                     .await
                     .expect("complete clean metadata proves read-only"),
                 oraclemcp_guard::Purity::ProvenReadOnly
             );
 
             let vpd = ScriptedRows::new([vec![row(&[("POLICY_NAME", Some("SYNTHETIC_VPD"))])]]);
-            let vpd_purity = resolved_relations_read_purity(&cx, &vpd, &[table_object()])
+            let vpd_purity = resolved_relations_read_purity(&cx, &vpd, &[table_object()], &[])
                 .await
                 .expect("visible VPD is a normal, non-error metadata answer");
             assert_eq!(vpd_purity, oraclemcp_guard::Purity::Unknown);
@@ -3961,7 +4478,8 @@ mod tests {
                 ),
             ] {
                 let blind = ScriptedRows::results(responses);
-                let refusal = resolved_relations_read_purity(&cx, &blind, &[table_object()]).await;
+                let refusal =
+                    resolved_relations_read_purity(&cx, &blind, &[table_object()], &[]).await;
                 assert!(
                     refusal.is_err(),
                     "unavailable {name} metadata must abort the proof so dispatch refuses; got {refusal:?}"
@@ -4008,7 +4526,8 @@ mod tests {
                 ),
             ] {
                 let blind = ScriptedRows::results(responses);
-                let refusal = resolved_relations_read_purity(&cx, &blind, &[table_object()]).await;
+                let refusal =
+                    resolved_relations_read_purity(&cx, &blind, &[table_object()], &[]).await;
                 assert!(
                     refusal.is_err(),
                     "unavailable {name} must abort the proof so dispatch refuses; got {refusal:?}"
@@ -4579,7 +5098,7 @@ mod tests {
         run_with_cx(|cx| async move {
             let sighted = CatalogVisibility::sighted();
             assert_eq!(
-                resolved_relations_read_purity(&cx, &sighted, &[table_object()])
+                resolved_relations_read_purity(&cx, &sighted, &[table_object()], &[])
                     .await
                     .expect("clean table proof"),
                 oraclemcp_guard::Purity::ProvenReadOnly,
@@ -4622,7 +5141,7 @@ mod tests {
     fn c8_a_catalog_blind_principal_must_not_yield_a_read_only_proof() {
         run_with_cx(|cx| async move {
             let blind = CatalogVisibility::blind();
-            let refused = resolved_relations_read_purity(&cx, &blind, &[table_object()]).await;
+            let refused = resolved_relations_read_purity(&cx, &blind, &[table_object()], &[]).await;
             assert!(
                 refused.is_err(),
                 "a catalog-blind principal (probe errors) must fail the read-purity proof \

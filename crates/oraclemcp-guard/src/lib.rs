@@ -48,7 +48,8 @@ pub use classifier::{
     BatchShape, Classifier, ClassifierConfig, GuardDecision, PlanMismatch, StageA,
     VERDICT_CERTIFICATE_CLASSIFIER_VERSION, VERDICT_CERTIFICATE_REGISTRY_GENERATION,
     VerdictCertificate, VerdictCertificateBindingError, VerdictDerivationStep, analyze_batch,
-    named_bind_placeholders, semantic_read_plan, semantic_read_plan_checked, stage_a,
+    builtin_only_virtual_column_expression, named_bind_placeholders, semantic_read_plan,
+    semantic_read_plan_checked, stage_a,
 };
 pub use clock::MonotonicDeadline;
 pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};

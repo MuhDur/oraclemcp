@@ -93,6 +93,14 @@ pub enum CatalogQueryId {
     ColumnConflict,
     /// One relation's column identity.
     RelationColumn,
+    /// Exact column type before interpreting a dotted value path.
+    ColumnPathType,
+    /// JSON constraint or native JSON column visibility for one exact column.
+    JsonColumn,
+    /// Enabled validated IS JSON check on one exact text column.
+    JsonConstraint,
+    /// One exact attribute of a visible SQL object type.
+    TypeAttribute,
     /// Enabled SELECT policies on one relation.
     SelectPolicy,
     /// Virtual columns on one relation.
@@ -195,7 +203,7 @@ pub enum CatalogQueryId {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 66] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -209,6 +217,10 @@ impl CatalogQueryId {
         Self::VirtualColumnsForRelations32,
         Self::ColumnConflict,
         Self::RelationColumn,
+        Self::ColumnPathType,
+        Self::JsonColumn,
+        Self::JsonConstraint,
+        Self::TypeAttribute,
         Self::SelectPolicy,
         Self::VirtualColumn,
         Self::AllPoliciesVisibility,
@@ -356,7 +368,7 @@ impl CatalogQueryId {
             Self::VirtualColumnsForRelations32 => (
                 VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL,
                 T32,
-                "prove no virtual column across bounded relations",
+                "prove virtual columns cannot run user code across bounded relations",
                 InternalProof,
                 ReadPurity,
             ),
@@ -371,6 +383,34 @@ impl CatalogQueryId {
                 RELATION_COLUMN_SQL,
                 TTT,
                 "resolve a relation column",
+                InternalProof,
+                NameResolution,
+            ),
+            Self::ColumnPathType => (
+                COLUMN_PATH_TYPE_SQL,
+                TTT,
+                "prove exact leading column type for dotted value path",
+                InternalProof,
+                NameResolution,
+            ),
+            Self::JsonColumn => (
+                JSON_COLUMN_SQL,
+                TTT,
+                "prove constrained JSON column for dotted value path",
+                InternalProof,
+                NameResolution,
+            ),
+            Self::JsonConstraint => (
+                JSON_CONSTRAINT_SQL,
+                TTT,
+                "prove enabled validated IS JSON check for dotted value path",
+                InternalProof,
+                NameResolution,
+            ),
+            Self::TypeAttribute => (
+                TYPE_ATTRIBUTE_SQL,
+                TTT,
+                "prove exact SQL object attribute chain",
                 InternalProof,
                 NameResolution,
             ),
@@ -1032,6 +1072,17 @@ pub(crate) const COLUMN_CONFLICT_SQL: &str = "SELECT owner, table_name, column_n
     FROM all_tab_columns WHERE column_name = :1 AND ROWNUM <= :2";
 pub(crate) const RELATION_COLUMN_SQL: &str = "SELECT column_name, column_id FROM all_tab_columns \
     WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
+pub(crate) const COLUMN_PATH_TYPE_SQL: &str = "SELECT data_type, data_type_owner FROM all_tab_columns \
+    WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
+pub(crate) const JSON_COLUMN_SQL: &str = "SELECT column_name FROM all_json_columns \
+    WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
+pub(crate) const JSON_CONSTRAINT_SQL: &str = "SELECT search_condition_vc FROM all_constraints c \
+    JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
+    WHERE c.owner = :1 AND c.table_name = :2 AND cc.column_name = :3 \
+    AND c.constraint_type = 'C' AND c.status = 'ENABLED' AND c.validated = 'VALIDATED' \
+    AND ROWNUM <= 65";
+pub(crate) const TYPE_ATTRIBUTE_SQL: &str = "SELECT attr_name, attr_type_owner, attr_type_name, attr_type_mod FROM all_type_attrs \
+    WHERE owner = :1 AND type_name = :2 AND attr_name = :3 AND ROWNUM <= 2";
 pub(crate) const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM all_policies \
     WHERE object_owner = :1 AND object_name = :2 \
     AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= 1";
@@ -1054,6 +1105,6 @@ pub(crate) const FGA_POLICIES_FOR_RELATIONS_32_SQL: &str = "SELECT object_schema
           FROM all_audit_policies \
           WHERE (object_schema, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) \
           ORDER BY object_schema, object_name, policy_name) WHERE ROWNUM <= 257";
-pub(crate) const VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL: &str = "SELECT owner, table_name, column_name FROM all_tab_cols \
+pub(crate) const VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL: &str = "SELECT owner, table_name, column_name, hidden_column, user_generated, data_default FROM all_tab_cols \
     WHERE virtual_column = 'YES' \
-    AND (owner, table_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";
+    AND (owner, table_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 257";

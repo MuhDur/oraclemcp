@@ -433,10 +433,13 @@ pub oraclemcp_db::CatalogQueryId::AllIdentifiersProbe
 pub oraclemcp_db::CatalogQueryId::AllObjectsProbe
 pub oraclemcp_db::CatalogQueryId::AllPoliciesVisibility
 pub oraclemcp_db::CatalogQueryId::ColumnConflict
+pub oraclemcp_db::CatalogQueryId::ColumnPathType
 pub oraclemcp_db::CatalogQueryId::DbaObjectsProbe
 pub oraclemcp_db::CatalogQueryId::DiagnosticsPackProbe
 pub oraclemcp_db::CatalogQueryId::FgaCatalogProof
 pub oraclemcp_db::CatalogQueryId::FgaPoliciesForRelations32
+pub oraclemcp_db::CatalogQueryId::JsonColumn
+pub oraclemcp_db::CatalogQueryId::JsonConstraint
 pub oraclemcp_db::CatalogQueryId::MemberArguments
 pub oraclemcp_db::CatalogQueryId::MemberProcedures
 pub oraclemcp_db::CatalogQueryId::NativeRedactionOption
@@ -447,6 +450,7 @@ pub oraclemcp_db::CatalogQueryId::PlscopeStatements
 pub oraclemcp_db::CatalogQueryId::PolicyCatalogProof
 pub oraclemcp_db::CatalogQueryId::PolicyRowsForRelations32
 pub oraclemcp_db::CatalogQueryId::RelationColumn
+pub oraclemcp_db::CatalogQueryId::TypeAttribute
 pub oraclemcp_db::CatalogQueryId::SelectPolicy
 pub oraclemcp_db::CatalogQueryId::SessionContext
 pub oraclemcp_db::CatalogQueryId::SessionPrivileges
@@ -10380,7 +10384,7 @@ pub const fn oraclemcp_db::redacted_oracle_binds(&[oraclemcp_db::OracleBind]) ->
 pub fn oraclemcp_db::requirement_matrix() -> &'static [oraclemcp_db::ToolRequirement]
 pub async fn oraclemcp_db::resolve_top_sql_source(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool) -> core::result::Result<oraclemcp_db::DiagnosticsSource, oraclemcp_db::DbError>
 pub fn oraclemcp_db::resolve_wallet_choice(&std::path::Path, core::option::Option<&str>) -> core::result::Result<oraclemcp_db::WalletResolutionReport, oraclemcp_db::WalletResolveError>
-pub async fn oraclemcp_db::resolved_relations_read_purity(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject]) -> core::result::Result<oraclemcp_guard::purity::Purity, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::resolved_relations_read_purity(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject], &[oraclemcp_guard::resolver::RawName]) -> core::result::Result<oraclemcp_guard::purity::Purity, oraclemcp_db::DbError>
 pub fn oraclemcp_db::retry_decision(oraclemcp_error::StatementOutcome, oraclemcp_db::StatementClass) -> oraclemcp_db::RetryDecision
 pub async fn oraclemcp_db::run_catalog_query(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, oraclemcp_db::CatalogQueryId, &[oraclemcp_db::OracleBind]) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::run_health(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_db::HealthSubcheck]) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::Finding>, oraclemcp_db::DbError>

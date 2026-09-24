@@ -1618,6 +1618,115 @@ fn is_builtin_function(name: &str, verified_local_vector_embedding: bool) -> boo
         || (verified_local_vector_embedding && name == "vector_embedding")
 }
 
+/// Prove the complete Oracle expression stored for a hidden virtual column
+/// contains only quoted column references, constants, and known pure builtins.
+/// The caller must separately prove the column is system-generated, hidden,
+/// unreferenced, and that the catalog text is complete.
+#[must_use]
+pub fn builtin_only_virtual_column_expression(column_name: &str, expression: &str) -> bool {
+    use sqlparser::tokenizer::Token;
+
+    if expression.is_empty() || expression.len() >= 4000 {
+        return false;
+    }
+    if column_name.starts_with("SYS_IME_OSON_") && exact_oracle_oson_index_expression(expression) {
+        return true;
+    }
+    let Ok(mut parser) = Parser::new(&OracleDialect {}).try_with_sql(expression) else {
+        return false;
+    };
+    let Ok(parsed) = parser.parse_expr() else {
+        return false;
+    };
+    if !matches!(parser.peek_token().token, Token::EOF) {
+        return false;
+    }
+
+    struct BuiltinExpressionVisitor;
+
+    impl Visitor for BuiltinExpressionVisitor {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<Self::Break> {
+            match expr {
+                Expr::Identifier(identifier) if identifier.quote_style == Some('"') => {}
+                Expr::Value(_) | Expr::Nested(_) => {}
+                Expr::Function(function) => {
+                    let [name] = function.name.0.as_slice() else {
+                        return ControlFlow::Break(());
+                    };
+                    let Some(name) = name.as_ident() else {
+                        return ControlFlow::Break(());
+                    };
+                    if name.quote_style.is_some()
+                        || !(is_builtin_function(&name.value, false)
+                            || name.value.eq_ignore_ascii_case("SYS_OP_COMBINED_HASH"))
+                        || function.uses_odbc_syntax
+                        || !matches!(function.parameters, FunctionArguments::None)
+                        || function.filter.is_some()
+                        || function.null_treatment.is_some()
+                        || function.over.is_some()
+                        || !function.within_group.is_empty()
+                    {
+                        return ControlFlow::Break(());
+                    }
+                    let FunctionArguments::List(arguments) = &function.args else {
+                        return ControlFlow::Break(());
+                    };
+                    if arguments.duplicate_treatment.is_some()
+                        || !arguments.clauses.is_empty()
+                        || !arguments.args.iter().all(|argument| {
+                            matches!(argument, FunctionArg::Unnamed(FunctionArgExpr::Expr(_)))
+                        })
+                    {
+                        return ControlFlow::Break(());
+                    }
+                }
+                _ => return ControlFlow::Break(()),
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    matches!(
+        parsed.visit(&mut BuiltinExpressionVisitor),
+        ControlFlow::Continue(())
+    )
+}
+
+fn exact_oracle_oson_index_expression(expression: &str) -> bool {
+    use sqlparser::tokenizer::Token;
+
+    // FREE23 creates SYS_IME_OSON_* for a native JSON column with this exact
+    // internal expression. Match the complete token stream: no extra call,
+    // operator, or expression can be hidden after the closing parenthesis.
+    let Ok(tokens) = Tokenizer::new(&OracleDialect {}, expression).tokenize() else {
+        return false;
+    };
+    let tokens = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::Whitespace(_)))
+        .collect::<Vec<_>>();
+    let bare = |index: usize, expected: &str| matches!(tokens.get(index), Some(Token::Word(word)) if word.quote_style.is_none() && word.value.eq_ignore_ascii_case(expected));
+    tokens.len() == 16
+        && bare(0, "OSON")
+        && matches!(tokens[1], Token::LParen)
+        && matches!(tokens[2], Token::Word(word) if word.quote_style == Some('"') && !word.value.is_empty() && word.value.len() <= 128)
+        && bare(3, "FORMAT")
+        && bare(4, "OSON")
+        && matches!(tokens[5], Token::Comma)
+        && matches!(tokens[6], Token::SingleQuotedString(value) if value == "ime")
+        && bare(7, "RETURNING")
+        && bare(8, "RAW")
+        && matches!(tokens[9], Token::LParen)
+        && matches!(tokens[10], Token::Number(value, _) if value == "2000")
+        && matches!(tokens[11], Token::RParen)
+        && bare(12, "NULL")
+        && bare(13, "ON")
+        && bare(14, "ERROR")
+        && matches!(tokens[15], Token::RParen)
+}
+
 /// Keyword-collision identifiers that, when used as a **bare** `name(` call, are
 /// genuine routine-name candidates rather than SQL syntax. These are the
 /// non-reserved Oracle words an agent can legally define a side-effecting UDF /
@@ -4498,6 +4607,48 @@ mod tests {
         Tokenizer::new(&OracleDialect {}, sql)
             .tokenize()
             .expect("test SQL should tokenize")
+    }
+
+    #[test]
+    fn issue30_virtual_expression_accepts_only_complete_builtin_calls() {
+        for (column, expression) in [
+            ("SYS_NC00003$", "UPPER(\"LABEL\")"),
+            ("SYS_STU$123", "SYS_OP_COMBINED_HASH(\"LABEL\",\"ID\")"),
+            (
+                "SYS_IME_OSON_123",
+                "OSON(\"DOC\" FORMAT OSON , 'ime' RETURNING RAW(2000) NULL ON ERROR)",
+            ),
+        ] {
+            assert!(
+                builtin_only_virtual_column_expression(column, expression),
+                "{expression}"
+            );
+        }
+        for expression in [
+            "APP.CANARY_FN(\"LABEL\")",
+            "SYS_OP_COMBINED_HASH(APP.CANARY_FN(\"LABEL\"),\"ID\")",
+            "\"UPPER\"(\"LABEL\")",
+            "UPPER(\"LABEL\") + APP.CANARY_FN(\"ID\")",
+            "UPPER(\"LABEL\") FROM APP.OTHER",
+            "UPPER(\"LABEL\") /* incomplete",
+            "SYS_OP_COMBINED_HASH((SELECT 1 FROM DUAL),\"ID\")",
+            "OSON(APP.CANARY_FN(\"DOC\") FORMAT OSON , 'ime' RETURNING RAW(2000) NULL ON ERROR)",
+            "OSON(\"DOC\" FORMAT OSON , 'ime' RETURNING RAW(2000) NULL ON ERROR) + 1",
+            "OSON(\"DOC\" FORMAT OSON , 'evil' RETURNING RAW(2000) NULL ON ERROR)",
+        ] {
+            assert!(
+                !builtin_only_virtual_column_expression("SYS_IME_OSON_123", expression),
+                "{expression}"
+            );
+        }
+        assert!(!builtin_only_virtual_column_expression(
+            "SYS_NC00003$",
+            &"X".repeat(4000)
+        ));
+        assert!(!builtin_only_virtual_column_expression(
+            "SYS_NC00003$",
+            "OSON(\"DOC\" FORMAT OSON , 'ime' RETURNING RAW(2000) NULL ON ERROR)"
+        ));
     }
 
     fn token_refs(tokens: &[Token]) -> Vec<&Token> {

@@ -166,7 +166,7 @@ fn live_relation_column_and_hidden_effect_proof_use_exact_dictionary_identity() 
         );
         assert_eq!(column.identity, table.identity);
         assert_eq!(
-            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(table.as_ref()))
+            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(table.as_ref()), &[])
                 .await
                 .expect("live hidden-effect proof"),
             Purity::ProvenReadOnly
@@ -550,7 +550,7 @@ fn live_adversarial_resolver_corpus_fails_closed_and_invalidates_stale_evidence(
         };
         assert_eq!(view.kind, CatalogObjectKind::View);
         assert_eq!(
-            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(view.as_ref()))
+            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(view.as_ref()), &[])
                 .await
                 .expect("view purity proof"),
             Purity::Unknown,
@@ -562,7 +562,7 @@ fn live_adversarial_resolver_corpus_fails_closed_and_invalidates_stale_evidence(
         };
         assert_eq!(table.kind, CatalogObjectKind::Table);
         assert_eq!(
-            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(table.as_ref()))
+            resolved_relations_read_purity(&cx, &conn, std::slice::from_ref(table.as_ref()), &[])
                 .await
                 .expect("VPD purity proof"),
             Purity::Unknown,

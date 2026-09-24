@@ -173,7 +173,7 @@ fn d4_catalog_blind_principal_cannot_prove_the_known_guarded_table_read_only() {
             .await
             .expect("D4 catalog-blind principal must connect with CREATE SESSION only");
         let table = guarded_fixture_table();
-        let purity = resolved_relations_read_purity(&cx, &conn, &[table])
+        let purity = resolved_relations_read_purity(&cx, &conn, &[table], &[])
             .await
             .expect(
                 "D4's restricted dictionary probes must be successful empty results; \

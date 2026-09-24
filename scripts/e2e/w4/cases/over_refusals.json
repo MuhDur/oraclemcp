@@ -480,5 +480,178 @@
     "audit_expect": [],
     "audit_zero_executions": true,
     "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "w4_query_issue30_fbi_builtin_admitted",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [{"sql": "CREATE INDEX ${owner}.IX_UPPER_${run_id} ON ${owner}.T_PARENT_${run_id}(UPPER(LABEL))"}],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id}",
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "max_rows": 2}},
+    "expect": {"rows": [{"ID": "1"}, {"ID": "2"}]},
+    "db_reread": [
+      {"sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "rows": [[1], [2]]},
+      {"sql": "SELECT COUNT(*) FROM ALL_TAB_COLS WHERE OWNER='${owner}' AND TABLE_NAME='T_PARENT_${run_id}' AND COLUMN_NAME LIKE 'SYS_NC%' AND VIRTUAL_COLUMN='YES' AND HIDDEN_COLUMN='YES' AND USER_GENERATED='NO'", "rows": [[1]]}
+    ],
+    "audit_expect": [], "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+  },
+  {
+    "case_id": "w4_query_issue30_extended_stats_admitted",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [{"sql": "DECLARE extension_name VARCHAR2(128); BEGIN extension_name := DBMS_STATS.CREATE_EXTENDED_STATS('${owner}', 'T_PARENT_${run_id}', '(LABEL,ID)'); END;"}],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id}",
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "max_rows": 2}},
+    "expect": {"rows": [{"ID": "1"}, {"ID": "2"}]},
+    "db_reread": [
+      {"sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "rows": [[1], [2]]},
+      {"sql": "SELECT COUNT(*) FROM ALL_TAB_COLS WHERE OWNER='${owner}' AND TABLE_NAME='T_PARENT_${run_id}' AND COLUMN_NAME LIKE 'SYS_STU%' AND VIRTUAL_COLUMN='YES' AND HIDDEN_COLUMN='YES' AND USER_GENERATED='NO'", "rows": [[1]]}
+    ],
+    "audit_expect": [], "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+  },
+  {
+    "case_id": "w4_query_issue30_fbi_user_function_refused",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": ["priv:SELECT_V_SQL"], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_FBIA_${run_id}(ID NUMBER PRIMARY KEY, LABEL VARCHAR2(40))"},
+      {"sql": "INSERT INTO ${owner}.T_FBIA_${run_id}(ID,LABEL) VALUES (1,'canary')"},
+      {"sql": "CREATE TABLE ${owner}.T_FBI_CANARY_${run_id}(ID NUMBER)"},
+      {"sql": "CREATE OR REPLACE FUNCTION ${owner}.F_CANARY_${run_id}(P VARCHAR2) RETURN VARCHAR2 DETERMINISTIC AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_FBI_CANARY_${run_id}(ID) VALUES (1); COMMIT; RETURN UPPER(P); END;"},
+      {"sql": "CREATE INDEX ${owner}.IX_CANARY_${run_id} ON ${owner}.T_FBIA_${run_id}(${owner}.F_CANARY_${run_id}(LABEL))"},
+      {"sql": "TRUNCATE TABLE ${owner}.T_FBI_CANARY_${run_id}"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_FBIA_${run_id}",
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_FBIA_${run_id} WHERE ID = 1 /* W4MARK_ISSUE30UDF000001 */", "max_rows": 1}, "vsql_absent_marker": "W4MARK_ISSUE30UDF000001"},
+    "expect": {"error_class": "FORBIDDEN_STATEMENT"},
+    "db_reread": [
+      {"sql": "SELECT COUNT(*) FROM ${owner}.T_FBI_CANARY_${run_id}", "rows": [[0]]},
+      {"sql": "SELECT COUNT(*) FROM ${owner}.T_FBIA_${run_id}", "rows": [[1]]}
+    ],
+    "audit_expect": [], "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+  },
+  {
+    "case_id": "w4_query_issue32_json_dot_path",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": ["version:23"], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_JSON_${run_id}(ID NUMBER PRIMARY KEY, DOC JSON)"},
+      {"sql": "INSERT INTO ${owner}.T_JSON_${run_id}(ID,DOC) SELECT 1, JSON_OBJECT('customer' VALUE JSON_OBJECT('id' VALUE 7) RETURNING JSON) FROM DUAL"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_JSON_${run_id}",
+    "call": {"arguments": {"sql": "SELECT j.DOC.customer.id AS CUSTOMER_ID FROM ${owner}.T_JSON_${run_id} j ORDER BY j.ID", "max_rows": 1}},
+    "expect": {"rows": [{"CUSTOMER_ID": {"kind": "json", "value": {"kind": "number", "value": "7"}}}]},
+    "db_reread": [{"sql": "SELECT j.DOC.customer.id FROM ${owner}.T_JSON_${run_id} j ORDER BY j.ID", "rows": [["7"]]}],
+    "audit_expect": [], "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "w4_query_issue32_object_attribute",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TYPE ${owner}.TY_ADDRESS_${run_id} AS OBJECT (CITY VARCHAR2(40))"},
+      {"sql": "CREATE TABLE ${owner}.T_EMP_OBJ_${run_id}(ID NUMBER PRIMARY KEY, ADDRESS ${owner}.TY_ADDRESS_${run_id})"},
+      {"sql": "INSERT INTO ${owner}.T_EMP_OBJ_${run_id}(ID,ADDRESS) VALUES (1,${owner}.TY_ADDRESS_${run_id}('Vienna'))"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_EMP_OBJ_${run_id}",
+    "call": {"arguments": {"sql": "SELECT e.ADDRESS.CITY AS CITY FROM ${owner}.T_EMP_OBJ_${run_id} e ORDER BY e.ID", "max_rows": 1}},
+    "expect": {"rows": [{"CITY": "Vienna"}]},
+    "db_reread": [{"sql": "SELECT e.ADDRESS.CITY FROM ${owner}.T_EMP_OBJ_${run_id} e ORDER BY e.ID", "rows": [["Vienna"]]}],
+    "audit_expect": [], "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "rel012_i30_hidden_virtual",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_REL30_${run_id} AS SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id}"},
+      {"sql": "CREATE INDEX ${owner}.IX_REL30_${run_id} ON ${owner}.T_REL30_${run_id}(UPPER(LABEL))"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_REL30_${run_id}",
+    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_REL30_${run_id} ORDER BY ID", "max_rows": 2}},
+    "expect": {"rows": [{"ID": "1"}, {"ID": "2"}]},
+    "db_reread": [
+      {"sql": "SELECT ID FROM ${owner}.T_REL30_${run_id} ORDER BY ID", "rows": [[1], [2]]},
+      {"sql": "SELECT COUNT(*) FROM ALL_TAB_COLS WHERE OWNER='${owner}' AND TABLE_NAME='T_REL30_${run_id}' AND COLUMN_NAME LIKE 'SYS_NC%' AND VIRTUAL_COLUMN='YES' AND HIDDEN_COLUMN='YES' AND USER_GENERATED='NO'", "rows": [[1]]}
+    ],
+    "audit_expect": [], "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+  },
+  {
+    "case_id": "rel012_i32_json_dot",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": ["version:23"], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_REL32_${run_id}(ID NUMBER PRIMARY KEY, DOC JSON)"},
+      {"sql": "INSERT INTO ${owner}.T_REL32_${run_id}(ID,DOC) SELECT 1, JSON_OBJECT('customer' VALUE JSON_OBJECT('id' VALUE 7) RETURNING JSON) FROM DUAL"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_REL32_${run_id}",
+    "call": {"arguments": {"sql": "SELECT j.DOC.customer.id AS CUSTOMER_ID FROM ${owner}.T_REL32_${run_id} j ORDER BY j.ID", "max_rows": 1}},
+    "expect": {"rows": [{"CUSTOMER_ID": {"kind": "json", "value": {"kind": "number", "value": "7"}}}]},
+    "db_reread": [{"sql": "SELECT j.DOC.customer.id FROM ${owner}.T_REL32_${run_id} j ORDER BY j.ID", "rows": [["7"]]}],
+    "audit_expect": [], "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "w4_query_issue32_clob_is_json_dot_path",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_JSON_CLOB_${run_id}(ID NUMBER PRIMARY KEY, DOC CLOB, CONSTRAINT CK_JSON_${run_id} CHECK (DOC IS JSON))"},
+      {"sql": "INSERT INTO ${owner}.T_JSON_CLOB_${run_id}(ID,DOC) VALUES (1,'{\"customer\":{\"id\":7}}')"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_JSON_CLOB_${run_id}",
+    "call": {"arguments": {"sql": "SELECT j.DOC.customer.id AS CUSTOMER_ID FROM ${owner}.T_JSON_CLOB_${run_id} j WHERE j.ID=1", "max_rows": 1}},
+    "expect": {"rows": [{"CUSTOMER_ID": "7"}]},
+    "db_reread": [{"sql": "SELECT j.DOC.customer.id FROM ${owner}.T_JSON_CLOB_${run_id} j WHERE j.ID=1", "rows": [["7"]]}],
+    "audit_expect": [], "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "w4_query_issue32_disabled_json_constraint_refused",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_JSON_DISABLED_${run_id}(ID NUMBER PRIMARY KEY, DOC CLOB, CONSTRAINT CK_DISABLED_${run_id} CHECK (DOC IS JSON))"},
+      {"sql": "INSERT INTO ${owner}.T_JSON_DISABLED_${run_id}(ID,DOC) VALUES (1,'{\"customer\":{\"id\":7}}')"},
+      {"sql": "ALTER TABLE ${owner}.T_JSON_DISABLED_${run_id} DISABLE CONSTRAINT CK_DISABLED_${run_id}"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_JSON_DISABLED_${run_id}",
+    "call": {"arguments": {"sql": "SELECT j.DOC.customer.id FROM ${owner}.T_JSON_DISABLED_${run_id} j WHERE j.ID=1", "max_rows": 1}},
+    "expect": {"error_class": "OBJECT_NOT_FOUND"},
+    "db_reread": [
+      {"sql": "SELECT COUNT(*) FROM ${owner}.T_JSON_DISABLED_${run_id}", "rows": [[1]]},
+      {"sql": "SELECT COUNT(*) FROM ALL_JSON_COLUMNS WHERE OWNER='${owner}' AND TABLE_NAME='T_JSON_DISABLED_${run_id}' AND COLUMN_NAME='DOC'", "rows": [[1]]}
+    ],
+    "audit_expect": [], "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "w4_query_issue32_json_without_constraint_refused",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_JSON_RAW_${run_id}(ID NUMBER PRIMARY KEY, DOC CLOB)"},
+      {"sql": "INSERT INTO ${owner}.T_JSON_RAW_${run_id}(ID,DOC) VALUES (1,'{\"customer\":{\"id\":7}}')"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_JSON_RAW_${run_id}",
+    "call": {"arguments": {"sql": "SELECT j.DOC.customer.id FROM ${owner}.T_JSON_RAW_${run_id} j WHERE j.ID=1", "max_rows": 1}},
+    "expect": {"error_class": "OBJECT_NOT_FOUND"},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_JSON_RAW_${run_id}", "rows": [[1]]}],
+    "audit_expect": [], "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "w4_query_issue32_object_method_refused",
+    "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"], "requires": [], "setup_phase": "before_server",
+    "setup": [
+      {"sql": "CREATE TABLE ${owner}.T_OBJ_METHOD_${run_id}(ID NUMBER PRIMARY KEY, LOCATION ${owner}.TY_POINT_${run_id})"},
+      {"sql": "INSERT INTO ${owner}.T_OBJ_METHOD_${run_id}(ID,LOCATION) VALUES (1,${owner}.TY_POINT_${run_id}(3,4))"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_OBJ_METHOD_${run_id}",
+    "call": {"arguments": {"sql": "SELECT p.LOCATION.NORM2() FROM ${owner}.T_OBJ_METHOD_${run_id} p WHERE p.ID=1", "max_rows": 1}},
+    "expect": {"error_class": "OPERATING_LEVEL_TOO_LOW"},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_OBJ_METHOD_${run_id}", "rows": [[1]]}],
+    "audit_expect": [], "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "OPERATING_LEVEL_TOO_LOW"}
   }
 ]

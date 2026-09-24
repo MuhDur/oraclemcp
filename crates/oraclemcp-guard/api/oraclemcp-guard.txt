@@ -826,6 +826,7 @@ pub const oraclemcp_guard::classifier::MAX_QUERY_BLOCKS: usize
 pub const oraclemcp_guard::classifier::VERDICT_CERTIFICATE_CLASSIFIER_VERSION: &str
 pub const oraclemcp_guard::classifier::VERDICT_CERTIFICATE_REGISTRY_GENERATION: u16
 pub fn oraclemcp_guard::classifier::analyze_batch(&str) -> oraclemcp_guard::classifier::BatchShape
+pub fn oraclemcp_guard::classifier::builtin_only_virtual_column_expression(&str, &str) -> bool
 pub fn oraclemcp_guard::classifier::named_bind_placeholders(&str) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_guard::classifier::planned_relations_match_base_objects(&oraclemcp_guard::resolver::SemanticReadPlan, &[oraclemcp_guard::purity::ObjectRef]) -> core::result::Result<(), oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::classifier::semantic_read_plan(&str) -> core::option::Option<oraclemcp_guard::resolver::SemanticReadPlan>
@@ -13647,6 +13648,7 @@ pub fn oraclemcp_guard::purity::UnknownOracle::routine_purity(&self, &oraclemcp_
 pub fn oraclemcp_guard::purity::UnknownOracle::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
 pub fn oraclemcp_guard::admit(&oraclemcp_guard::purity::RoutineEffectsV1, oraclemcp_guard::purity::AdmissionContext) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::purity::EffectRefusal>
 pub fn oraclemcp_guard::analyze_batch(&str) -> oraclemcp_guard::classifier::BatchShape
+pub fn oraclemcp_guard::builtin_only_virtual_column_expression(&str, &str) -> bool
 pub fn oraclemcp_guard::bind_value_hmac(&[u8; 32], &[u8]) -> [u8; 32]
 pub fn oraclemcp_guard::canonical_binds(&[oraclemcp_guard::action_envelope::CanonicalBind<'_>]) -> zeroize::Zeroizing<alloc::vec::Vec<u8>>
 pub fn oraclemcp_guard::enforce_sql_policy(&oraclemcp_guard::policy_gate::PolicyGateRequest<'_>) -> oraclemcp_guard::policy_gate::PolicyGate
