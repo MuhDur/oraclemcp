@@ -1286,7 +1286,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1951,7 +1951,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2710,7 +2710,7 @@ dependencies = [
 [[package]]
 name = "oraclemcp-driver-cx"
 version = "0.9.3"
-source = "git+https://github.com/MuhDur/rust-oracledb?rev=4fa672cd8adbd025c88b589acdc538d652b4b496#4fa672cd8adbd025c88b589acdc538d652b4b496"
+source = "git+https://github.com/MuhDur/rust-oracledb?rev=d6ae7c062ee25c25bf9930ca683bbd3ab78861b3#d6ae7c062ee25c25bf9930ca683bbd3ab78861b3"
 dependencies = [
  "asupersync",
  "base64",
@@ -2731,7 +2731,7 @@ dependencies = [
 [[package]]
 name = "oraclemcp-driver-cx-protocol"
 version = "0.9.2"
-source = "git+https://github.com/MuhDur/rust-oracledb?rev=4fa672cd8adbd025c88b589acdc538d652b4b496#4fa672cd8adbd025c88b589acdc538d652b4b496"
+source = "git+https://github.com/MuhDur/rust-oracledb?rev=d6ae7c062ee25c25bf9930ca683bbd3ab78861b3#d6ae7c062ee25c25bf9930ca683bbd3ab78861b3"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",
@@ -2739,6 +2739,7 @@ dependencies = [
  "des",
  "hex",
  "hmac 0.12.1",
+ "libc",
  "md-5",
  "pbkdf2 0.12.2",
  "rand 0.8.6",
@@ -3729,7 +3730,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4302,7 +4303,7 @@ dependencies = [
  "getrandom 0.4.2",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5020,7 +5021,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
