@@ -29,6 +29,14 @@ api_lock = [
 ]
 if len(api_lock) != 1:
     raise SystemExit(f"expected exactly one api-lock job in docs/ci_taxonomy.json, found {len(api_lock)}")
+if api_lock[0]["tier"] != "required" or not {"push", "pull_request"}.issubset(api_lock[0]["triggers"]):
+    raise SystemExit("expected api-lock to be a required push/PR gate")
+required_ci = [
+    job for job in real["jobs"]
+    if job["workflow_file"] == "ci.yml" and job["tier"] == "required"
+]
+if len(required_ci) != 15:
+    raise SystemExit(f"expected 15 required ci.yml jobs after api-lock restoration, found {len(required_ci)}")
 required = {
     "check_name": "required gate",
     "tier": "required",

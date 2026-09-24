@@ -22,7 +22,9 @@ downgrade that required result.
 
 `advisory` (`continue-on-error: true`) is reserved for the explicitly
 experimental `fuzz-build` and for the lanes other beads are restoring
-(`windows-rust`, `api-lock`, `plsql-intelligence`). `manual` is a
+(`windows-rust`, `plsql-intelligence`). `api-lock` is required again: its
+planned 0.12.0 SemVer scope is documented in `CHANGELOG.md`, and its committed
+public-API snapshots enforce reviewed surface changes. `manual` is a
 `workflow_dispatch` lane without `candidate_sha` (repair and acceptance
 workflows). When one check name exists in two workflows (`ci.yml` and
 `release.yml` both build `build on pinned nightly`), a check-run is judged by

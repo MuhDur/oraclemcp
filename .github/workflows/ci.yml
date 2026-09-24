@@ -667,9 +667,9 @@ jobs:
   #     crates/<crate>/api/<crate>.txt (deterministic, offline). Refresh the
   #     baseline in the same PR for an INTENTIONAL change (see the script header
   #     and crates/oraclemcp-db/README.md).
-  #   * cargo semver-checks — the SemVer contract: compares the working tree
-  #     against the last published release and fails when the diff is not allowed
-  #     by the version bump.
+  #   * cargo semver-checks — reports changes against the previous in-repository
+  #     release using the planned version and 0.x SemVer rules recorded in
+  #     CHANGELOG.md. The committed public-API snapshots reject unreviewed drift.
   # Both tools render rustdoc JSON, so they run on the pinned nightly. The tools
   # are not workspace dependencies (installed as standalone binaries), so they do
   # not enter the dependency graph or affect cargo deny. semver-checks uses the
@@ -677,10 +677,7 @@ jobs:
   # registry yanks; fetch full history so the baseline tag is available.
   api-lock:
     name: public-API lock (cargo public-api + semver-checks)
-    # Advisory until the reviewed baseline and SemVer gate are green.
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7

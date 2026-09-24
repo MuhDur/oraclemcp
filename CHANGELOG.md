@@ -6,6 +6,49 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Planned release: 0.12.0
+
+- **Reviewed breaking API changes against v0.11.0 (0.x minor release; SemVer
+  release type `major`).** `oraclemcp-error` adds
+  `ErrorEnvelope.statement_outcome` and `ErrorClass::SnapshotTooOld`, shifting
+  the implicit discriminants of `ErrorClass` and `ReasonCategory`. The wire
+  representation remains the explicit SCREAMING_SNAKE_CASE string.
+- `oraclemcp-guard` adds public fields `SemanticReadPlan.blocks` and
+  `StatementScope.merged_joins`, and adds private fields to public structs:
+  `ExecGrantStore.entries/counter`, `StepUpRegistry.challenges/counter`,
+  `Classifier.config/oracle/statement_unknown_guarded`,
+  `AllowOnceStore.entries/counter`, `SchemaPolicySet.per_schema`,
+  `StatementClass.r15_derivation`, `CiToken.secret/scope/deadline`,
+  `EditionIdentifier.0`,
+  `SessionLevelState.current_level/max_level/protected/scope_ceiling/elevation`,
+  `ClassifierConfig.allow_list/block_patterns/guard_unresolved_qualified_calls`,
+  `OperatorPureFunctionRestriction.independent/allowlist`,
+  `OperatorPureFunction.0`, `MonotonicDeadline.deadline/generation`,
+  `GuardDecision.verdict_certificate/certificate_derivation`,
+  `SchemaPolicy.mode/allow_dml/deny_ddl/deny_all/deny_patterns`, and
+  `OperatorPureFunctionAllowlist.entries`.
+- `oraclemcp-db` adds private fields to public structs:
+  `CqnQueryRegistration.registration_id/query_id`, `IamTokenSourceHandle.0`,
+  `RedactedOracleConnectionInfo.0`, `RedactedOracleBinds.0`,
+  `OfficialOracleConnection.options/actor/wire_limits/closed`,
+  `NativeRedactionPolicy.object_schema/object_name/policy_name/column_name`,
+  `RedactedNamedOracleBinds.0`, `OracleCatalogResolver.context/entries`,
+  `RustOracleConnection.opts/inner/wire_limits/cqn_client_ids`,
+  `OracleBackendCapabilities.password/pem_wallet/iam_token/auto_login_wallet/driver_cx_only`,
+  `DbRequestQuota.inner`, `QueryRowStream.inner`,
+  `ProfileMaskingSalt.salt_id/bytes`, `OracleBackendRegistration.backend/capabilities`,
+  `OracleConnectionManager.opts`, `CqnDriverNotification.registration_id`,
+  `OraclePool.manager/settings/state/capacity/request_limits`,
+  `RedactedOracleBind.0`, `OracleCatalogResolverCache.state`, and
+  `OracleRoutineArg.bind`. It removes `sample_rows`, `read_lob`, and `LobText`;
+  changes `explain_plan` from 4 to 6 parameters,
+  `resolved_relations_read_purity` from 3 to 4,
+  `plan_cost_estimate` from 2 to 4, and changes
+  `extract_catalog_rowsets` from one generic parameter to none.
+- `oraclemcp-verifier` adds private fields `TestAttestation.artifacts`,
+  `command`, `created_at`, `frame`, `git_sha`, `lane`, `repo`, `schema`,
+  `tests`, and `toolchain`.
+
 - **0.11.0 release candidate.** The audit/security hardening, fail-closed
   classifier default, official Oracle connect-time fallback build, blocking
   Free23 PL/SQL round trip, and scheduled guard fuzz corpora are recorded for
