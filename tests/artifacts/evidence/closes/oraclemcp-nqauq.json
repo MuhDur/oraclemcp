@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T03:05:00Z",
+  "bead_id": "oraclemcp-nqauq",
+  "scope": {
+    "summary": "P0: oracle_patch_source executed the patched DDL in the session schema instead of the previewed owner and reported success; now the executed statement is owner-qualified from the resolved identity (never from ALL_SOURCE text), a confirmation for one owner cannot apply to another, and the response reports the statement that actually ran (79841032).",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/dispatch/tests/patch_source_owner.rs"
+    ],
+    "out_of_scope": [
+      "Live W4 external runs were executed by the implementing pane; the orchestrator verified the unit/in-process proof in the clean gate."
+    ]
+  },
+  "source": {
+    "sha": "ffb9b04ee462fe0507e52e7fd05ac104c2c9a342",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at ffb9b04e (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 118 suites, 3480 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "dispatch::tests::patch_source_owner: owner_less_stored_header_is_bound_to_the_previewed_owner, every_stored_unit_header_shape_is_qualified_in_place, a_header_naming_another_target_is_refused, a_confirmation_minted_for_one_owner_cannot_apply_to_another, applied_patch_executes_the_owner_qualified_statement_and_reports_it: all ok. Implementer live proof on free23/xe21/xe18: patched object changes in the previewed owner, no SYSTEM object created."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution of the gate; live claims are the implementer's and labelled as such."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

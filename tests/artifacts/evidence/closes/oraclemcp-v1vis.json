@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T03:05:00Z",
+  "bead_id": "oraclemcp-v1vis",
+  "scope": {
+    "summary": "CTE read with CTE-alias-qualified columns is admitted at READ_ONLY (current code already admitted it); regression test pins it plus its unsafe neighbour (0780f94a).",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/tests/guard_metamorphic.rs",
+      "crates/oraclemcp-guard/src/classifier.rs"
+    ],
+    "out_of_scope": [
+      "Live W4 external runs were executed by the implementing pane; the orchestrator verified the unit/in-process proof in the clean gate."
+    ]
+  },
+  "source": {
+    "sha": "ffb9b04ee462fe0507e52e7fd05ac104c2c9a342",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at ffb9b04e (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 118 suites, 3480 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "dispatch::tests::guard_metamorphic::cte_qualified_projection_and_order_are_served_reads ok; classifier::tests::parenless_qualified_guard_is_surgical_and_spares_real_column_refs ok. Implementer live FREE23 W4 run passed the CTE read over stdio and HTTP."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution of the gate; live claims are the implementer's and labelled as such."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

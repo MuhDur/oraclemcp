@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T03:05:00Z",
+  "bead_id": "oraclemcp-nm9zb",
+  "scope": {
+    "summary": "Reads of tables with function-free arithmetic user virtual columns are admitted; callable-expression virtual columns still refuse (385e3a43).",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/classifier.rs",
+      "crates/oraclemcp-guard/src/lib.rs"
+    ],
+    "out_of_scope": [
+      "Live W4 external runs were executed by the implementing pane; the orchestrator verified the unit/in-process proof in the clean gate."
+    ]
+  },
+  "source": {
+    "sha": "ffb9b04ee462fe0507e52e7fd05ac104c2c9a342",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "gate",
+        "kind": "cli",
+        "trace": "Orchestrator batch gate in clean detached worktree at ffb9b04e (dirty=0, lease): fmt OK; clippy --workspace --all-targets -D warnings OK; cargo test --workspace --no-fail-fast: 118 suites, 3480 passed, 0 failed; cargo deny OK."
+      },
+      {
+        "name": "named tests",
+        "kind": "cli",
+        "trace": "classifier::tests::user_virtual_arithmetic_excludes_callable_neighbors ok; catalog_resolver::tests::user_virtual_arithmetic_is_readable_but_callable_expression_refuses ok. crates/oraclemcp-db/src/catalog_resolver.rs is excluded from the clean-scope claim (another agent's stranded uncommitted edits); its committed state is covered by the gate. Implementer live FREE23 W4 case passed on both transports; served metamorphic 7/7."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified by the orchestrator by re-execution of the gate; live claims are the implementer's and labelled as such."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
