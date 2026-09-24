@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T14:30:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.5",
+  "scope": {
+    "summary": "Official oracledb backend connect is bounded for stalled TNS handshakes: typed deadline error, at most two stuck actor threads, bounded guard acquisition with a single driver-cx fallback, slot recovery after peer close, and late completions discarded (82f40109).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/oracledb_backend.rs",
+      "crates/oraclemcp-db/src/oracledb_actor.rs"
+    ],
+    "out_of_scope": [
+      "Cancelling an individual stalled upstream connect (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "82f401090c93ab8ee935818ac3caa7789f608c2a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "blackhole tests (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean detached gate worktree at 82f40109, build lease: cargo test -p oraclemcp-db --features oracledb --lib official_connect_blackhole -- --test-threads=1: 5 passed, 0 failed. official_connect_blackhole_returns_within_deadline typed timeout at 2002 ms (deadline 2000, bound 3000); _caps_stuck_actors_at_two stuck_actors=2 with one driver-cx retry per saturated request; _third_acquire_falls_back_to_driver_cx_once exactly one fallback at 259 ms (guard 250 ms); _slots_recover_after_peer_close both slots reacquirable at 1001 ms; _never_reuses_stuck_session late completion discarded, fresh attempt on a distinct accepted socket."
+      },
+      {
+        "name": "review note",
+        "kind": "cli",
+        "trace": "Tests bind a real loopback TCP listener that accepts and holds sockets, drive the real oracledb::connect path, and assert the official driver established TCP before timing the deadline; no stub connect factory (the forbidden substitute)."
+      },
+      {
+        "name": "workspace gate",
+        "kind": "cli",
+        "trace": "Implementer-reported rebased workspace test 3568 passed / 0 failed. The orchestrator re-executed the feature-gated tests above; the default workspace gate does not compile the oracledb feature."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Workspace totals are implementer-reported; the feature-gated tests carrying the bead proof were re-executed by the orchestrator."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
