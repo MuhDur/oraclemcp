@@ -3750,10 +3750,24 @@ expression: rendered
                 ],
                 "type": "string"
               },
+              "rolled_back": {
+                "const": true,
+                "type": "boolean"
+              },
+              "savepoint": {
+                "enum": [
+                  "OMCP_EXPLAIN_PLAN"
+                ],
+                "type": "string"
+              },
               "statement": {
                 "enum": [
                   "EXPLAIN PLAN"
                 ],
+                "type": "string"
+              },
+              "statement_id": {
+                "pattern": "^OMCP_[A-Z0-9]{24}$",
                 "type": "string"
               },
               "writes": {
@@ -3766,8 +3780,11 @@ expression: rendered
             "required": [
               "statement",
               "writes",
+              "statement_id",
               "required_level",
-              "explicitly_allowed"
+              "explicitly_allowed",
+              "savepoint",
+              "rolled_back"
             ],
             "type": "object"
           },
