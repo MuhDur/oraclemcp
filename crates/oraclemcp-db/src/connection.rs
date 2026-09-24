@@ -175,7 +175,7 @@ pub trait CqnNotificationReceiver {
 /// name an `oraclemcp_driver_cx::` path — so consumers (e.g. `oraclemcp doctor`'s trio-stack
 /// provenance) can report the *driver's* version without reaching for
 /// `env!("CARGO_PKG_VERSION")`, which would resolve to the wrong crate. Because
-/// the whole workspace pins `oraclemcp-driver-cx = "=0.9.2"`, this is `"0.9.2"`.
+/// the whole workspace pins `oraclemcp-driver-cx = "=0.9.3"`, this is `"0.9.3"`.
 pub const DRIVER_VERSION: &str = oraclemcp_driver_cx::VERSION;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10379,27 +10379,27 @@ mod driver_seam {
     }
 
     #[test]
-    fn pin_is_0_9_2_and_seam_intact() {
+    fn pin_is_0_9_3_and_seam_intact() {
         let root = workspace_root();
         let manifest =
             std::fs::read_to_string(root.join("Cargo.toml")).expect("read workspace Cargo.toml");
         assert!(
             manifest.contains(
-                r#"oraclemcp-driver-cx = { version = "=0.9.2", default-features = false }"#
+                r#"oraclemcp-driver-cx = { version = "=0.9.3", default-features = false }"#
             ),
-            "workspace Cargo.toml must keep driver-cx exactly pinned at =0.9.2"
+            "workspace Cargo.toml must keep driver-cx exactly pinned at =0.9.3"
         );
 
         let lock = std::fs::read_to_string(root.join("Cargo.lock")).expect("read Cargo.lock");
         assert_eq!(
             lock_package_versions(&lock, "oraclemcp-driver-cx"),
-            vec!["0.9.2".to_owned()],
-            "Cargo.lock must resolve exactly one driver-cx package at 0.9.2"
+            vec!["0.9.3".to_owned()],
+            "Cargo.lock must resolve exactly one driver-cx package at 0.9.3"
         );
         assert_eq!(
             lock_package_versions(&lock, "oraclemcp-driver-cx-protocol"),
             vec!["0.9.2".to_owned()],
-            "Cargo.lock must resolve the matching driver-cx protocol package at 0.9.2"
+            "Cargo.lock must resolve the driver-cx protocol package at 0.9.2"
         );
         assert_eq!(
             lock_package_versions(&lock, "oracledb"),

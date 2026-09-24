@@ -19,7 +19,8 @@
 //! `connection.rs`.
 //! This module deliberately depends on the underlying **`oraclemcp-driver-cx-protocol`**
 //! crate directly and imports via the `oraclemcp_driver_cx_protocol::` path,
-//! which does not match the main-driver seam pattern. Both packages are pinned to `=0.9.2`;
+//! which does not match the main-driver seam pattern. The driver pin is `=0.9.3`
+//! and the protocol pin is `=0.9.2` at the same T0.2a revision;
 //! the protocol crate is pure encode/decode (no async runtime), so
 //! the driver seam stays confined to `connection.rs` and the engine-free
 //! boundary holds.

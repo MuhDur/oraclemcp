@@ -54,8 +54,8 @@ separately from the SQLcl and genai-toolbox comparison:
   Oracle maintains a pure-Rust, synchronous driver, currently `26.0.0-beta.3`
   (published 2026-09-08; first published 2026-06-14). It requires no Oracle
   Client libraries and targets Oracle Database 12 through 26ai. The shipped
-  default remains the frozen, async `oraclemcp-driver-cx` 0.9.2 (published
-  2026-07-30), the renamed continuation of the original Rust thin driver that
+  default remains the async `oraclemcp-driver-cx` 0.9.3 at the pinned T0.2a
+  development revision, the renamed continuation of the original Rust thin driver that
   Oracle's `oracledb` replaces. The official `oracledb` adapter is compiled
   into shipped artifacts as an experimental, reduced-capability, bounded
   acquisition-only alternate for compatible password connections after a raw

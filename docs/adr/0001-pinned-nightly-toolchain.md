@@ -55,7 +55,7 @@ decided; corrected here:
    asupersync gates them behind its `nightly-outcome-try` cargo feature
    (`asupersync-0.3.5/src/lib.rs:52-53`). The feature is opt-in — it is merely
    in asupersync's `default` set. A consumer that opts out does not get it.
-2. **"the driver is not the reason for the pin" is inaccurate.** The pinned `oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean,
+2. **"the driver is not the reason for the pin" is inaccurate.** The pinned `oraclemcp-driver-cx` 0.9.3 driver's own source is stable-clean,
    but it declares its asupersync dependency **without
    `default-features = false`**, so cargo feature unification re-enables the
    nightly feature for the whole graph — overriding this workspace's own opt-out.

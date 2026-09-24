@@ -12,7 +12,7 @@ query text.
 | --- | --- | --- |
 | Workspace | Cargo workspace with 9 crates plus `oraclemcp` binary, `resolver = "2"`, edition 2024, pinned nightly `nightly-2026-05-11`, and no stable MSRV on the thin-native line. | `Cargo.toml`, `rust-toolchain.toml` |
 | Safety posture | Every crate forbids unsafe code; raw SQL safety is centered on `oraclemcp-guard`. | `Cargo.toml`, crate roots, `AGENTS.md` |
-| Current release line | All `oraclemcp-*` package versions and `server.json` are aligned on the workspace release, while the independently-versioned thin driver/protocol pins are exact at 0.9.1. | `Cargo.toml`, crate `Cargo.toml` files, `server.json`, `Cargo.lock` |
+| Current release line | All `oraclemcp-*` package versions and `server.json` are aligned on the workspace release; train-0.12 pins driver-cx=0.9.3 and protocol=0.9.2 at exact sibling revisions. | `Cargo.toml`, crate `Cargo.toml` files, `server.json`, `Cargo.lock` |
 | Current DB mode | Default build includes live Oracle support through the pure-Rust `oraclemcp-driver-cx` thin driver. | `README.md`, `crates/oraclemcp-db/Cargo.toml` |
 | Current runtime/transport | Native stdio and native Streamable HTTP live in `oraclemcp-core`; dispatch receives explicit Asupersync `Cx` contexts; Tokio, `rmcp`, Axum, Hyper, ODPI-C, and `r2d2` are absent from the current manifests and lockfile. | `crates/oraclemcp-core/src/server.rs`, `crates/oraclemcp-core/src/http/mod.rs`, `Cargo.lock`, `Cargo.toml` |
 | Current bead state | Repo-local `.beads/` contains the migration graph and W-series release hardening work. | `br list --json`, `bv --robot-triage` |
@@ -132,22 +132,22 @@ query text.
 
 ## Thin Driver Release Dependency Decision
 
-Verified on 2026-07-30:
+Verified on 2026-09-24 for the train-0.12 development pins:
 
-- `Cargo.lock` resolves the published `oraclemcp-driver-cx = 0.9.2` and
-  `oraclemcp-driver-cx-protocol = 0.9.2` crates from crates.io; the
-  driver/protocol pins are exact at 0.9.2.
+- `Cargo.lock` resolves `oraclemcp-driver-cx = 0.9.3` and
+  `oraclemcp-driver-cx-protocol = 0.9.2` from the T0.2a git revision;
+  driver-cx=0.9.3, protocol=0.9.2 pins are exact.
 - The published driver exposes the pure-Rust native-async thin connection path
   used by the current `Cx`-first async DB trait boundary.
-- The local `/home/durakovic/projects/rust-oracledb` checkout is a normal
-  upstream checkout, not an `oraclemcp` release dependency. Any future driver
-  API needed by `oraclemcp` must be filed as granular `rust-oracledb` work and
-  released before this repo consumes it.
+- The dev pins use an exact pushed sibling revision, not a local checkout or
+  path dependency. R.5 removes these patches before a releaseable `oraclemcp`
+  crate resolves the driver and protocol from crates.io.
 
 Decision:
 
-- `oraclemcp` consumes `oraclemcp-driver-cx = 0.9.2` from crates.io, declared in the
-  workspace dependency table with `default-features = false`.
+- `oraclemcp` consumes `oraclemcp-driver-cx = 0.9.3` and
+  `oraclemcp-driver-cx-protocol = 0.9.2` from the exact T0.2a sibling revision,
+  declared in the workspace dependency table with `default-features = false`.
 - No vendoring is used. No releaseable `oraclemcp` crate may depend on
   `/home/durakovic/projects/rust-oracledb` or any other external local path.
 - The current production graph uses the driver's native-async

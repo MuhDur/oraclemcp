@@ -16,6 +16,12 @@ toml_key = "workspace.dependencies.oraclemcp-driver-cx.version"
 strip_prefix = "="
 
 [[canonical]]
+name = "protocol_version"
+path = "Cargo.toml"
+toml_key = "workspace.dependencies.oraclemcp-driver-cx-protocol.version"
+strip_prefix = "="
+
+[[canonical]]
 name = "runtime_version"
 path = "Cargo.toml"
 toml_key = "workspace.dependencies.asupersync.version"

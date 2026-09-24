@@ -162,7 +162,7 @@ serves that outcome and never becomes the product.
      hard-linked service lock (and the audit sink needs for file identity).
      There is no stable `std` equivalent, so Windows needs nightly regardless of
      reason 1.
-  Note the pinned `oraclemcp-driver-cx` 0.9.2 driver's own source is stable-clean; it is
+  Note the pinned `oraclemcp-driver-cx` 0.9.3 driver's own source is stable-clean; it is
   its asupersync **dependency declaration** that pulls the nightly feature in.
   Do not restate this as "asupersync requires nightly" — that attribution is
   wrong and sent a prior audit looking in the wrong place.
