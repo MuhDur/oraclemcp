@@ -10,6 +10,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
+asupersync.workspace = true
 oraclemcp-error = { path = "../oraclemcp-error", version = "0.11.0" }
 oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.11.0" }
 serde.workspace = true

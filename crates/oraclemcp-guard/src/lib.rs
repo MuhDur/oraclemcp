@@ -21,6 +21,7 @@ pub mod corpus;
 pub mod edition_lifecycle;
 pub mod enforcement;
 pub mod exec_grant;
+pub mod impact_binding;
 pub mod incident;
 pub mod levels;
 pub mod policy;
@@ -51,6 +52,11 @@ pub use classifier::{
 };
 pub use clock::MonotonicDeadline;
 pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
+pub use impact_binding::{
+    DbIdentity, DecisiveFacts, FieldBudget, FieldCaps, FieldMeasure, FieldStatus,
+    IMPACT_BINDING_VERSION, ImpactBindingV1, ImpactV1, ImpactVersionError, NotApplicableReason,
+    ObjectFact, Observations, RowEstimate, RowEstimateKind, ScnBounds, UnavailableReason,
+};
 pub use incident::{
     BuildIdentity, BundleEntry, BundleEntryKind, CapturedLane, CapturedVerdict,
     INCIDENT_MANIFEST_VERSION, IncidentCapture, IncidentManifest, IncidentManifestError,

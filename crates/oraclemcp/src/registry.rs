@@ -221,6 +221,72 @@ fn confirm_trio(confirm_description: &str) -> Value {
     })
 }
 
+/// The seven status-bearing impact fields are present on a preview even when
+/// their computation is not wired yet. A conditional schema keeps apply
+/// results valid while requiring impact whenever a preview result says so.
+fn confirmation_preview_output_schema(always_preview: bool) -> Value {
+    let field = json!({
+        "type": "object",
+        "properties": {
+            "status": { "type": "string", "enum": ["computed", "estimated", "unavailable", "not_applicable"] },
+            "reason": { "type": "string" },
+            "value": {}
+        },
+        "required": ["status"],
+        "additionalProperties": false
+    });
+    let mut schema = json!({
+        "type": "object",
+        "properties": {
+            "preview": { "type": "boolean" },
+            "confirmation": { "type": ["object", "null"], "additionalProperties": true },
+            "execute_confirmation": { "type": ["object", "null"], "additionalProperties": true },
+            "impact": {
+                "type": "object",
+                "properties": {
+                    "binding": {
+                        "type": "object",
+                        "properties": {
+                            "version": { "const": 1 },
+                            "decisive": { "type": "object" },
+                            "observations": { "type": "object" }
+                        },
+                        "required": ["version", "decisive", "observations"]
+                    },
+                    "rows": field,
+                    "dependents": field,
+                    "effects": field,
+                    "sast": field,
+                    "cost": field,
+                    "locks": field,
+                    "reversibility": field
+                },
+                "required": ["binding", "rows", "dependents", "effects", "sast", "cost", "locks", "reversibility"]
+            }
+        },
+        "additionalProperties": true
+    });
+    if always_preview {
+        schema["required"] = json!(["impact", "execute_confirmation"]);
+    } else {
+        schema["if"] = json!({"properties": {"preview": {"const": true}}, "required": ["preview"]});
+        schema["then"] = json!({"required": ["impact", "confirmation"]});
+    }
+    schema
+}
+
+fn advertises_confirmation_preview(tool: &ToolDescriptor) -> bool {
+    if matches!(tool.name.as_str(), "oracle_preview_sql" | "preview_sql") {
+        return true;
+    }
+    let properties = tool
+        .input_schema
+        .as_ref()
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object);
+    properties.is_some_and(|p| p.contains_key("execute") && p.contains_key("confirm"))
+}
+
 /// The DBMS_OUTPUT capture cluster shared by oracle_execute and execute_approved.
 /// Only the `capture_dbms_output` description differs between the two tools.
 fn dbms_output_props(capture_description: &str) -> Value {
@@ -1823,6 +1889,13 @@ pub fn tool_registry() -> ToolRegistry {
 
     #[cfg(feature = "plsql-intelligence")]
     crate::plsql_tools::register_tools(&mut registry);
+
+    for tool in &mut registry.tools {
+        if advertises_confirmation_preview(tool) {
+            let always_preview = matches!(tool.name.as_str(), "oracle_preview_sql" | "preview_sql");
+            tool.output_schema = Some(confirmation_preview_output_schema(always_preview));
+        }
+    }
 
     registry
 }

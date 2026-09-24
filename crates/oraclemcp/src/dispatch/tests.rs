@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::cost_budget::QueryCostBudgetStore;
-use crate::registry::tool_names;
+use crate::registry::{tool_names, tool_registry};
 use arrow_array::{Array, StringArray};
 use arrow_ipc::reader::StreamReader;
 use asupersync::Cx;
@@ -33,6 +33,100 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
         let cx = Cx::current().expect("block_on installs a current Cx");
         f(&cx);
     });
+}
+
+#[test]
+fn impact_attached_to_every_minting_preview() {
+    // Discover the preview surface from its advertised result schema. The
+    // argument fixtures below only supply valid inputs; they do not select
+    // which tools are in scope for this test.
+    let mut tested = 0;
+    for tool in tool_registry().tools {
+        let Some(schema) = tool.output_schema.as_ref() else {
+            continue;
+        };
+        let carries_confirmation = schema.pointer("/properties/confirmation").is_some()
+            || schema.pointer("/properties/execute_confirmation").is_some();
+        if !carries_confirmation {
+            continue;
+        }
+        tested += 1;
+        assert!(
+            schema.pointer("/properties/impact").is_some(),
+            "{}",
+            tool.name
+        );
+
+        let dispatcher = if matches!(
+            tool.name.as_str(),
+            "oracle_set_session_level" | "enable_writes"
+        ) {
+            OracleDispatcher::new_with_profile_level(
+                Box::new(OneRowMock),
+                Some("dev".to_owned()),
+                SessionLevelState::new(OperatingLevel::Admin, false),
+            )
+        } else if matches!(tool.name.as_str(), "oracle_patch_source" | "patch_package") {
+            OracleDispatcher::new_with_profile_level(
+                Box::new(SourceLookupMock),
+                Some("dev".to_owned()),
+                ddl_level(),
+            )
+        } else {
+            OracleDispatcher::new_with_profile_level(
+                Box::new(OneRowMock),
+                Some("dev".to_owned()),
+                ddl_level(),
+            )
+        };
+        let args = match tool.name.as_str() {
+            "oracle_preview_sql" | "preview_sql" => {
+                json!({"sql": "UPDATE OMCP_T SET N = N WHERE ID = 1", "commit": true})
+            }
+            "oracle_set_session_level" => json!({"level": "READ_WRITE"}),
+            _ => args_for(&tool.name),
+        };
+        let result = dispatcher
+            .dispatch(&tool.name, args)
+            .unwrap_or_else(|error| panic!("{} preview failed: {error:?}", tool.name));
+        for field in [
+            "rows",
+            "dependents",
+            "effects",
+            "sast",
+            "cost",
+            "locks",
+            "reversibility",
+        ] {
+            assert_eq!(
+                result["impact"][field]["status"], "unavailable",
+                "{} {field}",
+                tool.name
+            );
+            assert_eq!(
+                result["impact"][field]["reason"], "not_wired",
+                "{} {field}",
+                tool.name
+            );
+        }
+        assert_eq!(result["impact"]["binding"]["version"], 1, "{}", tool.name);
+        assert!(
+            result
+                .pointer("/confirmation/confirm")
+                .and_then(Value::as_str)
+                .is_some()
+                || result
+                    .pointer("/execute_confirmation/confirm")
+                    .and_then(Value::as_str)
+                    .is_some(),
+            "{} did not mint a confirmation: {result}",
+            tool.name
+        );
+    }
+    assert!(
+        tested >= 10,
+        "registry discovered only {tested} minting previews"
+    );
 }
 
 /// Decode the public Arrow response shape back into the exact JSON row values

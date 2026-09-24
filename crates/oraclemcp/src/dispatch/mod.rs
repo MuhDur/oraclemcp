@@ -82,10 +82,10 @@ use oraclemcp_guard::{
     ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, CatalogObjectKind, Classifier,
     ClassifierConfig, DangerLevel, EditionIdentifier, EditionLifecycleParse, EditionLifecycleSql,
     EscalationError, ExecGrantBinding, ExecGrantError, ExecGrantStore, ExecLimits, GuardDecision,
-    LevelDecision, ObjectRef, OperatingLevel, OperatorStatementClass, OutputCapture, PolicyGate,
-    PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity, QuoteSemantics, RawName,
-    ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig, VerdictCertificate,
-    enforce_sql_policy, is_allowed_alter_session, parse_edition_lifecycle_sql,
+    ImpactV1, LevelDecision, ObjectRef, OperatingLevel, OperatorStatementClass, OutputCapture,
+    PolicyGate, PolicyGateAdmission, PolicyGateDenial, PolicyGateRequest, Purity, QuoteSemantics,
+    RawName, ResolvedObject, SessionLevelState, SideEffectOracle, SqlPolicyConfig,
+    VerdictCertificate, enforce_sql_policy, is_allowed_alter_session, parse_edition_lifecycle_sql,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -6345,6 +6345,23 @@ fn execute_confirmation_json(
     }
 }
 
+/// Add the status-complete impact seam to every result shaped as a
+/// confirmation preview. This runs at the single dispatch return boundary,
+/// so compatibility aliases and future preview arms cannot omit the field.
+fn attach_preview_impact(mut response: Value) -> Result<Value, ErrorEnvelope> {
+    if let Value::Object(fields) = &mut response {
+        let is_confirmation_preview = fields.contains_key("execute_confirmation")
+            || (fields.get("preview").and_then(Value::as_bool) == Some(true)
+                && fields.contains_key("confirmation"));
+        if is_confirmation_preview && !fields.contains_key("impact") {
+            let impact = serde_json::to_value(ImpactV1::default())
+                .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "impact encoding failed"))?;
+            fields.insert("impact".to_owned(), impact);
+        }
+    }
+    Ok(response)
+}
+
 // The RequireStepUp and ExceedsCeiling next_actions arms are identical across
 // every builder (preview/compile/create-or-replace/patch); only the Allow arm
 // and the Forbidden message vary per tool.
@@ -12117,6 +12134,18 @@ impl OracleDispatcher {
     }
 
     async fn dispatch_with_cx_inner(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+        name: &str,
+        args: Value,
+    ) -> Result<Value, ErrorEnvelope> {
+        self.dispatch_with_cx_inner_core(cx, context, name, args)
+            .await
+            .and_then(attach_preview_impact)
+    }
+
+    async fn dispatch_with_cx_inner_core(
         &self,
         cx: &Cx,
         context: DispatchContext<'_>,
