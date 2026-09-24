@@ -1,0 +1,60 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-24T22:58:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.1.5",
+  "scope": {
+    "summary": "Engine repo (plsql-intelligence) health at cd727f1: bindgen-roundtrip lane fixed and re-enabled (active), green on the exact SHA against a live Oracle XE 23ai service container; engine CI green on the same SHA; br doctor schema ok (no SCHEMA_MISMATCH). Fix commits a92a754, 5f79df9, 7e9db44, cd727f1.",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "Engine soundness/completeness (bead no-claim).",
+      "usr-loop workflow remains disabled_inactivity (outside this bead)."
+    ]
+  },
+  "source": {
+    "sha": "d3efee3a044b559bec382dfb63f1cc819c0d133c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "CI on exact SHA (orchestrator check)",
+        "kind": "cli",
+        "trace": "engine origin/main == cd727f1. gh run list --workflow bindgen-roundtrip.yml: cd727f1d success (run 36068646823); previous runs 2026-08-22..09-24 all failure. ci.yml: cd727f1d success (run 36068635428). gh workflow list --all: 'bindgen-roundtrip (XE container, transitional nightly)' active."
+      },
+      {
+        "name": "live assertion in log (orchestrator check)",
+        "kind": "cli",
+        "trace": "Run 36068646823 steps: 'Deploy synthetic test package' success, 'Generate bindings' success, 'Run round-trip integration test' success; log line LIVE_XE_BINDGEN_ROUNDTRIP_ASSERTION_PASSED before=Some(1) salary=Some(1234.5) after=Some(0); test result ok 1 passed. No continue-on-error / if:false added in the workflow diff."
+      },
+      {
+        "name": "design review",
+        "kind": "cli",
+        "trace": "Generation now reads the committed BindingPlan fixture (crates/plsql-bindgen/tests/fixtures/pkg_employee_mgmt.binding-plan.json); bindgen's documented mode is BindingPlan JSON -> Rust and never introspected a live DB, so the old '--package' invocation was the broken design. The generated wrappers are compiled and invoked against the real XE 23ai service via a SQL*Plus-backed OracleExecutor test harness (real DB, no mock)."
+      },
+      {
+        "name": "tracker check (orchestrator)",
+        "kind": "cli",
+        "trace": "br doctor --json in plsql-intelligence: schema.tables ok, schema.columns ok; remaining doctor warnings are pre-existing (duplicate br binaries, .gitignore patterns, preserved recovery artifacts - not deleted per RULE 1)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live proof is the GitHub CI run (XE service container), re-read by the orchestrator, not re-executed locally.",
+    "The executor is a SQL*Plus-backed test harness, so this proves generated wrapper shape + DB round trip, not a production Rust driver path."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
