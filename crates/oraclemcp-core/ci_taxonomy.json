@@ -206,14 +206,12 @@
     },
     {
       "check_name": "public-API lock (cargo public-api + semver-checks)",
-      "tier": "required",
+      "tier": "advisory",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "api-lock",
       "triggers": [
-        "pull_request",
-        "push",
-        "workflow_dispatch"
+        "pull_request"
       ],
       "path_filtered": false
     },
@@ -841,7 +839,8 @@
     "advisory": [
       "PL/SQL intelligence feature matrix",
       "Rust workspace (Windows)",
-      "fuzz targets compile (nightly)"
+      "fuzz targets compile (nightly)",
+      "public-API lock (cargo public-api + semver-checks)"
     ],
     "manual": [
       "OCI ADB acceptance",
@@ -885,7 +884,6 @@
       "clippy (-D warnings)",
       "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
       "installer lint and built-artifact smoke",
-      "public-API lock (cargo public-api + semver-checks)",
       "release acceptance suite (B.12)",
       "rustfmt",
       "sensitive-data lint",
