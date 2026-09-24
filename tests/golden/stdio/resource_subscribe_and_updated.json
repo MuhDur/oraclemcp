@@ -179,6 +179,233 @@
               "type": "object"
             },
             "name": "oracle_set_session_level",
+            "outputSchema": {
+              "additionalProperties": true,
+              "if": {
+                "properties": {
+                  "preview": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "preview"
+                ]
+              },
+              "properties": {
+                "confirmation": {
+                  "additionalProperties": true,
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "execute_confirmation": {
+                  "additionalProperties": true,
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "impact": {
+                  "properties": {
+                    "binding": {
+                      "properties": {
+                        "decisive": {
+                          "type": "object"
+                        },
+                        "observations": {
+                          "type": "object"
+                        },
+                        "version": {
+                          "const": 1
+                        }
+                      },
+                      "required": [
+                        "version",
+                        "decisive",
+                        "observations"
+                      ],
+                      "type": "object"
+                    },
+                    "cost": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "dependents": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "effects": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "locks": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "reversibility": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "rows": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "sast": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "binding",
+                    "rows",
+                    "dependents",
+                    "effects",
+                    "sast",
+                    "cost",
+                    "locks",
+                    "reversibility"
+                  ],
+                  "type": "object"
+                },
+                "preview": {
+                  "type": "boolean"
+                }
+              },
+              "then": {
+                "required": [
+                  "impact",
+                  "confirmation"
+                ]
+              },
+              "type": "object"
+            },
             "title": "Oracle Set Session Level"
           },
           {
@@ -1137,6 +1364,221 @@
               "type": "object"
             },
             "name": "oracle_preview_sql",
+            "outputSchema": {
+              "additionalProperties": true,
+              "properties": {
+                "confirmation": {
+                  "additionalProperties": true,
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "execute_confirmation": {
+                  "additionalProperties": true,
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "impact": {
+                  "properties": {
+                    "binding": {
+                      "properties": {
+                        "decisive": {
+                          "type": "object"
+                        },
+                        "observations": {
+                          "type": "object"
+                        },
+                        "version": {
+                          "const": 1
+                        }
+                      },
+                      "required": [
+                        "version",
+                        "decisive",
+                        "observations"
+                      ],
+                      "type": "object"
+                    },
+                    "cost": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "dependents": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "effects": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "locks": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "reversibility": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "rows": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "sast": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "binding",
+                    "rows",
+                    "dependents",
+                    "effects",
+                    "sast",
+                    "cost",
+                    "locks",
+                    "reversibility"
+                  ],
+                  "type": "object"
+                },
+                "preview": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "impact",
+                "execute_confirmation"
+              ],
+              "type": "object"
+            },
             "title": "Oracle Preview SQL"
           },
           {
@@ -2312,6 +2754,221 @@
               "type": "object"
             },
             "name": "preview_sql",
+            "outputSchema": {
+              "additionalProperties": true,
+              "properties": {
+                "confirmation": {
+                  "additionalProperties": true,
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "execute_confirmation": {
+                  "additionalProperties": true,
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "impact": {
+                  "properties": {
+                    "binding": {
+                      "properties": {
+                        "decisive": {
+                          "type": "object"
+                        },
+                        "observations": {
+                          "type": "object"
+                        },
+                        "version": {
+                          "const": 1
+                        }
+                      },
+                      "required": [
+                        "version",
+                        "decisive",
+                        "observations"
+                      ],
+                      "type": "object"
+                    },
+                    "cost": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "dependents": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "effects": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "locks": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "reversibility": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "rows": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    },
+                    "sast": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "reason": {
+                          "type": "string"
+                        },
+                        "status": {
+                          "enum": [
+                            "computed",
+                            "estimated",
+                            "unavailable",
+                            "not_applicable"
+                          ],
+                          "type": "string"
+                        },
+                        "value": {}
+                      },
+                      "required": [
+                        "status"
+                      ],
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "binding",
+                    "rows",
+                    "dependents",
+                    "effects",
+                    "sast",
+                    "cost",
+                    "locks",
+                    "reversibility"
+                  ],
+                  "type": "object"
+                },
+                "preview": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "impact",
+                "execute_confirmation"
+              ],
+              "type": "object"
+            },
             "title": "Preview SQL"
           },
           {
