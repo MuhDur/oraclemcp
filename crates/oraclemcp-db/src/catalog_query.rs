@@ -167,11 +167,23 @@ pub enum CatalogQueryId {
     OrientForeignKeysPage,
     /// Bounded table-change activity page for orient.
     OrientHotObjectsPage,
+    /// Direct dependents of one object.
+    Dependents,
+    /// Metadata for one index.
+    IndexMetadata,
+    /// Ordered columns of one index.
+    IndexColumns,
+    /// Ordered expressions of one index.
+    IndexExpressions,
+    /// Metadata and body for one trigger.
+    TriggerMetadata,
+    /// Definition metadata for one view.
+    ViewMetadata,
 }
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 50] = [
+    pub const ALL: [Self; 56] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -222,6 +234,12 @@ impl CatalogQueryId {
         Self::ListSchemas,
         Self::OrientForeignKeysPage,
         Self::OrientHotObjectsPage,
+        Self::Dependents,
+        Self::IndexMetadata,
+        Self::IndexColumns,
+        Self::IndexExpressions,
+        Self::TriggerMetadata,
+        Self::ViewMetadata,
     ];
 
     /// Return the immutable SQL, bind and handling contract for this ID.
@@ -779,6 +797,72 @@ impl CatalogQueryId {
                ) WHERE page_row > :3",
                 NII,
                 "page bounded table-change activity",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::Dependents => (
+                "SELECT * FROM ( \
+                   WITH args AS ( \
+                       SELECT :1 owner_filter, :2 name_filter FROM dual \
+                   ) \
+                   SELECT DISTINCT d.owner, d.name, d.type \
+                   FROM all_dependencies d CROSS JOIN args \
+                   WHERE d.referenced_owner = args.owner_filter \
+                     AND d.referenced_name = args.name_filter \
+                     AND NOT (d.owner = args.owner_filter AND d.name = args.name_filter) \
+                   ORDER BY d.owner, d.type, d.name \
+               ) WHERE ROWNUM <= :3",
+                TTI,
+                "read bounded direct dependents",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::IndexMetadata => (
+                "SELECT owner, index_name, index_type, table_owner, table_name, \
+                uniqueness, status, partitioned, temporary, generated, degree \
+         FROM all_indexes \
+         WHERE owner = :1 AND index_name = :2",
+                TT,
+                "describe index metadata",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::IndexColumns => (
+                "SELECT column_position, column_name, descend, column_length, char_length \
+         FROM all_ind_columns \
+         WHERE index_owner = :1 AND index_name = :2 \
+         ORDER BY column_position",
+                TT,
+                "describe index columns",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::IndexExpressions => (
+                "SELECT column_position, column_expression \
+         FROM all_ind_expressions \
+         WHERE index_owner = :1 AND index_name = :2 \
+         ORDER BY column_position",
+                TT,
+                "describe index expressions",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::TriggerMetadata => (
+                "SELECT owner, trigger_name, trigger_type, triggering_event, \
+                table_owner, table_name, status, when_clause, description, trigger_body \
+         FROM all_triggers \
+         WHERE owner = :1 AND trigger_name = :2",
+                TT,
+                "describe trigger metadata and body",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ViewMetadata => (
+                "SELECT owner, view_name, text_length, text \
+         FROM all_views \
+         WHERE owner = :1 AND view_name = :2",
+                TT,
+                "describe view definition metadata",
                 DictionaryMetadata,
                 Diagnostic,
             ),

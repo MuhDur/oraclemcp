@@ -1283,23 +1283,12 @@ pub async fn probe_dependents(
     // Mirror the `list_objects` idiom: bind each value once through a `WITH
     // args` CTE and reference it by alias, so a repeated predicate does not
     // depend on repeating a positional placeholder.
-    let sql = "SELECT * FROM ( \
-                   WITH args AS ( \
-                       SELECT :1 owner_filter, :2 name_filter FROM dual \
-                   ) \
-                   SELECT DISTINCT d.owner, d.name, d.type \
-                   FROM all_dependencies d CROSS JOIN args \
-                   WHERE d.referenced_owner = args.owner_filter \
-                     AND d.referenced_name = args.name_filter \
-                     AND NOT (d.owner = args.owner_filter AND d.name = args.name_filter) \
-                   ORDER BY d.owner, d.type, d.name \
-               ) WHERE ROWNUM <= :3";
     let binds = [
         OracleBind::from(owner.to_ascii_uppercase()),
         OracleBind::from(name.to_ascii_uppercase()),
         OracleBind::from(max_rows as i64),
     ];
-    match conn.query_rows(cx, sql, &binds).await {
+    match run_catalog_query(cx, conn, CatalogQueryId::Dependents, &binds).await {
         Ok(rows) => DependentsProbe::Available {
             direct: rows.iter().filter_map(dependent_from_row).collect(),
         },
@@ -1324,36 +1313,12 @@ pub async fn describe_index(
         OracleBind::from(index_name.clone()),
     ];
 
-    let metadata = conn
-        .query_optional_row(
-            cx,
-            "SELECT owner, index_name, index_type, table_owner, table_name, \
-                uniqueness, status, partitioned, temporary, generated, degree \
-         FROM all_indexes \
-         WHERE owner = :1 AND index_name = :2",
-            &binds,
-        )
-        .await?;
-    let columns = conn
-        .query_rows(
-            cx,
-            "SELECT column_position, column_name, descend, column_length, char_length \
-         FROM all_ind_columns \
-         WHERE index_owner = :1 AND index_name = :2 \
-         ORDER BY column_position",
-            &binds,
-        )
-        .await?;
-    let expressions = conn
-        .query_rows(
-            cx,
-            "SELECT column_position, column_expression \
-         FROM all_ind_expressions \
-         WHERE index_owner = :1 AND index_name = :2 \
-         ORDER BY column_position",
-            &binds,
-        )
-        .await?;
+    let metadata = run_catalog_query(cx, conn, CatalogQueryId::IndexMetadata, &binds)
+        .await?
+        .into_iter()
+        .next();
+    let columns = run_catalog_query(cx, conn, CatalogQueryId::IndexColumns, &binds).await?;
+    let expressions = run_catalog_query(cx, conn, CatalogQueryId::IndexExpressions, &binds).await?;
 
     Ok(IndexDescription {
         metadata,
@@ -1370,19 +1335,18 @@ pub async fn describe_trigger(
     owner: &str,
     trigger_name: &str,
 ) -> Result<TriggerDescription, DbError> {
-    let metadata = conn
-        .query_optional_row(
-            cx,
-            "SELECT owner, trigger_name, trigger_type, triggering_event, \
-                table_owner, table_name, status, when_clause, description, trigger_body \
-         FROM all_triggers \
-         WHERE owner = :1 AND trigger_name = :2",
-            &[
-                OracleBind::from(owner.to_ascii_uppercase()),
-                OracleBind::from(trigger_name.to_ascii_uppercase()),
-            ],
-        )
-        .await?;
+    let metadata = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::TriggerMetadata,
+        &[
+            OracleBind::from(owner.to_ascii_uppercase()),
+            OracleBind::from(trigger_name.to_ascii_uppercase()),
+        ],
+    )
+    .await?
+    .into_iter()
+    .next();
     Ok(TriggerDescription { metadata })
 }
 
@@ -1401,15 +1365,10 @@ pub async fn describe_view(
         OracleBind::from(view_name.clone()),
     ];
 
-    let metadata = conn
-        .query_optional_row(
-            cx,
-            "SELECT owner, view_name, text_length, text \
-         FROM all_views \
-         WHERE owner = :1 AND view_name = :2",
-            &binds,
-        )
-        .await?;
+    let metadata = run_catalog_query(cx, conn, CatalogQueryId::ViewMetadata, &binds)
+        .await?
+        .into_iter()
+        .next();
     let columns = describe_columns(cx, conn, &owner, &view_name).await?;
     Ok(ViewDescription { metadata, columns })
 }
