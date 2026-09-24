@@ -111,6 +111,7 @@ fn audit_records() -> Vec<AuditRecord> {
         decision: AuditDecision::Blocked,
         rows_affected: None,
         outcome: AuditOutcome::Failed,
+        failure: None,
         prev_hash: "genesis".to_owned(),
         entry_hash: oraclemcp_audit::sha256_hex(b"entry"),
         key_id: Some("k1".to_owned()),

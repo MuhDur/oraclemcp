@@ -622,6 +622,7 @@ mod tests {
             decision: AuditDecision::Allowed,
             rows_affected: None,
             outcome: AuditOutcome::Pending,
+            failure: None,
             prev_hash: GENESIS_HASH.to_owned(),
             entry_hash: entry_hash.clone(),
             key_id: Some("k1".to_owned()),

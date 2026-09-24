@@ -38,7 +38,7 @@ impl ReadUncertaintyConn<'_> {
                 format!("{operation} failed at an uncertain read boundary: {err}"),
             )
         {
-            return Err(db_internal_from_envelope(mark_err));
+            return Err(DbError::Refused(Box::new(mark_err)));
         }
         Err(err)
     }
@@ -248,21 +248,44 @@ impl GuardedGeneratedReadConn<'_> {
         sql: &str,
         provenance: ReadQueryProvenance,
     ) -> Result<(String, Option<u64>), DbError> {
-        if matches!(
-            provenance,
-            ReadQueryProvenance::CallerRead | ReadQueryProvenance::ServerRead
-        ) {
-            return Err(DbError::Internal(
-                "metadata connection refuses application-read provenance".to_owned(),
-            ));
-        }
-        let ReadQueryProvenance::Catalog(id) = provenance else {
-            unreachable!("the provenance match above admits catalog reads only")
+        let refusal = match provenance {
+            ReadQueryProvenance::CallerRead | ReadQueryProvenance::ServerRead => Some(
+                ErrorEnvelope::new(
+                    ErrorClass::PolicyDenied,
+                    "metadata read requires a closed catalog query identity",
+                )
+                .with_next_step("use a CatalogQueryId for server-owned dictionary reads")
+                .with_structured_reason(
+                    StructuredReason::new(ReasonCategory::UnprovenSideEffect)
+                        .with_offending_construct("application_read_provenance"),
+                ),
+            ),
+            ReadQueryProvenance::Catalog(id) if id.spec().sql != sql => Some(
+                ErrorEnvelope::new(
+                    ErrorClass::ForbiddenStatement,
+                    "catalog query text does not match its closed query identity",
+                )
+                .with_next_step("use the SQL paired with the selected CatalogQueryId")
+                .with_structured_reason(
+                    StructuredReason::new(ReasonCategory::UnprovenSideEffect)
+                        .with_offending_construct("catalog_query_provenance_mismatch"),
+                ),
+            ),
+            ReadQueryProvenance::Catalog(_) => None,
         };
-        if id.spec().sql != sql {
-            return Err(DbError::Internal(
-                "catalog query provenance does not match its closed SQL".to_owned(),
-            ));
+        if let Some(refusal) = refusal {
+            append_audit_with_observed_scn_and_failure(
+                self.audit.entry,
+                self.audit.tool,
+                sql,
+                "READ_ONLY",
+                None,
+                AuditOutcome::Failed,
+                None,
+                Some(&refusal),
+            )
+            .map_err(|error| DbError::Refused(Box::new(error)))?;
+            return Err(DbError::Refused(Box::new(refusal)));
         }
         // This label is supplied by the closed CatalogQueryId boundary and
         // checked bind schema; caller text never receives the catalog label.
@@ -280,7 +303,7 @@ impl GuardedGeneratedReadConn<'_> {
             AuditOutcome::Pending,
             observed_scn,
         )
-        .map_err(db_internal_from_envelope)?;
+        .map_err(|error| DbError::Refused(Box::new(error)))?;
         Ok((danger, observed_scn))
     }
 
@@ -290,8 +313,9 @@ impl GuardedGeneratedReadConn<'_> {
         danger: &str,
         outcome: AuditOutcome,
         observed_scn: Option<u64>,
+        failure: Option<&ErrorEnvelope>,
     ) -> Result<(), DbError> {
-        append_audit_with_observed_scn(
+        append_audit_with_observed_scn_and_failure(
             self.audit.entry,
             self.audit.tool,
             sql,
@@ -299,8 +323,9 @@ impl GuardedGeneratedReadConn<'_> {
             None,
             outcome,
             observed_scn,
+            failure,
         )
-        .map_err(db_internal_from_envelope)
+        .map_err(|error| DbError::Refused(Box::new(error)))
     }
 }
 
@@ -349,11 +374,18 @@ impl OracleConnection for GuardedGeneratedReadConn<'_> {
             .await
         {
             Ok(rows) => {
-                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn)?;
+                self.after_query(sql, &danger, AuditOutcome::Succeeded, observed_scn, None)?;
                 Ok(rows)
             }
             Err(err) => {
-                self.after_query(sql, &danger, AuditOutcome::Failed, observed_scn)?;
+                let envelope = err.clone().into_envelope();
+                self.after_query(
+                    sql,
+                    &danger,
+                    AuditOutcome::Failed,
+                    observed_scn,
+                    Some(&envelope),
+                )?;
                 Err(err)
             }
         }
@@ -1588,6 +1620,7 @@ impl<'a> GuardedReadExecutor<'a> {
                         audit_certificate,
                         AuditOutcome::Pending,
                         None,
+                        None,
                     )?;
                 }
 
@@ -1621,6 +1654,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 let mut response = match read {
                     Ok(response) => response,
                     Err(error) => {
+                        let failure = error.clone().into_envelope();
                         if let Some(audit_certificate) = audit_certificate.as_ref() {
                             append_query_read_audit(
                                 read_audit,
@@ -1630,6 +1664,7 @@ impl<'a> GuardedReadExecutor<'a> {
                                 audit_certificate,
                                 AuditOutcome::Failed,
                                 None,
+                                Some(&failure),
                             )?;
                         }
                         return Err(DbError::into_envelope(error));
@@ -1649,6 +1684,7 @@ impl<'a> GuardedReadExecutor<'a> {
                         audit_certificate,
                         AuditOutcome::Succeeded,
                         Some(&mut response),
+                        None,
                     )?;
                 }
                 let response = match a.format {

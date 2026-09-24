@@ -1,6 +1,7 @@
 use super::*;
 use oraclemcp_audit::{
     AuditError, AuditOutcome, AuditRecord, AuditSink, AuditSubject, MemoryAuditSink, SigningKey,
+    VerifyOutcome, verify_records,
 };
 use std::sync::Arc;
 
@@ -865,6 +866,18 @@ fn definite_compile_failure_has_no_prior_session_effect_and_resolves_intent() {
     assert_eq!(recs[0].outcome, AuditOutcome::Pending);
     assert_eq!(recs[1].outcome, AuditOutcome::Failed);
     assert_eq!(recs[1].prev_hash, recs[0].entry_hash);
+    let failure = recs[1]
+        .failure
+        .as_ref()
+        .expect("failed tool audit records the typed cause");
+    assert_eq!(failure.error_class(), "OBJECT_NOT_FOUND");
+    assert_eq!(failure.ora_code(), Some(4043));
+    let verify_key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec())
+        .expect("verification key matches the test auditor");
+    assert_eq!(
+        verify_records(&recs, &[verify_key]),
+        VerifyOutcome::Ok { records: 2 }
+    );
     assert!(
         intents.unresolved().expect("intent snapshot").is_empty(),
         "a definite one-statement failure is safe to resolve"

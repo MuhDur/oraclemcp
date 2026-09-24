@@ -463,6 +463,20 @@ pub enum DbError {
     /// A query failed.
     #[error("oracle query failed: {0}")]
     Query(String),
+    /// A server-composed query failed. Its SQL text is not caller input, so a
+    /// parse error must not be attributed to the request arguments.
+    #[error("server-owned Oracle query failed: {0}")]
+    ServerQuery(String),
+    /// A server-composed execute failed (for example an internal probe).
+    #[error("server-owned Oracle execute failed: {0}")]
+    ServerExecute(String),
+    /// Request validation failed before SQL reached Oracle.
+    #[error("invalid Oracle request argument: {0}")]
+    InvalidArgument(String),
+    /// The SQL guard refused a generated read. Preserve its structured
+    /// envelope without flattening it into an internal database error.
+    #[error("generated read refused: {}", .0.message)]
+    Refused(Box<ErrorEnvelope>),
     /// Named bind names did not exactly match the SQL placeholders, so the
     /// driver was not called with values that could be positionally misbound.
     #[error("named bind mismatch: missing {missing:?}; unexpected {unexpected:?}")]
@@ -533,6 +547,17 @@ pub enum DbError {
 }
 
 impl DbError {
+    /// Mark a query/execute failure as originating in SQL composed by this
+    /// server. Other typed failures retain their existing classification.
+    #[must_use]
+    pub fn server_sql_origin(self) -> Self {
+        match self {
+            DbError::Query(message) => DbError::ServerQuery(message),
+            DbError::Execute(message) => DbError::ServerExecute(message),
+            other => other,
+        }
+    }
+
     /// Whether this error means the session state cannot be trusted for reuse.
     #[must_use]
     pub fn is_uncertain_session_state(&self) -> bool {
@@ -544,6 +569,9 @@ impl DbError {
             | DbError::Pool(_)
             | DbError::Quarantined { .. } => true,
             DbError::Query(message) | DbError::Execute(message) => {
+                message_is_uncertain_connection_state(message)
+            }
+            DbError::ServerQuery(message) | DbError::ServerExecute(message) => {
                 message_is_uncertain_connection_state(message)
             }
             _ => false,
@@ -562,7 +590,10 @@ impl DbError {
     pub fn retry_action(&self) -> OracleRetryAction {
         match self {
             DbError::ConnectionLost(_) => OracleRetryAction::ReconnectThenRetry,
-            DbError::Query(message) | DbError::Execute(message) => {
+            DbError::Query(message)
+            | DbError::Execute(message)
+            | DbError::ServerQuery(message)
+            | DbError::ServerExecute(message) => {
                 let action = oracle_retry_action_from_message(message);
                 if action == OracleRetryAction::Never && raw_connection_lost_marker(message) {
                     OracleRetryAction::ReconnectThenRetry
@@ -603,26 +634,34 @@ impl DbError {
             DbError::ConnectHandshake { kind, message } => {
                 connect_handshake_envelope(&kind, &message)
             }
+            DbError::ServerQuery(msg) | DbError::ServerExecute(msg) => {
+                server_sql_error_envelope(&msg)
+            }
+            DbError::Refused(envelope) => *envelope,
+            DbError::InvalidArgument(msg) => {
+                let mut envelope = ErrorEnvelope::new(ErrorClass::InvalidArguments, &msg);
+                let lower = msg.to_ascii_lowercase();
+                if lower.contains("unsupported ddl object type") {
+                    envelope = envelope
+                        .with_suggested_tool("oracle_get_ddl")
+                        .with_next_step("use one of the object types supported by oracle_get_ddl");
+                } else if lower.contains("unsupported source object type") {
+                    envelope = envelope
+                        .with_suggested_tool("oracle_get_source")
+                        .with_next_step("use a supported source object type");
+                } else if lower.contains("owner is required because current_schema") {
+                    envelope = envelope
+                        .with_suggested_tool("oracle_connection_info")
+                        .with_next_step("supply an owner because the current schema could not be detected");
+                }
+                envelope
+            }
             DbError::Query(msg) | DbError::Execute(msg) => {
                 if raw_connection_lost_marker(&msg) {
                     return transport_lost_envelope(&msg);
                 }
                 // Classify via the embedded ORA- code where present.
-                let env = oracle_error_envelope(&msg);
-                if env.error_class == ErrorClass::Internal {
-                    // An absent or as-yet-unclassified ORA code remains a
-                    // connection-class failure rather than a bare Internal.
-                    // Preserve a parsed code: rebuilding the fallback envelope
-                    // must not erase useful structured diagnostics such as
-                    // application-error ORA-20000.
-                    let mut fallback = ErrorEnvelope::new(ErrorClass::ConnectionFailed, msg);
-                    if let Some(code) = env.ora_code {
-                        fallback = fallback.with_ora_code(code);
-                    }
-                    fallback
-                } else {
-                    env
-                }
+                oracle_error_envelope(&msg)
             }
             DbError::NamedBindMismatch {
                 missing,
@@ -839,6 +878,11 @@ fn connect_handshake_envelope(kind: &ConnectFailureKind, detail: &str) -> ErrorE
 /// ordered operator steps make that safety-relevant distinction explicit.
 fn oracle_error_envelope(message: &str) -> ErrorEnvelope {
     let env = envelope_from_oracle_message(message);
+    if env.error_class == ErrorClass::SnapshotTooOld {
+        return env.with_retry_after_ms(1_000).with_next_step(
+            "retry with a narrower read; if the error repeats, ask the DBA about UNDO_RETENTION",
+        );
+    }
     match oracle_retry_action_from_message(message) {
         OracleRetryAction::Never => env,
         OracleRetryAction::RetrySameConnection => env.with_next_step(
@@ -848,6 +892,27 @@ fn oracle_error_envelope(message: &str) -> ErrorEnvelope {
             "the Oracle connection was lost; discard it and retry this idempotent read once on a fresh connection",
         ),
     }
+}
+
+/// Keep parser failures of SQL composed by the server on the server side of
+/// the boundary, retaining Oracle's numeric code without exposing generated
+/// SQL text as though the caller could fix it.
+fn server_sql_error_envelope(message: &str) -> ErrorEnvelope {
+    let oracle = oracle_error_envelope(message);
+    if oracle.error_class == ErrorClass::SyntaxError {
+        let mut envelope = ErrorEnvelope::new(
+            ErrorClass::Internal,
+            format!(
+                "a server-owned query failed (ORA-{}); your input did not cause this",
+                oracle.ora_code.unwrap_or_default()
+            ),
+        );
+        if let Some(code) = oracle.ora_code {
+            envelope = envelope.with_ora_code(code);
+        }
+        return envelope;
+    }
+    oracle
 }
 
 /// Defense-in-depth fallback for **driver-originated** `Query`/`Execute` errors
@@ -1097,6 +1162,104 @@ mod tests {
     }
 
     #[test]
+    fn error_class_table() {
+        let refused = ErrorEnvelope::new(ErrorClass::ForbiddenStatement, "generated read refused")
+            .with_next_step("inspect the policy decision");
+        let cases = [
+            (
+                "unsupported ddl type",
+                DbError::InvalidArgument("unsupported DDL object type: TABLESPACE".to_owned()),
+                ErrorClass::InvalidArguments,
+                None,
+                Some("oracle_get_ddl"),
+            ),
+            (
+                "unsupported source type",
+                DbError::InvalidArgument("unsupported source object type: TABLE".to_owned()),
+                ErrorClass::InvalidArguments,
+                None,
+                Some("oracle_get_source"),
+            ),
+            (
+                "snapshot too old",
+                DbError::Query("ORA-01555: snapshot too old".to_owned()),
+                ErrorClass::SnapshotTooOld,
+                Some(1555),
+                None,
+            ),
+            (
+                "table definition changed during read",
+                DbError::Query(
+                    "ORA-01466: unable to read data - table definition has changed".to_owned(),
+                ),
+                ErrorClass::Transient,
+                Some(1466),
+                None,
+            ),
+            (
+                "caller syntax error",
+                DbError::Query("ORA-00904: invalid identifier".to_owned()),
+                ErrorClass::SyntaxError,
+                Some(904),
+                None,
+            ),
+            (
+                "server syntax error",
+                DbError::ServerQuery("ORA-00904: invalid identifier".to_owned()),
+                ErrorClass::Internal,
+                Some(904),
+                None,
+            ),
+            (
+                "object missing",
+                DbError::Query("ORA-00942: table or view does not exist".to_owned()),
+                ErrorClass::ObjectNotFound,
+                Some(942),
+                Some("oracle_schema_inspect"),
+            ),
+            (
+                "insufficient privilege",
+                DbError::Execute("ORA-01031: insufficient privileges".to_owned()),
+                ErrorClass::InsufficientPrivilege,
+                Some(1031),
+                None,
+            ),
+            (
+                "generated read refusal",
+                DbError::Refused(Box::new(refused)),
+                ErrorClass::ForbiddenStatement,
+                None,
+                None,
+            ),
+            (
+                "connection loss",
+                DbError::ConnectionLost("Broken pipe".to_owned()),
+                ErrorClass::Transient,
+                None,
+                None,
+            ),
+        ];
+
+        for (source, error, expected_class, expected_code, expected_tool) in cases {
+            let envelope = error.into_envelope();
+            assert_eq!(envelope.error_class, expected_class, "{source}");
+            assert_eq!(envelope.ora_code, expected_code, "{source}");
+            assert_eq!(
+                envelope.suggested_tool.as_deref(),
+                expected_tool,
+                "{source}"
+            );
+            if source == "generated read refusal" {
+                assert_eq!(
+                    envelope.next_steps,
+                    ["inspect the policy decision".to_owned()],
+                    "{source}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dbms_metadata_missing_object_does_not_fall_back_to_connection_failed() {
         let env = DbError::Query(
             "ORA-31603: object \"MISSING_TABLE\" of type TABLE not found in schema \"APP\""
@@ -1109,11 +1272,71 @@ mod tests {
     }
 
     #[test]
-    fn unclassified_oracle_error_keeps_code_in_connection_fallback() {
+    fn unclassified_oracle_error_keeps_internal_class_and_code() {
         let env =
             DbError::Execute("ORA-20000: server detail suppressed".to_owned()).into_envelope();
-        assert_eq!(env.error_class, ErrorClass::ConnectionFailed);
+        assert_eq!(env.error_class, ErrorClass::Internal);
         assert_eq!(env.ora_code, Some(20_000));
+    }
+
+    #[test]
+    fn ora_01555_is_snapshot_too_old_not_connection_failed() {
+        let env = DbError::Query("ORA-01555: snapshot too old".to_owned()).into_envelope();
+        assert_eq!(env.error_class, ErrorClass::SnapshotTooOld);
+        assert_eq!(env.ora_code, Some(1555));
+        assert!(env.error_class.is_retryable());
+        assert_eq!(env.retry_after_ms, Some(1_000));
+        assert!(
+            env.next_steps
+                .iter()
+                .any(|step| step.contains("UNDO_RETENTION"))
+        );
+    }
+
+    #[test]
+    fn ora_01466_plain_query_is_transient_with_same_session_retry_guidance() {
+        let envelope = DbError::Query(
+            "ORA-01466: unable to read data - table definition has changed".to_owned(),
+        )
+        .into_envelope();
+
+        assert_eq!(envelope.error_class, ErrorClass::Transient);
+        assert_eq!(envelope.ora_code, Some(1466));
+        assert_ne!(
+            envelope.suggested_tool.as_deref(),
+            Some("oracle_connection_info")
+        );
+        assert!(
+            envelope
+                .next_steps
+                .iter()
+                .any(|step| step.contains("same connection")),
+            "{}",
+            envelope.next_steps.join("; ")
+        );
+    }
+
+    #[test]
+    fn server_origin_ora_00904_is_not_syntax_error() {
+        let caller = DbError::Query("ORA-00904: invalid identifier".to_owned()).into_envelope();
+        assert_eq!(caller.error_class, ErrorClass::SyntaxError);
+        assert_eq!(caller.ora_code, Some(904));
+
+        let server =
+            DbError::ServerQuery("ORA-00904: invalid identifier".to_owned()).into_envelope();
+        assert_eq!(server.error_class, ErrorClass::Internal);
+        assert_eq!(server.ora_code, Some(904));
+        assert!(server.message.contains("your input did not cause this"));
+        assert!(!server.message.contains("invalid identifier"));
+    }
+
+    #[test]
+    fn invalid_argument_has_type_specific_suggestion() {
+        let env =
+            DbError::InvalidArgument("unsupported DDL object type: \"DATABASE LINK\"".to_owned())
+                .into_envelope();
+        assert_eq!(env.error_class, ErrorClass::InvalidArguments);
+        assert_eq!(env.suggested_tool.as_deref(), Some("oracle_get_ddl"));
     }
 
     #[test]

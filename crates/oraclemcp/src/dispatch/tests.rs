@@ -36,6 +36,51 @@ fn run_with_current_cx(f: impl FnOnce(&Cx)) {
 }
 
 #[test]
+fn generated_read_guard_refusal_keeps_forbidden_statement_issue_42() {
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        let subject = system_generated_read_subject();
+        let guarded = GuardedGeneratedReadConn {
+            inner: &OneRowMock,
+            audit: GeneratedReadAuditCtx {
+                entry: AuditEntryCtx {
+                    auditor: None,
+                    subject: &subject,
+                    db_evidence: None,
+                },
+                tool: "oracle_describe",
+            },
+        };
+        let error = guarded
+            .query_rows_with_provenance(
+                &cx,
+                "SELECT 1 FROM dual",
+                &[],
+                ReadQueryProvenance::ServerRead,
+                None,
+            )
+            .await
+            .expect_err("metadata boundary refuses application SQL");
+        let envelope = error.into_envelope();
+        assert_eq!(envelope.error_class, ErrorClass::PolicyDenied);
+        assert_eq!(
+            envelope.next_steps,
+            ["use a CatalogQueryId for server-owned dictionary reads"]
+        );
+        assert_eq!(
+            envelope
+                .structured_reason
+                .as_ref()
+                .map(|reason| reason.category),
+            Some(ReasonCategory::UnprovenSideEffect)
+        );
+    });
+}
+
+#[test]
 fn impact_attached_to_every_minting_preview() {
     // Discover the preview surface from its advertised result schema. The
     // argument fixtures below only supply valid inputs; they do not select

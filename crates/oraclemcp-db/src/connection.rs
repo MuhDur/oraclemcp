@@ -9860,10 +9860,7 @@ mod tests {
 
         let envelope = error.into_envelope();
         assert_eq!(envelope.ora_code, Some(20_000));
-        assert_eq!(
-            envelope.error_class,
-            oraclemcp_error::ErrorClass::ConnectionFailed
-        );
+        assert_eq!(envelope.error_class, oraclemcp_error::ErrorClass::Internal);
         let json = envelope.to_json().to_string();
         assert!(!json.contains(SECRET), "doctor/tool JSON leaked: {json}");
         assert!(!json.contains(SQL), "doctor/tool JSON leaked SQL: {json}");
