@@ -433,11 +433,7 @@
    "http"
   ],
   "requires": [],
-  "setup": [
-   {
-    "sql": "CREATE TABLE ${owner}.D7_DESC_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_DESC_${run_id} PRIMARY KEY, LABEL VARCHAR2(40) DEFAULT 'w4' NOT NULL, TWICE NUMBER GENERATED ALWAYS AS (ID * 2) VIRTUAL, HIDDEN_NOTE VARCHAR2(10) INVISIBLE, PARENT_ID NUMBER(10) CONSTRAINT D7_FK_DESC_${run_id} REFERENCES ${owner}.T_PARENT_${run_id}(ID), CONSTRAINT D7_CK_DESC_${run_id} CHECK (ID > 0))"
-   }
-  ],
+  "setup": [],
   "setup_phase": "before_server",
   "call": {
    "arguments": {
