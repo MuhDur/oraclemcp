@@ -442,5 +442,43 @@
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
     }
+  },
+  {
+    "case_id": "w4_query_issue28_alias_expression_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {"arguments": {
+      "sql": "SELECT LABEL, COUNT(*) AS N FROM ${owner}.T_PARENT_${run_id} GROUP BY LABEL ORDER BY N + 1",
+      "max_rows": 2
+    }},
+    "expect": {"error_class": "OBJECT_NOT_FOUND"},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id}", "rows": [[2]]}],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
+  },
+  {
+    "case_id": "w4_query_issue29_qualified_using_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {"arguments": {
+      "sql": "SELECT T_PARENT_${run_id}.ID FROM ${owner}.T_PARENT_${run_id} JOIN ${owner}.T_CHILD_${run_id} USING (ID)",
+      "max_rows": 1
+    }},
+    "expect": {"error_class": "OBJECT_NOT_FOUND"},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id}", "rows": [[2]]}],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "OBJECT_NOT_FOUND"}
   }
 ]
