@@ -569,7 +569,7 @@ sed 's/rolling_image=""/rolling_image="$IMAGE_REPOSITORY:$stable_rolling"/' \
 expect_fail "prerelease recovery can move rolling tag" env \
   ORACLEMCP_DOCKER_WORKFLOW="$TMP/docker-prerelease-latest.yml" \
   bash "$ROOT/scripts/validate_release_security_workflows.sh"
-sed 's/group: docker-provenance-v${{ inputs.version }}-${{ inputs.variant }}/group: docker-recovery-${{ inputs.version }}/' \
+sed 's/group: docker-provenance-v${{ inputs.version }}/group: docker-recovery-${{ inputs.version }}/' \
   "$ROOT/.github/workflows/docker.yml" >"$TMP/docker-unserialized.yml"
 expect_fail "manual recovery not serialized with normal release" env \
   ORACLEMCP_DOCKER_WORKFLOW="$TMP/docker-unserialized.yml" \

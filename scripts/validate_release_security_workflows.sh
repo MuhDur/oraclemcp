@@ -335,7 +335,15 @@ require_job_run "$MCP_WORKFLOW" publish \
 # The normal tag pipeline carries the exact source and image digest out of the
 # serialized Docker job and revalidates both immediately before MCP OIDC login.
 require "$RELEASE_WORKFLOW" 'group: docker-provenance-${{ github.ref_name }}-core'
-require "$DOCKER_WORKFLOW" 'group: docker-provenance-v${{ inputs.version }}-${{ inputs.variant }}'
+require "$DOCKER_WORKFLOW" 'group: docker-provenance-v${{ inputs.version }}'
+require "$DOCKER_WORKFLOW" 'target="runtime"'
+require "$DOCKER_WORKFLOW" 'expected_engine="true"'
+if grep -F 'inputs.variant' "$DOCKER_WORKFLOW" >/dev/null; then
+  fail "single-image Docker recovery still accepts a variant input"
+fi
+if grep -E -- '-plsql-intelligence|plsql-intelligence-latest|runtime-plsql-intelligence' "$DOCKER_WORKFLOW" >/dev/null; then
+  fail "single-image Docker recovery retains a PL/SQL variant/tag"
+fi
 require "$RELEASE_WORKFLOW" 'EXPECTED_SOURCE_SHA: ${{ needs.docker.outputs.source_sha }}'
 require "$RELEASE_WORKFLOW" 'EXPECTED_IMAGE_DIGEST: ${{ needs.docker.outputs.image_digest }}'
 require_job_run "$RELEASE_WORKFLOW" publish-mcp-registry \

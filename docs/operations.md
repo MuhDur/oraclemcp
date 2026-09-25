@@ -112,8 +112,7 @@ docker run -i --rm ghcr.io/muhdur/oraclemcp:latest info       # version, tools, 
 docker run -i --rm ghcr.io/muhdur/oraclemcp:latest --json doctor
 ```
 
-The optional PL/SQL intelligence image uses the same runtime contract, but the
-binary is compiled with `--features plsql-intelligence`. It does not need a
+The single image includes PL/SQL intelligence by default. It does not need a
 database connection to start, list capabilities, or expose the offline
 `oracle_plsql_parse`, `oracle_plsql_analyze`, `oracle_plsql_lineage`,
 `oracle_plsql_sast`, and `oracle_plsql_doc` tools. The dashboard Workbench IDE
@@ -123,14 +122,12 @@ still need a configured profile and are not exposed through the browser
 Workbench action allowlist.
 
 ```sh
-# Published by the manual Docker workflow with variant=plsql-intelligence.
-docker run -i --rm ghcr.io/muhdur/oraclemcp:<version>-plsql-intelligence --json info
+# The regular release image includes the engine.
+docker run -i --rm ghcr.io/muhdur/oraclemcp:<version> --json info
 
-# Local feature build; PL/SQL engine crates resolve from crates.io.
-docker buildx build \
-  --target runtime-plsql-intelligence \
-  -t oraclemcp:plsql-intelligence .
-docker run -i --rm oraclemcp:plsql-intelligence --json info
+# Build and run the same single runtime locally.
+docker buildx build --load -t oraclemcp:local .
+docker run -i --rm oraclemcp:local --json info
 ```
 
 Pin to an immutable 0.9.0 tag (`:0.9.0`), not `:latest`, in any non-interactive

@@ -1804,7 +1804,7 @@ fn rollback_runbook_dry_run_covers_release_surfaces() {
         "gh release edit v9.9.9 --prerelease",
         "approval=destructive-optional condition=artifacts must be hidden",
         "gh release delete v9.9.9 --yes --cleanup-tag",
-        "gh workflow run docker.yml -f version=9.9.8 -f variant=core -f operation=rollback",
+        "gh workflow run docker.yml -f version=9.9.8 -f operation=rollback",
         "MCP registry: published versions are immutable and cannot be unpublished",
         "cut a fixed higher version through release.yml because republishing 9.9.8 cannot become latest",
         "rollback plan is non-mutating and covers the current tag pipeline",

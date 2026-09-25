@@ -164,7 +164,7 @@ plan_action github-release reversible "GitHub release exists and operator approv
 plan_action github-release destructive-optional "artifacts must be hidden and operator separately approved release plus tag deletion" \
   gh release delete "$TAG" --yes --cleanup-tag
 plan_action ghcr outward "versioned previous-good image exists, is signed, and rolling latest needs repair" \
-  gh workflow run docker.yml -f "version=$PREVIOUS_VERSION" -f variant=core -f operation=rollback
+  gh workflow run docker.yml -f "version=$PREVIOUS_VERSION" -f operation=rollback
 e2e_log_event "manual_channel" "assert" "pass" 0 \
   "MCP registry: published versions are immutable and cannot be unpublished; record $BROKEN_VERSION and cut a fixed higher version through release.yml because republishing $PREVIOUS_VERSION cannot become latest"
 e2e_log_event "scenario_assert" "assert" "pass" 0 \

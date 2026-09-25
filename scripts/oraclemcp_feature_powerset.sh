@@ -2,7 +2,7 @@
 # Curated feature-powerset gate: a COMPILE + LINT gate, not a test gate.
 #
 # Scope: only the three crates that actually define optional features
-#   - oraclemcp        (dashboard-bundle, mimalloc, live-xe, plsql-intelligence)
+#   - oraclemcp        (default plsql-intelligence, dashboard-bundle, mimalloc, live-xe)
 #   - oraclemcp-core   (dashboard-bundle)
 #   - oraclemcp-db     (live-xe, test-utils)
 # `--workspace` re-iterated every featureless crate under every combination for
@@ -13,10 +13,9 @@
 #
 # Excluded deliberately:
 #   - live-xe: requires external Oracle credentials, covered by live gates
-#   - plsql-intelligence: optional engine variant, built by distribution jobs
-#   - default: currently empty for these crates; excluding it avoids redundant
-#     with/without-default combinations. Re-add it here if `default` ever gains
-#     members.
+#   - plsql-intelligence/default: the default engine-enabled build and its full
+#     tests run in the required `plsql-intelligence` CI job. This powerset keeps
+#     its compile matrix bounded and covers the remaining optional combinations.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

@@ -11,6 +11,11 @@
   },
   "script_inventory": [
     {
+      "path": "scripts/antlr_codegen_release_gate.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
       "path": "scripts/audit_bead_closes.py",
       "kind": "entry_point",
       "trace": "required-quality"
@@ -97,6 +102,11 @@
     },
     {
       "path": "scripts/ci_taxonomy.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/container_python_lock_selftest.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
@@ -226,12 +236,12 @@
       "trace": "required-quality"
     },
     {
-      "path": "scripts/provenance_check.sh",
+      "path": "scripts/promote_release_image.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
     {
-      "path": "scripts/promote_release_image.sh",
+      "path": "scripts/provenance_check.sh",
       "kind": "entry_point",
       "trace": "required-quality"
     },
@@ -242,6 +252,16 @@
     },
     {
       "path": "scripts/release_acceptance_ci_suite.sh",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_artifact_acceptance.py",
+      "kind": "entry_point",
+      "trace": "required-quality"
+    },
+    {
+      "path": "scripts/release_build_metrics.py",
       "kind": "entry_point",
       "trace": "required-quality"
     },

@@ -34,10 +34,10 @@ before() {
 
 [ -f "$WORKFLOW" ] || fail "missing $WORKFLOW"
 
-# Dispatch is explicit and serialized per immutable release/variant pair.
+# Dispatch is explicit and serialized per immutable release image.
 require 'description: "Existing release version whose immutable image should be promoted."'
 require 'default: "rollback"'
-require 'group: docker-provenance-v${{ inputs.version }}-${{ inputs.variant }}'
+require 'group: docker-provenance-v${{ inputs.version }}'
 require 'cancel-in-progress: false'
 require '[ "$GITHUB_REF" = "refs/heads/main" ]'
 
@@ -52,6 +52,14 @@ require '[ "$source_sha" = "$tag_sha" ]'
 require '[ "$cargo_version" = "$VERSION" ]'
 require '[ "$server_version" = "$VERSION" ]'
 require 'RELEASE_TAG="v$VERSION" bash scripts/release_preflight.sh'
+require 'target="runtime"'
+require 'expected_engine="true"'
+if grep -F 'inputs.variant' "$WORKFLOW" >/dev/null; then
+  fail "single-image recovery still accepts a variant input"
+fi
+if grep -E -- '-plsql-intelligence|plsql-intelligence-latest|runtime-plsql-intelligence' "$WORKFLOW" >/dev/null; then
+  fail "single-image recovery retains a PL/SQL variant tag or runtime"
+fi
 before 'verify-release:' 'packages: write'
 before '[ "$GITHUB_REF" = "refs/heads/main" ]' 'packages: write'
 before 'Verify tag commit and release metadata' 'Log in to GHCR'

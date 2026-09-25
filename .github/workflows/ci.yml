@@ -724,28 +724,18 @@ jobs:
       - run: cargo deny check
       - run: cargo deny --features oraclemcp/dashboard-bundle,oraclemcp-core/dashboard-bundle check
 
-  # The optional PL/SQL-intelligence distribution must remain independently
-  # buildable and testable. This explicitly covers the feature excluded from
-  # the curated powerset job and proves the advertised tool surface, rather
-  # than merely compiling the optional dependency graph.
+  # Default builds include PL/SQL intelligence. Keep its full test lane
+  # required and bounded with low-debug, parallel code generation settings.
   plsql-intelligence:
     name: PL/SQL intelligence feature matrix
     needs: web-build
     runs-on: ubuntu-latest
-    # Advisory (operator steering 2026-09-16): the feature build and tests pass
-    # locally — scripts/plsql_feature_lane_check.sh is OK (engine=true + all eight
-    # oracle_plsql_* tools registered) and `cargo test -p oraclemcp --all-targets
-    # --features plsql-intelligence` is fully green — but this job OOM/timeout-
-    # thrashes on the hosted 2-core runner (see the bounding note below), a CI
-    # resource-envelope problem, not a product defect. `continue-on-error: true`
-    # is what makes scripts/ci_taxonomy.py classify it advisory until the runner
-    # sizing/parallelism is tuned; tracked for infra follow-up.
-    continue-on-error: true
-    # The plsql-intelligence feature is defined only on the `oraclemcp` crate, so
-    # `-p oraclemcp` exercises the whole feature surface; `--workspace` merely
-    # recompiled every other crate's test targets under a second feature set,
-    # which blew up compile + memory on the 2-core runner (multi-hour, cache-cold
-    # thrashing). Bounded so a cold run can never run away again.
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_DEV_CODEGEN_UNITS: "16"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_TEST_CODEGEN_UNITS: "16"
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -763,13 +753,21 @@ jobs:
           # PRs restore the main cache but never save (their short-lived
           # merge-ref caches would evict the useful main population).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test -p oraclemcp --all-targets --features plsql-intelligence
-      - name: Assert all eight PL/SQL tools are registered
-        # Single source of truth for the advertised tool surface, runnable
-        # offline (`bash scripts/plsql_feature_lane_check.sh`) so the lane is
-        # provable without pushing to CI. It rebuilds with the feature and
-        # asserts engine=true plus exactly the eight oracle_plsql_* tools.
-        run: bash scripts/plsql_feature_lane_check.sh
+      - run: cargo test -p oraclemcp --all-targets
+      - name: Build engine-free opt-out binary
+        run: cargo build -p oraclemcp --no-default-features
+      - name: Keep engine-free opt-out build and tests green
+        run: cargo test -p oraclemcp --all-targets --no-default-features
+      - name: Assert all nine PL/SQL tools are registered
+        run: bash scripts/plsql_feature_lane_check.sh --selftest
+      - name: Refuse parser regeneration in release builds
+        run: |
+          set -euo pipefail
+          bash scripts/antlr_codegen_release_gate.sh
+          if PLSQL_ANTLR_REGEN=1 bash scripts/antlr_codegen_release_gate.sh; then
+            echo "release gate accepted PLSQL_ANTLR_REGEN=1" >&2
+            exit 1
+          fi
 
   # Real Oracle FREE 23ai proves the current thin-driver line and the 23ai
   # VECTOR SQL surface. All connection values below are synthetic disposable
@@ -812,6 +810,9 @@ jobs:
       # CI supplies a prebuilt binary to the harness. Local execution keeps the
       # harness on omcpb, which owns target isolation, memory caps, and the pin.
       - run: cargo build -p oraclemcp --bin oraclemcp --features dashboard-bundle
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       - name: Grant DBMS_FLASHBACK to the 23ai app user for SCN capture
         # The governed read path captures the snapshot SCN via
         # DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER (V$DATABASE only as a fallback).
@@ -820,7 +821,15 @@ jobs:
         # the design expects. Synthetic disposable CI DB; the SYSTEM password is
         # the committed fixture value in this job's service env.
         run: |
-          python3 -m pip install --quiet --disable-pip-version-check "oracledb==${PYTHON_ORACLEDB_VERSION}"
+          set -euo pipefail
+          test "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12"
+          wheelhouse="$RUNNER_TEMP/oracledb-wheelhouse"
+          mkdir -p "$wheelhouse"
+          python3 -m pip download --disable-pip-version-check --only-binary=:all: \
+            --require-hashes --dest "$wheelhouse" -r containers/python-oracledb-requirements.lock
+          python3 -m pip install --disable-pip-version-check --no-index \
+            --find-links "$wheelhouse" --require-hashes \
+            -r containers/python-oracledb-requirements.lock
           python3 - <<'PY'
           import os
           import oracledb
@@ -895,7 +904,7 @@ jobs:
     name: sensitive-data lint
     needs: web-build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
         with:
@@ -905,6 +914,10 @@ jobs:
           name: oraclemcp-dashboard-dist
           path: web/dist
       - run: bash scripts/secret_scan.sh
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: bash scripts/container_python_lock_selftest.sh
       - run: bash tests/container_supply_chain_contract_test.sh --context
 
   # Compile every cargo-fuzz target so it cannot silently rot: guard classifier

@@ -30,7 +30,7 @@
     },
     {
       "check_name": "PL/SQL intelligence feature matrix",
-      "tier": "advisory",
+      "tier": "required",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "plsql-intelligence",
@@ -598,6 +598,90 @@
       "path_filtered": false
     },
     {
+      "check_name": "execute aarch64-apple-darwin archive",
+      "tier": "release",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "artifact-acceptance",
+      "triggers": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "execute aarch64-unknown-linux-gnu archive",
+      "tier": "release",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "artifact-acceptance",
+      "triggers": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "execute aarch64-unknown-linux-musl archive",
+      "tier": "release",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "artifact-acceptance",
+      "triggers": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "execute x86_64-apple-darwin archive",
+      "tier": "release",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "artifact-acceptance",
+      "triggers": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "execute x86_64-pc-windows-msvc archive",
+      "tier": "release",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "artifact-acceptance",
+      "triggers": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "execute x86_64-unknown-linux-gnu archive",
+      "tier": "release",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "artifact-acceptance",
+      "triggers": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "execute x86_64-unknown-linux-musl archive",
+      "tier": "release",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "artifact-acceptance",
+      "triggers": [
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "publish GHCR image",
       "tier": "release",
       "workflow": "Release",
@@ -818,6 +902,13 @@
         "build x86_64-pc-windows-msvc",
         "build x86_64-unknown-linux-gnu",
         "build x86_64-unknown-linux-musl",
+        "execute aarch64-apple-darwin archive",
+        "execute aarch64-unknown-linux-gnu archive",
+        "execute aarch64-unknown-linux-musl archive",
+        "execute x86_64-apple-darwin archive",
+        "execute x86_64-pc-windows-msvc archive",
+        "execute x86_64-unknown-linux-gnu archive",
+        "execute x86_64-unknown-linux-musl archive",
         "publish GHCR image",
         "publish GitHub release",
         "publish MCP registry entry",
@@ -839,7 +930,6 @@
   },
   "groups": {
     "advisory": [
-      "PL/SQL intelligence feature matrix",
       "Rust workspace (Windows)",
       "fuzz targets compile (nightly)"
     ],
@@ -863,6 +953,13 @@
       "build x86_64-pc-windows-msvc",
       "build x86_64-unknown-linux-gnu",
       "build x86_64-unknown-linux-musl",
+      "execute aarch64-apple-darwin archive",
+      "execute aarch64-unknown-linux-gnu archive",
+      "execute aarch64-unknown-linux-musl archive",
+      "execute x86_64-apple-darwin archive",
+      "execute x86_64-pc-windows-msvc archive",
+      "execute x86_64-unknown-linux-gnu archive",
+      "execute x86_64-unknown-linux-musl archive",
       "feature powerset (cargo hack)",
       "guard + audit BMC proofs",
       "multi-nightly early-warning (nightly)",
@@ -876,6 +973,7 @@
     ],
     "required": [
       "Oracle FREE 23ai matrix + VECTOR smoke",
+      "PL/SQL intelligence feature matrix",
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
       "build on pinned nightly",

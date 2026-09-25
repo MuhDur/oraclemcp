@@ -414,15 +414,15 @@ fn official_driver_root_data_license_is_distributed_with_every_artifact() {
         dockerfile
             .matches("COPY LICENSE-CDLA-Permissive-2.0 /usr/share/licenses/oraclemcp/LICENSE-CDLA-Permissive-2.0")
             .count(),
-        2,
-        "both core and PL/SQL runtime images must carry the CDLA root-data license"
+        1,
+        "the single runtime image must carry the CDLA root-data license"
     );
     assert_eq!(
         dockerfile
             .matches("LABEL org.opencontainers.image.licenses=\"(Apache-2.0 OR MIT) AND CDLA-Permissive-2.0\"")
             .count(),
-        2,
-        "both runtime images must disclose the embedded root-data license"
+        1,
+        "the single runtime image must disclose the embedded root-data license"
     );
     assert!(
         deny.contains("name = \"webpki-roots\"")

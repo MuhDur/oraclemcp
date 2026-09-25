@@ -24,9 +24,12 @@ import sys
 
 root = pathlib.Path(sys.argv[1])
 ci = (root / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+release = (root / ".github/workflows/release.yml").read_text(encoding="utf-8")
+docker_recovery = (root / ".github/workflows/docker.yml").read_text(encoding="utf-8")
 dockerfile = (root / "Dockerfile").read_text(encoding="utf-8")
 dockerignore = (root / ".dockerignore").read_text(encoding="utf-8")
 operations = (root / "docs/operations.md").read_text(encoding="utf-8")
+python_lock = (root / "containers/python-oracledb-requirements.lock").read_text(encoding="utf-8")
 # README is intentionally not a supply-chain proof surface; the container
 # contract is enforced against Dockerfile/.dockerignore/docs/operations.md.
 
@@ -36,20 +39,18 @@ ORACLE_SERVICE = (
     "gvenzl/oracle-free:23-slim@sha256:"
     "fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8"
 )
-ORACLELINUX = (
-    "oraclelinux:9@sha256:"
-    "fe2c9e975c93c1b8c00712e5ad40e0127c0f1982c2d76031f1e09e5307e32aeb"
+BUILDER_IMAGE = (
+    "rust:1.88.0-slim-bookworm@sha256:"
+    "38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89"
+)
+RUNTIME_IMAGE = (
+    "debian:bookworm-slim@sha256:"
+    "3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251"
 )
 DOCKERFILE_FRONTEND = (
     "# syntax=docker/dockerfile:1@sha256:"
     "87999aa3d42bdc6bea60565083ee17e86d1f3339802f543c0d03998580f9cb89"
 )
-RUSTUP_SHA = {
-    "x86_64-unknown-linux-gnu": "20a06e644b0d9bd2fbdbfd52d42540bdde820ea7df86e92e533c073da0cdd43c",
-    "aarch64-unknown-linux-gnu": "e3853c5a252fca15252d07cb23a1bdd9377a8c6f3efa01531109281ae47f841c",
-}
-
-
 def require(condition: bool, message: str) -> None:
     if not condition:
         raise AssertionError(message)
@@ -109,15 +110,16 @@ def validate_ci(workflow: str) -> None:
         "python-oracledb fixture policy version is not exact",
     )
     require(
-        workflow.count("PYTHON_ORACLEDB_VERSION") == 3,
-        "python-oracledb policy is missing or overridden outside the reviewed uses",
+        workflow.count("PYTHON_ORACLEDB_VERSION") == 2,
+        "python-oracledb version assertion is missing or unexpectedly overridden",
     )
-    python_installs = re.findall(
-        r'^\s*python3 -m pip install[^\n]*"oracledb==\$\{PYTHON_ORACLEDB_VERSION\}"[^\n]*$',
-        workflow,
-        re.MULTILINE,
-    )
-    require(len(python_installs) == 1, "python-oracledb install is not exact-policy-bound")
+    require("--require-hashes" in workflow, "Python fixture installation does not enforce wheel hashes")
+    require("containers/python-oracledb-requirements.lock" in workflow,
+            "Python fixture installation does not use the committed transitive lock")
+    require("--no-index" in workflow and "--find-links \"$wheelhouse\"" in workflow,
+            "Python fixture is not installed from its hash-verified wheelhouse")
+    require('test "$(python3 -c' in workflow and '"3.12"' in workflow,
+            "Python fixture interpreter is not pinned to the wheel lock platform")
     require(
         'if oracledb.__version__ != expected:' in workflow,
         "loaded python-oracledb version is not asserted",
@@ -148,6 +150,94 @@ def validate_ci(workflow: str) -> None:
         "bash tests/container_supply_chain_contract_test.sh --context" in sensitive_body,
         "sensitive-data CI does not run the Docker context inventory proof",
     )
+    feature_job = re.search(
+        r"^  plsql-intelligence:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+        workflow,
+        re.MULTILINE | re.DOTALL,
+    )
+    require(feature_job is not None, "required PL/SQL feature job is missing")
+    feature_body = feature_job.group("body")
+    require("continue-on-error" not in feature_body, "PL/SQL feature job is still advisory")
+    require("cargo test -p oraclemcp --all-targets" in feature_body,
+            "default engine-enabled feature tests are missing")
+    require("cargo build -p oraclemcp --no-default-features" in feature_body,
+            "engine-free opt-out binary build is missing")
+    require("--no-default-features" in feature_body,
+            "engine-free opt-out tests are missing")
+    require("scripts/plsql_feature_lane_check.sh --selftest" in feature_body,
+            "nine-tool registry check and negative selftest are missing")
+    require("CARGO_PROFILE_TEST_DEBUG: \"0\"" in feature_body
+            and "CARGO_PROFILE_TEST_CODEGEN_UNITS: \"16\"" in feature_body,
+            "feature lane memory/codegen bounds are missing")
+
+
+def validate_release(workflow: str) -> None:
+    targets = {
+        "x86_64-unknown-linux-gnu",
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu",
+        "aarch64-unknown-linux-musl",
+        "x86_64-apple-darwin",
+        "aarch64-apple-darwin",
+        "x86_64-pc-windows-msvc",
+    }
+    build_matrix = re.search(r"^  build:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+                             workflow, re.MULTILINE | re.DOTALL)
+    acceptance = re.search(r"^  artifact-acceptance:\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n)",
+                           workflow, re.MULTILINE | re.DOTALL)
+    require(build_matrix is not None and acceptance is not None,
+            "release target build or artifact acceptance job is missing")
+    for target in targets:
+        require(target in build_matrix.group("body"), f"release build matrix misses {target}")
+        require(target in acceptance.group("body"), f"release acceptance matrix misses {target}")
+    require("scripts/antlr_codegen_release_gate.sh" in workflow,
+            "release does not enforce the antlr-codegen gate")
+    require("release_artifact_acceptance.py --binary" in acceptance.group("body"),
+            "release archives are not executed on native runners")
+    require("artifact-acceptance" in workflow, "release publish gates do not depend on archive acceptance")
+
+
+def validate_docker_recovery(workflow: str) -> None:
+    require("inputs.variant" not in workflow and "matrix.variant" not in workflow,
+            "Docker recovery still selects a variant")
+    require("-plsql-intelligence" not in workflow and "plsql-intelligence-latest" not in workflow,
+            "separate PL/SQL image tag remains")
+    require('target="runtime"' in workflow and 'expected_engine="true"' in workflow,
+            "Docker recovery does not target the single engine-enabled runtime")
+
+
+def validate_python_lock(source: str) -> None:
+    expected_hashes = {
+        "cffi": "c1453022f490d2459a11819d83ad1d586e9ff65a12ac3e705ffebd46d3685dcf",
+        "cryptography": "ff838d62ec1bfce4f9ba7fa16f4a7b554cd8d0c299e6be37502161a660c84eef",
+        "oracledb": "579f2c568433523a990cde5bea73c980d144754dc54d3ab2cd37efd670dc31d6",
+        "pycparser": "b727414169a36b7d524c1c3e31839a521725078d7b2ff038656844266160a992",
+        "typing-extensions": "481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8",
+    }
+    packages: dict[str, tuple[str, str]] = {}
+    pending: str | None = None
+    for raw in source.splitlines():
+        line = raw.strip().rstrip("\\").strip()
+        if not line or line.startswith("#"):
+            continue
+        package = re.fullmatch(r"([a-zA-Z0-9_-]+)==([0-9][a-zA-Z0-9.+!-]*)", line)
+        digest = re.fullmatch(r"--hash=sha256:([0-9a-f]{64})", line)
+        if package is not None:
+            require(pending is None, f"package {pending} is missing a hash")
+            pending = package.group(1).lower().replace("_", "-")
+            packages[pending] = (package.group(2), "")
+        elif digest is not None:
+            require(pending is not None, "hash appears without a locked package")
+            packages[pending] = (packages[pending][0], digest.group(1))
+            pending = None
+        else:
+            raise AssertionError(f"invalid Python lock entry: {raw}")
+    require(pending is None, f"package {pending} is missing a hash")
+    require(set(packages) == {"cffi", "cryptography", "oracledb", "pycparser", "typing-extensions"},
+            f"Python dependency closure drifted: {sorted(packages)}")
+    require(all(digest for _, digest in packages.values()), "a Python dependency is not hash locked")
+    require({name: digest for name, (_, digest) in packages.items()} == expected_hashes,
+            "Python dependency wheel hash drifted from the reviewed lock")
 
 
 def validate_dockerfile(source: str) -> None:
@@ -167,32 +257,22 @@ def validate_dockerfile(source: str) -> None:
             external.append(image)
         if alias is not None:
             stages.add(alias.lower())
-    require(external == [ORACLELINUX, ORACLELINUX], f"unreviewed external FROM set: {external}")
-
-    require("ARG RUSTUP_VERSION=1.28.2" in source, "rustup-init version is not pinned")
-    require("https://sh.rustup.rs" not in source, "streamed rustup shell bootstrap remains")
+    require(external == [BUILDER_IMAGE, RUNTIME_IMAGE], f"unreviewed external FROM set: {external}")
     require(
-        '"https://static.rust-lang.org/rustup/archive/${RUSTUP_VERSION}/${rustup_target}/rustup-init"'
-        in source,
-        "pinned rustup-init archive URL is missing",
+        "rustup toolchain install nightly-2026-05-11 --profile minimal" in source,
+        "pinned nightly toolchain is not installed in the digest-locked builder",
     )
-    require(
-        'echo "${rustup_sha}  /tmp/rustup-init" | sha256sum --check --strict' in source,
-        "rustup-init bytes are not fail-closed SHA-256 checked",
-    )
-    for target, digest in RUSTUP_SHA.items():
-        require(target in source, f"rustup-init target is missing: {target}")
-        require(digest in source, f"rustup-init digest is missing: {target}")
+    require("dnf " not in source and "apt-get " not in source,
+            "Dockerfile installs packages from a mutable OS repository")
+    require("builder-plsql-intelligence" not in source, "separate engine builder remains")
 
     builds = re.findall(r"^RUN cargo build.*$", source, re.MULTILINE)
-    require(len(builds) == 2, f"expected two release cargo builds, found {len(builds)}")
-    require(all(" --locked " in f" {line} " for line in builds), "release cargo build lacks --locked")
+    require(len(builds) == 1, f"expected one release cargo build, found {len(builds)}")
+    require(" --locked " in f" {builds[0]} ", "release cargo build lacks --locked")
+    require("--no-default-features" not in builds[0], "container disables default features")
 
     require("FROM runtime-base AS runtime\n" in source, "core runtime does not inherit runtime-base")
-    require(
-        "FROM runtime-base AS runtime-plsql-intelligence\n" in source,
-        "PL/SQL runtime does not inherit runtime-base",
-    )
+    require("runtime-plsql-intelligence" not in source, "separate PL/SQL runtime remains")
     require("useradd --uid 10001 --gid 10001 --no-create-home" in source, "fixed runtime UID/GID is missing")
     require("USER 10001:10001" in source, "runtime user is not fixed and nonzero")
     require("USER root" not in source and "USER 0" not in source, "runtime resets to root")
@@ -355,6 +435,9 @@ def validate_operations(source: str) -> None:
 
 
 validate_ci(ci)
+validate_release(release)
+validate_docker_recovery(docker_recovery)
+validate_python_lock(python_lock)
 validate_dockerfile(dockerfile)
 validate_dockerignore(dockerignore)
 validate_operations(operations)
@@ -375,23 +458,30 @@ require(
 )
 
 rejects("PSScriptAnalyzer version drift", validate_ci, ci.replace('"1.25.0"', '"1.25.1"', 1))
+rejects("advisory PL/SQL lane", validate_ci, ci.replace("  plsql-intelligence:\n", "  plsql-intelligence:\n    continue-on-error: true\n", 1))
+rejects("missing native archive acceptance target", validate_release,
+        release.replace("            runner: macos-15\n            archive: tar.gz", "            runner: macos-15\n            archive: tar.gz", 1)
+        .replace("          - target: aarch64-apple-darwin\n            runner: macos-15\n            archive: tar.gz\n", "", 1))
 rejects(
     "PSScriptAnalyzer unpinned install",
     validate_ci,
     ci.replace(" -RequiredVersion $env:PSSCRIPTANALYZER_VERSION", "", 1),
 )
 rejects("python-oracledb version drift", validate_ci, ci.replace('"4.0.2"', '"4.0.3"', 1))
+rejects("mutated Python wheel hash", validate_python_lock,
+        python_lock.replace("579f2c568433523a990cde5bea73c980d144754dc54d3ab2cd37efd670dc31d6", "0" * 64, 1))
 rejects("tag-only service", validate_ci, ci.replace(ORACLE_SERVICE, "gvenzl/oracle-free:23-slim", 1))
 rejects(
     "tag-only Dockerfile frontend",
     validate_dockerfile,
     dockerfile.replace(DOCKERFILE_FRONTEND, "# syntax=docker/dockerfile:1", 1),
 )
-rejects("tag-only Docker base", validate_dockerfile, dockerfile.replace(ORACLELINUX, "oraclelinux:9", 1))
+rejects("tag-only Docker builder", validate_dockerfile, dockerfile.replace(BUILDER_IMAGE, "rust:1.88.0-slim-bookworm", 1))
+rejects("tag-only Docker runtime", validate_dockerfile, dockerfile.replace(RUNTIME_IMAGE, "debian:bookworm-slim", 1))
 rejects(
-    "wrong rustup-init digest",
+    "wrong builder OS digest",
     validate_dockerfile,
-    dockerfile.replace(RUSTUP_SHA["x86_64-unknown-linux-gnu"], "0" * 64, 1),
+    dockerfile.replace("38bc5a86d998772d4aec2348656ed21438d20fcdce2795b56ca434cf21430d89", "0" * 64, 1),
 )
 rejects("unlocked Cargo build", validate_dockerfile, dockerfile.replace("cargo build --locked", "cargo build", 1))
 rejects("root runtime", validate_dockerfile, dockerfile.replace("USER 10001:10001", "USER root", 1))
@@ -742,7 +832,7 @@ docker run --rm \
   -e XDG_STATE_HOME=/home/oraclemcp/.local/state \
   -v "$host_config:/home/oraclemcp/.config/oraclemcp:ro" \
   -v "$host_state:/home/oraclemcp/.local/state/oraclemcp" \
-  oraclelinux:9@sha256:fe2c9e975c93c1b8c00712e5ad40e0127c0f1982c2d76031f1e09e5307e32aeb \
+  debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251 \
   sh -ceu '
     test "$(id -u)" -ne 0
     test -r "$XDG_CONFIG_HOME/oraclemcp/profiles.toml"

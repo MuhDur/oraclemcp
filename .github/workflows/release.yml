@@ -257,43 +257,40 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             build_tool: cargo
-            binary_warn_bytes: 43000000
-            binary_limit_bytes: 48000000
+            binary_warn_bytes: 99279928
+            binary_limit_bytes: 108735159
           - os: ubuntu-latest
             target: x86_64-unknown-linux-musl
             build_tool: cargo
-            binary_warn_bytes: 43000000
-            binary_limit_bytes: 48000000
+            binary_warn_bytes: 100000000
+            binary_limit_bytes: 115000000
           - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             build_tool: cargo
-            binary_warn_bytes: 43000000
-            binary_limit_bytes: 48000000
+            binary_warn_bytes: 100000000
+            binary_limit_bytes: 115000000
           - os: ubuntu-latest
             target: aarch64-unknown-linux-musl
             build_tool: cargo-zigbuild
-            binary_warn_bytes: 43000000
-            binary_limit_bytes: 48000000
+            binary_warn_bytes: 100000000
+            binary_limit_bytes: 115000000
           - os: macos-latest
             target: x86_64-apple-darwin
             build_tool: cargo
-            binary_warn_bytes: 43000000
-            binary_limit_bytes: 48000000
+            binary_warn_bytes: 100000000
+            binary_limit_bytes: 115000000
           - os: macos-latest
             target: aarch64-apple-darwin
             build_tool: cargo
-            binary_warn_bytes: 43000000
-            binary_limit_bytes: 48000000
+            binary_warn_bytes: 100000000
+            binary_limit_bytes: 115000000
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             build_tool: cargo
-            # Aligned with the other six targets (was 36/40 MB). The 0.11.0 B1
-            # un-gate builds the official `oracledb` fallback into every target
-            # (--features dashboard-bundle,oracledb), which pushed the Windows
-            # binary to ~40.35 MB — past the old 40 MB Windows-only cap while
-            # well under the 48 MB hard budget every other target already uses.
-            binary_warn_bytes: 43000000
-            binary_limit_bytes: 48000000
+            # Initial engine-enabled envelope; replace with this target's native
+            # measured size + 5% / 15% after the pre-tag candidate rehearsal.
+            binary_warn_bytes: 100000000
+            binary_limit_bytes: 115000000
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -306,9 +303,15 @@ jobs:
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           key: ${{ matrix.target }}
+
+      - name: Refuse parser regeneration and antlr-codegen
+        run: bash scripts/antlr_codegen_release_gate.sh
 
       - name: Install Zig (aarch64 musl)
         if: matrix.build_tool == 'cargo-zigbuild'
@@ -345,10 +348,14 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${{ matrix.build_tool }}" = "cargo-zigbuild" ]; then
-            cargo zigbuild --release -p oraclemcp --features dashboard-bundle,oracledb --target "${{ matrix.target }}"
+            build=(cargo zigbuild --locked --release -p oraclemcp --features dashboard-bundle,oracledb --target "${{ matrix.target }}")
           else
-            cargo build --release -p oraclemcp --features dashboard-bundle,oracledb --target "${{ matrix.target }}"
+            build=(cargo build --locked --release -p oraclemcp --features dashboard-bundle,oracledb --target "${{ matrix.target }}")
           fi
+          python3 scripts/release_build_metrics.py \
+            --target "${{ matrix.target }}" \
+            --output "target/ci-logs/release-metrics.json" \
+            -- "${build[@]}"
 
       - name: Check binary size and musl static linkage
         shell: bash
@@ -391,6 +398,22 @@ jobs:
               fi
               ;;
           esac
+          python3 - "$size" "$warn" "$limit" "${{ matrix.target }}" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          size, warn, limit = map(int, sys.argv[1:4])
+          target = sys.argv[4]
+          path = pathlib.Path("target/ci-logs/release-metrics.json")
+          report = json.loads(path.read_text())
+          report.update(binary_size_bytes=size, warn_bytes=warn, limit_bytes=limit)
+          path.write_text(json.dumps(report, indent=2) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write("| Target | Wall seconds | Peak process RSS bytes | Binary bytes | Warn bytes | Hard limit bytes |\n")
+              summary.write("|---|---:|---:|---:|---:|---:|\n")
+              summary.write(f"| {target} | {report['elapsed_seconds']} | {report['peak_process_tree_rss_bytes']} | {size} | {warn} | {limit} |\n")
+          PY
 
       - name: Package (unix)
         if: runner.os != 'Windows'
@@ -425,6 +448,69 @@ jobs:
             oraclemcp-${{ matrix.target }}.zip*
           if-no-files-found: error
 
+      - name: Retain build resource measurements
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: release-metrics-${{ matrix.target }}
+          path: target/ci-logs/release-metrics.json
+          if-no-files-found: error
+          retention-days: 90
+
+  artifact-acceptance:
+    name: execute ${{ matrix.target }} archive
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-15
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: oraclemcp-${{ matrix.target }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Execute packaged release archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="oraclemcp-${{ matrix.target }}.${{ matrix.archive }}"
+          mkdir unpacked
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z x "$archive" -ounpacked >/dev/null
+            binary="unpacked/oraclemcp-${{ matrix.target }}/oraclemcp.exe"
+          else
+            tar xzf "$archive" -C unpacked
+            binary="unpacked/oraclemcp-${{ matrix.target }}/oraclemcp"
+          fi
+          python3 scripts/release_artifact_acceptance.py --binary "$binary" --target "${{ matrix.target }}"
+
   release:
     name: publish GitHub release
     # release-acceptance is a DIRECT need (not only transitive through
@@ -433,13 +519,14 @@ jobs:
     # `result == 'success'` check below, a prerelease could publish without
     # ever waiting on the acceptance suite once `build` stopped depending on
     # it (plan §25.3 P1.1 — see the comment on `build.needs`).
-    needs: [build, publish-crates, release-acceptance, web-build]
+    needs: [build, artifact-acceptance, publish-crates, release-acceptance, web-build]
     if: >-
       ${{
         always() &&
         startsWith(github.ref, 'refs/tags/') &&
         needs.web-build.result == 'success' &&
         needs.build.result == 'success' &&
+        needs.artifact-acceptance.result == 'success' &&
         needs.release-acceptance.result == 'success' &&
         (contains(github.ref_name, '-') || needs.publish-crates.result == 'success')
       }}
@@ -615,7 +702,7 @@ jobs:
     # requiring it here (rather than on `build`) is what keeps publishing
     # gated on the full acceptance suite while still letting the two long
     # jobs overlap instead of serializing.
-    needs: [build, release-acceptance]
+    needs: [build, artifact-acceptance, release-acceptance]
     if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     environment: crates-io
@@ -640,7 +727,7 @@ jobs:
 
   docker:
     name: publish GHCR image
-    needs: [release, web-build]
+    needs: [release, web-build, artifact-acceptance]
     concurrency:
       group: docker-provenance-${{ github.ref_name }}-core
       cancel-in-progress: false
@@ -703,6 +790,12 @@ jobs:
           # records the full build graph (base images, build steps).
           provenance: mode=max
           sbom: true
+      - name: Execute GHCR image and verify all nine tools
+        run: |
+          set -euo pipefail
+          image="ghcr.io/muhdur/oraclemcp@${{ steps.build.outputs.digest }}"
+          docker pull "$image"
+          python3 scripts/release_artifact_acceptance.py --image "$image" --target ghcr-linux-amd64
       # GitHub-native build provenance attestation for the pushed image, keyed
       # by its immutable digest. Verifiable with `gh attestation verify oci://...`.
       - name: Attest image build provenance

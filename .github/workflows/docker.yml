@@ -11,14 +11,6 @@ on:
         description: "Existing release version whose immutable image should be promoted."
         required: true
         type: string
-      variant:
-        description: "Image variant to promote."
-        required: true
-        default: "core"
-        type: choice
-        options:
-          - core
-          - plsql-intelligence
       operation:
         description: "Rollback retags the existing digest; rebuild first proves byte identity."
         required: true
@@ -32,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: docker-provenance-v${{ inputs.version }}-${{ inputs.variant }}
+  group: docker-provenance-v${{ inputs.version }}
   cancel-in-progress: false
 
 env:
@@ -47,7 +39,6 @@ jobs:
     timeout-minutes: 10
     outputs:
       version: ${{ steps.release.outputs.version }}
-      variant: ${{ steps.release.outputs.variant }}
       operation: ${{ steps.release.outputs.operation }}
       source_sha: ${{ steps.provenance.outputs.source_sha }}
       version_image: ${{ steps.provenance.outputs.version_image }}
@@ -60,7 +51,6 @@ jobs:
         shell: bash
         env:
           INPUT_VERSION: ${{ inputs.version }}
-          INPUT_VARIANT: ${{ inputs.variant }}
           INPUT_OPERATION: ${{ inputs.operation }}
         run: |
           set -euo pipefail
@@ -72,17 +62,12 @@ jobs:
             echo "invalid release version: $INPUT_VERSION" >&2
             exit 1
           }
-          case "$INPUT_VARIANT" in
-            core|plsql-intelligence) ;;
-            *) echo "invalid image variant: $INPUT_VARIANT" >&2; exit 1 ;;
-          esac
           case "$INPUT_OPERATION" in
             rollback|rebuild) ;;
             *) echo "invalid recovery operation: $INPUT_OPERATION" >&2; exit 1 ;;
           esac
           {
             echo "version=$INPUT_VERSION"
-            echo "variant=$INPUT_VARIANT"
             echo "operation=$INPUT_OPERATION"
           } >> "$GITHUB_OUTPUT"
 
@@ -102,7 +87,6 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ steps.release.outputs.version }}
-          VARIANT: ${{ steps.release.outputs.variant }}
           # Re-validates an already-published release: today's tier-B lane
           # state says nothing about that tag, so it must not block a rollback.
           RELEASE_PREFLIGHT_EXISTING_RELEASE: "1"
@@ -135,20 +119,10 @@ jobs:
           }
           RELEASE_TAG="v$VERSION" bash scripts/release_preflight.sh
 
-          case "$VARIANT" in
-            core)
-              suffix=""
-              stable_rolling="latest"
-              target="runtime"
-              expected_engine="false"
-              ;;
-            plsql-intelligence)
-              suffix="-plsql-intelligence"
-              stable_rolling="plsql-intelligence-latest"
-              target="runtime-plsql-intelligence"
-              expected_engine="true"
-              ;;
-          esac
+          suffix=""
+          stable_rolling="latest"
+          target="runtime"
+          expected_engine="true"
           if [[ "$VERSION" == *-* ]]; then
             rolling_image=""
           else
@@ -237,7 +211,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.verify-release.outputs.version }}
-          VARIANT: ${{ needs.verify-release.outputs.variant }}
+          VARIANT: core
           SOURCE_SHA: ${{ needs.verify-release.outputs.source_sha }}
           DIGEST: ${{ steps.existing.outputs.digest }}
         run: |
@@ -322,7 +296,7 @@ jobs:
         env:
           SOURCE_SHA: ${{ needs.verify-release.outputs.source_sha }}
           VERSION: ${{ needs.verify-release.outputs.version }}
-          VARIANT: ${{ needs.verify-release.outputs.variant }}
+          VARIANT: core
           DIGEST: ${{ steps.build.outputs.digest }}
           COSIGN_YES: "true"
         run: |
@@ -381,6 +355,11 @@ jobs:
             fi
           '
 
+      - name: Execute the single engine-enabled image through MCP tools/list
+        env:
+          DIGEST: ${{ steps.selected.outputs.digest }}
+        run: python3 scripts/release_artifact_acceptance.py --image "$IMAGE_REPOSITORY@$DIGEST" --target ghcr-linux-amd64
+
       # Rebuild may repair a missing version tag, but performs a second
       # existence check immediately before creation and never overwrites one.
       - name: Publish missing immutable version tag
@@ -427,7 +406,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ needs.verify-release.outputs.version }}
-          VARIANT: ${{ needs.verify-release.outputs.variant }}
+          VARIANT: core
           OPERATION: ${{ needs.verify-release.outputs.operation }}
           SOURCE_SHA: ${{ needs.verify-release.outputs.source_sha }}
           VERSION_IMAGE: ${{ needs.verify-release.outputs.version_image }}
