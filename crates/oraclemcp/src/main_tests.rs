@@ -10,6 +10,9 @@ use oraclemcp_audit::{AuditRecord, DbEvidence};
 use oraclemcp_config::HttpOAuthConfig;
 use std::sync::atomic::AtomicUsize;
 
+#[path = "main_tests_setup.rs"]
+mod setup;
+
 #[test]
 fn embedded_installers_match_repo_root() {
     // The crate-local install.sh/install.ps1 (embedded via include_bytes! so the

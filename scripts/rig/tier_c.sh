@@ -103,12 +103,26 @@ print(json.dumps(row, sort_keys=True))
 PY
 done
 
-python3 - "$rows" "$out_dir/summary.json" "$head" "$tree_dirty" <<'PY'
+client_binary="${CARGO_TARGET_DIR:-$ROOT/target}/release/oraclemcp"
+client_summary="$out_dir/clients.json"
+client_exit=0
+echo "tier-c: real MCP client snippet proofs"
+PYTHONDONTWRITEBYTECODE=1 python3 "$ROOT/scripts/rig/client_snippets.py" \
+  --binary "$client_binary" --summary-file "$client_summary" || client_exit=$?
+
+python3 - "$rows" "$out_dir/summary.json" "$head" "$tree_dirty" "$client_summary" "$client_exit" <<'PY'
 import json, sys
-rows_path, summary_path, head, dirty = sys.argv[1:]
+rows_path, summary_path, head, dirty, client_summary_path, client_exit = sys.argv[1:]
 lanes = [json.loads(line) for line in open(rows_path) if line.strip()]
 lanes.append({"lane": "adb", "verdict": "delegated", "reason": "Always-Free ADB runs in the W9 harness (T9.1)"})
-summary = {"sha": head, "tree_dirty": dirty == "true", "lanes": lanes}
+try:
+    clients = json.load(open(client_summary_path))
+except (OSError, ValueError):
+    clients = {"clients": [], "verdict": "fail", "reason": "client_proof_runner_failed_without_summary"}
+else:
+    records = clients.get("clients", [])
+    clients["verdict"] = "fail" if client_exit != "0" or any(row.get("status") == "fail" for row in records) else "pass"
+summary = {"sha": head, "tree_dirty": dirty == "true", "lanes": lanes, "clients": clients}
 with open(summary_path, "w") as handle:
     json.dump(summary, handle, indent=2, sort_keys=True)
     handle.write("\n")

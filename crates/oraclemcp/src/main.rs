@@ -4899,6 +4899,31 @@ fn setup_payload(
                 }
             }
         },
+        "cursor_mcp_json": {
+            "mcpServers": {
+                "oracle": {
+                    "command": snippet_command,
+                    "args": ["serve", "--profile", profile, "--allow-no-auth"]
+                }
+            }
+        },
+        "vscode_mcp_json": {
+            "servers": {
+                "oracle": {
+                    "type": "stdio",
+                    "command": snippet_command,
+                    "args": ["serve", "--profile", profile, "--allow-no-auth"]
+                }
+            }
+        },
+        "gemini_settings_json": {
+            "mcpServers": {
+                "oracle": {
+                    "command": snippet_command,
+                    "args": ["serve", "--profile", profile, "--allow-no-auth"]
+                }
+            }
+        },
         "codex_config_toml": format!(
             "[mcp_servers.oracle]\ncommand = {}\nargs = [\"serve\", \"--profile\", {}, \"--allow-no-auth\"]\n",
             toml_string_encode(snippet_command),
@@ -5221,8 +5246,20 @@ fn run_setup(
             serde_json::to_string_pretty(&payload["claude_mcp_json"]).unwrap()
         ));
         output.push_str(&format!(
+            "Cursor MCP JSON:\n{}\n\n",
+            serde_json::to_string_pretty(&payload["cursor_mcp_json"]).unwrap()
+        ));
+        output.push_str(&format!(
+            "VS Code MCP JSON:\n{}\n\n",
+            serde_json::to_string_pretty(&payload["vscode_mcp_json"]).unwrap()
+        ));
+        output.push_str(&format!(
             "Codex config TOML:\n{}",
             payload["codex_config_toml"].as_str().unwrap_or("")
+        ));
+        output.push_str(&format!(
+            "\nGemini CLI settings JSON:\n{}\n",
+            serde_json::to_string_pretty(&payload["gemini_settings_json"]).unwrap()
         ));
         output.push_str("\nHTTP per-client credentials:\n");
         output.push_str(&format!(
