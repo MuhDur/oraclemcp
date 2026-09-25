@@ -82,6 +82,7 @@ jobs:
             --arg sha "$GITHUB_SHA" \
             --arg toolchain "$RUST_TOOLCHAIN" \
             --argjson max_preemptions "$LOOM_MAX_PREEMPTIONS" \
+            --argjson connect_guard_preemptions 0 \
             --argjson audit "$audit_status" \
             --argjson admission "$admission_status" \
             --argjson lock_order "$lock_order_status" \
@@ -93,6 +94,7 @@ jobs:
               commit_sha: $sha,
               toolchain: $toolchain,
               loom_max_preemptions: $max_preemptions,
+              connect_guard_preemption_bound: $connect_guard_preemptions,
               outcome: (if ($audit + $admission + $lock_order + $official_actor) == 0 then "passed" else "failed" end),
               models: [
                 {crate: "oraclemcp-audit", test_target: "loom_shipping_spool", exit_code: $audit},

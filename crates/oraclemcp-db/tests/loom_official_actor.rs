@@ -10,8 +10,9 @@
 //! Production uses asupersync mpsc/oneshot channels and std::sync::Mutex,
 //! which Loom cannot instrument. This model mirrors their synchronization
 //! skeleton with Loom primitives. The operation-admission event is the
-//! run_actor_loop ACTIVE status re-check immediately before execute; counters
-//! observe whether admission happened after quarantine.
+//! run_actor_loop ACTIVE status re-check immediately before execute. A separate
+//! execute-site assertion catches an operation after quarantine if the re-check
+//! is removed.
 //!
 //! Source correspondence (re-derive with rg -n in src/oracledb_actor.rs):
 //! - BlockingConnectionActor::call_inner: ActorState::require_active, one-slot
@@ -60,9 +61,9 @@ enum Ack {
 struct Handshake {
     command_pending: [bool; COMMANDS],
     actor_started: [bool; COMMANDS],
-    receiver_live: [bool; COMMANDS],
     reply_ready: [bool; COMMANDS],
     cancelled: [bool; COMMANDS],
+    cancelled_before_reply: [bool; COMMANDS],
     acknowledgement: [Option<Ack>; COMMANDS],
     timeout_fired: [bool; COMMANDS],
     caller_returned: [bool; COMMANDS],
@@ -74,7 +75,6 @@ struct ActorModel {
     handshake: Mutex<Handshake>,
     changed: Condvar,
     operations: AtomicUsize,
-    operations_admitted_after_quarantine: AtomicUsize,
     refused_commands: AtomicUsize,
     resource_drops: AtomicUsize,
 }
@@ -83,20 +83,18 @@ impl ActorModel {
     fn new() -> Self {
         let mut handshake = Handshake::default();
         handshake.command_pending[0] = true;
-        handshake.receiver_live[0] = true;
         Self {
             state: AtomicUsize::new(ACTIVE),
             handshake: Mutex::new(handshake),
             changed: Condvar::new(),
             operations: AtomicUsize::new(0),
-            operations_admitted_after_quarantine: AtomicUsize::new(0),
             refused_commands: AtomicUsize::new(0),
             resource_drops: AtomicUsize::new(0),
         }
     }
 
-    /// Mirrors receive -> status-check -> execute -> reply -> ack in production.
-    /// The status load is the model's operation-admission linearization point.
+    /// Mirrors receive -> ACTIVE re-check -> execute -> reply -> ack in production.
+    /// The status load immediately before the operation is its admission point.
     fn run_actor_loop(&self, command_count: usize, status_recheck: bool) {
         for command in 0..command_count {
             let mut handshake = self.handshake.lock().unwrap();
@@ -121,20 +119,15 @@ impl ActorModel {
                 self.changed.notify_all();
                 break;
             }
-            if admitted_state != ACTIVE {
-                self.operations_admitted_after_quarantine
-                    .fetch_add(1, Ordering::Relaxed);
-            }
-            let mut handshake = self.handshake.lock().unwrap();
-            if !handshake.receiver_live[command] {
-                self.refused_commands.fetch_add(1, Ordering::Relaxed);
-                self.quarantine();
-                handshake.actor_stopped = true;
-                self.changed.notify_all();
-                break;
-            }
-
+            // This status snapshot is the operation's admission point. Keep
+            // the assertion unconditional so the planted no-recheck model is
+            // checked at the same point as the normal status re-check.
+            assert_eq!(
+                admitted_state, ACTIVE,
+                "injected actor operation admitted after quarantine"
+            );
             self.operations.fetch_add(1, Ordering::Relaxed);
+            let mut handshake = self.handshake.lock().unwrap();
             handshake.reply_ready[command] = true;
             self.changed.notify_all();
 
@@ -183,20 +176,35 @@ impl ActorModel {
 fn loom_actor_cancel_vs_completion_no_lost_wakeup() {
     loom::model(|| {
         let actor = Arc::new(ActorModel::new());
+        {
+            let mut handshake = actor.handshake.lock().unwrap();
+            // Seed command zero's completed Continue as the model prefix; this
+            // case explores only command two's Continue-versus-cancel race.
+            handshake.acknowledgement[0] = Some(Ack::Continue);
+            handshake.caller_returned[0] = true;
+            handshake.command_pending[1] = true;
+        }
         let actor_thread = {
             let actor = Arc::clone(&actor);
-            thread::spawn(move || actor.run_actor_loop(1, true))
+            thread::spawn(move || actor.run_actor_loop(COMMANDS, true))
         };
         let caller = {
             let actor = Arc::clone(&actor);
             thread::spawn(move || {
                 let mut handshake = actor.handshake.lock().unwrap();
-                while !handshake.reply_ready[0] && actor.state.load(Ordering::Acquire) == ACTIVE {
+                while !handshake.reply_ready[1] && actor.state.load(Ordering::Acquire) == ACTIVE {
                     handshake = actor.changed.wait(handshake).unwrap();
                 }
-                if handshake.reply_ready[0] && !handshake.cancelled[0] {
-                    handshake.acknowledgement[0] = Some(Ack::Continue);
-                    handshake.caller_returned[0] = true;
+                drop(handshake);
+
+                thread::yield_now();
+                let mut handshake = actor.handshake.lock().unwrap();
+                if handshake.reply_ready[1]
+                    && !handshake.cancelled[1]
+                    && handshake.acknowledgement[1].is_none()
+                {
+                    handshake.acknowledgement[1] = Some(Ack::Continue);
+                    handshake.caller_returned[1] = true;
                     actor.changed.notify_all();
                 }
             })
@@ -204,14 +212,16 @@ fn loom_actor_cancel_vs_completion_no_lost_wakeup() {
         let canceller = {
             let actor = Arc::clone(&actor);
             thread::spawn(move || {
+                let mut handshake = actor.handshake.lock().unwrap();
+                while !handshake.reply_ready[1] && actor.state.load(Ordering::Acquire) == ACTIVE {
+                    handshake = actor.changed.wait(handshake).unwrap();
+                }
+                drop(handshake);
                 thread::yield_now();
                 let mut handshake = actor.handshake.lock().unwrap();
-                if handshake.acknowledgement[0] != Some(Ack::Continue) {
-                    handshake.cancelled[0] = true;
-                    handshake.receiver_live[0] = false;
-                    if handshake.reply_ready[0] {
-                        handshake.acknowledgement[0] = Some(Ack::Quarantine);
-                    }
+                if handshake.reply_ready[1] && handshake.acknowledgement[1].is_none() {
+                    handshake.cancelled[1] = true;
+                    handshake.acknowledgement[1] = Some(Ack::Quarantine);
                     actor.quarantine();
                     actor.changed.notify_all();
                 }
@@ -223,22 +233,23 @@ fn loom_actor_cancel_vs_completion_no_lost_wakeup() {
         canceller.join().expect("cancellation race completes");
 
         let handshake = actor.handshake.lock().unwrap();
-        let caller_returned = handshake.caller_returned[0];
-        let cancelled = handshake.cancelled[0];
+        let caller_returned = handshake.caller_returned[1];
+        let cancelled = handshake.cancelled[1];
+        let acknowledgement = handshake.acknowledgement[1];
         drop(handshake);
         let state = actor.state.load(Ordering::Acquire);
         assert!(
-            (caller_returned && state == CLOSED && !cancelled)
-                || (!caller_returned && state == QUARANTINED && cancelled),
-            "terminal caller and actor states must agree"
+            (caller_returned
+                && acknowledgement == Some(Ack::Continue)
+                && state == CLOSED
+                && !cancelled)
+                || (!caller_returned
+                    && acknowledgement == Some(Ack::Quarantine)
+                    && state == QUARANTINED
+                    && cancelled),
+            "terminal caller and actor states must agree: returned={caller_returned}, ack={acknowledgement:?}, state={state}, cancelled={cancelled}"
         );
-        assert_eq!(
-            actor
-                .operations_admitted_after_quarantine
-                .load(Ordering::Acquire),
-            0,
-            "no operation is admitted after quarantine"
-        );
+        assert_eq!(actor.operations.load(Ordering::Acquire), 2);
         assert_eq!(actor.resource_drops.load(Ordering::Acquire), 1);
     });
 }
@@ -266,7 +277,6 @@ fn loom_actor_no_reuse_after_quarantine() {
                 handshake.acknowledgement[0] = Some(Ack::Continue);
                 handshake.caller_returned[0] = true;
                 handshake.command_pending[1] = true;
-                handshake.receiver_live[1] = true;
                 actor.changed.notify_all();
                 drop(handshake);
 
@@ -275,7 +285,11 @@ fn loom_actor_no_reuse_after_quarantine() {
                 // Mirrors call_inner's caller-side quarantine after cancel.
                 let mut handshake = actor.handshake.lock().unwrap();
                 handshake.cancelled[1] = true;
-                handshake.receiver_live[1] = false;
+                if handshake.reply_ready[1] {
+                    handshake.acknowledgement[1] = Some(Ack::Quarantine);
+                } else {
+                    handshake.cancelled_before_reply[1] = true;
+                }
                 actor.quarantine();
                 actor.changed.notify_all();
             })
@@ -289,19 +303,17 @@ fn loom_actor_no_reuse_after_quarantine() {
             handshake.actor_started[1],
             "second command reaches the loop"
         );
-        assert!(
-            handshake.acknowledgement[1] != Some(Ack::Continue),
-            "a cancelled caller never receives Continue"
-        );
-        assert!(!handshake.caller_returned[1]);
-        drop(handshake);
         assert_eq!(
-            actor
-                .operations_admitted_after_quarantine
-                .load(Ordering::Acquire),
-            0,
-            "no operation executes after the second-command check sees quarantine"
+            handshake.acknowledgement[1],
+            if handshake.cancelled_before_reply[1] {
+                None
+            } else {
+                Some(Ack::Quarantine)
+            },
+            "command two receives quarantine exactly when cancellation follows its reply"
         );
+        assert!(handshake.cancelled[1]);
+        drop(handshake);
         let operations = actor.operations.load(Ordering::Acquire);
         let refused = actor.refused_commands.load(Ordering::Acquire);
         assert_eq!(
@@ -346,9 +358,9 @@ fn loom_actor_join_bounded() {
 #[derive(Default)]
 struct ConnectGuardState {
     in_use: usize,
-    waiting_acquirers: usize,
     max_in_use: usize,
-    release_actors: bool,
+    owner_released: bool,
+    contention_seen: bool,
 }
 
 struct ConnectGuardModel {
@@ -368,17 +380,10 @@ impl ConnectGuardModel {
 
     fn acquire(guard: &Arc<Self>) -> ConnectSlot {
         let mut state = guard.state.lock().unwrap();
-        let waited = state.in_use == CONNECT_GUARD_CAPACITY;
-        if waited {
-            state.waiting_acquirers += 1;
-            state.release_actors = true;
-            guard.changed.notify_all();
-        }
         while state.in_use == CONNECT_GUARD_CAPACITY {
+            state.contention_seen = true;
+            guard.changed.notify_all();
             state = guard.changed.wait(state).unwrap();
-        }
-        if waited {
-            state.waiting_acquirers -= 1;
         }
         state.in_use += 1;
         state.max_in_use = state.max_in_use.max(state.in_use);
@@ -396,32 +401,40 @@ impl Drop for ConnectSlot {
     }
 }
 
-/// Three concurrent acquirers contend for two permits. A permit acquired on a
-/// setup thread moves into an actor thread and returns only when it retires.
-/// Local drops cover connect-error and spawn-failure setup paths.
+/// Three concurrent acquirers contend for two permits while the permit moved
+/// into the actor remains held. The harness releases it only after observing
+/// a blocked contender; local drops cover connect-error and spawn-failure paths.
 #[test]
 fn loom_connect_guard_slots_always_returned() {
     let mut builder = loom::model::Builder::new();
-    builder.max_threads = 5;
+    builder.max_threads = 6;
+    // The handoff uses only mutex/condition-variable blocking points. Keeping
+    // runnable-thread preemption at zero makes Loom enumerate all blocked wake
+    // and acquire orderings within its branch cap.
+    builder.preemption_bound = Some(0);
     builder.check(|| {
         let guard = Arc::new(ConnectGuardModel::new());
         let transferred_slot = ConnectGuardModel::acquire(&guard);
         let transferred_guard = Arc::clone(&guard);
         let transferred_actor = thread::spawn(move || {
-            let _actor_state = Arc::clone(&transferred_guard);
+            let mut state = transferred_guard.state.lock().unwrap();
+            while state.in_use < CONNECT_GUARD_CAPACITY || !state.contention_seen {
+                state = transferred_guard.changed.wait(state).unwrap();
+            }
+            drop(state);
             drop(transferred_slot);
+            let mut state = transferred_guard.state.lock().unwrap();
+            state.owner_released = true;
+            transferred_guard.changed.notify_all();
         });
-        transferred_actor
-            .join()
-            .expect("connect permit transfers into actor thread");
 
-        let acquirers: Vec<_> = (0..2)
+        let acquirers: Vec<_> = (0..3)
             .map(|_| {
                 let guard = Arc::clone(&guard);
                 thread::spawn(move || {
                     let actor_slot = ConnectGuardModel::acquire(&guard);
                     let mut state = guard.state.lock().unwrap();
-                    while !state.release_actors {
+                    while !state.owner_released {
                         state = guard.changed.wait(state).unwrap();
                     }
                     drop(state);
@@ -430,24 +443,15 @@ fn loom_connect_guard_slots_always_returned() {
             })
             .collect();
 
-        let mut state = guard.state.lock().unwrap();
-        while state.in_use < CONNECT_GUARD_CAPACITY {
-            state = guard.changed.wait(state).unwrap();
-        }
-        assert_eq!(state.in_use, CONNECT_GUARD_CAPACITY);
-        drop(state);
-
-        // This is the third acquire attempt. It waits at capacity two; the
-        // guard wakes both permit-owning actor threads so their slots retire.
-        let third_slot = ConnectGuardModel::acquire(&guard);
-        drop(third_slot);
-
         for acquirer in acquirers {
             acquirer.join().expect("connect-actor permit retires");
         }
+        transferred_actor
+            .join()
+            .expect("moved-in actor permit retires after contention");
 
         let state = guard.state.lock().unwrap();
-        assert_eq!(state.waiting_acquirers, 0);
+        assert!(state.contention_seen, "three acquirers contend at capacity");
         assert_eq!(state.max_in_use, CONNECT_GUARD_CAPACITY);
         assert_eq!(state.in_use, 0);
         drop(state);
@@ -489,7 +493,6 @@ fn loom_injected_second_command_without_status_recheck_panics() {
                 handshake.acknowledgement[0] = Some(Ack::Continue);
                 handshake.caller_returned[0] = true;
                 handshake.command_pending[1] = true;
-                handshake.receiver_live[1] = true;
                 actor.changed.notify_all();
                 drop(handshake);
 
@@ -497,20 +500,17 @@ fn loom_injected_second_command_without_status_recheck_panics() {
 
                 let mut handshake = actor.handshake.lock().unwrap();
                 handshake.cancelled[1] = true;
-                handshake.receiver_live[1] = false;
+                if handshake.reply_ready[1] && handshake.acknowledgement[1].is_none() {
+                    handshake.acknowledgement[1] = Some(Ack::Quarantine);
+                }
                 actor.quarantine();
                 actor.changed.notify_all();
             })
         };
 
-        actor_thread.join().expect("buggy actor loop retires");
+        actor_thread
+            .join()
+            .expect("buggy actor loop must detect the race");
         caller.join().expect("caller cancellation completes");
-        assert_eq!(
-            actor
-                .operations_admitted_after_quarantine
-                .load(Ordering::Acquire),
-            0,
-            "injected actor operation admitted after quarantine"
-        );
     });
 }
