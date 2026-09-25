@@ -1208,6 +1208,11 @@ def audit_record_matches(records, expected):
                for record in records)
 
 
+def audit_records_since(records, starting_count):
+    """Restrict a step's audit expectations to records appended by that step."""
+    return records[starting_count:]
+
+
 def audit_verify(binary, path, env):
     if not path.exists():
         return False
@@ -1323,8 +1328,10 @@ def session_level(client):
 def run_steps(client, case, row, binary, audit_path, env):
     """Run a multi-step case's steps in order; every step is verified, none is skipped."""
     captures, observed = {}, []
+    audit_scope_start = len(audit_records(audit_path))
     for index, step in enumerate(case["steps"]):
         if "tool" in step:
+            audit_scope_start = len(audit_records(audit_path))
             reply = client.rpc("tools/call", {"name": step["tool"],
                                                "arguments": fill_captures(step["arguments"], captures)})
             verify_envelope(reply)
@@ -1338,6 +1345,7 @@ def run_steps(client, case, row, binary, audit_path, env):
             for name, pointer in step.get("capture", {}).items():
                 captures[name] = json_pointer(structured, pointer)
         elif "wait_level" in step:
+            audit_scope_start = len(audit_records(audit_path))
             deadline = time.monotonic() + step["deadline_seconds"]
             level = session_level(client)
             while level != step["wait_level"]:
@@ -1354,13 +1362,13 @@ def run_steps(client, case, row, binary, audit_path, env):
             missing = [item for item in step["audit_report"]["contains"] if item not in report]
             require(not missing, f"step {index}: audit report lacks {missing}")
         elif "audit_record" in step:
-            records = audit_records(audit_path)
+            records = audit_records_since(audit_records(audit_path), audit_scope_start)
             expected = step["audit_record"]
             require(audit_record_matches(records, expected),
                     f"step {index}: no audit record matches exact fields {expected}")
             observed.append({"step": index, "audit_record": expected})
         else:
-            records = audit_records(audit_path)
+            records = audit_records_since(audit_records(audit_path), audit_scope_start)
             for expected in step["audit_records"]:
                 require(audit_record_matches(records, expected),
                         f"step {index}: no audit record matches exact fields {expected}")
@@ -1940,6 +1948,9 @@ def selftest():
                                "hard_parse_evidence_no_privilege", "different_observation")}
     require(not audit_record_matches([hard_parse_record], changed_observation),
             "audit matcher accepted a different observation code")
+    scoped_records = audit_records_since([hard_parse_record, {"tool": "oracle_query"}], 1)
+    require(not audit_record_matches(scoped_records, hard_parse_record),
+            "an earlier audit record satisfied a later step's assertion")
     print(compact({"selftest": "audit_record_exact_observation", "verdict": "pass"}))
     synthetic_descriptor = {"inputSchema": {"type": "object", "properties": {
         "object_name": {"type": "string"}}, "required": ["object_name"]}}

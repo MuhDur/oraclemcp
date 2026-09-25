@@ -50,6 +50,24 @@ where
     }
 }
 
+pub(super) async fn close_query_cost_metadata_session(
+    cx: &Cx,
+    session: Option<Box<dyn OracleConnection>>,
+) -> Result<(), DbError> {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    close_query_cost_metadata_session_ref(cx, session.as_ref()).await
+}
+
+pub(super) async fn close_query_cost_metadata_session_ref(
+    cx: &Cx,
+    session: &dyn OracleConnection,
+) -> Result<(), DbError> {
+    let cleanup_budget = RequestBudget::fresh_cleanup(cx.now());
+    run_cleanup_with_budget(cx, &cleanup_budget, session.close(cx)).await
+}
+
 /// Observe read failures at the connection-ownership boundary.
 ///
 /// A dispatcher-owned primary connection is retained across calls, so an
@@ -941,7 +959,13 @@ impl<'a> GuardedReadExecutor<'a> {
                 // its stateless pool. Cost estimation needs only the isolated
                 // session; dropping an unused pool skips its async Oracle-session
                 // cleanup and leaks its idle physical sessions.
-                stateless.close(cx).await?;
+                if let Err(error) = close_query_cost_metadata_session(cx, Some(stateless)).await {
+                    // The metadata session is already open even though closing
+                    // the unused pool failed. Try to close it under the same
+                    // request budget before propagating that error.
+                    let _ = close_query_cost_metadata_session(cx, Some(session)).await;
+                    return Err(error);
+                }
             }
             Ok(session)
         };
@@ -1210,7 +1234,7 @@ impl<'a> GuardedReadExecutor<'a> {
             });
             let require_hard_parse_evidence = state.require_hard_parse_evidence;
             let require_query_cost_estimate = state.require_query_cost_estimate;
-            let mut cost_metadata_session = if cost_limit.is_some() || cumulative_policy.is_some() {
+            let cost_metadata_session = if cost_limit.is_some() || cumulative_policy.is_some() {
                 self.open_query_cost_metadata_session(cx, state, &request_budget)
                     .await?
             } else {
@@ -1223,24 +1247,34 @@ impl<'a> GuardedReadExecutor<'a> {
                 ..
             } = &mut *state;
             let metadata_quarantine = SyncMutex::new(None);
+            let metadata_limits_result = cost_metadata_session.as_deref().map(|metadata_conn| {
+                ConnectionLimitGuard::install(
+                    cx,
+                    metadata_conn,
+                    None,
+                    None,
+                    request_budget.deadline(),
+                    Some(request_budget.db_quota()),
+                )
+            });
+            let metadata_limits = match metadata_limits_result {
+                Some(Ok(limits)) => Some(limits),
+                Some(Err(error)) => {
+                    let close_result = if let Some(session) = cost_metadata_session.as_deref() {
+                        close_query_cost_metadata_session_ref(cx, session).await
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(close_error) = close_result {
+                        return Err(DbError::into_envelope(close_error));
+                    }
+                    return Err(DbError::into_envelope(error));
+                }
+                None => None,
+            };
             let cost_conn = cost_metadata_session
                 .as_deref()
                 .unwrap_or_else(|| conn.as_ref());
-            let metadata_limits = if cost_metadata_session.is_some() {
-                Some(
-                    ConnectionLimitGuard::install(
-                        cx,
-                        cost_conn,
-                        None,
-                        None,
-                        request_budget.deadline(),
-                        Some(request_budget.db_quota()),
-                    )
-                    .map_err(DbError::into_envelope)?,
-                )
-            } else {
-                None
-            };
             let gate_result = enforce_query_cost_gate(
                 QueryCostGateCtx {
                     cx,
@@ -1270,12 +1304,16 @@ impl<'a> GuardedReadExecutor<'a> {
                 },
             )
             .await;
-            if let Some(Err(error)) = metadata_limits.map(ConnectionLimitGuard::restore) {
+            let restore_error = metadata_limits.and_then(|limits| limits.restore().err());
+            let close_result = if let Some(session) = cost_metadata_session.as_deref() {
+                close_query_cost_metadata_session_ref(cx, session).await
+            } else {
+                Ok(())
+            };
+            if let Err(error) = close_result {
                 return Err(DbError::into_envelope(error));
             }
-            if let Some(metadata_session) = cost_metadata_session.take()
-                && let Err(error) = metadata_session.close(cx).await
-            {
+            if let Some(error) = restore_error {
                 return Err(DbError::into_envelope(error));
             }
             prepared.hard_parse_observations = gate_result?;
@@ -1506,13 +1544,12 @@ impl<'a> GuardedReadExecutor<'a> {
                     });
                 let require_hard_parse_evidence = state.require_hard_parse_evidence;
                 let require_query_cost_estimate = state.require_query_cost_estimate;
-                let mut cost_metadata_session =
-                    if cost_limit.is_some() || cumulative_policy.is_some() {
-                        self.open_query_cost_metadata_session(cx, &state, &request_budget)
-                            .await?
-                    } else {
-                        None
-                    };
+                let cost_metadata_session = if cost_limit.is_some() || cumulative_policy.is_some() {
+                    self.open_query_cost_metadata_session(cx, &state, &request_budget)
+                        .await?
+                } else {
+                    None
+                };
                 let DispatcherState {
                     conn,
                     read_only_backstop,
@@ -1521,24 +1558,35 @@ impl<'a> GuardedReadExecutor<'a> {
                 } = &mut *state;
                 let cost_audit_subject = audit_subject(context, &self.default_audit_subject);
                 let metadata_quarantine = SyncMutex::new(None);
-                let cost_conn = cost_metadata_session
-                    .as_deref()
-                    .unwrap_or_else(|| conn.as_ref());
-                let metadata_limits = if cost_metadata_session.is_some() {
-                    Some(
+                let metadata_limits_result =
+                    cost_metadata_session.as_deref().map(|metadata_conn| {
                         ConnectionLimitGuard::install(
                             cx,
-                            cost_conn,
+                            metadata_conn,
                             None,
                             None,
                             request_budget.deadline(),
                             Some(request_budget.db_quota()),
                         )
-                        .map_err(DbError::into_envelope)?,
-                    )
-                } else {
-                    None
+                    });
+                let metadata_limits = match metadata_limits_result {
+                    Some(Ok(limits)) => Some(limits),
+                    Some(Err(error)) => {
+                        let close_result = if let Some(session) = cost_metadata_session.as_deref() {
+                            close_query_cost_metadata_session_ref(cx, session).await
+                        } else {
+                            Ok(())
+                        };
+                        if let Err(close_error) = close_result {
+                            return Err(DbError::into_envelope(close_error));
+                        }
+                        return Err(DbError::into_envelope(error));
+                    }
+                    None => None,
                 };
+                let cost_conn = cost_metadata_session
+                    .as_deref()
+                    .unwrap_or_else(|| conn.as_ref());
                 let gate_result = enforce_query_cost_gate(
                     QueryCostGateCtx {
                         cx,
@@ -1568,12 +1616,16 @@ impl<'a> GuardedReadExecutor<'a> {
                     },
                 )
                 .await;
-                if let Some(Err(error)) = metadata_limits.map(ConnectionLimitGuard::restore) {
+                let restore_error = metadata_limits.and_then(|limits| limits.restore().err());
+                let close_result = if let Some(session) = cost_metadata_session.as_deref() {
+                    close_query_cost_metadata_session_ref(cx, session).await
+                } else {
+                    Ok(())
+                };
+                if let Err(error) = close_result {
                     return Err(DbError::into_envelope(error));
                 }
-                if let Some(metadata_session) = cost_metadata_session.take()
-                    && let Err(error) = metadata_session.close(cx).await
-                {
+                if let Some(error) = restore_error {
                     return Err(DbError::into_envelope(error));
                 }
                 prepared.hard_parse_observations = gate_result?;

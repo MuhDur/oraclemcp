@@ -648,6 +648,76 @@ fn query_cost_metadata_acquisition_fails_with_typed_timeout_at_request_deadline(
     );
 }
 
+struct NeverCompletingCloseCostMock {
+    inner: QueryCostGateMock,
+    close_calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for NeverCompletingCloseCostMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.close_calls.fetch_add(1, Ordering::SeqCst);
+        std::future::pending().await
+    }
+
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.ping(cx).await
+    }
+
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.inner.describe(cx).await
+    }
+
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.inner.query_rows(cx, sql, binds).await
+    }
+
+    async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.inner.execute(cx, sql, binds).await
+    }
+
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.commit(cx).await
+    }
+
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+        self.inner.rollback(cx).await
+    }
+}
+
+#[test]
+fn query_cost_metadata_close_that_never_completes_fails_with_typed_timeout() {
+    let close_calls = Arc::new(AtomicUsize::new(0));
+    let state = Arc::new(QueryCostGateState::new(PlanCostFixture::Root(Some(2))));
+    let session: Box<dyn OracleConnection> = Box::new(NeverCompletingCloseCostMock {
+        inner: QueryCostGateMock { state },
+        close_calls: Arc::clone(&close_calls),
+    });
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync runtime builds");
+    let result = runtime.block_on(async move {
+        let cx = Cx::current().expect("block_on installs a Cx");
+        super::super::read_executor::close_query_cost_metadata_session_ref(&cx, session.as_ref())
+            .await
+    });
+
+    assert!(
+        matches!(result, Err(DbError::Cancelled(ref message)) if message.contains("cleanup finalizer exceeded its fresh bounded deadline")),
+        "a stalled metadata-session close must return a typed cleanup timeout, got {result:?}"
+    );
+    assert_eq!(close_calls.load(Ordering::SeqCst), 1);
+}
+
 /// The initially served profile is governed by its own `require_fga_evidence`:
 /// binding the accepted config snapshot installs the rule, exactly as a
 /// profile switch would.
