@@ -76,6 +76,8 @@ default_level = "READ_ONLY"
 # allow_change_notification = false
 # Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.
 # require_fga_evidence = true
+# Refuse reads when this account cannot read OLS/RAS/Data Redaction evidence; default false admits them with keyed security_feature_evidence: unavailable observations, an audit record, and a doctor warning. Protected profiles imply strict mode.
+# require_security_feature_evidence = true
 # Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.
 # require_hard_parse_evidence = true
 # Refuse a read when a requested optimizer-cost estimate is unavailable; independent of callback-safety evidence. Default false admits with a cost_unavailable observation and readable audit record.
@@ -181,6 +183,8 @@ default_level = "READ_ONLY"
 # allow_change_notification = false
 # Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.
 # require_fga_evidence = true
+# Refuse reads when this account cannot read OLS/RAS/Data Redaction evidence; default false admits them with keyed security_feature_evidence: unavailable observations, an audit record, and a doctor warning. Protected profiles imply strict mode.
+# require_security_feature_evidence = true
 # Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.
 # require_hard_parse_evidence = true
 # Refuse a read when a requested optimizer-cost estimate is unavailable; independent of callback-safety evidence. Default false admits with a cost_unavailable observation and readable audit record.

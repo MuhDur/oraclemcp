@@ -251,6 +251,7 @@ pub fn synthesize_profiles(
             explain_plan_table: None,
             allow_change_notification: None,
             require_fga_evidence: None,
+            require_security_feature_evidence: None,
             require_hard_parse_evidence: None,
             require_query_cost_estimate: None,
             diagnostics_pack_licensed: None,

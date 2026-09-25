@@ -223,6 +223,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.",
     },
     FieldDisposition {
+        field: "require_security_feature_evidence",
+        disposition: Disposition::Commented,
+        help: "Refuse reads when this account cannot read OLS/RAS/Data Redaction evidence; default false admits them with keyed security_feature_evidence: unavailable observations, an audit record, and a doctor warning. Protected profiles imply strict mode.",
+    },
+    FieldDisposition {
         field: "require_hard_parse_evidence",
         disposition: Disposition::Commented,
         help: "Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.",
@@ -374,6 +379,7 @@ mod tests {
             explain_plan_table: None,
             allow_change_notification: Some(false),
             require_fga_evidence: Some(true),
+            require_security_feature_evidence: Some(true),
             require_hard_parse_evidence: Some(true),
             require_query_cost_estimate: Some(false),
             diagnostics_pack_licensed: Some(false),
@@ -424,11 +430,12 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // The Diagnostics Pack license attestation is an additional explicit opt-in.
+        // R36 adds independent query-cost and security-feature evidence keys;
+        // Diagnostics Pack licensing is a separate explicit opt-in.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            39,
-            "ConnectionProfile has 39 serde fields"
+            40,
+            "ConnectionProfile has 40 serde fields"
         );
     }
 

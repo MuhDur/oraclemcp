@@ -316,6 +316,22 @@ then reports the check as a failure. A table with a proven FGA handler is
 refused either way, and any other failure of the catalog query (a lost
 session, a cancelled call) still refuses with `fga_evidence_unknown`.
 
+### 3.2 OLS, RAS, and Data Redaction visibility
+
+`oracle_query` and other relation reads check Oracle Label Security, Real
+Application Security, and Data Redaction evidence for every resolved relation.
+A proven policy always refuses with its typed `protected_by_*` reason. When an
+ordinary account cannot read one of the evidence sources, the default profile
+admits the otherwise safe read and returns
+`security_feature_evidence: "unavailable"` with keyed relation and feature
+details. The server records a separate signed audit marker before executing the
+read, and `oraclemcp doctor --online` warns about the missing catalog visibility.
+
+Set `require_security_feature_evidence = true` to refuse reads when any of these
+catalog sources are unavailable. `protected = true` profiles imply this strict
+setting. This control reports evidence visibility; it does not emulate the
+filtering behavior of OLS, RAS, or Data Redaction.
+
 Optimizer hard-parse evidence has a separate R36 policy. Before EXPLAIN or a
 decisive `max_query_cost` estimate, the server probes callback and policy
 catalogs for every resolved relation and callable. A privilege-denied probe is

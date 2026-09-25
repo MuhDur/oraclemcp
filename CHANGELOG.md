@@ -78,6 +78,11 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `oraclemcp-verifier` adds private fields `TestAttestation.artifacts`,
   `command`, `created_at`, `frame`, `git_sha`, `lane`, `repo`, `schema`,
   `tests`, and `toolchain`.
+- Least-privilege reads now admit when OLS, RAS, or Data Redaction evidence
+  cannot be read, with relation-scoped response observations, a signed audit
+  marker, and an online doctor warning. `require_security_feature_evidence =
+  true` restores strict refusal; protected profiles imply strict mode, and a
+  proven policy still refuses regardless of profile.
 
 - **0.11.0 release candidate.** The audit/security hardening, fail-closed
   classifier default, official Oracle connect-time fallback build, blocking

@@ -77,6 +77,7 @@ fn fully_populated_profile() -> ConnectionProfile {
         explain_plan_table: None,
         allow_change_notification: Some(false),
         require_fga_evidence: Some(true),
+        require_security_feature_evidence: Some(true),
         require_hard_parse_evidence: Some(true),
         require_query_cost_estimate: Some(false),
         diagnostics_pack_licensed: Some(false),

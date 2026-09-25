@@ -1959,6 +1959,54 @@
   }
  },
  {
+  "case_id": "w4_query_security_catalog_unreadable_admitted",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": [],
+  "setup": [],
+  "profile_variant": "synthetic_cross_security",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${cross}.T_CROSS_${run_id}",
+    "max_rows": 1
+   }
+  },
+  "expect": {
+   "json_subset": {
+    "rows": [{"ID": "1"}],
+    "security_feature_evidence": "unavailable",
+    "security_feature_evidence_details": [{"relation": "${cross}.T_CROSS_${run_id}"}]
+   }
+  },
+  "db_reread": [],
+  "audit_expect": [
+   {"tool": "security_feature_evidence_unavailable", "decision": "ALLOWED", "outcome": "SUCCEEDED"},
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+  ],
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_security_catalog_unreadable_strict_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": [],
+  "setup": [],
+  "profile_variant": "synthetic_cross_security_strict",
+  "call": {
+   "arguments": {
+    "sql": "SELECT ID FROM ${cross}.T_CROSS_${run_id}",
+    "max_rows": 1
+   }
+  },
+  "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "security_feature_visibility_unknown"},
+  "db_reread": [],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
   "case_id": "w4_query_redaction_policy_table_refused_no_execution",
   "tool": "oracle_query",
   "level": "READ_ONLY",

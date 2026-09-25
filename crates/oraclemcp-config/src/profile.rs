@@ -885,6 +885,13 @@ pub struct ConnectionProfile {
     /// doctor warning. A proven FGA handler refuses either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_fga_evidence: Option<bool>,
+    /// R36: refuse a read when OLS, RAS or Data Redaction evidence is
+    /// unavailable for any resolved relation. Defaults to `false`: the read
+    /// proceeds with a keyed `security_feature_evidence: unavailable`
+    /// observation, audit record, and doctor warning. Protected profiles imply
+    /// this strict behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_security_feature_evidence: Option<bool>,
     /// R36 extension: refuse EXPLAIN/cost admission when any hard-parse
     /// callback evidence is unreadable. Defaults to `false`; the doctor warns
     /// and admitted least-privilege paths emit an observation and audit row.
@@ -1002,6 +1009,10 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("allow_change_notification", &self.allow_change_notification)
             .field("require_fga_evidence", &self.require_fga_evidence)
             .field(
+                "require_security_feature_evidence",
+                &self.require_security_feature_evidence,
+            )
+            .field(
                 "require_hard_parse_evidence",
                 &self.require_hard_parse_evidence,
             )
@@ -1091,6 +1102,13 @@ impl ConnectionProfile {
     #[must_use]
     pub fn require_fga_evidence(&self) -> bool {
         self.require_fga_evidence == Some(true)
+    }
+
+    /// Whether reads require visible OLS/RAS/Data Redaction evidence. Protected
+    /// profiles are strict regardless of the explicit setting.
+    #[must_use]
+    pub fn require_security_feature_evidence(&self) -> bool {
+        self.protected() || self.require_security_feature_evidence == Some(true)
     }
 
     /// Whether EXPLAIN and decisive cost gates require complete hard-parse
@@ -1192,6 +1210,7 @@ impl ConnectionProfile {
             explain_plan_table,
             allow_change_notification,
             require_fga_evidence,
+            require_security_feature_evidence,
             require_hard_parse_evidence,
             require_query_cost_estimate,
             diagnostics_pack_licensed,
@@ -1410,6 +1429,7 @@ mod tests {
             explain_plan_table: None,
             allow_change_notification: None,
             require_fga_evidence: None,
+            require_security_feature_evidence: None,
             require_hard_parse_evidence: None,
             require_query_cost_estimate: None,
             diagnostics_pack_licensed: None,
@@ -2859,5 +2879,18 @@ mod tests {
         let mut prod = p("prod");
         prod.protected = Some(true);
         assert!(prod.require_signed_tools());
+    }
+
+    #[test]
+    fn security_feature_evidence_defaults_to_admit_and_protected_implies_strict() {
+        let mut ordinary = p("ordinary");
+        assert!(!ordinary.require_security_feature_evidence());
+        ordinary.require_security_feature_evidence = Some(true);
+        assert!(ordinary.require_security_feature_evidence());
+
+        let mut protected = p("protected");
+        protected.protected = Some(true);
+        protected.require_security_feature_evidence = Some(false);
+        assert!(protected.require_security_feature_evidence());
     }
 }

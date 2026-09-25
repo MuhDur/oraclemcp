@@ -349,6 +349,9 @@ struct SemanticGuardState {
     /// R36: ALL_AUDIT_POLICIES answers ORA-00942, as for a least-privilege
     /// account without dictionary access.
     fga_catalog_unreadable: Mutex<bool>,
+    /// Simulate unreadable OLS/RAS/Redaction evidence while ordinary table
+    /// reads remain available to the account.
+    security_catalog_unreadable: Mutex<bool>,
     virtual_column_default: Mutex<Option<String>>,
 }
 
@@ -363,6 +366,7 @@ impl Default for SemanticGuardState {
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
             fga_handler_table: Mutex::new(None),
             fga_catalog_unreadable: Mutex::new(false),
+            security_catalog_unreadable: Mutex::new(false),
             virtual_column_default: Mutex::new(None),
         }
     }
@@ -611,6 +615,17 @@ impl OracleConnection for SemanticGuardMock {
             .lock()
             .expect("read events lock")
             .push(format!("query:{sql}"));
+        if sql == CatalogQueryId::ReadRasPolicies.spec().sql
+            && *self
+                .state
+                .security_catalog_unreadable
+                .lock()
+                .expect("security catalog fixture lock")
+        {
+            return Err(DbError::ServerQuery(
+                "ORA-00942: table or view does not exist".to_owned(),
+            ));
+        }
         if let Some(rows) = mock_relation_security_probe_rows(sql) {
             return Ok(rows);
         }
