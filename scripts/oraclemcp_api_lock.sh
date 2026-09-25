@@ -173,7 +173,7 @@ PY
       return 1
     fi
     semver_status=0
-    output="$(cargo --offline --locked semver-checks check-release \
+    output="$(CARGO_TERM_COLOR=never cargo --offline --locked semver-checks check-release \
       --release-type "$release_type" --baseline-rustdoc "$baseline_rustdoc" \
       -p "$crate" 2>&1)" || semver_status=$?
     printf '%s\n' "$output"
