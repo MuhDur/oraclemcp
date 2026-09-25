@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T01:55:00Z",
+  "bead_id": "oraclemcp-h6r4w",
+  "scope": {
+    "summary": "W4 contract negatives: duplicate-member tools/call frames get a typed INVALID_ARGUMENTS JSON-RPC refusal on stdio (no timeout) and HTTP (no bare 400); alias-backed required arguments are required by the advertised JSON schema (registry-enumerated); every generated w4_contract_* case passes on the free23 lane from one binary. Fix commits by DustyJaguar incl. 54a563be.",
+    "in_scope": [
+      "crates/oraclemcp/src/registry.rs",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp-core/src/http/tests.rs"
+    ],
+    "out_of_scope": [
+      "The .9.6 get_source/get_ddl cases (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "35eac4cb51deae67d630b4f111619317ba8dee29",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "W4 contract lane (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary built at origin/main 172b2e65 (sha256 dfae3b2b...), driver.py --contract-only with --binary-source-sha, fresh cases.jsonl: free23 stdio 134/134 + http 134/134 pass; xe21 134/134 + 134/134 pass. xe18: 130/134 per transport - 4 wrong-enum cases (search_objects detail_level, get_ddl object_type x2, top_queries metric) hit a session quarantine (rollback I/O error) instead of INVALID_ARGUMENTS, reproduced twice; outside this bead's AC (free23) and filed as oraclemcp-6s6rd."
+      },
+      {
+        "name": "unit (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "At origin/main, lease: registry::tests::alias_backed_required_arguments_are_required_by_json_schema ok; registry::tests::compatibility_schemas_reject_empty_calls_and_accept_canonical_fields ok; oraclemcp-core server::tests::stdio_duplicate_member_frame_is_refused_before_dispatch ok; http::tests::http_duplicate_member_body_is_refused_before_dispatch ok."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "xe18 wrong-enum defect tracked separately (oraclemcp-6s6rd)."
+  ],
+  "known_defects": [
+    "oraclemcp-6s6rd"
+  ],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
