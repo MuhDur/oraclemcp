@@ -69,4 +69,39 @@ mod tests {
             "post-ACCEPT diagnostics must not send operators back to the connect string: {hint}"
         );
     }
+
+    #[test]
+    fn doctor_json_keeps_security_catalog_warning_visible() {
+        let report = oraclemcp_core::DoctorReport {
+            checks: vec![oraclemcp_core::doctor::CheckResult {
+                id: 20,
+                name: "Security feature catalog visibility".to_owned(),
+                status: oraclemcp_core::doctor::CheckStatus::Warn,
+                detail: "security_feature_catalog_unreadable: OLS/RAS/Data Redaction evidence is incomplete; reads proceed with security_feature_evidence: unavailable, a keyed observation, and an audit record".to_owned(),
+                fix: Some("Grant catalog visibility, then rerun `oraclemcp doctor --online`".to_owned()),
+                failure_class: None,
+                auth_mode: None,
+                wallet_error: None,
+                wallet_posture: None,
+                wallet_cert_expiry: None,
+                ora_code: None,
+            }],
+            profile_caps: None,
+            auth_capabilities: None,
+            service_health: None,
+            service_unit_caps: None,
+            fix: None,
+        };
+
+        let check = &report.to_json_with_exit_code(0)["checks"][0];
+        assert_eq!(check["id"], 20);
+        assert_eq!(check["status"], "warn");
+        assert!(
+            check["detail"]
+                .as_str()
+                .unwrap()
+                .contains("security_feature_evidence: unavailable")
+        );
+        assert!(check.get("fix").is_some());
+    }
 }

@@ -1981,7 +1981,10 @@
   },
   "db_reread": [],
   "audit_expect": [
+   {"tool": "fga_evidence_unavailable", "decision": "ALLOWED", "outcome": "SUCCEEDED"},
    {"tool": "security_feature_evidence_unavailable", "decision": "ALLOWED", "outcome": "SUCCEEDED"},
+   {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED"},
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
    {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
   ],
   "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
