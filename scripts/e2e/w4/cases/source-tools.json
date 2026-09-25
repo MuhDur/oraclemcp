@@ -2522,7 +2522,7 @@
       "arguments": {
         "owner": "${owner}",
         "name": "W4_${run_id}_VIEW",
-        "object_type": "VIEW"
+        "object_type": "NOT_A_TYPE"
       }
     },
     "expect": {
