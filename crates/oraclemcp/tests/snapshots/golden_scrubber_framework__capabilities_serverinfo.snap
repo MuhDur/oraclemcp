@@ -2244,7 +2244,20 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW.",
+            "description": "Oracle object type to compile; VIEW supports validation only.",
+            "enum": [
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PACKAGE_BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "TYPE_BODY",
+              "VIEW",
+              "TABLE"
+            ],
             "type": "string"
           },
           "owner": {
@@ -2841,16 +2854,19 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW.",
+            "description": "Optional source type override. Defaults to PACKAGE BODY.",
             "enum": [
               "PACKAGE",
+              "PACKAGE BODY",
               "PACKAGE_BODY",
               "PROCEDURE",
               "FUNCTION",
               "TRIGGER",
               "TYPE",
+              "TYPE BODY",
               "TYPE_BODY",
-              "VIEW"
+              "VIEW",
+              "TABLE"
             ],
             "type": "string"
           },
@@ -3189,7 +3205,22 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE.",
+            "description": "Optional exact Oracle object type filter.",
+            "enum": [
+              "TABLE",
+              "VIEW",
+              "MATERIALIZED VIEW",
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "SEQUENCE",
+              "INDEX",
+              "SYNONYM"
+            ],
             "type": "string"
           },
           "owner": {
@@ -3212,7 +3243,7 @@ expression: rendered
       "name": "oracle_search_objects",
       "title": "Oracle Search Objects",
       "tier": "foundation_live_db",
-      "summary": "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. fleet=true searches the names-only index across MCP-visible profiles, applying each source profile's egress policy before merge and returning no profile roster or profile counts. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
+      "summary": "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. fleet=true searches the names-only index across MCP-visible profiles, applying each source profile's egress policy before merge and returning no profile roster or profile counts. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim. Use object_types for a bound set of exact Oracle object types; it cannot be combined with object_type.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -3251,8 +3282,47 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE.",
+            "description": "Deprecated single-type filter; use object_types for one or more exact Oracle object types.",
+            "enum": [
+              "TABLE",
+              "VIEW",
+              "MATERIALIZED VIEW",
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "SEQUENCE",
+              "INDEX",
+              "SYNONYM"
+            ],
             "type": "string"
+          },
+          "object_types": {
+            "description": "Exact Oracle object types to include. Cannot be combined with object_type.",
+            "items": {
+              "enum": [
+                "TABLE",
+                "VIEW",
+                "MATERIALIZED VIEW",
+                "PACKAGE",
+                "PACKAGE BODY",
+                "PROCEDURE",
+                "FUNCTION",
+                "TRIGGER",
+                "TYPE",
+                "TYPE BODY",
+                "SEQUENCE",
+                "INDEX",
+                "SYNONYM"
+              ],
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
           },
           "owner": {
             "description": "Optional schema owner (case-insensitive for ordinary identifiers; quoted identifiers match verbatim). Omit or use * for all accessible schemas.",
@@ -3497,16 +3567,18 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Allowlisted type for DBMS_METADATA.GET_DDL.",
+            "description": "Allowlisted Oracle type for DBMS_METADATA.GET_DDL.",
             "enum": [
               "TABLE",
               "VIEW",
               "PACKAGE",
+              "PACKAGE BODY",
               "PACKAGE_BODY",
               "PROCEDURE",
               "FUNCTION",
               "TRIGGER",
               "TYPE",
+              "TYPE BODY",
               "TYPE_BODY",
               "SEQUENCE",
               "INDEX",
@@ -3537,12 +3609,12 @@ expression: rendered
       "name": "oracle_get_source",
       "title": "Oracle Get Source",
       "tier": "foundation_live_db",
-      "summary": "Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
+      "summary": "Fetch an object's full source text or inclusive line range from ALL_SOURCE, or fetch a view definition from ALL_VIEWS.TEXT, with a character cap. Omit object_type to return every visible source variant for the object name.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "from_line": {
-            "description": "Optional first ALL_SOURCE line to return, inclusive. Pair with oracle_search_source's LINE result.",
+            "description": "Optional first source line to return, inclusive. Pair with oracle_search_source's LINE result for ALL_SOURCE objects.",
             "minimum": 1,
             "type": "integer"
           },
@@ -3560,7 +3632,19 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY. When omitted, all visible source types for this name are returned.",
+            "description": "Optional supported source type, including VIEW. When omitted, all visible source types for this name are returned.",
+            "enum": [
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PACKAGE_BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "TYPE_BODY",
+              "VIEW"
+            ],
             "type": "string"
           },
           "owner": {
@@ -3568,7 +3652,7 @@ expression: rendered
             "type": "string"
           },
           "to_line": {
-            "description": "Optional last ALL_SOURCE line to return, inclusive. Must not be lower than from_line.",
+            "description": "Optional last source line to return, inclusive. Must not be lower than from_line.",
             "minimum": 1,
             "type": "integer"
           }
@@ -3777,7 +3861,18 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional source type filter: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY.",
+            "description": "Optional ALL_SOURCE object type filter.",
+            "enum": [
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PACKAGE_BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "TYPE_BODY"
+            ],
             "type": "string"
           },
           "owner": {
@@ -5242,7 +5337,20 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW.",
+            "description": "Oracle object type to compile; VIEW supports validation only.",
+            "enum": [
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PACKAGE_BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "TYPE_BODY",
+              "VIEW",
+              "TABLE"
+            ],
             "type": "string"
           },
           "owner": {
@@ -5538,7 +5646,20 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW.",
+            "description": "Oracle object type to compile; VIEW supports validation only.",
+            "enum": [
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PACKAGE_BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "TYPE_BODY",
+              "VIEW",
+              "TABLE"
+            ],
             "type": "string"
           },
           "owner": {
@@ -6092,7 +6213,7 @@ expression: rendered
       "name": "patch_package",
       "title": "Patch Package",
       "tier": "foundation_live_db",
-      "summary": "Compatibility alias for oracle_patch_source; defaults object_type to PACKAGE_BODY when omitted.",
+      "summary": "Compatibility alias for oracle_patch_source; defaults object_type to PACKAGE BODY when omitted.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -6131,7 +6252,20 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional override, usually PACKAGE or PACKAGE_BODY. Defaults to PACKAGE_BODY.",
+            "description": "Optional source type override. Defaults to PACKAGE BODY.",
+            "enum": [
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PACKAGE_BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "TYPE_BODY",
+              "VIEW",
+              "TABLE"
+            ],
             "type": "string"
           },
           "old_text": {
@@ -7070,7 +7204,22 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional object type filter.",
+            "description": "Optional exact object type filter.",
+            "enum": [
+              "TABLE",
+              "VIEW",
+              "MATERIALIZED VIEW",
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "SEQUENCE",
+              "INDEX",
+              "SYNONYM"
+            ],
             "type": "string"
           },
           "owner": {
@@ -7154,7 +7303,22 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional object type filter. Supplying it overrides the compact TABLE/VIEW/PACKAGE default projection.",
+            "description": "Optional exact object type filter. Supplying it overrides the compact TABLE/VIEW/PACKAGE default projection.",
+            "enum": [
+              "TABLE",
+              "VIEW",
+              "MATERIALIZED VIEW",
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "SEQUENCE",
+              "INDEX",
+              "SYNONYM"
+            ],
             "type": "string"
           },
           "owner": {
@@ -7340,16 +7504,18 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Allowlisted type for DBMS_METADATA.GET_DDL.",
+            "description": "Allowlisted Oracle type for DBMS_METADATA.GET_DDL.",
             "enum": [
               "TABLE",
               "VIEW",
               "PACKAGE",
+              "PACKAGE BODY",
               "PACKAGE_BODY",
               "PROCEDURE",
               "FUNCTION",
               "TRIGGER",
               "TYPE",
+              "TYPE BODY",
               "TYPE_BODY",
               "SEQUENCE",
               "INDEX",
@@ -7398,7 +7564,19 @@ expression: rendered
             "type": "string"
           },
           "object_type": {
-            "description": "Optional source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, or TYPE_BODY. When omitted, all visible source types for this name are returned.",
+            "description": "Optional source type, including VIEW. When omitted, all visible source types for this name are returned.",
+            "enum": [
+              "PACKAGE",
+              "PACKAGE BODY",
+              "PACKAGE_BODY",
+              "PROCEDURE",
+              "FUNCTION",
+              "TRIGGER",
+              "TYPE",
+              "TYPE BODY",
+              "TYPE_BODY",
+              "VIEW"
+            ],
             "type": "string"
           },
           "owner": {
