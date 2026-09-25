@@ -68,7 +68,7 @@ async fn free23(conn: &RustOracleConnection, cx: &Cx) {
     let rows = conn
         .query_rows(
             cx,
-            "SELECT VERSION AS DB_VERSION FROM V$INSTANCE",
+            "SELECT version_full AS db_version FROM product_component_version WHERE ROWNUM = 1",
             &[] as &[OracleBind],
         )
         .await
