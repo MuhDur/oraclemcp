@@ -4922,7 +4922,6 @@ fn validate_declared_args(tool: &str, args: &Value) -> Result<(), ErrorEnvelope>
         ))
         .with_next_step("call tools/list and inspect this tool's inputSchema.properties"));
     }
-    validate_enum_arguments(tool, args)?;
     Ok(())
 }
 
@@ -12230,6 +12229,7 @@ impl OracleDispatcher {
         // Reject schema-forbidden keys before connection metadata, audit, or
         // any generated SQL can observe an ambiguously shaped request.
         validate_declared_args(name, &args)?;
+        validate_enum_arguments(name, &args)?;
         let mut request_budget = self.dispatch_request_budget(cx, context)?;
         if let Some(timeout) = explicit_timeout_duration(&args)? {
             request_budget = request_budget.tighten_timeout(timeout);
