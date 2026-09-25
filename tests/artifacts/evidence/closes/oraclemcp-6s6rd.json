@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T03:58:00Z",
+  "bead_id": "oraclemcp-6s6rd",
+  "scope": {
+    "summary": "Enum arguments (search_objects detail_level, get_ddl object_type incl. alias, top_queries metric) are validated at dispatch entry and refused with INVALID_ARGUMENTS before any Oracle session work, so XE18 no longer quarantines the session (rollback I/O error) on a bad enum. Commits 2e941e49 (640c1715), 02f3c466.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "02f3c466109cd46e37797c8e3bff83b2c29fd251",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "unit (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "At 02f3c466 (clean worktree, lease): dispatch::tests::wrong_enum_arguments_are_refused_before_any_oracle_connection_call ok (asserts zero connection calls across four bad-enum routes)."
+      },
+      {
+        "name": "W4 contract lanes (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary built at 02f3c466, driver.py --contract-only --binary-source-sha, fresh cases.jsonl: free23 134/134 stdio + 134/134 http; xe21 134/134 + 134/134; xe18 134/134 + 134/134 (previously 130/134 with the 4 wrong-enum cases CONNECTION_FAILED/quarantined)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Why XE18 dropped the connection during rollback after pre-validation session work was not root-caused; the fix removes the trigger by validating first."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
