@@ -135,7 +135,7 @@
       {"audit_records": [
         {"tool": "hard_parse_evidence_unavailable[served_tool=oracle_query;observation=hard_parse_evidence_no_privilege]", "danger_level": "READ_ONLY", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
       ]},
-      {"tool": "oracle_query", "arguments": {"sql": "SELECT a.ID FROM ${owner}.T_TYPES_${run_id} a JOIN ${owner}.T_TYPES_${run_id} b ON b.ID = a.ID WHERE a.ID = 1", "max_rows": 1, "max_query_cost": 1, "allow_plan_table_write": true}, "expect": {"error_class": "POLICY_DENIED", "reason_code": "query_cost_exceeded"}}
+      {"tool": "oracle_query", "arguments": {"sql": "SELECT a.ID FROM ${owner}.T_TYPES_${run_id} a JOIN ${owner}.T_TYPES_${run_id} b ON b.ID = a.ID WHERE a.ID = 1", "max_rows": 1, "max_query_cost": 0, "allow_plan_table_write": true}, "expect": {"error_class": "POLICY_DENIED", "reason_code": "query_cost_exceeded"}}
     ],
     "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1}},
     "expect": {"json_subset": {"rows": [{"ID": "1"}]}},
