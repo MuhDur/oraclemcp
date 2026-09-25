@@ -1599,15 +1599,24 @@ class Ladder:
                 (package, "PACKAGE"),
                 (package, "PACKAGE_BODY"),
             ]:
-                source = structured(
-                    self.session.call(
-                        "oracle_get_source",
-                        {"name": name, "object_type": object_type, "max_chars": 4096},
-                    )
+                source_result = self.session.call(
+                    "oracle_get_source",
+                    {"name": name, "object_type": object_type, "max_chars": 4096},
+                )
+                source = structured(source_result)
+                require(
+                    source_result.get("isError") is True,
+                    f"the dropped {object_type} is refused by the dedicated source tool",
+                    source,
                 )
                 require(
-                    (source.get("source") or {}).get("line_count") == 0,
-                    f"the dropped {object_type} is absent through the dedicated source tool",
+                    source.get("error_class") == "OBJECT_NOT_FOUND",
+                    f"the dropped {object_type} returns typed OBJECT_NOT_FOUND",
+                    source,
+                )
+                require(
+                    source.get("suggested_tool") == "oracle_schema_inspect",
+                    f"the dropped {object_type} refusal directs callers to schema inspection",
                     source,
                 )
             return {"dropped": [package, function, proc, view]}
