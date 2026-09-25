@@ -594,6 +594,17 @@ fn read_only_transaction_uses_metadata_session_and_still_enforces_cost_cap() {
         under_opens.load(Ordering::SeqCst)
     );
 
+    let second_result = under
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "SELECT 1 FROM dual", "allow_plan_table_write": true}),
+        )
+        .expect("a second capped read completes in the same read-only transaction");
+    assert_eq!(second_result["row_count"], json!(1));
+    assert_eq!(under_state.actual_reads.load(Ordering::SeqCst), 2);
+    assert_eq!(under_opens.load(Ordering::SeqCst), 2);
+    assert_eq!(under_pool_closes.close.load(Ordering::SeqCst), 2);
+
     let (strict, strict_state, strict_opens, strict_pool_closes) =
         switchable_read_only_cost_dispatcher(PlanCostFixture::NoRoot, 50_000, true);
     let strict_error = strict
@@ -608,6 +619,32 @@ fn read_only_transaction_uses_metadata_session_and_still_enforces_cost_cap() {
     assert_eq!(
         strict_pool_closes.close.load(Ordering::SeqCst),
         strict_opens.load(Ordering::SeqCst)
+    );
+}
+
+#[test]
+fn query_cost_metadata_acquisition_fails_with_typed_timeout_at_request_deadline() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync runtime builds");
+    let result = runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a Cx");
+        let admitted_at = cx.now();
+        let request_budget = RequestBudget::from_budget_at(
+            admitted_at,
+            asupersync::Budget::new().with_timeout(admitted_at, Duration::from_millis(25)),
+        );
+        super::super::read_executor::await_request_bounded(
+            &cx,
+            &request_budget,
+            std::future::pending::<Result<(), DbError>>(),
+            "query-cost metadata session acquisition",
+        )
+        .await
+    });
+    assert!(
+        matches!(result, Err(DbError::Cancelled(ref message)) if message.contains("request budget deadline exceeded")),
+        "a stalled connector must fail as a typed cancellation/timeout, got {result:?}"
     );
 }
 

@@ -11,6 +11,45 @@ use oraclemcp_db::{
 };
 use oraclemcp_guard::semantic_read_plan_checked;
 
+/// Await a connection-acquisition phase only for the remaining request
+/// budget. A connector can perform more than one network operation (primary
+/// driver, guarded fallback, and optional pool bootstrap), so its awaits need
+/// an outer deadline in addition to per-wire timeouts.
+pub(super) async fn await_request_bounded<T, F>(
+    cx: &Cx,
+    request_budget: &RequestBudget,
+    future: F,
+    phase: &'static str,
+) -> Result<T, DbError>
+where
+    F: Future<Output = Result<T, DbError>>,
+{
+    request_budget.enforce(cx)?;
+    let request_deadline = request_budget.deadline();
+    let caller_deadline = cx.budget().deadline;
+    let deadline = match (request_deadline, caller_deadline) {
+        (Some(request), Some(caller)) => Some(request.min(caller)),
+        (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+        (None, None) => None,
+    };
+    let now = cx.now();
+    let timeout = match deadline {
+        Some(deadline) if now >= deadline => {
+            return Err(DbError::Cancelled(format!(
+                "{phase}: request budget exhausted before acquisition"
+            )));
+        }
+        Some(deadline) => Duration::from_nanos(deadline.as_nanos().saturating_sub(now.as_nanos())),
+        None => DEFAULT_REQUEST_TIMEOUT,
+    };
+    match asupersync::time::timeout(cx.now(), timeout, future).await {
+        Ok(result) => result,
+        Err(_) => Err(DbError::Cancelled(format!(
+            "{phase}: request budget deadline exceeded"
+        ))),
+    }
+}
+
 /// Observe read failures at the connection-ownership boundary.
 ///
 /// A dispatcher-owned primary connection is retained across calls, so an
@@ -887,24 +926,34 @@ impl<'a> GuardedReadExecutor<'a> {
         &self,
         cx: &Cx,
         state: &DispatcherState,
+        request_budget: &RequestBudget,
     ) -> Result<Option<Box<dyn OracleConnection>>, ErrorEnvelope> {
         let (Some(connector), Some(generation)) =
             (self.connector.as_ref(), state.profile_generation.as_ref())
         else {
             return Ok(None);
         };
-        let bundle = connector(cx, generation)
-            .await
-            .map_err(DbError::into_envelope)?;
-        let (session, stateless) = bundle.into_parts();
-        if let Some(stateless) = stateless {
-            // The profile connector opens the full runtime bundle, including
-            // its stateless pool. Cost estimation needs only the isolated
-            // session; dropping an unused pool skips its async Oracle-session
-            // cleanup and leaks its idle physical sessions.
-            stateless.close(cx).await.map_err(DbError::into_envelope)?;
-        }
-        Ok(Some(session))
+        let open_and_release_pool = async {
+            let bundle = connector(cx, generation).await?;
+            let (session, stateless) = bundle.into_parts();
+            if let Some(stateless) = stateless {
+                // The profile connector opens the full runtime bundle, including
+                // its stateless pool. Cost estimation needs only the isolated
+                // session; dropping an unused pool skips its async Oracle-session
+                // cleanup and leaks its idle physical sessions.
+                stateless.close(cx).await?;
+            }
+            Ok(session)
+        };
+        await_request_bounded(
+            cx,
+            request_budget,
+            open_and_release_pool,
+            "query-cost metadata session acquisition",
+        )
+        .await
+        .map(Some)
+        .map_err(DbError::into_envelope)
     }
 
     /// Admit server-generated application SQL through the same proof as a
@@ -1167,7 +1216,8 @@ impl<'a> GuardedReadExecutor<'a> {
             let require_hard_parse_evidence = state.require_hard_parse_evidence;
             let require_query_cost_estimate = state.require_query_cost_estimate;
             let mut cost_metadata_session = if cost_limit.is_some() || cumulative_policy.is_some() {
-                self.open_query_cost_metadata_session(cx, state).await?
+                self.open_query_cost_metadata_session(cx, state, &request_budget)
+                    .await?
             } else {
                 None
             };
@@ -1468,7 +1518,8 @@ impl<'a> GuardedReadExecutor<'a> {
                 let require_query_cost_estimate = state.require_query_cost_estimate;
                 let mut cost_metadata_session =
                     if cost_limit.is_some() || cumulative_policy.is_some() {
-                        self.open_query_cost_metadata_session(cx, &state).await?
+                        self.open_query_cost_metadata_session(cx, &state, &request_budget)
+                            .await?
                     } else {
                         None
                     };
