@@ -4160,12 +4160,12 @@ expression: rendered
       "name": "oracle_top_queries",
       "title": "Oracle Top Queries",
       "tier": "foundation_live_db",
-      "summary": "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Opt into historical AWR only when a Diagnostics Pack is licensed, else Statspack, else a structured-unavailable error — never invokes a paid pack unlicensed.",
+      "summary": "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Historical AWR requires the profile's explicit Diagnostics Pack license attestation and Oracle's active pack setting; without attestation the request returns POLICY_DENIED before database access. An attested profile may use Statspack when AWR is not active.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "historical": {
-            "description": "If true, use historical AWR (requires a licensed Diagnostics Pack) or Statspack instead of the live cursor cache. Defaults false (the free live source).",
+            "description": "If true, request historical diagnostics. Requires `profiles.diagnostics_pack_licensed = true` and Oracle pack activation for AWR; without an explicit attestation the server returns POLICY_DENIED. Defaults false (the free live cursor cache).",
             "type": "boolean"
           },
           "metric": {
@@ -4212,7 +4212,7 @@ expression: rendered
       "name": "oracle_plan_timeline",
       "title": "Oracle Plan Timeline",
       "tier": "foundation_live_db",
-      "summary": "Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. Requires a licensed Oracle Diagnostics Pack; when the license probe cannot prove DIAGNOSTIC access it returns a typed refusal before touching DBA_HIST_*.",
+      "summary": "Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. Requires `profiles.diagnostics_pack_licensed = true` and active Oracle Diagnostics Pack access; otherwise returns POLICY_DENIED before touching DBA_HIST_*.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
