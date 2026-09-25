@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T07:16:00Z",
+  "bead_id": "oraclemcp-wcsxp",
+  "scope": {
+    "summary": "api-lock CI job made green on a fresh runner: 9a3d6e2e fetches each baseline's locked dependencies online before the offline baseline rustdoc build; 8cdcd754 forces CARGO_TERM_COLOR=never so the semver-checks report parses; d5cfd08e/34289cb7 refresh the committed public-API snapshots with the reviewed 0.12 additions listed in CHANGELOG [Unreleased].",
+    "in_scope": [
+      "scripts/oraclemcp_api_lock.sh",
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "Whether each 0.12 public-API addition is desirable is judged by the originating beads; this bead proves the lock mechanism and the reviewed snapshot refresh."
+    ]
+  },
+  "source": {
+    "sha": "34289cb794d07ab16b64bc8e64e88f2095e7a024",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "api-lock CI job on a fresh runner (orchestrator-read verdict)",
+        "kind": "cli",
+        "trace": "GitHub Actions CI run 36101590882 at 34289cb7, job 107969774724 'public-API lock (cargo public-api + semver-checks)' conclusion success. Log: 'fetching locked dependencies for baseline v0.11.0'; SemVer reports parse for oraclemcp-error, oraclemcp-guard, oraclemcp-db, oraclemcp-verifier (checks_run=253 each; release type major for planned 0.12.0, so evaluated=0 is the documented major-release behaviour); 'OK - all locked public-API surfaces match their baselines.' Prior runs: 36078992567 failed on the offline fetch, 36095845834 on 963e3713 failed on real snapshot DRIFT (which the job exists to catch), 36101590882 green after the reviewed refresh."
+      },
+      {
+        "name": "prepush head check",
+        "kind": "cli",
+        "trace": "Orchestrator prepush.sh now runs bash scripts/oraclemcp_api_lock.sh on every agent push (added 2026-09-25 after the drift escaped), so unreviewed public-API drift is caught before landing."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The same CI run is red on the separate 'Oracle FREE 23ai matrix' job, caused by .10.19 (tracked there), not by this bead.",
+    "For a major release semver-checks evaluates zero checks by design; drift detection comes from the committed cargo public-api snapshots."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
