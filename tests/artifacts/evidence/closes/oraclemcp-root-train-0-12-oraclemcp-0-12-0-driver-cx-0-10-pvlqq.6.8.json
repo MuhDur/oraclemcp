@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T04:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.8",
+  "scope": {
+    "summary": "Hardened EXPLAIN: server-generated statement-id literal, verified PLAN_TABLE (local/private-synonym shadows and identity drift unavailable; SYS.PLAN_TABLE$ fallback surfaced), EXPLAIN inside a rolled-back savepoint, hard-parse closure (ODCI statistics, domain index, VPD/OLS/RAS/redaction refuse on positive evidence; unreadable evidence admits with observation + readable audit record under R36 unless require_hard_parse_evidence; probing continues after a denial; refused policy probes count as privilege-limited, never as absence), max_query_cost enforced from the plan estimate even in read-only transactions via a bounded metadata session (unmeasurable cost admits only under !require_query_cost_estimate), doctor WARN conditional on an online probe. Commits incl. b67766f4, 1ba44b84, fb10a7b8, fb29aafa, 40e31602, dcf2a820, c2fa08df, f5f66a14, 95695872, 1730f360, 4e857252.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/hard_parse_closure.rs",
+      "crates/oraclemcp-db/src/intelligence.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "scripts/e2e/w4/cases/explain-plan.json"
+    ],
+    "out_of_scope": [
+      "ADB behaviour; callback classes beyond the enumerated catalog evidence (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "02f3c466109cd46e37797c8e3bff83b2c29fd251",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "live EXPLAIN W4 (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary at 02f3c466, driver.py fresh cases.jsonl: w4_explain_plan_* 17/17 pass on each of free23, xe21, xe18 (stdio+HTTP): free_plan_table_and_rollback, interleaved_requests_own_statement_id, local_plan_table_trigger_refused, private_synonym_shadow_refused, vpd_policy_refused, odci_canary_not_invoked (FORBIDDEN_STATEMENT, canary count unchanged), read_only_txn_behaviour (two capped reads + over-cap refused POLICY_DENIED query_cost_exceeded), privilege_limited_evidence_observed, privilege_limited_strict_refuses. Earlier runs at 95695872 also 51/51."
+      },
+      {
+        "name": "unit (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "At 02f3c466: fga_evidence_r36::query_cost_metadata_close_that_never_completes_fails_with_typed_timeout ok; driver.py --selftest ok (step-local audit_record matching)."
+      },
+      {
+        "name": "review history",
+        "kind": "cli",
+        "trace": "fb10a7b8: P0 FAIL-OPEN (first denied probe admitted and skipped later probes) - fixed fb29aafa. 40e31602: max_query_cost silently bypassed in RO txn + OLS/RAS absence proven via privilege-filtered ALL_OBJECTS (strict fail-open) - fixed (dcf2a820/c2fa08df/95695872; optional_policy_view_is_absent removed). c2fa08df: P0 hang on the second capped read in a RO txn - fixed 95695872 (bounded acquire), 1730f360/4e857252 (bounded close + early-return close). Orchestrator rulings recorded on the bead: R36 extension to hard-parse/PLAN_TABLE evidence with full shape; removal of the per-request DB quota derived from max_query_cost accepted; steps-only capped W4 coverage accepted."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "A dispatcher built without a connector falls back to the primary connection and admits RO-txn capped reads with cost_unavailable_read_only_txn (audited); production uses the switchable constructor.",
+    "Refused{callback_unprovable} is RUNTIME_STATE_REQUIRED via the cost pre-check vs FORBIDDEN_STATEMENT via EXPLAIN (both refuse)."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
