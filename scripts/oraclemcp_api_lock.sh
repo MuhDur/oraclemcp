@@ -149,6 +149,8 @@ run_semver_check() {
   baseline_target="${CARGO_TARGET_DIR:-$ROOT/target}/semver-baseline-target-${baseline_tag}"
   mkdir -p "$archive" "$baseline_target"
   git archive "$baseline_tag" | tar -x -C "$archive"
+  echo "oraclemcp-api-lock: fetching locked dependencies for baseline $baseline_tag"
+  cargo fetch --locked --manifest-path "$archive/Cargo.toml"
   baseline_metadata="$(cargo --offline --locked metadata --no-deps --format-version 1 \
     --manifest-path "$archive/Cargo.toml")"
   for crate in "${SEMVER_CRATES[@]}"; do
