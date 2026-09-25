@@ -44,7 +44,8 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "plan_contains"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
-                    "synthetic_cross_rw_strict", "protected", "capped_rw"}
+                    "synthetic_cross_rw_strict", "synthetic_cross_security",
+                    "synthetic_cross_security_strict", "protected", "capped_rw"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
@@ -302,6 +303,9 @@ def validate_case(case, filename):
     if case.get("profile_variant") in {"synthetic_cross_rw", "synthetic_cross_rw_strict"}:
         require(case["level"] == "READ_WRITE",
                 "least-privilege cross-schema profile is restricted to explicit READ_WRITE cases")
+    if case.get("profile_variant") in {"synthetic_cross_security", "synthetic_cross_security_strict"}:
+        require(case["level"] == "READ_ONLY",
+                "security evidence profiles are pinned to READ_ONLY")
     require("plan_contains" not in case
             or (isinstance(case["plan_contains"], str) and case["plan_contains"]),
             "plan_contains must be a nonempty string")
@@ -960,6 +964,27 @@ credential_ref = "env:W4_CROSS_PASSWORD"
 max_level = "ADMIN"
 default_level = "READ_ONLY"
 require_hard_parse_evidence = true
+'''
+        content += f'''
+[[profiles]]
+name = "{lane}_cross_security"
+description = "synthetic W4 least-privilege read profile with default security evidence behavior"
+connect_string = "{dsn}"
+username = "{cross}"
+credential_ref = "env:W4_CROSS_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+'''
+        content += f'''
+[[profiles]]
+name = "{lane}_cross_security_strict"
+description = "synthetic W4 least-privilege read profile requiring security catalog evidence"
+connect_string = "{dsn}"
+username = "{cross}"
+credential_ref = "env:W4_CROSS_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+require_security_feature_evidence = true
 '''
     path.write_text(content)
     return audience
@@ -1812,6 +1837,8 @@ def run_lane(args):
                                        else args.lane + "_owner_rw" if variant == "synthetic_owner_rw"
                                        else args.lane + "_cross_rw" if variant == "synthetic_cross_rw"
                                        else args.lane + "_cross_rw_strict" if variant == "synthetic_cross_rw_strict"
+                                       else args.lane + "_cross_security" if variant == "synthetic_cross_security"
+                                       else args.lane + "_cross_security_strict" if variant == "synthetic_cross_security_strict"
                                        else args.lane + "_protected" if variant == "protected"
                                        else args.lane + "_capped" if variant == "capped_rw"
                                        else args.lane)

@@ -1678,24 +1678,21 @@ mod tests {
         );
     }
 
-    /// top_queries Statspack-fallback (C8): when the Diagnostics Pack is NOT
-    /// licensed but Statspack IS installed, historical resolves to Statspack;
-    /// when both are absent it resolves to Unavailable; the non-historical
-    /// default is always the free live cursor regardless.
+    /// The health preflight remains a report-only capability probe; the served
+    /// historical top-queries tool separately requires explicit license
+    /// attestation, which cannot be inferred from Oracle activation settings.
     #[test]
-    fn top_queries_statspack_fallback_through_preflight() {
+    fn top_queries_requires_explicit_license_attestation() {
         run_with_cx(|cx| async move {
             // Pack absent (v$parameter has no DIAGNOSTIC value), Statspack present.
             let with_statspack = TierMock { deny: &[] };
             assert!(!crate::awr::detect_diagnostics_pack(&cx, &with_statspack).await);
             assert!(crate::awr::detect_statspack(&cx, &with_statspack).await);
-            assert_eq!(
-                crate::awr::resolve_top_sql_source(&cx, &with_statspack, true)
-                    .await
-                    .expect("historical source resolution"),
-                crate::awr::DiagnosticsSource::Statspack,
-                "no pack + Statspack installed -> Statspack"
-            );
+            assert!(matches!(
+                crate::awr::resolve_top_sql_source(&cx, &with_statspack, true).await,
+                Err(crate::error::DbError::Refused(envelope))
+                    if envelope.error_class == oraclemcp_error::ErrorClass::PolicyDenied
+            ));
             assert_eq!(
                 crate::awr::resolve_top_sql_source(&cx, &with_statspack, false)
                     .await
@@ -1704,17 +1701,17 @@ mod tests {
                 "default mode is unaffected by the historical fallback"
             );
 
-            // Pack absent AND Statspack absent -> historical is Unavailable.
+            // Without a license attestation, historical requests refuse even
+            // when there is no free fallback source available.
             let without_statspack = TierMock {
                 deny: &["perfstat"],
             };
             assert!(!crate::awr::detect_statspack(&cx, &without_statspack).await);
-            assert_eq!(
-                crate::awr::resolve_top_sql_source(&cx, &without_statspack, true)
-                    .await
-                    .expect("unavailable historical source resolution"),
-                crate::awr::DiagnosticsSource::Unavailable
-            );
+            assert!(matches!(
+                crate::awr::resolve_top_sql_source(&cx, &without_statspack, true).await,
+                Err(crate::error::DbError::Refused(envelope))
+                    if envelope.error_class == oraclemcp_error::ErrorClass::PolicyDenied
+            ));
             assert_eq!(
                 crate::awr::resolve_top_sql_source(&cx, &without_statspack, false)
                     .await

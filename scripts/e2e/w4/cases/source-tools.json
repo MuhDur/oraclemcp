@@ -2438,7 +2438,11 @@
       "http"
     ],
     "requires": [],
-    "setup": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE VIEW ${owner}.V_SRC_${run_id} AS SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}"
+      }
+    ],
     "call": {
       "arguments": {
         "owner": "${owner}",
@@ -2469,7 +2473,12 @@
     "audit_expect": [],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
-    }
+    },
+    "cleanup": [
+      {
+        "sql": "DROP VIEW ${owner}.V_SRC_${run_id}"
+      }
+    ]
   },
   {
     "case_id": "w4_get_source_missing_object_not_found",
@@ -2479,6 +2488,7 @@
       "stdio",
       "http"
     ],
+    "setup_phase": "before_server",
     "requires": [],
     "setup": [],
     "call": {
@@ -2495,7 +2505,8 @@
     "audit_expect": [],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
-    }
+    },
+    "profile_variant": "synthetic_owner"
   },
   {
     "case_id": "w4_get_source_argument_class",

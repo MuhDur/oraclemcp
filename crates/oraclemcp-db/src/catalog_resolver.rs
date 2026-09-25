@@ -843,53 +843,70 @@ pub async fn observe_relation_security(
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
 ) -> Result<Vec<RelationSecurityObservation>, RelationSecurityProofError> {
+    let observations = observe_relation_security_for_read(cx, conn, relations).await?;
+    if let Some(observation) = observations.iter().find(|observation| {
+        observation.ols == RelationSecurityState::Unavailable
+            || observation.ras == RelationSecurityState::Unavailable
+            || observation.redaction == RelationSecurityState::Unavailable
+    }) {
+        let feature = if observation.ols == RelationSecurityState::Unavailable {
+            RelationSecurityFeature::Ols
+        } else if observation.ras == RelationSecurityState::Unavailable {
+            RelationSecurityFeature::Ras
+        } else {
+            RelationSecurityFeature::Redaction
+        };
+        return Err(RelationSecurityProofError::VisibilityUnknown {
+            feature,
+            observation: observation.clone(),
+        });
+    }
+    Ok(observations)
+}
+
+/// Read current relation security evidence for a served read. Unlike the
+/// strict mutation-closure helper, unavailable catalog visibility is retained
+/// as a keyed observation so the caller can apply the profile's R36 policy.
+pub(crate) async fn observe_relation_security_for_read(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> Result<Vec<RelationSecurityObservation>, RelationSecurityProofError> {
     if relations.is_empty() {
         return Ok(Vec::new());
     }
     if relations.len() > 256 {
         let relation = &relations[0];
-        let observation = RelationSecurityObservation {
-            key: RelationSecurityKey {
-                dbid: None,
-                container: None,
-                edition: None,
-                owner: relation.owner.clone(),
-                name: relation.name.clone(),
-                object_id: relation.identity.object_id,
-                object_edition: relation.identity.edition.clone(),
-            },
-            ols: RelationSecurityState::Unavailable,
-            ras: RelationSecurityState::Unavailable,
-            redaction: RelationSecurityState::Unavailable,
-        };
         return Err(RelationSecurityProofError::VisibilityUnknown {
             feature: RelationSecurityFeature::Ols,
-            observation,
+            observation: RelationSecurityObservation {
+                key: RelationSecurityKey {
+                    dbid: None,
+                    container: None,
+                    edition: None,
+                    owner: relation.owner.clone(),
+                    name: relation.name.clone(),
+                    object_id: relation.identity.object_id,
+                    object_edition: relation.identity.edition.clone(),
+                },
+                ols: RelationSecurityState::Unavailable,
+                ras: RelationSecurityState::Unavailable,
+                redaction: RelationSecurityState::Unavailable,
+            },
         });
     }
-    let identity = read_closure_database_identity(cx, conn)
-        .await
-        .map_err(|_| RelationSecurityProofError::VisibilityUnknown {
-            feature: RelationSecurityFeature::Ols,
-            observation: unavailable_relation_security_observation(
-                &relations[0],
-                None,
-                None,
-                None,
-                RelationSecurityFeature::Ols,
-            ),
-        })?;
-    let dbid = identity.dbid;
-    let container = identity.container;
-    let edition = identity.edition;
+    let identity = read_closure_database_identity(cx, conn).await.ok();
+    let dbid = identity.as_ref().map(|identity| identity.dbid.clone());
+    let container = identity.as_ref().map(|identity| identity.container.clone());
+    let edition = identity.as_ref().map(|identity| identity.edition.clone());
 
     let mut observations = Vec::with_capacity(relations.len());
     for relation in relations {
         let mut observation = RelationSecurityObservation {
             key: RelationSecurityKey {
-                dbid: Some(dbid.clone()),
-                container: Some(container.clone()),
-                edition: Some(edition.clone()),
+                dbid: dbid.clone(),
+                container: container.clone(),
+                edition: edition.clone(),
                 owner: relation.owner.clone(),
                 name: relation.name.clone(),
                 object_id: relation.identity.object_id,
@@ -946,28 +963,65 @@ pub async fn observe_relation_security(
                     ],
                 )
                 .await;
-                let (Ok(table_policies), Ok(schema_policies)) = (table_policies, schema_policies)
-                else {
-                    observation.ols = RelationSecurityState::Unavailable;
-                    return Err(RelationSecurityProofError::VisibilityUnknown {
-                        feature: RelationSecurityFeature::Ols,
-                        observation,
-                    });
-                };
-                if !table_policies.is_empty() || !schema_policies.is_empty() {
+                let protected = table_policies
+                    .as_ref()
+                    .is_ok_and(|policies| !policies.is_empty())
+                    || schema_policies
+                        .as_ref()
+                        .is_ok_and(|policies| !policies.is_empty());
+                if protected {
                     observation.ols = RelationSecurityState::Protected;
                     return Err(RelationSecurityProofError::Protected {
                         feature: RelationSecurityFeature::Ols,
                         observation,
                     });
                 }
-                observation.ols = RelationSecurityState::Absent;
+                observation.ols = if table_policies.is_ok() && schema_policies.is_ok() {
+                    RelationSecurityState::Absent
+                } else {
+                    RelationSecurityState::Unavailable
+                };
             }
             Err(_) => {
-                return Err(RelationSecurityProofError::VisibilityUnknown {
-                    feature: RelationSecurityFeature::Ols,
-                    observation,
-                });
+                let table_policies = if relation.kind == CatalogObjectKind::Table {
+                    run_catalog_query(
+                        cx,
+                        conn,
+                        CatalogQueryId::ReadOlsTablePolicies,
+                        &[
+                            OracleBind::from(relation.owner.as_str()),
+                            OracleBind::from(relation.name.as_str()),
+                            OracleBind::I64(2),
+                        ],
+                    )
+                    .await
+                } else {
+                    Ok(Vec::new())
+                };
+                let schema_policies = run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::ReadOlsSchemaPolicies,
+                    &[
+                        OracleBind::from(relation.owner.as_str()),
+                        OracleBind::I64(2),
+                    ],
+                )
+                .await;
+                let protected = table_policies
+                    .as_ref()
+                    .is_ok_and(|policies| !policies.is_empty())
+                    || schema_policies
+                        .as_ref()
+                        .is_ok_and(|policies| !policies.is_empty());
+                if protected {
+                    observation.ols = RelationSecurityState::Protected;
+                    return Err(RelationSecurityProofError::Protected {
+                        feature: RelationSecurityFeature::Ols,
+                        observation,
+                    });
+                }
+                observation.ols = RelationSecurityState::Unavailable;
             }
         }
 
@@ -982,21 +1036,17 @@ pub async fn observe_relation_security(
             ],
         )
         .await;
-        let Ok(ras_policies) = ras_policies else {
-            observation.ras = RelationSecurityState::Unavailable;
-            return Err(RelationSecurityProofError::VisibilityUnknown {
-                feature: RelationSecurityFeature::Ras,
-                observation,
-            });
-        };
-        if !ras_policies.is_empty() {
-            observation.ras = RelationSecurityState::Protected;
-            return Err(RelationSecurityProofError::Protected {
-                feature: RelationSecurityFeature::Ras,
-                observation,
-            });
+        match ras_policies {
+            Ok(ras_policies) if !ras_policies.is_empty() => {
+                observation.ras = RelationSecurityState::Protected;
+                return Err(RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Ras,
+                    observation,
+                });
+            }
+            Ok(_) => observation.ras = RelationSecurityState::Absent,
+            Err(_) => observation.ras = RelationSecurityState::Unavailable,
         }
-        observation.ras = RelationSecurityState::Absent;
 
         match redaction_installation_evidence(cx, conn).await {
             Ok(false) => {
@@ -1004,14 +1054,34 @@ pub async fn observe_relation_security(
                 observations.push(observation);
                 continue;
             }
-            Ok(true) => {}
+            Ok(true) => observation.redaction = RelationSecurityState::Absent,
             Err(_) => {
-                observation.redaction = RelationSecurityState::Unavailable;
-                return Err(RelationSecurityProofError::VisibilityUnknown {
-                    feature: RelationSecurityFeature::Redaction,
-                    observation,
-                });
+                let redaction_policies = run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::ReadRedactionPolicies,
+                    &[
+                        OracleBind::from(relation.owner.as_str()),
+                        OracleBind::from(relation.name.as_str()),
+                        OracleBind::I64(2),
+                    ],
+                )
+                .await;
+                match redaction_policies {
+                    Ok(policies) if !policies.is_empty() => {
+                        observation.redaction = RelationSecurityState::Protected;
+                        return Err(RelationSecurityProofError::Protected {
+                            feature: RelationSecurityFeature::Redaction,
+                            observation,
+                        });
+                    }
+                    _ => observation.redaction = RelationSecurityState::Unavailable,
+                }
             }
+        }
+        if observation.redaction == RelationSecurityState::Unavailable {
+            observations.push(observation);
+            continue;
         }
         let redaction_policies = run_catalog_query(
             cx,
@@ -1024,55 +1094,20 @@ pub async fn observe_relation_security(
             ],
         )
         .await;
-        let Ok(redaction_policies) = redaction_policies else {
-            observation.redaction = RelationSecurityState::Unavailable;
-            return Err(RelationSecurityProofError::VisibilityUnknown {
-                feature: RelationSecurityFeature::Redaction,
-                observation,
-            });
-        };
-        if !redaction_policies.is_empty() {
-            observation.redaction = RelationSecurityState::Protected;
-            return Err(RelationSecurityProofError::Protected {
-                feature: RelationSecurityFeature::Redaction,
-                observation,
-            });
+        match redaction_policies {
+            Ok(redaction_policies) if !redaction_policies.is_empty() => {
+                observation.redaction = RelationSecurityState::Protected;
+                return Err(RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Redaction,
+                    observation,
+                });
+            }
+            Ok(_) => observation.redaction = RelationSecurityState::Absent,
+            Err(_) => observation.redaction = RelationSecurityState::Unavailable,
         }
-        observation.redaction = RelationSecurityState::Absent;
         observations.push(observation);
     }
     Ok(observations)
-}
-
-fn unavailable_relation_security_observation(
-    relation: &ResolvedObject,
-    dbid: Option<String>,
-    container: Option<String>,
-    edition: Option<String>,
-    feature: RelationSecurityFeature,
-) -> RelationSecurityObservation {
-    let mut observation = RelationSecurityObservation {
-        key: RelationSecurityKey {
-            dbid,
-            container,
-            edition,
-            owner: relation.owner.clone(),
-            name: relation.name.clone(),
-            object_id: relation.identity.object_id,
-            object_edition: relation.identity.edition.clone(),
-        },
-        ols: RelationSecurityState::Unavailable,
-        ras: RelationSecurityState::Unavailable,
-        redaction: RelationSecurityState::Unavailable,
-    };
-    match feature {
-        RelationSecurityFeature::Ols => observation.ols = RelationSecurityState::Unavailable,
-        RelationSecurityFeature::Ras => observation.ras = RelationSecurityState::Unavailable,
-        RelationSecurityFeature::Redaction => {
-            observation.redaction = RelationSecurityState::Unavailable;
-        }
-    }
-    observation
 }
 
 fn fga_flag(row: &OracleRow, name: &str) -> Option<bool> {
@@ -1620,7 +1655,7 @@ pub async fn prove_semantic_read_plan(
             relations.push(*object);
         }
     }
-    let relation_security = observe_relation_security(cx, conn, &relations)
+    let relation_security = observe_relation_security_for_read(cx, conn, &relations)
         .await
         .map_err(|error| ReadPlanProofError::Database(error.into()))?;
     let fga_evidence = match fga_closure(cx, conn, &relations, FgaStatementKind::Select).await {
@@ -4425,12 +4460,13 @@ mod tests {
             for policy in [None, Some("SYNTHETIC_REDACTION")] {
                 responses.push(vec![row(&[("VALUE", Some("FALSE"))])]);
                 responses.push(Vec::new());
-                responses.push(vec![row(&[("DATA_REDACTION", Some("TRUE"))])]);
-                responses.push(
-                    policy
-                        .map(|name| vec![row(&[("POLICY_NAME", Some(name))])])
-                        .unwrap_or_default(),
-                );
+                responses.push(vec![row(&[(
+                    "DATA_REDACTION",
+                    Some(if policy.is_some() { "TRUE" } else { "FALSE" }),
+                )])]);
+                if let Some(name) = policy {
+                    responses.push(vec![row(&[("POLICY_NAME", Some(name))])]);
+                }
             }
             let conn = ScriptedRows::new(responses);
             let outcome = observe_relation_security(&cx, &conn, &[table_object(), nested]).await;
@@ -4452,7 +4488,7 @@ mod tests {
     }
 
     #[test]
-    fn security_view_unreadable_is_unknown_refused() {
+    fn security_view_unreadable_is_unknown_refused_when_strict() {
         run_with_cx(|cx| async move {
             let mut responses = relation_security_clear_prefix(false)
                 .into_iter()
@@ -4479,6 +4515,65 @@ mod tests {
     }
 
     #[test]
+    fn security_view_unreadable_is_unknown_available_to_default_read_policy() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(false)
+                .into_iter()
+                .map(Ok)
+                .collect::<Vec<_>>();
+            responses.push(Err(DbError::ServerQuery(
+                "ORA-00942: table or view does not exist".to_owned(),
+            )));
+            responses.push(Ok(vec![row(&[("DATA_REDACTION", Some("FALSE"))])]));
+            let conn = ScriptedRows::results(responses);
+            let observations = observe_relation_security_for_read(&cx, &conn, &[table_object()])
+                .await
+                .expect("default read policy retains unknown evidence as an observation");
+            assert_eq!(observations.len(), 1);
+            assert_eq!(observations[0].ras, RelationSecurityState::Unavailable);
+            assert_eq!(observations[0].key.owner, "APP");
+            assert_eq!(observations[0].key.name, "ORDERS");
+            assert_eq!(observations[0].key.object_id, 42);
+        });
+    }
+
+    #[test]
+    fn protected_relation_refuses_even_when_another_relation_is_unknown() {
+        run_with_cx(|cx| async move {
+            let mut responses = vec![Ok(vec![relation_security_identity_row()])];
+            responses.extend([
+                Ok(vec![row(&[("VALUE", Some("FALSE"))])]),
+                Err(DbError::ServerQuery("ORA-01031: denied".to_owned())),
+                Ok(vec![row(&[("DATA_REDACTION", Some("FALSE"))])]),
+                Ok(vec![row(&[("VALUE", Some("FALSE"))])]),
+                Ok(Vec::new()),
+                Ok(vec![row(&[("DATA_REDACTION", Some("TRUE"))])]),
+                Ok(vec![row(&[("POLICY_NAME", Some("SYNTHETIC"))])]),
+            ]);
+            let nested = ResolvedObject {
+                name: "REDACTED_INNER".to_owned(),
+                identity: ResolvedIdentity {
+                    object_id: 43,
+                    edition: None,
+                },
+                ..table_object()
+            };
+            let conn = ScriptedRows::results(responses);
+            assert!(matches!(
+                observe_relation_security_for_read(&cx, &conn, &[table_object(), nested]).await,
+                Err(RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Redaction,
+                    observation: RelationSecurityObservation {
+                        key: RelationSecurityKey { object_id: 43, .. },
+                        redaction: RelationSecurityState::Protected,
+                        ..
+                    }
+                })
+            ));
+        });
+    }
+
+    #[test]
     fn redaction_option_unreadable_is_unknown_refused() {
         run_with_cx(|cx| async move {
             let mut responses = relation_security_clear_prefix(false)
@@ -4489,6 +4584,7 @@ mod tests {
             responses.push(Err(DbError::ServerQuery(
                 "ORA-01031: insufficient privileges".to_owned(),
             )));
+            responses.push(Ok(Vec::new()));
             let conn = ScriptedRows::results(responses);
             match observe_relation_security(&cx, &conn, &[table_object()]).await {
                 Err(RelationSecurityProofError::VisibilityUnknown {
@@ -4505,7 +4601,7 @@ mod tests {
                 sql == CatalogQueryId::RedactionInstallationEvidence.spec().sql
             }));
             assert!(
-                !queries.iter().any(|(sql, _)| {
+                queries.iter().any(|(sql, _)| {
                     sql.to_ascii_lowercase().contains("from redaction_policies")
                 })
             );
@@ -4621,7 +4717,7 @@ mod tests {
     fn redaction_option_missing_is_unknown_refused() {
         run_with_cx(|cx| async move {
             let mut responses = relation_security_clear_prefix(false);
-            responses.extend([Vec::new(), Vec::new()]);
+            responses.extend([Vec::new(), Vec::new(), Vec::new()]);
             let conn = ScriptedRows::new(responses);
             assert!(matches!(
                 observe_relation_security(&cx, &conn, &[table_object()]).await,
@@ -4635,7 +4731,7 @@ mod tests {
             ));
             let queries = conn.queries.lock().expect("query log");
             assert!(
-                !queries.iter().any(|(sql, _)| {
+                queries.iter().any(|(sql, _)| {
                     sql.to_ascii_lowercase().contains("from redaction_policies")
                 })
             );

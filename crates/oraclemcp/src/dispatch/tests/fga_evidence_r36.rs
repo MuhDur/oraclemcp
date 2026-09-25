@@ -12,6 +12,20 @@ use oraclemcp_db::{CatalogQueryId, PLAN_COST_ESTIMATE_NOTE, PlanCostSummary};
 
 const READ: &str = "SELECT id FROM APP.ORDERS";
 
+fn unreadable_security_dispatcher(
+    require_evidence: bool,
+) -> (OracleDispatcher, Arc<SemanticGuardState>) {
+    let (dispatcher, state) = semantic_dispatcher();
+    *state
+        .security_catalog_unreadable
+        .lock()
+        .expect("security catalog fixture lock") = true;
+    (
+        dispatcher.with_security_feature_evidence_requirement(require_evidence),
+        state,
+    )
+}
+
 fn unreadable_fga_dispatcher(
     policy: FgaEvidencePolicy,
 ) -> (OracleDispatcher, Arc<SemanticGuardState>) {
@@ -28,6 +42,73 @@ fn offending_construct(error: &ErrorEnvelope) -> Option<&str> {
         .structured_reason
         .as_ref()
         .and_then(|reason| reason.offending_construct.as_deref())
+}
+
+#[test]
+fn unavailable_security_feature_evidence_admits_with_relation_observation() {
+    let (dispatcher, state) = unreadable_security_dispatcher(false);
+    let result = dispatcher
+        .dispatch("oracle_query", json!({"sql": READ}))
+        .expect("default profile admits an ordinary read when catalog visibility is unknown");
+    assert_eq!(result["security_feature_evidence"], json!("unavailable"));
+    assert_eq!(
+        result["security_feature_evidence_details"][0]["relation"],
+        json!("APP.ORDERS")
+    );
+    assert_eq!(
+        result["security_feature_evidence_details"][0]["features"],
+        json!(["ras"])
+    );
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn require_security_feature_evidence_refuses_unreadable_catalog_before_query() {
+    let (dispatcher, state) = unreadable_security_dispatcher(true);
+    let error = dispatcher
+        .dispatch("oracle_query", json!({"sql": READ}))
+        .expect_err("strict profiles restore the unknown-visibility refusal");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+    assert_eq!(
+        offending_construct(&error),
+        Some("security_feature_visibility_unknown")
+    );
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn unavailable_security_feature_evidence_is_signed_and_audited_before_the_read() {
+    let sink = Arc::new(MemoryAuditSink::new());
+    let signing_key = SigningKey::new(
+        "r36-test-key",
+        b"r36-security-feature-evidence-audit-key".to_vec(),
+    )
+    .expect("valid test key");
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(Arc::clone(&sink))),
+        signing_key.clone(),
+    ));
+    let (dispatcher, state) = unreadable_security_dispatcher(false);
+    let result = dispatcher
+        .with_auditor(auditor)
+        .dispatch("oracle_query", json!({"sql": READ}))
+        .expect("ordinary read proceeds with the R36 observation");
+    assert_eq!(result["security_feature_evidence"], json!("unavailable"));
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+    let records = sink.records();
+    let marker = records
+        .iter()
+        .position(|record| record.tool == "security_feature_evidence_unavailable")
+        .expect("signed security evidence observation record");
+    assert!(records[marker].signature_is_valid(&signing_key));
+    let read = records
+        .iter()
+        .position(|record| record.tool == "oracle_query")
+        .expect("the read's audit record");
+    assert!(
+        marker < read,
+        "observation audit record precedes query audit"
+    );
 }
 
 #[test]
@@ -803,6 +884,57 @@ fn startup_profile_require_fga_evidence_is_installed_from_the_config_snapshot() 
                 assert_eq!(offending_construct(&error), Some("fga_evidence_unknown"));
                 assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
             }
+        }
+    }
+}
+
+#[test]
+fn startup_security_feature_evidence_policy_is_installed_and_protected_is_strict() {
+    for (toml_flags, expected_strict) in [
+        ("", false),
+        ("require_security_feature_evidence = false", false),
+        ("require_security_feature_evidence = true", true),
+        (
+            "protected = true\nmax_level = \"READ_ONLY\"\nrequire_security_feature_evidence = false",
+            true,
+        ),
+    ] {
+        let config = OracleMcpConfig::from_toml_str(&format!(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "dev:1521/svc"
+            {toml_flags}
+            "#
+        ))
+        .expect("config");
+        let state = Arc::new(SemanticGuardState::default());
+        *state
+            .security_catalog_unreadable
+            .lock()
+            .expect("security catalog fixture lock") = true;
+        let dispatcher = OracleDispatcher::new_switchable(
+            Box::new(SemanticGuardMock {
+                state: Arc::clone(&state),
+            }),
+            Some("dev".to_owned()),
+            default_read_only_level(),
+            Arc::new(|_cx, _generation| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+        )
+        .with_profile_drain_state(ProfileDrainState::from_config(config));
+        let outcome = dispatcher.dispatch("oracle_query", json!({"sql": READ}));
+        if expected_strict {
+            let error = outcome.expect_err("strict and protected profiles refuse unknown evidence");
+            assert_eq!(
+                offending_construct(&error),
+                Some("security_feature_visibility_unknown"),
+                "{toml_flags:?}"
+            );
+            assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+        } else {
+            let result = outcome.unwrap_or_else(|error| panic!("{toml_flags:?}: {error:?}"));
+            assert_eq!(result["security_feature_evidence"], json!("unavailable"));
+            assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
         }
     }
 }

@@ -7067,6 +7067,7 @@ fn doctor_profile_caps(
         protected: level.is_protected(),
         read_only_standby: profile.read_only_standby(),
         require_fga_evidence: profile.require_fga_evidence(),
+        require_security_feature_evidence: profile.require_security_feature_evidence(),
         require_hard_parse_evidence: profile.require_hard_parse_evidence(),
     }
 }

@@ -74,7 +74,8 @@ use oraclemcp_db::{
     semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{
-    FgaEvidence, FgaEvidencePolicy, SearchDetailLevel, SourceText, StatementOutcome,
+    FgaEvidence, FgaEvidencePolicy, RelationSecurityObservation, RelationSecurityState,
+    SearchDetailLevel, SourceText, StatementOutcome,
 };
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
@@ -239,6 +240,8 @@ struct ProfileDispatchPolicy {
     /// R36: whether a read may proceed when the principal cannot read the FGA
     /// catalog (`require_fga_evidence`).
     fga_evidence_policy: FgaEvidencePolicy,
+    /// R36: whether unavailable OLS/RAS/Redaction catalog evidence refuses reads.
+    require_security_feature_evidence: bool,
     require_hard_parse_evidence: bool,
     require_query_cost_estimate: bool,
 }
@@ -255,6 +258,7 @@ struct PreparedProfileSwitch {
     result_masking: Option<ResultMaskingPolicy>,
     sql_policy: Option<SqlPolicyConfig>,
     fga_evidence_policy: FgaEvidencePolicy,
+    require_security_feature_evidence: bool,
     require_hard_parse_evidence: bool,
     require_query_cost_estimate: bool,
     custom_catalog: CustomToolCatalog,
@@ -278,6 +282,7 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         result_masking: None,
         sql_policy: None,
         fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
+        require_security_feature_evidence: false,
         require_hard_parse_evidence: false,
         require_query_cost_estimate: false,
     }
@@ -287,16 +292,18 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
 /// config snapshot a profile switch reads, so the initially served profile is
 /// governed exactly as it would be after switching to it. A snapshot that
 /// cannot produce a dispatch policy keeps the strict rule.
-fn install_bound_fga_evidence_policy(state: &mut DispatcherState) {
+fn install_bound_read_evidence_policies(state: &mut DispatcherState) {
     if let Some(lease) = state.profile_generation.as_ref() {
         match profile_dispatch_policy(lease) {
             Ok(policy) => {
                 state.fga_evidence_policy = policy.fga_evidence_policy;
+                state.require_security_feature_evidence = policy.require_security_feature_evidence;
                 state.require_hard_parse_evidence = policy.require_hard_parse_evidence;
                 state.require_query_cost_estimate = policy.require_query_cost_estimate;
             }
             Err(_) => {
                 state.fga_evidence_policy = FgaEvidencePolicy::RequireProof;
+                state.require_security_feature_evidence = true;
                 state.require_hard_parse_evidence = true;
                 state.require_query_cost_estimate = true;
             }
@@ -311,6 +318,10 @@ fn fga_evidence_policy_for(profile: &ConnectionProfile) -> FgaEvidencePolicy {
     } else {
         FgaEvidencePolicy::AdmitUnavailable
     }
+}
+
+fn require_security_feature_evidence_for(profile: &ConnectionProfile) -> bool {
+    profile.require_security_feature_evidence()
 }
 
 /// Convert the validated profile config DTO into the DB-layer result masking
@@ -425,6 +436,7 @@ fn profile_dispatch_policy(
         // It is validated at config load and can only ever restrict.
         sql_policy: profile.sql_policy.clone(),
         fga_evidence_policy: fga_evidence_policy_for(profile),
+        require_security_feature_evidence: require_security_feature_evidence_for(profile),
         require_hard_parse_evidence: profile.require_hard_parse_evidence(),
         require_query_cost_estimate: profile.require_query_cost_estimate(),
     })
@@ -498,6 +510,8 @@ struct DispatcherState {
     /// R36: the active profile's FGA evidence rule for reads. Swapped with the
     /// pinned session on a profile switch.
     fga_evidence_policy: FgaEvidencePolicy,
+    /// R36: the active profile's OLS/RAS/Redaction evidence rule for reads.
+    require_security_feature_evidence: bool,
     require_hard_parse_evidence: bool,
     require_query_cost_estimate: bool,
 }
@@ -671,6 +685,7 @@ impl OracleDispatcher {
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
                 fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
+                require_security_feature_evidence: false,
                 require_hard_parse_evidence: false,
                 require_query_cost_estimate: false,
             }),
@@ -764,6 +779,7 @@ impl OracleDispatcher {
                 read_only_backstop: ReadOnlyBackstop::new(),
                 checkpoints: CheckpointWorkspace::new(),
                 fga_evidence_policy: FgaEvidencePolicy::AdmitUnavailable,
+                require_security_feature_evidence: false,
                 require_hard_parse_evidence: false,
                 require_query_cost_estimate: false,
             }),
@@ -808,7 +824,7 @@ impl OracleDispatcher {
                 .active_profile
                 .as_deref()
                 .and_then(|profile| state.bind_existing_profile(profile));
-            install_bound_fga_evidence_policy(dispatcher_state);
+            install_bound_read_evidence_policies(dispatcher_state);
             self.profile_drain = state;
         }
         self
@@ -846,7 +862,7 @@ impl OracleDispatcher {
                 dispatcher_state.profile_generation = pending.take();
             })
             .map_err(|()| profile_draining_error(&profile))?;
-        install_bound_fga_evidence_policy(dispatcher_state);
+        install_bound_read_evidence_policies(dispatcher_state);
         self.profile_drain = state;
         Ok(self)
     }
@@ -1058,6 +1074,14 @@ impl OracleDispatcher {
     pub fn with_fga_evidence_policy(mut self, policy: FgaEvidencePolicy) -> Self {
         if let Ok(state) = self.state.get_mut() {
             state.fga_evidence_policy = policy;
+        }
+        self
+    }
+
+    #[cfg(test)]
+    fn with_security_feature_evidence_requirement(mut self, required: bool) -> Self {
+        if let Ok(state) = self.state.get_mut() {
+            state.require_security_feature_evidence = required;
         }
         self
     }
@@ -1421,6 +1445,7 @@ impl OracleDispatcher {
             result_masking,
             sql_policy,
             fga_evidence_policy,
+            require_security_feature_evidence,
             require_hard_parse_evidence,
             require_query_cost_estimate,
         } = profile_dispatch_policy(&profile_generation)?;
@@ -1494,6 +1519,7 @@ impl OracleDispatcher {
                 state.current_schema = None;
                 state.level = level;
                 state.fga_evidence_policy = fga_evidence_policy;
+                state.require_security_feature_evidence = require_security_feature_evidence;
                 state.require_hard_parse_evidence = require_hard_parse_evidence;
                 state.require_query_cost_estimate = require_query_cost_estimate;
                 state.custom_catalog = custom_catalog;
@@ -5407,6 +5433,7 @@ fn missing_semantic_column(name: &RawName) -> ErrorEnvelope {
 /// Resolve every caller-controlled read dependency against the exact live
 /// session before the submitted statement can execute. Dictionary lookup is
 /// observational I/O; the caller's SQL remains untouched until this returns.
+#[cfg(test)]
 async fn resolve_read_only_relations(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -5414,17 +5441,47 @@ async fn resolve_read_only_relations(
     sql: &str,
     fga_policy: FgaEvidencePolicy,
 ) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
-    resolve_read_only_relations_inner(cx, conn, cache, sql, false, fga_policy).await
+    resolve_read_only_relations_inner(cx, conn, cache, sql, false, fga_policy, false).await
 }
 
-async fn resolve_read_only_relations_with_verified_local_vector_embedding(
+async fn resolve_read_only_relations_with_security_policy(
     cx: &Cx,
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     sql: &str,
     fga_policy: FgaEvidencePolicy,
+    require_security_feature_evidence: bool,
 ) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
-    resolve_read_only_relations_inner(cx, conn, cache, sql, true, fga_policy).await
+    resolve_read_only_relations_inner(
+        cx,
+        conn,
+        cache,
+        sql,
+        false,
+        fga_policy,
+        require_security_feature_evidence,
+    )
+    .await
+}
+
+async fn resolve_read_only_relations_with_verified_local_vector_embedding_and_security_policy(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    sql: &str,
+    fga_policy: FgaEvidencePolicy,
+    require_security_feature_evidence: bool,
+) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
+    resolve_read_only_relations_inner(
+        cx,
+        conn,
+        cache,
+        sql,
+        true,
+        fga_policy,
+        require_security_feature_evidence,
+    )
+    .await
 }
 
 async fn resolve_read_only_relations_inner(
@@ -5434,14 +5491,16 @@ async fn resolve_read_only_relations_inner(
     sql: &str,
     verified_local_vector_embedding: bool,
     fga_policy: FgaEvidencePolicy,
+    require_security_feature_evidence: bool,
 ) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
-    read_executor::resolve_query_block_read(
+    read_executor::resolve_query_block_read_with_security_policy(
         cx,
         conn,
         cache,
         sql,
         verified_local_vector_embedding,
         fga_policy,
+        require_security_feature_evidence,
     )
     .await
 }
@@ -5530,6 +5589,7 @@ struct DiffSideRead {
     response: QueryResponse,
     inferred_key: Vec<String>,
     fga_evidence: FgaEvidence,
+    relation_security: Vec<RelationSecurityObservation>,
 }
 
 /// Both flashback reads use one admission verdict for the exact SQL and binds.
@@ -5548,6 +5608,7 @@ struct TimeDiffReadRequest<'a> {
     scn_b: u64,
     subject: &'a AuditSubject,
     fga_evidence_policy: FgaEvidencePolicy,
+    require_security_feature_evidence: bool,
 }
 
 struct TimeDiffRead {
@@ -5555,6 +5616,7 @@ struct TimeDiffRead {
     after: QueryResponse,
     key_columns: Vec<String>,
     fga_evidence: FgaEvidence,
+    relation_security: Vec<RelationSecurityObservation>,
 }
 
 impl DiffSide {
@@ -7887,6 +7949,7 @@ fn append_scn_capability_degraded_audit(
 /// marker, it is never a real tool name or caller SQL: the durable, signed
 /// record says which served tool was admitted on `fga_evidence: unavailable`.
 const FGA_EVIDENCE_UNAVAILABLE_TOOL: &str = "fga_evidence_unavailable";
+const SECURITY_FEATURE_EVIDENCE_UNAVAILABLE_TOOL: &str = "security_feature_evidence_unavailable";
 const HARD_PARSE_EVIDENCE_UNAVAILABLE_TOOL: &str = "hard_parse_evidence_unavailable";
 
 /// R36 extension: write a readable, independent record when the served SQL
@@ -7945,12 +8008,81 @@ fn append_fga_evidence_unavailable_audit(
     )
 }
 
+fn security_feature_evidence_details(observations: &[RelationSecurityObservation]) -> Vec<Value> {
+    observations
+        .iter()
+        .filter_map(|observation| {
+            let mut features = Vec::new();
+            if observation.ols == RelationSecurityState::Unavailable {
+                features.push("ols");
+            }
+            if observation.ras == RelationSecurityState::Unavailable {
+                features.push("ras");
+            }
+            if observation.redaction == RelationSecurityState::Unavailable {
+                features.push("redaction");
+            }
+            (!features.is_empty()).then(|| {
+                json!({
+                    "relation": format!("{}.{}", observation.key.owner, observation.key.name),
+                    "object_id": observation.key.object_id,
+                    "features": features,
+                })
+            })
+        })
+        .collect()
+}
+
+fn append_security_feature_evidence_unavailable_audit(
+    ctx: AuditEntryCtx<'_>,
+    served_tool: &str,
+    observations: &[RelationSecurityObservation],
+) -> Result<(), ErrorEnvelope> {
+    let details = security_feature_evidence_details(observations);
+    if details.is_empty() {
+        return Ok(());
+    }
+    let details = serde_json::to_string(&details).map_err(|_| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "cannot encode security feature evidence observations for audit",
+        )
+    })?;
+    append_audit_with_observed_scn(
+        ctx,
+        SECURITY_FEATURE_EVIDENCE_UNAVAILABLE_TOOL,
+        &format!(
+            "-- security_feature_evidence: unavailable; served_tool={served_tool}; relations={details}"
+        ),
+        "READ_ONLY",
+        None,
+        AuditOutcome::Succeeded,
+        None,
+    )
+}
+
 /// R36: the agent-visible observation on a read admitted without FGA proof.
 fn attach_fga_evidence(response: &mut Value, evidence: FgaEvidence) {
     if evidence == FgaEvidence::Unavailable
         && let Value::Object(map) = response
     {
         map.insert("fga_evidence".to_owned(), json!("unavailable"));
+    }
+}
+
+fn attach_security_feature_evidence(
+    response: &mut Value,
+    observations: &[RelationSecurityObservation],
+) {
+    let details = security_feature_evidence_details(observations);
+    if !details.is_empty()
+        && let Value::Object(map) = response
+    {
+        map.insert("security_feature_evidence".to_owned(), json!("unavailable"));
+        map.insert(
+            "security_feature_evidence_details".to_owned(),
+            json!(details),
+        );
     }
 }
 
@@ -12505,6 +12637,7 @@ impl OracleDispatcher {
                 result_masking: new_policy.result_masking,
                 sql_policy: new_policy.sql_policy,
                 fga_evidence_policy: new_policy.fga_evidence_policy,
+                require_security_feature_evidence: new_policy.require_security_feature_evidence,
                 require_hard_parse_evidence: new_policy.require_hard_parse_evidence,
                 require_query_cost_estimate: new_policy.require_query_cost_estimate,
                 custom_catalog: new_custom_catalog,
@@ -12536,6 +12669,7 @@ impl OracleDispatcher {
                 result_masking,
                 sql_policy,
                 fga_evidence_policy,
+                require_security_feature_evidence,
                 require_hard_parse_evidence,
                 require_query_cost_estimate,
                 custom_catalog,
@@ -12617,6 +12751,7 @@ impl OracleDispatcher {
                     retired_generation = state.profile_generation.replace(profile_generation);
                     state.level = level;
                     state.fga_evidence_policy = fga_evidence_policy;
+                    state.require_security_feature_evidence = require_security_feature_evidence;
                     state.require_hard_parse_evidence = require_hard_parse_evidence;
                     state.require_query_cost_estimate = require_query_cost_estimate;
                     state.custom_catalog = custom_catalog;
@@ -13544,7 +13679,15 @@ impl OracleDispatcher {
                         let explicit_key = normalize_diff_key_columns(a.key.clone())?;
                         let caps = diff_query_caps_from_args(&a);
 
-                        let (before, after, key_columns, source_a, source_b, fga_evidence) =
+                        let (
+                            before,
+                            after,
+                            key_columns,
+                            source_a,
+                            source_b,
+                            fga_evidence,
+                            relation_security,
+                        ) =
                             match &mode {
                             DiffMode::Time { scn_a, scn_b } => {
                                 let read = self
@@ -13565,6 +13708,8 @@ impl OracleDispatcher {
                                             scn_b: *scn_b,
                                             subject: &request_subject,
                                             fga_evidence_policy: state.fga_evidence_policy,
+                                            require_security_feature_evidence: state
+                                                .require_security_feature_evidence,
                                         },
                                     )
                                     .await?;
@@ -13575,6 +13720,7 @@ impl OracleDispatcher {
                                     QueryDiffSource::scn(*scn_a),
                                     QueryDiffSource::scn(*scn_b),
                                     read.fga_evidence,
+                                    read.relation_security,
                                 )
                             }
                             DiffMode::Fleet {
@@ -13621,6 +13767,8 @@ impl OracleDispatcher {
                                     .await?;
                                 let before = side_a.response;
                                 let after = side_b.response;
+                                let mut relation_security = side_a.relation_security;
+                                relation_security.extend(side_b.relation_security);
                                 if !before.columns.is_empty()
                                     && !after.columns.is_empty()
                                     && before.columns != after.columns
@@ -13675,6 +13823,7 @@ impl OracleDispatcher {
                                     QueryDiffSource::profile(profile_a).at_scn(*scn_a),
                                     QueryDiffSource::profile(profile_b).at_scn(*scn_b),
                                     fga_evidence,
+                                    relation_security,
                                 )
                             }
                         };
@@ -13704,6 +13853,7 @@ impl OracleDispatcher {
                             );
                         }
                         attach_fga_evidence(&mut value, fga_evidence);
+                        attach_security_feature_evidence(&mut value, &relation_security);
                         Ok(value)
                     },
                 )
@@ -14366,9 +14516,22 @@ impl OracleDispatcher {
                             cx,
                             &guarded_conn,
                             metric,
-                            top_n,
-                            min_pct,
-                            historical,
+                            read_executor::TopQueriesOptions {
+                                top_n,
+                                min_pct,
+                                historical,
+                                diagnostics_pack_licensed: state
+                                    .profile_generation
+                                    .as_ref()
+                                    .is_some_and(|lease| {
+                                        lease
+                                            .config()
+                                            .and_then(|config| config.profile(lease.profile()))
+                                            .is_some_and(
+                                                ConnectionProfile::diagnostics_pack_licensed,
+                                            )
+                                    }),
+                            },
                         )
                         .await
                     },
@@ -14392,9 +14555,19 @@ impl OracleDispatcher {
                     timeout_seconds,
                     CompletionPolicy::EnforceDeadlineAfterBody,
                     || async {
-                        let timeline =
-                            oraclemcp_db::plan_cost_timeline(cx, &guarded_conn, &sql_id, max_points)
-                                .await?;
+                        let timeline = oraclemcp_db::plan_cost_timeline_with_license(
+                            cx,
+                            &guarded_conn,
+                            &sql_id,
+                            max_points,
+                            state.profile_generation.as_ref().is_some_and(|lease| {
+                                lease
+                                    .config()
+                                    .and_then(|config| config.profile(lease.profile()))
+                                    .is_some_and(ConnectionProfile::diagnostics_pack_licensed)
+                            }),
+                        )
+                        .await?;
                         Ok(json!({
                             "sql_id": timeline.sql_id,
                             "points": timeline.points,
@@ -14684,16 +14857,18 @@ impl OracleDispatcher {
                 // proves a callback could run. The ordinary read-only guard
                 // still rejects every non-READ_ONLY statement before EXPLAIN.
                 ensure_read_only(&a.sql)?;
-                let read = read_executor::resolve_query_block_read(
+                let read = read_executor::resolve_query_block_read_with_security_policy(
                     cx,
                     conn,
                     &state.catalog_cache,
                     &a.sql,
                     false,
                     state.fga_evidence_policy,
+                    state.require_security_feature_evidence,
                 )
                 .await?;
                 let fga_evidence = read.fga_evidence;
+                let relation_security = read.relation_security;
                 if fga_evidence == FgaEvidence::Unavailable {
                     append_fga_evidence_unavailable_audit(
                         AuditEntryCtx {
@@ -14704,6 +14879,15 @@ impl OracleDispatcher {
                         "oracle_explain_plan",
                     )?;
                 }
+                append_security_feature_evidence_unavailable_audit(
+                    AuditEntryCtx {
+                        auditor: self.auditor.as_deref(),
+                        subject: &request_subject,
+                        db_evidence: None,
+                    },
+                    "oracle_explain_plan",
+                    &relation_security,
+                )?;
                 let configured_plan_table = self
                     .profile_drain
                     .accepted_config()
@@ -14853,6 +15037,7 @@ impl OracleDispatcher {
                 };
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.explain_plan.after")?;
                 attach_fga_evidence(&mut response, fga_evidence);
+                attach_security_feature_evidence(&mut response, &relation_security);
                 Ok(response)
             }
             other => {

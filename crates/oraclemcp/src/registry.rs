@@ -1371,14 +1371,14 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_top_queries",
             ToolTier::FoundationLiveDb,
-            "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Opt into historical AWR only when a Diagnostics Pack is licensed, else Statspack, else a structured-unavailable error — never invokes a paid pack unlicensed.",
+            "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Historical AWR requires the profile's explicit Diagnostics Pack license attestation and Oracle's active pack setting; without attestation the request returns POLICY_DENIED before database access. An attested profile may use Statspack when AWR is not active.",
         )
         .with_input_schema(object_schema(
             props_with(
                 json!({
                     "metric": { "type": "string", "enum": ["elapsed", "cpu", "buffer_gets", "disk_reads"], "description": "Ranking metric. Defaults to elapsed." },
                     "top_n": { "type": "integer", "minimum": 1, "maximum": 100, "description": "How many statements to return (1-100, default 20)." },
-                    "historical": { "type": "boolean", "description": "If true, use historical AWR (requires a licensed Diagnostics Pack) or Statspack instead of the live cursor cache. Defaults false (the free live source)." },
+                    "historical": { "type": "boolean", "description": "If true, request historical diagnostics. Requires `profiles.diagnostics_pack_licensed = true` and Oracle pack activation for AWR; without an explicit attestation the server returns POLICY_DENIED. Defaults false (the free live cursor cache)." },
                     "min_pct_of_total": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Live source only: keep only statements consuming at least this percent of the total selected metric (e.g. 5 for the 5%-of-total view)." }
                 }),
                 &[timeout_seconds_prop()],
@@ -1391,7 +1391,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_plan_timeline",
             ToolTier::FoundationLiveDb,
-            "Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. Requires a licensed Oracle Diagnostics Pack; when the license probe cannot prove DIAGNOSTIC access it returns a typed refusal before touching DBA_HIST_*.",
+            "Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. Requires `profiles.diagnostics_pack_licensed = true` and active Oracle Diagnostics Pack access; otherwise returns POLICY_DENIED before touching DBA_HIST_*.",
         )
         .with_input_schema(object_schema(
             props_with(

@@ -98,7 +98,7 @@ pub const TOP_LEVEL_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
 /// Per-profile [`crate::ConnectionProfile`] field dispositions (design spec §C.2).
 ///
 /// Enumerates every serde field of `ConnectionProfile`
-/// (`crates/oraclemcp-config/src/profile.rs`, 30 serde fields).
+/// (`crates/oraclemcp-config/src/profile.rs`, 39 serde fields).
 /// The schema-drift test asserts this list matches the struct's serde surface
 /// exactly.
 pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
@@ -223,6 +223,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.",
     },
     FieldDisposition {
+        field: "require_security_feature_evidence",
+        disposition: Disposition::Commented,
+        help: "Refuse reads when this account cannot read OLS/RAS/Data Redaction evidence; default false admits them with keyed security_feature_evidence: unavailable observations, an audit record, and a doctor warning. Protected profiles imply strict mode.",
+    },
+    FieldDisposition {
         field: "require_hard_parse_evidence",
         disposition: Disposition::Commented,
         help: "Refuse EXPLAIN and decisive query-cost admission when callback or PLAN_TABLE evidence is unreadable; default false admits with a verification observation, separate audit record, and doctor warning.",
@@ -231,6 +236,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         field: "require_query_cost_estimate",
         disposition: Disposition::Commented,
         help: "Refuse a read when a requested optimizer-cost estimate is unavailable; independent of callback-safety evidence. Default false admits with a cost_unavailable observation and readable audit record.",
+    },
+    FieldDisposition {
+        field: "diagnostics_pack_licensed",
+        disposition: Disposition::Commented,
+        help: "Explicit operator attestation that this Oracle target is licensed for the Diagnostics Pack; default false. The server also requires Oracle's activation setting before any AWR access.",
     },
     FieldDisposition {
         field: "max_subscriptions",
@@ -369,8 +379,10 @@ mod tests {
             explain_plan_table: None,
             allow_change_notification: Some(false),
             require_fga_evidence: Some(true),
+            require_security_feature_evidence: Some(true),
             require_hard_parse_evidence: Some(true),
             require_query_cost_estimate: Some(false),
+            diagnostics_pack_licensed: Some(false),
             max_subscriptions: Some(4),
             mcp_exposed: Some(true),
             dashboard_ddl_workbench: Some(false),
@@ -418,11 +430,12 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // R36 adds the independent query-cost estimate key, bringing this table to 38.
+        // R36 adds independent query-cost and security-feature evidence keys;
+        // Diagnostics Pack licensing is a separate explicit opt-in.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            38,
-            "ConnectionProfile has 38 serde fields"
+            40,
+            "ConnectionProfile has 40 serde fields"
         );
     }
 

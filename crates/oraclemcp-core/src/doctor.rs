@@ -26,7 +26,7 @@ use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as Cap
 use oraclemcp_audit::AuditLockProbe;
 use oraclemcp_db::{
     CatalogQueryId, DRIVER_VERSION, DbError, DiagnosticsSource, HardParseEffectClosureV1,
-    OracleConnection, OracleVpdRlsObservation, OracleVpdRlsObservationStatus,
+    OracleBind, OracleConnection, OracleVpdRlsObservation, OracleVpdRlsObservationStatus,
     canonical_nls_statements, detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema,
     preflight, probe_privileges, probe_write_posture, prove_hard_parse_effect_closure,
     resolve_plan_table, run_catalog_query, supported_wallet_modes,
@@ -197,6 +197,9 @@ pub struct DoctorProfileCaps {
     pub read_only_standby: bool,
     /// R36: whether reads refuse when the FGA catalog is unreadable.
     pub require_fga_evidence: bool,
+    /// R36: whether reads refuse when OLS/RAS/Redaction catalog evidence is
+    /// unreadable. Protected profiles imply this setting.
+    pub require_security_feature_evidence: bool,
     /// R36 extension: whether EXPLAIN/cost gates refuse unreadable hard-parse
     /// or PLAN_TABLE evidence.
     pub require_hard_parse_evidence: bool,
@@ -1403,6 +1406,7 @@ pub async fn run_doctor(cx: &Cx, ctx: &DoctorContext<'_>) -> DoctorReport {
         check_rls_vpd_visibility(cx, ctx).await,
         check_fga_catalog_visibility(cx, ctx).await,
         check_hard_parse_evidence_policy(cx, ctx).await,
+        check_security_feature_catalog_visibility(cx, ctx).await,
     ];
     DoctorReport {
         checks,
@@ -2688,6 +2692,190 @@ account (or have a DBA GRANT SELECT ON SYS.ALL_AUDIT_POLICIES to it), then rerun
 const FGA_CATALOG_CHECK_ID: u8 = 18;
 const FGA_CATALOG_CHECK_NAME: &str = "FGA catalog visibility";
 const HARD_PARSE_POLICY_CHECK_ID: u8 = 19;
+const SECURITY_FEATURE_CATALOG_CHECK_ID: u8 = 20;
+
+const SECURITY_FEATURE_CATALOG_REMEDIATION: &str = "Grant the served principal enough catalog visibility to inspect OLS, RAS, and Data Redaction evidence, then rerun `oraclemcp doctor --online`; see docs/operations.md §3.2";
+
+async fn check_security_feature_catalog_visibility(
+    cx: &Cx,
+    ctx: &DoctorContext<'_>,
+) -> CheckResult {
+    if ctx.connection_error.is_some() {
+        return CheckResult::new(
+            SECURITY_FEATURE_CATALOG_CHECK_ID,
+            "Security feature catalog visibility",
+            CheckStatus::Skip,
+            "skipped because connectivity failed",
+        );
+    }
+    let Some(conn) = ctx.conn else {
+        return CheckResult::new(
+            SECURITY_FEATURE_CATALOG_CHECK_ID,
+            "Security feature catalog visibility",
+            CheckStatus::Skip,
+            "offline — requires a live connection to probe OLS, RAS, and Data Redaction evidence",
+        );
+    };
+    let strict = ctx
+        .profile_caps
+        .as_ref()
+        .is_some_and(|caps| caps.protected || caps.require_security_feature_evidence);
+    let probes = async {
+        let ols = run_catalog_query(cx, conn, CatalogQueryId::OlsInstallationEvidence, &[]).await?;
+        match ols.as_slice() {
+            [row]
+                if row
+                    .text("VALUE")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("TRUE")) =>
+            {
+                run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::ReadOlsTablePolicies,
+                    &[
+                        OracleBind::from("SYS"),
+                        OracleBind::from("DUAL"),
+                        OracleBind::I64(1),
+                    ],
+                )
+                .await?;
+                run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::ReadOlsSchemaPolicies,
+                    &[OracleBind::from("SYS"), OracleBind::I64(1)],
+                )
+                .await?;
+            }
+            [row]
+                if row
+                    .text("VALUE")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("FALSE")) => {}
+            _ => {
+                return Err(DbError::Query(
+                    "OLS option catalog returned an incomplete answer".to_owned(),
+                ));
+            }
+        }
+        run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::ReadRasPolicies,
+            &[
+                OracleBind::from("SYS"),
+                OracleBind::from("DUAL"),
+                OracleBind::I64(1),
+            ],
+        )
+        .await?;
+        let redaction =
+            run_catalog_query(cx, conn, CatalogQueryId::RedactionInstallationEvidence, &[]).await?;
+        match redaction.as_slice() {
+            [row]
+                if row
+                    .text("DATA_REDACTION")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("TRUE")) =>
+            {
+                run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::ReadRedactionPolicies,
+                    &[
+                        OracleBind::from("SYS"),
+                        OracleBind::from("DUAL"),
+                        OracleBind::I64(1),
+                    ],
+                )
+                .await?;
+            }
+            [row]
+                if row
+                    .text("DATA_REDACTION")
+                    .is_some_and(|value| value.eq_ignore_ascii_case("FALSE")) => {}
+            _ => {
+                return Err(DbError::Query(
+                    "Data Redaction option catalog returned an incomplete answer".to_owned(),
+                ));
+            }
+        }
+        Ok::<(), DbError>(())
+    }
+    .await;
+    security_feature_catalog_check(probes, strict)
+}
+
+fn security_feature_catalog_check(probe: Result<(), DbError>, strict: bool) -> CheckResult {
+    match probe {
+        Ok(()) => CheckResult::new(
+            SECURITY_FEATURE_CATALOG_CHECK_ID,
+            "Security feature catalog visibility",
+            CheckStatus::Pass,
+            "OLS, RAS, and Data Redaction evidence sources are readable",
+        ),
+        Err(error) => {
+            let code = parse_ora_code(&error.to_string());
+            let cause = code.map_or_else(
+                || "a catalog query failed".to_owned(),
+                |code| format!("ORA-{code:05}"),
+            );
+            let (status, behavior) = if strict {
+                (
+                    CheckStatus::Fail,
+                    "reads are refused because require_security_feature_evidence = true (protected profiles imply strict mode)",
+                )
+            } else {
+                (
+                    CheckStatus::Warn,
+                    "reads proceed with security_feature_evidence: unavailable, a keyed observation, and an audit record; set require_security_feature_evidence = true to refuse",
+                )
+            };
+            CheckResult::new(
+                SECURITY_FEATURE_CATALOG_CHECK_ID,
+                "Security feature catalog visibility",
+                status,
+                format!(
+                    "security_feature_catalog_unreadable: OLS/RAS/Data Redaction evidence is incomplete ({cause}); {behavior}"
+                ),
+            )
+            .with_fix(SECURITY_FEATURE_CATALOG_REMEDIATION)
+        }
+    }
+}
+
+#[cfg(test)]
+mod security_feature_catalog_visibility_tests {
+    use super::*;
+
+    #[test]
+    fn unreadable_security_catalog_warns_by_default_and_fails_when_strict() {
+        let unavailable = || {
+            Err(DbError::ServerQuery(
+                "ORA-00942: table or view \"PRIVATE_OWNER\".\"REDACTION_POLICIES\" does not exist"
+                    .to_owned(),
+            ))
+        };
+        let warning = security_feature_catalog_check(unavailable(), false);
+        assert_eq!(warning.id, SECURITY_FEATURE_CATALOG_CHECK_ID);
+        assert_eq!(warning.status, CheckStatus::Warn);
+        assert!(
+            warning
+                .detail
+                .contains("security_feature_evidence: unavailable"),
+            "{}",
+            warning.detail
+        );
+        assert!(warning.detail.contains("require_security_feature_evidence"));
+        assert!(!warning.detail.contains("PRIVATE_OWNER"));
+
+        let strict = security_feature_catalog_check(unavailable(), true);
+        assert_eq!(strict.status, CheckStatus::Fail);
+        assert!(
+            strict
+                .detail
+                .contains("require_security_feature_evidence = true")
+        );
+    }
+}
 
 async fn check_hard_parse_evidence_policy(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     let Some(caps) = ctx.profile_caps.as_ref() else {
@@ -3762,6 +3950,7 @@ mod tests {
             protected: false,
             read_only_standby: false,
             require_fga_evidence: false,
+            require_security_feature_evidence: false,
             require_hard_parse_evidence: require_evidence,
         };
         let ctx = DoctorContext {
@@ -4058,9 +4247,9 @@ mod tests {
     }
 
     #[test]
-    fn report_has_nineteen_checks_and_classifier_self_test_passes() {
+    fn report_has_twenty_checks_and_classifier_self_test_passes() {
         let report = doctor(&DoctorContext::default());
-        assert_eq!(report.checks.len(), 19);
+        assert_eq!(report.checks.len(), 20);
         let selftest = report.checks.iter().find(|c| c.id == 8).unwrap();
         assert_eq!(selftest.status, CheckStatus::Pass, "{}", selftest.detail);
         // The IAM-token near-expiry check (14) skips cleanly when no token is set.
@@ -4805,7 +4994,7 @@ mod tests {
         assert!(text.contains("oraclemcp doctor"));
         assert!(text.contains("Classifier self-test"));
         let j = report.to_json();
-        assert_eq!(j["checks"].as_array().unwrap().len(), 19);
+        assert_eq!(j["checks"].as_array().unwrap().len(), 20);
         assert_eq!(j["exit_code"], json!(0));
     }
 

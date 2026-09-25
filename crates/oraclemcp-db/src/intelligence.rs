@@ -2146,6 +2146,19 @@ pub async fn get_source(
     )
     .await?;
 
+    if rows.is_empty()
+        && !list_source_types(cx, conn, owner, name)
+            .await?
+            .iter()
+            .any(|visible_type| visible_type == source_type)
+    {
+        return Err(describe_object_not_found(
+            &source_type.to_ascii_lowercase(),
+            &owner.to_ascii_uppercase(),
+            &name.to_ascii_uppercase(),
+        ));
+    }
+
     let cap = options.max_chars.max(1);
     let mut source = String::new();
     let mut char_count = 0usize;
@@ -2853,6 +2866,7 @@ mod tests {
         data_default_vc_available: bool,
         describe_metadata_available: bool,
         view_text: Option<String>,
+        source_types: Vec<String>,
     }
 
     struct PlanResolverMock {
@@ -3028,6 +3042,13 @@ mod tests {
                         )],
                     }]
                 }));
+            }
+            if lower_sql.contains("from all_source") && lower_sql.contains("select type") {
+                return Ok(self
+                    .source_types
+                    .iter()
+                    .map(|source_type| cell_row(&[("TYPE", source_type)]))
+                    .collect());
             }
             if self.data_default_vc_available && sql.contains("column_name = 'DATA_DEFAULT_VC'") {
                 Ok(vec![OracleRow { columns: vec![] }])
@@ -3862,6 +3883,48 @@ mod tests {
     }
 
     #[test]
+    fn get_source_missing_all_source_object_is_object_not_found() {
+        let mock = CaptureMock::default();
+        let m = &mock;
+        let err = run_with_cx(|cx| async move {
+            get_source(
+                &cx,
+                m,
+                "hr",
+                "missing_procedure",
+                "PROCEDURE",
+                SourceReadOptions {
+                    from_line: None,
+                    to_line: None,
+                    max_chars: 100,
+                },
+            )
+            .await
+            .expect_err("missing source object must not become empty success")
+        });
+        let envelope = err.into_envelope();
+        assert_eq!(
+            envelope.error_class,
+            oraclemcp_error::ErrorClass::ObjectNotFound
+        );
+        assert_eq!(
+            envelope.suggested_tool.as_deref(),
+            Some("oracle_schema_inspect")
+        );
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 2, "source read followed by visible-type proof");
+        assert!(calls[0].0.contains("FROM all_source"));
+        assert!(calls[1].0.contains("SELECT type"));
+        assert_eq!(
+            calls[1].1,
+            vec![
+                OracleBind::String("HR".to_owned()),
+                OracleBind::String("MISSING_PROCEDURE".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
     fn get_ddl_unsupported_type_is_invalid_arguments_issue_38() {
         let mock = CaptureMock::default();
         let m = &mock;
@@ -4169,7 +4232,10 @@ mod tests {
 
     #[test]
     fn get_source_range_binds_inclusive_line_bounds() {
-        let conn = CaptureMock::default();
+        let conn = CaptureMock {
+            source_types: vec!["PACKAGE BODY".to_owned()],
+            ..CaptureMock::default()
+        };
         let conn_ref = &conn;
         run_with_cx(|cx| async move {
             get_source(

@@ -34,11 +34,11 @@ use oraclemcp_db::OfficialOracleConnection;
 use oraclemcp_db::{
     AuthAdapter, CatalogExtractRequest, CatalogRowSetName, CqnNotificationOutcome, DbError,
     DependentsProbe, DrcpConfig, NativeRedactionAvailability, OracleBind, OracleConnectOptions,
-    OracleConnection, OracleIdentifier, OracleSessionIdentity, QueryCaps, RustOracleConnection,
-    SchemaObject, SchemaObjectType, SchemaSnapshot, SearchDetailLevel, SessionPurity,
-    compare_schemas, explain_plan, extract_catalog_rowsets, migration_plan, orient_fks,
-    orient_hot_objects, orient_recent_ddl, orient_schema, plan_cost_estimate, probe_dependents,
-    search_objects,
+    OracleConnection, OracleIdentifier, OracleSessionIdentity, PlanStatementId, QueryCaps,
+    RustOracleConnection, SchemaObject, SchemaObjectType, SchemaSnapshot, SearchDetailLevel,
+    SessionPurity, compare_schemas, explain_plan, extract_catalog_rowsets, migration_plan,
+    orient_fks, orient_hot_objects, orient_recent_ddl, orient_schema, plan_cost_estimate,
+    probe_dependents, resolve_plan_table, search_objects,
 };
 use oraclemcp_db::{OraclePool, PoolSettings, SerializeOptions, serialize_row};
 use serde_json::json;
@@ -2616,25 +2616,41 @@ fn live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup() {
         .await
         .expect("gather stats");
 
-        // Expensive: a full-table scan returning every row (high cost + card).
-        explain_plan(&cx, &conn, &format!("SELECT * FROM {table}"), false)
+        let plan_table = resolve_plan_table(&cx, &conn, None)
             .await
-            .expect("explain full scan");
-        let full = plan_cost_estimate(&cx, &conn)
+            .expect("resolve verified standard PLAN_TABLE");
+
+        // Expensive: a full-table scan returning every row (high cost + card).
+        let full_statement_id =
+            PlanStatementId::generate().expect("generate full-scan statement id");
+        explain_plan(
+            &cx,
+            &conn,
+            &format!("SELECT * FROM {table}"),
+            &plan_table,
+            &full_statement_id,
+            false,
+        )
+        .await
+        .expect("explain full scan");
+        let full = plan_cost_estimate(&cx, &conn, &plan_table, &full_statement_id)
             .await
             .expect("full-scan cost query")
             .expect("full-scan cost estimate present");
 
         // Cheap: a primary-key unique lookup (low cost + cardinality of 1).
+        let pk_statement_id = PlanStatementId::generate().expect("generate pk-lookup statement id");
         explain_plan(
             &cx,
             &conn,
             &format!("SELECT * FROM {table} WHERE id = 42"),
+            &plan_table,
+            &pk_statement_id,
             false,
         )
         .await
         .expect("explain PK lookup");
-        let pk = plan_cost_estimate(&cx, &conn)
+        let pk = plan_cost_estimate(&cx, &conn, &plan_table, &pk_statement_id)
             .await
             .expect("pk-lookup cost query")
             .expect("pk-lookup cost estimate present");

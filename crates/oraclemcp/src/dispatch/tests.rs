@@ -349,6 +349,9 @@ struct SemanticGuardState {
     /// R36: ALL_AUDIT_POLICIES answers ORA-00942, as for a least-privilege
     /// account without dictionary access.
     fga_catalog_unreadable: Mutex<bool>,
+    /// Simulate unreadable OLS/RAS/Redaction evidence while ordinary table
+    /// reads remain available to the account.
+    security_catalog_unreadable: Mutex<bool>,
     virtual_column_default: Mutex<Option<String>>,
 }
 
@@ -363,6 +366,7 @@ impl Default for SemanticGuardState {
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
             fga_handler_table: Mutex::new(None),
             fga_catalog_unreadable: Mutex::new(false),
+            security_catalog_unreadable: Mutex::new(false),
             virtual_column_default: Mutex::new(None),
         }
     }
@@ -611,6 +615,17 @@ impl OracleConnection for SemanticGuardMock {
             .lock()
             .expect("read events lock")
             .push(format!("query:{sql}"));
+        if sql == CatalogQueryId::ReadRasPolicies.spec().sql
+            && *self
+                .state
+                .security_catalog_unreadable
+                .lock()
+                .expect("security catalog fixture lock")
+        {
+            return Err(DbError::ServerQuery(
+                "ORA-00942: table or view does not exist".to_owned(),
+            ));
+        }
         if let Some(rows) = mock_relation_security_probe_rows(sql) {
             return Ok(rows);
         }
@@ -13227,68 +13242,10 @@ mod action_envelope;
 /// licensed AWR path is opt-in and gated (proven in awr.rs unit tests).
 mod top_queries {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     struct CancelledLicenseProbeMock {
         queries: Arc<AtomicUsize>,
-    }
-
-    struct MissingHistoricalCatalogMock {
-        queries: Arc<Mutex<Vec<String>>>,
-    }
-
-    #[async_trait::async_trait(?Send)]
-    impl OracleConnection for MissingHistoricalCatalogMock {
-        fn backend(&self) -> OracleBackend {
-            OracleBackend::RustOracle
-        }
-
-        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
-            Ok(OracleConnectionInfo {
-                current_schema: Some("APP".to_owned()),
-                ..Default::default()
-            })
-        }
-
-        async fn query_rows(
-            &self,
-            _cx: &Cx,
-            sql: &str,
-            _binds: &[OracleBind],
-        ) -> Result<Vec<OracleRow>, DbError> {
-            self.queries
-                .lock()
-                .expect("historical probe query log")
-                .push(sql.to_owned());
-            Err(DbError::Query(
-                "ORA-00942: table or view does not exist".to_owned(),
-            ))
-        }
-
-        async fn execute(
-            &self,
-            _cx: &Cx,
-            _sql: &str,
-            _binds: &[OracleBind],
-        ) -> Result<u64, DbError> {
-            Ok(0)
-        }
-
-        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
-
-        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
-            Ok(())
-        }
     }
 
     #[async_trait::async_trait(?Send)]
@@ -13380,7 +13337,7 @@ mod top_queries {
     }
 
     #[test]
-    fn uncertain_historical_probe_stops_fallback_and_quarantines_pinned_session() {
+    fn historical_request_without_license_refuses_before_any_database_io() {
         let queries = Arc::new(AtomicUsize::new(0));
         let dispatcher = OracleDispatcher::new_with_profile(
             Box::new(CancelledLicenseProbeMock {
@@ -13391,51 +13348,12 @@ mod top_queries {
 
         let error = dispatcher
             .dispatch("oracle_top_queries", json!({ "historical": true }))
-            .expect_err("uncertain license probe must stop source resolution");
-        assert_eq!(error.error_class, ErrorClass::Timeout);
+            .expect_err("unattested historical request must be refused");
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied);
         assert_eq!(
             queries.load(Ordering::SeqCst),
-            1,
-            "Statspack must not be probed after connection uncertainty"
-        );
-        assert_eq!(
-            dispatcher
-                .connection_quarantine()
-                .expect("quarantine lock")
-                .expect("uncertain pinned probe quarantines")
-                .outcome,
-            AuditOutcome::UnknownDiscarded
-        );
-
-        let retry = dispatcher
-            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
-            .expect_err("quarantined pinned session cannot be reused");
-        assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
-        assert_eq!(queries.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn guarded_ora_00942_historical_probes_degrade_without_internal_error() {
-        let queries = Arc::new(Mutex::new(Vec::new()));
-        let dispatcher = OracleDispatcher::new_with_profile(
-            Box::new(MissingHistoricalCatalogMock {
-                queries: Arc::clone(&queries),
-            }),
-            Some("dev".to_owned()),
-        );
-
-        let error = dispatcher
-            .dispatch("oracle_top_queries", json!({ "historical": true }))
-            .expect_err("missing licensed and Statspack catalogs report unavailable history");
-
-        assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{error:?}");
-        let queries = queries.lock().expect("historical probe query log");
-        assert_eq!(queries.len(), 2, "both guarded probes should degrade");
-        assert!(queries[0].to_ascii_lowercase().contains("v$parameter"));
-        assert!(
-            queries[1]
-                .to_ascii_lowercase()
-                .contains("perfstat.stats$snapshot")
+            0,
+            "license refusal must precede even the activation probe"
         );
     }
 }
@@ -13541,24 +13459,16 @@ mod plan_timeline {
     }
 
     #[test]
-    fn serves_a_snapshot_bounded_plan_cost_timeline() {
+    fn plan_timeline_without_license_attestation_refuses_even_when_oracle_enables_pack() {
         let dispatcher = OracleDispatcher::new(Box::new(PlanTimelineMock));
-        let out = dispatcher
+        let error = dispatcher
             .dispatch(
                 "oracle_plan_timeline",
                 json!({ "sql_id": "ABC123DEF4567", "max_points": 20 }),
             )
-            .expect("licensed timeline dispatches");
+            .expect_err("Oracle activation does not establish license ownership");
 
-        assert_eq!(out["sql_id"], json!("abc123def4567"));
-        assert_eq!(out["points"][0]["snapshot_id"], json!(42));
-        assert_eq!(out["points"][0]["plan_hash_value"], json!(7_654_321));
-        assert_eq!(out["points"][0]["optimizer_cost"], json!(19));
-        assert!(
-            out["note"]
-                .as_str()
-                .is_some_and(|note| note.contains("not exact historical SCNs"))
-        );
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{error:?}");
     }
 }
 

@@ -1942,6 +1942,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.explain_plan_table == after.explain_plan_table
         && before.allow_change_notification == after.allow_change_notification
         && before.require_fga_evidence == after.require_fga_evidence
+        && before.require_security_feature_evidence == after.require_security_feature_evidence
         && before.require_hard_parse_evidence == after.require_hard_parse_evidence
         && before.require_query_cost_estimate == after.require_query_cost_estimate
         && before.mcp_exposed == after.mcp_exposed
@@ -3962,6 +3963,11 @@ mod tests {
                 "require_fga_evidence",
                 |_| {},
                 |p| p.require_fga_evidence = Some(true),
+            ),
+            (
+                "require_security_feature_evidence",
+                |_| {},
+                |p| p.require_security_feature_evidence = Some(true),
             ),
             (
                 "require_hard_parse_evidence",

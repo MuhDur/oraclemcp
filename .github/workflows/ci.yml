@@ -139,6 +139,13 @@ jobs:
           cargo test --workspace --all-targets 2>&1 | tee target/ci-logs/cargo-test.log
       - run: bash scripts/oraclemcp_concurrency_lint.sh --test-output target/ci-logs/cargo-test.log
       - run: cargo test --workspace --doc
+      # The live suites are runtime-gated, so the default workspace test never
+      # compiles their targets. Keep both crates' live test interfaces in the
+      # per-push build graph without requiring an Oracle service in CI.
+      - name: compile env-gated live Oracle test targets
+        run: |
+          cargo check -p oraclemcp-db --tests --features live-xe,oracledb
+          cargo check -p oraclemcp --tests --features live-xe
       # Runtime coverage of the optional feature interactions. The feature-powerset
       # job is now a compile+lint gate only (clippy over the powerset), so the
       # actual test behaviour under dashboard-bundle / mimalloc is exercised here.

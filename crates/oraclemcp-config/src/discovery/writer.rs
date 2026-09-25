@@ -230,8 +230,12 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
             "allow_change_notification" => push_commented_scalar(&mut scalars, fd, "false"),
             // Strict FGA evidence is the opt-in value an operator would type.
             "require_fga_evidence" => push_commented_scalar(&mut scalars, fd, "true"),
+            "require_security_feature_evidence" => push_commented_scalar(&mut scalars, fd, "true"),
             "require_hard_parse_evidence" => push_commented_scalar(&mut scalars, fd, "true"),
             "require_query_cost_estimate" => push_commented_scalar(&mut scalars, fd, "true"),
+            // Diagnostics Pack access remains disabled until the operator
+            // explicitly attests licensing for this target.
+            "diagnostics_pack_licensed" => push_commented_scalar(&mut scalars, fd, "false"),
             "max_subscriptions" => push_commented_scalar(&mut scalars, fd, "4"),
             // mcp_exposed = false is the instructive opt-out value.
             "mcp_exposed" => push_commented_scalar(&mut scalars, fd, "false"),

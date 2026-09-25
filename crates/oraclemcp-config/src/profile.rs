@@ -885,6 +885,13 @@ pub struct ConnectionProfile {
     /// doctor warning. A proven FGA handler refuses either way.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_fga_evidence: Option<bool>,
+    /// R36: refuse a read when OLS, RAS or Data Redaction evidence is
+    /// unavailable for any resolved relation. Defaults to `false`: the read
+    /// proceeds with a keyed `security_feature_evidence: unavailable`
+    /// observation, audit record, and doctor warning. Protected profiles imply
+    /// this strict behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_security_feature_evidence: Option<bool>,
     /// R36 extension: refuse EXPLAIN/cost admission when any hard-parse
     /// callback evidence is unreadable. Defaults to `false`; the doctor warns
     /// and admitted least-privilege paths emit an observation and audit row.
@@ -896,6 +903,11 @@ pub struct ConnectionProfile {
     /// readable audit record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_query_cost_estimate: Option<bool>,
+    /// Operator attestation that this Oracle target is licensed for the
+    /// Diagnostics Pack. The Oracle activation parameter is checked separately
+    /// and does not establish license ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics_pack_licensed: Option<bool>,
     /// Maximum live subscriptions per server-derived principal. Defaults to 4;
     /// `0` deliberately disables new subscriptions for this profile. Each
     /// admitted subscription also consumes one EMON notification connection
@@ -997,6 +1009,10 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("allow_change_notification", &self.allow_change_notification)
             .field("require_fga_evidence", &self.require_fga_evidence)
             .field(
+                "require_security_feature_evidence",
+                &self.require_security_feature_evidence,
+            )
+            .field(
                 "require_hard_parse_evidence",
                 &self.require_hard_parse_evidence,
             )
@@ -1004,6 +1020,7 @@ impl std::fmt::Debug for ConnectionProfile {
                 "require_query_cost_estimate",
                 &self.require_query_cost_estimate,
             )
+            .field("diagnostics_pack_licensed", &self.diagnostics_pack_licensed)
             .field("max_subscriptions", &self.max_subscriptions)
             .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
@@ -1087,6 +1104,13 @@ impl ConnectionProfile {
         self.require_fga_evidence == Some(true)
     }
 
+    /// Whether reads require visible OLS/RAS/Data Redaction evidence. Protected
+    /// profiles are strict regardless of the explicit setting.
+    #[must_use]
+    pub fn require_security_feature_evidence(&self) -> bool {
+        self.protected() || self.require_security_feature_evidence == Some(true)
+    }
+
     /// Whether EXPLAIN and decisive cost gates require complete hard-parse
     /// callback evidence from the active Oracle principal.
     #[must_use]
@@ -1098,6 +1122,14 @@ impl ConnectionProfile {
     #[must_use]
     pub fn require_query_cost_estimate(&self) -> bool {
         self.require_query_cost_estimate == Some(true)
+    }
+
+    /// Whether the operator explicitly attested Diagnostics Pack licensing
+    /// for this target. Oracle's `CONTROL_MANAGEMENT_PACK_ACCESS` activation
+    /// setting is still checked before AWR use.
+    #[must_use]
+    pub fn diagnostics_pack_licensed(&self) -> bool {
+        self.diagnostics_pack_licensed == Some(true)
     }
 
     /// Whether this profile explicitly permits CQN registration.
@@ -1178,8 +1210,10 @@ impl ConnectionProfile {
             explain_plan_table,
             allow_change_notification,
             require_fga_evidence,
+            require_security_feature_evidence,
             require_hard_parse_evidence,
             require_query_cost_estimate,
+            diagnostics_pack_licensed,
             max_subscriptions,
             mcp_exposed,
             dashboard_ddl_workbench,
@@ -1395,8 +1429,10 @@ mod tests {
             explain_plan_table: None,
             allow_change_notification: None,
             require_fga_evidence: None,
+            require_security_feature_evidence: None,
             require_hard_parse_evidence: None,
             require_query_cost_estimate: None,
+            diagnostics_pack_licensed: None,
             max_subscriptions: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,
@@ -2822,9 +2858,39 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_pack_license_is_explicit_and_inherited() {
+        let mut base = p("licensed");
+        assert!(!base.diagnostics_pack_licensed());
+        base.diagnostics_pack_licensed = Some(true);
+        let mut child = p("child");
+        child.base = Some("licensed".to_owned());
+        let mut profiles = vec![base, child];
+
+        resolve_inheritance(&mut profiles).expect("resolve profile license setting");
+
+        assert!(profiles[0].diagnostics_pack_licensed());
+        assert!(profiles[1].diagnostics_pack_licensed());
+        profiles[1].diagnostics_pack_licensed = Some(false);
+        assert!(!profiles[1].diagnostics_pack_licensed());
+    }
+
+    #[test]
     fn protected_profile_implies_signed_custom_tools() {
         let mut prod = p("prod");
         prod.protected = Some(true);
         assert!(prod.require_signed_tools());
+    }
+
+    #[test]
+    fn security_feature_evidence_defaults_to_admit_and_protected_implies_strict() {
+        let mut ordinary = p("ordinary");
+        assert!(!ordinary.require_security_feature_evidence());
+        ordinary.require_security_feature_evidence = Some(true);
+        assert!(ordinary.require_security_feature_evidence());
+
+        let mut protected = p("protected");
+        protected.protected = Some(true);
+        protected.require_security_feature_evidence = Some(false);
+        assert!(protected.require_security_feature_evidence());
     }
 }
