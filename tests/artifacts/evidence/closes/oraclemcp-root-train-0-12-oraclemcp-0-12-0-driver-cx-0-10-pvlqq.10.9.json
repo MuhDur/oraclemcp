@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T02:05:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.9",
+  "scope": {
+    "summary": "Catalog fact store with whole-closure keys: key covers spec/body source, AUTHID, compiler settings (PLSQL_CCFLAGS), LAST_DDL_TIME, object_id, dependency targets, trigger source, edition, container and DBID - never the in-memory catalog revision; revalidate returns Fresh/Stale/Unknown, with missing privilege, wrapped source, invalid member, cap exhaustion and corrupt records all Unknown. Commits c083147a, adea9696, 48f149d1, 35eac4cb.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_facts.rs",
+      "crates/oraclemcp-core/tests/catalog_facts_live.rs"
+    ],
+    "out_of_scope": [
+      "Effect correctness and external-client reachability (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "71f1d558fcacddf960ca867809dd614ef2f03751",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "unit (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean worktree at origin/main 71f1d558, lease: cargo test -p oraclemcp-db --lib fact_ -> 17 passed. Spot-checked bodies drive production key()/map_catalog_read()/hash_source(): fact_key_changes_on_ccflags (inserting PLSQL_CCFLAGS changes the key), fact_store_ignores_in_memory_catalog_revision (catalog_revision=99 leaves key equal), fact_missing_privilege_is_unknown (ORA-00942 -> Revalidation::Unknown), fact_wrapped_source_is_unknown."
+      },
+      {
+        "name": "live FREE 23ai (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "ORACLEMCP_CATALOG_FACTS_LIVE=1, system on localhost:1523/FREEPDB1: cargo test -p oraclemcp-core --test catalog_facts_live -- --test-threads=1 -> 3 passed; emitted {catalog_facts_live_roundtrip: fresh_after_process_restart, pass} (fresh child process catalog_facts_restart_process_child: fresh) and {catalog_facts_live_recompile_is_stale: stale_after_last_ddl_time_change, pass} - the live cases actually executed (they self-skip when the env gate is unset)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live tests return early (pass) when ORACLEMCP_CATALOG_FACTS_LIVE is unset, so a green default test run is not live evidence; this close relies on the gated run above."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
