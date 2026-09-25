@@ -1,0 +1,52 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T04:36:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.5",
+  "scope": {
+    "summary": "Typed not-found for missing views (#43: oracle_describe_view on an absent view -> OBJECT_NOT_FOUND, not an empty success) and effective access in connection info (#44: a protected READ_ONLY-pinned profile on a READ WRITE database reports effective_access.operating_level READ_ONLY and writes_permitted_now=false; after confirmed elevation on a writable profile writes_permitted_now=true). Commits fcee83c7, 36126b07, 393c1aef.",
+    "in_scope": [
+      "scripts/e2e/w4/cases/write-tools.json",
+      "scripts/e2e/cases/release_0_12.json"
+    ],
+    "out_of_scope": [
+      "Not-found for tools outside the tested set (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "393c1aef8efa9f0c43dc0e21d7d3fdbb21378e2a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "unit (gate log)",
+        "kind": "cli",
+        "trace": "AC-named unit tests describe_view_missing_is_object_not_found_issue_43, connection_info_shows_effective_access_on_protected_profile_issue_44, switch_profile_shows_effective_access passed in the orchestrator gate log."
+      },
+      {
+        "name": "live W4 (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary at 393c1aef (sha256 edfb9881...), driver.py fresh cases.jsonl, free23/xe21/xe18 stdio+HTTP: w4_describe_view_missing_object_not_found, w4_connection_info_effective_access_after_elevation, w4_connection_info_effective_access_readonly_pinned all PASS (plus the .8.4 cases; 42/42). readonly_pinned expects effective_access {operating_level READ_ONLY, max_level READ_ONLY, protected true, writes_permitted_now false} with connection {open_mode READ WRITE, read_only false}."
+      },
+      {
+        "name": "manifest (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "python3 scripts/e2e/cases/validate_manifest.py scripts/e2e/cases/release_0_12.json rc=0; rel012_i43_missing_view -> w4_describe_view_missing_object_not_found; rel012_i44_effective_access -> w4_connection_info_effective_access_readonly_pinned (previously dangling ids)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
