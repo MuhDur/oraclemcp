@@ -64,6 +64,13 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `CatalogQueryId` also gains the `RedactionInstallationEvidence` query for
   the Data Redaction policy probe in bead
   `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.19`.
+  Bead
+  `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.2`
+  adds `list_objects_by_types` and `search_objects_by_types`, public
+  object-type constants and accessors for catalog/compile/DDL/patch/source
+  operations, `normalize_source_search_object_type`, and
+  `CatalogQueryId::ListObjectsByTypes` (`CatalogQueryId::ALL` now has 169
+  entries).
   `oraclemcp-error::ReasonCategory` adds `EditionsNotEnabled` for the
   version-aware owner/object-type editions probe in bead
   `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.14.3`;
