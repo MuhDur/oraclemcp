@@ -41,9 +41,7 @@
   "limitations": [
     "xe18 wrong-enum defect tracked separately (oraclemcp-6s6rd)."
   ],
-  "known_defects": [
-    "oraclemcp-6s6rd"
-  ],
+  "known_defects": [],
   "follow_ups": [],
   "readiness": {
     "claim": "not-ready",
