@@ -564,34 +564,134 @@ pub fn semantic_search_text_query_with_filter(
     ))
 }
 
+/// `ALL_OBJECTS.OBJECT_TYPE` values accepted by the object-list filters.
+pub const CATALOG_OBJECT_TYPES: &[&str] = &[
+    "TABLE",
+    "VIEW",
+    "MATERIALIZED VIEW",
+    "PACKAGE",
+    "PACKAGE BODY",
+    "PROCEDURE",
+    "FUNCTION",
+    "TRIGGER",
+    "TYPE",
+    "TYPE BODY",
+    "SEQUENCE",
+    "INDEX",
+    "SYNONYM",
+];
+
 /// The `DBMS_METADATA` object types we expose (validated allowlist).
-const DDL_OBJECT_TYPES: &[&str] = &[
+pub const DDL_OBJECT_TYPES: &[&str] = &[
     "TABLE",
     "VIEW",
     "PACKAGE",
+    "PACKAGE BODY",
     "PACKAGE_BODY",
     "PROCEDURE",
     "FUNCTION",
     "TRIGGER",
     "TYPE",
+    "TYPE BODY",
     "TYPE_BODY",
     "SEQUENCE",
     "INDEX",
     "SYNONYM",
 ];
 
-/// The `ALL_SOURCE.TYPE` values we expose for source retrieval.
-const SOURCE_OBJECT_TYPES: &[(&str, &str)] = &[
-    ("PACKAGE", "PACKAGE"),
-    ("PACKAGE_BODY", "PACKAGE BODY"),
-    ("PACKAGE BODY", "PACKAGE BODY"),
-    ("PROCEDURE", "PROCEDURE"),
-    ("FUNCTION", "FUNCTION"),
-    ("TRIGGER", "TRIGGER"),
-    ("TYPE", "TYPE"),
-    ("TYPE_BODY", "TYPE BODY"),
-    ("TYPE BODY", "TYPE BODY"),
+/// Source object types accepted by `oracle_get_source`.
+pub const SOURCE_OBJECT_TYPES: &[&str] = &[
+    "PACKAGE",
+    "PACKAGE BODY",
+    "PACKAGE_BODY",
+    "PROCEDURE",
+    "FUNCTION",
+    "TRIGGER",
+    "TYPE",
+    "TYPE BODY",
+    "TYPE_BODY",
+    "VIEW",
 ];
+
+/// `ALL_SOURCE.TYPE` values accepted by source search. Views are fetched from
+/// `ALL_VIEWS.TEXT`, so they are valid for `get_source` but not `search_source`.
+pub const SOURCE_SEARCH_OBJECT_TYPES: &[&str] = &[
+    "PACKAGE",
+    "PACKAGE BODY",
+    "PACKAGE_BODY",
+    "PROCEDURE",
+    "FUNCTION",
+    "TRIGGER",
+    "TYPE",
+    "TYPE BODY",
+    "TYPE_BODY",
+];
+
+/// Object types accepted by the Oracle compiler path.
+pub const COMPILE_OBJECT_TYPES: &[&str] = &[
+    "PACKAGE",
+    "PACKAGE BODY",
+    "PACKAGE_BODY",
+    "PROCEDURE",
+    "FUNCTION",
+    "TRIGGER",
+    "TYPE",
+    "TYPE BODY",
+    "TYPE_BODY",
+    "VIEW",
+    "TABLE",
+];
+
+/// Object types accepted by patch_source, including TABLE's typed refusal.
+pub const PATCH_SOURCE_OBJECT_TYPES: &[&str] = &[
+    "PACKAGE",
+    "PACKAGE BODY",
+    "PACKAGE_BODY",
+    "PROCEDURE",
+    "FUNCTION",
+    "TRIGGER",
+    "TYPE",
+    "TYPE BODY",
+    "TYPE_BODY",
+    "VIEW",
+    "TABLE",
+];
+
+/// Return the supported `ALL_OBJECTS.OBJECT_TYPE` filters.
+#[must_use]
+pub const fn catalog_object_types() -> &'static [&'static str] {
+    CATALOG_OBJECT_TYPES
+}
+
+/// Return the supported `DBMS_METADATA.GET_DDL` object types.
+#[must_use]
+pub const fn ddl_object_types() -> &'static [&'static str] {
+    DDL_OBJECT_TYPES
+}
+
+/// Return the supported `oracle_get_source` object types.
+#[must_use]
+pub const fn source_object_types() -> &'static [&'static str] {
+    SOURCE_OBJECT_TYPES
+}
+
+/// Return the supported `oracle_search_source` object types.
+#[must_use]
+pub const fn source_search_object_types() -> &'static [&'static str] {
+    SOURCE_SEARCH_OBJECT_TYPES
+}
+
+/// Return the supported `oracle_compile_object` object types.
+#[must_use]
+pub const fn compile_object_types() -> &'static [&'static str] {
+    COMPILE_OBJECT_TYPES
+}
+
+/// Return the supported `oracle_patch_source` object types.
+#[must_use]
+pub const fn patch_source_object_types() -> &'static [&'static str] {
+    PATCH_SOURCE_OBJECT_TYPES
+}
 
 /// Full source text plus truncation metadata.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -673,16 +773,37 @@ pub struct ViewDescription {
 /// Whether `t` is an allowlisted `DBMS_METADATA` object type.
 #[must_use]
 pub fn is_ddl_object_type(t: &str) -> bool {
-    DDL_OBJECT_TYPES.contains(&t.to_ascii_uppercase().as_str())
+    DDL_OBJECT_TYPES.contains(&t)
 }
 
 /// Normalize a supported source object type to `ALL_SOURCE.TYPE`.
 #[must_use]
 pub fn normalize_source_object_type(t: &str) -> Option<&'static str> {
-    let ty = t.trim().to_ascii_uppercase();
+    if t == "PACKAGE_BODY" {
+        return Some("PACKAGE BODY");
+    }
+    if t == "TYPE_BODY" {
+        return Some("TYPE BODY");
+    }
     SOURCE_OBJECT_TYPES
         .iter()
-        .find_map(|(input, normalized)| (*input == ty).then_some(*normalized))
+        .copied()
+        .find(|object_type| *object_type == t)
+}
+
+/// Normalize an `ALL_SOURCE.TYPE` value used by `oracle_search_source`.
+#[must_use]
+pub fn normalize_source_search_object_type(t: &str) -> Option<&'static str> {
+    if t == "PACKAGE_BODY" {
+        return Some("PACKAGE BODY");
+    }
+    if t == "TYPE_BODY" {
+        return Some("TYPE BODY");
+    }
+    SOURCE_SEARCH_OBJECT_TYPES
+        .iter()
+        .copied()
+        .find(|object_type| *object_type == t)
 }
 
 /// The detail level for [`search_objects`] (E4). Higher levels add bounded,
@@ -843,6 +964,29 @@ pub async fn search_objects(
     // verbatim in the dictionary, so binding the exact owner/name matches them.
     let base = list_objects(cx, conn, owner, object_type, name_like, max_rows).await?;
 
+    search_objects_from_base(cx, conn, base, detail).await
+}
+
+/// E4 object search filtered by a bound set of object types.
+pub async fn search_objects_by_types(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    object_types: &[String],
+    name_like: Option<&str>,
+    detail: SearchDetailLevel,
+    max_rows: usize,
+) -> Result<Vec<SearchObject>, DbError> {
+    let base = list_objects_by_types(cx, conn, owner, object_types, name_like, max_rows).await?;
+    search_objects_from_base(cx, conn, base, detail).await
+}
+
+async fn search_objects_from_base(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    base: Vec<OracleRow>,
+    detail: SearchDetailLevel,
+) -> Result<Vec<SearchObject>, DbError> {
     let mut results = Vec::with_capacity(base.len());
     for row in &base {
         let owner = row.text("OWNER").unwrap_or_default().to_owned();
@@ -1097,6 +1241,49 @@ pub async fn list_objects(
         ],
     )
     .await
+}
+
+/// `schema_inspect` object listing filtered by a nonempty set of exact
+/// `ALL_OBJECTS.OBJECT_TYPE` values. Each requested value is bound separately;
+/// the fixed query's unused type slots are bound as SQL NULL.
+pub async fn list_objects_by_types(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: Option<&str>,
+    object_types: &[String],
+    name_like: Option<&str>,
+    max_rows: usize,
+) -> Result<Vec<OracleRow>, DbError> {
+    if object_types.is_empty() || object_types.len() > CATALOG_OBJECT_TYPES.len() {
+        return Err(DbError::InvalidArgument(format!(
+            "object_types must contain between 1 and {} values",
+            CATALOG_OBJECT_TYPES.len()
+        )));
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for object_type in object_types {
+        if !CATALOG_OBJECT_TYPES.contains(&object_type.as_str()) {
+            return Err(DbError::InvalidArgument(format!(
+                "unsupported object_type: {object_type:?}"
+            )));
+        }
+        if !seen.insert(object_type.as_str()) {
+            return Err(DbError::InvalidArgument(format!(
+                "object_types contains duplicate value {object_type:?}"
+            )));
+        }
+    }
+    let mut binds = Vec::with_capacity(CATALOG_OBJECT_TYPES.len() + 3);
+    binds.push(owner.map_or(OracleBind::Null, |o| {
+        OracleBind::from(o.to_ascii_uppercase())
+    }));
+    binds.extend(object_types.iter().cloned().map(OracleBind::from));
+    binds.resize(CATALOG_OBJECT_TYPES.len() + 1, OracleBind::Null);
+    binds.push(name_like.map_or(OracleBind::Null, |n| {
+        OracleBind::from(n.to_ascii_uppercase())
+    }));
+    binds.push(OracleBind::from(max_rows.max(1) as i64));
+    run_catalog_query(cx, conn, CatalogQueryId::ListObjectsByTypes, &binds).await
 }
 
 /// One deterministic, bounded page from the `schema_inspect` object listing.
@@ -1805,6 +1992,11 @@ pub async fn get_ddl(
             "unsupported DDL object type: {object_type:?}"
         )));
     }
+    let metadata_type = match object_type {
+        "PACKAGE BODY" => "PACKAGE_BODY",
+        "TYPE BODY" => "TYPE_BODY",
+        other => other,
+    };
     // DBMS_METADATA returns a CLOB. The thin-driver path intentionally reads a
     // bounded VARCHAR2 prefix, and carries GETLENGTH alongside it so the MCP
     // surface can never silently present a partial document as complete.
@@ -1813,7 +2005,7 @@ pub async fn get_ddl(
         conn,
         CatalogQueryId::GetDdl,
         &[
-            OracleBind::from(object_type.to_ascii_uppercase()),
+            OracleBind::from(metadata_type.to_ascii_uppercase()),
             OracleBind::from(name.to_ascii_uppercase()),
             OracleBind::from(owner.to_ascii_uppercase()),
         ],
@@ -1881,7 +2073,7 @@ pub async fn search_source(
     max_rows: usize,
 ) -> Result<Vec<OracleRow>, DbError> {
     let source_type = match object_type {
-        Some(t) => Some(normalize_source_object_type(t).ok_or_else(|| {
+        Some(t) => Some(normalize_source_search_object_type(t).ok_or_else(|| {
             DbError::InvalidArgument(format!("unsupported source object type: {t:?}"))
         })?),
         None => None,
@@ -1922,6 +2114,9 @@ pub async fn get_source(
             "unsupported source object type: {object_type:?}"
         )));
     };
+    if source_type == "VIEW" {
+        return get_view_source(cx, conn, owner, name, options).await;
+    }
     // One positional value per `:n` OCCURRENCE (see `compile_errors`): each
     // optional line bound is tested and compared through its own placeholder
     // and supplied twice, rather than reusing `:4`/`:5`.
@@ -1974,6 +2169,60 @@ pub async fn get_source(
         object_type: source_type.to_owned(),
         source,
         line_count: rows.len(),
+        char_count,
+        truncated,
+    })
+}
+
+/// Return a bounded view definition from the same version-neutral
+/// `ALL_VIEWS.TEXT` read used by `describe_view`.
+async fn get_view_source(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+    options: SourceReadOptions,
+) -> Result<SourceText, DbError> {
+    let owner = owner.to_ascii_uppercase();
+    let name = name.to_ascii_uppercase();
+    let row = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::ViewMetadata,
+        &[
+            OracleBind::from(owner.clone()),
+            OracleBind::from(name.clone()),
+        ],
+    )
+    .await?
+    .into_iter()
+    .next()
+    .ok_or_else(|| describe_object_not_found("view", &owner, &name))?;
+    let text = row.text("TEXT").ok_or_else(|| {
+        DbError::Internal(format!(
+            "view {owner}.{name} metadata returned no definition text"
+        ))
+    })?;
+    let lines = text.lines().collect::<Vec<_>>();
+    let first = options.from_line.unwrap_or(1).saturating_sub(1);
+    let end = options.to_line.unwrap_or(lines.len());
+    let selected = if first < end && first < lines.len() {
+        &lines[first..end.min(lines.len())]
+    } else {
+        &[]
+    };
+    let selected_text = selected.join("\n");
+    let char_count = selected_text.chars().count();
+    let cap = options.max_chars.max(1);
+    let truncated = char_count > cap;
+    let source = selected_text.chars().take(cap).collect();
+
+    Ok(SourceText {
+        owner,
+        name,
+        object_type: "VIEW".to_owned(),
+        source,
+        line_count: selected.len(),
         char_count,
         truncated,
     })
@@ -2603,6 +2852,7 @@ mod tests {
         calls: std::sync::Mutex<Vec<(String, Vec<OracleBind>)>>,
         data_default_vc_available: bool,
         describe_metadata_available: bool,
+        view_text: Option<String>,
     }
 
     struct PlanResolverMock {
@@ -2768,6 +3018,16 @@ mod tests {
                     .any(|marker| lower_sql.contains(marker))
             {
                 return Ok(vec![OracleRow { columns: vec![] }]);
+            }
+            if lower_sql.contains("from all_views") {
+                return Ok(self.view_text.as_ref().map_or_else(Vec::new, |text| {
+                    vec![OracleRow {
+                        columns: vec![(
+                            "TEXT".to_owned(),
+                            OracleCell::new("VARCHAR2", Some(text.clone())),
+                        )],
+                    }]
+                }));
             }
             if self.data_default_vc_available && sql.contains("column_name = 'DATA_DEFAULT_VC'") {
                 Ok(vec![OracleRow { columns: vec![] }])
@@ -3208,11 +3468,13 @@ mod tests {
     fn identifier_and_type_validation() {
         assert!(is_simple_identifier("HR"));
         assert!(!is_simple_identifier("HR; DROP TABLE t"));
-        assert!(is_ddl_object_type("table"));
-        assert!(is_ddl_object_type("PACKAGE_BODY"));
+        assert!(is_ddl_object_type("TABLE"));
+        assert!(!is_ddl_object_type("table"));
+        assert!(is_ddl_object_type("PACKAGE BODY"));
         assert!(!is_ddl_object_type("ANYTHING_ELSE"));
+        assert_eq!(normalize_source_object_type("package_body"), None);
         assert_eq!(
-            normalize_source_object_type("package_body"),
+            normalize_source_object_type("PACKAGE BODY"),
             Some("PACKAGE BODY")
         );
         assert_eq!(normalize_source_object_type("TYPE BODY"), Some("TYPE BODY"));
@@ -3428,6 +3690,38 @@ mod tests {
     }
 
     #[test]
+    fn search_objects_object_types_binds_each_value() {
+        let mock = CaptureMock::default();
+        let m = &mock;
+        run_with_cx(|cx| async move {
+            search_objects_by_types(
+                &cx,
+                m,
+                Some("app"),
+                &["TABLE".to_owned(), "VIEW".to_owned()],
+                Some("PARENT%"),
+                SearchDetailLevel::Names,
+                25,
+            )
+            .await
+            .unwrap();
+        });
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("o.object_type IN (:2, :3"));
+        assert_eq!(calls[0].1[0], OracleBind::String("APP".to_owned()));
+        assert_eq!(calls[0].1[1], OracleBind::String("TABLE".to_owned()));
+        assert_eq!(calls[0].1[2], OracleBind::String("VIEW".to_owned()));
+        assert!(
+            calls[0].1[3..14]
+                .iter()
+                .all(|bind| matches!(bind, OracleBind::Null))
+        );
+        assert_eq!(calls[0].1[14], OracleBind::String("PARENT%".to_owned()));
+        assert_eq!(calls[0].1[15], OracleBind::I64(25));
+    }
+
+    #[test]
     fn search_source_binds_optional_scope_filters() {
         let mock = CaptureMock::default();
         let m = &mock;
@@ -3437,7 +3731,7 @@ mod tests {
                 m,
                 None,
                 "commit",
-                Some("package_body"),
+                Some("PACKAGE BODY"),
                 Some("emp%"),
                 25,
             )
@@ -3484,7 +3778,45 @@ mod tests {
     }
 
     #[test]
-    fn get_source_view_validation_is_invalid_arguments_issue_38() {
+    fn get_source_view_returns_view_text_issue_39() {
+        let mock = CaptureMock {
+            view_text: Some("SELECT ID, LABEL\nFROM APP.T_PARENT\nWHERE ID > 0".to_owned()),
+            ..CaptureMock::default()
+        };
+        let m = &mock;
+        let source = run_with_cx(|cx| async move {
+            get_source(
+                &cx,
+                m,
+                "app",
+                "parent_view",
+                "VIEW",
+                SourceReadOptions {
+                    from_line: Some(2),
+                    to_line: Some(3),
+                    max_chars: 100,
+                },
+            )
+            .await
+            .unwrap()
+        });
+        assert_eq!(source.object_type, "VIEW");
+        assert_eq!(source.source, "FROM APP.T_PARENT\nWHERE ID > 0");
+        assert_eq!(source.line_count, 2);
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert!(calls[0].0.contains("FROM all_views"));
+        assert_eq!(
+            calls[0].1,
+            vec![
+                OracleBind::String("APP".to_owned()),
+                OracleBind::String("PARENT_VIEW".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn get_source_missing_view_is_object_not_found() {
         let mock = CaptureMock::default();
         let m = &mock;
         let err = run_with_cx(|cx| async move {
@@ -3501,18 +3833,18 @@ mod tests {
                 },
             )
             .await
-            .expect_err("VIEW is not an ALL_SOURCE object type")
+            .expect_err("missing view should not become empty source")
         });
         let envelope = err.into_envelope();
         assert_eq!(
             envelope.error_class,
-            oraclemcp_error::ErrorClass::InvalidArguments
+            oraclemcp_error::ErrorClass::ObjectNotFound
         );
         assert_eq!(
             envelope.suggested_tool.as_deref(),
-            Some("oracle_get_source")
+            Some("oracle_schema_inspect")
         );
-        assert!(mock.calls.lock().expect("capture lock").is_empty());
+        assert_eq!(mock.calls.lock().expect("capture lock").len(), 1);
     }
 
     #[test]
@@ -3538,7 +3870,7 @@ mod tests {
         let mock = CaptureMock::default();
         let m = &mock;
         run_with_cx(|cx| async move {
-            get_ddl(&cx, m, "package", "hr", "pkg_demo").await.unwrap();
+            get_ddl(&cx, m, "PACKAGE", "hr", "pkg_demo").await.unwrap();
         });
 
         let calls = mock.calls.lock().expect("capture lock");
@@ -3554,6 +3886,20 @@ mod tests {
                 OracleBind::String("HR".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn get_ddl_space_spelling_maps_to_metadata_body_type() {
+        let mock = CaptureMock::default();
+        let m = &mock;
+        run_with_cx(|cx| async move {
+            get_ddl(&cx, m, "PACKAGE BODY", "hr", "pkg_demo")
+                .await
+                .unwrap();
+        });
+        let calls = mock.calls.lock().expect("capture lock");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1[0], OracleBind::String("PACKAGE_BODY".to_owned()));
     }
 
     #[test]
@@ -3788,7 +4134,7 @@ mod tests {
                 &SourceMock,
                 "hr",
                 "emp_api",
-                "package_body",
+                "PACKAGE BODY",
                 SourceReadOptions {
                     from_line: None,
                     to_line: None,
@@ -3817,7 +4163,7 @@ mod tests {
                 conn_ref,
                 "hr",
                 "emp_api",
-                "package_body",
+                "PACKAGE BODY",
                 SourceReadOptions {
                     from_line: Some(37),
                     to_line: Some(42),
