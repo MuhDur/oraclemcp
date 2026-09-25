@@ -25,6 +25,127 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+struct ZeroCallOracleConnection {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ZeroCallOracleConnection {
+    fn unexpected_call<T>(&self) -> Result<T, DbError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Internal(
+            "invalid enum reached the Oracle connection".to_owned(),
+        ))
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for ZeroCallOracleConnection {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.unexpected_call()
+    }
+
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.unexpected_call()
+    }
+
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.unexpected_call()
+    }
+
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.unexpected_call()
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.unexpected_call()
+    }
+
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.unexpected_call()
+    }
+
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.unexpected_call()
+    }
+
+    fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+        self.unexpected_call()
+    }
+
+    fn set_call_timeout(&self, _timeout: Option<Duration>) -> Result<(), DbError> {
+        self.unexpected_call()
+    }
+
+    fn request_deadline(&self, _cx: &Cx) -> Result<Option<asupersync::Time>, DbError> {
+        self.unexpected_call()
+    }
+
+    fn set_request_deadline(
+        &self,
+        _cx: &Cx,
+        _deadline: Option<asupersync::Time>,
+    ) -> Result<(), DbError> {
+        self.unexpected_call()
+    }
+
+    fn request_quota(&self, _cx: &Cx) -> Result<Option<oraclemcp_db::DbRequestQuota>, DbError> {
+        self.unexpected_call()
+    }
+
+    fn set_request_quota(
+        &self,
+        _cx: &Cx,
+        _quota: Option<oraclemcp_db::DbRequestQuota>,
+    ) -> Result<(), DbError> {
+        self.unexpected_call()
+    }
+}
+
+#[test]
+fn wrong_enum_arguments_are_refused_before_any_oracle_connection_call() {
+    let cases = [
+        (
+            "oracle_search_objects",
+            json!({ "owner": "APP", "detail_level": "bogus" }),
+        ),
+        (
+            "oracle_get_ddl",
+            json!({ "object_type": "bogus", "owner": "APP", "name": "T" }),
+        ),
+        (
+            "get_ddl",
+            json!({ "object_type": "bogus", "owner": "APP", "object_name": "T" }),
+        ),
+        ("oracle_top_queries", json!({ "metric": "bogus" })),
+    ];
+
+    for (tool, arguments) in cases {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let dispatcher = OracleDispatcher::new(Box::new(ZeroCallOracleConnection {
+            calls: Arc::clone(&calls),
+        }));
+
+        let error = dispatcher
+            .dispatch(tool, arguments)
+            .expect_err("wrong enum value is refused before connection access");
+        assert_eq!(
+            error.error_class,
+            ErrorClass::InvalidArguments,
+            "tool {tool}"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "tool {tool}");
+    }
+}
+
 fn run_with_current_cx(f: impl FnOnce(&Cx)) {
     let runtime = RuntimeBuilder::current_thread()
         .build()

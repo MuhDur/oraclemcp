@@ -4922,6 +4922,63 @@ fn validate_declared_args(tool: &str, args: &Value) -> Result<(), ErrorEnvelope>
         ))
         .with_next_step("call tools/list and inspect this tool's inputSchema.properties"));
     }
+    validate_enum_arguments(tool, args)?;
+    Ok(())
+}
+
+/// Refuse the served string enums before the dispatcher locks or consults an
+/// Oracle session. These values previously reached tool arms only after session
+/// metadata work; XE18 could then lose the connection while rolling back that
+/// work even though the caller's argument was already invalid.
+fn validate_enum_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope> {
+    match canonical_tool_name(tool) {
+        "oracle_search_objects" => {
+            for field in ["detail_level", "detail"] {
+                let Some(value) = args.get(field) else {
+                    continue;
+                };
+                let Some(raw) = value.as_str() else {
+                    return Err(invalid_args(format!(
+                        "invalid arguments for {tool}: {field} must be a string"
+                    )));
+                };
+                if oraclemcp_db::SearchDetailLevel::parse(Some(raw)).is_none() {
+                    return Err(invalid_args(
+                        "detail_level must be one of: names, summary, standard, full",
+                    ));
+                }
+            }
+        }
+        "oracle_get_ddl" => {
+            if let Some(value) = args.get("object_type") {
+                let Some(object_type) = value.as_str() else {
+                    return Err(invalid_args(format!(
+                        "invalid arguments for {tool}: object_type must be a string"
+                    )));
+                };
+                if !oraclemcp_db::is_ddl_object_type(object_type) {
+                    return Err(invalid_args(format!(
+                        "unsupported DDL object type: {object_type:?}"
+                    )));
+                }
+            }
+        }
+        "oracle_top_queries" => {
+            if let Some(value) = args.get("metric") {
+                let Some(metric) = value.as_str() else {
+                    return Err(invalid_args(format!(
+                        "invalid arguments for {tool}: metric must be a string"
+                    )));
+                };
+                if oraclemcp_db::TopSqlMetric::parse(metric).is_none() {
+                    return Err(invalid_args(format!(
+                        "unknown metric '{metric}': use elapsed, cpu, buffer_gets, or disk_reads"
+                    )));
+                }
+            }
+        }
+        _ => {}
+    }
     Ok(())
 }
 
