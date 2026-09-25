@@ -71,14 +71,15 @@ recorded = "fuzz-setup-job-failure-2026-09-23"
 FUZZ_RUN = 29900000002
 
 
-def runs(run_id, conclusion="success"):
+def runs(run_id, conclusion="success", repo="MuhDur/oraclemcp"):
     return {
         "workflow_runs": [
             {
                 "id": run_id,
                 "status": "completed",
                 "conclusion": conclusion,
-                "html_url": f"https://github.com/MuhDur/oraclemcp/actions/runs/{run_id}",
+                "event": "workflow_dispatch",
+                "html_url": f"https://github.com/{repo}/actions/runs/{run_id}",
                 "head_sha": sha,
                 "updated_at": "2026-09-23T14:34:00Z",
             }
@@ -113,7 +114,17 @@ if "repos/MuhDur/oraclemcp/releases/tags/" in path:
         raise SystemExit(1)
     emit({"tag_name": tag, "draft": release == "draft", "prerelease": False})
 elif "MuhDur/rust-oracledb/actions/workflows/" in path:
-    emit(runs(29900000009, "failure" if scenario == "driver_advisory_red_still_exits_zero" else "success"))
+    red = scenario == "driver_advisory_red_still_exits_zero" and "canary.yml" in path
+    emit(runs(29900000009, "failure" if red else "success", "MuhDur/rust-oracledb"))
+elif "MuhDur/plsql-intelligence/actions/workflows/" in path:
+    red = scenario == "sibling_scheduled_red_reported_advisory" and "bindgen-roundtrip.yml" in path
+    if "usr.yml" in path:
+        latest_push = runs(29900000011, "failure", "MuhDur/plsql-intelligence")["workflow_runs"][0]
+        latest_push["event"] = "push"
+        latest_dispatch = runs(29900000012, "success", "MuhDur/plsql-intelligence")["workflow_runs"][0]
+        emit({"workflow_runs": [latest_push, latest_dispatch]})
+    else:
+        emit(runs(29900000010, "failure" if red else "success", "MuhDur/plsql-intelligence"))
 elif "actions/workflows/required.yml/runs" in path:
     emit(runs(29900000001))
 elif "actions/workflows/fuzz.yml/runs" in path:
@@ -173,6 +184,7 @@ run_case scheduled_setup_failure_exits_nonzero 1 11 0
 run_case scheduled_unknown_exits_nonzero 1 11 0
 run_case scheduled_green_required_green_exits_zero 0 0 0
 run_case driver_advisory_red_still_exits_zero 0 0 1
+run_case sibling_scheduled_red_reported_advisory 0 0 1
 
 # The replayed setup failure must name the observed run, and the driver case
 # must still report the red driver lane rather than hide it.
@@ -183,9 +195,25 @@ jq -e '[.lanes[] | select(.state == "not_green" and .conclusion == "failure"
   failures=$((failures + 1))
 }
 jq -e '.watched_red == true and .blocked == false and
-  ([.lanes[] | select(.tier == "driver_advisory" and .state == "not_green")] | length) == 1' \
+  ([.sibling_scheduled[] | select(.repo == "MuhDur/rust-oracledb" and
+    .workflow_file == "canary.yml" and .state == "not_green" and .conclusion == "failure")] | length) == 1' \
   "$workdir/driver_advisory_red_still_exits_zero.json" >/dev/null || {
-  echo "ci-heartbeat test: the red driver advisory lane was hidden or gated" >&2
+  echo "ci-heartbeat test: the red driver sibling lane was hidden or gated" >&2
+  failures=$((failures + 1))
+}
+jq -e '.watched_red == true and .blocked == false and
+  ([.sibling_scheduled[] | select(.repo == "MuhDur/plsql-intelligence" and
+    .workflow_file == "bindgen-roundtrip.yml" and .state == "not_green" and
+    .conclusion == "failure")] | length) == 1' \
+  "$workdir/sibling_scheduled_red_reported_advisory.json" >/dev/null || {
+  echo "ci-heartbeat test: the red engine sibling lane was hidden or gated" >&2
+  failures=$((failures + 1))
+}
+jq -e '([.sibling_scheduled[] | select(.workflow_file == "usr.yml" and
+  .state == "success" and .event == "workflow_dispatch" and
+  .run_url == "https://github.com/MuhDur/plsql-intelligence/actions/runs/29900000012")] | length) == 1' \
+  "$workdir/sibling_scheduled_red_reported_advisory.json" >/dev/null || {
+  echo "ci-heartbeat test: usr-loop push evidence replaced the scheduled/manual tier-B run" >&2
   failures=$((failures + 1))
 }
 grep -Fq "scheduled_not_green: fuzz" "$workdir/scheduled_red_exits_nonzero.stderr" || {

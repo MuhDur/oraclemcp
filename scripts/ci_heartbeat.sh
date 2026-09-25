@@ -3,10 +3,9 @@
 # + C8): "the deepest operator-trust wound was the operator discovering red CI
 # himself." This script polls the REAL GitHub Actions state — never local git
 # state, which can be stale or unpushed — for the required + scheduled lanes
-# this repo's own `docs/ci_taxonomy.json` names, plus, advisory-only, the
-# sibling driver repo's lanes (both its required gate and its Live nightly are
-# watched but non-gating; the driver repo is discontinued and off-limits — see
-# the DRIVER_REPO note below). It is designed to run on a schedule (see
+# this repo's own `docs/ci_taxonomy.json` names, plus advisory-only sibling
+# driver and PL/SQL engine tier-B lanes. Their state is published separately
+# as `sibling_scheduled`. It is designed to run on a schedule (see
 # `.github/workflows/ci-heartbeat.yml`) so a red or blocked lane is surfaced
 # within one cycle, not discovered later by a human reading the Actions tab.
 #
@@ -37,14 +36,14 @@
 #     notification went unnoticed. A red or unknown scheduled server lane is
 #     listed in `scheduled_not_green`, fails this heartbeat, and makes
 #     scripts/release_preflight.sh refuse a release tag.
-#   - The sibling driver repo's lanes stay ADVISORY (R1): recorded in the
-#     snapshot for visibility, never part of the exit code.
+#   - Sibling tier-B lanes stay ADVISORY (R1): recorded under
+#     `sibling_scheduled` for visibility, never part of the exit code.
 #
 # Usage:
 #   scripts/ci_heartbeat.sh [--out PATH] [--no-driver] [--quiet]
 #
 # Exit codes: 0 = every required and scheduled server lane confirmed green
-# (driver advisory reds or unknowns are reported honestly but never fail the
+# (sibling advisory reds or unknowns are reported honestly but never fail the
 # heartbeat); 1 = at least one required or scheduled server lane is red or
 # unknown (see the printed report and `scheduled_not_green`); 2 =
 # the harness itself could not run (missing `gh`/`jq`/`python3`, or the local
@@ -57,26 +56,15 @@ TAXONOMY="${CI_HEARTBEAT_TAXONOMY:-$ROOT/docs/ci_taxonomy.json}"
 
 SERVER_REPO="MuhDur/oraclemcp"
 DRIVER_REPO="MuhDur/rust-oracledb"
-# The driver repo's own CI taxonomy is not generated/embedded here (that would
-# be a second copy of a different repo's source of truth — out of proportion
-# for a heartbeat). Its required gate and its Live nightly are small and stable
-# enough to name directly; review this list if the driver restructures its
-# workflows.
-#
-# BOTH driver lanes are ADVISORY (watched, non-gating) from this heartbeat's
-# perspective. The in-house driver `rust-oracledb` (driver-cx) was DISCONTINUED
-# upstream on 2026-08-06 and is off-limits to this repo — oraclemcp consumes the
-# last published crate plus the official `oracledb` beta as a connect-time
-# fallback, so its source repo's own required gate is not part of oraclemcp's
-# health. Its `required.yml` has been red since the discontinuation; letting a
-# separate, unfixable repo redden oraclemcp's heartbeat would train the operator
-# to ignore a red badge — the exact opposite of this bead's operator-trust goal.
-# Both lanes are still recorded in the snapshot (visible, honestly not_green),
-# they just no longer drive this script's exit code.
-DRIVER_REQUIRED_WORKFLOWS=("required.yml")
-DRIVER_SCHEDULED_WORKFLOWS=("live.yml")
+ENGINE_REPO="MuhDur/plsql-intelligence"
+# Sibling repo workflow files are named directly rather than embedding a
+# second repository's generated taxonomy here. Keep these lists aligned with
+# their `# tier: B` workflow headers; all are advisory from oraclemcp's view.
+DRIVER_SCHEDULED_WORKFLOWS=("canary.yml" "live.yml" "soak.yml" "tsan.yml" "version-matrix.yml")
+ENGINE_SCHEDULED_WORKFLOWS=("bindgen-roundtrip.yml" "fuzz.yml" "usr.yml")
 
 INCLUDE_DRIVER=1
+INCLUDE_ENGINE=1
 QUIET=0
 OUT_PATH="${CI_HEARTBEAT_OUTPUT:-${XDG_STATE_HOME:-$HOME/.local/state}/oraclemcp/ci-heartbeat.json}"
 
@@ -95,6 +83,9 @@ done
 
 if [ "${CI_HEARTBEAT_SKIP_DRIVER:-0}" = "1" ]; then
   INCLUDE_DRIVER=0
+fi
+if [ "${CI_HEARTBEAT_SKIP_ENGINE:-0}" = "1" ]; then
+  INCLUDE_ENGINE=0
 fi
 
 require_cmd() {
@@ -150,10 +141,11 @@ note_lane_state() {
 }
 
 record_lane() {
-  # repo check_name tier state conclusion run_url head_sha updated_at
+  # repo check_name tier state conclusion run_url head_sha updated_at event
   jq -nc \
     --arg repo "$1" --arg check_name "$2" --arg tier "$3" --arg state "$4" \
     --arg conclusion "$5" --arg run_url "$6" --arg head_sha "$7" --arg updated_at "$8" \
+    --arg event "${9:-}" \
     '{
       repo: $repo,
       check_name: $check_name,
@@ -162,7 +154,8 @@ record_lane() {
       conclusion: (if $conclusion == "" then null else $conclusion end),
       run_url: (if $run_url == "" then null else $run_url end),
       head_sha: (if $head_sha == "" then null else $head_sha end),
-      updated_at: (if $updated_at == "" then null else $updated_at end)
+      updated_at: (if $updated_at == "" then null else $updated_at end),
+      event: (if $event == "" then null else $event end)
     }' >> "$tmp_lanes"
 }
 
@@ -192,12 +185,18 @@ record_job_lane() {
 # Echoes a single JSON object (or `null` if none exists) on success; returns
 # non-zero if the GitHub API call itself failed (network, auth, 404).
 fetch_latest_run() {
-  local repo="$1" workflow_file="$2" query_suffix="$3"
+  local repo="$1" workflow_file="$2" query_suffix="$3" accepted_events="${4:-}"
   local raw
   # shellcheck disable=SC2034 # loop count only; the body ignores the index.
   for attempt in 1 2; do
-    if raw="$(gh api "repos/${repo}/actions/workflows/${workflow_file}/runs?status=completed&per_page=10${query_suffix}" 2>&1)"; then
-      jq -c '([.workflow_runs[]? | select(.conclusion != "cancelled")] | .[0]) // null' <<<"$raw"
+    if raw="$(gh api "repos/${repo}/actions/workflows/${workflow_file}/runs?status=completed&per_page=100${query_suffix}" 2>&1)"; then
+      if [ -n "$accepted_events" ]; then
+        jq -c --argjson accepted_events "$accepted_events" \
+          '([.workflow_runs[]? | select(.conclusion != "cancelled") |
+             select(.event as $event | $accepted_events | index($event))] | .[0]) // null' <<<"$raw"
+      else
+        jq -c '([.workflow_runs[]? | select(.conclusion != "cancelled")] | .[0]) // null' <<<"$raw"
+      fi
       return 0
     fi
     sleep 2
@@ -223,10 +222,10 @@ fetch_run_jobs() {
 # Resolve one workflow's latest definitive run and record it as a lane.
 # `notify=1` means a red/unknown result here counts toward the exit code.
 watch_workflow() {
-  local repo="$1" workflow_file="$2" tier="$3" query_suffix="$4" notify="$5"
+  local repo="$1" workflow_file="$2" tier="$3" query_suffix="$4" notify="$5" accepted_events="${6:-}"
   local check_name="${tier}:${workflow_file}"
   local run_json
-  if ! run_json="$(fetch_latest_run "$repo" "$workflow_file" "$query_suffix")"; then
+  if ! run_json="$(fetch_latest_run "$repo" "$workflow_file" "$query_suffix" "$accepted_events")"; then
     record_lane "$repo" "$check_name" "$tier" "unknown" "" "" "" ""
     note_lane_state "unknown" "$notify"
     report_errors+=("${repo} ${workflow_file}: gh api call failed")
@@ -238,17 +237,18 @@ watch_workflow() {
     report_errors+=("${repo} ${workflow_file}: no completed non-superseded run was found")
     return
   fi
-  local conclusion url sha updated state
+  local conclusion url sha updated event state
   conclusion="$(jq -r '.conclusion // ""' <<<"$run_json")"
   url="$(jq -r '.html_url // ""' <<<"$run_json")"
   sha="$(jq -r '.head_sha // ""' <<<"$run_json")"
   updated="$(jq -r '.updated_at // ""' <<<"$run_json")"
+  event="$(jq -r '.event // ""' <<<"$run_json")"
   if [ "$conclusion" = "success" ]; then
     state="success"
   else
     state="not_green"
   fi
-  record_lane "$repo" "$check_name" "$tier" "$state" "$conclusion" "$url" "$sha" "$updated"
+  record_lane "$repo" "$check_name" "$tier" "$state" "$conclusion" "$url" "$sha" "$updated" "$event"
   note_lane_state "$state" "$notify"
 }
 
@@ -363,29 +363,24 @@ for file in "${server_scheduled_files[@]}"; do
   watch_server_scheduled_jobs "$file"
 done
 
-# --- Driver (rust-oracledb): watched ADVISORY-only (see the DRIVER_REPO note
-# above). The driver source repo is discontinued and off-limits; neither its
-# required gate nor its Live nightly gates oraclemcp's heartbeat. Both are still
-# recorded in the snapshot so a reader sees their real state.
+# --- Sibling Tier-B workflows are watched ADVISORY-only (R1). Their exact
+# conclusions are kept in `sibling_scheduled`, but cannot affect this repo's
+# exit status.
 if [ "$INCLUDE_DRIVER" = "1" ]; then
-  for file in "${DRIVER_REQUIRED_WORKFLOWS[@]}"; do
-    # Demoted from a hard gate (notify=1) to advisory (notify=0): the driver's
-    # own required.yml has been red since the 2026-08-06 driver-cx
-    # discontinuation and cannot be fixed from here, so it must not redden
-    # oraclemcp's heartbeat. Tier is `driver_advisory` to name the demotion
-    # honestly in the snapshot (it is the driver's required gate, watched
-    # advisory-only from oraclemcp's side).
-    watch_workflow "$DRIVER_REPO" "$file" "driver_advisory" "&branch=main&event=push" 0
-  done
   for file in "${DRIVER_SCHEDULED_WORKFLOWS[@]}"; do
-    # Advisory (see the scheduled note above): the Live nightly self-skips its
-    # operator-only real-wallet TCPS test, so an unattended nightly must never
-    # redden this heartbeat; it is still recorded for visibility.
-    watch_workflow "$DRIVER_REPO" "$file" "driver_scheduled" "&event=schedule" 0
+    watch_workflow "$DRIVER_REPO" "$file" "driver_scheduled" "&branch=main" 0 '["schedule", "workflow_dispatch"]'
+  done
+fi
+if [ "$INCLUDE_ENGINE" = "1" ]; then
+  for file in "${ENGINE_SCHEDULED_WORKFLOWS[@]}"; do
+    watch_workflow "$ENGINE_REPO" "$file" "engine_scheduled" "&branch=main" 0 '["schedule", "workflow_dispatch"]'
   done
 fi
 
 lanes_json="$(jq -s '.' "$tmp_lanes")"
+sibling_scheduled="$(jq -c '[.[] | select(.tier == "driver_scheduled" or .tier == "engine_scheduled") | {
+  repo, check_name, workflow_file: (.check_name | sub("^[^:]+:"; "")), tier, state, conclusion, event, run_url, head_sha, updated_at
+}]' <<<"$lanes_json")"
 now_utc="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 required_blocked=false
 if [ "$required_red" = "1" ] || [ "$required_unknown" = "1" ]; then
@@ -431,6 +426,7 @@ report="$(jq -n \
   --argjson watched_blocked "$watched_blocked" \
   --argjson watched_red "$([ "$watched_red" = "1" ] && echo true || echo false)" \
   --argjson watched_unknown "$([ "$watched_unknown" = "1" ] && echo true || echo false)" \
+  --argjson sibling_scheduled "$sibling_scheduled" \
   --argjson lanes "$lanes_json" \
   --argjson errors "$errors_json" \
   '{
@@ -447,6 +443,7 @@ report="$(jq -n \
     watched_blocked: $watched_blocked,
     watched_red: $watched_red,
     watched_unknown: $watched_unknown,
+    sibling_scheduled: $sibling_scheduled,
     lanes: $lanes,
     errors: $errors
   }'
@@ -478,7 +475,7 @@ if [ "$watched_blocked" = "true" ]; then
   if [ "$QUIET" != "1" ]; then
     {
       echo "::warning::ci-heartbeat: required and scheduled lanes are green, but an advisory watched lane is red or unknown"
-      echo "ci-heartbeat: ADVISORY — driver advisory lane evidence is red or unknown (snapshot: $OUT_PATH)"
+      echo "ci-heartbeat: ADVISORY — sibling scheduled lane evidence is red or unknown (snapshot: $OUT_PATH)"
       jq -r '.lanes[] | select(.state != "success") | "  \(.state)\t\(.repo)\t\(.check_name)\t\(.run_url // "no run observed")"' <<<"$report"
       for error in "${report_errors[@]+"${report_errors[@]}"}"; do
         echo "  error: $error"

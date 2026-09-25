@@ -118,11 +118,12 @@ banner, and makes the heartbeat exit non-zero: the Fuzz Campaign failed at
 "Set up job" every night for six days while its own failure notifications went
 unnoticed, and the old heartbeat, which gated only required lanes, exited 0.
 `blocked`, `any_red` and `any_unknown` cover both tiers; `required_blocked` and
-`scheduled_blocked` say which one caused it. The sibling driver repo's lanes
-stay advisory (R1): recorded as `driver_advisory` / `driver_scheduled`, counted
-in `watched_*`, never in the exit code. `scripts/release_preflight.sh` runs the
-same check when a new tag is cut and refuses it while any tier-B lane is not
-green, printing `lane -> found -> expected success`. The repair workflows
+`scheduled_blocked` say which one caused it. The driver and PL/SQL engine
+repositories' tier-B workflows stay advisory (R1): their conclusions are
+recorded in `sibling_scheduled` and `watched_*`, never in the exit code.
+`scripts/release_preflight.sh` runs the same server-lane check when a new tag
+is cut and refuses it while an oraclemcp tier-B lane is not green, printing
+`lane -> found -> expected success`. The repair workflows
 (`docker.yml`, `publish-mcp.yml`) re-validate an already-published release and
 set `RELEASE_PREFLIGHT_EXISTING_RELEASE=1`; the preflight honours it only after
 the GitHub releases API shows a published (non-draft) release for that tag, and
