@@ -1,0 +1,59 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T02:55:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.2.4",
+  "scope": {
+    "summary": "CI tier rules applied in the driver and engine repos (every workflow has a '# tier:' header, all active, last tier-A/B runs green on the current sibling mains) and oraclemcp's heartbeat reports sibling tier-B lanes under sibling_scheduled as advisory (red sibling is shown red, heartbeat exit stays 0). Commits: oraclemcp 56ef6915, driver 06af345/ee3c97d/159b546, engine 7ae19c2.",
+    "in_scope": [
+      "scripts/ci_heartbeat.sh",
+      "scripts/test_ci_heartbeat.sh"
+    ],
+    "out_of_scope": [
+      "Sibling functional correctness (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "956958728230595e56430881e6125356a9944f14",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "sibling workflow state (orchestrator check)",
+        "kind": "cli",
+        "trace": "gh workflow list --all: rust-oracledb and plsql-intelligence - every workflow 'active', none disabled_inactivity (usr-loop active). '# tier:' headers: driver 10/10, engine 7/7 workflow files at origin/main (driver 159b546, engine 7ae19c2)."
+      },
+      {
+        "name": "sibling runs on exact SHAs (orchestrator spot-check)",
+        "kind": "cli",
+        "trace": "rust-oracledb 159b546: Canary 36085303202 success, Live (database) tests 36085305465 success, Version matrix (live, multi-generation) 36085311556 success; plus implementer-cited CI 36085286346 and Required 36085286495 success. plsql-intelligence 7ae19c2: usr-loop 36079596366 success (implementer-cited CI, change-impact, bindgen round-trip, tier-B fuzz also green)."
+      },
+      {
+        "name": "heartbeat fixture (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "At origin/main: bash scripts/test_ci_heartbeat.sh rc=0; case sibling_scheduled_red_reported_advisory expected_exit 0 actual_exit 0; scheduled_setup_failure_exits_nonzero still exits 1."
+      },
+      {
+        "name": "gate-diff review",
+        "kind": "cli",
+        "trace": "Driver test changes 06af345..159b546 unwrap the ConnectPhase error wrapper (added by .13.4) and keep the same checks: UnsupportedVersion must name floor TNS_VERSION_MIN_ACCEPTED and version < minimum, now additionally required to occur in the ACCEPT phase; TCP-timeout test must see a timeout-class cause. Not weakened. Canary diff adds '# tier: B' + 'mode: strict' only; no continue-on-error, no removed steps."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The live heartbeat snapshot itself exits 1 because oraclemcp's own required lanes (api-lock, fuzz evidence) were red/unknown at the time; this bead claims only the sibling_scheduled reporting."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
