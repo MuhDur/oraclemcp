@@ -1,0 +1,30 @@
+{
+  "run_id": "orchestrator-local-verify-20260925T0145Z",
+  "lane": "free23",
+  "source_sha": "71f1d558fcacddf960ca867809dd614ef2f03751",
+  "kind": "catalog-facts-live-gated-run",
+  "runner": "orchestrator (IvoryHorizon) clean worktree oraclemcp-gate-prepush, build lease; ORACLEMCP_CATALOG_FACTS_LIVE=1; FREE 23ai localhost:1523/FREEPDB1 as system",
+  "command": "cargo test -p oraclemcp-core --test catalog_facts_live -- --nocapture --test-threads=1",
+  "result": "3 passed; 0 failed",
+  "cases": [
+    {
+      "case_id": "catalog_facts_live_recompile_is_stale",
+      "lane": "free23",
+      "result": "stale_after_last_ddl_time_change",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "catalog_facts_restart_process_child",
+      "lane": "free23",
+      "result": "fresh",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "catalog_facts_live_roundtrip",
+      "lane": "free23",
+      "result": "fresh_after_process_restart",
+      "verdict": "pass"
+    }
+  ],
+  "note": "Local orchestrator run, not a scheduled CI lane; the live tests self-skip when the env gate is unset, so this gated run is the live proof."
+}

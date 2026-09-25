@@ -34,8 +34,13 @@
     ]
   },
   "live_evidence": {
-    "claimed": false,
-    "artifacts": []
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "catalog-facts-live-gated-run",
+        "path": "tests/artifacts/evidence/live/catalog-facts-10.9-free23-20260925T0145Z.json"
+      }
+    ]
   },
   "limitations": [
     "The live tests return early (pass) when ORACLEMCP_CATALOG_FACTS_LIVE is unset, so a green default test run is not live evidence; this close relies on the gated run above."
