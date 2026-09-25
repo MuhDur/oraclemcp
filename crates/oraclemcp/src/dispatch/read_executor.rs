@@ -1014,7 +1014,7 @@ impl<'a> GuardedReadExecutor<'a> {
         context: DispatchContext<'_>,
         name: &str,
         args: Value,
-        mut request_budget: RequestBudget,
+        request_budget: RequestBudget,
         request_subject: &AuditSubject,
         sql_policy: Option<SqlPolicyConfig>,
         current_schema: Option<String>,
@@ -1175,11 +1175,6 @@ impl<'a> GuardedReadExecutor<'a> {
                 semantic_metadata,
             )
         };
-        request_budget = query_budget_with_cost_limit(
-            request_budget,
-            self.max_query_cost()?,
-            prepared.args.max_query_cost,
-        );
         request_budget.enforce(cx).map_err(DbError::into_envelope)?;
 
         // A1: lazily ensure SET TRANSACTION READ ONLY is in force so a
@@ -1485,11 +1480,6 @@ impl<'a> GuardedReadExecutor<'a> {
                     hard_parse_observations: Vec::new(),
                 }
             };
-            request_budget = query_budget_with_cost_limit(
-                request_budget,
-                self.max_query_cost()?,
-                prepared.args.max_query_cost,
-            );
             request_budget.enforce(cx).map_err(DbError::into_envelope)?;
 
             if prepared.gate.is_ok() {

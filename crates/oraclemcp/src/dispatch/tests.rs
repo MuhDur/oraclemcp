@@ -15152,26 +15152,6 @@ fn query_cost_override_can_only_lower_profile_ceiling() {
     assert_eq!(effective_query_cost_limit(None, None), None);
 }
 
-#[test]
-fn query_budget_applies_clamped_cost_quota() {
-    let now = Time::from_secs(100);
-    let request = RequestBudget::from_call_timeout(now, Some(Duration::from_secs(30)));
-    let clamped = query_budget_with_cost_limit(request, Some(50), Some(75));
-    assert_eq!(
-        clamped.budget().cost_quota,
-        Some(50),
-        "per-call max_query_cost above the profile ceiling is clamped down"
-    );
-
-    let request = RequestBudget::from_call_timeout(now, Some(Duration::from_secs(30)));
-    let lowered = query_budget_with_cost_limit(request, Some(50), Some(25));
-    assert_eq!(
-        lowered.budget().cost_quota,
-        Some(25),
-        "per-call max_query_cost below the profile ceiling lowers it"
-    );
-}
-
 /// QA85: a multi-round-trip health request inherits one absolute deadline and
 /// one shared quota handle. Later subchecks cannot get a fresh allowance merely
 /// because they issue a separate database call.

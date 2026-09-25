@@ -33,7 +33,7 @@ use refusal_corpus::RefusalCorpusWriter;
 
 use asupersync::combinator::try_commit_section;
 use asupersync::sync::Mutex as AsyncMutex;
-use asupersync::{Budget, CancelReason, Cx, Outcome, Time};
+use asupersync::{CancelReason, Cx, Outcome, Time};
 use oraclemcp_audit::{
     AuditCancel, AuditDecision, AuditEntryDraft, AuditFailureCause, AuditOutcome,
     AuditResultMaskingAction, AuditResultMaskingCertificate, AuditResultMaskingColumnDecision,
@@ -3200,17 +3200,6 @@ fn effective_query_cost_limit(
         (Some(profile), None) => Some(profile),
         (None, Some(per_call)) => Some(per_call),
         (None, None) => None,
-    }
-}
-
-fn query_budget_with_cost_limit(
-    request_budget: RequestBudget,
-    profile_max_query_cost: Option<u64>,
-    per_call_max_query_cost: Option<u64>,
-) -> RequestBudget {
-    match effective_query_cost_limit(profile_max_query_cost, per_call_max_query_cost) {
-        Some(cost_limit) => request_budget.meet(Budget::new().with_cost_quota(cost_limit)),
-        None => request_budget,
     }
 }
 
