@@ -1,0 +1,40 @@
+{
+  "run_id": "orchestrator-local-verify-20260925T0757Z",
+  "lane": "free23",
+  "source_sha": "fa2b2e59b38a7fd81e1a01374fcf84ed67f83c90",
+  "kind": "grant-rewrite-live-gated-run",
+  "runner": "orchestrator (IvoryHorizon) clean worktree oraclemcp-gate-prepush, build lease; ORACLEMCP_LIVE_XE=1; FREE 23ai localhost:1523/FREEPDB1, run once as least-privilege E2E_ORACLE (CONNECT, RESOURCE, CREATE VIEW/MATERIALIZED VIEW/SYNONYM, EXECUTE ON DBMS_FLASHBACK; CI-equivalent) and once as SYSTEM",
+  "command": "cargo test -p oraclemcp --test scoped_grant_rewrite_live_free23 --features live-xe -- --nocapture --test-threads=1",
+  "result": "E2E_ORACLE: 2 passed; 0 failed. SYSTEM: 2 passed; 0 failed",
+  "cases": [
+    {
+      "case_id": "grant_template_check_option_live_free23",
+      "lane": "free23",
+      "account": "E2E_ORACLE",
+      "result": "UPDATE changes only rows satisfying caller WHERE AND Q AND P; scope-leaving update raises ORA-01402",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "grant_rewrite_live_delete_touches_only_p_rows",
+      "lane": "free23",
+      "account": "E2E_ORACLE",
+      "result": "DELETE removes only the P row; independent re-read shows rows outside P remain",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "grant_template_check_option_live_free23",
+      "lane": "free23",
+      "account": "SYSTEM",
+      "result": "same as above",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "grant_rewrite_live_delete_touches_only_p_rows",
+      "lane": "free23",
+      "account": "SYSTEM",
+      "result": "same as above",
+      "verdict": "pass"
+    }
+  ],
+  "note": "Local orchestrator run, not a scheduled CI lane; the live tests return early when ORACLEMCP_LIVE_XE is unset, so this gated run is the live proof. At 1e9340b7 the same tests failed as E2E_ORACLE in their own V$INSTANCE precondition; fa2b2e59 reads PRODUCT_COMPONENT_VERSION instead."
+}

@@ -1,0 +1,59 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T08:00:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.15.6",
+  "scope": {
+    "summary": "Scoped-grant rewrite: server-owned CHECK OPTION UPDATE template and conjunct-parenthesised DELETE with caller WHERE AND Q AND P, cap validated, caller text kept as AST (no concatenation), reclassification matching the caller verdict, SET/P overlap refused, P/cap mismatch refused; property test, fuzz target, live FREE 23ai proof. 1e9340b7 + test fix fa2b2e59.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/scoped_grant/rewrite.rs",
+      "crates/oraclemcp-guard/src/scoped_grant/matcher.rs",
+      "crates/oraclemcp-guard/tests/scoped_grant_rewrite.rs",
+      "crates/oraclemcp-guard/fuzz/fuzz_targets/grant_rewrite_round_trip.rs",
+      "crates/oraclemcp/tests/scoped_grant_rewrite_live_free23.rs"
+    ],
+    "out_of_scope": [
+      "Concurrent cap enforcement, reservation and commit isolation (T13.5); external-client proof w4_request_grant_mr_rewrite_subset_of_p (T13.8)."
+    ]
+  },
+  "source": {
+    "sha": "fa2b2e59b38a7fd81e1a01374fcf84ed67f83c90",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "guard rewrite suites (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean worktree: at 1e9340b7 scoped_grant_rewrite 8/8 (incl. prop_rewrite_never_widens_row_set, 10k cases, asserting exact equality of the selected row set with caller WHERE AND Q AND P over the full small domain, not only subset), scoped_grant_matcher 25/25, effective_dml_plan 9/9; at fa2b2e59 scoped_grant_rewrite 8/8 again. Test bodies read: no-concatenation test proves ') OR (1=1' survives only as a quoted literal; cap 0 and cap > grant cap refused; SET on the predicate column refused before rendering."
+      },
+      {
+        "name": "live FREE 23ai (orchestrator re-execution, least-privilege and SYSTEM)",
+        "kind": "cli",
+        "trace": "At fa2b2e59, ORACLEMCP_LIVE_XE=1 cargo test -p oraclemcp --test scoped_grant_rewrite_live_free23 --features live-xe: 2/2 as E2E_ORACLE and 2/2 as SYSTEM. See live artifact."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "grant-rewrite-live-gated-run",
+        "path": "tests/artifacts/evidence/live/grant-rewrite-15.6-free23-20260925T0757Z.json",
+        "sha": "fa2b2e59b38a7fd81e1a01374fcf84ed67f83c90"
+      }
+    ]
+  },
+  "limitations": [
+    "The live tests return early when ORACLEMCP_LIVE_XE is unset, so a default green test run is not live evidence; this close relies on the gated run in the artifact.",
+    "UPDATE non-widening is proven by Oracle's CHECK OPTION live (ORA-01402); the offline property test covers DELETE."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
