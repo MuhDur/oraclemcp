@@ -1472,6 +1472,21 @@ mod tests {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if sql == CatalogQueryId::ClosureIdentity.spec().sql {
+                return Ok(vec![catalog_row(&[
+                    ("DBID", Some("424242")),
+                    ("CONTAINER_NAME", Some("FREEPDB1")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])]);
+            }
+            if sql == CatalogQueryId::OlsInstallationEvidence.spec().sql {
+                return Ok(vec![catalog_row(&[("VALUE", Some("FALSE"))])]);
+            }
+            if sql == CatalogQueryId::ReadRasPolicies.spec().sql
+                || sql == CatalogQueryId::ReadRedactionPolicies.spec().sql
+            {
+                return Ok(Vec::new());
+            }
             if sql == CatalogQueryId::FgaPoliciesForRelations32.spec().sql
                 || sql == CatalogQueryId::FgaCatalogProof.spec().sql
             {
