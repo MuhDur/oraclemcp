@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T01:35:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.13.5",
+  "scope": {
+    "summary": "Server diagnosability: doctor --online --verbose reports the connect phase (AuthTtc/Tcp/Wallet), ORA code and a phase-appropriate hint (never the connect-string hint after ACCEPT); planted password/token/OCID/DSN canaries never appear in verbose doctor output or stderr; MCP tool envelopes stay 'driver detail suppressed' even with ORACLEMCP_CONNECT_DETAIL=1; request span ids match between local log and OTLP. Commits f6015799, f20a9155, 3d52139f, f195fe90.",
+    "in_scope": [
+      "crates/oraclemcp/src/cli/doctor.rs",
+      "crates/oraclemcp/tests/doctor_verbose_redaction.rs",
+      "scripts/e2e/doctor_online_connect_phase.py"
+    ],
+    "out_of_scope": [
+      "Any ADB connect (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "172b2e65772697b2440b04dddba6a9b4db1dcd75",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "unit (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean worktree at origin/main 0a1817ba, lease: cli::doctor::tests::connect_hint_after_accept_never_suggests_connect_string ok; tests/doctor_verbose_redaction.rs verbose_detail_redacts_password_token_ocid_dsn_canaries ok (spawns the real oraclemcp binary: doctor --online --verbose with canaries in profile + env, asserts none in rendered output). connect_phase_from_error_kind_table, tool_envelope_stays_detail_suppressed_with_verbose_env (oraclemcp-db) and request_span_ids_match_local_log_and_otlp, concurrent_requests_separable_by_request_id (oraclemcp-telemetry) passed in the orchestrator gate log and implementer prepush."
+      },
+      {
+        "name": "live external doctor case #56 (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary built at origin/main 0a1817ba (sha256 dfae3b2b...); python3 scripts/e2e/doctor_online_connect_phase.py --binary <it> --lane {free23,xe21,xe18}: rc=0 each; 9/9 rows rel012_i56_connect_phase with actual_phase == expected_phase (AuthTtc wrong password, Tcp closed port, Wallet bad wallet dir) and canary_leak=false."
+      },
+      {
+        "name": "review history",
+        "kind": "cli",
+        "trace": "First verify (7a06e8d4) REWORK: canary test, connect-hint test and a committed re-runnable #56 case were missing (the live doctor proof had been ad hoc). All three delivered and re-verified here."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live request-id correlation across MCP transports was not re-established live; the AC's correlation positive is covered by the telemetry unit tests."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
