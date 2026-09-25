@@ -61,6 +61,9 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `EditionsProofStatus`, `MAX_EDITIONED_TYPES`, `probe_editions_catalog`, and
   `probe_editions_enabled`; `CatalogQueryId` gains its version/capability,
   owner, and editioned-type query IDs.
+  `CatalogQueryId` also gains the `RedactionInstallationEvidence` query for
+  the Data Redaction policy probe in bead
+  `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.19`.
   `oraclemcp-error::ReasonCategory` adds `EditionsNotEnabled` for the
   version-aware owner/object-type editions probe in bead
   `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.14.3`;
