@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T00:38:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.4",
+  "scope": {
+    "summary": "Engine (plsql-intelligence) parser fuzz targets repaired and extended at fad41dd: 8 retained targets (parse_lower, lower_statement_body, lower_expression, lower_type_decl, ir_lower_statement_body, catalog_snapshot_json, package_units_lower, effects_extract) build on nightly-2026-05-11 in CI; package_units_lower + effects_extract run in the scheduled tier-B lane (weekly cron) with 300s budgets; effects_extract checks check_effects_invariants (parse diagnostics must not yield a Clean closure; executable body must yield effects).",
+    "in_scope": [
+      "Cargo.toml"
+    ],
+    "out_of_scope": [
+      "Effect semantics (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "c2fa08df57a1087571dd065e559552cb9535dea7",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "fuzz CI on exact SHA (orchestrator check)",
+        "kind": "cli",
+        "trace": "engine origin/main == fad41dd. Workflow scheduled-tier-b-fuzz (.github/workflows/fuzz.yml: schedule cron '43 3 * * 1' + workflow_dispatch) run 36076110227 on fad41ddc: success; jobs effects_extract + package_units_lower success. Build step 'cargo +nightly-2026-05-11 fuzz build --features catalog' builds all 8 [[bin]] targets in fuzz/Cargo.toml. Logs: stat::number_of_executed_units effects_extract 7396, package_units_lower 6038 within -max_total_time=300; zero crashes."
+      },
+      {
+        "name": "invariant negative (orchestrator review)",
+        "kind": "cli",
+        "trace": "fuzz/src/lib.rs fuzz_regression_diagnostics_never_allow_a_clean_closure feeds a known-bad InvocationClosureV1 (clean=true) with has_parse_diagnostics=true into check_effects_invariants and asserts the exact Err; fuzz/fuzz_targets/effects_extract.rs:60 calls the same check_effects_invariants. fuzz/tests/package_units_lower.rs holds a fuzz_regression_* crash-regression test from a found input."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Throughput is low (~20-25 exec/s) for parser-heavy targets; 300s campaigns cover ~6-7k inputs each.",
+    "The fuzz run is the GitHub CI run re-read by the orchestrator, not re-executed locally."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
