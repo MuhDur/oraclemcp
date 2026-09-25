@@ -39,7 +39,7 @@
       {
         "kind": "catalog-facts-live-gated-run",
         "path": "tests/artifacts/evidence/live/catalog-facts-10.9-free23-20260925T0145Z.json",
-        "sha": "2003b89183fe5847ca6e204e7687c85ccdab8305"
+        "sha": "71f1d558fcacddf960ca867809dd614ef2f03751"
       }
     ]
   },
