@@ -1,0 +1,48 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T04:58:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.12",
+  "scope": {
+    "summary": "MCP client config snippets proven against real client binaries: scripts/rig/client_snippets.py launches each available client with the documented snippet, captures the server-side stdio trace and records client version, launch command, transport, tools_list_sha256 (canonical JSON of the served tools/list), exit status. Unavailable clients each have one blocked child bead blocking R.1 (.5.2): oraclemcp-a49ff cursor-agent, oraclemcp-kpaq3 VS Code 'code', oraclemcp-h7rfn Gemini (tier refused). Commit 2ca3ff68.",
+    "in_scope": [
+      "scripts/rig/client_snippets.py"
+    ],
+    "out_of_scope": [
+      "Client versions other than those recorded (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "8cdcd7541aefaf6832a0b62920825d92c9964b81",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "selftest (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "At 8cdcd754: PYTHONDONTWRITEBYTECODE=1 python3 scripts/rig/client_snippets.py --selftest rc=0: 'selftest PASS (5 adapters, mock and schema-only refusals, MCP trace parser)'."
+      },
+      {
+        "name": "live clients (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Release binary built at 8cdcd754; client_snippets.py --client claude: rc=0, artifact {client_version '2.1.282 (Claude Code)', transport stdio, proof_source live_client_stdio_trace, tools_list_sha256 112a6273dabb7ca43b408409555648dd8519e3e56a89d6ed0cb287549b6227e4, exit_status 0, status pass}; --client codex: rc=0, {client_version 'codex-cli 0.156.1', same digest, exit_status 0, pass}. The digest is computed from the server's tools/list response in the captured stdio trace (client_snippets.py ~:193), so it is the served digest; both clients received the identical list."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Gemini CLI 0.60.0 receives the same tool list but the account tier refuses the client; Cursor and VS Code CLIs are not installed - tracked as blocked children a49ff/kpaq3/h7rfn gating R.1."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
