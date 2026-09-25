@@ -63,6 +63,28 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
     {
         return Some(Vec::new());
     }
+    if sql == oraclemcp_db::CatalogQueryId::ClosureIdentity.spec().sql {
+        return Some(vec![catalog_row(&[
+            ("DBID", Some("424242")),
+            ("CONTAINER_NAME", Some("FREEPDB1")),
+            ("EDITION_NAME", Some("ORA$BASE")),
+        ])]);
+    }
+    if sql
+        == oraclemcp_db::CatalogQueryId::OlsInstallationEvidence
+            .spec()
+            .sql
+    {
+        return Some(vec![catalog_row(&[("VALUE", Some("FALSE"))])]);
+    }
+    if sql == oraclemcp_db::CatalogQueryId::ReadRasPolicies.spec().sql
+        || sql
+            == oraclemcp_db::CatalogQueryId::ReadRedactionPolicies
+                .spec()
+                .sql
+    {
+        return Some(Vec::new());
+    }
     let normalized = sql.to_ascii_lowercase();
     if normalized.contains("sys_context('userenv', 'session_user')") {
         return Some(vec![catalog_row(&[

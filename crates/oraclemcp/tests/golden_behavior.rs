@@ -41,6 +41,25 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
     {
         return Some(Vec::new());
     }
+    if sql == CatalogQueryId::ClosureIdentity.spec().sql {
+        return Some(vec![OracleRow {
+            columns: vec![
+                ("DBID".to_owned(), resolver_text("424242")),
+                ("CONTAINER_NAME".to_owned(), resolver_text("FREEPDB1")),
+                ("EDITION_NAME".to_owned(), resolver_text("ORA$BASE")),
+            ],
+        }]);
+    }
+    if sql == CatalogQueryId::OlsInstallationEvidence.spec().sql {
+        return Some(vec![OracleRow {
+            columns: vec![("VALUE".to_owned(), resolver_text("FALSE"))],
+        }]);
+    }
+    if sql == CatalogQueryId::ReadRasPolicies.spec().sql
+        || sql == CatalogQueryId::ReadRedactionPolicies.spec().sql
+    {
+        return Some(Vec::new());
+    }
     if sql.contains("policy_name FROM all_policies WHERE ROWNUM <= 1") {
         return Some(vec![OracleRow {
             columns: vec![("POLICY_NAME".to_owned(), resolver_text("SYNTHETIC"))],

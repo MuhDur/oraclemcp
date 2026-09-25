@@ -67,6 +67,21 @@ impl OracleConnection for VisibleCatalogQueryMock {
         {
             return Ok(Vec::new());
         }
+        if sql == CatalogQueryId::ClosureIdentity.spec().sql {
+            return Ok(vec![row(&[
+                ("DBID", Some("424242")),
+                ("CONTAINER_NAME", Some("FREEPDB1")),
+                ("EDITION_NAME", Some("ORA$BASE")),
+            ])]);
+        }
+        if sql == CatalogQueryId::OlsInstallationEvidence.spec().sql {
+            return Ok(vec![row(&[("VALUE", Some("FALSE"))])]);
+        }
+        if sql == CatalogQueryId::ReadRasPolicies.spec().sql
+            || sql == CatalogQueryId::ReadRedactionPolicies.spec().sql
+        {
+            return Ok(Vec::new());
+        }
         let normalized = sql.to_ascii_lowercase();
         if normalized.contains("sys_context('userenv', 'session_user')") {
             return Ok(vec![row(&[
