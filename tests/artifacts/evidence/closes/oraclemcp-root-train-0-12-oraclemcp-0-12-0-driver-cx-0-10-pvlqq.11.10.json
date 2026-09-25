@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T05:56:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.10",
+  "scope": {
+    "summary": "Loom model of the official-driver actor lifecycle and connect guard (crates/oraclemcp-db/tests/loom_official_actor.rs) wired into the nightly loom.yml workflow. Round-3 rework at 66e63d53: unconditional ACTIVE admission invariant at the execute site, second-command loop coverage, Continue-vs-cancel race, three connect-guard contenders at capacity 2 while the moved-in permit is held (contention asserted), planted no-status-recheck bug must panic.",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/loom_official_actor.rs",
+      ".github/workflows/loom.yml"
+    ],
+    "out_of_scope": [
+      "Production asupersync channels are not Loom-instrumented; the model is a documented mirror of the synchronization skeleton (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "66e63d53c5fbd4bc1ad2012f539313410345aa8a",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "loom model (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean worktree detached at 66e63d53: LOOM_MAX_PREEMPTIONS=3 RUSTFLAGS='--cfg loom' cargo +nightly-2026-05-11 test -p oraclemcp-db --test loom_official_actor --release -- --test-threads=1 under the build lease: 5 passed 0 failed (180.99s): cancel_vs_completion_no_lost_wakeup, join_bounded, no_reuse_after_quarantine, connect_guard_slots_always_returned, injected_second_command_without_status_recheck_panics (should_panic with the exact invariant message, i.e. Loom finds the planted bug)."
+      },
+      {
+        "name": "loom.yml CI at exact SHA",
+        "kind": "cli",
+        "trace": "GitHub Actions run 36097978431 (Loom Concurrency Invariants) conclusion success, head 66e63d53; official actor 5/5, audit spool 6/6, core admission 4/4, lock order 2/2; artifact records connect_guard_preemption_bound=0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Connect-guard model runs at Loom preemption bound 0 (only blocking-point interleavings; mutex/condvar-only handoff), documented in the test and CI metadata; actor models use the global bound 3.",
+    "Model-vs-production correspondence is by documented source mapping, not mechanically checked."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
