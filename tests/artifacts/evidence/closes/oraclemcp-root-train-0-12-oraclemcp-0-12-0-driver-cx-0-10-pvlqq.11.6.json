@@ -1,0 +1,53 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T01:20:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.6",
+  "scope": {
+    "summary": "Cross-backend parity (driver-cx vs official) for DATE/TIMESTAMP/TSLTZ/INTERVAL/CLOB/BLOB/NULL on FREE 23ai: every fixture cell serializes identically against independent expected values; planted UTC suffix / empty-string NULL fail the shared parity assertion. Commit 0a1817ba plus earlier parity work (a2d089a7, 74b81d0f, ea431d97).",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/cross_backend_parity.rs"
+    ],
+    "out_of_scope": [
+      "Other type families and guard decisions (bead no-claim)."
+    ]
+  },
+  "source": {
+    "sha": "0a1817babee514d86585c8194bde1a35da7514ca",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "live parity (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean worktree at origin/main 0a1817ba, fresh W4 fixture W401068CF821 on free23 (localhost:1523/FREEPDB1), owner/cross passwords reset in memory, ORACLEMCP_DUAL_BACKEND_LAB=1: cargo test -p oraclemcp-db --features oracledb,live-xe --test cross_backend_parity live_cross_backend_parity_for_supported_basic_auth -- --ignored --exact: rc=0. Per-case assertion counts (both backends): parity_date_min_max 6 (incl. -4712-01-01 BC), parity_timestamp_fractional_0_to_9 20, parity_timestamp_no_utc_suffix 2, parity_tsltz_session_zone 6, parity_interval_ym_signed 4, parity_interval_ds_signed 4, parity_clob_empty_ascii_multibyte_large 16, parity_blob_empty_small_large 16, parity_typed_null_every_type 14. Teardown PASS: 37 objects dropped, 0 leftovers, 0 errors."
+      },
+      {
+        "name": "planted negatives (review)",
+        "kind": "cli",
+        "trace": "parity_timestamp_no_utc_suffix_rejects_planted_utc_suffix and parity_typed_null_every_type_rejects_planted_empty_string (should_panic with the case-specific message) exercise assert_parity_value, the same helper the live test uses for both driver-cx and official values against the independent expectation; implementer ran them green at 0a1817ba."
+      },
+      {
+        "name": "note on the earlier BC DATE block",
+        "kind": "cli",
+        "trace": "An earlier .11.6 run was blocked on the BC DATE case; CreamLeopard fixed the driver's BC DATE handling in rust-oracledb defb23ad (not yet pinned here). At the current pin the live SELECT TO_DATE('4712-01-01 BC',...) path already matches on both backends; the driver fix remains for the T0.7 pin refresh."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live on FREE 23ai only (the AC requires FREE 23ai)."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
