@@ -1380,6 +1380,46 @@ mod tests {
             outcome
         }
 
+        async fn assert_live_ddl_lock_no_privilege(lane: &str) -> Result<(), String> {
+            let name = format!("impact_locks_live_ddl_no_privilege_unavailable_{lane}");
+            let cx = Cx::current().ok_or_else(|| "live test Cx missing".to_owned())?;
+            let conn = RustOracleConnection::connect(&cx, options(lane))
+                .await
+                .map_err(|error| format!("{name}: live connection failed: {error}"))?;
+            let cache = OracleCatalogResolverCache::new();
+            let dual = RawName::new([RawNamePart::unquoted("DUAL")], SyntacticRole::FromFactor);
+            let context = cache
+                .preload(
+                    &cx,
+                    &conn,
+                    std::slice::from_ref(&dual),
+                    StatementScope::default(),
+                )
+                .await
+                .map_err(|error| {
+                    format!("{name}: could not resolve the live lock target: {error}")
+                })?;
+            let Resolution::Resolved(target) = cache.resolve(&dual, &context) else {
+                return Err(format!("{name}: DUAL did not resolve to a live object"));
+            };
+            let locks = compute_locks_impact(
+                &cx,
+                &conn,
+                Some(OperatingLevel::Ddl),
+                false,
+                std::slice::from_ref(target.as_ref()),
+            )
+            .await;
+            match locks {
+                FieldStatus::Unavailable {
+                    reason: UnavailableReason::NoPrivilege,
+                } => Ok(()),
+                other => Err(format!(
+                    "{name}: expected unavailable(no_privilege) for the live account, got {other:?}"
+                )),
+            }
+        }
+
         macro_rules! live_lane_test {
         ($test:ident, $lane:literal) => {
             #[test]
@@ -1398,5 +1438,29 @@ mod tests {
         live_lane_test!(impact_cost_live_free23, "FREE23");
         live_lane_test!(impact_cost_live_xe21, "XE21");
         live_lane_test!(impact_cost_live_xe18, "XE18");
+
+        macro_rules! live_lock_lane_test {
+            ($test:ident, $lane:literal) => {
+                #[test]
+                #[ignore = "requires an explicitly configured least-privilege live Oracle lane"]
+                fn $test() {
+                    assert!(
+                        std::env::var("ORACLEMCP_LIVE_XE").is_ok_and(|value| value == "1"),
+                        "set ORACLEMCP_LIVE_XE=1 and lane credentials before running ignored live tests"
+                    );
+                    let result = run_with_cx(|_| async {
+                        assert_live_ddl_lock_no_privilege($lane).await
+                    });
+                    result.unwrap_or_else(|error| panic!("{error}"));
+                }
+            };
+        }
+
+        live_lock_lane_test!(
+            impact_locks_live_ddl_no_privilege_unavailable_free23,
+            "FREE23"
+        );
+        live_lock_lane_test!(impact_locks_live_ddl_no_privilege_unavailable_xe21, "XE21");
+        live_lock_lane_test!(impact_locks_live_ddl_no_privilege_unavailable_xe18, "XE18");
     }
 }
