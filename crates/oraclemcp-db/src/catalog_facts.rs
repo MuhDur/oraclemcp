@@ -794,8 +794,11 @@ mod tests {
     fn fact_key_changes_on_dependency_target() {
         let mut f = fixture();
         let a = key(&f);
-        f.dependencies[0].last_ddl_time = "t9".into();
+        f.dependencies[0].object_id += 1;
         assert_ne!(a, key(&f));
+        let b = key(&f);
+        f.dependencies[0].last_ddl_time = "t9".into();
+        assert_ne!(b, key(&f));
     }
     #[test]
     fn fact_key_changes_on_trigger_source() {
@@ -809,6 +812,13 @@ mod tests {
         let mut f = fixture();
         let a = key(&f);
         f.key.edition = "edition_two".into();
+        assert_ne!(a, key(&f));
+    }
+    #[test]
+    fn fact_key_changes_on_dbid() {
+        let mut f = fixture();
+        let a = key(&f);
+        f.key.dbid = "db_two".into();
         assert_ne!(a, key(&f));
     }
     #[test]
