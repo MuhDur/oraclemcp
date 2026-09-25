@@ -997,7 +997,7 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "object_type": { "type": "string", "enum": oraclemcp_db::compile_object_types(), "description": "Oracle object type to compile; VIEW supports validation only." },
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
                     "name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                     "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
@@ -1053,7 +1053,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to the current schema when available." },
                     "name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                     "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
-                    "object_type": { "type": "string", "enum": ["PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "VIEW"], "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "object_type": { "type": "string", "enum": oraclemcp_db::patch_source_object_types(), "description": "Optional source type override. Defaults to PACKAGE BODY." },
                     "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
                     "search_text": { "type": "string", "description": "Alias for old_text." },
                     "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
@@ -1097,7 +1097,7 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Omit for current schema; use * for all accessible schemas." },
-                "object_type": { "type": "string", "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::catalog_object_types(), "description": "Optional exact Oracle object type filter." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return (default 500, hard cap 5000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
@@ -1111,12 +1111,13 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_search_objects",
             ToolTier::FoundationLiveDb,
-            "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. fleet=true searches the names-only index across MCP-visible profiles, applying each source profile's egress policy before merge and returning no profile roster or profile counts. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim.",
+            "Unified read-only object search/inspection with a detail_level. names=identifiers only; summary=+column count, comments, and the optimizer ALL_TABLES.NUM_ROWS row-count ESTIMATE (gathered statistics, never COUNT(*) — may be stale, reported via stats_stale/last_analyzed); standard (default)=+columns; full=+indexes. fleet=true searches the names-only index across MCP-visible profiles, applying each source profile's egress policy before merge and returning no profile roster or profile counts. Returns {count, results, truncated}. Owner/type/name filters are bound; quoted/case-sensitive identifiers are matched verbatim. Use object_types for a bound set of exact Oracle object types; it cannot be combined with object_type.",
         )
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive for ordinary identifiers; quoted identifiers match verbatim). Omit or use * for all accessible schemas." },
-                "object_type": { "type": "string", "description": "Optional object type filter, e.g. TABLE, VIEW, PACKAGE." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::catalog_object_types(), "description": "Deprecated single-type filter; use object_types for one or more exact Oracle object types." },
+                "object_types": { "type": "array", "items": { "type": "string", "enum": oraclemcp_db::catalog_object_types() }, "uniqueItems": true, "minItems": 1, "description": "Exact Oracle object types to include. Cannot be combined with object_type." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name, e.g. EMP%." },
                 "detail_level": { "type": "string", "enum": ["names", "summary", "standard", "full"], "description": "Enrichment level. names=identifiers only; summary=+column count + comments + the optimizer ALL_TABLES.NUM_ROWS estimate (NOT COUNT(*)); standard (default)=+columns; full=+indexes." },
                 "detail": { "type": "string", "description": "Alias for detail_level." },
@@ -1222,7 +1223,7 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "object_type": { "type": "string", "enum": ["TABLE", "VIEW", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "SEQUENCE", "INDEX", "SYNONYM"], "description": "Allowlisted type for DBMS_METADATA.GET_DDL." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::ddl_object_types(), "description": "Allowlisted Oracle type for DBMS_METADATA.GET_DDL." },
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
                 "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." }
@@ -1235,17 +1236,17 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_get_source",
             ToolTier::FoundationLiveDb,
-            "Fetch an object's full source text or inclusive line range from ALL_SOURCE with a character cap. Omit object_type to return every visible source variant for the object name.",
+            "Fetch an object's full source text or inclusive line range from ALL_SOURCE, or fetch a view definition from ALL_VIEWS.TEXT, with a character cap. Omit object_type to return every visible source variant for the object name.",
         )
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
                 "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
-                "object_type": { "type": "string", "description": "Optional supported source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY. When omitted, all visible source types for this name are returned." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::source_object_types(), "description": "Optional supported source type, including VIEW. When omitted, all visible source types for this name are returned." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return (default 1000000)." },
-                "from_line": { "type": "integer", "minimum": 1, "description": "Optional first ALL_SOURCE line to return, inclusive. Pair with oracle_search_source's LINE result." },
-                "to_line": { "type": "integer", "minimum": 1, "description": "Optional last ALL_SOURCE line to return, inclusive. Must not be lower than from_line." }
+                "from_line": { "type": "integer", "minimum": 1, "description": "Optional first source line to return, inclusive. Pair with oracle_search_source's LINE result for ALL_SOURCE objects." },
+                "to_line": { "type": "integer", "minimum": 1, "description": "Optional last source line to return, inclusive. Must not be lower than from_line." }
             }),
             &["name"],
         )),
@@ -1320,7 +1321,7 @@ pub fn tool_registry() -> ToolRegistry {
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema; use * for all visible source." },
                 "needle": { "type": "string", "description": "Case-insensitive substring to find in source text." },
-                "object_type": { "type": "string", "description": "Optional source type filter: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::source_search_object_types(), "description": "Optional ALL_SOURCE object type filter." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for source object names, e.g. EMP%." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum matching source lines to return (default 200, hard cap 5000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." },
@@ -1571,7 +1572,7 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "object_type": { "type": "string", "enum": oraclemcp_db::compile_object_types(), "description": "Oracle object type to compile; VIEW supports validation only." },
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
                     "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
                     "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
@@ -1599,7 +1600,7 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             props_with(
                 json!({
-                    "object_type": { "type": "string", "description": "PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, TYPE_BODY, or VIEW." },
+                    "object_type": { "type": "string", "enum": oraclemcp_db::compile_object_types(), "description": "Oracle object type to compile; VIEW supports validation only." },
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
                     "name": { "type": "string", "description": "Required object name. May be OWNER.NAME." },
                     "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
@@ -1645,7 +1646,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "patch_package",
             ToolTier::FoundationLiveDb,
-            "Compatibility alias for oracle_patch_source; defaults object_type to PACKAGE_BODY when omitted.",
+            "Compatibility alias for oracle_patch_source; defaults object_type to PACKAGE BODY when omitted.",
         )
         .with_input_schema(object_schema(
             props_with(
@@ -1653,7 +1654,7 @@ pub fn tool_registry() -> ToolRegistry {
                     "owner": { "type": "string", "description": "Optional schema owner. Defaults to current schema." },
                     "name": { "type": "string", "description": "Required package name. May be OWNER.NAME." },
                     "object_name": { "type": "string", "description": "Runtime compatibility alias for name; schema clients should supply name." },
-                    "object_type": { "type": "string", "description": "Optional override, usually PACKAGE or PACKAGE_BODY. Defaults to PACKAGE_BODY." },
+                    "object_type": { "type": "string", "enum": oraclemcp_db::patch_source_object_types(), "description": "Optional source type override. Defaults to PACKAGE BODY." },
                     "old_text": { "type": "string", "description": "Exact non-empty text to replace. It must match the current source exactly once." },
                     "search_text": { "type": "string", "description": "Alias for old_text." },
                     "new_text": { "type": "string", "description": "Replacement text. May be empty to delete the matched text." },
@@ -1754,7 +1755,7 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner; omit for current schema, or use * for all accessible schemas." },
-                "object_type": { "type": "string", "description": "Optional object type filter." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::catalog_object_types(), "description": "Optional exact object type filter." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Maximum objects to return." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 5000, "description": "Alias for limit." }
@@ -1788,7 +1789,7 @@ pub fn tool_registry() -> ToolRegistry {
         .with_input_schema(object_schema(
             json!({
                 "owner": { "type": "string", "description": "Optional schema owner; omit for current schema, or use * for all accessible schemas." },
-                "object_type": { "type": "string", "description": "Optional object type filter. Supplying it overrides the compact TABLE/VIEW/PACKAGE default projection." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::catalog_object_types(), "description": "Optional exact object type filter. Supplying it overrides the compact TABLE/VIEW/PACKAGE default projection." },
                 "name_like": { "type": "string", "description": "Optional SQL LIKE pattern for object_name." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 250, "description": "Maximum objects to return (default 100, hard cap 250)." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 250, "description": "Alias for limit." },
@@ -1873,7 +1874,7 @@ pub fn tool_registry() -> ToolRegistry {
         )
         .with_input_schema(object_schema(
             json!({
-                "object_type": { "type": "string", "enum": ["TABLE", "VIEW", "PACKAGE", "PACKAGE_BODY", "PROCEDURE", "FUNCTION", "TRIGGER", "TYPE", "TYPE_BODY", "SEQUENCE", "INDEX", "SYNONYM"], "description": "Allowlisted type for DBMS_METADATA.GET_DDL." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::ddl_object_types(), "description": "Allowlisted Oracle type for DBMS_METADATA.GET_DDL." },
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "object_name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                 "name": { "type": "string", "description": "Alias for object_name." }
@@ -1893,7 +1894,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "owner": { "type": "string", "description": "Optional schema owner; defaults to current schema." },
                 "object_name": { "type": "string", "description": "Object name. May be OWNER.NAME." },
                 "name": { "type": "string", "description": "Alias for object_name." },
-                "object_type": { "type": "string", "description": "Optional source type: PACKAGE, PACKAGE_BODY, PROCEDURE, FUNCTION, TRIGGER, TYPE, or TYPE_BODY. When omitted, all visible source types for this name are returned." },
+                "object_type": { "type": "string", "enum": oraclemcp_db::source_object_types(), "description": "Optional source type, including VIEW. When omitted, all visible source types for this name are returned." },
                 "max_chars": { "type": "integer", "minimum": 1, "description": "Maximum source characters to return." }
             }),
             &["object_name"],
@@ -1980,6 +1981,69 @@ pub fn capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_type_properties_are_enums_from_runtime_constants() {
+        let registry = tool_registry();
+        for tool in &registry.tools {
+            let Some(property) = tool
+                .input_schema
+                .as_ref()
+                .and_then(|schema| schema.pointer("/properties/object_type"))
+            else {
+                continue;
+            };
+            let canonical = match tool.name.as_str() {
+                "get_ddl" => "oracle_get_ddl",
+                "get_object_source" => "oracle_get_source",
+                "compile_object" | "compile_with_warnings" => "oracle_compile_object",
+                "patch_package" | "patch_view" | "read_patch_preview" => "oracle_patch_source",
+                "list_objects" | "get_schema" => "oracle_schema_inspect",
+                other => other,
+            };
+            let allowed = match canonical {
+                "oracle_schema_inspect" | "oracle_search_objects" => {
+                    oraclemcp_db::catalog_object_types()
+                }
+                "oracle_get_ddl" => oraclemcp_db::ddl_object_types(),
+                "oracle_get_source" => oraclemcp_db::source_object_types(),
+                "oracle_search_source" => oraclemcp_db::source_search_object_types(),
+                "oracle_compile_object" => oraclemcp_db::compile_object_types(),
+                "oracle_patch_source" => oraclemcp_db::patch_source_object_types(),
+                other => panic!(
+                    "{tool_name} advertises an unsupported object_type field",
+                    tool_name = other
+                ),
+            };
+            assert_eq!(property["type"], "string", "{} object_type type", tool.name);
+            assert_eq!(
+                property["enum"],
+                json!(allowed),
+                "{} object_type enum must come from its runtime allowlist",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn search_objects_advertises_object_types_array() {
+        let schema = tool_registry()
+            .tools
+            .into_iter()
+            .find(|tool| tool.name == "oracle_search_objects")
+            .expect("search tool is registered")
+            .input_schema
+            .expect("search tool advertises a schema");
+        let property = &schema["properties"]["object_types"];
+        assert_eq!(property["type"], "array");
+        assert_eq!(property["items"]["type"], "string");
+        assert_eq!(
+            property["items"]["enum"],
+            json!(oraclemcp_db::catalog_object_types())
+        );
+        assert!(property["uniqueItems"].as_bool().unwrap_or(false));
+        assert_eq!(property["minItems"], 1);
+    }
 
     #[test]
     fn registry_lists_exactly_the_registered_tools() {
@@ -2748,6 +2812,7 @@ mod tests {
                 &[
                     "owner",
                     "object_type",
+                    "object_types",
                     "name_like",
                     "detail_level",
                     "detail",

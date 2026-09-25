@@ -5,6 +5,56 @@
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
+/// Strict uppercase object type accepted by the advertised object-type enums.
+/// Tool-specific subsets are checked by the early dispatcher validator.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct ObjectTypeArg(String);
+
+impl std::ops::Deref for ObjectTypeArg {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for ObjectTypeArg {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        let allowed = object_type_values();
+        if allowed.contains(&raw.as_str()) {
+            Ok(Self(raw))
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "object_type must be one of: {}",
+                allowed.join(", ")
+            )))
+        }
+    }
+}
+
+fn object_type_values() -> Vec<&'static str> {
+    let mut values = Vec::new();
+    for group in [
+        oraclemcp_db::catalog_object_types(),
+        oraclemcp_db::ddl_object_types(),
+        oraclemcp_db::source_object_types(),
+        oraclemcp_db::source_search_object_types(),
+        oraclemcp_db::compile_object_types(),
+        oraclemcp_db::patch_source_object_types(),
+    ] {
+        for value in group {
+            if !values.contains(value) {
+                values.push(*value);
+            }
+        }
+    }
+    values
+}
+
 /// Inline representation for an `oracle_query` result page.
 ///
 /// `Arrow` never changes query execution or egress policy: it only encodes the
@@ -384,7 +434,7 @@ pub(super) struct SetSessionLevelArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CompileObjectArgs {
-    pub(super) object_type: String,
+    pub(super) object_type: ObjectTypeArg,
     #[serde(default)]
     pub(super) owner: Option<String>,
     #[serde(default, alias = "object_name")]
@@ -424,7 +474,7 @@ pub(super) struct PatchSourceArgs {
     #[serde(default, alias = "object_name")]
     pub(super) name: Option<String>,
     #[serde(default)]
-    pub(super) object_type: Option<String>,
+    pub(super) object_type: Option<ObjectTypeArg>,
     #[serde(default, alias = "search_text")]
     pub(super) old_text: Option<String>,
     #[serde(default, alias = "replacement")]
@@ -475,7 +525,7 @@ pub(super) struct SchemaInspectArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
     #[serde(default)]
-    pub(super) object_type: Option<String>,
+    pub(super) object_type: Option<ObjectTypeArg>,
     #[serde(default)]
     pub(super) name_like: Option<String>,
     #[serde(default, alias = "limit")]
@@ -490,7 +540,9 @@ pub(super) struct SearchObjectsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
     #[serde(default)]
-    pub(super) object_type: Option<String>,
+    pub(super) object_type: Option<ObjectTypeArg>,
+    #[serde(default)]
+    pub(super) object_types: Option<Vec<ObjectTypeArg>>,
     #[serde(default)]
     pub(super) name_like: Option<String>,
     #[serde(default, alias = "detail")]
@@ -571,7 +623,7 @@ pub(super) struct DescribeViewArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct GetDdlArgs {
-    pub(super) object_type: String,
+    pub(super) object_type: ObjectTypeArg,
     #[serde(default)]
     pub(super) owner: Option<String>,
     #[serde(alias = "object_name")]
@@ -586,7 +638,7 @@ pub(super) struct GetSourceArgs {
     #[serde(alias = "object_name")]
     pub(super) name: String,
     #[serde(default)]
-    pub(super) object_type: Option<String>,
+    pub(super) object_type: Option<ObjectTypeArg>,
     #[serde(default)]
     pub(super) max_chars: Option<usize>,
     #[serde(default)]
@@ -692,7 +744,7 @@ pub(super) struct SearchSourceArgs {
     pub(super) owner: Option<String>,
     pub(super) needle: String,
     #[serde(default)]
-    pub(super) object_type: Option<String>,
+    pub(super) object_type: Option<ObjectTypeArg>,
     #[serde(default)]
     pub(super) name_like: Option<String>,
     #[serde(default, alias = "limit")]

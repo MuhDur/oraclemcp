@@ -98,6 +98,7 @@ pub(super) struct FleetCatalogRequest<'a> {
     pub(super) profile: String,
     pub(super) owner: Option<&'a str>,
     pub(super) object_type: Option<&'a str>,
+    pub(super) object_types: Option<&'a [String]>,
     pub(super) name_like: Option<&'a str>,
     pub(super) max_rows: usize,
     pub(super) request_budget: &'a RequestBudget,

@@ -42,6 +42,7 @@
 mod authorization;
 pub mod matcher;
 pub mod predicate;
+pub mod rewrite;
 mod signed_ref;
 mod store;
 
@@ -67,6 +68,9 @@ pub use predicate::{
     GrantBind, GrantPredicateBuilder, PredicateColumnType, PredicateConjunctRequest,
     PredicateExpressionRequest, PredicateInputValue, PredicateOperator, PredicateRefusal,
     ResolvedColumns, compose_where, render_ast,
+};
+pub use rewrite::{
+    GrantRewriteError, GrantRewriteParts, GrantRewriteV1, render_grant_delete, render_grant_update,
 };
 pub use signed_ref::{SCOPED_GRANT_TOKEN_SCOPE, SignedGrantRef};
 pub use store::{

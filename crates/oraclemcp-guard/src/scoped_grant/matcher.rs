@@ -19,7 +19,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::action_envelope::OracleBindType;
 use crate::resolver::{CatalogObjectKind, QuoteSemantics, RawName, SyntacticRole};
 
-use super::{ColumnIdent, GrantTargetIdentity, GrantVerb, ScopedGrant};
+use super::{ColumnIdent, GrantPredicateV1, GrantTargetIdentity, GrantVerb, ScopedGrant};
 
 /// A catalog answer for exactly the lexical DML target in the parsed AST.
 /// The DB-facing consumer must derive this from the live resolver; creating a
@@ -140,6 +140,8 @@ impl AssignedValue {
 pub struct GrantMatch {
     verb: GrantVerb,
     target: GrantTargetIdentity,
+    grant_predicate: GrantPredicateV1,
+    max_rows_per_statement: u64,
     set_assignments: Vec<(ColumnIdent, AssignedValue)>,
     caller_where: Option<Expr>,
     cte: Option<With>,
@@ -180,6 +182,14 @@ impl GrantMatch {
     #[must_use]
     pub fn cte(&self) -> Option<&With> {
         self.cte.as_ref()
+    }
+
+    pub(super) fn grant_predicate_matches(&self, predicate: &GrantPredicateV1) -> bool {
+        self.grant_predicate == *predicate
+    }
+
+    pub(super) fn max_rows_per_statement(&self) -> u64 {
+        self.max_rows_per_statement
     }
 }
 
@@ -299,6 +309,8 @@ pub fn match_statement(
     Ok(GrantMatch {
         verb,
         target: resolved.identity.clone(),
+        grant_predicate: grant.row_predicate().clone(),
+        max_rows_per_statement: grant.limits().max_rows_per_statement,
         set_assignments,
         caller_where: selection.cloned(),
         cte: cte.cloned(),

@@ -45,6 +45,36 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `resolved_relations_read_purity` from 3 to 4,
   `plan_cost_estimate` from 2 to 4, and changes
   `extract_catalog_rowsets` from one generic parameter to none.
+- **Reviewed 0.12 API additions:** `oraclemcp-db` exposes the whole-closure
+  `catalog_facts` API from bead
+  `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.9`:
+  `ClosureDatabaseIdentity`, `DmlTarget`, `ClosureMember`, `RoutineClosure`,
+  `ClosureFactKey`, `MemberFact`, `DependencyFact`, `TriggerFact`, `ClosureFacts`,
+  `Revalidation`, `ClosureFactStore`, `CLOSURE_FACT_SCHEMA_VERSION`, the
+  `MAX_CLOSURE_*` bounds, `extract_closure_facts`, `revalidate`, and
+  `fact_record_valid`; its `CatalogQueryId` enum gains the closure identity,
+  member, routine-authid, compiler-settings, source, dependency, and trigger
+  query IDs. Bead
+  `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.14.3`
+  exposes the editions probe API in `oraclemcp-db`: `EditionsCatalogCapabilities`,
+  `EditionsCatalogColumn`, `EditionsEnabledProof`, `EditionsProbeAuditRecord`,
+  `EditionsProofStatus`, `MAX_EDITIONED_TYPES`, `probe_editions_catalog`, and
+  `probe_editions_enabled`; `CatalogQueryId` gains its version/capability,
+  owner, and editioned-type query IDs.
+  `CatalogQueryId` also gains the `RedactionInstallationEvidence` query for
+  the Data Redaction policy probe in bead
+  `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.19`.
+  Bead
+  `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.2`
+  adds `list_objects_by_types` and `search_objects_by_types`, public
+  object-type constants and accessors for catalog/compile/DDL/patch/source
+  operations, `normalize_source_search_object_type`, and
+  `CatalogQueryId::ListObjectsByTypes` (`CatalogQueryId::ALL` now has 169
+  entries).
+  `oraclemcp-error::ReasonCategory` adds `EditionsNotEnabled` for the
+  version-aware owner/object-type editions probe in bead
+  `oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.14.3`;
+  its serialized wire value is the string `EDITIONS_NOT_ENABLED`.
 - `oraclemcp-verifier` adds private fields `TestAttestation.artifacts`,
   `command`, `created_at`, `frame`, `git_sha`, `lane`, `repo`, `schema`,
   `tests`, and `toolchain`.

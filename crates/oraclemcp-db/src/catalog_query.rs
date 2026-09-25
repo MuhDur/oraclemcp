@@ -350,6 +350,8 @@ pub enum CatalogQueryId {
     HardParseColumnTypes,
     /// Bounded object listing with optional filters.
     ListObjects,
+    /// Bounded object listing filtered by a bound list of object types.
+    ListObjectsByTypes,
     /// Deterministic object listing page with optional filters.
     ListObjectsPage,
     /// Compact schema projection page with optional filters.
@@ -550,7 +552,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 168] = [
+    pub const ALL: [Self; 169] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -621,6 +623,7 @@ impl CatalogQueryId {
         Self::HardParseOperator,
         Self::HardParseColumnTypes,
         Self::ListObjects,
+        Self::ListObjectsByTypes,
         Self::ListObjectsPage,
         Self::SchemaProjectionPage,
         Self::OrientSchemaPage,
@@ -777,6 +780,12 @@ impl CatalogQueryId {
             Integer,
         ]);
         const N3I: BindSchema = BindSchema(&[NullableText, NullableText, NullableText, Integer]);
+        const LIST_OBJECT_TYPES_BINDS: [CatalogBindKind;
+            crate::intelligence::CATALOG_OBJECT_TYPES.len() + 3] = {
+            let mut binds = [NullableText; crate::intelligence::CATALOG_OBJECT_TYPES.len() + 3];
+            binds[crate::intelligence::CATALOG_OBJECT_TYPES.len() + 2] = Integer;
+            binds
+        };
         const N3II: BindSchema =
             BindSchema(&[NullableText, NullableText, NullableText, Integer, Integer]);
         const N2II: BindSchema = BindSchema(&[NullableText, NullableText, Integer, Integer]);
@@ -1346,6 +1355,25 @@ impl CatalogQueryId {
                ) WHERE ROWNUM <= :4",
                 N3I,
                 "list bounded objects with optional filters",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ListObjectsByTypes => (
+                "SELECT * FROM ( \
+                   WITH args AS (SELECT :1 owner_filter, :2 type_1, :3 type_2, :4 type_3, \
+                       :5 type_4, :6 type_5, :7 type_6, :8 type_7, :9 type_8, :10 type_9, \
+                       :11 type_10, :12 type_11, :13 type_12, :14 type_13, :15 name_filter FROM dual) \
+                   SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
+                   FROM all_objects o CROSS JOIN args \
+                   WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
+                     AND o.object_type IN (args.type_1, args.type_2, args.type_3, args.type_4, \
+                         args.type_5, args.type_6, args.type_7, args.type_8, args.type_9, \
+                         args.type_10, args.type_11, args.type_12, args.type_13) \
+                     AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
+                   ORDER BY o.owner, o.object_type, o.object_name \
+               ) WHERE ROWNUM <= :16",
+                BindSchema(&LIST_OBJECT_TYPES_BINDS),
+                "list bounded objects filtered by a bound object-type set",
                 DictionaryMetadata,
                 Diagnostic,
             ),

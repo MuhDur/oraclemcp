@@ -8303,6 +8303,234 @@ pub const oraclemcp_guard::scoped_grant::predicate::MAX_PREDICATE_IN_VALUES: usi
 pub fn oraclemcp_guard::scoped_grant::predicate::compose_where(core::option::Option<sqlparser::ast::Expr>, core::option::Option<sqlparser::ast::Expr>, sqlparser::ast::Expr) -> sqlparser::ast::Expr
 pub fn oraclemcp_guard::scoped_grant::predicate::parse_rendered_ast(&sqlparser::ast::Expr) -> core::result::Result<sqlparser::ast::Expr, oraclemcp_guard::scoped_grant::predicate::PredicateRefusal>
 pub fn oraclemcp_guard::scoped_grant::predicate::render_ast(&oraclemcp_guard::scoped_grant::GrantPredicateV1) -> (sqlparser::ast::Expr, alloc::vec::Vec<oraclemcp_guard::scoped_grant::predicate::GrantBind>)
+pub mod oraclemcp_guard::scoped_grant::rewrite
+pub enum oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::CteUnsupported
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::GrantPredicateMismatch
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::InvalidCap
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::InvalidTarget
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::MissingCallerWhere
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Reclassification
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::RoundTrip
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::SetPredicateColumn
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::UnsupportedExpression
+pub oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::UnsupportedVerb
+impl oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub const fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::code(self) -> &'static str
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::clone(&self) -> oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::eq(&self, &oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError) -> bool
+impl core::error::Error for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Send for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Owned = T
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::vzip(self) -> V
+pub struct oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::assignments(&self) -> &[sqlparser::ast::Assignment]
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::cap(&self) -> u32
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::predicate(&self) -> &sqlparser::ast::Expr
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::target(&self) -> &oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::where_expression(&self) -> &sqlparser::ast::Expr
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::clone(&self) -> oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::Send for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Owned = T
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::vzip(self) -> V
+pub struct oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::binds(&self) -> &[oraclemcp_guard::scoped_grant::predicate::GrantBind]
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::executable_sql(&self) -> &str
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::parts(&self) -> &oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::reclass_form(&self) -> &str
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::clone(&self) -> oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::Send for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Owned = T
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::vzip(self) -> V
+pub struct oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::clone(&self) -> oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::eq(&self, &oraclemcp_guard::scoped_grant::rewrite::QuotedIdent) -> bool
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::marker::Send for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::Owned = T
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub type oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::QuotedIdent where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::QuotedIdent::vzip(self) -> V
+pub fn oraclemcp_guard::scoped_grant::rewrite::render_grant_delete(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
+pub fn oraclemcp_guard::scoped_grant::rewrite::render_grant_update(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
 pub enum oraclemcp_guard::scoped_grant::GrantMismatch
 pub oraclemcp_guard::scoped_grant::GrantMismatch::BindCountMismatch
 pub oraclemcp_guard::scoped_grant::GrantMismatch::CollectionExpression
@@ -8511,6 +8739,75 @@ pub type oraclemcp_guard::scoped_grant::GrantOperand::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::GrantOperand where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::GrantOperand where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::scoped_grant::GrantOperand::vzip(self) -> V
+pub enum oraclemcp_guard::scoped_grant::GrantRewriteError
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::CteUnsupported
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::GrantPredicateMismatch
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::InvalidCap
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::InvalidTarget
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::MissingCallerWhere
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::Reclassification
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::RoundTrip
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::SetPredicateColumn
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::UnsupportedExpression
+pub oraclemcp_guard::scoped_grant::GrantRewriteError::UnsupportedVerb
+impl oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub const fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::code(self) -> &'static str
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::clone(&self) -> oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::cmp::Eq for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::cmp::PartialEq for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::eq(&self, &oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError) -> bool
+impl core::error::Error for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::StructuralPartialEq for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Send for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Owned = T
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::to_owned(&self) -> T
+impl<T> alloc::string::ToString for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: core::fmt::Display + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::to_string(&self) -> alloc::string::String
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError::vzip(self) -> V
 pub enum oraclemcp_guard::scoped_grant::GrantState
 pub oraclemcp_guard::scoped_grant::GrantState::Active
 pub oraclemcp_guard::scoped_grant::GrantState::Expired
@@ -10057,6 +10354,107 @@ pub type oraclemcp_guard::scoped_grant::GrantPredicateV1::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::GrantPredicateV1 where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::GrantPredicateV1 where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::scoped_grant::GrantPredicateV1::vzip(self) -> V
+pub struct oraclemcp_guard::scoped_grant::GrantRewriteParts
+impl oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::assignments(&self) -> &[sqlparser::ast::Assignment]
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::cap(&self) -> u32
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::predicate(&self) -> &sqlparser::ast::Expr
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::target(&self) -> &oraclemcp_guard::scoped_grant::rewrite::QuotedIdent
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::where_expression(&self) -> &sqlparser::ast::Expr
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::clone(&self) -> oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::Send for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Owned = T
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts::vzip(self) -> V
+pub struct oraclemcp_guard::scoped_grant::GrantRewriteV1
+impl oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::binds(&self) -> &[oraclemcp_guard::scoped_grant::predicate::GrantBind]
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::executable_sql(&self) -> &str
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::parts(&self) -> &oraclemcp_guard::scoped_grant::rewrite::GrantRewriteParts
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::reclass_form(&self) -> &str
+impl core::clone::Clone for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::clone(&self) -> oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::fmt::Debug for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::Send for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::Sync for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::Unpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::marker::UnsafeUnpin for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where U: core::convert::From<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where U: core::convert::Into<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Error = core::convert::Infallible
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: core::clone::Clone
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Owned = T
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> core::any::Any for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+impl<T> typenum::type_operators::Same for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1
+pub type oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1::vzip(self) -> V
 pub struct oraclemcp_guard::scoped_grant::GrantTargetIdentity
 pub oraclemcp_guard::scoped_grant::GrantTargetIdentity::catalog_generation: oraclemcp_guard::resolver::CatalogGeneration
 pub oraclemcp_guard::scoped_grant::GrantTargetIdentity::container: oraclemcp_guard::scoped_grant::GrantContainer
@@ -11000,6 +11398,8 @@ pub fn oraclemcp_guard::scoped_grant::hex(&[u8]) -> alloc::string::String
 pub fn oraclemcp_guard::scoped_grant::match_sql(&oraclemcp_guard::scoped_grant::ScopedGrant, &str, &oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget) -> core::result::Result<oraclemcp_guard::scoped_grant::matcher::GrantMatch, oraclemcp_guard::scoped_grant::matcher::GrantMismatch>
 pub fn oraclemcp_guard::scoped_grant::match_statement(&oraclemcp_guard::scoped_grant::ScopedGrant, &sqlparser::ast::Statement, &oraclemcp_guard::scoped_grant::matcher::ResolvedDmlTarget) -> core::result::Result<oraclemcp_guard::scoped_grant::matcher::GrantMatch, oraclemcp_guard::scoped_grant::matcher::GrantMismatch>
 pub fn oraclemcp_guard::scoped_grant::render_ast(&oraclemcp_guard::scoped_grant::GrantPredicateV1) -> (sqlparser::ast::Expr, alloc::vec::Vec<oraclemcp_guard::scoped_grant::predicate::GrantBind>)
+pub fn oraclemcp_guard::scoped_grant::render_grant_delete(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
+pub fn oraclemcp_guard::scoped_grant::render_grant_update(&oraclemcp_guard::scoped_grant::matcher::GrantMatch, &oraclemcp_guard::scoped_grant::GrantPredicateV1, core::option::Option<&sqlparser::ast::Expr>, u32) -> core::result::Result<oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
 pub mod oraclemcp_guard::stepup
 pub enum oraclemcp_guard::stepup::ChallengeStatus
 pub oraclemcp_guard::stepup::ChallengeStatus::ExpiredOrUnknown

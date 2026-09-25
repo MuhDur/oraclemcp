@@ -497,9 +497,10 @@
     "repo": "oraclemcp",
     "symbols": [
       "SOURCE_OBJECT_TYPES",
+      "source_object_types",
       "tool_registry"
     ],
-    "test_id": "w4_get_source_get_source_view",
+    "test_id": "w4_get_source_view_text",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i39_get_source_view.jsonl"
   },
@@ -616,7 +617,7 @@
     "reproducible": "live",
     "input": {
       "arguments": {
-        "name_pattern": "W4_<run>%",
+        "name_like": "W4_<run>%",
         "object_types": [
           "TABLE",
           "VIEW"
@@ -637,9 +638,11 @@
     "capabilities": [],
     "repo": "oraclemcp",
     "symbols": [
-      "SearchObjectsArgs"
+      "SearchObjectsArgs",
+      "CatalogQueryId::ListObjectsByTypes",
+      "list_objects_by_types"
     ],
-    "test_id": "w4_search_objects_object_types",
+    "test_id": "w4_search_objects_object_types_filter",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i41_object_types.jsonl"
   },

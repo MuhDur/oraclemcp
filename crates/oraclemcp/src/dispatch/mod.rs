@@ -69,8 +69,8 @@ use oraclemcp_db::{
     list_schemas, observe_vpd_rls_for_relations, paginated_sql, plan_cost_estimate,
     plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents,
     prove_hard_parse_effect_closure, read_query, read_query_as_of, resolve_plan_table,
-    run_catalog_query, search_objects, search_source, semantic_search_query,
-    semantic_search_query_with_filter, semantic_search_text_query,
+    run_catalog_query, search_objects, search_objects_by_types, search_source,
+    semantic_search_query, semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{
@@ -1204,6 +1204,7 @@ impl OracleDispatcher {
             profile,
             owner,
             object_type,
+            object_types,
             name_like,
             max_rows,
             request_budget,
@@ -1237,16 +1238,29 @@ impl OracleDispatcher {
                 quarantine: None,
                 provenance: ReadQueryProvenance::ServerRead,
             };
-            let objects = search_objects(
-                cx,
-                &observed,
-                owner,
-                object_type,
-                name_like,
-                SearchDetailLevel::Names,
-                max_rows,
-            )
-            .await?;
+            let objects = if let Some(object_types) = object_types {
+                search_objects_by_types(
+                    cx,
+                    &observed,
+                    owner,
+                    object_types,
+                    name_like,
+                    SearchDetailLevel::Names,
+                    max_rows,
+                )
+                .await?
+            } else {
+                search_objects(
+                    cx,
+                    &observed,
+                    owner,
+                    object_type,
+                    name_like,
+                    SearchDetailLevel::Names,
+                    max_rows,
+                )
+                .await?
+            };
             let source_row = objects.first().map(fleet_catalog_source_row);
             let mut audit_response = QueryResponse {
                 columns: source_row
@@ -4932,6 +4946,47 @@ fn validate_declared_args(tool: &str, args: &Value) -> Result<(), ErrorEnvelope>
 fn validate_enum_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope> {
     match canonical_tool_name(tool) {
         "oracle_search_objects" => {
+            validate_object_type_field(
+                tool,
+                args,
+                "object_type",
+                oraclemcp_db::catalog_object_types(),
+            )?;
+            if args.get("object_type").is_some() && args.get("object_types").is_some() {
+                return Err(invalid_args(
+                    "object_type and object_types cannot be supplied together",
+                ));
+            }
+            if let Some(raw_types) = args.get("object_types") {
+                let Some(types) = raw_types.as_array() else {
+                    return Err(invalid_args(
+                        "object_types must be a JSON array of strings, not a JSON-encoded string",
+                    ));
+                };
+                if types.is_empty() || types.len() > oraclemcp_db::catalog_object_types().len() {
+                    return Err(invalid_args(format!(
+                        "object_types must contain between 1 and {} values",
+                        oraclemcp_db::catalog_object_types().len()
+                    )));
+                }
+                let mut seen = std::collections::BTreeSet::new();
+                for value in types {
+                    let Some(value) = value.as_str() else {
+                        return Err(invalid_args("object_types must be a JSON array of strings"));
+                    };
+                    if !oraclemcp_db::catalog_object_types().contains(&value) {
+                        return Err(invalid_args(format!(
+                            "object_types values must be one of: {}",
+                            oraclemcp_db::catalog_object_types().join(", ")
+                        )));
+                    }
+                    if !seen.insert(value) {
+                        return Err(invalid_args(format!(
+                            "object_types contains duplicate value {value:?}"
+                        )));
+                    }
+                }
+            }
             for field in ["detail_level", "detail"] {
                 let Some(value) = args.get(field) else {
                     continue;
@@ -4948,20 +5003,48 @@ fn validate_enum_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope
                 }
             }
         }
-        "oracle_get_ddl" => {
-            if let Some(value) = args.get("object_type") {
-                let Some(object_type) = value.as_str() else {
-                    return Err(invalid_args(format!(
-                        "invalid arguments for {tool}: object_type must be a string"
-                    )));
-                };
-                if !oraclemcp_db::is_ddl_object_type(object_type) {
-                    return Err(invalid_args(format!(
-                        "unsupported DDL object type: {object_type:?}"
-                    )));
-                }
+        "oracle_orient" => {
+            if let Some(include) = args.get("include")
+                && !include.is_array()
+            {
+                return Err(invalid_args(
+                    "include must be a JSON array of strings, not a JSON-encoded string",
+                ));
             }
         }
+        "oracle_schema_inspect" => validate_object_type_field(
+            tool,
+            args,
+            "object_type",
+            oraclemcp_db::catalog_object_types(),
+        )?,
+        "oracle_get_ddl" => {
+            validate_object_type_field(tool, args, "object_type", oraclemcp_db::ddl_object_types())?
+        }
+        "oracle_get_source" => validate_object_type_field(
+            tool,
+            args,
+            "object_type",
+            oraclemcp_db::source_object_types(),
+        )?,
+        "oracle_search_source" => validate_object_type_field(
+            tool,
+            args,
+            "object_type",
+            oraclemcp_db::source_search_object_types(),
+        )?,
+        "oracle_compile_object" => validate_object_type_field(
+            tool,
+            args,
+            "object_type",
+            oraclemcp_db::compile_object_types(),
+        )?,
+        "oracle_patch_source" => validate_object_type_field(
+            tool,
+            args,
+            "object_type",
+            oraclemcp_db::patch_source_object_types(),
+        )?,
         "oracle_top_queries" => {
             if let Some(value) = args.get("metric") {
                 let Some(metric) = value.as_str() else {
@@ -4977,6 +5060,70 @@ fn validate_enum_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope
             }
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_object_type_field(
+    tool: &str,
+    args: &Value,
+    field: &str,
+    allowed: &[&str],
+) -> Result<(), ErrorEnvelope> {
+    let Some(value) = args.get(field) else {
+        return Ok(());
+    };
+    let Some(raw) = value.as_str() else {
+        return Err(invalid_args(format!(
+            "invalid arguments for {tool}: {field} must be a string"
+        )));
+    };
+    if !allowed.contains(&raw) {
+        return Err(invalid_args(format!(
+            "{field} must be one of: {}",
+            allowed.join(", ")
+        )));
+    }
+    Ok(())
+}
+
+fn validate_json_array_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope> {
+    let schema = crate::registry::tool_registry()
+        .tools
+        .into_iter()
+        .find(|descriptor| descriptor.name == tool)
+        .and_then(|descriptor| descriptor.input_schema);
+    let Some(properties) = schema
+        .as_ref()
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+    for (field, property) in properties {
+        if property.get("type").and_then(Value::as_str) != Some("array") {
+            continue;
+        }
+        let Some(value) = args.get(field) else {
+            continue;
+        };
+        if value.is_array() {
+            continue;
+        }
+        let item_type = property
+            .pointer("/items/type")
+            .and_then(Value::as_str)
+            .map(|item_type| match item_type {
+                "string" => "strings",
+                "integer" => "integers",
+                "number" => "numbers",
+                "boolean" => "booleans",
+                other => other,
+            })
+            .unwrap_or("values");
+        return Err(invalid_args(format!(
+            "{field} must be a JSON array of {item_type}, not a JSON-encoded string"
+        )));
     }
     Ok(())
 }
@@ -10848,7 +10995,10 @@ async fn patch_source_inner(
     let session = ctx.session;
     let audit = ctx.audit;
     let object_name = required_non_empty_arg(tool_name, "name", args.name)?;
-    let object_type = normalize_patch_object_type(tool_name, args.object_type)?;
+    let object_type = normalize_patch_object_type(
+        tool_name,
+        args.object_type.map(|object_type| object_type.to_string()),
+    )?;
     let old_text = required_patch_old_text(tool_name, args.old_text)?;
     let new_text = required_patch_new_text(tool_name, args.new_text)?;
     let max_chars = args.max_chars.unwrap_or(DEFAULT_SOURCE_MAX_CHARS).max(1);
@@ -12229,6 +12379,7 @@ impl OracleDispatcher {
         // Reject schema-forbidden keys before connection metadata, audit, or
         // any generated SQL can observe an ambiguously shaped request.
         validate_declared_args(name, &args)?;
+        validate_json_array_arguments(name, &args)?;
         validate_enum_arguments(name, &args)?;
         let mut request_budget = self.dispatch_request_budget(cx, context)?;
         if let Some(timeout) = explicit_timeout_duration(&args)? {
@@ -13562,7 +13713,7 @@ impl OracleDispatcher {
                 let a: SchemaInspectArgs = parse_args(name, args)?;
                 let compact_alias = name == "get_schema";
                 let owner_arg = non_empty_arg(a.owner);
-                let object_type = non_empty_arg(a.object_type);
+                let object_type = non_empty_arg(a.object_type.map(|value| value.to_string()));
                 let name_like = non_empty_arg(a.name_like);
                 let max_rows = if compact_alias {
                     a.max_rows
@@ -13702,7 +13853,13 @@ impl OracleDispatcher {
                         invalid_args("detail_level must be one of: names, summary, standard, full")
                     })?;
                 let owner_arg = non_empty_arg(a.owner);
-                let object_type = non_empty_arg(a.object_type);
+                let object_type = non_empty_arg(a.object_type.map(|value| value.to_string()));
+                let object_types = a.object_types.map(|values| {
+                    values
+                        .into_iter()
+                        .map(|value| value.to_string())
+                        .collect::<Vec<_>>()
+                });
                 let name_like = non_empty_arg(a.name_like);
                 let max_rows = a
                     .max_rows
@@ -13752,6 +13909,7 @@ impl OracleDispatcher {
                                     profile: profile.name,
                                     owner: owner_filter.as_deref(),
                                     object_type: object_type.as_deref(),
+                                    object_types: object_types.as_deref(),
                                     name_like: name_like.as_deref(),
                                     max_rows: remaining,
                                     request_budget: &request_budget,
@@ -13804,21 +13962,35 @@ impl OracleDispatcher {
                 // carry `IO`, but the locked trait cannot be made generic without
                 // breaking object safety — narrowing therefore applies to the
                 // handler scaffolding, and the IO call is the explicit exception.
-                let results = search_objects(
-                    cx,
-                    &guarded_metadata_conn,
-                    owner_filter.as_deref(),
-                    object_type.as_deref(),
-                    name_like.as_deref(),
-                    detail,
-                    max_rows,
-                )
-                .await
+                let results = if let Some(object_types) = object_types.as_deref() {
+                    search_objects_by_types(
+                        cx,
+                        &guarded_metadata_conn,
+                        owner_filter.as_deref(),
+                        object_types,
+                        name_like.as_deref(),
+                        detail,
+                        max_rows,
+                    )
+                    .await
+                } else {
+                    search_objects(
+                        cx,
+                        &guarded_metadata_conn,
+                        owner_filter.as_deref(),
+                        object_type.as_deref(),
+                        name_like.as_deref(),
+                        detail,
+                        max_rows,
+                    )
+                    .await
+                }
                 .map_err(DbError::into_envelope)?;
                 dispatch_checkpoint(&read_cx, "oraclemcp.dispatch.search_objects.after")?;
                 Ok(json!({
                     "owner": owner_filter.as_deref().unwrap_or("*"),
                     "object_type": object_type,
+                    "object_types": object_types,
                     "name_like": name_like,
                     "detail_level": detail.as_str(),
                     "count": results.len(),
@@ -14388,7 +14560,7 @@ impl OracleDispatcher {
                             .map_err(DbError::into_envelope)?,
                     ),
                 };
-                let object_type = non_empty_arg(a.object_type);
+                let object_type = non_empty_arg(a.object_type.map(|value| value.to_string()));
                 let name_like = non_empty_arg(a.name_like);
                 dispatch_checkpoint(cx, "oraclemcp.dispatch.search_source.before")?;
                 let rows = search_source(
@@ -14906,5 +15078,8 @@ impl OracleDispatcher {
 #[cfg(test)]
 #[path = "h6r4w_contract_tests.rs"]
 mod h6r4w_contract_tests;
+#[cfg(test)]
+#[path = "object_types_contract_tests.rs"]
+mod object_types_contract_tests;
 #[cfg(test)]
 mod tests;
