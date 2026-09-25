@@ -57,7 +57,7 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
     }
     if sql == CatalogQueryId::RedactionInstallationEvidence.spec().sql {
         return Some(vec![OracleRow {
-            columns: vec![("ADVANCED_SECURITY".to_owned(), resolver_text("FALSE"))],
+            columns: vec![("DATA_REDACTION".to_owned(), resolver_text("FALSE"))],
         }]);
     }
     if sql == CatalogQueryId::ReadRasPolicies.spec().sql

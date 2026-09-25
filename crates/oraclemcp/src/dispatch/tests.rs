@@ -404,7 +404,7 @@ fn relation_security_probe_rows(id: CatalogQueryId) -> Vec<OracleRow> {
             vec![semantic_row(&[("VALUE", Some("FALSE"))])]
         }
         CatalogQueryId::RedactionInstallationEvidence => {
-            vec![semantic_row(&[("ADVANCED_SECURITY", Some("FALSE"))])]
+            vec![semantic_row(&[("DATA_REDACTION", Some("FALSE"))])]
         }
         CatalogQueryId::ReadOlsTablePolicies
         | CatalogQueryId::ReadOlsSchemaPolicies
@@ -5619,11 +5619,11 @@ fn schema_inspect_accepts_all_owners_and_limit_alias() {
     let out = dispatcher
         .dispatch(
             "oracle_schema_inspect",
-            json!({ "owner": "*", "object_type": "package", "name_like": "emp%", "limit": 5 }),
+            json!({ "owner": "*", "object_type": "PACKAGE", "name_like": "emp%", "limit": 5 }),
         )
         .expect("schema inspect accepts all-owner filters");
     assert_eq!(out["owner"], json!("*"));
-    assert_eq!(out["object_type"], json!("package"));
+    assert_eq!(out["object_type"], json!("PACKAGE"));
     assert_eq!(out["name_like"], json!("emp%"));
     assert_eq!(out["max_rows"], json!(5));
 }
@@ -5725,14 +5725,14 @@ fn dictionary_tools_accept_default_owner_qualified_names_and_aliases() {
             json!({
                 "owner": "*",
                 "needle": "commit",
-                "object_type": "package_body",
+                "object_type": "PACKAGE_BODY",
                 "name_like": "emp%",
                 "limit": 999999
             }),
         )
         .expect("search source accepts all-owner, scope filters, and limit alias");
     assert_eq!(all_matches["owner"], json!("*"));
-    assert_eq!(all_matches["object_type"], json!("package_body"));
+    assert_eq!(all_matches["object_type"], json!("PACKAGE_BODY"));
     assert_eq!(all_matches["name_like"], json!("emp%"));
     assert_eq!(all_matches["max_rows"], json!(5000));
 

@@ -78,7 +78,7 @@ impl OracleConnection for VisibleCatalogQueryMock {
             return Ok(vec![row(&[("VALUE", Some("FALSE"))])]);
         }
         if sql == CatalogQueryId::RedactionInstallationEvidence.spec().sql {
-            return Ok(vec![row(&[("ADVANCED_SECURITY", Some("FALSE"))])]);
+            return Ok(vec![row(&[("DATA_REDACTION", Some("FALSE"))])]);
         }
         if sql == CatalogQueryId::ReadRasPolicies.spec().sql
             || sql == CatalogQueryId::ReadRedactionPolicies.spec().sql

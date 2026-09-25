@@ -812,9 +812,8 @@ pub async fn ols_installation_evidence(
     }
 }
 
-/// Read explicit Advanced Security option evidence before relying on the
-/// optional Data Redaction catalog view. A successful empty V$OPTION result
-/// proves the option is absent; denied or malformed results stay unknown.
+/// Read explicit Data Redaction option evidence before relying on the optional
+/// policy view. Missing, denied, or malformed results stay unknown.
 async fn redaction_installation_evidence(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -822,18 +821,15 @@ async fn redaction_installation_evidence(
     let rows =
         run_catalog_query(cx, conn, CatalogQueryId::RedactionInstallationEvidence, &[]).await?;
     match rows.as_slice() {
-        // V$OPTION lists installed options. A successful empty result for this
-        // exact parameter proves Advanced Security is absent.
-        [] => Ok(false),
-        [row] => match required_text(row, "ADVANCED_SECURITY").as_deref() {
+        [row] => match required_text(row, "DATA_REDACTION").as_deref() {
             Some(value) if value.eq_ignore_ascii_case("TRUE") => Ok(true),
             Some(value) if value.eq_ignore_ascii_case("FALSE") => Ok(false),
             _ => Err(DbError::Query(
-                "Advanced Security option catalog returned an incomplete answer".to_owned(),
+                "Data Redaction option catalog returned an incomplete answer".to_owned(),
             )),
         },
         _ => Err(DbError::Query(
-            "Advanced Security option catalog returned an incomplete answer".to_owned(),
+            "Data Redaction option catalog returned an incomplete answer".to_owned(),
         )),
     }
 }
@@ -4208,7 +4204,7 @@ mod tests {
             let mut view = table_object();
             view.kind = CatalogObjectKind::View;
             let mut responses = relation_security_clear_prefix(false);
-            responses.extend([Vec::new(), Vec::new()]);
+            responses.extend([Vec::new(), vec![row(&[("DATA_REDACTION", Some("FALSE"))])]]);
             let conn = ScriptedRows::new(responses);
             let evidence = observe_relation_security(&cx, &conn, &[view])
                 .await
@@ -4294,7 +4290,7 @@ mod tests {
             let mut responses = relation_security_clear_prefix(false);
             responses.extend([
                 Vec::new(),
-                vec![row(&[("ADVANCED_SECURITY", Some("TRUE"))])],
+                vec![row(&[("DATA_REDACTION", Some("TRUE"))])],
                 vec![row(&[("POLICY_NAME", Some("SYNTHETIC_REDACTION"))])],
             ]);
             let conn = ScriptedRows::new(responses);
@@ -4331,6 +4327,11 @@ mod tests {
                             OracleBind::from("ORDERS"),
                             OracleBind::I64(2),
                         ]
+            }));
+            assert!(queries.iter().any(|(sql, binds)| {
+                sql.contains("parameter = 'Data Redaction'")
+                    && sql.to_ascii_lowercase().contains("as data_redaction")
+                    && binds.is_empty()
             }));
         });
     }
@@ -4424,7 +4425,7 @@ mod tests {
             for policy in [None, Some("SYNTHETIC_REDACTION")] {
                 responses.push(vec![row(&[("VALUE", Some("FALSE"))])]);
                 responses.push(Vec::new());
-                responses.push(vec![row(&[("ADVANCED_SECURITY", Some("TRUE"))])]);
+                responses.push(vec![row(&[("DATA_REDACTION", Some("TRUE"))])]);
                 responses.push(
                     policy
                         .map(|name| vec![row(&[("POLICY_NAME", Some(name))])])
@@ -4519,7 +4520,7 @@ mod tests {
                 .map(Ok)
                 .collect::<Vec<_>>();
             responses.push(Ok(Vec::new()));
-            responses.push(Ok(vec![row(&[("ADVANCED_SECURITY", Some("TRUE"))])]));
+            responses.push(Ok(vec![row(&[("DATA_REDACTION", Some("TRUE"))])]));
             responses.push(Err(DbError::ServerQuery(
                 "ORA-01031: insufficient privileges".to_owned(),
             )));
@@ -4592,14 +4593,13 @@ mod tests {
     fn feature_not_installed_evidence_allows() {
         run_with_cx(|cx| async move {
             let mut responses = relation_security_clear_prefix(false);
-            responses.extend([
-                Vec::new(),
-                vec![row(&[("ADVANCED_SECURITY", Some("FALSE"))])],
-            ]);
+            responses.extend([Vec::new(), vec![row(&[("DATA_REDACTION", Some("FALSE"))])]]);
             let conn = ScriptedRows::new(responses);
             let evidence = observe_relation_security(&cx, &conn, &[table_object()])
                 .await
-                .expect("uninstalled OLS, readable empty RAS, and absent Advanced Security row");
+                .expect(
+                    "uninstalled OLS, readable empty RAS, and explicit disabled Data Redaction",
+                );
             assert_eq!(evidence[0].ols, RelationSecurityState::NotInstalled);
             assert_eq!(evidence[0].ras, RelationSecurityState::Absent);
             assert_eq!(evidence[0].redaction, RelationSecurityState::NotInstalled);
@@ -4609,6 +4609,31 @@ mod tests {
                     .iter()
                     .any(|(sql, _)| sql.contains("all_sa_table_policies"))
             );
+            assert!(
+                !queries.iter().any(|(sql, _)| {
+                    sql.to_ascii_lowercase().contains("from redaction_policies")
+                })
+            );
+        });
+    }
+
+    #[test]
+    fn redaction_option_missing_is_unknown_refused() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(false);
+            responses.extend([Vec::new(), Vec::new()]);
+            let conn = ScriptedRows::new(responses);
+            assert!(matches!(
+                observe_relation_security(&cx, &conn, &[table_object()]).await,
+                Err(RelationSecurityProofError::VisibilityUnknown {
+                    feature: RelationSecurityFeature::Redaction,
+                    observation: RelationSecurityObservation {
+                        redaction: RelationSecurityState::Unavailable,
+                        ..
+                    }
+                })
+            ));
+            let queries = conn.queries.lock().expect("query log");
             assert!(
                 !queries.iter().any(|(sql, _)| {
                     sql.to_ascii_lowercase().contains("from redaction_policies")

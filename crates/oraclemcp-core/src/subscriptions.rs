@@ -1483,7 +1483,7 @@ mod tests {
                 return Ok(vec![catalog_row(&[("VALUE", Some("FALSE"))])]);
             }
             if sql == CatalogQueryId::RedactionInstallationEvidence.spec().sql {
-                return Ok(vec![catalog_row(&[("ADVANCED_SECURITY", Some("FALSE"))])]);
+                return Ok(vec![catalog_row(&[("DATA_REDACTION", Some("FALSE"))])]);
             }
             if sql == CatalogQueryId::ReadRasPolicies.spec().sql
                 || sql == CatalogQueryId::ReadRedactionPolicies.spec().sql

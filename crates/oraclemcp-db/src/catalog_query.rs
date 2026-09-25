@@ -242,7 +242,7 @@ pub enum CatalogQueryId {
     ReadRedactionPolicies,
     /// Current OLS enablement evidence used when optional OLS views are absent.
     OlsInstallationEvidence,
-    /// Current Advanced Security evidence used when redaction catalogs are optional.
+    /// Current Data Redaction option evidence used before reading policy catalogs.
     RedactionInstallationEvidence,
     /// Virtual columns on one relation.
     VirtualColumn,
@@ -945,9 +945,9 @@ impl CatalogQueryId {
                 ReadPurity,
             ),
             Self::RedactionInstallationEvidence => (
-                crate::native_redaction::NATIVE_REDACTION_OPTION_SQL,
+                "SELECT value AS data_redaction FROM v$option WHERE parameter = 'Data Redaction' AND ROWNUM <= 1",
                 EMPTY,
-                "observe Advanced Security when redaction catalogs are optional",
+                "observe Data Redaction availability before reading policy catalogs",
                 InternalProof,
                 ReadPurity,
             ),

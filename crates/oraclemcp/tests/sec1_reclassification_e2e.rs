@@ -82,7 +82,7 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
             .spec()
             .sql
     {
-        return Some(vec![catalog_row(&[("ADVANCED_SECURITY", Some("FALSE"))])]);
+        return Some(vec![catalog_row(&[("DATA_REDACTION", Some("FALSE"))])]);
     }
     if sql == oraclemcp_db::CatalogQueryId::ReadRasPolicies.spec().sql
         || sql
