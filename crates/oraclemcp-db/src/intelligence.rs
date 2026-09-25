@@ -3708,7 +3708,21 @@ mod tests {
         });
         let calls = mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("o.object_type IN (:2, :3"));
+        assert!(
+            calls[0]
+                .0
+                .contains("o.object_type IN (args.type_1, args.type_2")
+        );
+        let placeholder_order = calls[0]
+            .0
+            .split(':')
+            .skip(1)
+            .filter_map(|tail| {
+                let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+                (!digits.is_empty()).then(|| digits.parse::<usize>().expect("numeric bind"))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(placeholder_order, (1..=16).collect::<Vec<_>>());
         assert_eq!(calls[0].1[0], OracleBind::String("APP".to_owned()));
         assert_eq!(calls[0].1[1], OracleBind::String("TABLE".to_owned()));
         assert_eq!(calls[0].1[2], OracleBind::String("VIEW".to_owned()));

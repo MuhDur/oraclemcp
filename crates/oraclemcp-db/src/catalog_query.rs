@@ -1360,11 +1360,15 @@ impl CatalogQueryId {
             ),
             Self::ListObjectsByTypes => (
                 "SELECT * FROM ( \
-                   WITH args AS (SELECT :1 owner_filter, :15 name_filter FROM dual) \
+                   WITH args AS (SELECT :1 owner_filter, :2 type_1, :3 type_2, :4 type_3, \
+                       :5 type_4, :6 type_5, :7 type_6, :8 type_7, :9 type_8, :10 type_9, \
+                       :11 type_10, :12 type_11, :13 type_12, :14 type_13, :15 name_filter FROM dual) \
                    SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
                    FROM all_objects o CROSS JOIN args \
                    WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
-                     AND o.object_type IN (:2, :3, :4, :5, :6, :7, :8, :9, :10, :11, :12, :13, :14) \
+                     AND o.object_type IN (args.type_1, args.type_2, args.type_3, args.type_4, \
+                         args.type_5, args.type_6, args.type_7, args.type_8, args.type_9, \
+                         args.type_10, args.type_11, args.type_12, args.type_13) \
                      AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
                    ORDER BY o.owner, o.object_type, o.object_name \
                ) WHERE ROWNUM <= :16",
