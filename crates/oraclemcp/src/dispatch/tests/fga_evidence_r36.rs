@@ -8,7 +8,7 @@
 
 use super::*;
 use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
-use oraclemcp_db::{PLAN_COST_ESTIMATE_NOTE, PlanCostSummary};
+use oraclemcp_db::{CatalogQueryId, PLAN_COST_ESTIMATE_NOTE, PlanCostSummary};
 
 const READ: &str = "SELECT id FROM APP.ORDERS";
 
@@ -267,7 +267,8 @@ fn dispatched_read_writes_readable_cost_unavailable_audit_before_admission() {
             .is_some_and(|observations| {
                 observations.contains(&json!("hard_parse_evidence_no_privilege"))
                     && observations.contains(&json!("cost_unavailable"))
-            })
+            }),
+        "unexpected cost evidence: {result:?}"
     );
     assert!(result["row_count"].as_u64().is_some());
 
@@ -320,12 +321,34 @@ impl OracleConnection for CostAuditMock {
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
         let normalized = sql.to_ascii_lowercase();
-        if normalized.contains("from all_policies")
-            || normalized.contains("from redaction_policies")
+        if sql == CatalogQueryId::OlsInstallationEvidence.spec().sql {
+            return Ok(vec![semantic_row(&[("VALUE", Some("FALSE"))])]);
+        }
+        if [
+            CatalogQueryId::ReadOlsTablePolicies,
+            CatalogQueryId::ReadOlsSchemaPolicies,
+            CatalogQueryId::ReadRasPolicies,
+            CatalogQueryId::ReadRedactionPolicies,
+        ]
+        .iter()
+        .any(|id| sql == id.spec().sql)
         {
             return Ok(Vec::new());
         }
         if [
+            CatalogQueryId::HardParseOlsTablePolicies,
+            CatalogQueryId::HardParseOlsSchemaPolicies,
+            CatalogQueryId::HardParseRasPolicies,
+        ]
+        .iter()
+        .any(|id| sql == id.spec().sql)
+        {
+            return Err(DbError::ServerQuery(
+                "ORA-00942: table or view does not exist".to_owned(),
+            ));
+        }
+        if [
+            "all_associations",
             "all_sa_table_policies",
             "all_sa_schema_policies",
             "all_xs_applied_policies",
@@ -336,6 +359,11 @@ impl OracleConnection for CostAuditMock {
             return Err(DbError::ServerQuery(
                 "ORA-00942: table or view does not exist".to_owned(),
             ));
+        }
+        if normalized.contains("from all_policies")
+            || normalized.contains("from redaction_policies")
+        {
+            return Ok(Vec::new());
         }
         if normalized.contains("dbms_flashback.get_system_change_number") {
             return Ok(vec![semantic_row(&[("OBSERVED_SCN", Some("424242"))])]);

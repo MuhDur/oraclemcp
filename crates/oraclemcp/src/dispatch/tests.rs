@@ -13,7 +13,9 @@ use asupersync::runtime::RuntimeBuilder;
 use base64::Engine;
 use oraclemcp_config::CumulativeQueryCostBudgetConfig;
 use oraclemcp_core::{DispatchCloseReason, DispatchContext, FileStore, ScopeGrant};
-use oraclemcp_db::{OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart};
+use oraclemcp_db::{
+    CatalogQueryId, OracleBackend, OracleCell, OracleRow, QueryRowStream, QueryRowStreamStart,
+};
 use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
 use oraclemcp_guard::corpus::{CorpusAuthenticity, CorpusRecord, ReasonCategory};
 use std::fs;
@@ -391,10 +393,45 @@ fn string_bind(binds: &[OracleBind], index: usize) -> Option<&str> {
     }
 }
 
+fn relation_security_probe_rows(id: CatalogQueryId) -> Vec<OracleRow> {
+    match id {
+        CatalogQueryId::ClosureIdentity => vec![semantic_row(&[
+            ("DBID", Some("424242")),
+            ("CONTAINER_NAME", Some("FREEPDB1")),
+            ("EDITION_NAME", Some("ORA$BASE")),
+        ])],
+        CatalogQueryId::OlsInstallationEvidence => {
+            vec![semantic_row(&[("VALUE", Some("FALSE"))])]
+        }
+        CatalogQueryId::ReadOlsTablePolicies
+        | CatalogQueryId::ReadOlsSchemaPolicies
+        | CatalogQueryId::ReadRasPolicies
+        | CatalogQueryId::ReadRedactionPolicies => Vec::new(),
+        _ => unreachable!("only relation-security catalog queries use this helper"),
+    }
+}
+
+fn mock_relation_security_probe_rows(sql: &str) -> Option<Vec<OracleRow>> {
+    [
+        CatalogQueryId::ClosureIdentity,
+        CatalogQueryId::OlsInstallationEvidence,
+        CatalogQueryId::ReadOlsTablePolicies,
+        CatalogQueryId::ReadOlsSchemaPolicies,
+        CatalogQueryId::ReadRasPolicies,
+        CatalogQueryId::ReadRedactionPolicies,
+    ]
+    .into_iter()
+    .find(|id| sql == id.spec().sql)
+    .map(relation_security_probe_rows)
+}
+
 /// Shared live-catalog model for dispatcher mocks whose test concern is above
 /// semantic resolution. Dedicated security tests use `SemanticGuardMock`
 /// instead, so views, policies, and callables are never cleared by this model.
 fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>> {
+    if let Some(rows) = mock_relation_security_probe_rows(sql) {
+        return Some(rows);
+    }
     let normalized = sql.to_ascii_lowercase();
     if normalized.contains("sys_context('userenv', 'session_user')") {
         return Some(vec![semantic_row(&[
@@ -570,6 +607,9 @@ impl OracleConnection for SemanticGuardMock {
             .lock()
             .expect("read events lock")
             .push(format!("query:{sql}"));
+        if let Some(rows) = mock_relation_security_probe_rows(sql) {
+            return Ok(rows);
+        }
         let normalized = sql.to_ascii_lowercase();
         if normalized.contains("dbms_flashback.get_system_change_number") {
             return Ok(vec![semantic_row(&[("OBSERVED_SCN", Some("424242"))])]);
@@ -915,6 +955,10 @@ fn executor_orders_parse_resolve_prove_mask_audit_execute() {
         C::Objects,
         C::Objects,
         C::RelationColumn,
+        C::ClosureIdentity,
+        C::OlsInstallationEvidence,
+        C::ReadRasPolicies,
+        C::ReadRedactionPolicies,
         C::FgaPoliciesForRelations32,
         C::FgaCatalogProof,
         C::PolicyRowsForRelations32,
@@ -922,20 +966,20 @@ fn executor_orders_parse_resolve_prove_mask_audit_execute() {
         C::PolicyCatalogProof,
         C::TargetColumnCatalogProof,
     ];
-    assert_eq!(events.len(), 19, "the exact proof and observation sequence");
+    assert_eq!(events.len(), 23, "the exact proof and observation sequence");
     for (actual, id) in events.iter().zip(expected_proof) {
         assert_eq!(actual, &format!("query:{}", id.spec().sql));
     }
-    assert_eq!(events[13], format!("execute:{SET_TRANSACTION_READ_ONLY}"));
-    assert!(events[14].contains("tool=oracle_query */ SELECT o.id FROM app.orders o"));
+    assert_eq!(events[17], format!("execute:{SET_TRANSACTION_READ_ONLY}"));
+    assert!(events[18].contains("tool=oracle_query */ SELECT o.id FROM app.orders o"));
     assert_eq!(
-        events[15],
+        events[19],
         format!("query:{}", C::SessionContext.spec().sql)
     );
-    assert_eq!(events[16], format!("query:{}", C::SessionRoles.spec().sql));
-    assert!(events[17].contains("FROM all_policies WHERE object_owner = :1 AND object_name = :2"));
+    assert_eq!(events[20], format!("query:{}", C::SessionRoles.spec().sql));
+    assert!(events[21].contains("FROM all_policies WHERE object_owner = :1 AND object_name = :2"));
     assert_eq!(
-        events[18],
+        events[22],
         format!("query:{}", C::AllPoliciesVisibility.spec().sql)
     );
     assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);

@@ -879,7 +879,12 @@ pub async fn observe_relation_security(
         };
         if relation.db_link.is_some()
             || relation.identity.object_id == 0
-            || !matches!(relation.kind, CatalogObjectKind::Table)
+            || !matches!(
+                relation.kind,
+                CatalogObjectKind::Table
+                    | CatalogObjectKind::View
+                    | CatalogObjectKind::MaterializedView
+            )
             || relation.owner.is_empty()
             || relation.name.is_empty()
         {
@@ -894,17 +899,21 @@ pub async fn observe_relation_security(
                 observation.ols = RelationSecurityState::NotInstalled;
             }
             Ok(true) => {
-                let table_policies = run_catalog_query(
-                    cx,
-                    conn,
-                    CatalogQueryId::ReadOlsTablePolicies,
-                    &[
-                        OracleBind::from(relation.owner.as_str()),
-                        OracleBind::from(relation.name.as_str()),
-                        OracleBind::I64(2),
-                    ],
-                )
-                .await;
+                let table_policies = if relation.kind == CatalogObjectKind::Table {
+                    run_catalog_query(
+                        cx,
+                        conn,
+                        CatalogQueryId::ReadOlsTablePolicies,
+                        &[
+                            OracleBind::from(relation.owner.as_str()),
+                            OracleBind::from(relation.name.as_str()),
+                            OracleBind::I64(2),
+                        ],
+                    )
+                    .await
+                } else {
+                    Ok(Vec::new())
+                };
                 let schema_policies = run_catalog_query(
                     cx,
                     conn,
@@ -4150,6 +4159,23 @@ mod tests {
                 Some(if ols_installed { "TRUE" } else { "FALSE" }),
             )])],
         ]
+    }
+
+    #[test]
+    fn unprotected_view_has_current_relation_security_evidence() {
+        run_with_cx(|cx| async move {
+            let mut view = table_object();
+            view.kind = CatalogObjectKind::View;
+            let mut responses = relation_security_clear_prefix(false);
+            responses.extend([Vec::new(), Vec::new()]);
+            let conn = ScriptedRows::new(responses);
+            let evidence = observe_relation_security(&cx, &conn, &[view])
+                .await
+                .expect("readable empty RAS and redaction catalogs prove no view policy");
+            assert_eq!(evidence[0].ols, RelationSecurityState::NotInstalled);
+            assert_eq!(evidence[0].ras, RelationSecurityState::Absent);
+            assert_eq!(evidence[0].redaction, RelationSecurityState::Absent);
+        });
     }
 
     #[test]
