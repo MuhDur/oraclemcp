@@ -13,7 +13,7 @@
 
 > **Governed, least-privilege Oracle Database access for AI agents — in pure Rust.**
 
-`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database. Every raw statement the agent submits is classified **before** it can reach Oracle: read tools admit only statements *proven* read-only, and non-read SQL runs only through an explicit, profile-gated path that **rolls DML back by default** and requires a preview-derived grant before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The core is engine-free and `#![forbid(unsafe_code)]`.
+`oraclemcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that gives an AI agent governed, least-privilege access to an Oracle database. Every raw statement the agent submits is classified **before** it can reach Oracle: read tools admit only statements *proven* read-only, and non-read SQL runs only through an explicit, profile-gated path that **rolls DML back by default** and requires a preview-derived grant before commit. Session elevation is explicit, temporary, and capped by profile `max_level`. The engine-free SQL guard remains independent of PL/SQL intelligence; the default binary embeds the offline engine. All crates use `#![forbid(unsafe_code)]`.
 
 > _An independent open-source project — not affiliated with Oracle. See [how it compares](#how-it-compares) to Oracle's own MCP servers._
 
@@ -35,7 +35,7 @@ flowchart LR
 
 | | |
 |---|---|
-| **Tools** | **34 governed MCP tools** + 25 compatibility aliases, each with a real JSON Schema and MCP safety hints |
+| **Tools** | **43 governed MCP tools** + 25 compatibility aliases, each with a real JSON Schema and MCP safety hints |
 | **Safety** | fail-closed SQL classifier · 4-level ladder `READ_ONLY → READ_WRITE → DDL → ADMIN` · DML rollback-by-default · signed, hash-chained audit |
 | **Auth** | username/password over TCP · IAM / OCI ADB token · TLS/TCPS + PEM · Oracle wallet (`cwallet.sso`) |
 | **Oracle** | 18c · 21c · 23ai — including governed native **VECTOR** search |
@@ -193,6 +193,15 @@ The tables below are generated from the server's tool registry — the same desc
 | `oracle_top_queries` | Oracle Top Queries | Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). | `READ_ONLY` | no |
 | `oracle_plan_timeline` | Oracle Plan Timeline | Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. | `READ_ONLY` | no |
 | `oracle_db_health` | Oracle Db Health | Read-only DBA health-check suite. | `READ_ONLY` | no |
+| `oracle_plsql_parse` | Oracle Plsql Parse | Parse PL/SQL source with the offline plsql-intelligence lowerer and return declaration and diagnostic counts. | `READ_ONLY` | no |
+| `oracle_plsql_analyze` | Oracle Plsql Analyze | Run the offline plsql-intelligence engine over a local project root and return doctor summaries. | `READ_ONLY` | no |
+| `oracle_plsql_what_breaks` | Oracle Plsql What Breaks | Predict invalidation and recompilation impact for a PL/SQL ChangeSet without touching Oracle. | `READ_ONLY` | no |
+| `oracle_plsql_lineage` | Oracle Plsql Lineage | Run offline dependency-lineage traversal from a logical object id in a local PL/SQL project. | `READ_ONLY` | no |
+| `oracle_lineage` | Oracle Lineage | Live-verified COLUMN lineage: cross-check source-derived owner.object.column edges against the guarded Oracle catalog and mark verified, missing, or type-mismatched drift. | `READ_ONLY` | no |
+| `oracle_plsql_sast` | Oracle Plsql Sast | Run the offline plsql-sast rule harness over a local PL/SQL project and return findings plus skipped-rule evidence. | `READ_ONLY` | no |
+| `oracle_plsql_doc` | Oracle Plsql Doc | Extract doc comments from source or render an existing plsql-doc DocSet. | `READ_ONLY` | no |
+| `oracle_plsql_live_snapshot` | Oracle Plsql Live Snapshot | Extract live Oracle dictionary rowsets and normalize them through plsql-intelligence CatalogSnapshotBuilder. | `READ_ONLY` | no |
+| `oracle_plsql_blast_radius` | Oracle Plsql Blast Radius | Extract a live catalog snapshot, then run the plsql-cicd change-impact predictor for a proposed ChangeSet. | `READ_ONLY` | no |
 <!-- /generated:tools -->
 
 Every advertised tool descriptor includes a human title plus explicit MCP annotations; these hints are advisory for clients, while the fail-closed classifier and operating-level gate remain the enforcement boundary. `oracle_query` and `oracle_explain_plan` also advertise `outputSchema`, and query results keep Oracle `NUMBER` cells as strings by default (opt into `numbers_as_float=true` explicitly). Beyond `tools/*`, `initialize` advertises `resources`, `prompts`, and `completions` (protocol `2025-11-25`): `resources/list` exposes `oracle://capabilities` and `oracle://tools`, and read templates for `oracle://schema/{owner}` and `oracle://object/{owner}/{type}/{name}` route through the same safe dispatch path.
@@ -263,7 +272,7 @@ rustup toolchain install nightly-2026-05-11 --component rustfmt --component clip
 cargo +nightly-2026-05-11 install oraclemcp
 ```
 
-Live database access is built in through the pure-Rust thin driver — **no Oracle Instant Client, ODPI-C, or C toolchain**. Optionally set `TNS_ADMIN` for net-service-name connections. An optional `--features plsql-intelligence` build embeds the offline PL/SQL engine (also published as the `:plsql-intelligence-latest` GHCR image).
+Live database access is built in through the pure-Rust thin driver — **no Oracle Instant Client, ODPI-C, or C toolchain**. Optionally set `TNS_ADMIN` for net-service-name connections. The default build embeds the offline PL/SQL engine; `--no-default-features` omits it.
 
 ## License
 

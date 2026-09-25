@@ -893,10 +893,9 @@ mod tests {
     /// so `cargo test` catches drift even without the shell gate.
     ///
     /// The README tool/alias tables describe the DEFAULT distribution:
-    /// `scripts/docs_generate.sh` renders them from a `cargo build -p oraclemcp`
-    /// with no features. Enabling `plsql-intelligence` legitimately adds the
-    /// `oracle_plsql_*` rows to the registry, so that comparison only holds
-    /// when the feature is off. The config block is feature-independent and is
+    /// `scripts/docs_generate.sh` renders them from `cargo build -p oraclemcp`,
+    /// whose default feature set includes `plsql-intelligence` and its
+    /// `oracle_plsql_*` rows. The config block is feature-independent and is
     /// always checked.
     #[test]
     fn committed_generated_blocks_match_a_fresh_render() {
@@ -910,7 +909,7 @@ mod tests {
             "config reference drifted; run scripts/docs_generate.sh --write"
         );
 
-        #[cfg(not(feature = "plsql-intelligence"))]
+        #[cfg(feature = "plsql-intelligence")]
         {
             let readme =
                 std::fs::read_to_string(root.join("README.md")).expect("README.md readable");

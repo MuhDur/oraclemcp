@@ -1,4 +1,4 @@
-//! The advertised tool surface for the engine-free `oraclemcp` server.
+//! The advertised tool surface for the `oraclemcp` server.
 //!
 //! Pure data — no database access. [`tool_registry`] builds the
 //! governed, least-privilege config-inspection, read, and guarded execute tools the server dispatches (see
@@ -1959,7 +1959,8 @@ pub fn tool_registry() -> ToolRegistry {
 /// reflects whether the Oracle driver is compiled in, not whether a database is
 /// currently reachable; `http` reflects whether the
 /// Streamable HTTP transport is exposed by `serve`. The engine tier reflects the
-/// optional `plsql-intelligence` feature; default builds stay engine-free.
+/// `plsql-intelligence` feature, included in default builds and omitted by
+/// `--no-default-features`.
 pub fn capabilities(
     version: impl Into<String>,
     built_with_live_db: bool,

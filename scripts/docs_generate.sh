@@ -13,9 +13,9 @@
 #
 # `--write` regenerates every block in place. `--check` renders fresh blocks and
 # fails (exit 1) with a unified diff on any drift. The README tables document
-# the default distribution, so every mode refuses a renderer built with
-# `plsql-intelligence`. `--selftest` proves the gate refuses both a tampered
-# block and a feature-enabled renderer.
+# the default distribution, so every mode requires a renderer built with the
+# default `plsql-intelligence` feature. `--selftest` proves the gate refuses a
+# tampered block and a renderer missing that default feature.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,8 +69,8 @@ fi
 
 # README's tool and alias tables describe the default distribution. The config
 # reference is feature-independent, but handling the two outputs together means
-# a feature build must not quietly rewrite README with its extra PL/SQL tools.
-require_default_feature_renderer() {
+# docs must always be rendered from the default-feature build.
+require_default_renderer() {
   local renderer="$1" engine
   if ! engine="$("$renderer" --json info | python3 -c '
 import json
@@ -85,11 +85,11 @@ print(str(engine).lower())
     echo "docs-generate: could not verify renderer feature set from $renderer --json info" >&2
     return 1
   fi
-  if [ "$engine" = "false" ]; then
+  if [ "$engine" = "true" ]; then
     return 0
   fi
-  if [ "$engine" = "true" ]; then
-    echo "docs-generate: renderer $renderer was built with plsql-intelligence; refusing to generate default-distribution docs" >&2
+  if [ "$engine" = "false" ]; then
+    echo "docs-generate: renderer $renderer is missing default plsql-intelligence; refusing to generate default-distribution docs" >&2
     echo "  build the default renderer with: CARGO_TARGET_DIR=$ROOT scripts/build_lease.sh -- cargo build -p oraclemcp" >&2
     return 1
   fi
@@ -97,7 +97,7 @@ print(str(engine).lower())
   return 1
 }
 
-if ! require_default_feature_renderer "$BIN"; then
+if ! require_default_renderer "$BIN"; then
   exit 2
 fi
 
@@ -195,23 +195,32 @@ done
 # Prove the comparison actually detects drift before trusting a pass.
 selftest() {
   local clean="README.md" tampered="$TMP_DIR/README.tampered.md"
-  local feature_renderer="$TMP_DIR/plsql-renderer" feature_output
+  local default_renderer="$TMP_DIR/default-renderer"
+  local no_engine_renderer="$TMP_DIR/no-engine-renderer" no_engine_output
   local explicit_target="$TMP_DIR/explicit-target" explicit_renderer
   local fallback_target="$TMP_DIR/fallback-target/debug/oraclemcp" selected
 
-  # The default README must never be generated from a feature build. A tiny
-  # renderer fixture exercises the exact `--json info` contract used above,
+  # The default README must come from the default engine-enabled binary. Tiny
+  # renderer fixtures exercise the exact `--json info` contract used above,
   # independent of which feature set compiled the real binary.
   printf '%s\n' \
     '#!/usr/bin/env sh' \
-    "printf '%s\\n' '{\"engine\":true}'" > "$feature_renderer"
-  chmod +x "$feature_renderer"
-  if feature_output="$(require_default_feature_renderer "$feature_renderer" 2>&1)"; then
-    echo "docs-generate: selftest failed: a plsql-intelligence renderer was accepted" >&2
+    "printf '%s\\n' '{\"engine\":true}'" > "$default_renderer"
+  chmod +x "$default_renderer"
+  if ! require_default_renderer "$default_renderer"; then
+    echo "docs-generate: selftest failed: the default feature renderer was refused" >&2
     return 1
   fi
-  if ! printf '%s\n' "$feature_output" | grep -Fq 'plsql-intelligence'; then
-    echo "docs-generate: selftest failed: feature renderer refusal was not diagnostic" >&2
+  printf '%s\n' \
+    '#!/usr/bin/env sh' \
+    "printf '%s\\n' '{\"engine\":false}'" > "$no_engine_renderer"
+  chmod +x "$no_engine_renderer"
+  if no_engine_output="$(require_default_renderer "$no_engine_renderer" 2>&1)"; then
+    echo "docs-generate: selftest failed: a renderer missing the default feature was accepted" >&2
+    return 1
+  fi
+  if ! printf '%s\n' "$no_engine_output" | grep -Fq 'plsql-intelligence'; then
+    echo "docs-generate: selftest failed: missing-default-feature refusal was not diagnostic" >&2
     return 1
   fi
 
@@ -243,7 +252,7 @@ selftest() {
     echo "docs-generate: selftest failed: a tampered generated block was accepted" >&2
     return 1
   fi
-  echo "docs-generate: selftest OK (drift detected, clean render accepted)"
+  echo "docs-generate: selftest OK (default renderer required, drift detected, clean render accepted)"
 }
 
 case "$mode" in

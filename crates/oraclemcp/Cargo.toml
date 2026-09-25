@@ -1,7 +1,7 @@
 [package]
 name = "oraclemcp"
 version = "0.11.0"
-description = "Engine-free, governed least-privilege Oracle Database MCP server with a fail-closed SQL guard and confirmation-gated operating levels (independent open-source project)."
+description = "Governed least-privilege Oracle Database MCP server with PL/SQL intelligence, a fail-closed SQL guard, and confirmation-gated operating levels (independent open-source project)."
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -23,13 +23,13 @@ disabled-strategies = ["quick-install", "compile"]
 pkg-fmt = "zip"
 
 [features]
-default = []
+default = ["plsql-intelligence"]
 # Explicitly select the official synchronous adapter. `oraclemcp-db` enables
 # this by default so shipped builds always contain the bounded connect-time
 # alternate; driver-cx remains the primary route.
 oracledb = ["oraclemcp-db/oracledb"]
-# Opt in to the published PL/SQL intelligence engine crates. Default builds stay
-# engine-free; the feature build resolves the offline engine from crates.io.
+# Embed the published PL/SQL intelligence engine crates for the default build.
+# The offline engine resolves from the pinned plsql-intelligence workspace rev.
 plsql-intelligence = [
     "dep:chrono",
     "dep:plsql-core",

@@ -1,4 +1,4 @@
-//! End-to-end MCP suite for the engine-free `oraclemcp` server (Phase-E E-2b).
+//! End-to-end MCP suite for the `oraclemcp` server (Phase-E E-2b).
 //!
 //! Mirrors `oraclemcp-core/tests/e2e_mcp.rs`: drives THIS server — built from
 //! the real [`oraclemcp::registry::tool_registry`] + [`OracleDispatcher`] over a
