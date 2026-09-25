@@ -392,7 +392,7 @@ mod live {
     fn assert_matches_expected_dropcol_golden(statuses: &BTreeMap<String, String>) {
         let expected_json = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../plsql-intelligence/corpus/lab/hero_diff_dropcol/expected_what_breaks.json"
+            "/tests/fixtures/hero_diff_dropcol/expected_what_breaks.json"
         ));
         let expected: Value =
             serde_json::from_str(expected_json).expect("expected what-breaks golden is valid JSON");
@@ -492,7 +492,7 @@ mod live {
 
         let spec = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../plsql-intelligence/corpus/lab/hero_diff_dropcol/before/pkg_customer_report.pks"
+            "/tests/fixtures/hero_diff_dropcol/before/pkg_customer_report.pks"
         ))
         .replace(
             "CREATE OR REPLACE PACKAGE pkg_customer_report",
@@ -502,7 +502,7 @@ mod live {
 
         let body = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../plsql-intelligence/corpus/lab/hero_diff_dropcol/before/pkg_customer_report.pkb"
+            "/tests/fixtures/hero_diff_dropcol/before/pkg_customer_report.pkb"
         ))
         .replace(
             "CREATE OR REPLACE PACKAGE BODY pkg_customer_report",
@@ -518,7 +518,7 @@ mod live {
 
         let proc_src = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../plsql-intelligence/corpus/lab/hero_diff_dropcol/before/proc_segment_summary.sql"
+            "/tests/fixtures/hero_diff_dropcol/before/proc_segment_summary.sql"
         ))
         .replace(
             "CREATE OR REPLACE PROCEDURE proc_segment_summary",

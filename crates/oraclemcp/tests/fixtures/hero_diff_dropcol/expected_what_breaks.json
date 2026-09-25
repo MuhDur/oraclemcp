@@ -1,0 +1,74 @@
+{
+  "schema_id": "plsql.lineage.what_breaks_golden",
+  "schema_version": "1.0.0",
+  "scenario": "ALTER TABLE customers DROP COLUMN legacy_segment — §1.4 commercial nucleus hero scenario",
+  "change_set": {
+    "old_run_id": null,
+    "new_run_id": null,
+    "changes": [
+      {
+        "kind": "ColumnDrop",
+        "object_id": "customers.legacy_segment",
+        "summary": "column legacy_segment removed from table customers",
+        "breaking_for_dependents": true
+      }
+    ]
+  },
+  "what_breaks": {
+    "nodes": [
+      {
+        "logical_id": "v_high_value_customers",
+        "kind": "View",
+        "confidence": "Exact",
+        "oracle_status": "INVALID",
+        "reason": "View SELECT-references customers.legacy_segment directly; column no longer exists after DROP COLUMN"
+      },
+      {
+        "logical_id": "pkg_customer_report",
+        "kind": "PackageBody",
+        "confidence": "Exact",
+        "oracle_status": "INVALID",
+        "reason": "Package body references customers.legacy_segment in get_customers_by_segment (WHERE clause + SELECT list), get_segment_summary (GROUP BY), and audit_segment_access (%TYPE anchor + SELECT). All three become invalid."
+      },
+      {
+        "logical_id": "proc_segment_summary",
+        "kind": "Procedure",
+        "confidence": "Exact",
+        "oracle_status": "INVALID",
+        "reason": "Procedure references customers.legacy_segment via %TYPE anchor and a SELECT in the FOR loop cursor."
+      }
+    ],
+    "edges": [
+      {
+        "source": "customers.legacy_segment",
+        "target": "v_high_value_customers",
+        "kind": "ColumnDependency",
+        "confidence": "Exact"
+      },
+      {
+        "source": "customers.legacy_segment",
+        "target": "pkg_customer_report",
+        "kind": "ColumnDependency",
+        "confidence": "Exact"
+      },
+      {
+        "source": "customers.legacy_segment",
+        "target": "proc_segment_summary",
+        "kind": "ColumnDependency",
+        "confidence": "Exact"
+      }
+    ],
+    "unknown_reasons": []
+  },
+  "objects_not_broken": [
+    "pkg_customer_report PACKAGE SPEC (spec does not reference legacy_segment; spec status remains VALID)"
+  ],
+  "audit_trail": {
+    "input_diff": "change.diff",
+    "before_root": "before/",
+    "after_root": "after/",
+    "parser": "plsql_lineage::parse_change_file",
+    "oracle_ground_truth": "ALL_OBJECTS.STATUS=INVALID confirmed on all three dependents via live Oracle XE 23ai",
+    "expected_unresolved_count": 0
+  }
+}
