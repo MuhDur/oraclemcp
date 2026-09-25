@@ -1,0 +1,19 @@
+{
+  "run_id": "orchestrator-local-verify-20260925T0908Z",
+  "lane": "free23",
+  "source_sha": "c16a49adf257737322af78d85d4e1b2336d94653",
+  "kind": "live-oracle-k3-gated-run",
+  "runner": "orchestrator (IvoryHorizon) clean worktree oraclemcp-gate-prepush, build lease; ORACLEMCP_LIVE_XE=1; FREE 23ai localhost:1523/FREEPDB1 as least-privilege E2E_ORACLE (CONNECT, RESOURCE, CREATE VIEW/MATERIALIZED VIEW/SYNONYM, EXECUTE ON DBMS_FLASHBACK)",
+  "command": "cargo test -p oraclemcp-db --features live-xe,oracledb --test live_oracle -- live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup --nocapture --test-threads=1",
+  "result": "1 passed; 0 failed",
+  "cases": [
+    {
+      "case_id": "live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup",
+      "lane": "free23",
+      "account": "E2E_ORACLE",
+      "result": "full_scan(cost=Some(19), card=Some(5000)) vs pk_lookup(cost=Some(2), card=Some(1))",
+      "verdict": "pass"
+    }
+  ],
+  "note": "Local orchestrator run, not a scheduled CI lane; the live suite is runtime-gated so this gated run is the live proof. The same commit's compile gate (cargo check -p oraclemcp-db --tests --features live-xe,oracledb; cargo check -p oraclemcp --tests --features live-xe) passed rc=0."
+}

@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T09:10:00Z",
+  "bead_id": "oraclemcp-dt3cf",
+  "scope": {
+    "summary": "Repair the rotted feature-gated live Oracle test target (live_oracle.rs K3 migrated to resolve_plan_table + unique PlanStatementId per EXPLAIN, assertions unchanged) and add a per-push CI compile gate for env-gated live test targets so they cannot rot silently again.",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/live_oracle.rs",
+      ".github/workflows/ci.yml"
+    ],
+    "out_of_scope": [
+      "Running the full live_oracle suite in CI (needs an Oracle service); the CI gate is compile-only by design."
+    ]
+  },
+  "source": {
+    "sha": "c16a49adf257737322af78d85d4e1b2336d94653",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "compile gate (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "Clean worktree at c16a49ad: cargo check -p oraclemcp-db --tests --features live-xe,oracledb rc=0; cargo check -p oraclemcp --tests --features live-xe rc=0 (these fail at 61190636 with four E0061 errors, per the bead report). Diff review: only the K3 call sites changed; no assertion lines touched."
+      },
+      {
+        "name": "live K3 (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "At c16a49ad, ORACLEMCP_LIVE_XE=1 as least-privilege E2E_ORACLE on free23: live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup 1 passed; full_scan(cost=19, card=5000) above pk_lookup(cost=2, card=1). Assignee also reported XE21/XE18 as SYSTEM passing."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "live-oracle-k3-gated-run",
+        "path": "tests/artifacts/evidence/live/live-oracle-k3-dt3cf-free23-20260925T0908Z.json",
+        "sha": "c16a49adf257737322af78d85d4e1b2336d94653"
+      }
+    ]
+  },
+  "limitations": [
+    "The CI gate proves the live targets compile on every push, not that they pass; live pass is proven by gated runs like this one.",
+    "XE21/XE18 runs are the assignee's report, not orchestrator re-executed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
