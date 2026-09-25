@@ -226,6 +226,21 @@ fn every_sql_path_goes_through_the_read_executor() {
         // is acceptable, but a raw SQL call or a read route that never reaches
         // the provenance-aware connection is not.
         let result = dispatcher.dispatch(name, args_for(name));
+        if name == "oracle_plan_timeline" {
+            let error = result.expect_err("no license attestation must refuse plan history");
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+            assert_eq!(
+                log.tags.lock().expect("provenance log").len(),
+                tagged_before,
+                "unlicensed plan history must refuse before catalog SQL"
+            );
+            assert_eq!(
+                log.untagged.load(Ordering::SeqCst),
+                untagged_before,
+                "unlicensed plan history must not issue untagged SQL"
+            );
+            continue;
+        }
         validate_dispatched_provenance(route, tagged_before, untagged_before, &log)
             .unwrap_or_else(|error| panic!("{name}: {error}; dispatch={result:?}"));
     }

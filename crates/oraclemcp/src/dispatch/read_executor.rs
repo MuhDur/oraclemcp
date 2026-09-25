@@ -2153,14 +2153,18 @@ impl OracleDispatcher {
         cx: &Cx,
         conn: &dyn OracleConnection,
         metric: oraclemcp_db::TopSqlMetric,
-        top_n: u32,
-        min_pct: Option<u8>,
-        historical: bool,
+        options: TopQueriesOptions,
     ) -> Result<Value, ErrorEnvelope> {
-        let source = oraclemcp_db::resolve_top_sql_source(cx, conn, historical)
-            .await
-            .map_err(DbError::into_envelope)?;
-        let (id, binds) = oraclemcp_db::top_sql_query(source, metric, top_n, min_pct)?;
+        let source = oraclemcp_db::resolve_top_sql_source_with_license(
+            cx,
+            conn,
+            options.historical,
+            options.diagnostics_pack_licensed,
+        )
+        .await
+        .map_err(DbError::into_envelope)?;
+        let (id, binds) =
+            oraclemcp_db::top_sql_query(source, metric, options.top_n, options.min_pct)?;
         let rows = run_catalog_query(cx, conn, id, &binds)
             .await
             .map_err(DbError::into_envelope)?;
@@ -2636,6 +2640,13 @@ impl OracleDispatcher {
         restore?;
         Ok(read)
     }
+}
+
+pub(super) struct TopQueriesOptions {
+    pub(super) top_n: u32,
+    pub(super) min_pct: Option<u8>,
+    pub(super) historical: bool,
+    pub(super) diagnostics_pack_licensed: bool,
 }
 
 #[cfg(test)]

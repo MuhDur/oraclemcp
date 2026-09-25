@@ -80,6 +80,8 @@ default_level = "READ_ONLY"
 # require_hard_parse_evidence = true
 # Refuse a read when a requested optimizer-cost estimate is unavailable; independent of callback-safety evidence. Default false admits with a cost_unavailable observation and readable audit record.
 # require_query_cost_estimate = true
+# Explicit operator attestation that this Oracle target is licensed for the Diagnostics Pack; default false. The server also requires Oracle's activation setting before any AWR access.
+# diagnostics_pack_licensed = false
 # Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
 # max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.
@@ -183,6 +185,8 @@ default_level = "READ_ONLY"
 # require_hard_parse_evidence = true
 # Refuse a read when a requested optimizer-cost estimate is unavailable; independent of callback-safety evidence. Default false admits with a cost_unavailable observation and readable audit record.
 # require_query_cost_estimate = true
+# Explicit operator attestation that this Oracle target is licensed for the Diagnostics Pack; default false. The server also requires Oracle's activation setting before any AWR access.
+# diagnostics_pack_licensed = false
 # Per-principal live-subscription cap; default 4, and each admitted subscription reserves one EMON connection against the database ceiling.
 # max_subscriptions = 4
 # Per-profile MCP exposure; default exposed (opt-out). Set false to hide this profile from the agent surface.

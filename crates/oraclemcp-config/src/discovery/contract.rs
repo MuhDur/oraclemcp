@@ -98,7 +98,7 @@ pub const TOP_LEVEL_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
 /// Per-profile [`crate::ConnectionProfile`] field dispositions (design spec §C.2).
 ///
 /// Enumerates every serde field of `ConnectionProfile`
-/// (`crates/oraclemcp-config/src/profile.rs`, 30 serde fields).
+/// (`crates/oraclemcp-config/src/profile.rs`, 39 serde fields).
 /// The schema-drift test asserts this list matches the struct's serde surface
 /// exactly.
 pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
@@ -231,6 +231,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         field: "require_query_cost_estimate",
         disposition: Disposition::Commented,
         help: "Refuse a read when a requested optimizer-cost estimate is unavailable; independent of callback-safety evidence. Default false admits with a cost_unavailable observation and readable audit record.",
+    },
+    FieldDisposition {
+        field: "diagnostics_pack_licensed",
+        disposition: Disposition::Commented,
+        help: "Explicit operator attestation that this Oracle target is licensed for the Diagnostics Pack; default false. The server also requires Oracle's activation setting before any AWR access.",
     },
     FieldDisposition {
         field: "max_subscriptions",
@@ -371,6 +376,7 @@ mod tests {
             require_fga_evidence: Some(true),
             require_hard_parse_evidence: Some(true),
             require_query_cost_estimate: Some(false),
+            diagnostics_pack_licensed: Some(false),
             max_subscriptions: Some(4),
             mcp_exposed: Some(true),
             dashboard_ddl_workbench: Some(false),
@@ -418,11 +424,11 @@ mod tests {
             actual.difference(&documented).collect::<Vec<_>>(),
             documented.difference(&actual).collect::<Vec<_>>(),
         );
-        // R36 adds the independent query-cost estimate key, bringing this table to 38.
+        // The Diagnostics Pack license attestation is an additional explicit opt-in.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            38,
-            "ConnectionProfile has 38 serde fields"
+            39,
+            "ConnectionProfile has 39 serde fields"
         );
     }
 

@@ -14366,9 +14366,22 @@ impl OracleDispatcher {
                             cx,
                             &guarded_conn,
                             metric,
-                            top_n,
-                            min_pct,
-                            historical,
+                            read_executor::TopQueriesOptions {
+                                top_n,
+                                min_pct,
+                                historical,
+                                diagnostics_pack_licensed: state
+                                    .profile_generation
+                                    .as_ref()
+                                    .is_some_and(|lease| {
+                                        lease
+                                            .config()
+                                            .and_then(|config| config.profile(lease.profile()))
+                                            .is_some_and(
+                                                ConnectionProfile::diagnostics_pack_licensed,
+                                            )
+                                    }),
+                            },
                         )
                         .await
                     },
@@ -14392,9 +14405,19 @@ impl OracleDispatcher {
                     timeout_seconds,
                     CompletionPolicy::EnforceDeadlineAfterBody,
                     || async {
-                        let timeline =
-                            oraclemcp_db::plan_cost_timeline(cx, &guarded_conn, &sql_id, max_points)
-                                .await?;
+                        let timeline = oraclemcp_db::plan_cost_timeline_with_license(
+                            cx,
+                            &guarded_conn,
+                            &sql_id,
+                            max_points,
+                            state.profile_generation.as_ref().is_some_and(|lease| {
+                                lease
+                                    .config()
+                                    .and_then(|config| config.profile(lease.profile()))
+                                    .is_some_and(ConnectionProfile::diagnostics_pack_licensed)
+                            }),
+                        )
+                        .await?;
                         Ok(json!({
                             "sql_id": timeline.sql_id,
                             "points": timeline.points,

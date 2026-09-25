@@ -1,11 +1,10 @@
 //! Tier-3 AWR/ASH performance diagnostics, license-gated (plan §11.3; bead P3-3
 //! / oracle-qmwz.4.3). AWR (`DBA_HIST_*`) and ASH (`V$ACTIVE_SESSION_HISTORY`)
-//! require a licensed **Diagnostics Pack** (`control_management_pack_access` ≠
-//! `NONE`) **and** DBA-tier dictionary access. This is opportunistic, NOT a
-//! headline feature: when the pack is not licensed we fall back to the free
-//! **Statspack** (`STATS$*`) if it is installed, and otherwise return a clear
-//! structured error — **never a silent empty result** (the §5.11 degradation
-//! contract, gated by the P2-9 privilege matrix).
+//! require both an explicit operator Diagnostics Pack license attestation and
+//! Oracle's technical activation setting, plus DBA-tier dictionary access.
+//! With explicit license attestation but no active pack, use free **Statspack**
+//! (`STATS$*`) when installed; without attestation, historical requests refuse
+//! before querying the database.
 
 use crate::error_envelope::{ErrorClass, ErrorEnvelope};
 use crate::{CatalogQueryId, OracleBind, run_catalog_query};
@@ -123,10 +122,11 @@ pub(crate) async fn detect_statspack_for_preflight(
     }
 }
 
-/// Detect a licensed Diagnostics Pack: `control_management_pack_access` includes
-/// `DIAGNOSTIC`. Best-effort and **fail closed** — any error (including the
-/// common "no SELECT on V$PARAMETER") means "not licensed", so we never touch
-/// `DBA_HIST_*` on an unlicensed instance.
+/// Detect whether Oracle activated Diagnostics Pack functionality through
+/// `control_management_pack_access`. This is technical availability only,
+/// not proof that the organization holds the required license. Callers must
+/// also have an explicit operator license attestation before accessing
+/// `DBA_HIST_*`.
 pub async fn detect_diagnostics_pack(
     cx: &asupersync::Cx,
     conn: &dyn crate::connection::OracleConnection,
@@ -136,9 +136,9 @@ pub async fn detect_diagnostics_pack(
         .unwrap_or(false)
 }
 
-/// Detect Diagnostics Pack licensing for the DBA-suite preflight while
+/// Detect Diagnostics Pack activation for the DBA-suite preflight while
 /// preserving structurally uncertain connection failures. Proven
-/// absence/privilege failures remain fail-closed as "not licensed";
+/// absence/privilege failures remain fail-closed as "not available";
 /// cancellation, session loss, and arbitrary adapter/query failures propagate
 /// because the preflight cannot truthfully report connection posture afterward.
 pub(crate) async fn detect_diagnostics_pack_for_preflight(
@@ -157,9 +157,10 @@ pub(crate) async fn detect_diagnostics_pack_for_preflight(
 }
 
 /// Resolve the top-SQL source from the request. The free live cursor cache is
-/// the default; `historical` opts into AWR (only when the Diagnostics Pack is
-/// licensed) → Statspack → structured-unavailable. We **never** probe or query a
-/// licensed pack object unless the license probe confirmed it. Structurally
+/// the default; `historical` opts into AWR only with explicit operator license
+/// attestation and an active Oracle pack setting. Historical access without
+/// that attestation is a typed refusal, even when Statspack is installed.
+/// Structurally
 /// uncertain probe failures propagate so the connection owner can quarantine
 /// or discard the affected physical session instead of relabelling uncertainty
 /// as an ordinary unavailable feature.
@@ -168,8 +169,26 @@ pub async fn resolve_top_sql_source(
     conn: &dyn crate::connection::OracleConnection,
     historical: bool,
 ) -> Result<DiagnosticsSource, crate::error::DbError> {
+    resolve_top_sql_source_with_license(cx, conn, historical, false).await
+}
+
+/// Resolve the top-SQL source using an operator's explicit Diagnostics Pack
+/// license attestation as well as Oracle's activation setting. The Oracle
+/// parameter reports whether the feature is enabled in the instance; it does
+/// not establish that the organization purchased the license.
+pub async fn resolve_top_sql_source_with_license(
+    cx: &asupersync::Cx,
+    conn: &dyn crate::connection::OracleConnection,
+    historical: bool,
+    diagnostics_pack_licensed: bool,
+) -> Result<DiagnosticsSource, crate::error::DbError> {
     if !historical {
         return Ok(DiagnosticsSource::LiveCursor);
+    }
+    if !diagnostics_pack_licensed {
+        return Err(crate::error::DbError::Refused(Box::new(
+            diagnostics_pack_required("historical top-SQL query"),
+        )));
     }
     if detect_diagnostics_pack_for_preflight(cx, conn).await? {
         return Ok(DiagnosticsSource::AwrAsh);
@@ -315,11 +334,10 @@ fn normalize_sql_id(sql_id: &str) -> Result<String, ErrorEnvelope> {
     .with_next_step("obtain the SQL ID from oracle_top_queries or a trusted Oracle diagnostic"))
 }
 
-fn diagnostics_pack_required() -> ErrorEnvelope {
+fn diagnostics_pack_required(feature: &str) -> ErrorEnvelope {
     ErrorEnvelope::new(
         ErrorClass::PolicyDenied,
-        "historical plan-cost timeline requires a licensed Oracle Diagnostics Pack; \
-         control_management_pack_access did not prove DIAGNOSTIC access",
+        format!("{feature} requires an explicit Oracle Diagnostics Pack license attestation and active DIAGNOSTIC access"),
     )
     .with_next_step(
         "enable the Diagnostics Pack only when your Oracle license permits it, then retry",
@@ -370,10 +388,26 @@ pub async fn plan_cost_timeline(
     sql_id: &str,
     max_points: u32,
 ) -> Result<PlanCostTimeline, ErrorEnvelope> {
+    plan_cost_timeline_with_license(cx, conn, sql_id, max_points, false).await
+}
+
+/// Read AWR plan history only after both an operator's explicit license
+/// attestation and Oracle's activation setting are proven.
+#[allow(clippy::result_large_err)]
+pub async fn plan_cost_timeline_with_license(
+    cx: &asupersync::Cx,
+    conn: &dyn crate::connection::OracleConnection,
+    sql_id: &str,
+    max_points: u32,
+    diagnostics_pack_licensed: bool,
+) -> Result<PlanCostTimeline, ErrorEnvelope> {
     let sql_id = normalize_sql_id(sql_id)?;
+    if !diagnostics_pack_licensed {
+        return Err(diagnostics_pack_required("historical plan-cost timeline"));
+    }
     match detect_diagnostics_pack_for_preflight(cx, conn).await {
         Ok(true) => {}
-        Ok(false) => return Err(diagnostics_pack_required()),
+        Ok(false) => return Err(diagnostics_pack_required("historical plan-cost timeline")),
         Err(error) => return Err(error.into_envelope()),
     }
 
@@ -552,7 +586,7 @@ mod tests {
                 "license probe deadline exceeded".to_owned(),
             ))]);
 
-            let error = resolve_top_sql_source(&cx, &conn, true)
+            let error = resolve_top_sql_source_with_license(&cx, &conn, true, true)
                 .await
                 .expect_err("cancellation must propagate");
 
@@ -570,7 +604,7 @@ mod tests {
                 "ORA-03113: end-of-file on communication channel".to_owned(),
             ))]);
 
-            let error = resolve_top_sql_source(&cx, &conn, true)
+            let error = resolve_top_sql_source_with_license(&cx, &conn, true, true)
                 .await
                 .expect_err("connection uncertainty must propagate");
 
@@ -580,7 +614,7 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_unlicensed_probe_falls_back_to_statspack() {
+    fn attested_but_unavailable_pack_falls_back_to_statspack() {
         run_with_cx(|cx| async move {
             let conn = ProbeMock::new(vec![
                 Err(DbError::Query(
@@ -589,13 +623,14 @@ mod tests {
                 Ok(Vec::new()),
             ]);
 
-            let source = resolve_top_sql_source(&cx, &conn, true)
+            let source = resolve_top_sql_source_with_license(&cx, &conn, true, true)
                 .await
                 .expect("ordinary privilege failure may use the free fallback");
 
             assert_eq!(source, DiagnosticsSource::Statspack);
             let sql = conn.sql();
             assert_eq!(sql.len(), 2);
+            assert!(sql[0].contains("v$parameter"));
             assert!(sql[1].contains("perfstat.stats$snapshot"));
         });
     }
@@ -607,7 +642,7 @@ mod tests {
                 "ORA-00600: internal error code".to_owned(),
             ))]);
 
-            let error = resolve_top_sql_source(&cx, &conn, true)
+            let error = resolve_top_sql_source_with_license(&cx, &conn, true, true)
                 .await
                 .expect_err("an arbitrary query failure is not an unlicensed result");
 
@@ -621,7 +656,7 @@ mod tests {
         run_with_cx(|cx| async move {
             let conn = ProbeMock::new(vec![Ok(vec![diagnostics_pack_row()])]);
 
-            let source = resolve_top_sql_source(&cx, &conn, true)
+            let source = resolve_top_sql_source_with_license(&cx, &conn, true, true)
                 .await
                 .expect("licensed AWR source");
 
@@ -641,6 +676,27 @@ mod tests {
 
             assert_eq!(source, DiagnosticsSource::LiveCursor);
             assert!(conn.sql().is_empty());
+        });
+    }
+
+    #[test]
+    fn enabled_oracle_parameter_without_operator_license_is_refused_before_io() {
+        run_with_cx(|cx| async move {
+            // The Oracle parameter enables the feature technically, but does
+            // not prove that the organization purchased the Diagnostics Pack.
+            let conn = ProbeMock::new(vec![Ok(vec![diagnostics_pack_row()])]);
+
+            let error = resolve_top_sql_source(&cx, &conn, true)
+                .await
+                .expect_err("historical diagnostics require operator attestation");
+
+            assert!(matches!(
+                error,
+                crate::error::DbError::Refused(envelope)
+                    if envelope.error_class == ErrorClass::PolicyDenied
+            ));
+            let sql = conn.sql();
+            assert!(sql.is_empty(), "refusal precedes every database call");
         });
     }
 
@@ -839,9 +895,7 @@ mod tests {
     #[test]
     fn plan_timeline_refuses_unlicensed_before_any_awr_query() {
         run_with_cx(|cx| async move {
-            let conn = ProbeMock::new(vec![Err(DbError::Query(
-                "ORA-01031: insufficient privileges".to_owned(),
-            ))]);
+            let conn = ProbeMock::new(vec![Ok(vec![diagnostics_pack_row()])]);
 
             let error = plan_cost_timeline(&cx, &conn, "abc123def4567", 20)
                 .await
@@ -861,8 +915,10 @@ mod tests {
                     .any(|step| step.to_ascii_lowercase().contains("license"))
             );
             let sql = conn.sql();
-            assert_eq!(sql.len(), 1, "the pack probe is the only database call");
-            assert!(sql[0].contains("v$parameter"));
+            assert!(
+                sql.is_empty(),
+                "unlicensed refusal must precede every database call"
+            );
             assert!(
                 !sql.iter().any(|query| query.contains("dba_hist_")),
                 "unlicensed refusal must not touch paid AWR views"
@@ -875,7 +931,7 @@ mod tests {
         run_with_cx(|cx| async move {
             let conn = ProbeMock::new(vec![Ok(vec![no_diagnostics_pack_row()])]);
 
-            let error = plan_cost_timeline(&cx, &conn, "abc123def4567", 20)
+            let error = plan_cost_timeline_with_license(&cx, &conn, "abc123def4567", 20, true)
                 .await
                 .expect_err("a NONE Diagnostics Pack parameter must be refused");
 
@@ -892,7 +948,7 @@ mod tests {
                 "license probe deadline exceeded".to_owned(),
             ))]);
 
-            let error = plan_cost_timeline(&cx, &conn, "abc123def4567", 20)
+            let error = plan_cost_timeline_with_license(&cx, &conn, "abc123def4567", 20, true)
                 .await
                 .expect_err("uncertain probe must propagate");
 
@@ -912,9 +968,10 @@ mod tests {
                 ]),
             ]);
 
-            let timeline = plan_cost_timeline(&cx, &conn, "ABC123DEF4567", 9_999)
-                .await
-                .expect("licensed AWR history");
+            let timeline =
+                plan_cost_timeline_with_license(&cx, &conn, "ABC123DEF4567", 9_999, true)
+                    .await
+                    .expect("licensed AWR history");
 
             assert_eq!(timeline.sql_id, "abc123def4567");
             assert_eq!(timeline.points.len(), 2);

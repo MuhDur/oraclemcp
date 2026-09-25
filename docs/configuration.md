@@ -25,7 +25,7 @@ structs (the `deny_unknown_fields` source of truth) by
 covers every key, including the governance/arc knobs (`profiles.max_query_cost`,
 `profiles.cumulative_query_cost_budget`, `profiles.sql_policy`,
 `profiles.masking`, `profiles.allow_change_notification`,
-`profiles.max_subscriptions`) that the narrative sections below expand on. Do
+`profiles.diagnostics_pack_licensed`, `profiles.max_subscriptions`) that the narrative sections below expand on. Do
 not hand-edit it; edit the config types and run
 `bash scripts/docs_generate.sh --write`. The same block is mirrored, commented,
 in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
@@ -99,6 +99,7 @@ in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
 | `profiles.require_fga_evidence` | bool | false | yes | no | 2 | Refuse reads when ALL_AUDIT_POLICIES is unreadable (default admits them with an fga_evidence: unavailable observation + audit record; a proven FGA handler always refuses). |
 | `profiles.require_hard_parse_evidence` | bool | false | yes | no | 2 | Refuse EXPLAIN and decisive query-cost admission when installed hard-parse callback or PLAN_TABLE evidence is unreadable; default emits a verification observation and separate audit record, and doctor warns only when an online probe finds unreadable evidence. |
 | `profiles.require_query_cost_estimate` | bool | false | yes | no | 2 | Refuse a read when requested optimizer cost cannot be measured; independent of require_hard_parse_evidence. Default admits with a cost_unavailable observation and readable audit record. |
+| `profiles.diagnostics_pack_licensed` | bool | false | yes | no | 1 | Operator attestation that this Oracle target is licensed for the Diagnostics Pack; AWR also requires the Oracle activation setting and is never enabled from that setting alone. |
 | `profiles.max_subscriptions` | integer | 4 | yes | no | 2 | Per-principal live-subscription cap; 0 disables new subscriptions fail-closed. |
 | `profiles.mcp_exposed` | bool | true | yes | no | 1 | E5 per-profile MCP exposure opt-out (visibility, never access control). |
 | `profiles.dashboard_ddl_workbench` | bool | false | yes | no | 2 | Reserved profile metadata; browser DDL/Admin apply is refused in this release. |

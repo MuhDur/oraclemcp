@@ -896,6 +896,11 @@ pub struct ConnectionProfile {
     /// readable audit record.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_query_cost_estimate: Option<bool>,
+    /// Operator attestation that this Oracle target is licensed for the
+    /// Diagnostics Pack. The Oracle activation parameter is checked separately
+    /// and does not establish license ownership.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics_pack_licensed: Option<bool>,
     /// Maximum live subscriptions per server-derived principal. Defaults to 4;
     /// `0` deliberately disables new subscriptions for this profile. Each
     /// admitted subscription also consumes one EMON notification connection
@@ -1004,6 +1009,7 @@ impl std::fmt::Debug for ConnectionProfile {
                 "require_query_cost_estimate",
                 &self.require_query_cost_estimate,
             )
+            .field("diagnostics_pack_licensed", &self.diagnostics_pack_licensed)
             .field("max_subscriptions", &self.max_subscriptions)
             .field("dashboard_ddl_workbench", &self.dashboard_ddl_workbench)
             .field("session_identity", &self.session_identity)
@@ -1100,6 +1106,14 @@ impl ConnectionProfile {
         self.require_query_cost_estimate == Some(true)
     }
 
+    /// Whether the operator explicitly attested Diagnostics Pack licensing
+    /// for this target. Oracle's `CONTROL_MANAGEMENT_PACK_ACCESS` activation
+    /// setting is still checked before AWR use.
+    #[must_use]
+    pub fn diagnostics_pack_licensed(&self) -> bool {
+        self.diagnostics_pack_licensed == Some(true)
+    }
+
     /// Whether this profile explicitly permits CQN registration.
     ///
     /// This is a fail-closed capability switch, not an authorization bypass:
@@ -1180,6 +1194,7 @@ impl ConnectionProfile {
             require_fga_evidence,
             require_hard_parse_evidence,
             require_query_cost_estimate,
+            diagnostics_pack_licensed,
             max_subscriptions,
             mcp_exposed,
             dashboard_ddl_workbench,
@@ -1397,6 +1412,7 @@ mod tests {
             require_fga_evidence: None,
             require_hard_parse_evidence: None,
             require_query_cost_estimate: None,
+            diagnostics_pack_licensed: None,
             max_subscriptions: None,
             mcp_exposed: None,
             dashboard_ddl_workbench: None,
@@ -2819,6 +2835,23 @@ mod tests {
         let mut profiles = vec![base, child];
         resolve_inheritance(&mut profiles).expect("resolve");
         assert!(profiles[1].require_signed_tools());
+    }
+
+    #[test]
+    fn diagnostics_pack_license_is_explicit_and_inherited() {
+        let mut base = p("licensed");
+        assert!(!base.diagnostics_pack_licensed());
+        base.diagnostics_pack_licensed = Some(true);
+        let mut child = p("child");
+        child.base = Some("licensed".to_owned());
+        let mut profiles = vec![base, child];
+
+        resolve_inheritance(&mut profiles).expect("resolve profile license setting");
+
+        assert!(profiles[0].diagnostics_pack_licensed());
+        assert!(profiles[1].diagnostics_pack_licensed());
+        profiles[1].diagnostics_pack_licensed = Some(false);
+        assert!(!profiles[1].diagnostics_pack_licensed());
     }
 
     #[test]
