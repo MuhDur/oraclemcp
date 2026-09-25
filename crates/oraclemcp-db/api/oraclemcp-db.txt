@@ -1201,6 +1201,7 @@ pub oraclemcp_db::CatalogQueryId::ReadOlsSchemaPolicies
 pub oraclemcp_db::CatalogQueryId::ReadOlsTablePolicies
 pub oraclemcp_db::CatalogQueryId::ReadRasPolicies
 pub oraclemcp_db::CatalogQueryId::ReadRedactionPolicies
+pub oraclemcp_db::CatalogQueryId::RedactionInstallationEvidence
 pub oraclemcp_db::CatalogQueryId::RelationColumn
 pub oraclemcp_db::CatalogQueryId::SchemaProjectionPage
 pub oraclemcp_db::CatalogQueryId::SearchColumns
@@ -1247,7 +1248,7 @@ pub oraclemcp_db::CatalogQueryId::VirtualColumnsForRelations32
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesByObject
 pub oraclemcp_db::CatalogQueryId::VpdRlsPoliciesBySchema
 impl oraclemcp_db::CatalogQueryId
-pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 167]
+pub const oraclemcp_db::CatalogQueryId::ALL: [Self; 168]
 pub const fn oraclemcp_db::CatalogQueryId::spec(self) -> oraclemcp_db::CatalogReadSpec
 impl core::clone::Clone for oraclemcp_db::CatalogQueryId
 pub fn oraclemcp_db::CatalogQueryId::clone(&self) -> oraclemcp_db::CatalogQueryId
