@@ -1,0 +1,44 @@
+{
+  "run_id": "orchestrator-local-verify-20260925T0150Z",
+  "lane": "xe18+xe21+free23",
+  "source_sha": "d7a9a7f850f6f120986ff4e00ecf910579c33521",
+  "kind": "editions-probe-live-gated-run",
+  "runner": "orchestrator (IvoryHorizon) clean worktree oraclemcp-gate-prepush, build lease; ORACLEMCP_EDITIONS_LIVE=1; system on localhost:1518/XEPDB1, localhost:1520/XEPDB1, localhost:1523/FREEPDB1",
+  "command": "cargo test -p oraclemcp-db --features live-xe --test editions_probe_live -- --nocapture",
+  "result": "8 passed; 0 failed",
+  "tests": [
+    {
+      "name": "editions_probe_connection_audit_rejects_planted_alter_user",
+      "result": "ok"
+    },
+    {
+      "name": "editions_probe_synthetic_owner_cleanup_runs_while_unwinding",
+      "result": "ok"
+    },
+    {
+      "name": "editions_probe_columns_present_per_version_live",
+      "result": "ok"
+    },
+    {
+      "name": "editions_probe_audit_contains_only_catalog_reads_live",
+      "result": "ok"
+    },
+    {
+      "name": "editions_probe_type_omitted_refuses_live",
+      "result": "ok"
+    },
+    {
+      "name": "editions_probe_owner_disabled_refuses_live",
+      "result": "ok"
+    },
+    {
+      "name": "editions_probe_other_owner_without_dba_privilege_unknown_live",
+      "result": "ok"
+    },
+    {
+      "name": "editions_probe_owner_enabled_live",
+      "result": "ok"
+    }
+  ],
+  "note": "Local orchestrator run, not a scheduled CI lane; tests are env-gated so this gated run is the live proof. Panics in the log are the planted negatives caught by catch_unwind."
+}

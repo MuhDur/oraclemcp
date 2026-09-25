@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-25T01:55:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.14.3",
+  "scope": {
+    "summary": "Editions-enabled probe per owner and per (owner, object_type): Proven only from positive catalog evidence (per-version columns read from live ALL_TAB_COLUMNS); PROCEDURE-only owner refused EDITIONS_NOT_ENABLED for VIEW before any DDL; another owner without DBA-view privilege -> Unknown (refuse); the probe never sends ALTER USER, proven through a recording OracleConnection wrapper around the real connection with offline and live planted negatives. Commits 5a084812/1710a203, d2fd36da, 6aa4e088.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_editions.rs",
+      "crates/oraclemcp-db/tests/editions_probe_live.rs"
+    ],
+    "out_of_scope": [
+      "ADB behaviour (bead no-claim).",
+      "Carrying the proof verdict into change-request open/stage records (.14.7)."
+    ]
+  },
+  "source": {
+    "sha": "d7a9a7f850f6f120986ff4e00ecf910579c33521",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "unit (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "At d7a9a7f8 (clean worktree, lease): catalog_editions::tests editions_probe_* 4 passed (capability view never proves enablement, catalog queries never issue DDL, unknown refuses, audit rejects planted ALTER USER)."
+      },
+      {
+        "name": "live 3 lanes (orchestrator re-execution)",
+        "kind": "cli",
+        "trace": "editions_probe_live 8 passed against XE18/XE21/FREE23: owner_enabled, owner_disabled_refuses, type_omitted_refuses, other_owner_without_dba_privilege_unknown, columns_present_per_version, audit_contains_only_catalog_reads (probe run through EditionsProbeRecordingConnection over the real connection; every recorded statement must be a SELECT and none ALTER USER), connection_audit_rejects_planted_alter_user (planted ALTER USER refused before Oracle), synthetic_owner_cleanup_runs_while_unwinding. See live artifact."
+      },
+      {
+        "name": "independent reviews",
+        "kind": "cli",
+        "trace": "Round 1 (d2fd36da): fail-closed, per-version columns, real users, closed SQL PASS; the no-ALTER-USER proof was circular (probe self-reported). Round 2 (6aa4e088): recording wrapper covers every SQL-sending trait path; planted negatives offline + live; panic-safe cleanup - PASS. Minor: the ALTER USER name match is whitespace-sensitive, but the stronger all-statements-must-be-SELECT rule covers it."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "editions-probe-live-gated-run",
+        "path": "tests/artifacts/evidence/live/editions-probe-14.3-3lane-20260925T0150Z.json",
+        "sha": "d7a9a7f850f6f120986ff4e00ecf910579c33521"
+      }
+    ]
+  },
+  "limitations": [
+    "Only the audit live test routes the probe through the recording wrapper; the other live tests use the raw connection (they assert verdicts, not statements)."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
