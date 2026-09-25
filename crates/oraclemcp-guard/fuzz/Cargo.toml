@@ -49,4 +49,11 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "grant_rewrite_round_trip"
+path = "fuzz_targets/grant_rewrite_round_trip.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
