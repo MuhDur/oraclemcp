@@ -499,15 +499,32 @@ fn switchable_read_only_cost_dispatcher(
     root: PlanCostFixture,
     max_query_cost: u64,
     require_query_cost_estimate: bool,
-) -> (OracleDispatcher, Arc<QueryCostGateState>, Arc<AtomicUsize>) {
+) -> (
+    OracleDispatcher,
+    Arc<QueryCostGateState>,
+    Arc<AtomicUsize>,
+    Arc<TouchCounts>,
+) {
     let state = Arc::new(QueryCostGateState::new(root));
     let opened_metadata_sessions = Arc::new(AtomicUsize::new(0));
     let opened = Arc::clone(&opened_metadata_sessions);
     let metadata_state = Arc::clone(&state);
+    let metadata_pool_closes = Arc::new(TouchCounts::default());
+    let pool_closes = Arc::clone(&metadata_pool_closes);
     let connector: Arc<ProfileConnector> = Arc::new(move |_cx, _generation| {
         opened.fetch_add(1, Ordering::SeqCst);
         let state = Arc::clone(&metadata_state);
-        Box::pin(async move { Ok(session_bundle(QueryCostGateMock { state })) })
+        let pool_closes = Arc::clone(&pool_closes);
+        Box::pin(async move {
+            Ok(ProfileConnectionBundle::new(
+                Box::new(QueryCostGateMock { state }),
+                Some(Box::new(LabeledMock::new(
+                    "cost-metadata-pool",
+                    "stateless_metadata_pool",
+                    pool_closes,
+                ))),
+            ))
+        })
     });
     let strict_cost = if require_query_cost_estimate {
         "require_query_cost_estimate = true\n"
@@ -528,12 +545,17 @@ fn switchable_read_only_cost_dispatcher(
     )
     .with_profile_drain_state(ProfileDrainState::from_config(config))
     .with_max_query_cost(Some(max_query_cost));
-    (dispatcher, state, opened_metadata_sessions)
+    (
+        dispatcher,
+        state,
+        opened_metadata_sessions,
+        metadata_pool_closes,
+    )
 }
 
 #[test]
 fn read_only_transaction_uses_metadata_session_and_still_enforces_cost_cap() {
-    let (over, over_state, over_opens) =
+    let (over, over_state, over_opens, over_pool_closes) =
         switchable_read_only_cost_dispatcher(PlanCostFixture::Root(Some(190_000)), 50_000, false);
     let over_error = over
         .dispatch(
@@ -551,8 +573,12 @@ fn read_only_transaction_uses_metadata_session_and_still_enforces_cost_cap() {
     );
     assert_eq!(over_state.actual_reads.load(Ordering::SeqCst), 0);
     assert!(over_opens.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        over_pool_closes.close.load(Ordering::SeqCst),
+        over_opens.load(Ordering::SeqCst)
+    );
 
-    let (under, under_state, under_opens) =
+    let (under, under_state, under_opens, under_pool_closes) =
         switchable_read_only_cost_dispatcher(PlanCostFixture::Root(Some(2)), 50_000, false);
     let result = under
         .dispatch(
@@ -563,8 +589,12 @@ fn read_only_transaction_uses_metadata_session_and_still_enforces_cost_cap() {
     assert_eq!(result["row_count"], json!(1));
     assert_eq!(under_state.actual_reads.load(Ordering::SeqCst), 1);
     assert!(under_opens.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        under_pool_closes.close.load(Ordering::SeqCst),
+        under_opens.load(Ordering::SeqCst)
+    );
 
-    let (strict, strict_state, strict_opens) =
+    let (strict, strict_state, strict_opens, strict_pool_closes) =
         switchable_read_only_cost_dispatcher(PlanCostFixture::NoRoot, 50_000, true);
     let strict_error = strict
         .dispatch(
@@ -575,6 +605,10 @@ fn read_only_transaction_uses_metadata_session_and_still_enforces_cost_cap() {
     assert_eq!(strict_error.error_class, ErrorClass::RuntimeStateRequired);
     assert_eq!(strict_state.actual_reads.load(Ordering::SeqCst), 0);
     assert!(strict_opens.load(Ordering::SeqCst) > 0);
+    assert_eq!(
+        strict_pool_closes.close.load(Ordering::SeqCst),
+        strict_opens.load(Ordering::SeqCst)
+    );
 }
 
 /// The initially served profile is governed by its own `require_fga_evidence`:

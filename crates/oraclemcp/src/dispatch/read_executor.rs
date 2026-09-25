@@ -897,7 +897,13 @@ impl<'a> GuardedReadExecutor<'a> {
             .await
             .map_err(DbError::into_envelope)?;
         let (session, stateless) = bundle.into_parts();
-        drop(stateless);
+        if let Some(stateless) = stateless {
+            // The profile connector opens the full runtime bundle, including
+            // its stateless pool. Cost estimation needs only the isolated
+            // session; dropping an unused pool skips its async Oracle-session
+            // cleanup and leaks its idle physical sessions.
+            stateless.close(cx).await.map_err(DbError::into_envelope)?;
+        }
         Ok(Some(session))
     }
 
