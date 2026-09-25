@@ -1,4 +1,4 @@
-//! Live Oracle XE coverage for the optional PL/SQL intelligence surface.
+//! Live Oracle XE coverage for the PL/SQL intelligence surface.
 //!
 //! Default builds compile only the gate assertion. The real scenario runs only
 //! with both `live-xe` and `plsql-intelligence` enabled and follows the existing

@@ -2221,8 +2221,8 @@ fn doctor_process_exit_code_matches_cli_contract() {
 /// `cfg!(...)` expression `run_doctor_cmd` uses (not a mock) and runs the actual
 /// doctor trio-stack, then asserts the outcome per build. The present/absent
 /// expectations are gated on the SAME real `cfg`, so under
-/// `--features plsql-intelligence` (and in the `cargo hack` feature powerset) the
-/// present-arm truly executes, and the default build executes the absent-arm.
+/// default build (and in the `cargo hack` feature powerset) the present-arm
+/// truly executes, and a `--no-default-features` build executes the absent-arm.
 /// Neither arm may crash and neither may LEAK a path, crate name, or version.
 #[test]
 fn trio_stack_reports_real_cfg_gated_plsql_intelligence_detection() {
@@ -2261,12 +2261,12 @@ fn trio_stack_reports_real_cfg_gated_plsql_intelligence_detection() {
     #[cfg(feature = "plsql-intelligence")]
     assert_eq!(
         segment, "plsql-intelligence detected",
-        "the --features plsql-intelligence build must report the engine PRESENT"
+        "the default plsql-intelligence build must report the engine PRESENT"
     );
     #[cfg(not(feature = "plsql-intelligence"))]
     assert_eq!(
         segment, "plsql-intelligence not detected",
-        "the default build must report the engine ABSENT, cleanly"
+        "the --no-default-features build must report the engine ABSENT, cleanly"
     );
 
     // No-leak: detection is a bool, so its rendered status is JUST
