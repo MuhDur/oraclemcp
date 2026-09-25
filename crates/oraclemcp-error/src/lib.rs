@@ -213,6 +213,14 @@ pub enum ReasonCategory {
     /// schema and object type. The server never enables it on the caller's
     /// behalf. The wire value is `EDITIONS_NOT_ENABLED`.
     EditionsNotEnabled,
+    /// An Oracle Label Security policy applies to a relation being read.
+    ProtectedByOls,
+    /// A Real Application Security policy applies to a relation being read.
+    ProtectedByRas,
+    /// An Oracle Data Redaction policy applies to a relation being read.
+    ProtectedByRedaction,
+    /// Required OLS, RAS, or Data Redaction catalog evidence was unavailable.
+    SecurityFeatureVisibilityUnknown,
     /// A refusal that does not fit the categories above.
     Other,
 }
@@ -303,6 +311,10 @@ pub struct StructuredReason {
     /// evaluated, which is NOT the claim that no policy applied.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub policy_tightening: Option<serde_json::Value>,
+    /// Exact DB/container/edition/object key and the security catalog
+    /// observation attached to an OLS/RAS/Redaction refusal.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub relation_security_observation: Option<serde_json::Value>,
 }
 
 impl StructuredReason {
@@ -316,6 +328,7 @@ impl StructuredReason {
             required_level: None,
             query_cost_refusal: None,
             policy_tightening: None,
+            relation_security_observation: None,
         }
     }
 
@@ -351,6 +364,14 @@ impl StructuredReason {
     #[must_use]
     pub fn with_query_cost_refusal(mut self, detail: QueryCostRefusal) -> Self {
         self.query_cost_refusal = Some(detail);
+        self
+    }
+
+    /// Attach the strict relation identity and catalog observation for a
+    /// security-feature refusal.
+    #[must_use]
+    pub fn with_relation_security_observation(mut self, observation: serde_json::Value) -> Self {
+        self.relation_security_observation = Some(observation);
         self
     }
 }
@@ -1116,6 +1137,68 @@ mod tests {
         );
         let back: ErrorEnvelope = serde_json::from_value(json).expect("deserialize");
         assert_eq!(env, back);
+    }
+
+    #[test]
+    fn relation_security_refusal_carries_observation_and_strict_key() {
+        let observation = serde_json::json!({
+            "key": {
+                "dbid": "synthetic-db",
+                "container": "SYNTHETIC_PDB",
+                "edition": "ORA$BASE",
+                "owner": "APP",
+                "name": "SYNTHETIC_TABLE",
+                "object_id": 42,
+                "object_edition": null
+            },
+            "ols": "absent",
+            "ras": "absent",
+            "redaction": "protected"
+        });
+        let envelope = ErrorEnvelope::new(
+            ErrorClass::ForbiddenStatement,
+            "read refused by Data Redaction policy",
+        )
+        .with_structured_reason(
+            StructuredReason::new(ReasonCategory::ProtectedByRedaction)
+                .with_offending_construct("protected_by_redaction")
+                .with_relation_security_observation(observation.clone()),
+        );
+
+        let json = serde_json::to_value(&envelope).expect("serialize");
+        assert_eq!(
+            json["structured_reason"]["category"],
+            serde_json::json!("PROTECTED_BY_REDACTION")
+        );
+        assert_eq!(
+            json["structured_reason"]["offending_construct"],
+            serde_json::json!("protected_by_redaction")
+        );
+        assert_eq!(
+            json["structured_reason"]["relation_security_observation"],
+            observation
+        );
+        let decoded: ErrorEnvelope = serde_json::from_value(json).expect("decode");
+        assert_eq!(decoded, envelope);
+    }
+
+    #[test]
+    fn relation_security_reason_categories_have_stable_wire_names() {
+        for (category, expected) in [
+            (ReasonCategory::ProtectedByOls, "PROTECTED_BY_OLS"),
+            (ReasonCategory::ProtectedByRas, "PROTECTED_BY_RAS"),
+            (
+                ReasonCategory::ProtectedByRedaction,
+                "PROTECTED_BY_REDACTION",
+            ),
+            (
+                ReasonCategory::SecurityFeatureVisibilityUnknown,
+                "SECURITY_FEATURE_VISIBILITY_UNKNOWN",
+            ),
+        ] {
+            let value = serde_json::to_value(StructuredReason::new(category)).expect("serialize");
+            assert_eq!(value["category"], serde_json::json!(expected));
+        }
     }
 
     #[test]

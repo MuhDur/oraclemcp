@@ -107,12 +107,13 @@ pub use catalog_extract::{
     CatalogRowSetName, CatalogSchemaFilter, catalog_extract_rowsets, extract_catalog_rowsets,
 };
 pub use catalog_facts::{
-    CLOSURE_FACT_SCHEMA_VERSION, ClosureFactKey, ClosureFactStore, ClosureFacts, ClosureMember,
-    DependencyFact, DmlTarget, MAX_CLOSURE_DEPENDENCIES, MAX_CLOSURE_DML_TARGETS,
-    MAX_CLOSURE_MEMBERS, MAX_CLOSURE_SOURCE_BYTES, MAX_CLOSURE_SOURCE_ROWS,
-    MAX_CLOSURE_TOTAL_DEPENDENCIES, MAX_CLOSURE_TOTAL_SOURCE_ROWS, MAX_CLOSURE_TOTAL_TRIGGERS,
-    MAX_CLOSURE_TRIGGERS, MemberFact, Revalidation, RoutineClosure, TriggerFact,
-    extract_closure_facts, fact_record_valid, revalidate,
+    CLOSURE_FACT_SCHEMA_VERSION, ClosureDatabaseIdentity, ClosureFactKey, ClosureFactStore,
+    ClosureFacts, ClosureMember, DependencyFact, DmlTarget, MAX_CLOSURE_DEPENDENCIES,
+    MAX_CLOSURE_DML_TARGETS, MAX_CLOSURE_MEMBERS, MAX_CLOSURE_SOURCE_BYTES,
+    MAX_CLOSURE_SOURCE_ROWS, MAX_CLOSURE_TOTAL_DEPENDENCIES, MAX_CLOSURE_TOTAL_SOURCE_ROWS,
+    MAX_CLOSURE_TOTAL_TRIGGERS, MAX_CLOSURE_TRIGGERS, MemberFact, Revalidation, RoutineClosure,
+    TriggerFact, extract_closure_facts, fact_record_valid, read_closure_database_identity,
+    revalidate,
 };
 pub use catalog_query::{
     BindSchema, CatalogAuditClass, CatalogBindKind, CatalogOutputPolicy, CatalogQueryId,
@@ -124,7 +125,9 @@ pub use catalog_resolver::{
     OracleCatalogResolver, OracleCatalogResolverCache, OraclePolicyCatalogProbe,
     OraclePolicyCatalogVisibility, OracleSessionSecurityContext, OracleVpdRlsObservation,
     OracleVpdRlsObservationStatus, OracleVpdRlsPolicy, ReadPlanProof, ReadPlanProofError,
-    fga_closure, observe_vpd_rls_for_relations, observe_vpd_rls_for_schema,
+    RelationSecurityFeature, RelationSecurityKey, RelationSecurityObservation,
+    RelationSecurityProofError, RelationSecurityState, fga_closure, observe_relation_security,
+    observe_vpd_rls_for_relations, observe_vpd_rls_for_schema, ols_installation_evidence,
     prove_semantic_read_plan, read_catalog_resolve_context, read_session_security_context,
     resolve_semantic_read_relations, resolved_relations_read_purity,
 };

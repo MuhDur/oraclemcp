@@ -1927,5 +1927,67 @@
   "on_unsupported": {
    "error_class": "INVALID_ARGUMENTS"
   }
+ },
+ {
+  "case_id": "w4_query_redaction_policy_table_refused_no_execution",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": ["priv:SELECT_V_SQL"],
+  "setup": [
+   {"sql": "CREATE TABLE ${owner}.T_REDACT_TABLE_${run_id} (ID NUMBER(10) PRIMARY KEY, SECRET_TEXT VARCHAR2(64))"},
+   {"sql": "INSERT INTO ${owner}.T_REDACT_TABLE_${run_id} (ID, SECRET_TEXT) VALUES (1, 'synthetic')"},
+   {"sql": "BEGIN DBMS_REDACT.ADD_POLICY(object_schema => '${owner}', object_name => 'T_REDACT_TABLE_${run_id}', policy_name => 'W4_REDACT_TABLE_${run_id}', column_name => 'SECRET_TEXT', function_type => DBMS_REDACT.FULL, expression => '1=1', enable => TRUE); END;"}
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT POLICY_NAME FROM REDACTION_POLICIES WHERE OBJECT_OWNER = '${owner}' AND OBJECT_NAME = 'T_REDACT_TABLE_${run_id}' AND ENABLE = 'YES'",
+  "call": {
+   "arguments": {
+    "sql": "SELECT SECRET_TEXT FROM ${owner}.T_REDACT_TABLE_${run_id} WHERE ID = 1 /* W4MARK_REDACTTABLE000001 */",
+    "max_rows": 1
+   },
+   "vsql_absent_marker": "W4MARK_REDACTTABLE000001"
+  },
+  "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "protected_by_redaction"},
+  "cleanup": [
+   {"sql": "BEGIN DBMS_REDACT.DROP_POLICY(object_schema => '${owner}', object_name => 'T_REDACT_TABLE_${run_id}', policy_name => 'W4_REDACT_TABLE_${run_id}'); END;"},
+   {"sql": "DROP TABLE ${owner}.T_REDACT_TABLE_${run_id} PURGE"}
+  ],
+  "db_reread": [],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"},
+  "profile_variant": "synthetic_raw"
+ },
+ {
+  "case_id": "w4_query_redaction_nested_exists_refused_no_execution",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": ["priv:SELECT_V_SQL"],
+  "setup": [
+   {"sql": "CREATE TABLE ${owner}.T_REDACT_EXISTS_${run_id} (ID NUMBER(10) PRIMARY KEY, SECRET_TEXT VARCHAR2(64))"},
+   {"sql": "INSERT INTO ${owner}.T_REDACT_EXISTS_${run_id} (ID, SECRET_TEXT) VALUES (1, 'synthetic')"},
+   {"sql": "BEGIN DBMS_REDACT.ADD_POLICY(object_schema => '${owner}', object_name => 'T_REDACT_EXISTS_${run_id}', policy_name => 'W4_REDACT_EXISTS_${run_id}', column_name => 'SECRET_TEXT', function_type => DBMS_REDACT.FULL, expression => '1=1', enable => TRUE); END;"}
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT POLICY_NAME FROM REDACTION_POLICIES WHERE OBJECT_OWNER = '${owner}' AND OBJECT_NAME = 'T_REDACT_EXISTS_${run_id}' AND ENABLE = 'YES'",
+  "call": {
+   "arguments": {
+    "sql": "SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p WHERE EXISTS (SELECT 1 FROM ${owner}.T_REDACT_EXISTS_${run_id} r WHERE r.ID = p.ID) /* W4MARK_REDACTEXISTS0001 */",
+    "max_rows": 1
+   },
+   "vsql_absent_marker": "W4MARK_REDACTEXISTS0001"
+  },
+  "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "protected_by_redaction"},
+  "cleanup": [
+   {"sql": "BEGIN DBMS_REDACT.DROP_POLICY(object_schema => '${owner}', object_name => 'T_REDACT_EXISTS_${run_id}', policy_name => 'W4_REDACT_EXISTS_${run_id}'); END;"},
+   {"sql": "DROP TABLE ${owner}.T_REDACT_EXISTS_${run_id} PURGE"}
+  ],
+  "db_reread": [],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"},
+  "profile_variant": "synthetic_raw"
  }
 ]

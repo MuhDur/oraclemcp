@@ -10,6 +10,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
 
 use asupersync::Cx;
+use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
 use oraclemcp_guard::{
     CatalogObjectKind, CatalogResolver, ObjectRef, Purity, QueryBlock, QueryBlockKind,
     QuoteSemantics, RawName, RawNamePart, Resolution, ResolveCtx, ResolvedContainer,
@@ -18,6 +19,7 @@ use oraclemcp_guard::{
     SyntacticRole,
 };
 
+use crate::catalog_facts::read_closure_database_identity;
 #[cfg(test)]
 use crate::catalog_query::{
     ALL_POLICIES_VISIBILITY_SQL, COLUMN_CONFLICT_SQL, FGA_CATALOG_PROOF_SQL, MEMBER_ARGUMENTS_SQL,
@@ -631,6 +633,402 @@ pub enum FgaEvidence {
     Unavailable,
 }
 
+/// Security feature whose filtering behavior requires a served read refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationSecurityFeature {
+    /// Oracle Label Security.
+    Ols,
+    /// Real Application Security.
+    Ras,
+    /// Oracle Data Redaction.
+    Redaction,
+}
+
+/// Strict database and object identity to which a security observation applies.
+///
+/// This follows the whole-closure key boundary used by catalog facts: a result
+/// is bound to one database, container, edition and exact dictionary object id.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelationSecurityKey {
+    /// `SYS_CONTEXT('USERENV', 'DBID')` observed in the current session.
+    pub dbid: Option<String>,
+    /// `SYS_CONTEXT('USERENV', 'CON_NAME')` observed in the current session.
+    pub container: Option<String>,
+    /// Current session edition, absent when identity could not be read.
+    pub edition: Option<String>,
+    /// Exact owner from the resolved dictionary object.
+    pub owner: String,
+    /// Exact object name from the resolved dictionary object.
+    pub name: String,
+    /// Exact Oracle `ALL_OBJECTS.OBJECT_ID` from resolution.
+    pub object_id: u64,
+    /// Object edition identity from `ALL_OBJECTS`, when present.
+    pub object_edition: Option<String>,
+}
+
+/// Catalog state observed for one security feature and strict relation key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationSecurityState {
+    /// The readable feature catalog had no enabled policy for the relation.
+    Absent,
+    /// OLS option evidence positively showed that OLS is not enabled.
+    NotInstalled,
+    /// An enabled policy or realm applies to the relation.
+    Protected,
+    /// The evidence source could not be read or did not return a complete answer.
+    Unavailable,
+}
+
+/// Per-relation security observation retained by a successful read proof.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RelationSecurityObservation {
+    /// Exact database and object identity for the result.
+    pub key: RelationSecurityKey,
+    /// OLS table/schema policy evidence.
+    pub ols: RelationSecurityState,
+    /// RAS applied-policy evidence.
+    pub ras: RelationSecurityState,
+    /// Data Redaction policy evidence.
+    pub redaction: RelationSecurityState,
+}
+
+/// Why security evidence blocks a served read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationSecurityProofError {
+    /// Positive evidence of a policy on the relation.
+    Protected {
+        /// Feature that protects the relation.
+        feature: RelationSecurityFeature,
+        /// Exact relation key attached to the finding.
+        observation: RelationSecurityObservation,
+    },
+    /// A source was unreadable or incomplete; its observation is still bound to
+    /// the strict identity so consumers cannot reuse it for a different object.
+    VisibilityUnknown {
+        /// Feature whose evidence is unavailable.
+        feature: RelationSecurityFeature,
+        /// Exact relation key and all observations gathered so far.
+        observation: RelationSecurityObservation,
+    },
+}
+
+impl From<RelationSecurityProofError> for DbError {
+    fn from(error: RelationSecurityProofError) -> Self {
+        let (category, code, message, observation) = match error {
+            RelationSecurityProofError::Protected {
+                feature,
+                observation,
+            } => {
+                let (category, code, feature_name) = match feature {
+                    RelationSecurityFeature::Ols => (
+                        ReasonCategory::ProtectedByOls,
+                        "protected_by_ols",
+                        "Oracle Label Security",
+                    ),
+                    RelationSecurityFeature::Ras => (
+                        ReasonCategory::ProtectedByRas,
+                        "protected_by_ras",
+                        "Real Application Security",
+                    ),
+                    RelationSecurityFeature::Redaction => (
+                        ReasonCategory::ProtectedByRedaction,
+                        "protected_by_redaction",
+                        "Data Redaction",
+                    ),
+                };
+                (
+                    category,
+                    code,
+                    format!("read refused because a {feature_name} policy applies"),
+                    observation,
+                )
+            }
+            RelationSecurityProofError::VisibilityUnknown { observation, .. } => (
+                ReasonCategory::SecurityFeatureVisibilityUnknown,
+                "security_feature_visibility_unknown",
+                "read refused because required security policy evidence is unavailable".to_owned(),
+                observation,
+            ),
+        };
+        let structured = StructuredReason::new(category)
+            .with_offending_construct(code)
+            .with_relation_security_observation(relation_security_observation_value(&observation));
+        DbError::Refused(Box::new(
+            ErrorEnvelope::new(ErrorClass::ForbiddenStatement, message)
+                .with_structured_reason(structured),
+        ))
+    }
+}
+
+fn relation_security_observation_value(
+    observation: &RelationSecurityObservation,
+) -> serde_json::Value {
+    fn state(value: RelationSecurityState) -> &'static str {
+        match value {
+            RelationSecurityState::Absent => "absent",
+            RelationSecurityState::NotInstalled => "not_installed",
+            RelationSecurityState::Protected => "protected",
+            RelationSecurityState::Unavailable => "unavailable",
+        }
+    }
+
+    serde_json::json!({
+        "key": {
+            "dbid": &observation.key.dbid,
+            "container": &observation.key.container,
+            "edition": &observation.key.edition,
+            "owner": &observation.key.owner,
+            "name": &observation.key.name,
+            "object_id": observation.key.object_id,
+            "object_edition": &observation.key.object_edition,
+        },
+        "ols": state(observation.ols),
+        "ras": state(observation.ras),
+        "redaction": state(observation.redaction),
+    })
+}
+
+/// Read current OLS enablement evidence from `V$OPTION`. Query failures or
+/// malformed answers remain errors so callers can distinguish denied evidence
+/// from a positive disabled result.
+pub async fn ols_installation_evidence(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<bool, DbError> {
+    let rows = run_catalog_query(cx, conn, CatalogQueryId::OlsInstallationEvidence, &[]).await?;
+    match rows.as_slice() {
+        [row] => match required_text(row, "VALUE").as_deref() {
+            Some("TRUE") => Ok(true),
+            Some("FALSE") => Ok(false),
+            _ => Err(DbError::Query(
+                "OLS option catalog returned an incomplete answer".to_owned(),
+            )),
+        },
+        _ => Err(DbError::Query(
+            "OLS option catalog returned an incomplete answer".to_owned(),
+        )),
+    }
+}
+
+/// Read bounded OLS, RAS and Data Redaction evidence for exact resolved
+/// relations. This is shared with mutation-closure consumers; every returned
+/// fact is bound to a DBID/container/edition/object-id key and every unreadable
+/// or incomplete source returns an error rather than proving absence.
+pub async fn observe_relation_security(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> Result<Vec<RelationSecurityObservation>, RelationSecurityProofError> {
+    if relations.is_empty() {
+        return Ok(Vec::new());
+    }
+    if relations.len() > 256 {
+        let relation = &relations[0];
+        let observation = RelationSecurityObservation {
+            key: RelationSecurityKey {
+                dbid: None,
+                container: None,
+                edition: None,
+                owner: relation.owner.clone(),
+                name: relation.name.clone(),
+                object_id: relation.identity.object_id,
+                object_edition: relation.identity.edition.clone(),
+            },
+            ols: RelationSecurityState::Unavailable,
+            ras: RelationSecurityState::Unavailable,
+            redaction: RelationSecurityState::Unavailable,
+        };
+        return Err(RelationSecurityProofError::VisibilityUnknown {
+            feature: RelationSecurityFeature::Ols,
+            observation,
+        });
+    }
+    let identity = read_closure_database_identity(cx, conn)
+        .await
+        .map_err(|_| RelationSecurityProofError::VisibilityUnknown {
+            feature: RelationSecurityFeature::Ols,
+            observation: unavailable_relation_security_observation(
+                &relations[0],
+                None,
+                None,
+                None,
+                RelationSecurityFeature::Ols,
+            ),
+        })?;
+    let dbid = identity.dbid;
+    let container = identity.container;
+    let edition = identity.edition;
+
+    let mut observations = Vec::with_capacity(relations.len());
+    for relation in relations {
+        let mut observation = RelationSecurityObservation {
+            key: RelationSecurityKey {
+                dbid: Some(dbid.clone()),
+                container: Some(container.clone()),
+                edition: Some(edition.clone()),
+                owner: relation.owner.clone(),
+                name: relation.name.clone(),
+                object_id: relation.identity.object_id,
+                object_edition: relation.identity.edition.clone(),
+            },
+            ols: RelationSecurityState::Unavailable,
+            ras: RelationSecurityState::Unavailable,
+            redaction: RelationSecurityState::Unavailable,
+        };
+        if relation.db_link.is_some()
+            || relation.identity.object_id == 0
+            || !matches!(relation.kind, CatalogObjectKind::Table)
+            || relation.owner.is_empty()
+            || relation.name.is_empty()
+        {
+            return Err(RelationSecurityProofError::VisibilityUnknown {
+                feature: RelationSecurityFeature::Ols,
+                observation,
+            });
+        }
+
+        match ols_installation_evidence(cx, conn).await {
+            Ok(false) => {
+                observation.ols = RelationSecurityState::NotInstalled;
+            }
+            Ok(true) => {
+                let table_policies = run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::ReadOlsTablePolicies,
+                    &[
+                        OracleBind::from(relation.owner.as_str()),
+                        OracleBind::from(relation.name.as_str()),
+                        OracleBind::I64(2),
+                    ],
+                )
+                .await;
+                let schema_policies = run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::ReadOlsSchemaPolicies,
+                    &[
+                        OracleBind::from(relation.owner.as_str()),
+                        OracleBind::I64(2),
+                    ],
+                )
+                .await;
+                let (Ok(table_policies), Ok(schema_policies)) = (table_policies, schema_policies)
+                else {
+                    observation.ols = RelationSecurityState::Unavailable;
+                    return Err(RelationSecurityProofError::VisibilityUnknown {
+                        feature: RelationSecurityFeature::Ols,
+                        observation,
+                    });
+                };
+                if !table_policies.is_empty() || !schema_policies.is_empty() {
+                    observation.ols = RelationSecurityState::Protected;
+                    return Err(RelationSecurityProofError::Protected {
+                        feature: RelationSecurityFeature::Ols,
+                        observation,
+                    });
+                }
+                observation.ols = RelationSecurityState::Absent;
+            }
+            Err(_) => {
+                return Err(RelationSecurityProofError::VisibilityUnknown {
+                    feature: RelationSecurityFeature::Ols,
+                    observation,
+                });
+            }
+        }
+
+        let ras_policies = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::ReadRasPolicies,
+            &[
+                OracleBind::from(relation.owner.as_str()),
+                OracleBind::from(relation.name.as_str()),
+                OracleBind::I64(2),
+            ],
+        )
+        .await;
+        let Ok(ras_policies) = ras_policies else {
+            observation.ras = RelationSecurityState::Unavailable;
+            return Err(RelationSecurityProofError::VisibilityUnknown {
+                feature: RelationSecurityFeature::Ras,
+                observation,
+            });
+        };
+        if !ras_policies.is_empty() {
+            observation.ras = RelationSecurityState::Protected;
+            return Err(RelationSecurityProofError::Protected {
+                feature: RelationSecurityFeature::Ras,
+                observation,
+            });
+        }
+        observation.ras = RelationSecurityState::Absent;
+
+        let redaction_policies = run_catalog_query(
+            cx,
+            conn,
+            CatalogQueryId::ReadRedactionPolicies,
+            &[
+                OracleBind::from(relation.owner.as_str()),
+                OracleBind::from(relation.name.as_str()),
+                OracleBind::I64(2),
+            ],
+        )
+        .await;
+        let Ok(redaction_policies) = redaction_policies else {
+            observation.redaction = RelationSecurityState::Unavailable;
+            return Err(RelationSecurityProofError::VisibilityUnknown {
+                feature: RelationSecurityFeature::Redaction,
+                observation,
+            });
+        };
+        if !redaction_policies.is_empty() {
+            observation.redaction = RelationSecurityState::Protected;
+            return Err(RelationSecurityProofError::Protected {
+                feature: RelationSecurityFeature::Redaction,
+                observation,
+            });
+        }
+        observation.redaction = RelationSecurityState::Absent;
+        observations.push(observation);
+    }
+    Ok(observations)
+}
+
+fn unavailable_relation_security_observation(
+    relation: &ResolvedObject,
+    dbid: Option<String>,
+    container: Option<String>,
+    edition: Option<String>,
+    feature: RelationSecurityFeature,
+) -> RelationSecurityObservation {
+    let mut observation = RelationSecurityObservation {
+        key: RelationSecurityKey {
+            dbid,
+            container,
+            edition,
+            owner: relation.owner.clone(),
+            name: relation.name.clone(),
+            object_id: relation.identity.object_id,
+            object_edition: relation.identity.edition.clone(),
+        },
+        ols: RelationSecurityState::Unavailable,
+        ras: RelationSecurityState::Unavailable,
+        redaction: RelationSecurityState::Unavailable,
+    };
+    match feature {
+        RelationSecurityFeature::Ols => observation.ols = RelationSecurityState::Unavailable,
+        RelationSecurityFeature::Ras => observation.ras = RelationSecurityState::Unavailable,
+        RelationSecurityFeature::Redaction => {
+            observation.redaction = RelationSecurityState::Unavailable;
+        }
+    }
+    observation
+}
+
 fn fga_flag(row: &OracleRow, name: &str) -> Option<bool> {
     match row.text(name)? {
         "YES" => Some(true),
@@ -841,6 +1239,8 @@ pub struct ReadPlanProof {
     pub relations: Vec<ResolvedObject>,
     /// The FGA evidence this read was admitted on.
     pub fga_evidence: FgaEvidence,
+    /// OLS/RAS/Redaction evidence for each exact base relation in this proof.
+    pub relation_security: Vec<RelationSecurityObservation>,
     by_source: HashMap<ObjectRef, Vec<ReadObjectIdentity>>,
     by_identity: HashMap<ReadObjectIdentity, Purity>,
     proved_value_columns: HashSet<RawName>,
@@ -1174,6 +1574,9 @@ pub async fn prove_semantic_read_plan(
             relations.push(*object);
         }
     }
+    let relation_security = observe_relation_security(cx, conn, &relations)
+        .await
+        .map_err(|error| ReadPlanProofError::Database(error.into()))?;
     let fga_evidence = match fga_closure(cx, conn, &relations, FgaStatementKind::Select).await {
         FgaClosure::ProvenReadOnly => FgaEvidence::Proven,
         FgaClosure::Autonomous { .. } => return Err(ReadPlanProofError::FgaHandlerAutonomous),
@@ -1265,6 +1668,7 @@ pub async fn prove_semantic_read_plan(
     Ok(ReadPlanProof {
         relations,
         fga_evidence,
+        relation_security,
         by_source,
         by_identity,
         proved_value_columns,
@@ -3730,6 +4134,352 @@ mod tests {
         });
     }
 
+    fn relation_security_identity_row() -> OracleRow {
+        row(&[
+            ("DBID", Some("424242")),
+            ("CONTAINER_NAME", Some("FREEPDB1")),
+            ("EDITION_NAME", Some("ORA$BASE")),
+        ])
+    }
+
+    fn relation_security_clear_prefix(ols_installed: bool) -> Vec<Vec<OracleRow>> {
+        vec![
+            vec![relation_security_identity_row()],
+            vec![row(&[(
+                "VALUE",
+                Some(if ols_installed { "TRUE" } else { "FALSE" }),
+            )])],
+        ]
+    }
+
+    #[test]
+    fn ols_policy_on_relation_refused() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(true);
+            responses.extend([
+                vec![row(&[("POLICY_NAME", Some("SYNTHETIC_OLS"))])],
+                Vec::new(),
+            ]);
+            let conn = ScriptedRows::new(responses);
+            let error = observe_relation_security(&cx, &conn, &[table_object()])
+                .await
+                .expect_err("enabled OLS table policy refuses");
+            assert!(matches!(
+                error,
+                RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Ols,
+                    observation: RelationSecurityObservation {
+                        ols: RelationSecurityState::Protected,
+                        ..
+                    }
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn ols_schema_policy_on_relation_refused() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(true);
+            responses.extend([
+                Vec::new(),
+                vec![row(&[("POLICY_NAME", Some("SYNTHETIC_OLS_SCHEMA"))])],
+            ]);
+            let conn = ScriptedRows::new(responses);
+            assert!(matches!(
+                observe_relation_security(&cx, &conn, &[table_object()]).await,
+                Err(RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Ols,
+                    observation: RelationSecurityObservation {
+                        ols: RelationSecurityState::Protected,
+                        ..
+                    }
+                })
+            ));
+        });
+    }
+
+    #[test]
+    fn ras_realm_on_relation_refused() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(false);
+            responses.push(vec![row(&[("POLICY", Some("SYNTHETIC_RAS_REALM"))])]);
+            let conn = ScriptedRows::new(responses);
+            let error = observe_relation_security(&cx, &conn, &[table_object()])
+                .await
+                .expect_err("enabled RAS policy refuses");
+            assert!(matches!(
+                error,
+                RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Ras,
+                    observation: RelationSecurityObservation {
+                        ras: RelationSecurityState::Protected,
+                        ..
+                    }
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn redaction_policy_on_relation_refused() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(false);
+            responses.extend([
+                Vec::new(),
+                vec![row(&[("POLICY_NAME", Some("SYNTHETIC_REDACTION"))])],
+            ]);
+            let conn = ScriptedRows::new(responses);
+            let error = observe_relation_security(&cx, &conn, &[table_object()])
+                .await
+                .expect_err("enabled redaction policy refuses");
+            match error {
+                RelationSecurityProofError::Protected {
+                    feature: RelationSecurityFeature::Redaction,
+                    observation,
+                } => {
+                    assert_eq!(observation.redaction, RelationSecurityState::Protected);
+                    assert_eq!(observation.key.dbid.as_deref(), Some("424242"));
+                    assert_eq!(observation.key.container.as_deref(), Some("FREEPDB1"));
+                    assert_eq!(observation.key.edition.as_deref(), Some("ORA$BASE"));
+                    assert_eq!(observation.key.owner, "APP");
+                    assert_eq!(observation.key.name, "ORDERS");
+                    assert_eq!(observation.key.object_id, 42);
+                }
+                other => panic!("expected redaction refusal, got {other:?}"),
+            }
+            let queries = conn.queries.lock().expect("query log");
+            assert!(
+                !queries
+                    .iter()
+                    .any(|(sql, _)| sql.to_ascii_lowercase().contains("from all_policies")),
+                "an ALL_POLICIES-only proof cannot clear the redaction feature"
+            );
+            assert!(queries.iter().any(|(sql, binds)| {
+                sql.to_ascii_lowercase().contains("from redaction_policies")
+                    && binds
+                        == &[
+                            OracleBind::from("APP"),
+                            OracleBind::from("ORDERS"),
+                            OracleBind::I64(2),
+                        ]
+            }));
+        });
+    }
+
+    #[test]
+    fn relation_security_refusal_envelope_preserves_typed_reason_and_strict_key() {
+        run_with_cx(|_cx| async move {
+            let observation = RelationSecurityObservation {
+                key: RelationSecurityKey {
+                    dbid: Some("424242".to_owned()),
+                    container: Some("FREEPDB1".to_owned()),
+                    edition: Some("ORA$BASE".to_owned()),
+                    owner: "APP".to_owned(),
+                    name: "ORDERS".to_owned(),
+                    object_id: 42,
+                    object_edition: None,
+                },
+                ols: RelationSecurityState::NotInstalled,
+                ras: RelationSecurityState::Absent,
+                redaction: RelationSecurityState::Protected,
+            };
+            let protected = DbError::from(RelationSecurityProofError::Protected {
+                feature: RelationSecurityFeature::Redaction,
+                observation: observation.clone(),
+            })
+            .into_envelope();
+            assert_eq!(protected.error_class, ErrorClass::ForbiddenStatement);
+            let reason = protected.structured_reason.expect("typed reason");
+            assert_eq!(reason.category, ReasonCategory::ProtectedByRedaction);
+            assert_eq!(
+                reason.offending_construct.as_deref(),
+                Some("protected_by_redaction")
+            );
+            let key = &reason.relation_security_observation.expect("observation")["key"];
+            assert_eq!(key["dbid"], "424242");
+            assert_eq!(key["container"], "FREEPDB1");
+            assert_eq!(key["edition"], "ORA$BASE");
+            assert_eq!(key["owner"], "APP");
+            assert_eq!(key["name"], "ORDERS");
+            assert_eq!(key["object_id"], 42);
+
+            let unknown = DbError::from(RelationSecurityProofError::VisibilityUnknown {
+                feature: RelationSecurityFeature::Ras,
+                observation,
+            })
+            .into_envelope();
+            assert_eq!(unknown.error_class, ErrorClass::ForbiddenStatement);
+            let reason = unknown.structured_reason.expect("typed unknown reason");
+            assert_eq!(
+                reason.category,
+                ReasonCategory::SecurityFeatureVisibilityUnknown
+            );
+            assert_eq!(
+                reason.offending_construct.as_deref(),
+                Some("security_feature_visibility_unknown")
+            );
+            assert_eq!(
+                reason.relation_security_observation.expect("observation")["key"]["object_id"],
+                42
+            );
+        });
+    }
+
+    #[test]
+    fn nested_subquery_relation_with_redaction_refused() {
+        run_with_cx(|cx| async move {
+            let sql = "SELECT p.ID FROM APP.PARENT p WHERE EXISTS \
+                (SELECT 1 FROM APP.REDACTED_ONLY r WHERE r.ID = p.ID)";
+            let plan = oraclemcp_guard::semantic_read_plan_checked(sql)
+                .expect("nested read has a semantic plan");
+            assert!(
+                plan.blocks.iter().any(|block| {
+                    block.relations.iter().any(|name| {
+                        name.parts
+                            .last()
+                            .is_some_and(|part| part.text.eq_ignore_ascii_case("REDACTED_ONLY"))
+                    })
+                }),
+                "nested block must contribute its own relation proof"
+            );
+
+            let nested = ResolvedObject {
+                name: "REDACTED_ONLY".to_owned(),
+                identity: ResolvedIdentity {
+                    object_id: 43,
+                    edition: None,
+                },
+                ..table_object()
+            };
+            let mut responses = vec![vec![relation_security_identity_row()]];
+            for policy in [None, Some("SYNTHETIC_REDACTION")] {
+                responses.push(vec![row(&[("VALUE", Some("FALSE"))])]);
+                responses.push(Vec::new());
+                responses.push(
+                    policy
+                        .map(|name| vec![row(&[("POLICY_NAME", Some(name))])])
+                        .unwrap_or_default(),
+                );
+            }
+            let conn = ScriptedRows::new(responses);
+            let outcome = observe_relation_security(&cx, &conn, &[table_object(), nested]).await;
+            assert!(
+                matches!(
+                    &outcome,
+                    Err(RelationSecurityProofError::Protected {
+                        feature: RelationSecurityFeature::Redaction,
+                        observation: RelationSecurityObservation {
+                            key: RelationSecurityKey { object_id: 43, .. },
+                            redaction: RelationSecurityState::Protected,
+                            ..
+                        }
+                    })
+                ),
+                "got {outcome:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn security_view_unreadable_is_unknown_refused() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(false)
+                .into_iter()
+                .map(Ok)
+                .collect::<Vec<_>>();
+            responses.push(Err(DbError::Query(
+                "ORA-00942: table or view does not exist".to_owned(),
+            )));
+            let conn = ScriptedRows::results(responses);
+            match observe_relation_security(&cx, &conn, &[table_object()]).await {
+                Err(RelationSecurityProofError::VisibilityUnknown {
+                    feature: RelationSecurityFeature::Ras,
+                    observation,
+                }) => {
+                    assert_eq!(observation.ras, RelationSecurityState::Unavailable);
+                    assert_eq!(observation.key.dbid.as_deref(), Some("424242"));
+                    assert_eq!(observation.key.container.as_deref(), Some("FREEPDB1"));
+                    assert_eq!(observation.key.edition.as_deref(), Some("ORA$BASE"));
+                    assert_eq!(observation.key.object_id, 42);
+                }
+                other => panic!("expected unknown RAS evidence, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn security_identity_unreadable_refuses_with_partial_strict_key() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::results(vec![Err(DbError::Query(
+                "ORA-01031: identity unavailable".to_owned(),
+            ))]);
+            match observe_relation_security(&cx, &conn, &[table_object()]).await {
+                Err(RelationSecurityProofError::VisibilityUnknown {
+                    feature: RelationSecurityFeature::Ols,
+                    observation,
+                }) => {
+                    assert_eq!(observation.key.dbid, None);
+                    assert_eq!(observation.key.container, None);
+                    assert_eq!(observation.key.edition, None);
+                    assert_eq!(observation.key.owner, "APP");
+                    assert_eq!(observation.key.name, "ORDERS");
+                    assert_eq!(observation.key.object_id, 42);
+                    assert_eq!(observation.ols, RelationSecurityState::Unavailable);
+                    assert_eq!(observation.ras, RelationSecurityState::Unavailable);
+                    assert_eq!(observation.redaction, RelationSecurityState::Unavailable);
+                }
+                other => panic!("expected unknown identity, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn ols_option_unreadable_is_unknown_refused() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::results([
+                Ok(vec![relation_security_identity_row()]),
+                Err(DbError::ServerQuery(
+                    "ORA-01031: insufficient privileges".to_owned(),
+                )),
+            ]);
+            match observe_relation_security(&cx, &conn, &[table_object()]).await {
+                Err(RelationSecurityProofError::VisibilityUnknown {
+                    feature: RelationSecurityFeature::Ols,
+                    observation,
+                }) => {
+                    assert_eq!(observation.ols, RelationSecurityState::Unavailable);
+                    assert_eq!(observation.key.dbid.as_deref(), Some("424242"));
+                    assert_eq!(observation.key.container.as_deref(), Some("FREEPDB1"));
+                    assert_eq!(observation.key.edition.as_deref(), Some("ORA$BASE"));
+                    assert_eq!(observation.key.object_id, 42);
+                }
+                other => panic!("expected unknown OLS option evidence, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn feature_not_installed_evidence_allows() {
+        run_with_cx(|cx| async move {
+            let mut responses = relation_security_clear_prefix(false);
+            responses.extend([Vec::new(), Vec::new()]);
+            let conn = ScriptedRows::new(responses);
+            let evidence = observe_relation_security(&cx, &conn, &[table_object()])
+                .await
+                .expect("uninstalled OLS plus readable empty RAS/redaction catalogs");
+            assert_eq!(evidence[0].ols, RelationSecurityState::NotInstalled);
+            assert_eq!(evidence[0].ras, RelationSecurityState::Absent);
+            assert_eq!(evidence[0].redaction, RelationSecurityState::Absent);
+            let queries = conn.queries.lock().expect("query log");
+            assert!(
+                !queries
+                    .iter()
+                    .any(|(sql, _)| sql.contains("all_sa_table_policies"))
+            );
+        });
+    }
+
     #[test]
     fn fga_catalog_batches_1_10_100_relations_with_one_visibility_probe() {
         run_with_cx(|cx| async move {
@@ -3795,7 +4545,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 162);
+        assert_eq!(specs.len(), 167);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -4561,6 +5311,7 @@ mod tests {
         let proof = ReadPlanProof {
             relations: vec![object.clone()],
             fga_evidence: FgaEvidence::Proven,
+            relation_security: Vec::new(),
             by_source: HashMap::from([(source.clone(), vec![ReadObjectIdentity::from(&object)])]),
             by_identity: HashMap::from([(
                 ReadObjectIdentity::from(&object),

@@ -232,6 +232,16 @@ pub enum CatalogQueryId {
     TypeAttribute,
     /// Enabled SELECT policies on one relation.
     SelectPolicy,
+    /// Enabled Oracle Label Security table policies for a read relation.
+    ReadOlsTablePolicies,
+    /// Enabled Oracle Label Security schema policies for a read relation.
+    ReadOlsSchemaPolicies,
+    /// Enabled Real Application Security SELECT policies for a read relation.
+    ReadRasPolicies,
+    /// Enabled Oracle Data Redaction policies for a read relation.
+    ReadRedactionPolicies,
+    /// Current OLS enablement evidence used when optional OLS views are absent.
+    OlsInstallationEvidence,
     /// Virtual columns on one relation.
     VirtualColumn,
     /// Diagnostic visibility of ALL_POLICIES.
@@ -538,7 +548,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 162] = [
+    pub const ALL: [Self; 167] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -557,6 +567,11 @@ impl CatalogQueryId {
         Self::JsonConstraint,
         Self::TypeAttribute,
         Self::SelectPolicy,
+        Self::ReadOlsTablePolicies,
+        Self::ReadOlsSchemaPolicies,
+        Self::ReadRasPolicies,
+        Self::ReadRedactionPolicies,
+        Self::OlsInstallationEvidence,
         Self::VirtualColumn,
         Self::AllPoliciesVisibility,
         Self::PolicyCatalogProof,
@@ -888,6 +903,41 @@ impl CatalogQueryId {
                 SELECT_POLICY_SQL,
                 TT,
                 "prove no enabled SELECT policy",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::ReadOlsTablePolicies => (
+                "SELECT policy_name FROM all_sa_table_policies WHERE schema_name = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= :3",
+                TTI,
+                "prove no enabled OLS table policy on one relation",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::ReadOlsSchemaPolicies => (
+                "SELECT policy_name FROM all_sa_schema_policies WHERE schema_name = :1 AND status = 'ENABLED' AND ROWNUM <= :2",
+                TI,
+                "prove no enabled OLS schema policy on one relation owner",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::ReadRasPolicies => (
+                "SELECT policy FROM all_xs_applied_policies WHERE schema = :1 AND object = :2 AND status = 'ENABLED' AND sel = 'YES' AND ROWNUM <= :3",
+                TTI,
+                "prove no enabled RAS SELECT policy on one relation",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::ReadRedactionPolicies => (
+                "SELECT policy_name FROM redaction_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND ROWNUM <= :3",
+                TTI,
+                "prove no enabled data-redaction policy on one relation",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::OlsInstallationEvidence => (
+                "SELECT value FROM v$option WHERE parameter = 'Oracle Label Security' AND ROWNUM <= 1",
+                EMPTY,
+                "observe OLS enablement when its optional policy views are absent",
                 InternalProof,
                 ReadPurity,
             ),
@@ -2270,7 +2320,7 @@ order by owner, name, referenced_owner, referenced_name"#
                 EMPTY,
                 "read stable database, container and edition identity",
                 InternalProof,
-                Diagnostic,
+                ReadPurity,
             ),
             Self::ClosureMemberObject => (
                 "SELECT object_id, TO_CHAR(last_ddl_time,'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_ddl_time, status \

@@ -83,6 +83,17 @@ pub struct ClosureFactKey {
     pub fingerprint: String,
 }
 
+/// Live database identity shared by whole-closure and relation-security facts.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ClosureDatabaseIdentity {
+    /// Database DBID read from USERENV.
+    pub dbid: String,
+    /// PDB/container name read from USERENV.
+    pub container: String,
+    /// Current edition read from USERENV.
+    pub edition: String,
+}
+
 /// Catalog identity for one closure object and its compiler state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemberFact {
@@ -204,11 +215,7 @@ pub async fn extract_closure_facts(
             "closure DML target cap exhausted".into(),
         ));
     }
-    let identity_rows = query(cx, conn, CatalogQueryId::ClosureIdentity, &[]).await?;
-    let identity = exactly_one(&identity_rows, "database identity")?;
-    let dbid = required_text(identity, "DBID", "database identity")?;
-    let container = required_text(identity, "CONTAINER_NAME", "database identity")?;
-    let edition = required_text(identity, "EDITION_NAME", "database identity")?;
+    let identity = read_closure_database_identity(cx, conn).await?;
 
     let mut members = Vec::with_capacity(closure.members.len());
     let mut dependencies = Vec::new();
@@ -465,9 +472,9 @@ pub async fn extract_closure_facts(
     let mut facts = ClosureFacts {
         schema_version: FACT_SCHEMA_VERSION,
         key: ClosureFactKey {
-            dbid,
-            container,
-            edition,
+            dbid: identity.dbid,
+            container: identity.container,
+            edition: identity.edition,
             root: closure.root.clone(),
             fingerprint: String::new(),
         },
@@ -478,6 +485,21 @@ pub async fn extract_closure_facts(
     };
     facts.key.fingerprint = fingerprint(&facts)?;
     Ok(facts)
+}
+
+/// Read the same strict DBID/container/edition identity used by persisted
+/// whole-closure keys, for callers that bind another live fact to that scope.
+pub async fn read_closure_database_identity(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<ClosureDatabaseIdentity, Revalidation> {
+    let identity_rows = query(cx, conn, CatalogQueryId::ClosureIdentity, &[]).await?;
+    let identity = exactly_one(&identity_rows, "database identity")?;
+    Ok(ClosureDatabaseIdentity {
+        dbid: required_text(identity, "DBID", "database identity")?,
+        container: required_text(identity, "CONTAINER_NAME", "database identity")?,
+        edition: required_text(identity, "EDITION_NAME", "database identity")?,
+    })
 }
 
 /// Compare stored facts with a new live extraction, mapping all incomplete reads to Unknown.
