@@ -318,6 +318,10 @@ pub enum CatalogQueryId {
     ExplainPlanDisplay,
     /// Optimizer estimates scoped to one server-generated plan statement id.
     PlanCostEstimate,
+    /// Current DDL locks held on one exact target object.
+    ImpactDbaDdlLocksForObject,
+    /// Current database access pins on one exact target object.
+    ImpactVAccessForObject,
     /// Current-schema objects that could shadow the standard plan table.
     PlanTableCurrentObjects,
     /// Current-schema private synonyms that could shadow the standard plan table.
@@ -552,7 +556,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 169] = [
+    pub const ALL: [Self; 171] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -607,6 +611,8 @@ impl CatalogQueryId {
         Self::PrimaryKeyColumns,
         Self::ExplainPlanDisplay,
         Self::PlanCostEstimate,
+        Self::ImpactDbaDdlLocksForObject,
+        Self::ImpactVAccessForObject,
         Self::PlanTableCurrentObjects,
         Self::PlanTablePrivateSynonym,
         Self::PlanTablePublicSynonym,
@@ -1233,6 +1239,20 @@ impl CatalogQueryId {
                 crate::intelligence::PLAN_COST_SQL,
                 T,
                 "read estimates for one server-generated plan statement id",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ImpactDbaDdlLocksForObject => (
+                "SELECT owner, name, type, mode_held FROM dba_ddl_locks WHERE owner = :1 AND name = :2 AND ROWNUM <= :3",
+                TTI,
+                "observe DDL locks held on one exact target object",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ImpactVAccessForObject => (
+                "SELECT sid, owner, object, type FROM v$access WHERE owner = :1 AND object = :2 AND ROWNUM <= :3",
+                TTI,
+                "observe sessions currently accessing one exact target object",
                 DictionaryMetadata,
                 Diagnostic,
             ),
@@ -2575,7 +2595,43 @@ pub(crate) const FGA_POLICIES_FOR_RELATIONS_32_SQL: &str = "SELECT object_schema
     FROM (SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \
           FROM all_audit_policies \
           WHERE (object_schema, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) \
-          ORDER BY object_schema, object_name, policy_name) WHERE ROWNUM <= 257";
+    ORDER BY object_schema, object_name, policy_name) WHERE ROWNUM <= 257";
 pub(crate) const VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL: &str = "SELECT owner, table_name, column_name, hidden_column, user_generated, data_default FROM all_tab_cols \
     WHERE virtual_column = 'YES' \
     AND (owner, table_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 257";
+
+#[cfg(test)]
+mod impact_lock_query_tests {
+    use super::{CatalogAuditClass, CatalogBindKind, CatalogQueryId};
+
+    #[test]
+    fn impact_lock_queries_are_fixed_and_bind_exact_identity_with_a_cap() {
+        for (id, expected_sql, expected_purpose) in [
+            (
+                CatalogQueryId::ImpactDbaDdlLocksForObject,
+                "SELECT owner, name, type, mode_held FROM dba_ddl_locks WHERE owner = :1 AND name = :2 AND ROWNUM <= :3",
+                "observe DDL locks held on one exact target object",
+            ),
+            (
+                CatalogQueryId::ImpactVAccessForObject,
+                "SELECT sid, owner, object, type FROM v$access WHERE owner = :1 AND object = :2 AND ROWNUM <= :3",
+                "observe sessions currently accessing one exact target object",
+            ),
+        ] {
+            let spec = id.spec();
+            assert_eq!(spec.sql, expected_sql);
+            assert_eq!(spec.purpose, expected_purpose);
+            assert_eq!(
+                spec.binds.0,
+                &[
+                    CatalogBindKind::Text,
+                    CatalogBindKind::Text,
+                    CatalogBindKind::Integer,
+                ]
+            );
+            assert!(spec.sql.contains(":1") && spec.sql.contains(":2") && spec.sql.contains(":3"));
+            assert_eq!(spec.audit_class, CatalogAuditClass::Diagnostic);
+            assert!(CatalogQueryId::ALL.contains(&id));
+        }
+    }
+}

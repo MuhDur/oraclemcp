@@ -4735,6 +4735,8 @@ use read_executor::{
     ReadUncertaintyConn, ensure_read_only_backstop_bounded,
 };
 
+mod impact;
+
 mod workspace;
 use workspace::CheckpointWorkspace;
 
@@ -12496,9 +12498,119 @@ impl OracleDispatcher {
         name: &str,
         args: Value,
     ) -> Result<Value, ErrorEnvelope> {
-        self.dispatch_with_cx_inner_core(cx, context, name, args)
-            .await
-            .and_then(attach_preview_impact)
+        let canonical_name = canonical_tool_name(name);
+        let preview_sql = args
+            .get("sql")
+            .or_else(|| args.get("ddl"))
+            .or_else(|| args.get("source_code"))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let commit = args.get("commit").and_then(Value::as_bool) == Some(true);
+        let hold = args.get("hold").and_then(Value::as_bool) == Some(true);
+        let timeout_seconds = args.get("timeout_seconds").and_then(Value::as_u64);
+        let can_carry_impact = matches!(
+            canonical_name,
+            "oracle_preview_sql"
+                | "oracle_compile_object"
+                | "oracle_create_or_replace"
+                | "oracle_patch_source"
+        );
+        let before_generation = if can_carry_impact && preview_sql.is_some() {
+            let state = self.state.lock(cx).await.map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+            })?;
+            Some((
+                state.active_profile.clone(),
+                state
+                    .profile_generation
+                    .as_ref()
+                    .map(|lease| (lease.profile().to_owned(), lease.generation())),
+            ))
+        } else {
+            None
+        };
+        let mut response = self
+            .dispatch_with_cx_inner_core(cx, context, name, args)
+            .await?;
+        let Some(sql) = preview_sql else {
+            return attach_preview_impact(response);
+        };
+        if !can_carry_impact || !impact::is_confirmation_preview(&response) {
+            return attach_preview_impact(response);
+        }
+        let Some((active_profile, generation)) = before_generation else {
+            return attach_preview_impact(response);
+        };
+
+        let state = self.state.lock(cx).await.map_err(|_| {
+            ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+        })?;
+        let current_generation = state
+            .profile_generation
+            .as_ref()
+            .map(|lease| (lease.profile().to_owned(), lease.generation()));
+        if state.active_profile != active_profile || current_generation != generation {
+            // The preview was rendered against a different pinned-session
+            // generation than the one currently owned by the dispatcher.
+            // Keep the status-complete default; never recompute evidence on a
+            // connection/profile that did not produce the preview.
+            return attach_preview_impact(response);
+        }
+        let Some(profile) = state
+            .profile_generation
+            .as_ref()
+            .and_then(|lease| lease.config())
+            .and_then(|config| {
+                state
+                    .profile_generation
+                    .as_ref()
+                    .and_then(|lease| config.profile(lease.profile()))
+            })
+        else {
+            // Config-free dispatcher constructors intentionally retain the
+            // status-complete `not_wired` impact payload used by unit tests.
+            return attach_preview_impact(response);
+        };
+        let required_level = response
+            .get("required_level")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<OperatingLevel>(value).ok());
+        let current_level = scoped_session_level(&state.level, context).effective_level();
+        let request_budget = self.dispatch_request_budget(cx, context)?;
+        let result = with_call_timeout(
+            cx,
+            state.conn.as_ref(),
+            &self.quarantine,
+            request_budget,
+            timeout_seconds,
+            CompletionPolicy::EnforceDeadlineAfterBody,
+            || async {
+                impact::enrich_preview_impact(
+                    &mut response,
+                    cx,
+                    state.conn.as_ref(),
+                    &state.read_only_backstop,
+                    &state.checkpoints,
+                    &self.quarantine,
+                    &state.catalog_cache,
+                    &sql,
+                    required_level,
+                    impact::is_dml_statement(&sql),
+                    commit,
+                    hold,
+                    sql.to_ascii_uppercase().contains("NEXTVAL"),
+                    current_level,
+                    profile.explain_plan_table.as_deref(),
+                    profile.max_query_cost,
+                    profile.read_only_standby(),
+                )
+                .await
+                .map_err(DbError::into_envelope)?;
+                Ok(response)
+            },
+        )
+        .await?;
+        attach_preview_impact(result)
     }
 
     async fn dispatch_with_cx_inner_core(

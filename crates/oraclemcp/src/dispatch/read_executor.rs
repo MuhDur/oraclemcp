@@ -6,9 +6,10 @@
 
 use super::*;
 use oraclemcp_db::{
-    FgaEvidence, FgaEvidencePolicy, ReadPlanProofError, ReadQueryProvenance,
+    FgaEvidence, FgaEvidencePolicy, PlanStatementId, ReadPlanProofError, ReadQueryProvenance,
     RelationSecurityFeature, RelationSecurityObservation, RelationSecurityProofError,
-    RelationSecurityState, prove_semantic_read_plan, resolve_semantic_read_relations,
+    RelationSecurityState, VerifiedPlanTable, prove_semantic_read_plan,
+    resolve_semantic_read_relations,
 };
 use oraclemcp_guard::semantic_read_plan_checked;
 
@@ -100,6 +101,49 @@ impl ReadUncertaintyConn<'_> {
         }
         Err(err)
     }
+}
+
+/// Count only the generated statement's rows in a plan table whose identity
+/// was verified by `resolve_plan_table`. Object names cannot be bound, so the
+/// private `VerifiedPlanTable` fields are rechecked against Oracle identifier
+/// grammar before constructing this one server-owned query. Read errors retain
+/// the normal server-read provenance boundary.
+pub(super) async fn verified_plan_table_row_count(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    table: &VerifiedPlanTable,
+    statement_id: &PlanStatementId,
+) -> Result<Option<i64>, DbError> {
+    let owner = table.owner();
+    let name = table.name();
+    if !verified_plan_identifier(owner) || !verified_plan_identifier(name) {
+        return Err(DbError::Internal(
+            "verified plan table contained an invalid identifier".to_owned(),
+        ));
+    }
+    let sql =
+        format!("SELECT COUNT(*) AS ROW_COUNT FROM \"{owner}\".\"{name}\" WHERE statement_id = :1");
+    let observed = ReadUncertaintyConn {
+        inner: conn,
+        quarantine: None,
+        provenance: ReadQueryProvenance::ServerRead,
+    };
+    let rows = observed
+        .query_rows(
+            cx,
+            &sql,
+            &[OracleBind::String(statement_id.as_str().to_owned())],
+        )
+        .await?;
+    Ok(rows.first().and_then(|row| row.parse_i64("ROW_COUNT")))
+}
+
+fn verified_plan_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().all(|byte| {
+            byte.is_ascii_uppercase() || byte.is_ascii_digit() || b"_$#".contains(&byte)
+        })
 }
 
 #[async_trait::async_trait(?Send)]

@@ -48,6 +48,9 @@
       {"sql": "CREATE TABLE ${owner}.T_PLAN_CANARY_${run_id} (ID NUMBER)"},
       {"sql": "CREATE OR REPLACE TRIGGER ${owner}.TR_PLAN_CANARY_${run_id} BEFORE INSERT ON ${owner}.PLAN_TABLE FOR EACH ROW DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_PLAN_CANARY_${run_id} VALUES (1); COMMIT; END;"}
     ],
+    "steps": [
+      {"tool": "oracle_preview_sql", "arguments": {"sql": "UPDATE ${owner}.T_PLAN_CANARY_${run_id} SET ID = ID WHERE ID = 1"}, "expect": {"json_subset": {"impact": {"cost": {"status": "unavailable", "reason": "plan_table_unverified"}}}}}
+    ],
     "call": {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id}", "allow_plan_table_write": true}},
     "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "callback_unprovable"},
     "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_PLAN_CANARY_${run_id}", "rows": [[0]]}],
@@ -63,6 +66,9 @@
     "requires": [],
     "profile_variant": "synthetic_owner_rw",
     "setup": [{"sql": "CREATE SYNONYM ${owner}.PLAN_TABLE FOR ${owner}.T_RUN_${run_id}"}],
+    "steps": [
+      {"tool": "oracle_preview_sql", "arguments": {"sql": "UPDATE ${owner}.T_RUN_${run_id} SET TOKEN = TOKEN WHERE RUN_ID = '${run_id}'"}, "expect": {"json_subset": {"impact": {"cost": {"status": "unavailable", "reason": "plan_table_unverified"}}}}}
+    ],
     "call": {"arguments": {"sql": "SELECT 1 AS ID FROM ${owner}.T_RUN_${run_id}", "allow_plan_table_write": true}},
     "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "callback_unprovable"},
     "db_reread": [],
@@ -104,6 +110,7 @@
       {"tool": "oracle_set_session_level", "arguments": {"action": "drop"}, "expect": {"json_subset": {"session": {"current_level": "READ_ONLY"}}}},
       {"tool": "oracle_set_session_level", "arguments": {"level": "READ_WRITE"}, "expect": {"json_subset": {"confirmation": {}}}, "capture": {"elevation": "/confirmation/confirm"}},
       {"tool": "oracle_set_session_level", "arguments": {"level": "READ_WRITE", "execute": true, "confirm": "${cap:elevation}"}, "expect": {"json_subset": {"session": {"current_level": "READ_WRITE"}}}},
+      {"tool": "oracle_preview_sql", "arguments": {"sql": "UPDATE ${owner}.T_TYPES_${run_id} SET N_VAL = N_VAL WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1"}, "expect": {"json_subset": {"impact": {"cost": {"status": "unavailable", "reason": "hard_parse_callbacks"}}}}},
       {"tool": "oracle_explain_plan", "arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "allow_plan_table_write": true}, "expect": {"error_class": "FORBIDDEN_STATEMENT", "reason_code": "odci_stats_callback"}}
     ],
     "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ${owner}.FN_ODCI_${run_id}(ID) = 1", "max_query_cost": 1, "allow_plan_table_write": true}},
@@ -172,6 +179,20 @@
     "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_TYPES_${run_id} WHERE ID = 1", "max_rows": 1, "max_query_cost": 1000, "allow_plan_table_write": true}},
     "expect": {"error_class": "RUNTIME_STATE_REQUIRED", "reason_code": "no_privilege"},
     "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
+  },
+  {
+    "case_id": "w4_impact_preview_dml_cost",
+    "tool": "oracle_preview_sql",
+    "level": "READ_WRITE",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "profile_variant": "synthetic_owner_rw",
+    "setup": [],
+    "call": {"arguments": {"sql": "UPDATE ${owner}.T_RUN_${run_id} SET TOKEN = TOKEN WHERE RUN_ID = '${run_id}'"}},
+    "expect": {"json_subset": {"required_level": "READ_WRITE", "gate_decision": "allow", "impact": {"cost": {"status": "estimated"}}}},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_RUN_${run_id} WHERE RUN_ID = '${run_id}'", "rows": [[1]]}],
     "audit_expect": [],
     "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
   }
