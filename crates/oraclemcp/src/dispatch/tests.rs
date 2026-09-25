@@ -10325,7 +10325,7 @@ impl OracleConnection for QueryCostQuotaMock {
 }
 
 #[test]
-fn query_cost_limit_is_installed_on_db_boundary_and_cannot_be_widened() {
+fn query_cost_limit_does_not_consume_db_request_quota() {
     let state = Arc::new(QueryCostQuotaState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
         Box::new(QueryCostQuotaMock {
@@ -10360,12 +10360,8 @@ fn query_cost_limit_is_installed_on_db_boundary_and_cannot_be_widened() {
     let observed = state.observed_costs.lock().expect("observed costs mutex");
     assert_eq!(observed.len(), 2);
     assert!(
-        matches!(observed[0], Some(remaining) if remaining <= 120),
-        "per-call max_query_cost=1000 must not widen the profile cap: {observed:?}"
-    );
-    assert!(
-        matches!(observed[1], Some(remaining) if remaining <= 70),
-        "per-call max_query_cost=70 must lower the effective cap: {observed:?}"
+        observed.iter().all(Option::is_none),
+        "optimizer cost caps use plan estimates, not DB request checkpoint quotas: {observed:?}"
     );
 }
 
