@@ -38,7 +38,8 @@
     "artifacts": [
       {
         "kind": "catalog-facts-live-gated-run",
-        "path": "tests/artifacts/evidence/live/catalog-facts-10.9-free23-20260925T0145Z.json"
+        "path": "tests/artifacts/evidence/live/catalog-facts-10.9-free23-20260925T0145Z.json",
+        "sha": "2003b89183fe5847ca6e204e7687c85ccdab8305"
       }
     ]
   },
