@@ -758,7 +758,7 @@
     "symbols": [
       "describe_view"
     ],
-    "test_id": "w4_describe_view_missing_view",
+    "test_id": "w4_describe_view_missing_object_not_found",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i43_missing_view.jsonl"
   },
@@ -788,7 +788,7 @@
       "connection_info",
       "switch_profile"
     ],
-    "test_id": "w4_connection_info_effective_access",
+    "test_id": "w4_connection_info_effective_access_readonly_pinned",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i44_effective_access.jsonl"
   },

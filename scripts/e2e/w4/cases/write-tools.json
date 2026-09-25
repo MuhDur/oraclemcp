@@ -2215,6 +2215,40 @@
     "profile_variant": "protected"
   },
   {
+    "case_id": "w4_connection_info_effective_access_readonly_pinned",
+    "tool": "oracle_connection_info",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {}
+    },
+    "expect": {
+      "json_subset": {
+        "effective_access": {
+          "operating_level": "READ_ONLY",
+          "max_level": "READ_ONLY",
+          "protected": true,
+          "writes_permitted_now": false
+        },
+        "connection": {
+          "open_mode": "READ WRITE",
+          "read_only": false
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "protected"
+  },
+  {
     "case_id": "w4_connection_info_effective_access_after_elevation",
     "tool": "oracle_connection_info",
     "level": "READ_ONLY",
