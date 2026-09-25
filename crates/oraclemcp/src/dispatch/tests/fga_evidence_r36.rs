@@ -324,6 +324,9 @@ impl OracleConnection for CostAuditMock {
         if sql == CatalogQueryId::OlsInstallationEvidence.spec().sql {
             return Ok(vec![semantic_row(&[("VALUE", Some("FALSE"))])]);
         }
+        if sql == CatalogQueryId::RedactionInstallationEvidence.spec().sql {
+            return Ok(vec![semantic_row(&[("ADVANCED_SECURITY", Some("FALSE"))])]);
+        }
         if [
             CatalogQueryId::ReadOlsTablePolicies,
             CatalogQueryId::ReadOlsSchemaPolicies,

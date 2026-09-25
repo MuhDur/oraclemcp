@@ -403,6 +403,9 @@ fn relation_security_probe_rows(id: CatalogQueryId) -> Vec<OracleRow> {
         CatalogQueryId::OlsInstallationEvidence => {
             vec![semantic_row(&[("VALUE", Some("FALSE"))])]
         }
+        CatalogQueryId::RedactionInstallationEvidence => {
+            vec![semantic_row(&[("ADVANCED_SECURITY", Some("FALSE"))])]
+        }
         CatalogQueryId::ReadOlsTablePolicies
         | CatalogQueryId::ReadOlsSchemaPolicies
         | CatalogQueryId::ReadRasPolicies
@@ -415,6 +418,7 @@ fn mock_relation_security_probe_rows(sql: &str) -> Option<Vec<OracleRow>> {
     [
         CatalogQueryId::ClosureIdentity,
         CatalogQueryId::OlsInstallationEvidence,
+        CatalogQueryId::RedactionInstallationEvidence,
         CatalogQueryId::ReadOlsTablePolicies,
         CatalogQueryId::ReadOlsSchemaPolicies,
         CatalogQueryId::ReadRasPolicies,
@@ -958,7 +962,7 @@ fn executor_orders_parse_resolve_prove_mask_audit_execute() {
         C::ClosureIdentity,
         C::OlsInstallationEvidence,
         C::ReadRasPolicies,
-        C::ReadRedactionPolicies,
+        C::RedactionInstallationEvidence,
         C::FgaPoliciesForRelations32,
         C::FgaCatalogProof,
         C::PolicyRowsForRelations32,

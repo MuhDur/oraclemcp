@@ -59,6 +59,11 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
             columns: vec![("VALUE".to_owned(), resolver_text("FALSE"))],
         }]);
     }
+    if sql == CatalogQueryId::RedactionInstallationEvidence.spec().sql {
+        return Some(vec![OracleRow {
+            columns: vec![("ADVANCED_SECURITY".to_owned(), resolver_text("FALSE"))],
+        }]);
+    }
     if sql == CatalogQueryId::ReadRasPolicies.spec().sql
         || sql == CatalogQueryId::ReadRedactionPolicies.spec().sql
     {

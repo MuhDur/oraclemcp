@@ -77,6 +77,13 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
     {
         return Some(vec![catalog_row(&[("VALUE", Some("FALSE"))])]);
     }
+    if sql
+        == oraclemcp_db::CatalogQueryId::RedactionInstallationEvidence
+            .spec()
+            .sql
+    {
+        return Some(vec![catalog_row(&[("ADVANCED_SECURITY", Some("FALSE"))])]);
+    }
     if sql == oraclemcp_db::CatalogQueryId::ReadRasPolicies.spec().sql
         || sql
             == oraclemcp_db::CatalogQueryId::ReadRedactionPolicies

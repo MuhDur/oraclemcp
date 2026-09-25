@@ -242,6 +242,8 @@ pub enum CatalogQueryId {
     ReadRedactionPolicies,
     /// Current OLS enablement evidence used when optional OLS views are absent.
     OlsInstallationEvidence,
+    /// Current Advanced Security evidence used when redaction catalogs are optional.
+    RedactionInstallationEvidence,
     /// Virtual columns on one relation.
     VirtualColumn,
     /// Diagnostic visibility of ALL_POLICIES.
@@ -548,7 +550,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 167] = [
+    pub const ALL: [Self; 168] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -572,6 +574,7 @@ impl CatalogQueryId {
         Self::ReadRasPolicies,
         Self::ReadRedactionPolicies,
         Self::OlsInstallationEvidence,
+        Self::RedactionInstallationEvidence,
         Self::VirtualColumn,
         Self::AllPoliciesVisibility,
         Self::PolicyCatalogProof,
@@ -938,6 +941,13 @@ impl CatalogQueryId {
                 "SELECT value FROM v$option WHERE parameter = 'Oracle Label Security' AND ROWNUM <= 1",
                 EMPTY,
                 "observe OLS enablement when its optional policy views are absent",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::RedactionInstallationEvidence => (
+                crate::native_redaction::NATIVE_REDACTION_OPTION_SQL,
+                EMPTY,
+                "observe Advanced Security when redaction catalogs are optional",
                 InternalProof,
                 ReadPurity,
             ),
