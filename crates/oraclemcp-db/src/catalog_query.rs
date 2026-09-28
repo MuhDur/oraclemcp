@@ -292,6 +292,8 @@ pub enum CatalogQueryId {
     DictionaryViewIdentity,
     /// Bounded dependency closure for one eligible dictionary view.
     DictionaryViewDependencies,
+    /// Bounded source text and editioning marker for one exact application view.
+    TrustedViewText,
     /// Exact identity and validity for one closure member.
     ClosureMemberObject,
     /// AUTHID of one exact standalone routine or package member.
@@ -572,7 +574,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 174] = [
+    pub const ALL: [Self; 175] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -741,6 +743,7 @@ impl CatalogQueryId {
         Self::PdbIdentity,
         Self::DictionaryViewIdentity,
         Self::DictionaryViewDependencies,
+        Self::TrustedViewText,
         Self::ClosureMemberObject,
         Self::ClosureRoutineAuthid,
         Self::ClosureCompilerSettings,
@@ -856,6 +859,13 @@ impl CatalogQueryId {
                 "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, u.oracle_maintained AS owner_oracle_maintained FROM (SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name FROM all_dependencies WHERE owner = :1 AND name = :2 AND type = 'VIEW' ORDER BY referenced_owner, referenced_name, referenced_type) d LEFT JOIN all_users u ON u.username = d.referenced_owner WHERE ROWNUM <= :3",
                 TTI,
                 "prove one eligible dictionary view has a bounded Oracle-maintained dependency closure",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::TrustedViewText => (
+                "SELECT text, editioning_view FROM all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
+                TT,
+                "read bounded source for one exact profile-trusted application view",
                 InternalProof,
                 ReadPurity,
             ),

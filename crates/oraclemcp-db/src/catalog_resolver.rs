@@ -17,7 +17,7 @@ use oraclemcp_guard::{
     QuoteSemantics, RawName, RawNamePart, Resolution, ResolveCtx, ResolvedContainer,
     ResolvedIdentity, ResolvedObject, ResolvedOverload, RoutineArgument, RoutineArgumentValue,
     RoutineIdentifier, RoutineRef, SemanticReadPlan, SideEffectOracle, StatementScope, SynonymHop,
-    SyntacticRole,
+    SyntacticRole, semantic_read_plan_checked,
 };
 
 use crate::catalog_facts::read_closure_database_identity;
@@ -595,6 +595,88 @@ pub async fn resolved_relations_read_purity(
     prove_policy_catalog_readable(cx, conn).await?;
     prove_target_column_catalog_readable(cx, conn, &relations[0]).await?;
     Ok(oraclemcp_guard::Purity::ProvenReadOnly)
+}
+
+/// Extend the ordinary relation proof with the narrowly configured application
+/// views whose source can itself complete the same semantic proof.  The
+/// configuration is eligibility only: an unavailable, malformed, truncated,
+/// or non-read-only source remains unknown.
+async fn resolved_relations_read_purity_with_trusted_views(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    relations: &[ResolvedObject],
+    values: &[RawName],
+    fga_policy: FgaEvidencePolicy,
+    trusted_views: &[String],
+) -> Result<Purity, DbError> {
+    let mut policy_relations = Vec::with_capacity(relations.len());
+    for relation in relations {
+        if relation.kind == CatalogObjectKind::View
+            && trusted_view_identity_is_eligible(relation, trusted_views)
+        {
+            if !trusted_view_source_is_proven(cx, conn, cache, relation, fga_policy).await? {
+                return Ok(Purity::Unknown);
+            }
+            let mut policy_relation = relation.clone();
+            policy_relation.kind = CatalogObjectKind::Table;
+            policy_relations.push(policy_relation);
+        } else {
+            policy_relations.push(relation.clone());
+        }
+    }
+    resolved_relations_read_purity(cx, conn, &policy_relations, values).await
+}
+
+fn trusted_view_identity_is_eligible(relation: &ResolvedObject, trusted_views: &[String]) -> bool {
+    !relation.quote_exact
+        && trusted_views
+            .iter()
+            .any(|candidate| candidate == &format!("{}.{}", relation.owner, relation.name))
+}
+
+async fn trusted_view_source_is_proven(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    relation: &ResolvedObject,
+    fga_policy: FgaEvidencePolicy,
+) -> Result<bool, DbError> {
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::TrustedViewText,
+        &[
+            OracleBind::from(relation.owner.as_str()),
+            OracleBind::from(relation.name.as_str()),
+        ],
+    )
+    .await?;
+    let Some(row) = rows.first().filter(|_| rows.len() == 1) else {
+        return Ok(false);
+    };
+    let Some(source) = required_text(row, "TEXT") else {
+        return Ok(false);
+    };
+    if row.cell("TEXT").is_some_and(|cell| {
+        cell.source_length
+            .is_some_and(|length| length > source.chars().count())
+    }) {
+        return Ok(false);
+    }
+    let Ok(plan) = semantic_read_plan_checked(&source) else {
+        return Ok(false);
+    };
+    Ok(Box::pin(prove_semantic_read_plan(
+        cx,
+        conn,
+        cache,
+        &plan,
+        fga_policy,
+        &[],
+    ))
+    .await
+    .is_ok())
 }
 
 /// A dictionary spelling is eligible only when Oracle resolved it through its
@@ -1840,9 +1922,17 @@ pub async fn prove_semantic_read_plan(
         .iter()
         .flat_map(|block| block.values.iter().cloned())
         .collect::<Vec<_>>();
-    let purity = resolved_relations_read_purity(cx, conn, &relations, &values)
-        .await
-        .map_err(ReadPlanProofError::Database)?;
+    let purity = resolved_relations_read_purity_with_trusted_views(
+        cx,
+        conn,
+        cache,
+        &relations,
+        &values,
+        fga_policy,
+        _trusted_views,
+    )
+    .await
+    .map_err(ReadPlanProofError::Database)?;
     if !purity.permits_safe() {
         return Err(ReadPlanProofError::Unproven(
             "a relation can invoke an unproven view, policy, or virtual-column dependency",
@@ -5116,7 +5206,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 174);
+        assert_eq!(specs.len(), 175);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
