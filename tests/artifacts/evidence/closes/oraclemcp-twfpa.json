@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T21:40:00Z",
+  "bead_id": "oraclemcp-twfpa",
+  "scope": {
+    "summary": "oracle_top_queries accepts optional live-cursor-only sql_id (exact) and sql_text (case-insensitive substring) filters, bound positionally (each placeholder occurrence bound separately) in the fixed V$SQLSTATS catalog query; historical sources refuse the filters with INVALID_ARGUMENTS.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/awr.rs",
+      "crates/oraclemcp-db/src/catalog_query.rs",
+      "crates/oraclemcp/src/dispatch/args.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "crates/oraclemcp/src/registry.rs"
+    ],
+    "out_of_scope": [
+      "AWR/Statspack filtering (explicitly refused)."
+    ]
+  },
+  "source": {
+    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_top_queries over external MCP client (W4, release binary)",
+        "kind": "tool",
+        "trace": "Release binary built with cargo build --release -p oraclemcp --bin oraclemcp in a clean git-archive export of 32024974 (export HEAD = 32024974, status clean), sha256 0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f. --case w4_top_queries_live_cursor_cache_contains_marker: the case runs a run-id-marked query through oracle_query, then oracle_top_queries(metric=elapsed, top_n=1, sql_text=<marker>) must return source live_cursor, row_count 1, and a row whose SQL_TEXT contains the marker -> pass stdio+http on free23, xe21, xe18."
+      },
+      {
+        "name": "unit tests (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Clean export of 32024974, dedicated CARGO_TARGET_DIR: cargo test -p oraclemcp-db --lib 668 passed; -p oraclemcp-db --test positional_bind_shape 3 passed; -p oraclemcp-core --lib 824 passed; -p oraclemcp --lib 558 passed; -p oraclemcp --bins 167 passed; 0 failed in each. Includes awr::tests::live_cursor_filters_are_bound_and_historical_filters_refuse and the positional bind shape tests."
+      },
+      {
+        "name": "orchestrator re-verification at ef2885a5",
+        "kind": "tool",
+        "trace": "filtered live top_queries marker case (sql_id/sql_text filter): pass live on free23/xe21/xe18 at ef2885a5 (both transports); full gate PREPUSH PASS ef2885a5."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-live-case-rerun",
+        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-20260928T2140Z.json",
+        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+      }
+    ]
+  },
+  "limitations": [
+    "The sql_id pattern ^[0-9a-z]{13}$ and sql_text length bounds are advertised in the tool schema; server-side enforcement of those bounds was not separately exercised (values are always bound, never interpolated).",
+    "The same verification run shows w4_query_issue35_trusted_view_function_refused red on all lanes; it belongs to open bead .6.7 and is not part of this bead's claim."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "run_id": "orchestrator-verify-ef2885a5",
+  "lane": "free23,xe21,xe18",
+  "source_sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+  "kind": "w4-live-case-rerun",
+  "runner": "orchestrator; clean detached gate worktree at ef2885a5 (PREPUSH PASS, 4696 tests); debug binary with dashboard-bundle; least-privilege E2E_ORACLE",
+  "command": "python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/debug/oraclemcp --binary-source-sha <sha> --case <each of the 43 dictionary-tools cases + get_ddl_view + 4 security/redaction cases + top_queries marker case>",
+  "result": "per lane 88/90 case-transport results pass; the only red is w4_query_issue35_trusted_view_function_refused (stdio+http), which belongs to open bead .6.7 and is not claimed here",
+  "lanes": {
+    "free23": {
+      "total": 90,
+      "pass": 88,
+      "red": [
+        "w4_query_issue35_trusted_view_function_refused (stdio, http)"
+      ]
+    },
+    "xe21": {
+      "total": 90,
+      "pass": 88,
+      "red": [
+        "w4_query_issue35_trusted_view_function_refused (stdio, http)"
+      ]
+    },
+    "xe18": {
+      "total": 90,
+      "pass": 88,
+      "red": [
+        "w4_query_issue35_trusted_view_function_refused (stdio, http)"
+      ]
+    }
+  }
+}

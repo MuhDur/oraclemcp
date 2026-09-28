@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T19:50:00Z",
+  "generated_at": "2026-09-28T21:40:00Z",
   "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.7",
   "scope": {
     "summary": "W4 external-client cases for the dictionary tools (list_schemas, schema_inspect, describe, describe_index, describe_trigger, describe_view, sample_rows, read_clob, plscope_inspect; scripts/e2e/w4/cases/dictionary-tools.json, 41 cases) green over stdio and Streamable HTTP on FREE 23ai, XE 21 and XE 18, with per-case isolated fixtures (df03922d rework) so expectations hold both alone and in the family.",
@@ -14,7 +14,7 @@
     ]
   },
   "source": {
-    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
     "tree_clean": true,
     "branch": "main"
   },
@@ -22,14 +22,19 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "W4 dictionary-tools family, release binary (verifier re-execution)",
+        "name": "W4 dictionary-tools family, release binary (verifier re-execution at 32024974)",
         "kind": "cli",
-        "trace": "Release binary from a clean export of 12e16ecb; driver invoked with every dictionary-tools case id: free23 82/82, xe21 82/82, xe18 82/82 (stdio + http). Alone on free23 (stdio + http): the five reworked cases w4_schema_inspect_object_inventory_exact, w4_schema_inspect_object_type_filter, w4_schema_inspect_pagination_cursor, w4_sample_rows_types_exact_values, w4_search_objects_detail_names_only, plus negatives w4_describe_view_missing_object_not_found and w4_sample_rows_view_with_side_effecting_function_refused -> all pass. Blockers brsya, mo1ld, 74jzy, i1k2q, .8.5 are closed."
+        "trace": "Release binary built with cargo build --release -p oraclemcp --bin oraclemcp in a clean git-archive export of 32024974 (export HEAD = 32024974, status clean), sha256 0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f. Driver invoked with every dictionary-tools case id (41): free23 82/82, xe21 82/82, xe18 82/82 (stdio + http)."
       },
       {
         "name": "expectation review",
         "kind": "api",
-        "trace": "02512dea (leaked-state expectations) was superseded by df03922d: listing/search cases now create and drop their own D7I_/D7V_/D7P_/D7S_ objects and filter by that prefix; expected sets are re-read from ALL_OBJECTS. sample_rows T_TYPES truncated=true is legitimate in isolation: the T4.3 fixture seeds T_TYPES with several rows, so max_rows=1 cuts the result (the oraclemcp-74jzy fix), and the case passes alone."
+        "trace": "dictionary-tools.json is byte-identical between 12e16ecb (previous verification, expectations reviewed there) and 32024974; listing/search cases create and drop their own D7*_ objects and re-read expected sets from ALL_OBJECTS."
+      },
+      {
+        "name": "orchestrator re-verification at ef2885a5",
+        "kind": "tool",
+        "trace": "all 43 dictionary-tools W4 cases (both transports): pass live on free23/xe21/xe18 at ef2885a5 (both transports); full gate PREPUSH PASS ef2885a5."
       }
     ]
   },
@@ -37,15 +42,16 @@
     "claimed": true,
     "artifacts": [
       {
-        "kind": "w4-dictionary-tools-family",
-        "path": "tests/artifacts/evidence/live/verify-12e16ecb-pvlqq.9.7-20260928T1945Z.json",
-        "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b"
+        "kind": "w4-live-case-rerun",
+        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-20260928T2140Z.json",
+        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
       }
     ]
   },
   "limitations": [
     "The isolation rework narrowed w4_schema_inspect_object_inventory_exact from a nine-object multi-type inventory (INDEX/PACKAGE/PACKAGE BODY/TABLE/FUNCTION/VIEW) to three objects (FUNCTION/TABLE/VIEW); it is still exact and DB re-read, but covers fewer object types.",
-    "Tier-C runner was not used; each lane was driven directly with the scoped family in one invocation."
+    "Tier-C runner was not used; each lane was driven directly with the scoped family in one invocation.",
+    "The same verification run shows w4_query_issue35_trusted_view_function_refused red on all lanes; it belongs to open bead .6.7 and is not part of this bead's claim."
   ],
   "known_defects": [
     {

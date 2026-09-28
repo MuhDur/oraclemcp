@@ -1,7 +1,7 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T19:50:00Z",
+  "generated_at": "2026-09-28T21:40:00Z",
   "bead_id": "oraclemcp-tio2e",
   "scope": {
     "summary": "w4_describe_view_after_describe_keeps_session_usable no longer replaces the canonical fixture view V_TYPES_${run_id}; it creates and cleans up its own D7_V_SESS view, so source-tools w4_get_ddl_view asserts the unmodified fixture against its existing golden in both scoped and family runs.",
@@ -13,7 +13,7 @@
     ]
   },
   "source": {
-    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
     "tree_clean": true,
     "branch": "main"
   },
@@ -21,9 +21,19 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "W4 external client, release binary (verifier re-execution)",
+        "name": "W4 external client, release binary (verifier re-execution at 32024974)",
         "kind": "cli",
-        "trace": "Release binary from a clean export of 12e16ecb. --case w4_describe_view_after_describe_keeps_session_usable alone: pass stdio+http on free23, xe21, xe18. --case w4_get_ddl_view alone on free23: pass stdio+http. Source-tools family (all 40 ids in one invocation) 80/80 on each lane, w4_get_ddl_view passing against tests/golden/w4 files that were not modified in fc6bba0a..12e16ecb (only the issue46 goldens were added in that range)."
+        "trace": "Release binary built with cargo build --release -p oraclemcp --bin oraclemcp in a clean git-archive export of 32024974 (export HEAD = 32024974, status clean), sha256 0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f. --case w4_describe_view_after_describe_keeps_session_usable alone: pass stdio+http on free23, xe21, xe18. --case w4_get_ddl_view alone: pass stdio+http on free23, xe21, xe18. Source-tools family (all 40 ids in one invocation) 80/80 on each lane. scripts/e2e/w4/cases/dictionary-tools.json and the w4 get_ddl goldens are unchanged 12e16ecb..32024974."
+      },
+      {
+        "name": "re-verification at 660c0872 (orchestrator)",
+        "kind": "tool",
+        "trace": "describe_view session-usability and get_ddl_view against the unchanged fixture golden pass live on free23/xe21/xe18 at 660c0872; full workspace gate PREPUSH PASS 660c0872 (4694 tests)."
+      },
+      {
+        "name": "orchestrator re-verification at ef2885a5",
+        "kind": "tool",
+        "trace": "describe-view session-usability and get_ddl_view against its unchanged fixture golden: pass live on free23/xe21/xe18 at ef2885a5 (both transports); full gate PREPUSH PASS ef2885a5."
       }
     ]
   },
@@ -31,14 +41,15 @@
     "claimed": true,
     "artifacts": [
       {
-        "kind": "w4-isolated-and-family-runs",
-        "path": "tests/artifacts/evidence/live/verify-12e16ecb-oraclemcp-tio2e-20260928T1945Z.json",
-        "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b"
+        "kind": "w4-live-case-rerun",
+        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-20260928T2140Z.json",
+        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
       }
     ]
   },
   "limitations": [
-    "A full unscoped lane (all families) ordering was not the proof here; scoped family runs and single-case runs were."
+    "A full unscoped lane (all families) ordering was not the proof here; scoped family runs and single-case runs were.",
+    "The same verification run shows w4_query_issue35_trusted_view_function_refused red on all lanes; it belongs to open bead .6.7 and is not part of this bead's claim."
   ],
   "known_defects": [],
   "follow_ups": [],
