@@ -138,6 +138,12 @@
       "STATUS": "VALID"
      },
      {
+      "OBJECT_NAME": "D7_GEN_F_${run_id}",
+      "OBJECT_TYPE": "FUNCTION",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
       "OBJECT_NAME": "D7_PK_DESC_${run_id}",
       "OBJECT_TYPE": "INDEX",
       "OWNER": "${owner}",
@@ -145,6 +151,12 @@
      },
      {
       "OBJECT_NAME": "D7_PK_MASK_${run_id}",
+      "OBJECT_TYPE": "INDEX",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_PK_SESS_${run_id}",
       "OBJECT_TYPE": "INDEX",
       "OWNER": "${owner}",
       "STATUS": "VALID"
@@ -180,8 +192,20 @@
       "STATUS": "VALID"
      },
      {
+      "OBJECT_NAME": "D7_SESS_${run_id}",
+      "OBJECT_TYPE": "TABLE",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
       "OBJECT_NAME": "D7_STATS_${run_id}",
       "OBJECT_TYPE": "TABLE",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
+      "OBJECT_NAME": "D7_V_SESS_${run_id}",
+      "OBJECT_TYPE": "VIEW",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      },
@@ -203,12 +227,20 @@
       "D7_F_SIDE_${run_id}"
      ],
      [
+      "FUNCTION",
+      "D7_GEN_F_${run_id}"
+     ],
+     [
       "INDEX",
       "D7_PK_DESC_${run_id}"
      ],
      [
       "INDEX",
       "D7_PK_MASK_${run_id}"
+     ],
+     [
+      "INDEX",
+      "D7_PK_SESS_${run_id}"
      ],
      [
       "INDEX",
@@ -232,7 +264,15 @@
      ],
      [
       "TABLE",
+      "D7_SESS_${run_id}"
+     ],
+     [
+      "TABLE",
       "D7_STATS_${run_id}"
+     ],
+     [
+      "VIEW",
+      "D7_V_SESS_${run_id}"
      ],
      [
       "VIEW",
@@ -314,6 +354,12 @@
     "truncated": false,
     "objects": [
      {
+      "OBJECT_NAME": "D7_V_SESS_${run_id}",
+      "OBJECT_TYPE": "VIEW",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
+     {
       "OBJECT_NAME": "D7_V_SIDE_${run_id}",
       "OBJECT_TYPE": "VIEW",
       "OWNER": "${owner}",
@@ -350,6 +396,12 @@
   "expect": {
    "json_subset": {
     "objects": [
+     {
+      "OBJECT_NAME": "D7_SESS_${run_id}",
+      "OBJECT_TYPE": "TABLE",
+      "OWNER": "${owner}",
+      "STATUS": "VALID"
+     },
      {
       "OBJECT_NAME": "D7_STATS_${run_id}",
       "OBJECT_TYPE": "TABLE",
@@ -1346,7 +1398,7 @@
   "expect": {
    "json_subset": {
     "row_count": 1,
-    "truncated": false,
+    "truncated": true,
     "rows": [
      {
       "ID": "1",
@@ -1937,7 +1989,7 @@
   },
   "expect": {
    "json_subset": {
-    "count": 3,
+    "count": 4,
     "results": [
      {
       "object_name": "D7_PK_DESC_${run_id}",
@@ -1953,6 +2005,12 @@
      },
      {
       "object_name": "D7_PK_STATS_${run_id}",
+      "object_type": "INDEX",
+      "owner": "${owner}",
+      "status": "VALID"
+     },
+     {
+      "object_name": "D7_PK_VCOL_${run_id}",
       "object_type": "INDEX",
       "owner": "${owner}",
       "status": "VALID"
