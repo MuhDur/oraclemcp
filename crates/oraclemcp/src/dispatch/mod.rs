@@ -10037,7 +10037,8 @@ async fn execute_sql_inner(
                 // statement's wire outcome for a caller; preserve the
                 // no-replay protocol uncertainty rather than presenting a
                 // rollback as a retryable terminal result.
-                envelope = envelope.with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
+                envelope =
+                    envelope.with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
             }
             return Err(envelope);
         }
@@ -13537,6 +13538,7 @@ impl OracleDispatcher {
             // only permitted re-lease. No in-flight statement is replayed.
             if let Err(error) = &result
                 && error.error_class == ErrorClass::Transient
+                && self.connector.is_some()
                 && error
                     .next_steps
                     .iter()
@@ -13547,6 +13549,12 @@ impl OracleDispatcher {
                     AuditOutcome::UnknownDiscarded,
                     format!("{tool} admission probe lost the Oracle connection"),
                 )?;
+                // A connector proves a fresh physical lease can be obtained.
+                // This remains limited to the guarded caller-read arm; the
+                // retry matrix rejects every mutation and unproven statement.
+                return result.map_err(|error| {
+                    error.with_statement_outcome(StatementOutcome::ProtocolUnsynchronized)
+                });
             }
             return result;
         }
