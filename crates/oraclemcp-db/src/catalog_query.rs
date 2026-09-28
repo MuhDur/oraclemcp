@@ -568,7 +568,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 171] = [
+    pub const ALL: [Self; 172] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,

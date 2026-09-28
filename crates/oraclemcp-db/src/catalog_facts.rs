@@ -123,9 +123,15 @@ pub enum PdbIdentityObservation {
 #[serde(tag = "coordination_scope", rename_all = "snake_case")]
 pub enum PdbIdentityScope {
     /// Stable identity permits coordination within this service state store.
-    ServiceStateStore { identity: PdbIdentity },
+    ServiceStateStore {
+        /// The stable DBID/CON_UID identity the store keys requests by.
+        identity: PdbIdentity,
+    },
     /// Stable identity is unavailable; only local request observation is safe.
-    LocalOnly { observation: PdbIdentityObservation },
+    LocalOnly {
+        /// Why stable identity could not be established.
+        observation: PdbIdentityObservation,
+    },
 }
 
 /// Catalog identity for one closure object and its compiler state.
