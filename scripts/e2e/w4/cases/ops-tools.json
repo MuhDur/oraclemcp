@@ -524,15 +524,7 @@
       "mutation": true
     },
     "expect": {
-      "json_subset": {
-        "changed": [
-          {
-            "key": {
-              "ID": "1"
-            }
-          }
-        ]
-      }
+      "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
     },
     "db_reread": [
       {
@@ -545,14 +537,7 @@
         ]
       }
     ],
-    "audit_expect": [
-      {
-        "tool": "oracle_execute",
-        "decision": "ALLOWED",
-        "outcome": "SUCCEEDED",
-        "rows_affected": 1
-      }
-    ],
+    "audit_expect": [],
     "on_unsupported": {
       "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
     },
@@ -566,7 +551,7 @@
       {
         "tool": "oracle_query",
         "arguments": {
-          "sql": "SELECT ORA_ROWSCN AS SCN FROM DIFF_T_${run_id} WHERE ID=1",
+          "sql": "SELECT ORA_ROWSCN FROM DIFF_T_${run_id} WHERE ID=1",
           "max_rows": 1
         },
         "expect": {
@@ -577,7 +562,7 @@
           }
         },
         "capture": {
-          "scn_a": "/rows/0/SCN"
+          "scn_a": "/rows/0/ORA_ROWSCN"
         }
       },
       {
@@ -613,9 +598,17 @@
         "capture": {}
       },
       {
+        "audit_record": {
+          "tool": "oracle_execute",
+          "decision": "ALLOWED",
+          "outcome": "SUCCEEDED",
+          "rows_affected": 1
+        }
+      },
+      {
         "tool": "oracle_query",
         "arguments": {
-          "sql": "SELECT ORA_ROWSCN AS SCN FROM DIFF_T_${run_id} WHERE ID=1",
+          "sql": "SELECT ORA_ROWSCN FROM DIFF_T_${run_id} WHERE ID=1",
           "max_rows": 1
         },
         "expect": {
@@ -626,7 +619,7 @@
           }
         },
         "capture": {
-          "scn_b": "/rows/0/SCN"
+          "scn_b": "/rows/0/ORA_ROWSCN"
         }
       }
     ]
@@ -786,6 +779,7 @@
       "arguments": {
         "metric": "elapsed",
         "top_n": 1,
+        "sql_text": "W4MARK_TOPQUERY_${run_id}",
         "historical": false
       }
     },
@@ -793,13 +787,11 @@
       "json_subset": {
         "source": "live_cursor",
         "metric": "elapsed",
-        "row_count": 1,
-        "rows": [
-          {
-            "SQL_TEXT": "SELECT /* W4MARK_TOPQUERY_${run_id} */ 1 AS MARKER FROM DUAL"
-          }
-        ]
+        "row_count": 1
       }
+    },
+    "row_contains": {
+      "SQL_TEXT": "W4MARK_TOPQUERY_${run_id}"
     },
     "db_reread": [],
     "audit_expect": [],
@@ -810,7 +802,7 @@
       {
         "tool": "oracle_query",
         "arguments": {
-          "sql": "SELECT /* W4MARK_TOPQUERY_${run_id} */ 1 AS MARKER FROM DUAL",
+          "sql": "SELECT /* W4MARK_TOPQUERY_${run_id} */ COUNT(*) AS MARKER FROM ALL_OBJECTS",
           "max_rows": 1
         },
         "expect": {

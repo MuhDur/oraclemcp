@@ -46,7 +46,8 @@ OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "au
                         "steps", "expect_by_version", "cleanup", "plan_contains", "row_contains"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
-                    "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed"}
+                    "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
+                    "trusted_views"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
@@ -451,7 +452,9 @@ def validate_case(case, filename):
                 and isinstance(action["sql"], str) and action["sql"],
                 "cleanup action needs exact nonempty SQL")
     if case["call"].get("mutation"):
-        require(case["db_reread"] and case["audit_expect"],
+        step_audits = any("audit_record" in step or "audit_records" in step
+                          for step in case.get("steps", []))
+        require(case["db_reread"] and (case["audit_expect"] or step_audits),
                 "mutating case needs independent DB re-read and audit expectations")
     require(isinstance(case["on_unsupported"], dict)
             and isinstance(case["on_unsupported"].get("error_class"), str),
@@ -970,7 +973,18 @@ diagnostics_pack_licensed = true
     if owner is not None:
         require(re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", owner) is not None,
                 "owner profile must name the exact W4 fixture")
+        run_owner_suffix = owner.removeprefix("W4O_")
         content += f'''
+[[profiles]]
+name = "{lane}_trusted_views"
+description = "synthetic W4 profile for recursive trusted application-view proof"
+connect_string = "{dsn}"
+username = "system"
+credential_ref = "env:W4_DB_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+trusted_views = ["{owner}.V35_INNER_{run_owner_suffix}", "{owner}.V35_OUTER_{run_owner_suffix}", "{owner}.V35_SIDE_{run_owner_suffix}"]
+
 [[profiles]]
 name = "{lane}_owner"
 description = "synthetic W4 disposable owner fixture"
@@ -1999,6 +2013,7 @@ def run_lane(args):
                                        else args.lane + "_cross_rw_strict" if variant == "synthetic_cross_rw_strict"
                                        else args.lane + "_cross_security" if variant == "synthetic_cross_security"
                                        else args.lane + "_cross_security_strict" if variant == "synthetic_cross_security_strict"
+                                       else args.lane + "_trusted_views" if variant == "trusted_views"
                                        else args.lane + "_protected" if variant == "protected"
                                        else args.lane + "_capped" if variant == "capped_rw"
                                        else args.lane)
@@ -2267,6 +2282,20 @@ def selftest():
                    "call": {"arguments": {}}, "expect": {"rows": [[1]]},
                    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"},
                    "db_reread": [], "audit_expect": []}
+    mutation_step_audit = {"case_id": "w4_selftest_mutation_step_audit", "tool": "oracle_diff",
+                           "level": "READ_WRITE", "transports": ["stdio"], "requires": [], "setup": [],
+                           "steps": [{"audit_record": {"tool": "oracle_execute",
+                                                        "decision": "ALLOWED",
+                                                        "outcome": "SUCCEEDED"}}],
+                           "call": {"arguments": {}, "mutation": True},
+                           "expect": {"error_class": "INVALID_ARGUMENTS"},
+                           "on_unsupported": {"error_class": "INVALID_ARGUMENTS"},
+                           "db_reread": [{"sql": "SELECT 1 FROM dual", "rows": [[1]]}],
+                           "audit_expect": []}
+    validate_case(mutation_step_audit, "selftest")
+    print(compact({"selftest": "mutation_step_audit_is_accepted", "verdict": "pass"}))
+    rejected("mutation_without_any_audit", lambda: validate_case(
+        {**mutation_step_audit, "steps": []}, "selftest"))
     stub = StubClient()
     unsupported_row = run_case(stub, unsupported, "stdio", "xe18", set(), object(),
                                BarrierPool(), Path("unused"), Path("unused"), {})
