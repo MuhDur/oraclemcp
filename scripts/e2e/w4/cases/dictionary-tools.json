@@ -433,34 +433,42 @@
    "http"
   ],
   "requires": [],
-  "setup": [
-   {
-    "sql": "CREATE TABLE ${owner}.D7_SESS_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_SESS_${run_id} PRIMARY KEY)"
-   },
-   {
-    "sql": "CREATE OR REPLACE VIEW ${owner}.V_TYPES_${run_id} AS SELECT ID FROM ${owner}.D7_SESS_${run_id}"
-   }
-  ],
-  "setup_phase": "before_server",
-  "setup_ready_sql": "SELECT 1 FROM ALL_VIEWS WHERE OWNER = '${owner}' AND VIEW_NAME = 'V_TYPES_${run_id}'",
-  "call": {
-   "arguments": {
-    "owner": "${owner}",
-    "name": "V_TYPES_${run_id}"
+   "setup": [
+    {
+     "sql": "CREATE TABLE ${owner}.D7_SESS_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_SESS_${run_id} PRIMARY KEY)"
+    },
+    {
+     "sql": "CREATE OR REPLACE VIEW ${owner}.D7_V_SESS_${run_id} AS SELECT ID FROM ${owner}.D7_SESS_${run_id}"
+    }
+   ],
+   "setup_phase": "before_server",
+   "setup_ready_sql": "SELECT 1 FROM ALL_VIEWS WHERE OWNER = '${owner}' AND VIEW_NAME = 'D7_V_SESS_${run_id}'",
+   "call": {
+    "arguments": {
+     "owner": "${owner}",
+     "name": "D7_V_SESS_${run_id}"
    }
   },
-  "expect": {
-   "json_subset": {
-    "owner": "${owner}",
-    "name": "V_TYPES_${run_id}"
-   }
+   "expect": {
+    "json_subset": {
+     "owner": "${owner}",
+     "name": "D7_V_SESS_${run_id}"
+    }
   },
   "db_reread": [],
   "audit_expect": [],
-  "on_unsupported": {
-   "error_class": "INVALID_ARGUMENTS"
-  },
-  "steps": [
+    "on_unsupported": {
+     "error_class": "INVALID_ARGUMENTS"
+    },
+   "cleanup": [
+    {
+     "sql": "DROP VIEW ${owner}.D7_V_SESS_${run_id}"
+    },
+    {
+     "sql": "DROP TABLE ${owner}.D7_SESS_${run_id}"
+    }
+   ],
+   "steps": [
    {
     "tool": "oracle_describe",
     "arguments": {
