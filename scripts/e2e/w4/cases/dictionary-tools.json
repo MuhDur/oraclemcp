@@ -613,9 +613,7 @@
   ],
   "on_unsupported": {
    "error_class": "INVALID_ARGUMENTS"
-  },
-  "setup_phase": "before_server",
-  "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ROWNUM <= 1"
+  }
  },
  {
   "case_id": "w4_describe_table_virtual_invisible_flags",
