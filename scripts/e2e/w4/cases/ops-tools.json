@@ -162,7 +162,7 @@
       "json_subset": {
         "owner": "${owner}",
         "detail_level": "names",
-        "count": 11,
+        "count": 12,
         "results": [
           {
             "object_name": "<masked>",
@@ -197,6 +197,13 @@
             "object_type": "TABLE",
             "owner": "${owner}",
             "profile": "${lane}_licensed",
+            "status": "VALID"
+          },
+          {
+            "object_name": "T_RUN_${run_id}",
+            "object_type": "TABLE",
+            "owner": "${owner}",
+            "profile": "${lane}_trusted_views",
             "status": "VALID"
           },
           {
