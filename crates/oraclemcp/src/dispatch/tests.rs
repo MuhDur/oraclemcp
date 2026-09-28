@@ -4324,6 +4324,67 @@ fn nonrecoverable_pinned_quarantine_still_refuses_without_reconnect() {
 }
 
 #[test]
+fn issue47_open_checkpoint_is_not_silently_relet() {
+    let connector_calls = Arc::new(AtomicUsize::new(0));
+    let calls_for_connector = Arc::clone(&connector_calls);
+    let counts = Arc::new(TouchCounts::default());
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(LabeledMock::new("old-session", "single_session", counts)),
+        Some("dev".to_owned()),
+        default_read_only_level(),
+        Arc::new(move |_cx, _generation| {
+            calls_for_connector.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async move { Ok(session_bundle(OneRowMock)) })
+        }),
+    );
+    let runtime = RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("block_on installs a current Cx");
+        let state = dispatcher.state.lock(&cx).await.expect("state lock");
+        state.checkpoints.commit_open("CP_ISSUE47");
+        drop(state);
+        mark_connection_quarantined_recoverable(
+            &dispatcher.quarantine,
+            AuditOutcome::UnknownDiscarded,
+            "synthetic lost session while checkpoint was open",
+        )
+        .expect("test quarantine");
+
+        let budget = RequestBudget::from_profile(cx.now(), None);
+        let error = dispatcher
+            .recycle_pinned_session_if_needed(&cx, &budget)
+            .await
+            .expect_err("open checkpoint must prevent automatic re-lease");
+        assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
+        assert_eq!(error.statement_outcome, Some(StatementOutcome::RolledBack));
+        assert!(error.message.contains("rolled back"), "{}", error.message);
+        assert_eq!(
+            connector_calls.load(Ordering::SeqCst),
+            0,
+            "a dead checkpoint workspace must not acquire a replacement session"
+        );
+        assert!(
+            !dispatcher
+                .state
+                .lock(&cx)
+                .await
+                .expect("state lock")
+                .checkpoints
+                .is_open(),
+            "local checkpoint metadata must not survive a lost Oracle session"
+        );
+        let quarantine = dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .expect("checkpoint loss remains quarantined");
+        assert_eq!(quarantine.outcome, AuditOutcome::RolledBack);
+        assert!(!quarantine.recycle_allowed);
+    });
+}
+
+#[test]
 fn reload_rejects_a_connection_prepared_from_the_stale_generation() {
     let before = OracleMcpConfig::from_toml_str(
         r#"

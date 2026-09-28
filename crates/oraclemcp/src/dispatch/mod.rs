@@ -1405,6 +1405,25 @@ impl OracleDispatcher {
             }
             profile
         };
+        {
+            let state = self.state.lock(cx).await.map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "connection mutex lock failed")
+            })?;
+            if state.checkpoints.is_open() {
+                // Oracle discards the transaction when its physical session is
+                // lost.  Do not silently swap the wire and leave the caller
+                // believing the checkpoint chain survived on the new session.
+                state.checkpoints.clear();
+                drop(state);
+                let message = "pinned Oracle session was lost while the reversible workspace was open; Oracle rolled back the checkpoint chain and the session will not be re-leased automatically";
+                mark_connection_quarantined(&self.quarantine, AuditOutcome::RolledBack, message)?;
+                return Err(
+                    ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
+                        .with_statement_outcome(StatementOutcome::RolledBack)
+                        .with_next_step("verify the rolled-back work, then switch or restart the profile session"),
+                );
+            }
+        }
         request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         let old_quarantine = self.connection_quarantine()?;
         let old_quarantine = old_quarantine
@@ -8717,7 +8736,9 @@ fn mark_connection_quarantined_with_recycle(
             // failure. Never downgrade them with a secondary `Failed` or
             // `RolledBack` classification.
             AuditOutcome::CommitInDoubt | AuditOutcome::Succeeded => true,
-            AuditOutcome::UnknownDiscarded => outcome != AuditOutcome::CommitInDoubt,
+            AuditOutcome::UnknownDiscarded => {
+                outcome != AuditOutcome::CommitInDoubt && outcome != AuditOutcome::RolledBack
+            }
             _ => false,
         };
         if preserve_existing {
