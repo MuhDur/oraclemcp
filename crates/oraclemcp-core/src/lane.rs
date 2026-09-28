@@ -369,6 +369,9 @@ impl LaneCallerSignal {
             waker.wake_by_ref();
             return;
         }
+        if let Some(request) = &self.request_cancellation {
+            request.register_waker(waker);
+        }
         let mut slot = self.lane_waker.lock();
         if !slot
             .as_ref()

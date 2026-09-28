@@ -9,6 +9,7 @@ use oraclemcp_guard::{Classifier, ClassifierConfig, OperatingLevel};
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::io::Read;
+use std::sync::Condvar;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 struct NoopDispatch;
@@ -102,6 +103,43 @@ impl ToolDispatch for CancelledDispatch {
         _args: Value,
     ) -> DispatchFuture<'a> {
         Box::pin(async { Outcome::Cancelled(CancelReason::timeout()) })
+    }
+}
+
+/// A pending body whose second poll verifies that the HTTP cancellation
+/// notification crossed into the lane-owned Cx.
+struct HttpPendingUntilCancelledDispatch {
+    entered: Arc<(std::sync::Mutex<bool>, Condvar)>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ToolDispatch for HttpPendingUntilCancelledDispatch {
+    fn dispatch<'a>(
+        &'a self,
+        cx: &'a Cx,
+        _context: DispatchContext<'a>,
+        _name: &'a str,
+        _args: Value,
+    ) -> DispatchFuture<'a> {
+        let entered = Arc::clone(&self.entered);
+        let cancelled = Arc::clone(&self.cancelled);
+        let mut first_poll = true;
+        Box::pin(std::future::poll_fn(move |_task_cx| {
+            if first_poll {
+                first_poll = false;
+                let (lock, ready) = &*entered;
+                *lock.lock().expect("HTTP test gate lock") = true;
+                ready.notify_all();
+                return std::task::Poll::Pending;
+            }
+            if cx.checkpoint().is_err() {
+                cancelled.store(true, AtomicOrdering::SeqCst);
+                return std::task::Poll::Ready(Outcome::Cancelled(
+                    cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
+                ));
+            }
+            std::task::Poll::Ready(Outcome::Ok(serde_json::json!({ "completed": true })))
+        }))
     }
 }
 
@@ -446,6 +484,74 @@ fn post(body: &Value) -> HttpRequest {
         ],
         body.to_string().into_bytes(),
     )
+}
+
+#[test]
+fn issue49_http_cancel_cancels_in_flight_request() {
+    let entered = Arc::new((std::sync::Mutex::new(false), Condvar::new()));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let dispatcher: Arc<dyn ToolDispatch> = Arc::new(crate::lane::LaneRuntime::spawn_default(
+        "issue49-http-cancel",
+        Arc::new(HttpPendingUntilCancelledDispatch {
+            entered: Arc::clone(&entered),
+            cancelled: Arc::clone(&cancelled),
+        }),
+    ));
+    let server = server_with_dispatch(dispatcher);
+    let config = HttpTransportConfig {
+        json_response: true,
+        ..Default::default()
+    };
+    let call_server = server.clone();
+    let call_config = config.clone();
+    let call = std::thread::spawn(move || {
+        handle_http_request(
+            &call_server,
+            &call_config,
+            post(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 49, "method": "tools/call",
+                "params": {
+                    "name": "oracle_query",
+                    "arguments": { "sql": "SELECT 1 FROM dual" },
+                },
+            })),
+        )
+    });
+    let (lock, ready) = &*entered;
+    let admitted = lock.lock().expect("HTTP test gate lock");
+    let (_admitted, timeout) = ready
+        .wait_timeout_while(admitted, std::time::Duration::from_secs(5), |admitted| {
+            !*admitted
+        })
+        .expect("HTTP test gate wait");
+    assert!(!timeout.timed_out(), "HTTP call never reached its lane");
+
+    let cancel = handle_http_request(
+        &server,
+        &config,
+        post(&serde_json::json!({
+            "jsonrpc": "2.0", "method": "notifications/cancelled",
+            "params": { "requestId": 49, "reason": "untrusted test text" },
+        })),
+    );
+    assert_eq!(cancel.status, 202, "MCP notifications are one-way");
+
+    let response = call.join().expect("HTTP call joins");
+    assert_eq!(response.status, 200);
+    let body = response_json(&response);
+    assert_eq!(body["id"], serde_json::json!(49));
+    assert_eq!(
+        body["result"]["structuredContent"]["error_class"],
+        serde_json::json!("REQUEST_CANCELLED")
+    );
+    assert_eq!(
+        body["result"]["structuredContent"]["cancel_outcome"],
+        serde_json::json!("cancel_confirmed")
+    );
+    assert!(
+        cancelled.load(AtomicOrdering::SeqCst),
+        "the lane Cx observed the HTTP cancellation"
+    );
 }
 
 #[test]

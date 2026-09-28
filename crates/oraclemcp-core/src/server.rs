@@ -13,7 +13,7 @@ use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, OnceLock};
-use std::task::Poll;
+use std::task::{Poll, Waker};
 use std::time::{Duration, Instant};
 
 use asupersync::channel::{mpsc, oneshot};
@@ -108,6 +108,7 @@ pub type DispatchOutcome = Outcome<Value, ErrorEnvelope>;
 pub(crate) struct RequestCancellation {
     requested: AtomicBool,
     reason: parking_lot::Mutex<Option<CancelReason>>,
+    waker: parking_lot::Mutex<Option<Waker>>,
 }
 
 impl RequestCancellation {
@@ -116,12 +117,38 @@ impl RequestCancellation {
         if !self.requested.swap(true, Ordering::AcqRel) {
             *self.reason.lock() = Some(reason);
         }
+        if let Some(waker) = self.waker.lock().take() {
+            waker.wake();
+        }
     }
 
     /// Return the requested cancellation reason, if any.
     #[must_use]
     pub(crate) fn reason(&self) -> Option<CancelReason> {
         self.reason.lock().clone()
+    }
+
+    /// Register the waiting lane poll so a transport-side cancellation can
+    /// interrupt an already-pending database future.  The second requested
+    /// check closes the register/cancel race.
+    pub(crate) fn register_waker(&self, waker: &Waker) {
+        if self.requested.load(Ordering::Acquire) {
+            waker.wake_by_ref();
+            return;
+        }
+        let mut slot = self.waker.lock();
+        if !slot
+            .as_ref()
+            .is_some_and(|current| current.will_wake(waker))
+        {
+            *slot = Some(waker.clone());
+        }
+        drop(slot);
+        if self.requested.load(Ordering::Acquire)
+            && let Some(waker) = self.waker.lock().take()
+        {
+            waker.wake();
+        }
     }
 }
 
@@ -1216,7 +1243,14 @@ impl OracleMcpServer {
                         .map(str::to_owned)
                 })
                 .is_some_and(|method| method == "tools/call");
-            if is_tool_call && frame.len() <= STDIO_MAX_FRAME_BYTES {
+            // Do not move a pre-initialize tools/call onto a worker: the
+            // lifecycle gate is intentionally ordered with the synchronous
+            // initialize frame.  Once initialization succeeded (or auth is
+            // explicitly disabled), workers keep the reader free to accept a
+            // cancellation frame while database work is in flight.
+            let tool_worker_allowed =
+                matches!(auth, StdioAuthPolicy::Disabled) || self.stdio_negotiated.lock().is_some();
+            if is_tool_call && tool_worker_allowed && frame.len() <= STDIO_MAX_FRAME_BYTES {
                 let server = self.clone();
                 let auth = auth.clone();
                 let response_tx = response_tx.clone();
@@ -1796,7 +1830,10 @@ impl OracleMcpServer {
     ) -> JsonRpcDispatchOutcome {
         let observe_catalog = request.as_object().is_some_and(|object| {
             object.get("jsonrpc") == Some(&Value::String("2.0".to_owned()))
-                && object.get("method").and_then(Value::as_str) != Some("initialize")
+                && !matches!(
+                    object.get("method").and_then(Value::as_str),
+                    Some("initialize" | "notifications/cancelled")
+                )
         }) && context.notification_session_owner().is_some()
             && context.notification_request_owner().is_some();
         if observe_catalog {
@@ -2407,6 +2444,7 @@ impl OracleMcpServer {
         let outcome = span.in_scope(|| {
             self.run_tool_blocking_outcome_with_context(context, name.to_owned(), args)
         });
+        let cancelled_by_transport = cancellation.reason().is_some();
         self.inflight_cancellations.lock().remove(&cancellation_key);
         match outcome {
             Outcome::Ok(result) => {
@@ -2438,7 +2476,22 @@ impl OracleMcpServer {
                 let response = jsonrpc_result(id, tool_result_err_json(&envelope));
                 Outcome::Err(JsonRpcDispatchError::new(response))
             }
-            Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
+            // Keep the tool request id and its typed terminal outcome. Letting
+            // this escape to the outer router would turn it into an id-less
+            // generic JSON-RPC error after the lane has already finalized.
+            Outcome::Cancelled(reason) => {
+                if cancelled_by_transport {
+                    let response = jsonrpc_result(
+                        id,
+                        tool_result_err_json(&cancelled_dispatch_envelope(&reason)),
+                    );
+                    Outcome::Err(JsonRpcDispatchError::new(response))
+                } else {
+                    // Deadlines and server-side cancellation retain the HTTP
+                    // transport's established terminal status mapping (499).
+                    Outcome::Cancelled(reason)
+                }
+            }
             Outcome::Panicked(payload) => Outcome::Panicked(payload),
         }
     }
@@ -3179,8 +3232,9 @@ mod tests {
     use crate::tools::{ToolDescriptor, ToolTier};
     use oraclemcp_error::ErrorClass;
     use oraclemcp_guard::OperatingLevel;
-    use std::io::Cursor;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::io::{Cursor, Read};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Condvar, Mutex};
     #[test]
     fn streaming_terminal_wait_expiry_uses_lane_safety_hook() {
         let (_sender, receiver) = oneshot::channel();
@@ -3308,6 +3362,168 @@ mod tests {
                 Outcome::Ok(serde_json::json!({ "completed": true }))
             })
         }
+    }
+
+    /// A two-poll tool body used to prove the reader/worker split.  Its first
+    /// poll signals that the lane has admitted the request and then stays
+    /// pending; cancellation wakes the lane wrapper, which copies the bridge
+    /// reason to its owner Cx before the finalization poll reaches this body.
+    struct PendingUntilCancelledDispatcher {
+        entered: Arc<(Mutex<bool>, Condvar)>,
+        cancelled: Arc<AtomicBool>,
+    }
+
+    impl ToolDispatch for PendingUntilCancelledDispatcher {
+        fn dispatch<'a>(
+            &'a self,
+            cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            let entered = Arc::clone(&self.entered);
+            let cancelled = Arc::clone(&self.cancelled);
+            let mut first_poll = true;
+            Box::pin(std::future::poll_fn(move |_task_cx| {
+                if first_poll {
+                    first_poll = false;
+                    let (lock, ready) = &*entered;
+                    *lock.lock().expect("test gate lock") = true;
+                    ready.notify_all();
+                    return Poll::Pending;
+                }
+                if cx.checkpoint().is_err() {
+                    cancelled.store(true, Ordering::SeqCst);
+                    return Poll::Ready(Outcome::Cancelled(
+                        cx.cancel_reason().unwrap_or_else(CancelReason::timeout),
+                    ));
+                }
+                Poll::Ready(Outcome::Ok(json!({ "completed": true })))
+            }))
+        }
+    }
+
+    struct CompleteBeforeCancelDispatcher {
+        completed: Arc<(Mutex<bool>, Condvar)>,
+    }
+
+    impl ToolDispatch for CompleteBeforeCancelDispatcher {
+        fn dispatch<'a>(
+            &'a self,
+            _cx: &'a Cx,
+            _context: DispatchContext<'a>,
+            _name: &'a str,
+            _args: Value,
+        ) -> DispatchFuture<'a> {
+            let completed = Arc::clone(&self.completed);
+            Box::pin(async move {
+                let (lock, ready) = &*completed;
+                *lock.lock().expect("test completion lock") = true;
+                ready.notify_all();
+                Outcome::Ok(json!({ "committed": true }))
+            })
+        }
+    }
+
+    /// A test-only stdin pipe.  The test controls frame ordering explicitly:
+    /// it writes the call, waits for lane admission, then writes cancellation.
+    /// That proves the transport race without relying on a wall-clock sleep.
+    struct FrameChannelReader {
+        receiver: std::sync::mpsc::Receiver<Vec<u8>>,
+        current: Cursor<Vec<u8>>,
+    }
+
+    impl Read for FrameChannelReader {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            loop {
+                let read = self.current.read(buffer)?;
+                if read != 0 {
+                    return Ok(read);
+                }
+                match self.receiver.recv() {
+                    Ok(frame) => self.current = Cursor::new(frame),
+                    Err(_) => return Ok(0),
+                }
+            }
+        }
+    }
+
+    fn server_with_dispatcher(dispatcher: Arc<dyn ToolDispatch>) -> OracleMcpServer {
+        let mut registry = ToolRegistry::new();
+        registry.register(ToolDescriptor::new(
+            "oracle_query",
+            ToolTier::FoundationLiveDb,
+            "run a query",
+        ));
+        let caps = CapabilitiesReport::new(
+            "0.1.0",
+            registry.tools.clone(),
+            OperatingLevel::ReadOnly,
+            FeatureTiers {
+                live_db: true,
+                engine: true,
+                http_transport: true,
+            },
+        );
+        OracleMcpServer::new("0.1.0", registry, caps, dispatcher)
+    }
+
+    fn cancellation_frames(id: u64, with_progress_token: bool) -> Vec<Vec<u8>> {
+        let mut params = json!({
+            "name": "oracle_query",
+            "arguments": { "sql": "SELECT 1 FROM dual" },
+        });
+        if with_progress_token {
+            params["_meta"] = json!({ "progressToken": "issue49-progress" });
+        }
+        vec![
+            stdio_frame(&json!({
+                "jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params,
+            })),
+            stdio_frame(&json!({
+                "jsonrpc": "2.0", "method": "notifications/cancelled",
+                "params": { "requestId": id, "reason": "untrusted test text" },
+            })),
+        ]
+    }
+
+    fn start_interactive_stdio(
+        server: &OracleMcpServer,
+    ) -> (
+        std::sync::mpsc::Sender<Vec<u8>>,
+        std::thread::JoinHandle<Vec<Value>>,
+    ) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let server = server.clone();
+        let worker = std::thread::spawn(move || {
+            let mut output = Vec::new();
+            server
+                .serve_stdio_with_io(
+                    FrameChannelReader {
+                        receiver,
+                        current: Cursor::new(Vec::new()),
+                    },
+                    &mut output,
+                    &StdioAuthPolicy::Disabled,
+                )
+                .expect("stdio cancellation session completes");
+            String::from_utf8(output)
+                .expect("stdio replies are UTF-8")
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| serde_json::from_str::<Value>(line).expect("reply is JSON"))
+                .collect()
+        });
+        (sender, worker)
+    }
+
+    fn wait_for_test_gate(gate: &Arc<(Mutex<bool>, Condvar)>) {
+        let (lock, ready) = &**gate;
+        let admitted = lock.lock().expect("test gate lock");
+        let (_admitted, timeout) = ready
+            .wait_timeout_while(admitted, Duration::from_secs(5), |admitted| !*admitted)
+            .expect("test gate wait");
+        assert!(!timeout.timed_out(), "tool call never reached the lane");
     }
 
     fn server() -> OracleMcpServer {
@@ -3807,6 +4023,135 @@ mod tests {
             cancellation
                 .reason()
                 .is_some_and(|reason| reason.to_string().contains("notifications/cancelled"))
+        );
+    }
+
+    #[test]
+    fn issue49_cancel_frame_mid_call_cancels_in_flight_request() {
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let dispatcher: Arc<dyn ToolDispatch> = Arc::new(crate::lane::LaneRuntime::spawn_default(
+            "issue49-stdio-cancel",
+            Arc::new(PendingUntilCancelledDispatcher {
+                entered: Arc::clone(&entered),
+                cancelled: Arc::clone(&cancelled),
+            }),
+        ));
+        let server = server_with_dispatcher(dispatcher);
+        let (sender, worker) = start_interactive_stdio(&server);
+        let frames = cancellation_frames(49, false);
+        sender.send(frames[0].clone()).expect("send tool call");
+        wait_for_test_gate(&entered);
+        sender.send(frames[1].clone()).expect("send cancellation");
+        drop(sender);
+        let replies = worker.join().expect("stdio worker joins");
+
+        let response_index = replies
+            .iter()
+            .position(|reply| reply["id"] == json!(49))
+            .expect("cancelled tool call has its own response");
+        let response = &replies[response_index];
+        assert_eq!(response["result"]["isError"], json!(true));
+        assert_eq!(
+            response["result"]["structuredContent"]["error_class"],
+            json!("REQUEST_CANCELLED")
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["cancel_outcome"],
+            json!("cancel_confirmed")
+        );
+        assert!(
+            cancelled.load(Ordering::SeqCst),
+            "lane Cx observed the transport cancellation"
+        );
+    }
+
+    #[test]
+    fn issue49_progress_emitted_in_flight_only_with_token() {
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let dispatcher: Arc<dyn ToolDispatch> = Arc::new(crate::lane::LaneRuntime::spawn_default(
+            "issue49-stdio-progress",
+            Arc::new(PendingUntilCancelledDispatcher {
+                entered: Arc::clone(&entered),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }),
+        ));
+        let server = server_with_dispatcher(dispatcher);
+        let (sender, worker) = start_interactive_stdio(&server);
+        let frames = cancellation_frames(50, true);
+        sender.send(frames[0].clone()).expect("send tool call");
+        wait_for_test_gate(&entered);
+        sender.send(frames[1].clone()).expect("send cancellation");
+        drop(sender);
+        let replies = worker.join().expect("stdio worker joins");
+
+        let progress_index = replies
+            .iter()
+            .position(|reply| reply["method"] == json!("notifications/progress"))
+            .expect("progress token produces a notification");
+        let response_index = replies
+            .iter()
+            .position(|reply| reply["id"] == json!(50))
+            .expect("cancelled call has a response");
+        assert!(
+            progress_index < response_index,
+            "the start notification is written while the call is in flight"
+        );
+        assert_eq!(
+            replies[progress_index]["params"]["progressToken"],
+            json!("issue49-progress")
+        );
+    }
+
+    #[test]
+    fn issue49_no_progress_without_token() {
+        let entered = Arc::new((Mutex::new(false), Condvar::new()));
+        let dispatcher: Arc<dyn ToolDispatch> = Arc::new(crate::lane::LaneRuntime::spawn_default(
+            "issue49-stdio-no-progress",
+            Arc::new(PendingUntilCancelledDispatcher {
+                entered: Arc::clone(&entered),
+                cancelled: Arc::new(AtomicBool::new(false)),
+            }),
+        ));
+        let server = server_with_dispatcher(dispatcher);
+        let (sender, worker) = start_interactive_stdio(&server);
+        let frames = cancellation_frames(51, false);
+        sender.send(frames[0].clone()).expect("send tool call");
+        wait_for_test_gate(&entered);
+        sender.send(frames[1].clone()).expect("send cancellation");
+        drop(sender);
+        let replies = worker.join().expect("stdio worker joins");
+
+        assert!(
+            replies
+                .iter()
+                .all(|reply| reply["method"] != json!("notifications/progress")),
+            "requests without a progress token never emit progress"
+        );
+    }
+
+    #[test]
+    fn issue49_completed_before_break_reports_real_result() {
+        let completed = Arc::new((Mutex::new(false), Condvar::new()));
+        let dispatcher: Arc<dyn ToolDispatch> = Arc::new(CompleteBeforeCancelDispatcher {
+            completed: Arc::clone(&completed),
+        });
+        let server = server_with_dispatcher(dispatcher);
+        let (sender, worker) = start_interactive_stdio(&server);
+        let frames = cancellation_frames(52, false);
+        sender.send(frames[0].clone()).expect("send tool call");
+        wait_for_test_gate(&completed);
+        sender.send(frames[1].clone()).expect("send cancellation");
+        drop(sender);
+        let replies = worker.join().expect("stdio worker joins");
+        let response = replies
+            .iter()
+            .find(|reply| reply["id"] == json!(52))
+            .expect("completed call has a response");
+        assert_eq!(response["result"]["isError"], json!(false));
+        assert_eq!(
+            response["result"]["structuredContent"]["committed"],
+            json!(true)
         );
     }
 
