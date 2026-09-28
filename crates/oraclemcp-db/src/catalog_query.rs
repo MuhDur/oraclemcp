@@ -2062,7 +2062,7 @@ impl CatalogQueryId {
             ),
             Self::ExtractObjects => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, object_name, object_type, status,
   to_char(last_ddl_time, 'YYYY-MM-DD"T"HH24:MI:SS') as last_ddl_time_iso,
   editionable, edition_name
@@ -2080,7 +2080,7 @@ order by owner, object_type, object_name"#
             ),
             Self::ExtractColumns => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, table_name, column_name, nvl(column_id, internal_column_id) as column_position,
   data_type_owner, data_type, data_length, data_precision, data_scale, char_used,
   nullable, data_default_vc, virtual_column, hidden_column
@@ -2096,7 +2096,7 @@ order by owner, table_name, nvl(column_id, internal_column_id)"#
             ),
             Self::ExtractConstraints => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   c.owner, c.constraint_name, c.table_name, c.constraint_type,
   c.r_owner as referenced_table_owner, p.table_name as referenced_table_name,
   c.search_condition_vc,
@@ -2121,7 +2121,7 @@ order by c.owner, c.constraint_name, child.position"#
             ),
             Self::ExtractIndexes => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   i.owner, i.index_name, i.table_owner, i.table_name,
   case when i.uniqueness = 'UNIQUE' then 'Y' else 'N' end as is_unique,
   i.index_type, i.status, c.column_name, c.column_position
@@ -2139,7 +2139,7 @@ order by i.owner, i.index_name, c.column_position"#
             ),
             Self::ExtractTriggers => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, trigger_name, table_owner, table_name, trigger_type, triggering_event, when_clause
 from all_triggers
 where owner in ("#,
@@ -2153,12 +2153,12 @@ order by owner, trigger_name"#
             ),
             Self::ExtractSynonyms => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, synonym_name, table_owner, table_name, db_link
 from all_synonyms
-where (owner = 'PUBLIC' and :33 = 1)
-   or (owner <> 'PUBLIC' and owner in ("#,
+where (owner <> 'PUBLIC' and owner in ("#,
                     r#"))
+   or (owner = 'PUBLIC' and :33 = 1)
 order by owner, synonym_name"#
                 ),
                 OWNER32_PUBLIC,
@@ -2168,7 +2168,7 @@ order by owner, synonym_name"#
             ),
             Self::ExtractRoutines => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, object_name, procedure_name, subprogram_id, overload, object_type,
   deterministic, pipelined
 from all_procedures
@@ -2184,7 +2184,7 @@ order by owner, object_name, procedure_name, subprogram_id"#
             ),
             Self::ExtractRoutineArguments => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, package_name, object_name, subprogram_id, overload, argument_name,
   position, sequence, data_type, type_owner, type_name, data_length,
   data_precision, data_scale, in_out, defaulted
@@ -2200,7 +2200,7 @@ order by owner, package_name, object_name, subprogram_id, sequence"#
             ),
             Self::ExtractViews => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, view_name, text_vc, read_only
 from all_views
 where owner in ("#,
@@ -2214,7 +2214,7 @@ order by owner, view_name"#
             ),
             Self::ExtractMaterializedViews => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, mview_name, refresh_mode, refresh_method, query
 from all_mviews
 where owner in ("#,
@@ -2228,7 +2228,7 @@ order by owner, mview_name"#
             ),
             Self::ExtractSequences => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   sequence_owner, sequence_name, min_value, max_value, increment_by,
   cycle_flag, order_flag, cache_size
 from all_sequences
@@ -2243,7 +2243,7 @@ order by sequence_owner, sequence_name"#
             ),
             Self::ExtractTypeAttributes => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, type_name, attr_name, attr_no, attr_type_owner, attr_type_name,
   length, precision, scale
 from all_type_attrs
@@ -2265,7 +2265,7 @@ order by owner, type_name, attr_no"#
             ),
             Self::ExtractGrants => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   table_schema, table_name, grantee, privilege, grantable, hierarchy
 from all_tab_privs
 where table_schema in ("#,
@@ -2279,12 +2279,12 @@ order by table_schema, table_name, grantee, privilege"#
             ),
             Self::ExtractDatabaseLinks => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, db_link, host
 from all_db_links
-where (owner = 'PUBLIC' and :33 = 1)
-   or (owner <> 'PUBLIC' and owner in ("#,
+where (owner <> 'PUBLIC' and owner in ("#,
                     r#"))
+   or (owner = 'PUBLIC' and :33 = 1)
 order by owner, db_link"#
                 ),
                 OWNER32_PUBLIC,
@@ -2294,7 +2294,7 @@ order by owner, db_link"#
             ),
             Self::ExtractTableComments => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, table_name, table_type, comments
 from all_tab_comments
 where owner in ("#,
@@ -2308,7 +2308,7 @@ order by owner, table_name"#
             ),
             Self::ExtractColumnComments => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, table_name, column_name, comments
 from all_col_comments
 where owner in ("#,
@@ -2329,7 +2329,7 @@ order by owner, table_name, column_name"#
             ),
             Self::ExtractEditioningViews => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, view_name, table_name
 from all_editioning_views
 where owner in ("#,
@@ -2343,7 +2343,7 @@ order by owner, view_name"#
             ),
             Self::ExtractVpdPolicies => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   object_owner, object_name, policy_group, policy_name, pf_owner, package,
   function, sel, ins, upd, del, enable
 from all_policies
@@ -2358,7 +2358,7 @@ order by object_owner, object_name, policy_group, policy_name"#
             ),
             Self::ExtractDependencies => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, name, type, referenced_owner, referenced_name, referenced_type,
   dependency_type
 from all_dependencies
@@ -2450,7 +2450,7 @@ order by owner, name, referenced_owner, referenced_name"#
             ),
             Self::ExtractPlscopeAvailability => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, plscope_settings
 from all_plsql_object_settings
 where owner in ("#,
@@ -2463,7 +2463,7 @@ where owner in ("#,
             ),
             Self::ExtractPlscopeIdentifiers => (
                 extract_owner_sql!(
-                    r#"SELECT "
+                    r#"SELECT 
   owner, name, type, usage, line, col, object_name
 from all_identifiers
 where owner in ("#,
@@ -2632,6 +2632,95 @@ mod impact_lock_query_tests {
             assert!(spec.sql.contains(":1") && spec.sql.contains(":2") && spec.sql.contains(":3"));
             assert_eq!(spec.audit_class, CatalogAuditClass::Diagnostic);
             assert!(CatalogQueryId::ALL.contains(&id));
+        }
+    }
+}
+
+#[cfg(test)]
+mod catalog_sql_lexical_tests {
+    use super::CatalogQueryId;
+
+    /// Oracle lexes a `"` outside a string literal as the start of a quoted
+    /// identifier. A stray `"` therefore swallows the rest of the statement up
+    /// to the next `"` — the live failure `ORA-00972: identifier HH24:MI:SS...`
+    /// came from exactly that in the generated `SELECT` of the extract
+    /// rowsets. Every catalog statement is fixed text with no quoted
+    /// identifiers, so a `"` may appear only inside a `'...'` literal (the
+    /// canonical `'YYYY-MM-DD"T"HH24:MI:SS'` date format).
+    #[test]
+    fn every_catalog_query_quotes_are_confined_to_string_literals() {
+        for id in CatalogQueryId::ALL {
+            let sql = id.spec().sql;
+            let mut in_literal = false;
+            let mut literal_open_at = 0usize;
+            for (offset, byte) in sql.bytes().enumerate() {
+                match byte {
+                    b'\'' => {
+                        if in_literal {
+                            in_literal = false;
+                        } else {
+                            in_literal = true;
+                            literal_open_at = offset;
+                        }
+                    }
+                    b'"' if !in_literal => panic!(
+                        "{id:?} has an unescaped double quote outside a string literal at byte {offset}: {}",
+                        &sql[offset.saturating_sub(16)..(offset + 16).min(sql.len())]
+                    ),
+                    _ => {}
+                }
+            }
+            assert!(
+                !in_literal,
+                "{id:?} has an unterminated string literal opened at byte {literal_open_at}"
+            );
+        }
+    }
+
+    /// Oracle matches bind values to placeholders by *first-occurrence
+    /// position*, not by the number written after the colon. A statement whose
+    /// placeholders are not `:1, :2, ... :N` in the order they first appear
+    /// silently shifts every bind: the live `synonyms`/`database_links` queries
+    /// wrote `:33` (the PUBLIC chunk flag) before `:1..:32` (the owners), so the
+    /// first owner string was fed to `:33 = 1` and Oracle raised
+    /// `ORA-01722: invalid string value: SYS`. Every fixed catalog statement
+    /// must therefore list its distinct placeholders as exactly `1..=N` in
+    /// first-occurrence order, matching the ordered bind schema.
+    #[test]
+    fn every_catalog_query_placeholders_follow_bind_position_order() {
+        for id in CatalogQueryId::ALL {
+            let spec = id.spec();
+            let sql = spec.sql;
+            let bytes = sql.as_bytes();
+            let mut in_literal = false;
+            let mut order: Vec<u32> = Vec::new();
+            let mut index = 0usize;
+            while index < bytes.len() {
+                match bytes[index] {
+                    b'\'' => {
+                        in_literal = !in_literal;
+                        index += 1;
+                    }
+                    b':' if !in_literal && bytes.get(index + 1).is_some_and(u8::is_ascii_digit) => {
+                        let start = index + 1;
+                        let mut end = start;
+                        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                            end += 1;
+                        }
+                        let position: u32 = sql[start..end].parse().expect("numeric bind");
+                        if !order.contains(&position) {
+                            order.push(position);
+                        }
+                        index = end;
+                    }
+                    _ => index += 1,
+                }
+            }
+            let expected: Vec<u32> = (1..=spec.binds.0.len() as u32).collect();
+            assert_eq!(
+                order, expected,
+                "{id:?} placeholders must first appear as :1..:N in positional order"
+            );
         }
     }
 }
