@@ -43,7 +43,7 @@ RELEASE_MANIFEST = ROOT / "scripts/e2e/cases/release_0_12.json"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
-                        "steps", "expect_by_version", "cleanup", "plan_contains"}
+                        "steps", "expect_by_version", "cleanup", "plan_contains", "row_contains"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed"}
@@ -248,6 +248,21 @@ def verify_expect(expect, reply, golden_root=None):
     return scrub(structured)
 
 
+def verify_row_contains(reply, expected_row):
+    require(isinstance(expected_row, dict) and expected_row,
+            "row_contains must be a nonempty object")
+    payload = tool_payload(reply)
+    require(payload.get("isError") is not True, "row_contains expected a successful tool result")
+    rows = payload.get("structuredContent", {}).get("rows")
+    require(isinstance(rows, list), "row_contains requires a rows array")
+    def matches(row):
+        return isinstance(row, dict) and all(
+            key in row and (value in row[key] if isinstance(value, str) and isinstance(row[key], str)
+                            else row[key] == value)
+            for key, value in expected_row.items())
+    require(any(matches(row) for row in rows), "rows did not contain the expected row")
+
+
 def verify_audit(expected, records, verified):
     require(verified, "audit chain verification failed")
     require(len(expected) == len(records),
@@ -310,6 +325,10 @@ def validate_case(case, filename):
     require("plan_contains" not in case
             or (isinstance(case["plan_contains"], str) and case["plan_contains"]),
             "plan_contains must be a nonempty string")
+    require("row_contains" not in case
+            or (isinstance(case["row_contains"], dict) and case["row_contains"]
+                and all(isinstance(key, str) and key for key in case["row_contains"])),
+            "row_contains must be a nonempty object with nonempty string keys")
     if case.get("profile_variant") == "protected":
         require(case["level"] == "READ_ONLY", "a protected profile is pinned at READ_ONLY")
     if case.get("profile_variant") == "capped_rw":
@@ -1601,6 +1620,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if supported and not case["call"].get("retry"):
             verify_case_rereads(connection, case, row)
         verify_expect(expected, reply, ROOT / "tests/golden/w4")
+        if "row_contains" in case:
+            verify_row_contains(reply, case["row_contains"])
         if marker and supported:
             require(vsql_marker_count(connection, marker) == 0,
                     "refused SQL marker reached V$SQL")
@@ -2179,6 +2200,9 @@ def selftest():
     correct = {"jsonrpc": "2.0", "id": 1, "result": {"content": [], "isError": False,
                "structuredContent": {"rows": [[1], [2]]}}}
     verify_expect({"rows": [[1], [2]]}, correct)
+    marker_rows = {"result": {"content": [], "isError": False,
+                   "structuredContent": {"rows": [{"SQL_TEXT": "SELECT /* W4MARK */ 1 FROM DUAL"}]}}}
+    verify_row_contains(marker_rows, {"SQL_TEXT": "W4MARK"})
     def rejected(label, operation):
         try:
             operation()
@@ -2201,6 +2225,8 @@ def selftest():
          "call": {"arguments": {"sql": "UPDATE T SET X = 1"}, "mutation": True,
                   "kill_served_session_dml_user": "SYSTEM"}}, "selftest"))
     rejected("wrong_row_order", lambda: verify_expect({"rows": [[2], [1]]}, correct))
+    rejected("row_contains_marker_absent",
+             lambda: verify_row_contains(marker_rows, {"SQL_TEXT": "OTHER_MARKER"}))
     rejected("malformed_wire_envelope", lambda: verify_envelope({"result": {"content": []}}))
     rejected("missing_output_schema_key", lambda: verify_envelope(
         correct, {"outputSchema": {"type": "object", "required": ["missing"]}}))
