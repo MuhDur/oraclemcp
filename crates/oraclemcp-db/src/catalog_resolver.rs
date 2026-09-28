@@ -602,11 +602,18 @@ pub async fn resolved_relations_read_purity(
 /// views whose source can itself complete the same semantic proof.  The
 /// configuration is eligibility only: an unavailable, malformed, truncated,
 /// or non-read-only source remains unknown.
-struct TrustedViewProofPolicy<'a> {
-    cache: &'a OracleCatalogResolverCache,
+#[derive(Clone, Copy)]
+struct TrustedViewProofContext<'a> {
     fga_policy: FgaEvidencePolicy,
     trusted_views: &'a [String],
     view_depth: u8,
+    view_path: &'a [ReadObjectIdentity],
+}
+
+#[derive(Clone, Copy)]
+struct TrustedViewProofPolicy<'a> {
+    cache: &'a OracleCatalogResolverCache,
+    context: TrustedViewProofContext<'a>,
 }
 
 async fn resolved_relations_read_purity_with_trusted_views(
@@ -619,18 +626,9 @@ async fn resolved_relations_read_purity_with_trusted_views(
     let mut policy_relations = Vec::with_capacity(relations.len());
     for relation in relations {
         if relation.kind == CatalogObjectKind::View
-            && trusted_view_identity_is_eligible(relation, policy.trusted_views)
+            && trusted_view_identity_is_eligible(relation, policy.context.trusted_views)
         {
-            if !trusted_view_source_is_proven(
-                cx,
-                conn,
-                policy.cache,
-                relation,
-                policy.fga_policy,
-                policy.trusted_views,
-                policy.view_depth,
-            )
-            .await?
+            if !trusted_view_source_is_proven(cx, conn, relation, policy).await?
             {
                 return Ok(Purity::Unknown);
             }
@@ -654,13 +652,14 @@ fn trusted_view_identity_is_eligible(relation: &ResolvedObject, trusted_views: &
 async fn trusted_view_source_is_proven(
     cx: &Cx,
     conn: &dyn OracleConnection,
-    cache: &OracleCatalogResolverCache,
     relation: &ResolvedObject,
-    fga_policy: FgaEvidencePolicy,
-    trusted_views: &[String],
-    view_depth: u8,
+    policy: TrustedViewProofPolicy<'_>,
 ) -> Result<bool, DbError> {
-    if view_depth >= MAX_TRUSTED_VIEW_DEPTH {
+    if policy.context.view_depth >= MAX_TRUSTED_VIEW_DEPTH {
+        return Ok(false);
+    }
+    let identity = ReadObjectIdentity::from(relation);
+    if policy.context.view_path.contains(&identity) {
         return Ok(false);
     }
     let rows = run_catalog_query(
@@ -688,14 +687,19 @@ async fn trusted_view_source_is_proven(
     let Ok(plan) = semantic_read_plan_checked(&source) else {
         return Ok(false);
     };
+    let mut next_path = policy.context.view_path.to_vec();
+    next_path.push(identity);
+    let next_context = TrustedViewProofContext {
+        view_depth: policy.context.view_depth + 1,
+        view_path: &next_path,
+        ..policy.context
+    };
     Ok(Box::pin(prove_semantic_read_plan_inner(
         cx,
         conn,
-        cache,
+        policy.cache,
         &plan,
-        fga_policy,
-        trusted_views,
-        view_depth + 1,
+        next_context,
     ))
     .await
     .is_ok())
@@ -1844,7 +1848,19 @@ pub async fn prove_semantic_read_plan(
     fga_policy: FgaEvidencePolicy,
     trusted_views: &[String],
 ) -> Result<ReadPlanProof, ReadPlanProofError> {
-    prove_semantic_read_plan_inner(cx, conn, cache, plan, fga_policy, trusted_views, 0).await
+    prove_semantic_read_plan_inner(
+        cx,
+        conn,
+        cache,
+        plan,
+        TrustedViewProofContext {
+            fga_policy,
+            trusted_views,
+            view_depth: 0,
+            view_path: &[],
+        },
+    )
+    .await
 }
 
 async fn prove_semantic_read_plan_inner(
@@ -1852,9 +1868,7 @@ async fn prove_semantic_read_plan_inner(
     conn: &dyn OracleConnection,
     cache: &OracleCatalogResolverCache,
     plan: &SemanticReadPlan,
-    fga_policy: FgaEvidencePolicy,
-    trusted_views: &[String],
-    view_depth: u8,
+    trusted_view_context: TrustedViewProofContext<'_>,
 ) -> Result<ReadPlanProof, ReadPlanProofError> {
     if plan.blocks.len() > 128 || plan.relations.len() > 256 {
         return Err(ReadPlanProofError::Unproven("relation_plan_cap_exceeded"));
@@ -1944,7 +1958,7 @@ async fn prove_semantic_read_plan_inner(
         FgaClosure::ProvenReadOnly => FgaEvidence::Proven,
         FgaClosure::Autonomous { .. } => return Err(ReadPlanProofError::FgaHandlerAutonomous),
         FgaClosure::Unknown { .. } => return Err(ReadPlanProofError::FgaEvidenceUnknown),
-        FgaClosure::Unavailable => match fga_policy {
+        FgaClosure::Unavailable => match trusted_view_context.fga_policy {
             FgaEvidencePolicy::AdmitUnavailable => FgaEvidence::Unavailable,
             FgaEvidencePolicy::RequireProof => {
                 return Err(ReadPlanProofError::FgaEvidenceUnknown);
@@ -1963,9 +1977,7 @@ async fn prove_semantic_read_plan_inner(
         &values,
         TrustedViewProofPolicy {
             cache,
-            fga_policy,
-            trusted_views,
-            view_depth,
+            context: trusted_view_context,
         },
     )
     .await
@@ -6214,20 +6226,60 @@ mod tests {
             let mut view = dictionary_view_object("REPORTING_VIEW");
             view.owner = "APP".to_owned();
             view.synonym_chain.clear();
+            let cache = OracleCatalogResolverCache::new();
+            let trusted_views = ["APP.REPORTING_VIEW".to_owned()];
             assert!(
                 !trusted_view_source_is_proven(
                     &cx,
                     &conn,
-                    &OracleCatalogResolverCache::new(),
                     &view,
-                    FgaEvidencePolicy::RequireProof,
-                    &["APP.REPORTING_VIEW".to_owned()],
-                    0,
+                    TrustedViewProofPolicy {
+                        cache: &cache,
+                        context: TrustedViewProofContext {
+                            fga_policy: FgaEvidencePolicy::RequireProof,
+                            trusted_views: &trusted_views,
+                            view_depth: 0,
+                            view_path: &[],
+                        },
+                    },
                 )
                 .await
                 .expect("truncated text is a normal unproven result")
             );
             assert_eq!(conn.queries.lock().expect("queries lock").len(), 1);
+        });
+    }
+
+    #[test]
+    fn issue35_nested_view_cycle_refused_before_view_source_io() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([]);
+            let mut view = dictionary_view_object("REPORTING_VIEW");
+            view.owner = "APP".to_owned();
+            view.synonym_chain.clear();
+            let view_path = vec![ReadObjectIdentity::from(&view)];
+            let cache = OracleCatalogResolverCache::new();
+            let trusted_views = ["APP.REPORTING_VIEW".to_owned()];
+
+            assert!(
+                !trusted_view_source_is_proven(
+                    &cx,
+                    &conn,
+                    &view,
+                    TrustedViewProofPolicy {
+                        cache: &cache,
+                        context: TrustedViewProofContext {
+                            fga_policy: FgaEvidencePolicy::RequireProof,
+                            trusted_views: &trusted_views,
+                            view_depth: 1,
+                            view_path: &view_path,
+                        },
+                    },
+                )
+                .await
+                .expect("cycle is a normal unproven result")
+            );
+            assert!(conn.queries.lock().expect("queries lock").is_empty());
         });
     }
 
