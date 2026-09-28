@@ -1,11 +1,14 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T08:37:32Z",
+  "generated_at": "2026-09-28T09:05:00Z",
   "bead_id": "oraclemcp-dybi5",
   "scope": {
-    "summary": "PARTIAL, in-lane prose only; bead is NOT closable. The five prose docs that described the ci.yml `fuzz-build` job as advisory/best-effort now state it is a Tier 1 required, tag-blocking lane (only the cargo-fuzz install step is tolerant; the four target builds and the planted-negative block), matching the generated docs/ci_taxonomy.json tier=required. The synthetic UI fixture and the crate-local embedded taxonomy copy named by the bead remain tier=advisory because both are coupled to Rust source/production code outside this bead's declared file lane; one committed gate is red from the crate-local copy.",
+    "summary": "Align the fuzz-build tier with the required ci.yml job at every surface. Prose docs were landed by a prior agent at 2d9b94de (docs/test-tiers.md, docs/toolchain.md, docs/ci-taxonomy.md, docs/release-checklist.md, docs/behavior-inventory.md), the crate-local embedded taxonomy was synced by the orchestrator at ce3e703f (crates/oraclemcp-core/ci_taxonomy.json), and this session (work commit 90f21baac0acb04441735664310a52731754c944) sets the Rust-generated operator contract (\"tier\": \"required\" for job_id fuzz-build in crates/oraclemcp-core/src/operator_protocol.rs::operator_fixture_values) and regenerates tests/fixtures/ui/operator-v1/ci-lanes.json from it via scripts/generate_operator_schema.sh (UPDATE_OPERATOR_SCHEMA=1). VERIFICATION RUN AT 90f21baa: (1) CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-core --lib -- generated_operator_schema_artifacts_match_rust_contract => PASS (operator_protocol::tests::generated_operator_schema_artifacts_match_rust_contract ... ok; 1 passed; 0 failed). (2) CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-core --lib -- crate_local_ci_taxonomy_matches_repo_root => PASS (http::tests::crate_local_ci_taxonomy_matches_repo_root ... ok). (3) CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-core --lib => 820 passed; 0 failed; 0 ignored. (4) planted negative: hand-edited ci-lanes.json fuzz-build tier=advisory then ran test (1) => FAILED at operator_protocol.rs:1079 'operator UI fixture .../ci-lanes.json drifted from Rust contract', left tier=advisory vs right tier=required; fixture restored by re-running scripts/generate_operator_schema.sh and test (1) green again. (5) python3 assertion on the fixture: fuzz-build tier = required. (6) cargo fmt -p oraclemcp-core -- --check clean; CARGO_TARGET_DIR=$PWD/target cargo clippy -p oraclemcp-core --lib -- -D warnings zero warnings.",
     "in_scope": [
+      "crates/oraclemcp-core/src/operator_protocol.rs",
+      "tests/fixtures/ui/operator-v1/ci-lanes.json",
+      "crates/oraclemcp-core/ci_taxonomy.json",
       "docs/test-tiers.md",
       "docs/toolchain.md",
       "docs/ci-taxonomy.md",
@@ -13,34 +16,33 @@
       "docs/behavior-inventory.md"
     ],
     "out_of_scope": [
-      "tests/fixtures/ui/operator-v1/ci-lanes.json: still tier=advisory. It is a generated artifact of crates/oraclemcp-core/src/operator_protocol.rs::operator_fixture_values(); editing the fixture alone makes operator_protocol::tests::generated_operator_schema_artifacts_match_rust_contract fail. Aligning it needs the forbidden crates/oraclemcp-core lane (edit operator_fixture_values, run UPDATE_OPERATOR_SCHEMA=1).",
-      "crates/oraclemcp-core/src/operator_protocol.rs: the inline Rust fixture (`\"tier\": \"advisory\"` for job_id fuzz-build) that generates the UI fixture above. Not edited; forbidden crates/** lane.",
-      "crates/oraclemcp-core/ci_taxonomy.json: a byte-identical embedded copy of docs/ci_taxonomy.json (include_str! in crates/oraclemcp-core/src/http/ci_lanes.rs, production code) that still says tier=advisory. Committed test crate_local_ci_taxonomy_matches_repo_root (crates/oraclemcp-core/src/http/tests_ci_lanes.rs:1051) asserts byte-equality with docs/ci_taxonomy.json and therefore FAILS at this work commit. Out of the declared lane (crates/**); the fix is to copy docs/ci_taxonomy.json over the crate-local copy.",
-      ".github/workflows/ci.yml: explicitly out of lane, not edited.",
-      "docs/threat-model.md: listed by the bead but on inspection its only fuzz reference (line 80) already calls compile 'the gate' with no advisory claim; no change was needed (truthful null for that file)."
+      ".github/workflows/ci.yml: the job znmel made required; not edited by this bead (the work was documentation/fixture alignment, not workflow changes).",
+      "docs/threat-model.md: listed by the bead, but its only fuzz reference (line 80) already calls the compile step 'the gate' with no advisory claim; no change was needed (truthful null for that file).",
+      "docs/release-checklist.md:243 and docs/ci-taxonomy.md:88-94: inspected for the two remaining 'advisory' mentions; both describe the historical/tier-C multi-nightly job, not fuzz-build, and are consistent with ci_taxonomy.json tier=release for job_id multi-nightly. Left unchanged deliberately (not fuzz-build/tier drift).",
+      "This session did not edit .beads/, .github/workflows/, or any other crate."
     ]
   },
   "source": {
-    "sha": "2d9b94de0e7735cc06ec95a4485ad3397412b576",
+    "sha": "90f21baac0acb04441735664310a52731754c944",
     "tree_clean": true,
     "branch": "main"
   },
   "proofs": [],
   "integration_evidence": {
     "entry_points": [],
-    "entry_points_excluded_reason": "no-runtime-surface"
+    "entry_points_excluded_reason": "no-runtime-surface: this change only aligns a generated fixture's declared CI tier and its Rust generator with docs/ci_taxonomy.json; the /operator/v1/ci-lanes runtime behavior is unchanged."
   },
   "live_evidence": {
     "claimed": false,
     "artifacts": []
   },
   "limitations": [
-    "This is a documentation-only change; no runtime code path changed, so no live/DB or binary behavior is claimed.",
-    "No prose-content gate exists for these files (scripts/ci_taxonomy.py --check reads only docs/ci_taxonomy.json and the workflows; scripts/docs_generate.sh owns README.md, docs/configuration.md and oraclemcp.example.toml). The planted-negative analogue is therefore the git before/after grep, not a failing-then-passing gate: `git show 2d9b94de^:docs/test-tiers.md` had '1-shaped but advisory | advisory' vs '1 | required' at 2d9b94de, and `rg -n -i 'fuzz.{0,80}(advisory|best-effort|continue-on-error|not a gate)' docs/` has no post-change match scoping fuzz-build advisory.",
-    "The bead's synthetic UI fixture could not be aligned in lane because it is generated from Rust (crates/oraclemcp-core/src/operator_protocol.rs); editing the fixture alone breaks generated_operator_schema_artifacts_match_rust_contract.",
-    "A committed gate (crate_local_ci_taxonomy_matches_repo_root) is red at this commit because crates/oraclemcp-core/ci_taxonomy.json still carries tier=advisory; that file is outside the declared lane and is embedded in production code. `diff docs/ci_taxonomy.json crates/oraclemcp-core/ci_taxonomy.json` is non-zero with the fuzz-build tier as the only semantic difference.",
-    "The cargo tests were not executed in this session: the shared checkout carries other agents' uncommitted crates/** edits (constitution rules 13/14), so the crate-local equality failure is proven textually against the test's assert_eq! rather than by running it.",
-    "source.tree_clean=true is scoped to the five in-scope paths, derived with `python3 scripts/audit_bead_closes.py --template oraclemcp-dybi5 --scope <each in-scope path>` (constitution rule 14: derive rather than assert). The tree as a whole is not clean because other agents hold uncommitted crates/** edits, which are outside this bead's lane and in_scope."
+    "Readiness is scoped-test: this session ran the crate-local unit suite plus fmt/clippy, not a full Required graph proof, so the document does not claim a machine-verified 'ready'. The orchestrator verifies and closes.",
+    "The bead-close-evidence/v1 `proofs` array holds cross-references to required-proof/v1, release-candidate-proof/v1, or mutation-result/v1 documents only; this scoped doc does not create one (a new evidence document is outside this bead's file lane), so the six executed commands and their results are recorded inline in scope.summary instead.",
+    "The five prose docs (docs/test-tiers.md, docs/toolchain.md, docs/ci-taxonomy.md, docs/release-checklist.md, docs/behavior-inventory.md) were landed by a prior agent at commit 2d9b94de, not re-edited here.",
+    "crates/oraclemcp-core/ci_taxonomy.json was synced by the orchestrator at commit ce3e703f; not edited here. It is in_scope because the bead's documented tier now matches across all three artifacts (docs taxonomy, embedded crate copy, and the Rust-generated UI fixture).",
+    "No prose-content gate exists for these files. The planted-negative analogue for the Rust/fixture pair is the deliberately-red generated_operator_schema_artifacts_match_rust_contract run recorded in scope.summary; for the prose docs it was the prior agent's git before/after grep.",
+    "source.tree_clean=true is scoped to the eight in_scope paths, derived with python3 scripts/audit_bead_closes.py --template oraclemcp-dybi5 --scope <each in_scope path> (constitution rule 14: derive rather than assert). The audit reported 40 dirty paths outside this scope (other agents mid-edit); they are excluded by design and are not this bead's files."
   ],
   "known_defects": [],
   "follow_ups": [],
