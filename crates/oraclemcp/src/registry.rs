@@ -817,8 +817,8 @@ pub fn tool_registry() -> ToolRegistry {
                         "description": "Positional bind values (string | number | bool | null) for :1, :2 …",
                         "items": {}
                     },
-                    "scn_a": { "type": "integer", "minimum": 1, "description": "System change number for side A. Required with scn_b when comparing one database at two points in time; optional in cross-database mode, where it pins side A to a flashback read instead of the current committed state." },
-                    "scn_b": { "type": "integer", "minimum": 1, "description": "System change number for side B. See scn_a." },
+                    "scn_a": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^[0-9]+$" }], "description": "System change number for side A. A decimal string is accepted so the lossless NUMBER string returned by oracle_query can be captured directly; it must fit an unsigned 64-bit integer. Required with scn_b when comparing one database at two points in time; optional in cross-database mode, where it pins side A to a flashback read instead of the current committed state." },
+                    "scn_b": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "string", "pattern": "^[0-9]+$" }], "description": "System change number for side B. See scn_a." },
                     "profile_a": { "type": "string", "description": "Connection profile for side A. Supplying profile_a and profile_b selects cross-database mode: the same proven read runs against two databases (e.g. prod vs staging), each classified against its own catalog and masked under its own egress policy. Only profiles this server exposes can be named." },
                     "profile_b": { "type": "string", "description": "Connection profile for side B. See profile_a." },
                     "db_a": { "type": "string", "description": "Alias for profile_a." },

@@ -17594,6 +17594,42 @@ fn diff_needs_either_two_scns_or_two_profiles() {
     );
 }
 
+#[test]
+fn oracle_diff_scn_accepts_lossless_query_number_strings_and_refuses_non_u64_values() {
+    let parsed: DiffArgs = parse_args(
+        "oracle_diff",
+        json!({
+            "sql": "SELECT id FROM app.orders",
+            "scn_a": "18446744073709551615",
+            "scn_b": 42,
+        }),
+    )
+    .expect("lossless NUMBER strings from oracle_query are valid SCN inputs");
+    assert_eq!(parsed.scn_a, Some(u64::MAX));
+    assert_eq!(parsed.scn_b, Some(42));
+
+    for invalid in [
+        json!(""),
+        json!(" 42"),
+        json!("+42"),
+        json!("-42"),
+        json!("42.0"),
+        json!("18446744073709551616"),
+        json!(-1),
+        json!(42.0),
+        json!(true),
+    ] {
+        let Err(err) = parse_args::<DiffArgs>(
+            "oracle_diff",
+            json!({ "sql": "SELECT id FROM app.orders", "scn_a": invalid }),
+        ) else {
+            panic!("only unsigned 64-bit decimal SCNs are accepted");
+        };
+        assert_eq!(err.error_class, ErrorClass::InvalidArguments);
+        assert!(err.message.contains("unsigned 64-bit decimal integer"));
+    }
+}
+
 // --- Arc I / bead .11.2 — the dry run (oracle_preview_dml) ------------------
 
 /// The dry run really executes, inside a savepoint the server owns, and really

@@ -239,10 +239,10 @@ pub(super) struct DiffArgs {
     /// System change number for side A. Required in the single-database
     /// (time) mode; optional in the cross-database (fleet) mode, where it pins
     /// side A to a flashback read instead of the current committed state.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_scn")]
     pub(super) scn_a: Option<u64>,
     /// System change number for side B. See [`DiffArgs::scn_a`].
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_scn")]
     pub(super) scn_b: Option<u64>,
     /// Connection profile for side A. Supplying both `profile_a` and
     /// `profile_b` selects the cross-database mode: the same proven read runs
@@ -272,6 +272,34 @@ pub(super) struct DiffArgs {
     pub(super) numbers_as_float: Option<bool>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
+}
+
+/// Decode an `oracle_diff` SCN without losing the default NUMBER wire form.
+///
+/// Oracle NUMBER values are deliberately serialized as JSON strings by
+/// `oracle_query` so precision survives the MCP boundary.  A captured SCN must
+/// therefore be accepted as decimal text as well as a JSON integer.  Keeping
+/// this conversion here, at the typed `oracle_diff` boundary, means a capture
+/// never has to be coerced by the external W4 client.
+fn deserialize_optional_scn<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let scn = match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(decimal)
+            if !decimal.is_empty() && decimal.bytes().all(|byte| byte.is_ascii_digit()) =>
+        {
+            decimal.parse::<u64>().ok()
+        }
+        _ => None,
+    };
+    scn.map(Some)
+        .ok_or_else(|| serde::de::Error::custom("SCN must be an unsigned 64-bit decimal integer"))
 }
 
 #[derive(Deserialize)]
