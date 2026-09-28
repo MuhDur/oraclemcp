@@ -443,7 +443,7 @@
   {
     "case_id": "w4_diff_flashback_capability_unavailable_typed",
     "tool": "oracle_diff",
-    "level": "READ_ONLY",
+    "level": "READ_WRITE",
     "transports": [
       "stdio",
       "http"
@@ -468,7 +468,7 @@
     "on_unsupported": {
       "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
     },
-    "profile_variant": "synthetic_owner",
+    "profile_variant": "synthetic_cross_rw",
     "setup_phase": "before_server"
   },
   {
@@ -514,6 +514,9 @@
       },
       {
         "sql": "INSERT INTO ${owner}.DIFF_T_${run_id} (ID, N_VAL) VALUES (1, 0)"
+      },
+      {
+        "sql": "GRANT EXECUTE ON DBMS_FLASHBACK TO ${owner}"
       }
     ],
     "setup_phase": "before_server",
@@ -530,7 +533,15 @@
       "mutation": true
     },
     "expect": {
-      "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
+      "json_subset": {
+        "changed": [
+          {
+            "key": {
+              "ID": "1"
+            }
+          }
+        ]
+      }
     },
     "db_reread": [
       {
@@ -543,13 +554,23 @@
         ]
       }
     ],
-    "audit_expect": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
+      }
+    ],
     "on_unsupported": {
       "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
     },
     "cleanup": [
       {
         "sql": "DROP TABLE ${owner}.DIFF_T_${run_id} PURGE"
+      },
+      {
+        "sql": "REVOKE EXECUTE ON DBMS_FLASHBACK FROM ${owner}"
       }
     ],
     "profile_variant": "synthetic_owner_rw",
