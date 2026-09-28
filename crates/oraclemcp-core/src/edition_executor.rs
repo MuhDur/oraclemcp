@@ -321,6 +321,9 @@ mod tests {
             child_edition: "CHILD_V2".to_owned(),
             base_edition: "ORA$BASE".to_owned(),
             objects: vec!["SYNTHETIC_VIEW".to_owned()],
+            coordination_scope: oraclemcp_db::PdbIdentityScope::LocalOnly {
+                observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
+            },
             status: EditionProposalStatus::Reviewing,
             created_at: String::new(),
             updated_at: String::new(),

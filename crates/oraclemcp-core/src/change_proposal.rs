@@ -8,6 +8,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use oraclemcp_db::PdbIdentityScope;
 use oraclemcp_guard::{
     Classifier, ClassifierConfig, EditionLifecycleParse, EditionLifecycleSql, OperatingLevel,
     parse_edition_lifecycle_sql,
@@ -29,6 +30,22 @@ const EDITION_PROPOSAL_SCHEMA_VERSION: u8 = 1;
 const MAX_EDITION_PROPOSAL_OBJECTS: usize = 64;
 /// Tamper-token scope for change-proposal list cursors.
 const CHANGE_PROPOSAL_CURSOR_KIND: &str = "change-proposals";
+
+fn local_only_pdb_scope() -> PdbIdentityScope {
+    PdbIdentityScope::LocalOnly {
+        observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
+    }
+}
+
+fn same_identified_pdb(left: &PdbIdentityScope, right: &PdbIdentityScope) -> bool {
+    matches!(
+        (left, right),
+        (
+            PdbIdentityScope::ServiceStateStore { identity: left },
+            PdbIdentityScope::ServiceStateStore { identity: right },
+        ) if left == right
+    )
+}
 
 /// Proposal review is a text-only classification phase. Applying a proposal
 /// always enters the dispatcher, which independently binds a live semantic
@@ -251,6 +268,10 @@ impl ChangeProposalStore {
             .into_iter()
             .find(|candidate| {
                 candidate.proposal_id != proposal.proposal_id
+                    && same_identified_pdb(
+                        &candidate.coordination_scope,
+                        &proposal.coordination_scope,
+                    )
                     && candidate.base_edition == proposal.base_edition
                     && candidate.child_edition != proposal.child_edition
                     && candidate.status != EditionProposalStatus::Withdrawn
@@ -265,8 +286,28 @@ impl ChangeProposalStore {
         request: EditionProposalCreateRequest,
     ) -> Result<EditionProposalView, ChangeProposalError> {
         let proposal = EditionProposal::from_request(request)?;
+        if let Some(conflict) = self.active_pdb_request_conflict(&proposal)? {
+            return Err(ChangeProposalError::OpenPdbRequest(conflict.proposal_id));
+        }
         self.write_edition_proposal(&proposal)?;
         Ok(proposal.view())
+    }
+
+    fn active_pdb_request_conflict(
+        &self,
+        proposal: &EditionProposal,
+    ) -> Result<Option<EditionProposalView>, ChangeProposalError> {
+        Ok(self
+            .list_edition_proposals()?
+            .into_iter()
+            .find(|candidate| {
+                candidate.proposal_id != proposal.proposal_id
+                    && same_identified_pdb(
+                        &candidate.coordination_scope,
+                        &proposal.coordination_scope,
+                    )
+                    && candidate.status != EditionProposalStatus::Withdrawn
+            }))
     }
 
     /// Move an Edition-Based Redefinition request through its non-authorizing
@@ -339,6 +380,9 @@ pub enum ChangeProposalError {
     /// The requested edition proposal id does not exist.
     #[error("unknown edition proposal")]
     UnknownEditionProposal,
+    /// A service-state store already has an open request for this PDB.
+    #[error("an open edition request already exists for this service-state-store PDB: {0}")]
+    OpenPdbRequest(String),
 }
 
 /// A non-authorizing request to stage editionable objects in one child edition.
@@ -353,6 +397,9 @@ pub struct EditionProposalCreateRequest {
     pub child_edition: String,
     pub base_edition: String,
     pub objects: Vec<String>,
+    /// Server-derived PDB coordination scope; local-only when identity is unreadable.
+    #[serde(skip_deserializing, default = "local_only_pdb_scope")]
+    pub coordination_scope: PdbIdentityScope,
 }
 
 /// The deliberately narrow lifecycle recorded by the Reviews board.
@@ -386,6 +433,8 @@ pub struct EditionProposal {
     pub child_edition: String,
     pub base_edition: String,
     pub objects: Vec<String>,
+    /// Server-derived scope for this service state store's local control plane.
+    pub coordination_scope: PdbIdentityScope,
     pub status: EditionProposalStatus,
     pub created_at: String,
     pub updated_at: String,
@@ -448,6 +497,7 @@ impl EditionProposal {
             child_edition,
             base_edition,
             objects,
+            coordination_scope: request.coordination_scope,
             status: EditionProposalStatus::Requested,
             created_at: now.clone(),
             updated_at: now,
@@ -488,6 +538,7 @@ impl EditionProposal {
             child_edition: self.child_edition.clone(),
             base_edition: self.base_edition.clone(),
             objects: self.objects.clone(),
+            coordination_scope: self.coordination_scope.clone(),
             status: self.status,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
@@ -538,6 +589,8 @@ pub struct EditionProposalView {
     pub child_edition: String,
     pub base_edition: String,
     pub objects: Vec<String>,
+    /// Scope of the service-local coordination claim.
+    pub coordination_scope: PdbIdentityScope,
     pub status: EditionProposalStatus,
     pub created_at: String,
     pub updated_at: String,
@@ -1205,6 +1258,7 @@ mod tests {
                 child_edition: "child_v2".to_owned(),
                 base_edition: "ora$base".to_owned(),
                 objects: vec!["SYNTHETIC_PACKAGE".to_owned(), "SYNTHETIC_VIEW".to_owned()],
+                coordination_scope: local_only_pdb_scope(),
             })
             .expect("create edition proposal");
 
@@ -1242,5 +1296,68 @@ mod tests {
             })
             .expect_err("replaying the same status must not reset a request");
         assert!(matches!(replay, ChangeProposalError::Invalid(_)));
+    }
+
+    fn identified_scope(dbid: &str, con_uid: &str) -> PdbIdentityScope {
+        PdbIdentityScope::ServiceStateStore {
+            identity: oraclemcp_db::PdbIdentity {
+                dbid: dbid.to_owned(),
+                con_uid: con_uid.to_owned(),
+            },
+        }
+    }
+
+    fn edition_request(scope: PdbIdentityScope, child: &str) -> EditionProposalCreateRequest {
+        EditionProposalCreateRequest {
+            profile: "synthetic-profile".to_owned(),
+            child_edition: child.to_owned(),
+            base_edition: "ORA$BASE".to_owned(),
+            objects: vec!["SYNTHETIC_VIEW".to_owned()],
+            coordination_scope: scope,
+        }
+    }
+
+    #[test]
+    fn edition_proposals_conflict_only_for_the_same_identified_pdb() {
+        let store = ChangeProposalStore::open(store_root("pdb-scope")).expect("store");
+        store
+            .create_edition_proposal(edition_request(
+                identified_scope("db-a", "pdb-1"),
+                "CHILD_A",
+            ))
+            .expect("first PDB request");
+        let conflict = store
+            .create_edition_proposal(edition_request(
+                identified_scope("db-a", "pdb-1"),
+                "CHILD_B",
+            ))
+            .expect_err("same PDB must serialize in one service state store");
+        assert!(matches!(conflict, ChangeProposalError::OpenPdbRequest(_)));
+        store
+            .create_edition_proposal(edition_request(
+                identified_scope("db-a", "pdb-2"),
+                "CHILD_C",
+            ))
+            .expect("different PDB remains independent");
+    }
+
+    #[test]
+    fn edition_pdb_scope_conflict_survives_store_restart() {
+        let root = store_root("pdb-scope-restart");
+        ChangeProposalStore::open(&root)
+            .expect("first store")
+            .create_edition_proposal(edition_request(
+                identified_scope("db-a", "pdb-1"),
+                "CHILD_A",
+            ))
+            .expect("persist first PDB request");
+        let restarted = ChangeProposalStore::open(&root).expect("restarted store");
+        let conflict = restarted
+            .create_edition_proposal(edition_request(
+                identified_scope("db-a", "pdb-1"),
+                "CHILD_B",
+            ))
+            .expect_err("persisted same-PDB request must survive restart");
+        assert!(matches!(conflict, ChangeProposalError::OpenPdbRequest(_)));
     }
 }

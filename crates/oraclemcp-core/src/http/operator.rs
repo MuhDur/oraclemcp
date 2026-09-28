@@ -2636,6 +2636,7 @@ fn operator_change_proposal_error_response(
         ChangeProposalError::Invalid(_) => (400, "invalid_change_proposal"),
         ChangeProposalError::UnknownProposal => (404, "unknown_change_proposal"),
         ChangeProposalError::UnknownEditionProposal => (404, "unknown_edition_proposal"),
+        ChangeProposalError::OpenPdbRequest(_) => (409, "pdb_request_already_open"),
         ChangeProposalError::FileStore(FileStoreError::InvalidSegment { .. }) => {
             (400, "invalid_change_proposal")
         }
@@ -2665,6 +2666,7 @@ fn operator_edition_proposal_error_response(
         ChangeProposalError::Invalid(_) => (400, "invalid_edition_proposal"),
         ChangeProposalError::UnknownEditionProposal => (404, "unknown_edition_proposal"),
         ChangeProposalError::UnknownProposal => (404, "unknown_edition_proposal"),
+        ChangeProposalError::OpenPdbRequest(_) => (409, "pdb_request_already_open"),
         ChangeProposalError::FileStore(FileStoreError::InvalidSegment { .. }) => {
             (400, "invalid_edition_proposal")
         }

@@ -57,21 +57,22 @@ use oraclemcp_db::{
     DependentObject, DependentsProbe, FlashbackRefusalKind, HardParseEffectClosureV1,
     IncomparableMaskedColumn, MaskComparabilityBreak, OracleBackend, OracleBind,
     OracleCatalogResolverCache, OracleConnection, OracleConnectionInfo, OracleRow,
-    PlanCostEstimate, PlanStatementId, PlanTableUnavailable, QuarantineOutcome, QueryCaps,
-    QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart, ReadQueryProvenance,
-    ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingDecisionAction,
-    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, ScnCapability,
-    ScnProbeOutcome, SemanticSearchMetric, SerializeOptions, SourceReadOptions,
-    StructuredDecodeCaps, VerifiedPlanTable, compile_errors, compile_object_statements,
-    describe_columns, describe_constraints, describe_index, describe_trigger, describe_view,
-    diff_query_responses, execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl,
-    get_source, get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
-    list_schema_projection_page, list_schemas,
-    observe_vpd_rls_for_relations_with_cached_bounded_probe, paginated_sql, plan_cost_estimate,
-    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents,
-    prove_hard_parse_effect_closure, read_query, read_query_as_of, resolve_plan_table,
-    run_catalog_query, search_objects, search_objects_by_types, search_source,
-    semantic_search_query, semantic_search_query_with_filter, semantic_search_text_query,
+    PdbIdentityScope, PlanCostEstimate, PlanStatementId, PlanTableUnavailable, QuarantineOutcome,
+    QueryCaps, QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart,
+    ReadQueryProvenance, ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate,
+    ResultMaskingDecisionAction, ResultMaskingDecisionSource, ResultMaskingPolicy,
+    ResultMaskingRule, ScnCapability, ScnProbeOutcome, SemanticSearchMetric, SerializeOptions,
+    SourceReadOptions, StructuredDecodeCaps, VerifiedPlanTable, compile_errors,
+    compile_object_statements, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
+    incomparable_masked_columns, list_objects, list_objects_page, list_schema_projection_page,
+    list_schemas, observe_vpd_rls_for_relations_with_cached_bounded_probe, paginated_sql,
+    plan_cost_estimate, plscope_identifiers, plscope_statements, primary_key_columns,
+    probe_dependents, prove_hard_parse_effect_closure, read_pdb_identity_scope, read_query,
+    read_query_as_of, resolve_plan_table, run_catalog_query, search_objects,
+    search_objects_by_types, search_source, semantic_search_query,
+    semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{
@@ -7539,6 +7540,8 @@ struct DbToolCtx<'a> {
     /// consults it before committing and clears it at its transaction boundary.
     checkpoints: &'a CheckpointWorkspace,
     request_budget: RequestBudget,
+    /// Stable PDB scope for this request's service-local coordination policy.
+    pdb_identity_scope: PdbIdentityScope,
     active_profile: Option<&'a str>,
     session: &'a SessionLevelState,
     execute_grants: &'a ExecGrantStore,
@@ -7617,16 +7620,24 @@ fn not_editionable_error(object_type: &str) -> ErrorEnvelope {
 
 fn reserve_edition_child_slot(
     parent: &EditionIdentifier,
+    pdb_identity_scope: &PdbIdentityScope,
     active_profile: Option<&str>,
 ) -> Result<EditionCreationReservation, ErrorEnvelope> {
-    // Profile is the least surprising server-side DB partition available at
-    // this layer. A direct dispatcher without a named profile remains
-    // conservatively shared rather than risking a second local CREATE.
-    let key = format!(
-        "{}\0{}",
-        active_profile.unwrap_or("<unnamed-profile>"),
-        parent.as_str()
-    );
+    let key = match pdb_identity_scope {
+        PdbIdentityScope::ServiceStateStore { identity } => {
+            format!(
+                "{}\0{}\0{}",
+                identity.dbid,
+                identity.con_uid,
+                parent.as_str()
+            )
+        }
+        PdbIdentityScope::LocalOnly { .. } => format!(
+            "local-only\0{}\0{}",
+            active_profile.unwrap_or("<unnamed-profile>"),
+            parent.as_str()
+        ),
+    };
     let mut reservations = EDITION_CREATION_RESERVATIONS.lock().map_err(|_| {
         ErrorEnvelope::new(
             ErrorClass::Internal,
@@ -7643,7 +7654,8 @@ async fn reserve_checked_edition_child_slot(
     ctx: &DbToolCtx<'_>,
     parent: &EditionIdentifier,
 ) -> Result<EditionCreationReservation, ErrorEnvelope> {
-    let reservation = reserve_edition_child_slot(parent, ctx.active_profile)?;
+    let reservation =
+        reserve_edition_child_slot(parent, &ctx.pdb_identity_scope, ctx.active_profile)?;
     let rows = run_catalog_query(
         ctx.cx,
         ctx.conn,
@@ -13235,6 +13247,7 @@ impl OracleDispatcher {
                 read_only_backstop: &state.read_only_backstop,
                 checkpoints: &state.checkpoints,
                 request_budget,
+                pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
                 execute_grants: &state.execute_grants,
@@ -13274,6 +13287,7 @@ impl OracleDispatcher {
                 read_only_backstop: &state.read_only_backstop,
                 checkpoints: &state.checkpoints,
                 request_budget,
+                pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
                 execute_grants: &state.execute_grants,
@@ -13695,6 +13709,7 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
+                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13727,6 +13742,7 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
+                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13755,6 +13771,7 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
+                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13783,6 +13800,7 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
+                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13811,6 +13829,7 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
+                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13839,6 +13858,7 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
+                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13867,6 +13887,7 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
+                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -15346,6 +15367,7 @@ impl OracleDispatcher {
                             read_only_backstop: &state.read_only_backstop,
                             checkpoints: &state.checkpoints,
                             request_budget,
+                            pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                             active_profile: active_profile.as_deref(),
                             session: &scoped_level,
                             execute_grants: &state.execute_grants,
