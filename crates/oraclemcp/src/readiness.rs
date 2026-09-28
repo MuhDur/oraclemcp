@@ -27,6 +27,7 @@ use oraclemcp_db::OracleConnection;
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
 /// Per-probe ping timeout budget (the ping itself is cancellation-aware).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+#[cfg(all(unix, target_os = "linux"))]
 const SYSTEMD_READY_MESSAGE: &[u8] = b"READY=1\nSTATUS=oraclemcp service ready\n";
 
 /// Shared, lock-free DB-reachability flag the `/readyz` handler reads.

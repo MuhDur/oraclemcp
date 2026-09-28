@@ -812,9 +812,14 @@ impl StagedBundle {
             })?;
             let nonce = u128::from_le_bytes(random);
             let staging_name = OsString::from(format!(".oraclemcp-incident-{nonce:032x}"));
-            let mut builder = CapDirBuilder::new();
             #[cfg(unix)]
-            builder.mode(0o700);
+            let builder = {
+                let mut builder = CapDirBuilder::new();
+                builder.mode(0o700);
+                builder
+            };
+            #[cfg(not(unix))]
+            let builder = CapDirBuilder::new();
             match parent.create_dir_with(&staging_name, &builder) {
                 Ok(()) => {
                     let before = parent.symlink_metadata(&staging_name).map_err(|error| {
@@ -870,9 +875,14 @@ impl StagedBundle {
             .directory
             .as_ref()
             .ok_or_else(|| invalid_path_error("incident staging directory is closed"))?;
-        let mut builder = CapDirBuilder::new();
         #[cfg(unix)]
-        builder.mode(0o700);
+        let builder = {
+            let mut builder = CapDirBuilder::new();
+            builder.mode(0o700);
+            builder
+        };
+        #[cfg(not(unix))]
+        let builder = CapDirBuilder::new();
         directory.create_dir_with(name, &builder)?;
         let before = directory.symlink_metadata(name)?;
         let child = directory.open_dir_nofollow(name)?;

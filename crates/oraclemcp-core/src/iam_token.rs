@@ -521,7 +521,7 @@ fn with_token_exec_test_lock<R>(f: impl FnOnce() -> R) -> R {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 fn active_token_exec_reader_workers() -> usize {
     ACTIVE_TOKEN_EXEC_READER_WORKERS.load(Ordering::SeqCst)
 }

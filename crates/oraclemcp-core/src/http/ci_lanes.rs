@@ -137,12 +137,12 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn set_ci_lane_snapshot_inspect_hook(hook: impl FnOnce() + 'static) {
     CI_LANE_SNAPSHOT_INSPECT_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(super) fn set_ci_lane_snapshot_open_hook(hook: impl FnOnce() + 'static) {
     CI_LANE_SNAPSHOT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
@@ -1238,7 +1238,7 @@ fn ci_lane_snapshot_identity_matches(opened: &fs::Metadata, current: &fs::Metada
     {
         use std::os::windows::fs::MetadataExt as _;
 
-        return matches!(
+        matches!(
             (
                 opened.volume_serial_number(),
                 opened.file_index(),
@@ -1247,7 +1247,7 @@ fn ci_lane_snapshot_identity_matches(opened: &fs::Metadata, current: &fs::Metada
             ),
             (Some(opened_volume), Some(opened_index), Some(current_volume), Some(current_index))
                 if opened_volume == current_volume && opened_index == current_index
-        );
+        )
     }
     #[cfg(not(any(unix, windows)))]
     {

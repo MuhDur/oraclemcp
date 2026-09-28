@@ -1636,12 +1636,17 @@ fn create_private_staging_dir(
         &state_target.display_path,
     )?;
     let path = transaction_sibling(&state_target.display_path, "restore-staging");
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
+    let builder = {
+        let mut builder = fs::DirBuilder::new();
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     builder
         .create(&path)
         .map_err(|e| service_io_error("ORACLEMCP_SERVICE_RESTORE_WRITE_FAILED", &path, e))?;
@@ -2078,12 +2083,17 @@ fn stream_copy_private_file_atomic(source: &Path, target: &Path) -> Result<(), S
 }
 
 fn create_new_private_dir(path: &Path) -> Result<(), ServiceError> {
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt as _;
-        builder.mode(0o700);
-    }
+    let builder = {
+        let mut builder = fs::DirBuilder::new();
+        {
+            use std::os::unix::fs::DirBuilderExt as _;
+            builder.mode(0o700);
+        }
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = fs::DirBuilder::new();
     builder.create(path).map_err(|e| {
         ServiceError::new(
             "ORACLEMCP_SERVICE_BACKUP_WRITE_FAILED",
@@ -3183,12 +3193,17 @@ fn open_or_create_dir_chain(
         match current.open_dir_nofollow(name) {
             Ok(next) => current = next,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                let mut builder = CapDirBuilder::new();
                 #[cfg(unix)]
-                {
-                    use cap_std::fs::DirBuilderExt as _;
-                    builder.mode(0o700);
-                }
+                let builder = {
+                    let mut builder = CapDirBuilder::new();
+                    {
+                        use cap_std::fs::DirBuilderExt as _;
+                        builder.mode(0o700);
+                    }
+                    builder
+                };
+                #[cfg(not(unix))]
+                let builder = CapDirBuilder::new();
                 match current.create_dir_with(name, &builder) {
                     Ok(()) => {}
                     Err(race) if race.kind() == io::ErrorKind::AlreadyExists => {}

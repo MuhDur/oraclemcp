@@ -1,7 +1,9 @@
 //! Focused bounded-streaming tests for audit DB-evidence correlation.
 
 use super::*;
-use std::io::{Cursor, Read};
+use std::io::Cursor;
+#[cfg(unix)]
+use std::io::Read;
 
 use oraclemcp_audit::{
     AuditDecision, AuditEntryDraft, AuditOutcome, AuditSubject, GENESIS_HASH, JsonlError,

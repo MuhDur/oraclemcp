@@ -1484,9 +1484,14 @@ fn open_or_create_dir_nofollow(path: &Path) -> Result<CapDir, ConfigOpsError> {
             Ok(next) => next,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 run_config_parent_create_hook();
-                let mut builder = CapDirBuilder::new();
                 #[cfg(unix)]
-                builder.mode(0o700);
+                let builder = {
+                    let mut builder = CapDirBuilder::new();
+                    builder.mode(0o700);
+                    builder
+                };
+                #[cfg(not(unix))]
+                let builder = CapDirBuilder::new();
                 match current.create_dir_with(name, &builder) {
                     Ok(()) => {}
                     Err(race) if race.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1619,7 +1624,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn set_config_atomic_write_hook(hook: impl FnOnce() + 'static) {
     CONFIG_ATOMIC_WRITE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
@@ -1633,7 +1638,7 @@ fn run_config_atomic_write_hook() {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn set_config_parent_create_hook(hook: impl FnOnce() + 'static) {
     CONFIG_PARENT_CREATE_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
@@ -1647,7 +1652,7 @@ fn run_config_parent_create_hook() {
     });
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn set_config_read_hook(hook: impl FnOnce() + 'static) {
     CONFIG_READ_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }

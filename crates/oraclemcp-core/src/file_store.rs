@@ -922,6 +922,7 @@ fn hex_lower(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
     use std::process::{Command, Stdio};
+    #[cfg(unix)]
     use std::sync::atomic::AtomicBool;
     use std::thread;
     use std::time::{Duration, Instant, UNIX_EPOCH};

@@ -959,9 +959,14 @@ fn open_or_create_private_dir_nofollow(path: &Path) -> Result<CapDir, String> {
         match current.open_dir_nofollow(name) {
             Ok(next) => current = next,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                let mut builder = CapDirBuilder::new();
                 #[cfg(unix)]
-                builder.mode(0o700);
+                let builder = {
+                    let mut builder = CapDirBuilder::new();
+                    builder.mode(0o700);
+                    builder
+                };
+                #[cfg(not(unix))]
+                let builder = CapDirBuilder::new();
                 match current.create_dir_with(name, &builder) {
                     Ok(()) => {}
                     Err(race) if race.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -1261,7 +1266,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn set_doctor_atomic_install_hook(hook: impl FnOnce() + 'static) {
     DOCTOR_ATOMIC_INSTALL_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }
@@ -1284,7 +1289,7 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn set_doctor_legacy_audit_open_hook(hook: impl FnOnce() + 'static) {
     DOCTOR_LEGACY_AUDIT_OPEN_HOOK.with(|slot| *slot.borrow_mut() = Some(Box::new(hook)));
 }

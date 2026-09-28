@@ -45,7 +45,9 @@ fn read_tls_pem(role: &'static str, path: &Path) -> Result<Vec<u8>, (&'static st
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     #[cfg(unix)]

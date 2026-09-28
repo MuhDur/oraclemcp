@@ -42,7 +42,9 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command as ProcessCommand, ExitCode, ExitStatus};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -1475,8 +1477,8 @@ fn exposed_profiles_summary(config: &OracleMcpConfig) -> String {
 fn create_private_audit_dir(path: &Path) -> std::io::Result<()> {
     #[cfg(windows)]
     {
-        return create_windows_private_audit_directory(path)
-            .map_err(|error| std::io::Error::other(error.to_string()));
+        create_windows_private_audit_directory(path)
+            .map_err(|error| std::io::Error::other(error.to_string()))
     }
     #[cfg(not(windows))]
     {
@@ -5300,6 +5302,7 @@ fn run_setup(
 
 const LATEST_RELEASE_API_URL: &str =
     "https://api.github.com/repos/MuhDur/oraclemcp/releases/latest";
+#[cfg(any(test, not(windows)))]
 const LATEST_RELEASE_MAX_BYTES: usize = 1024 * 1024;
 // Embed the installers from a crate-local copy kept byte-identical to the
 // repo-root install.sh/install.ps1 (drift-guarded by the
@@ -5361,6 +5364,7 @@ fn normalize_self_update_version(value: &str) -> Result<String, String> {
     Ok(value.to_owned())
 }
 
+#[cfg(any(test, not(windows)))]
 fn parse_latest_release_version(body: &[u8]) -> Result<String, String> {
     if body.len() > LATEST_RELEASE_MAX_BYTES {
         return Err("latest-release metadata exceeded 1 MiB".to_owned());

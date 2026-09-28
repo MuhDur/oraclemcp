@@ -547,14 +547,14 @@ mod tests {
     fn sh_bin() -> String {
         #[cfg(windows)]
         {
-            return [
+            [
                 r"C:\Program Files\Git\usr\bin\sh.exe",
                 r"C:\Program Files\Git\bin\sh.exe",
             ]
             .into_iter()
             .find(|c| std::path::Path::new(c).exists())
             .map(str::to_owned)
-            .expect("hermetic plugin test requires Git Bash sh.exe on Windows");
+            .expect("hermetic plugin test requires Git Bash sh.exe on Windows")
         }
         #[cfg(not(windows))]
         "/bin/sh".to_owned()
