@@ -14,30 +14,6 @@ use std::sync::atomic::AtomicUsize;
 mod setup;
 
 #[test]
-fn defaulted_keepalive_is_reported_as_descriptor_owned() {
-    let config: OracleMcpConfig = toml::from_str(
-        r#"
-schema_version = 2
-default_profile = "descriptor"
-
-[[profiles]]
-name = "descriptor"
-connect_string = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))"
-username = "E2E_ORACLE"
-credential_ref = "env:E2E_ORACLE_PASSWORD"
-"#,
-    )
-    .expect("descriptor profile parses");
-    let profile = config.profile("descriptor").expect("profile exists");
-
-    assert!(defaulted_keepalive_descriptor_skip(profile));
-    assert!(!defaulted_keepalive_descriptor_skip(&ConnectionProfile {
-        keepalive_minutes: Some(10),
-        ..profile.clone()
-    }));
-}
-
-#[test]
 fn embedded_installers_match_repo_root() {
     // The crate-local install.sh/install.ps1 (embedded via include_bytes! so the
     // published binary can self-update offline) must stay byte-identical to the

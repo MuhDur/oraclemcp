@@ -4494,9 +4494,9 @@ mod tests {
         let report = doctor(&ctx);
         let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
         assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
-        assert!(timeout
-            .detail
-            .contains("default keepalive was not injected because the complete Oracle Net descriptor"));
+        assert!(timeout.detail.contains(
+            "default keepalive was not injected because the complete Oracle Net descriptor"
+        ));
     }
 
     #[test]

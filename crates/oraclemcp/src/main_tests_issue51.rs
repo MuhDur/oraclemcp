@@ -4,6 +4,30 @@
 
 use super::*;
 
+#[test]
+fn defaulted_keepalive_is_reported_as_descriptor_owned() {
+    let config: OracleMcpConfig = toml::from_str(
+        r#"
+schema_version = 2
+default_profile = "descriptor"
+
+[[profiles]]
+name = "descriptor"
+connect_string = "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=FREEPDB1)))"
+username = "E2E_ORACLE"
+credential_ref = "env:E2E_ORACLE_PASSWORD"
+"#,
+    )
+    .expect("descriptor profile parses");
+    let profile = config.profile("descriptor").expect("profile exists");
+
+    assert!(defaulted_keepalive_descriptor_skip(profile));
+    assert!(!defaulted_keepalive_descriptor_skip(&ConnectionProfile {
+        keepalive_minutes: Some(10),
+        ..profile.clone()
+    }));
+}
+
 /// #51: a profile that can reach a write level never executes a tool without
 /// the audit sink it requires. Neither a missing key (fatal, before the
 /// transport) nor another instance's writer lock (typed, per call) lets the

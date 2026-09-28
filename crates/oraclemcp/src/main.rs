@@ -7085,10 +7085,13 @@ fn doctor_profile_caps(
 /// second `EXPIRE_TIME` into that descriptor.
 fn defaulted_keepalive_descriptor_skip(profile: &ConnectionProfile) -> bool {
     profile.keepalive_minutes.is_none()
-        && profile.connect_string.as_deref().is_some_and(|connect_string| {
-            let lower = connect_string.trim_start().to_ascii_lowercase();
-            lower.starts_with('(') || lower.contains("expire_time=")
-        })
+        && profile
+            .connect_string
+            .as_deref()
+            .is_some_and(|connect_string| {
+                let lower = connect_string.trim_start().to_ascii_lowercase();
+                lower.starts_with('(') || lower.contains("expire_time=")
+            })
 }
 
 fn doctor_auth_capabilities_for_profile(
