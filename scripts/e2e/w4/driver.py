@@ -1917,7 +1917,7 @@ def select_cases(file_cases, generated_cases, selected):
 
 def select_requested_cases(file_cases, generated_cases, requested):
     """Resolve --case only after descriptors have generated contract cases."""
-    if not requested:
+    if requested is None:
         return list(file_cases) + list(generated_cases)
     return select_cases(file_cases, generated_cases, set(requested))
 
@@ -2009,7 +2009,7 @@ def run_lane(args):
     for case in family_cases:
         if case["case_id"] in release_ids:
             case["test_id"] = release_ids[case["case_id"]]
-    rows, descriptors, fixture_runs = [], None, {}
+    rows, descriptors, fixture_runs, selected_case_ids = [], None, {}, set()
     barriers = BarrierPool()
     try:
         for transport in ("stdio", "http"):
@@ -2086,7 +2086,11 @@ def run_lane(args):
                         "could not return to READ_ONLY after discovery")
                 generated_cases = list(generic_contract_cases(
                     discovered, args.lane, contract_baselines(expanded_family)))
-                cases = select_requested_cases(expanded_family, generated_cases, args.case)
+                available_here = {case["case_id"] for case in expanded_family + generated_cases}
+                requested_here = set(args.case or ()) & available_here
+                selected_case_ids.update(requested_here)
+                cases = select_requested_cases(expanded_family, generated_cases,
+                                               requested_here if args.case else None)
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
@@ -2151,6 +2155,9 @@ def run_lane(args):
                         with contextlib.redirect_stdout(fixture_log):
                             fixture_teardown(args.lane, settings, fixture_id)
                 env.pop("W4_OWNER_PASSWORD", None)
+        if args.case:
+            missing = set(args.case) - selected_case_ids
+            require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
         output = {"lane": args.lane, "checkout_sha": checkout_sha,
                   "binary_source_sha": args.binary_source_sha or (checkout_sha if built_here else None),
                   "binary_sha256": binary_sha256,

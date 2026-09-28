@@ -1281,7 +1281,7 @@
       "repeat_count": 20,
       "scn_cache_expect": true
     },
-    "expect": {"rows": [{"C": "1"}]},
+    "expect": {"golden": "issue46-scn-cache.${lane}.json"},
     "db_reread": [],
     "audit_expect": [],
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}

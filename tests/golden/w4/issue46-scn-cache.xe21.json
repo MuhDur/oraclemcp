@@ -2,20 +2,6 @@
   "columns": [
     "C"
   ],
-  "mask_certificate": {
-    "audit_entry_hash": "sha256:d244265f3216e9f9fa1781be79b554cd8fb354fa8d0782ec269fb239848b2fed",
-    "decisions": [
-      {
-        "action": "mask",
-        "column": "C",
-        "oracle_type": "NUMBER",
-        "source": "mask_unknown_default"
-      }
-    ],
-    "policy_id": "sha256:fa9ebd4225df218e28a719ebc1b33fe101543ee52e6f834b32ea7524bd574b93",
-    "profile": "xe21",
-    "schema_version": 1
-  },
   "rls_vpd": {
     "all_policies_probe": {
       "detail": "ALL_POLICIES returned at least one row visible to this principal",
@@ -26,41 +12,19 @@
     "policies": [],
     "scope": "relations",
     "session": {
-      "current_schema": "SYSTEM",
+      "current_schema": "W4O_<run_id>",
       "edition_name": "ORA$BASE",
-      "enabled_roles": [
-        "ACCHK_READ",
-        "AQ_ADMINISTRATOR_ROLE",
-        "CAPTURE_ADMIN",
-        "DATAPUMP_EXP_FULL_DATABASE",
-        "DATAPUMP_IMP_FULL_DATABASE",
-        "DBA",
-        "EM_EXPRESS_ALL",
-        "EM_EXPRESS_BASIC",
-        "EXECUTE_CATALOG_ROLE",
-        "EXP_FULL_DATABASE",
-        "GATHER_SYSTEM_STATISTICS",
-        "HS_ADMIN_EXECUTE_ROLE",
-        "HS_ADMIN_SELECT_ROLE",
-        "IMP_FULL_DATABASE",
-        "OLAP_XS_ADMIN",
-        "OPTIMIZER_PROCESSING_RATE",
-        "PPLB_ROLE",
-        "SCHEDULER_ADMIN",
-        "SELECT_CATALOG_ROLE",
-        "XDBADMIN",
-        "XDB_SET_INVOKER"
-      ],
-      "session_user": "SYSTEM"
+      "enabled_roles": [],
+      "session_user": "W4O_<run_id>"
     },
     "status": "no_visible_matching_policies"
   },
   "row_count": 1,
   "rows": [
     {
-      "C": "<masked>"
+      "C": "1"
     }
   ],
-  "total_bytes": 16,
+  "total_bytes": 9,
   "truncated": false
 }
