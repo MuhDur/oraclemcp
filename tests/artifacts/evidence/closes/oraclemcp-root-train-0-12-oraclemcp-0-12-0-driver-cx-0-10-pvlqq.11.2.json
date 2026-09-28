@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:00:49Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.2",
+  "scope": {
+    "summary": "Run install_mcp_publisher as a subshell function that installs a guarded, quoted EXIT trap, so each invocation removes only its own mcp-publisher.XXXXXX work directory on success or failure; add three offline cleanup cases plus a caller-EXIT-trap-intact case to the supply-chain check.",
+    "in_scope": [
+      "scripts/install_mcp_publisher.sh",
+      "scripts/workflow_supply_chain_check.sh"
+    ],
+    "out_of_scope": [
+      "Changing the pinned mcp-publisher version, checksum source, or download URL",
+      "Deleting any temp directory other than the invocation's own mcp-publisher.XXXXXX work dir (R22)",
+      "The live MCP registry publish step (only the real release run R.7 exercises it)",
+      "GitHub-hosted runner behaviour; cleanup is proven offline with a stubbed curl and a synthetic archive"
+    ]
+  },
+  "source": {
+    "sha": "b076869a00c70e7e938ede198d3f3b58a94dfd65",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "Tier-A workflow supply-chain check (scripts/workflow_supply_chain_check.sh)",
+        "kind": "config-gate",
+        "trace": "bash scripts/workflow_supply_chain_check.sh exits 0; the three cases mcp_publisher_workdir_removed_on_success/_sha_mismatch/_download_failure each print {\"expected\":\"absent\",\"actual\":\"absent\"} and mcp_publisher_caller_exit_trap_intact prints actual=fired; the pre-existing verify_sha256-before-tar ordering assertions also stay green"
+      },
+      {
+        "name": "install_mcp_publisher (invoked as `bash scripts/install_mcp_publisher.sh` from release.yml and publish-mcp.yml; sourced by the supply-chain check)",
+        "kind": "cli",
+        "trace": "The same check sources the installer and drives install_mcp_publisher against a stubbed curl; on success the destination is installed and the work dir is gone, and on SHA mismatch / curl exit 22 the installer fails and the work dir is gone"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Offline only: curl is stubbed through PATH and the platform metadata is overridden with a synthetic tar.gz fixture, so the real pinned publisher archive and the network path are not exercised (forbidden substitute per the bead).",
+    "The success case overrides mcp_publisher_platform to supply a matching digest for the synthetic fixture; the real pinned digests are only format-checked by the existing mapping assertions, not downloaded.",
+    "Proves the MCP registry publish step is not exercised, so registry publication is unproven.",
+    "Cleanup is demonstrated on this host's bash; GitHub-hosted self-hosted-runner reuse is only argued, not run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
