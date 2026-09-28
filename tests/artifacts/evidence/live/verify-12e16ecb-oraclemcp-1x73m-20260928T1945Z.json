@@ -1,0 +1,462 @@
+{
+  "run_id": "verifier-12e16ecb-oraclemcp-1x73m-20260928T1945Z",
+  "lane": "free23,xe21,xe18",
+  "source_sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+  "kind": "w4-isolated-case-runs",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 12e16ecb (tree identical to HEAD, verified with git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 12e16ecb3d4d5e70507a1ffb2e752557351e192b --case <id>... (clean git-archive export of 12e16ecb; release binary built there with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "30 single --case invocations (10 cases x 3 lanes), each stdio+http: 60/60 rows pass",
+  "runs": [
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_object_procedure_valid",
+      "fixture_runs": {
+        "http": "W417196C1B62",
+        "stdio": "W4171992D1D2"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_procedure_valid"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_object_function_valid",
+      "fixture_runs": {
+        "http": "W41720EDD910",
+        "stdio": "W4172083D1B6"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_function_valid"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_object_package_valid",
+      "fixture_runs": {
+        "http": "W4172194C447",
+        "stdio": "W41721BB83B6"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_package_valid"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_object_view_valid",
+      "fixture_runs": {
+        "http": "W41722B8DD26",
+        "stdio": "W4172175A0E0"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_view_valid"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_object_trigger_valid",
+      "fixture_runs": {
+        "http": "W41723F80071",
+        "stdio": "W417220AECE9"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_trigger_valid"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_object_type_valid",
+      "fixture_runs": {
+        "http": "W41724037DA4",
+        "stdio": "W417237CE2D5"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_type_valid"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_patch_source_ambiguous_anchor_refused",
+      "fixture_runs": {
+        "http": "W417258C2B97",
+        "stdio": "W41724CBEA6F"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_patch_source_ambiguous_anchor_refused"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_patch_source_readonly_refused",
+      "fixture_runs": {
+        "http": "W4172627FD47",
+        "stdio": "W41726E85187"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_patch_source_readonly_refused"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_errors_lists_exact_line_and_text",
+      "fixture_runs": {
+        "http": "W41727F7C728",
+        "stdio": "W4172712910F"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_errors_lists_exact_line_and_text"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_compile_errors_none_for_valid_object",
+      "fixture_runs": {
+        "http": "W417280C1543",
+        "stdio": "W41728A62FCF"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_errors_none_for_valid_object"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_object_procedure_valid",
+      "fixture_runs": {
+        "http": "W41715A86B81",
+        "stdio": "W41714BD78C1"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_procedure_valid"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_object_function_valid",
+      "fixture_runs": {
+        "http": "W41715399D88",
+        "stdio": "W41715F52D27"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_function_valid"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_object_package_valid",
+      "fixture_runs": {
+        "http": "W417166B9A09",
+        "stdio": "W4171600201C"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_package_valid"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_object_view_valid",
+      "fixture_runs": {
+        "http": "W41716ABCF78",
+        "stdio": "W4171633113E"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_view_valid"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_object_trigger_valid",
+      "fixture_runs": {
+        "http": "W417175E4090",
+        "stdio": "W417179E98A7"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_trigger_valid"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_object_type_valid",
+      "fixture_runs": {
+        "http": "W417172E7C15",
+        "stdio": "W41717A366EB"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_type_valid"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_patch_source_ambiguous_anchor_refused",
+      "fixture_runs": {
+        "http": "W41718427B01",
+        "stdio": "W41718FC89BA"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_patch_source_ambiguous_anchor_refused"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_patch_source_readonly_refused",
+      "fixture_runs": {
+        "http": "W417191A5C87",
+        "stdio": "W417181E21E4"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_patch_source_readonly_refused"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_errors_lists_exact_line_and_text",
+      "fixture_runs": {
+        "http": "W41719781928",
+        "stdio": "W417191C25F2"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_errors_lists_exact_line_and_text"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_compile_errors_none_for_valid_object",
+      "fixture_runs": {
+        "http": "W4172037283E",
+        "stdio": "W41719E77617"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_errors_none_for_valid_object"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_object_procedure_valid",
+      "fixture_runs": {
+        "http": "W4171539E5FB",
+        "stdio": "W417140F40BB"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_procedure_valid"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_object_function_valid",
+      "fixture_runs": {
+        "http": "W417159C2631",
+        "stdio": "W41715113A0A"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_function_valid"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_object_package_valid",
+      "fixture_runs": {
+        "http": "W41716FAA2B4",
+        "stdio": "W417165A64FB"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_package_valid"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_object_view_valid",
+      "fixture_runs": {
+        "http": "W41716169C1D",
+        "stdio": "W41716F20316"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_view_valid"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_object_trigger_valid",
+      "fixture_runs": {
+        "http": "W41717D87D6E",
+        "stdio": "W41717902D14"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_trigger_valid"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_object_type_valid",
+      "fixture_runs": {
+        "http": "W41718EA4A6A",
+        "stdio": "W417176EFF72"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_object_type_valid"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_patch_source_ambiguous_anchor_refused",
+      "fixture_runs": {
+        "http": "W41718040F09",
+        "stdio": "W41718640F1C"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_patch_source_ambiguous_anchor_refused"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_patch_source_readonly_refused",
+      "fixture_runs": {
+        "http": "W41719CA615D",
+        "stdio": "W417196E851E"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_patch_source_readonly_refused"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_errors_lists_exact_line_and_text",
+      "fixture_runs": {
+        "http": "W4171985A27F",
+        "stdio": "W417194B3257"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_errors_lists_exact_line_and_text"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_compile_errors_none_for_valid_object",
+      "fixture_runs": {
+        "http": "W417204D42B5",
+        "stdio": "W41720DEB777"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_compile_errors_none_for_valid_object"
+      ]
+    }
+  ],
+  "note": "Each case ran alone in its own driver invocation with a fresh run-id fixture; no earlier source-tools case ran first."
+}

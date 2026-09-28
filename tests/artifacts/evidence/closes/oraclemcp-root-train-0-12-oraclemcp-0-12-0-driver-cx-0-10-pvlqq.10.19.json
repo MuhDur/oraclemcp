@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T19:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.10.19",
+  "scope": {
+    "summary": "Per-relation OLS / Real Application Security / Data Redaction detection on the read path: positive policy evidence refuses before execution with protected_by_ols / protected_by_ras / protected_by_redaction; unreadable evidence follows the orchestrator's R36 ruling (default admit with security_feature_evidence: unavailable + keyed observation + audit record; require_security_feature_evidence = true restores the security_feature_visibility_unknown refusal); doctor check 20 warns when the account cannot read the evidence sources.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "scripts/e2e/w4/cases/dictionary-tools.json"
+    ],
+    "out_of_scope": [
+      "OLS and RAS live refusal on FREE 23ai (image cannot enable them; unit + catalog proof only, per the bead's no-claim).",
+      "ADB behaviour (T9.6).",
+      "Mutation-closure integration (T7.9a)."
+    ]
+  },
+  "source": {
+    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_query over external MCP client (W4, release binary)",
+        "kind": "tool",
+        "trace": "Release binary built from a clean export of 12e16ecb. Single --case runs, stdio + Streamable HTTP each: free23 w4_query_redaction_policy_table_refused_no_execution, w4_query_redaction_nested_exists_refused_no_execution (FORBIDDEN_STATEMENT, structured_reason.category PROTECTED_BY_REDACTION, audit_zero_executions true, V$SQL marker absent), w4_query_security_catalog_unreadable_admitted (rows ID=1 + security_feature_evidence=unavailable naming the relation; exact five-record audit set), w4_query_security_catalog_unreadable_strict_refused (security_feature_visibility_unknown) -> all pass; xe21 and xe18 redaction-table + admitted cases pass; full dictionary family 82/82 on each of free23/xe21/xe18."
+      },
+      {
+        "name": "oraclemcp doctor --online as least-privilege E2E_ORACLE (free23)",
+        "kind": "cli",
+        "trace": "Release binary at 12e16ecb, profile username E2E_ORACLE, READ_ONLY: check id 20 'Security feature catalog visibility' status=warn, detail security_feature_catalog_unreadable (ORA-00942) stating reads proceed with security_feature_evidence: unavailable, a keyed observation and an audit record, and that require_security_feature_evidence = true refuses."
+      },
+      {
+        "name": "unit tests (verifier re-execution)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-db --lib -> 667 passed, including ols_policy_on_relation_refused, ras_realm_on_relation_refused, redaction_policy_on_relation_refused, nested_subquery_relation_with_redaction_refused, feature_not_installed_evidence_allows, security_view_unreadable_is_unknown_refused_when_strict, security_view_unreadable_is_unknown_available_to_default_read_policy. cargo test -p oraclemcp-core --lib -> 824 passed incl. doctor::security_feature_catalog_visibility_tests::unreadable_security_catalog_warns_by_default_and_fails_when_strict."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-security-feature-cases+doctor",
+        "path": "tests/artifacts/evidence/live/verify-12e16ecb-pvlqq.10.19-20260928T1945Z.json",
+        "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b"
+      }
+    ]
+  },
+  "limitations": [
+    "Acceptance box 'With the security catalog view unreadable, the SELECT is refused (Unknown)' is met only for profiles with require_security_feature_evidence = true; the default admits with an observation per the orchestrator's 2026-09-25 R36 ruling recorded on the bead, which supersedes the frozen box text.",
+    "OLS and RAS refusals are proven by unit tests with scripted catalog rows only; no live OLS/RAS lane exists.",
+    "The W4 fixture principal for the redaction cases is the lab SYSTEM account; the least-privilege path is covered by the admitted/strict cases (synthetic cross account) and the E2E_ORACLE doctor run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

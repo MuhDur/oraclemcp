@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T19:50:00Z",
+  "bead_id": "oraclemcp-b41nq",
+  "scope": {
+    "summary": "Bound the parser work that nested malformed '[' input drives in sqlparser: classify_raw and the public semantic_read_plan_checked share an 8-square-bracket pre-parser budget and refuse beyond it with typed fail-closed results (Forbidden / reason_category Other / 'parser square-bracket budget', and PlanMismatch::ParserWorkBudgetExceeded). The classify_fuzz timeout reproducer is committed to the fuzz corpus and pinned by regression tests.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/classifier.rs",
+      "crates/oraclemcp-guard/src/classifier_query_blocks.rs",
+      "crates/oraclemcp-guard/tests/adversarial_corpus.rs",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/timeout_nested_square_brackets"
+    ],
+    "out_of_scope": [
+      "Other super-linear sqlparser shapes not reached by a 300 s campaign (the campaign is bounded evidence, not a proof of absence).",
+      "Admitting bracket-heavy literal text: 9+ '[' anywhere in a statement (including inside string literals) is now refused; this is tighten-only by design."
+    ]
+  },
+  "source": {
+    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "root cause timing, before vs after (verifier re-execution)",
+        "kind": "api",
+        "trace": "Out-of-tree release harness calling Classifier::default().classify and semantic_read_plan_checked on the bead's base64 reproducer (249 bytes, 16 '['). Pre-fix guard at 984c1ed9 (parent of 6e24a438): classify 0.36 ms (already Forbidden/UnbalancedBlock), semantic_read_plan_checked 2595 ms (UnsupportedShape) -> the super-linear path is sqlparser backtracking inside the semantic planner, which the classify_fuzz target calls after classify. At 12e16ecb: classify 0.046-0.065 ms Forbidden reason_category=Other construct='parser square-bracket budget'; semantic_read_plan_checked <0.001 ms Err(ParserWorkBudgetExceeded). Committed corpus file equals the bead's base64 bytes (plus trailing newline)."
+      },
+      {
+        "name": "regression tests (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Clean git-archive export of 12e16ecb: cargo test -p oraclemcp-guard --test adversarial_corpus -- --nocapture -> 18 passed, 0 failed, including classifier_fuzz_square_bracket_budget_refuses_without_parser_backtracking, semantic_read_plan_fuzz_square_bracket_budget_refuses_without_parser_backtracking (original reproducer + three slow-unit variants, each asserted < 1 s) and classifier_square_bracket_budget_spares_ordinary_literal_data."
+      },
+      {
+        "name": "classify_fuzz reproducer + bounded campaign (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Under scripts/build_lease.sh at 12e16ecb: cargo +nightly-2026-05-11 fuzz run classify_fuzz fuzz/corpus/classify_fuzz/timeout_nested_square_brackets -- -timeout=10 -> 'Executed ... in 0 ms', rc=0. cargo fuzz run classify_fuzz <copy of corpus> -- -max_total_time=300 -timeout=10 -> 'Done 234237 runs in 301 second(s)', rc=0, no timeout/crash artifact written."
+      },
+      {
+        "name": "production reachability",
+        "kind": "api",
+        "trace": "semantic_read_plan_checked is the public planner reached from the read executor and the oracle_explain_plan hard-parse path (per the implementer audit); the budget is enforced inside that function, so every caller is bounded regardless of whether classify ran first."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Pre-fix timing measured in a release build without sanitizers (2.6 s); the CI libFuzzer timeout (>10 s) was under ASan/coverage instrumentation.",
+    "The bead title attributes the stall to classify(); measurement shows classify was already fast and fail-closed pre-fix, and the stall was the semantic planner. The fix covers both entry points.",
+    "The budget counts '[' bytes anywhere, including string literals and comments, so a query with 9 or more '[' in literal data is now refused (typed). This is tighten-only and was accepted by the bead, but it can over-refuse bracket-heavy literal text."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

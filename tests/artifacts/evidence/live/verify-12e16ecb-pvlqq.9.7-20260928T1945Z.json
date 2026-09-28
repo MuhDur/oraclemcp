@@ -1,0 +1,156 @@
+{
+  "run_id": "verifier-12e16ecb-pvlqq.9.7-20260928T1945Z",
+  "lane": "free23,xe21,xe18",
+  "source_sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+  "kind": "w4-dictionary-tools-family",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 12e16ecb (tree identical to HEAD, verified with git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 12e16ecb3d4d5e70507a1ffb2e752557351e192b --case <id>... (clean git-archive export of 12e16ecb; release binary built there with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "dictionary-tools family (all 41 case ids, one invocation) 82/82 pass on free23, xe21, xe18; the five reworked cases and two acceptance negatives pass alone on free23",
+  "runs": [
+    {
+      "lane": "free23",
+      "invocation": "family-dictionary",
+      "fixture_runs": {
+        "http": "W41737CA61F7",
+        "stdio": "W41736998A21"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "cases": "41 distinct case ids"
+    },
+    {
+      "lane": "xe21",
+      "invocation": "family-dictionary",
+      "fixture_runs": {
+        "http": "W41723713373",
+        "stdio": "W41722006727"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "cases": "41 distinct case ids"
+    },
+    {
+      "lane": "xe18",
+      "invocation": "family-dictionary",
+      "fixture_runs": {
+        "http": "W41723382288",
+        "stdio": "W4172244EC59"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "cases": "41 distinct case ids"
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_schema_inspect_object_inventory_exact",
+      "fixture_runs": {
+        "http": "W41729667FEE",
+        "stdio": "W417289A4C80"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_schema_inspect_object_inventory_exact"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_schema_inspect_object_type_filter",
+      "fixture_runs": {
+        "http": "W41729556802",
+        "stdio": "W417294D0694"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_schema_inspect_object_type_filter"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_schema_inspect_pagination_cursor",
+      "fixture_runs": {
+        "http": "W4173028C9F8",
+        "stdio": "W417309B4C1E"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_schema_inspect_pagination_cursor"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_sample_rows_types_exact_values",
+      "fixture_runs": {
+        "http": "W417313C3F4F",
+        "stdio": "W417308CE458"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_sample_rows_types_exact_values"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_search_objects_detail_names_only",
+      "fixture_runs": {
+        "http": "W41731B4CABC",
+        "stdio": "W41731C65BE9"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_search_objects_detail_names_only"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_describe_view_missing_object_not_found",
+      "fixture_runs": {
+        "http": "W4173431FA7D",
+        "stdio": "W41734C53F82"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_describe_view_missing_object_not_found"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_sample_rows_view_with_side_effecting_function_refused",
+      "fixture_runs": {
+        "http": "W41735669C94",
+        "stdio": "W4173415990C"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_sample_rows_view_with_side_effecting_function_refused"
+      ]
+    }
+  ],
+  "note": "Isolation runs prove the df03922d rework expectations do not depend on leaked shared-fixture state."
+}

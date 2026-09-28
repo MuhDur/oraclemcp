@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T19:50:00Z",
+  "bead_id": "oraclemcp-tio2e",
+  "scope": {
+    "summary": "w4_describe_view_after_describe_keeps_session_usable no longer replaces the canonical fixture view V_TYPES_${run_id}; it creates and cleans up its own D7_V_SESS view, so source-tools w4_get_ddl_view asserts the unmodified fixture against its existing golden in both scoped and family runs.",
+    "in_scope": [
+      "scripts/e2e/w4/cases/dictionary-tools.json"
+    ],
+    "out_of_scope": [
+      "Driver behaviour of applying family before_server setup to scoped runs (not changed; the case no longer mutates canonical fixtures)."
+    ]
+  },
+  "source": {
+    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "W4 external client, release binary (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Release binary from a clean export of 12e16ecb. --case w4_describe_view_after_describe_keeps_session_usable alone: pass stdio+http on free23, xe21, xe18. --case w4_get_ddl_view alone on free23: pass stdio+http. Source-tools family (all 40 ids in one invocation) 80/80 on each lane, w4_get_ddl_view passing against tests/golden/w4 files that were not modified in fc6bba0a..12e16ecb (only the issue46 goldens were added in that range)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-isolated-and-family-runs",
+        "path": "tests/artifacts/evidence/live/verify-12e16ecb-oraclemcp-tio2e-20260928T1945Z.json",
+        "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b"
+      }
+    ]
+  },
+  "limitations": [
+    "A full unscoped lane (all families) ordering was not the proof here; scoped family runs and single-case runs were."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

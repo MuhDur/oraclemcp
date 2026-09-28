@@ -1,0 +1,47 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T19:50:00Z",
+  "bead_id": "oraclemcp-1x73m",
+  "scope": {
+    "summary": "The ten order-dependent source-tools cases (w4_compile_object_{procedure,function,package,view,trigger,type}_valid, w4_patch_source_{ambiguous_anchor_refused,readonly_refused}, w4_compile_errors_{lists_exact_line_and_text,none_for_valid_object}) carry their own run-owned setup and cleanup and pass in isolation.",
+    "in_scope": [
+      "scripts/e2e/w4/cases/source-tools.json"
+    ],
+    "out_of_scope": [
+      "Other W4 families' isolation."
+    ]
+  },
+  "source": {
+    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "W4 single-case isolation sweep (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Release binary from a clean export of 12e16ecb. Each of the ten cases invoked alone (one driver invocation per case, fresh run-id fixture) on free23, xe21 and xe18: 30 invocations, 60/60 rows pass (stdio + http). Diff review of 188d8d2f: only setup/cleanup arrays and one audit_zero_executions field added; no expectation removed or loosened, no golden or driver change."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-isolated-case-runs",
+        "path": "tests/artifacts/evidence/live/verify-12e16ecb-oraclemcp-1x73m-20260928T1945Z.json",
+        "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b"
+      }
+    ]
+  },
+  "limitations": [],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

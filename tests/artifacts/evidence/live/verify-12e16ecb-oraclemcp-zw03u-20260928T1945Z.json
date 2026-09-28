@@ -1,0 +1,53 @@
+{
+  "run_id": "verifier-12e16ecb-oraclemcp-zw03u-20260928T1945Z",
+  "lane": "free23",
+  "source_sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+  "kind": "external-mcp-stdio-enum-probe",
+  "runner": "independent verifier (Claude agent); release binary built from a clean git-archive export of 12e16ecb; local FREE 23ai lab on localhost, least-privilege E2E_ORACLE profile (static PL/SQL tools do not touch the DB)",
+  "command": "python3 enum_probe.py <release oraclemcp> <profiles.toml> <state-dir>: spawns 'oraclemcp serve --profile verify_e2e --allow-no-auth', MCP initialize + tools/list, then tools/call for every advertised string-enum property of the oracle_plsql_* tools with value __w4_wrong_enum__, plus one in-enum oracle_plsql_lineage call",
+  "result": "5/5 out-of-enum calls isError=true INVALID_ARGUMENTS before execution (what_breaks.mode, lineage.direction, sast.format, doc.format with 'must be one of' messages; blast_radius.mode refused INVALID_ARGUMENTS at argument parsing); in-enum lineage call isError=false (normal found=false payload)",
+  "wrong_enum_calls": [
+    {
+      "tool": "oracle_plsql_what_breaks",
+      "property": "mode",
+      "isError": true,
+      "error_class": "INVALID_ARGUMENTS",
+      "message": "invalid arguments for oracle_plsql_what_breaks: mode must be one of: source_only, catalog_aware, live_snapshot",
+      "ms": 7.9
+    },
+    {
+      "tool": "oracle_plsql_lineage",
+      "property": "direction",
+      "isError": true,
+      "error_class": "INVALID_ARGUMENTS",
+      "message": "invalid arguments for oracle_plsql_lineage: direction must be one of: upstream, downstream, bidirectional",
+      "ms": 5.2
+    },
+    {
+      "tool": "oracle_plsql_sast",
+      "property": "format",
+      "isError": true,
+      "error_class": "INVALID_ARGUMENTS",
+      "message": "invalid arguments for oracle_plsql_sast: format must be one of: json, sarif, junit, histogram",
+      "ms": 5.5
+    },
+    {
+      "tool": "oracle_plsql_doc",
+      "property": "format",
+      "isError": true,
+      "error_class": "INVALID_ARGUMENTS",
+      "message": "invalid arguments for oracle_plsql_doc: format must be one of: json, markdown, html, doctor",
+      "ms": 5.4
+    },
+    {
+      "tool": "oracle_plsql_blast_radius",
+      "property": "mode",
+      "isError": true,
+      "error_class": "INVALID_ARGUMENTS",
+      "message": "invalid arguments for oracle_plsql_blast_radius: missing field `changeset`",
+      "ms": 4.2
+    }
+  ],
+  "valid_enum_lineage_isError": false,
+  "note": "The W4 generated case w4_contract_oracle_plsql_lineage_direction_wrong_enum cannot be selected with --case at 12e16ecb (driver: 'unknown scoped W4 case(s)') because 0d9d506d re-added a file-case-only check after 6dedef5a; a full unscoped free23 lane aborted before reaching it ('failed to drop before profile switch'). Streamable HTTP was not re-executed by the verifier."
+}

@@ -1,0 +1,111 @@
+{
+  "run_id": "verifier-12e16ecb-oraclemcp-tio2e-20260928T1945Z",
+  "lane": "free23,xe21,xe18",
+  "source_sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+  "kind": "w4-isolated-and-family-runs",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 12e16ecb (tree identical to HEAD, verified with git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 12e16ecb3d4d5e70507a1ffb2e752557351e192b --case <id>... (clean git-archive export of 12e16ecb; release binary built there with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "describe_view_after_describe alone: pass stdio+http on 3 lanes; get_ddl_view alone on free23: pass; source-tools family 80/80 on each of 3 lanes (w4_get_ddl_view pass against the unchanged golden)",
+  "runs": [
+    {
+      "lane": "free23",
+      "invocation": "one-w4_describe_view_after_describe_keeps_session_usable",
+      "fixture_runs": {
+        "http": "W41718D152BE",
+        "stdio": "W41717866A2A"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_describe_view_after_describe_keeps_session_usable"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_describe_view_after_describe_keeps_session_usable",
+      "fixture_runs": {
+        "http": "W41714845471",
+        "stdio": "W4171454EAA0"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_describe_view_after_describe_keeps_session_usable"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_describe_view_after_describe_keeps_session_usable",
+      "fixture_runs": {
+        "http": "W417144487EB",
+        "stdio": "W4171468852B"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_describe_view_after_describe_keeps_session_usable"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_get_ddl_view",
+      "fixture_runs": {
+        "http": "W41719A709F0",
+        "stdio": "W41718051F72"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_get_ddl_view"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "family-source",
+      "fixture_runs": {
+        "http": "W417362D0663",
+        "stdio": "W417352272FB"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 80,
+      "pass": 80,
+      "fail": 0,
+      "cases": "40 distinct case ids"
+    },
+    {
+      "lane": "xe21",
+      "invocation": "family-source",
+      "fixture_runs": {
+        "http": "W417227EC87B",
+        "stdio": "W41721B0B07E"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 80,
+      "pass": 80,
+      "fail": 0,
+      "cases": "40 distinct case ids"
+    },
+    {
+      "lane": "xe18",
+      "invocation": "family-source",
+      "fixture_runs": {
+        "http": "W41722F67A2D",
+        "stdio": "W4172276686C"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 80,
+      "pass": 80,
+      "fail": 0,
+      "cases": "40 distinct case ids"
+    }
+  ],
+  "note": "No golden under tests/golden changed between fc6bba0a and 12e16ecb except the issue46 files; the get_ddl view golden is untouched."
+}

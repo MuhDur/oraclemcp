@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T19:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.6",
+  "scope": {
+    "summary": "W4 external-client cases for oracle_compile_object, oracle_create_or_replace, oracle_patch_source, oracle_compile_errors, oracle_get_source and oracle_get_ddl (scripts/e2e/w4/cases/source-tools.json, 40 cases) green over stdio and Streamable HTTP on FREE 23ai, XE 21 and XE 18 with the release binary.",
+    "in_scope": [
+      "scripts/e2e/w4/cases/source-tools.json",
+      "tests/golden/w4"
+    ],
+    "out_of_scope": [
+      "ADB behaviour (T9.6a) and unlisted behaviours, per the bead's no-claim."
+    ]
+  },
+  "source": {
+    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "W4 source-tools family, release binary (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Release binary (cargo build --release -p oraclemcp --bin oraclemcp) from a clean export of 12e16ecb; driver invoked with every source-tools case id: free23 80/80, xe21 80/80, xe18 80/80 (stdio + http), in-driver audit-chain verification passed. Acceptance negatives also pass alone on free23: w4_create_or_replace_refused_at_read_write, w4_patch_source_stale_preview_refused, w4_get_ddl_unsupported_type_invalid_arguments (INVALID_ARGUMENTS). Previously red blockers (nqauq, moad8, .8.2, .8.4) are closed and their cases now pass."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-source-tools-family",
+        "path": "tests/artifacts/evidence/live/verify-12e16ecb-pvlqq.9.6-20260928T1945Z.json",
+        "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b"
+      }
+    ]
+  },
+  "limitations": [
+    "Tier-C runner was not used; each lane was driven directly with the scoped family (all ids) in one invocation, which exercises the same cases and transports.",
+    "W1 bypass-shape and W2 runtime cases for these tools belong to their own beads."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

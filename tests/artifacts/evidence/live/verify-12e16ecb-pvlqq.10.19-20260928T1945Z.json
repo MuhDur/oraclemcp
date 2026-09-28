@@ -1,0 +1,197 @@
+{
+  "run_id": "verifier-12e16ecb-pvlqq.10.19-20260928T1945Z",
+  "lane": "free23,xe21,xe18",
+  "source_sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+  "kind": "w4-security-feature-cases+doctor",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 12e16ecb (tree identical to HEAD, verified with git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 12e16ecb3d4d5e70507a1ffb2e752557351e192b --case <id>... (clean git-archive export of 12e16ecb; release binary built there with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "redaction table + nested EXISTS refused PROTECTED_BY_REDACTION with zero executions and no V$SQL marker; unreadable-catalog read admitted with security_feature_evidence=unavailable and exact 5-record audit set; strict profile refused security_feature_visibility_unknown; all stdio+http",
+  "runs": [
+    {
+      "lane": "free23",
+      "invocation": "one-w4_query_redaction_policy_table_refused_no_execution",
+      "fixture_runs": {
+        "http": "W4171411C544",
+        "stdio": "W4171491E04A"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_redaction_policy_table_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_query_security_catalog_unreadable_admitted",
+      "fixture_runs": {
+        "http": "W417150B6829",
+        "stdio": "W4171558E2D5"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_security_catalog_unreadable_admitted"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_query_security_catalog_unreadable_strict_refused",
+      "fixture_runs": {
+        "http": "W4171641462E",
+        "stdio": "W417158A35DA"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_security_catalog_unreadable_strict_refused"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "one-w4_query_redaction_nested_exists_refused_no_execution",
+      "fixture_runs": {
+        "http": "W41716CC2409",
+        "stdio": "W41716456043"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_redaction_nested_exists_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_query_redaction_policy_table_refused_no_execution",
+      "fixture_runs": {
+        "http": "W41720603C0A",
+        "stdio": "W41720E62AD8"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_redaction_policy_table_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "one-w4_query_security_catalog_unreadable_admitted",
+      "fixture_runs": {
+        "http": "W41721D0BDC5",
+        "stdio": "W417214E911A"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_security_catalog_unreadable_admitted"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_query_redaction_policy_table_refused_no_execution",
+      "fixture_runs": {
+        "http": "W417217C0321",
+        "stdio": "W417208E47A0"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_redaction_policy_table_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "one-w4_query_security_catalog_unreadable_admitted",
+      "fixture_runs": {
+        "http": "W41721C912DC",
+        "stdio": "W41721DAD1ED"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "cases": [
+        "w4_query_security_catalog_unreadable_admitted"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "family-dictionary",
+      "fixture_runs": {
+        "http": "W41737CA61F7",
+        "stdio": "W41736998A21"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 8,
+      "pass": 8,
+      "fail": 0,
+      "cases": [
+        "w4_query_redaction_nested_exists_refused_no_execution",
+        "w4_query_redaction_policy_table_refused_no_execution",
+        "w4_query_security_catalog_unreadable_admitted",
+        "w4_query_security_catalog_unreadable_strict_refused"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "family-dictionary",
+      "fixture_runs": {
+        "http": "W41723713373",
+        "stdio": "W41722006727"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 8,
+      "pass": 8,
+      "fail": 0,
+      "cases": [
+        "w4_query_redaction_nested_exists_refused_no_execution",
+        "w4_query_redaction_policy_table_refused_no_execution",
+        "w4_query_security_catalog_unreadable_admitted",
+        "w4_query_security_catalog_unreadable_strict_refused"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "family-dictionary",
+      "fixture_runs": {
+        "http": "W41723382288",
+        "stdio": "W4172244EC59"
+      },
+      "binary_sha256": "b54a235116336e1416c63011638e12263b22608058e46c4f19ebaafd0b76c060",
+      "rows": 8,
+      "pass": 8,
+      "fail": 0,
+      "cases": [
+        "w4_query_redaction_nested_exists_refused_no_execution",
+        "w4_query_redaction_policy_table_refused_no_execution",
+        "w4_query_security_catalog_unreadable_admitted",
+        "w4_query_security_catalog_unreadable_strict_refused"
+      ]
+    }
+  ],
+  "note": "Single-case runs on free23 (4 cases) and xe21/xe18 (2 cases), plus each lane's full dictionary family, all pass.",
+  "doctor": {
+    "account": "E2E_ORACLE (least privilege)",
+    "lane": "free23",
+    "command": "oraclemcp --json doctor --online --profile <E2E_ORACLE profile> (release binary at 12e16ecb)",
+    "check": {
+      "id": 20,
+      "name": "Security feature catalog visibility",
+      "status": "warn",
+      "detail": "security_feature_catalog_unreadable: OLS/RAS/Data Redaction evidence is incomplete (ORA-00942); reads proceed with security_feature_evidence: unavailable, a keyed observation, and an audit record; set require_security_feature_evidence = true to refuse"
+    }
+  }
+}

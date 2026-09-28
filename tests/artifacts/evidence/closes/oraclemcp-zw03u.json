@@ -1,0 +1,56 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T19:55:00Z",
+  "bead_id": "oraclemcp-zw03u",
+  "scope": {
+    "summary": "Static PL/SQL tools (dispatch_static) validate every advertised string-enum argument against the registry's own input schema before the handler runs, so oracle_plsql_lineage (and what_breaks, sast, doc) refuse an out-of-enum value with INVALID_ARGUMENTS instead of executing.",
+    "in_scope": [
+      "crates/oraclemcp/src/plsql_tools.rs"
+    ],
+    "out_of_scope": [
+      "Live PL/SQL tools (oracle_plsql_blast_radius, oracle_plsql_live_snapshot, oracle_lineage) go through dispatch_live; blast_radius still refuses a wrong mode via parse_predict_mode, but also accepts hyphen/case variants outside the advertised enum.",
+      "W4 driver --case selection of generated contract cases (regressed by 0d9d506d; see limitations)."
+    ]
+  },
+  "source": {
+    "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_plsql_lineage / what_breaks / sast / doc over external MCP stdio (verifier re-execution)",
+        "kind": "tool",
+        "trace": "Release binary from a clean export of 12e16ecb, spawned as 'oraclemcp serve --allow-no-auth' and driven by an independent MCP stdio client that read tools/list and sent __w4_wrong_enum__ for every advertised enum property: oracle_plsql_lineage.direction, oracle_plsql_what_breaks.mode, oracle_plsql_sast.format, oracle_plsql_doc.format -> isError true, INVALID_ARGUMENTS, 'must be one of: <advertised values>' (4-8 ms, project_root '/nonexistent-verifier-root' never read). In-enum oracle_plsql_lineage call -> isError false, normal found=false payload."
+      },
+      {
+        "name": "unit test (verifier re-execution)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp --lib at 12e16ecb -> 554 passed, including plsql_tools::tests::advertised_static_enums_are_refused_before_tool_execution."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "external-mcp-stdio-enum-probe",
+        "path": "tests/artifacts/evidence/live/verify-12e16ecb-oraclemcp-zw03u-20260928T1945Z.json",
+        "sha": "12e16ecb3d4d5e70507a1ffb2e752557351e192b"
+      }
+    ]
+  },
+  "limitations": [
+    "The bead's original W4 generated case w4_contract_oracle_plsql_lineage_direction_wrong_enum was not re-run: at 12e16ecb 'driver.py --case <generated id>' refuses with 'unknown scoped W4 case(s)' because 0d9d506d re-added a file-case-only check after 6dedef5a made generated cases selectable, and a full unscoped free23 lane aborted early with 'failed to drop before profile switch'.",
+    "Streamable HTTP was not re-executed by the verifier; the validation is in transport-independent dispatch_static."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}
