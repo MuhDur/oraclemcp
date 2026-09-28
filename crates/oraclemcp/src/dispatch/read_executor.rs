@@ -1592,7 +1592,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     false,
                     state.fga_evidence_policy,
                     state.require_security_feature_evidence,
-                    &[],
+                    state.trusted_views.as_ref(),
                 )
                 .await;
                 let (
