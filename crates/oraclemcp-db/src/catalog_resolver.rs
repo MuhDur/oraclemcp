@@ -6192,6 +6192,40 @@ mod tests {
     }
 
     #[test]
+    fn issue35_truncated_view_text_refused_before_recursive_proof() {
+        run_with_cx(|cx| async move {
+            let mut text = row(&[
+                ("TEXT", Some("SELECT 1 FROM APP.T")),
+                ("EDITIONING_VIEW", Some("N")),
+            ]);
+            text.columns
+                .iter_mut()
+                .find(|(name, _)| name == "TEXT")
+                .expect("view text cell")
+                .1
+                .source_length = Some(5_000);
+            let conn = ScriptedRows::new([vec![text]]);
+            let mut view = dictionary_view_object("REPORTING_VIEW");
+            view.owner = "APP".to_owned();
+            view.synonym_chain.clear();
+            assert!(
+                !trusted_view_source_is_proven(
+                    &cx,
+                    &conn,
+                    &OracleCatalogResolverCache::new(),
+                    &view,
+                    FgaEvidencePolicy::RequireProof,
+                    &["APP.REPORTING_VIEW".to_owned()],
+                    0,
+                )
+                .await
+                .expect("truncated text is a normal unproven result")
+            );
+            assert_eq!(conn.queries.lock().expect("queries lock").len(), 1);
+        });
+    }
+
+    #[test]
     fn issue35_dictionary_view_admitted_only_with_oracle_maintained_closure() {
         run_with_cx(|cx| async move {
             let conn = ScriptedRows::new([
