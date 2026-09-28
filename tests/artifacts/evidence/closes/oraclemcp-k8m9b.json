@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:37:19Z",
+  "bead_id": "oraclemcp-k8m9b",
+  "scope": {
+    "summary": "oracle_semantic_search with query_vector now proves the native VECTOR capability from COMPATIBLE and returns the stable typed requires_23ai refusal before any relation/column resolution, so a pre-23ai server no longer reports a misleading OBJECT_NOT_FOUND for its VEC_VAL column.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs"
+    ],
+    "out_of_scope": [
+      "crates/oraclemcp/src/dispatch/tests.rs is held by another agent and was not edited; the query_vector pre-23ai ordering is covered by the new inline pure unit tests plus the live W4 case instead.",
+      "The query_text 23.4 in-database-embedding gate still runs in semantic_search_text_model after relation resolution; only its helper was refactored, not reordered.",
+      "The live W4 result JSON lives under the gitignored target/e2e/w4/ tree and is not committed as a live artifact; this close claims scoped-test readiness, not live-evidence readiness.",
+      "No change to the SQL guard/classifier or the read-only admission path."
+    ]
+  },
+  "source": {
+    "sha": "7bfef457de39cee1ea20e4a5833ed974c100d68c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_semantic_search (query_vector) MCP tool",
+        "kind": "tool",
+        "trace": "Unit: cargo test -p oraclemcp --lib semantic_search_capability_tests -> vector_capability_gate_refuses_every_pre_23ai_compatible + in_database_embedding_gate_still_requires_the_23_4_minimum. Live W4: scripts/e2e/w4/driver.py --lane xe18 --case w4_semantic_search_unsupported_version_typed_refusal returned RUNTIME_STATE_REQUIRED/requires_23ai (pre-change it returned OBJECT_NOT_FOUND); same on xe21; free23 --case w4_semantic_search_ranked_results_23ai still returned row_count 3."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Readiness basis is scoped-test: the inline unit tests exercise the COMPATIBLE version arithmetic, and the live W4 cases were run manually against xe18/xe21/free23 but their JSON output is under the gitignored target/ tree, so it is not a committed exact-SHA live artifact.",
+    "The planted negative (forcing compatible_supports_vector to admit every value) was a temporary local build and was reverted before the work commit; it is not present in source.sha.",
+    "The query_vector capability probe adds one extra catalog round-trip (v$parameter compatible) before relation resolution on 23ai; it is the same closed catalog query the query_text path already uses.",
+    "No independent verifier re-ran the change; the swarm verifier must re-execute before closing."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
