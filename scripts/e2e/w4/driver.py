@@ -376,7 +376,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "cancel_after_completion", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -419,6 +419,11 @@ def validate_case(case, filename):
                 and isinstance(case["call"]["lock_sql"], str)
                 and case["call"]["lock_sql"].strip(),
                 "lock_sql is only meaningful for a marked cancellation call")
+    if "cancel_after_completion" in case["call"]:
+        require(case["call"]["cancel_after_completion"] is True
+                and case["call"].get("mutation") is True
+                and case["call"]["arguments"].get("commit") is True,
+                "cancel_after_completion needs a committed mutation")
     if "kill_served_session_user" in case["call"]:
         user = case["call"]["kill_served_session_user"]
         require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
@@ -1546,6 +1551,28 @@ def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
     return result["reply"]
 
 
+def completed_before_cancel_call(client, case, captures):
+    """Issue cancellation only after the committed response was acknowledged."""
+    request_id = client.next_id + 1
+    reply = client.rpc("tools/call", {
+        "name": case["tool"],
+        "arguments": fill_captures(case["call"]["arguments"], captures),
+    })
+    verify_envelope(reply)
+    require(tool_payload(reply).get("isError") is not True,
+            "commit-race setup did not receive the committed result")
+    client.notify("notifications/cancelled", {
+        "requestId": request_id,
+        "reason": "synthetic W4 cancellation after acknowledged commit",
+    })
+    client.last_cancel_observation = {
+        "request_id": request_id,
+        "after_completion": True,
+        "session_reused": False,
+    }
+    return reply
+
+
 def session_level(client):
     status = tool_payload(client.rpc("tools/call", {
         "name": "oracle_set_session_level", "arguments": {"action": "status"}}))
@@ -1722,7 +1749,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         input_value["vsql_absent_marker"] = case["call"]["vsql_absent_marker"]
     if "cancel_marker" in case["call"]:
         input_value["cancel_marker"] = case["call"]["cancel_marker"]
-    for field in ("cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql"):
+    for field in ("cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql",
+                  "cancel_after_completion"):
         if field in case["call"]:
             input_value[field] = case["call"][field]
     if "steps" in case:
@@ -1767,6 +1795,9 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             finally:
                 if lock_sql:
                     connection.rollback()
+            row["cancel_observation"] = client.last_cancel_observation
+        elif case["call"].get("cancel_after_completion") and supported:
+            reply = completed_before_cancel_call(client, case, captures)
             row["cancel_observation"] = client.last_cancel_observation
         elif "parallel" in case["call"] and supported:
             require(transport == "http", "parallel case requires HTTP transport")
@@ -2733,6 +2764,9 @@ def selftest():
         "selftest"))
     rejected("lock_sql_without_marked_call", lambda: validate_case(
         {**replay_case, "call": {"arguments": {}, "lock_sql": "UPDATE T SET X = 1"}},
+        "selftest"))
+    rejected("cancel_after_completion_without_committed_mutation", lambda: validate_case(
+        {**replay_case, "call": {"arguments": {}, "cancel_after_completion": True}},
         "selftest"))
     rejected("missing_positive_case", lambda: verify_coverage({"oracle_query": {}}, []))
     manifest_enforcement_integration()
