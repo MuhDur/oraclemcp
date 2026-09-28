@@ -46,7 +46,9 @@
     "claimed": true,
     "artifacts": [
       {
-        "path": "tests/artifacts/evidence/live/oraclemcp-rfflx-xe18-20260928T0850Z.json"
+        "kind": "live-oracle-invalid-objects-18c-fix",
+        "path": "tests/artifacts/evidence/live/oraclemcp-rfflx-xe18-20260928T0850Z.json",
+        "sha": "e7472bfa2e7cb9261dc216dfc17731e135a0de90"
       }
     ]
   },
