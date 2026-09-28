@@ -511,6 +511,76 @@ jobs:
           fi
           python3 scripts/release_artifact_acceptance.py --binary "$binary" --target "${{ matrix.target }}"
 
+      - name: Set up Rust for Windows durable-state acceptance
+        if: runner.os == 'Windows'
+        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - name: Windows durable-state acceptance
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $target = "${{ matrix.target }}"
+          $archive = Join-Path $PWD "oraclemcp-$target.zip"
+          $prefix = Join-Path $env:RUNNER_TEMP "oraclemcp-release-installed"
+          $version = ([regex]::Match((Get-Content Cargo.toml -Raw), 'version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')).Groups[1].Value
+          if ([string]::IsNullOrWhiteSpace($version)) { throw "could not derive release version" }
+
+          .\install.ps1 -DryRun -Version $version -Offline $archive -Prefix $prefix -Verify checksum-only
+          "{check=install_dry_run,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          .\install.ps1 -Version $version -Offline $archive -Prefix $prefix -Verify checksum-only
+          "{check=install,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+          $binary = Join-Path $prefix "bin\oraclemcp.exe"
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "installer did not produce $binary" }
+          & $binary service install --dry-run
+          if ($LASTEXITCODE -ne 0) { throw "service dry-run failed: $LASTEXITCODE" }
+          "{check=service_dry_run,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+          $state = Join-Path $env:RUNNER_TEMP "oraclemcp-release-state"
+          $audit = Join-Path $state "audit\audit.jsonl"
+          New-Item -ItemType Directory -Path $state -Force | Out-Null
+          $config = Join-Path $state "profiles.toml"
+          $auditTomlPath = $audit.Replace("\\", "/")
+          @"
+          schema_version = 2
+          default_profile = "release_acceptance"
+
+          [audit]
+          path = '$auditTomlPath'
+          key_ref = "env:ORACLEMCP_AUDIT_KEY"
+
+          [[profiles]]
+          name = "release_acceptance"
+          connect_string = "127.0.0.1:1/RELEASE_ACCEPTANCE"
+          default_level = "READ_ONLY"
+          max_level = "READ_WRITE"
+          "@ | Set-Content -LiteralPath $config -NoNewline
+          $env:ORACLEMCP_CONFIG = $config
+          $env:ORACLEMCP_AUDIT_KEY = "release-acceptance-key-0123456789abcdef"
+          $port = 18765
+          $stderr = Join-Path $state "serve.stderr"
+          $stdout = Join-Path $state "serve.stdout"
+          $server = Start-Process -FilePath $binary -ArgumentList @("serve", "--listen", "127.0.0.1:$port", "--allow-no-auth") -PassThru -RedirectStandardError $stderr -RedirectStandardOutput $stdout
+          try {
+            Start-Sleep -Seconds 3
+            if ($server.HasExited) { throw "serve exited early ($($server.ExitCode)): $(Get-Content -LiteralPath $stderr -Raw)" }
+            "{check=serve,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          } finally {
+            if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+          }
+
+          if (-not (Test-Path -LiteralPath $audit -PathType Leaf)) { throw "serve did not create the signed audit log" }
+          & $binary audit verify $audit
+          if ($LASTEXITCODE -ne 0) { throw "audit verify failed: $LASTEXITCODE" }
+          "{check=audit_verify,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+          cargo test -p oraclemcp-audit --lib -- windows_audit_fresh_parent_and_file_owner_is_token_user_with_exact_dacl
+          if ($LASTEXITCODE -ne 0) { throw "audit ACL verifier failed: $LASTEXITCODE" }
+          "{check=audit_acl_verify,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
   release:
     name: publish GitHub release
     # release-acceptance is a DIRECT need (not only transitive through
