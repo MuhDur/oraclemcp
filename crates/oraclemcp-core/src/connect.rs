@@ -480,6 +480,32 @@ mod tests {
     }
 
     #[test]
+    fn omitted_keepalive_uses_default_with_descriptor_provenance() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "defaulted-dcd"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
+        );
+        let ctx = build_session_context(&p, None, None, false).expect("context");
+        assert_eq!(ctx.options.keepalive_minutes, Some(10));
+        assert!(ctx.options.keepalive_defaulted);
+
+        let explicit_opt_out = profile(
+            r#"
+            [[profiles]]
+            name = "no-dcd"
+            connect_string = "localhost:1521/FREEPDB1"
+            keepalive_minutes = 0
+            "#,
+        );
+        let ctx = build_session_context(&explicit_opt_out, None, None, false).expect("context");
+        assert_eq!(ctx.options.keepalive_minutes, None);
+        assert!(!ctx.options.keepalive_defaulted);
+    }
+
+    #[test]
     fn protected_profile_pins_read_only_and_adds_backstop() {
         let p = profile(
             r#"
