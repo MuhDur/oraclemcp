@@ -1,0 +1,73 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:23:39Z",
+  "bead_id": "oraclemcp-r520q",
+  "scope": {
+    "summary": "Windows-target clippy -D warnings is clean for oraclemcp-core and oraclemcp: unix-only test hooks/helpers are cfg-gated to the targets whose tests call them, unused imports are gated to their using target, and windows-only unused_mut/needless_return lints are removed; no allow()/expect() suppression.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/config_ops.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp-core/src/file_store.rs",
+      "crates/oraclemcp-core/src/http/ci_lanes.rs",
+      "crates/oraclemcp-core/src/iam_token.rs",
+      "crates/oraclemcp-core/src/incident.rs",
+      "crates/oraclemcp-core/src/plugin.rs",
+      "crates/oraclemcp/src/audit_evidence_tests.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/readiness.rs",
+      "crates/oraclemcp/src/service_lifecycle.rs",
+      "crates/oraclemcp/src/tls_config_material.rs"
+    ],
+    "out_of_scope": [
+      "crates/oraclemcp/src/dispatch/** and registry.rs (held by another agent)",
+      "crates/oraclemcp-db/**",
+      "Native Windows CI lanes or any push"
+    ]
+  },
+  "source": {
+    "sha": "736318fd17ceab4db2229b2cca3fc8dbce7f5960",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "windows clippy oraclemcp-core",
+        "kind": "cli",
+        "trace": "cargo xwin clippy -p oraclemcp-core --all-targets --target x86_64-pc-windows-msvc -- -D warnings => Finished, 0 warnings, exit 0 (crates/oraclemcp-core, source 736318fd)."
+      },
+      {
+        "name": "windows clippy oraclemcp",
+        "kind": "cli",
+        "trace": "cargo xwin clippy -p oraclemcp --all-targets --target x86_64-pc-windows-msvc -- -D warnings => Finished, 0 warnings, exit 0 (crates/oraclemcp, source 736318fd)."
+      },
+      {
+        "name": "host regression check",
+        "kind": "cli",
+        "trace": "cargo +nightly-2026-05-11 check -p oraclemcp-core -p oraclemcp --all-targets => Finished, 0 warnings, exit 0 on the Linux host (source 736318fd)."
+      },
+      {
+        "name": "planted negative",
+        "kind": "cli",
+        "trace": "Reverting set_config_read_hook's gate from all(test, unix) to test re-emits `error: function set_config_read_hook is never used` on the windows target (-D dead-code), proving the gate is load-bearing; restored before commit."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Windows clippy was executed locally via cargo-xwin (clang-cl plus a downloaded MSVC CRT/Windows SDK): the literal `cargo clippy --target x86_64-pc-windows-msvc` cannot compile the transitive aws-lc-sys C dependency on this Linux host without an MSVC C toolchain. The gate itself (same crate, target, --all-targets, -D warnings) is unchanged; only toolchain provisioning differs.",
+    "Results are implementer-run on this host; no native Windows runner or independent verifier executed the gate.",
+    "crates/oraclemcp/src/plugin.rs (windows-only needless_return) was not in the bead's enumerated dead-code/unused-import list but is required for the -D warnings gate; it is a windows-only clippy lint fix, not a dead-code item."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
