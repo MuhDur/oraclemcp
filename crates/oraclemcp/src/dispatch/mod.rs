@@ -629,6 +629,7 @@ impl OracleDispatcher {
         ) {
             return;
         }
+        emit_lease_event("guard.refused", "classifier_or_level_refusal");
         let Some(sql) = args.get("sql").and_then(Value::as_str) else {
             return;
         };
@@ -1596,13 +1597,8 @@ impl OracleDispatcher {
             )
             .await;
         }
-        tracing::info!(
-            profile = profile.as_str(),
-            generation,
-            outcome = audit_outcome_label(old_quarantine.outcome),
-            reason = old_quarantine.message.as_str(),
-            "recycled pinned Oracle session after recoverable quarantine"
-        );
+        let _ = (profile, generation, old_quarantine);
+        emit_lease_event("lease.relet", "recoverable_quarantine");
         Ok(())
     }
 
@@ -2224,6 +2220,7 @@ impl ProfileDrainState {
         if *count == 0 {
             lifecycle.live_generations.remove(&generation);
             lifecycle.manually_drained.remove(&generation);
+            emit_lease_event("lease.released", "last_generation_reference_released");
         }
     }
 
@@ -8832,7 +8829,21 @@ fn mark_connection_quarantined_with_recycle(
         message,
         recycle_allowed,
     });
+    emit_lease_event(
+        "lease.quarantined",
+        if recycle_allowed {
+            "recoverable_connection_loss"
+        } else {
+            "uncertain_connection_state"
+        },
+    );
     Ok(())
+}
+
+/// Bounded lifecycle telemetry. Audit remains the durable authoritative record;
+/// these logs deliberately expose only a stable event and reason code.
+fn emit_lease_event(event: &'static str, reason_code: &'static str) {
+    tracing::info!(target: "oraclemcp::lease", lifecycle_event = event, reason_code, "lease lifecycle transition");
 }
 
 fn quarantined_db_error(outcome: QuarantineOutcome, message: impl Into<String>) -> DbError {
@@ -12557,6 +12568,7 @@ impl OracleDispatcher {
                 "request terminal finalization timed out; the lane was discarded and the database outcome requires verification"
                     .to_owned();
             mark_connection_quarantined(&self.quarantine, AuditOutcome::UnknownDiscarded, message)?;
+            emit_lease_event("lease.expired", "request_finalization_timeout");
             state.profile_generation.take();
             let unavailable_evidence = self
                 .auditor
@@ -14865,6 +14877,8 @@ impl OracleDispatcher {
                 };
                 let top_n = a.top_n.unwrap_or(20);
                 let min_pct = a.min_pct_of_total;
+                let sql_id = a.sql_id;
+                let sql_text = a.sql_text;
                 let historical = a.historical;
                 let timeout_seconds = a.timeout_seconds;
                 // Read-only diagnostic: resolve the source (free live cursor cache
@@ -14886,6 +14900,8 @@ impl OracleDispatcher {
                             read_executor::TopQueriesOptions {
                                 top_n,
                                 min_pct,
+                                sql_id,
+                                sql_text,
                                 historical,
                                 diagnostics_pack_licensed: state
                                     .profile_generation

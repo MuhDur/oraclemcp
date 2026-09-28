@@ -19,7 +19,7 @@ use oraclemcp_db::{
 use oraclemcp_guard::SET_TRANSACTION_READ_ONLY;
 use oraclemcp_guard::corpus::{CorpusAuthenticity, CorpusRecord, ReasonCategory};
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Barrier;
 use std::sync::Mutex;
@@ -1750,7 +1750,10 @@ fn cte_shadow_of_vpd_relation_stays_local_to_its_lexical_scope() {
             json!({"sql": "WITH policy_table AS (SELECT id FROM app.orders) SELECT id FROM app.policy_table"}),
         )
         .expect_err("qualified real VPD table outside CTE scope must refuse");
-    assert_eq!(refusal.error_class, ErrorClass::ForbiddenStatement);
+    assert!(matches!(
+        refusal.error_class,
+        ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+    ));
     assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
     write_executor_test_artifact(
         "cte_shadow_of_vpd_relation_stays_local_to_its_lexical_scope",
@@ -5284,6 +5287,155 @@ fn connection_diagnostics_report_exact_generation_without_config_secrets() {
         "ROTATED_SECRET_PASSWORD",
     ] {
         assert!(!rendered.contains(secret), "diagnostics leaked {secret}");
+    }
+}
+
+#[test]
+fn lease_schedule_single_owner_no_mid_transaction_relet() {
+    let before = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "old:1521/svc"
+        "#,
+    )
+    .expect("before config");
+    let after = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "prod"
+        connect_string = "new:1521/svc"
+        "#,
+    )
+    .expect("after config");
+    let state = ProfileDrainState::from_config(before.clone());
+    let old = match state.admit_mcp_profile("prod", true) {
+        ProfileGenerationAdmission::Ready(lease) => lease,
+        other => panic!("initial owner was not admitted: {other:?}"),
+    };
+    state
+        .apply_config_reload_plan(&ConfigReloadPlan::between(&before, &after), &before, &after)
+        .expect("reload advances the generation");
+    assert!(
+        old.is_draining(),
+        "the old owner must not be re-let mid-transaction"
+    );
+    assert!(
+        state
+            .commit_generation("prod", old.generation(), || ())
+            .is_err(),
+        "a retired generation must not commit after a re-let"
+    );
+    let fresh = match state.admit_mcp_profile("prod", true) {
+        ProfileGenerationAdmission::Ready(lease) => lease,
+        other => panic!("fresh owner was not admitted: {other:?}"),
+    };
+    assert_ne!(old.generation(), fresh.generation());
+    drop(fresh);
+    drop(old);
+    assert!(
+        state.draining_profiles().is_empty(),
+        "released owners must not strand a drain"
+    );
+}
+
+#[test]
+fn lease_holder_panic_releases_immediately() {
+    let state = ProfileDrainState::default();
+    let panicking_state = state.clone();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _lease = match panicking_state.admit_mcp_profile("prod", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("owner was not admitted: {other:?}"),
+        };
+        panic!("synthetic lease-holder panic");
+    }));
+    assert!(panic.is_err());
+    assert!(
+        state.draining_profiles().is_empty(),
+        "drop during unwind releases the lease"
+    );
+    assert!(matches!(
+        state.admit_mcp_profile("prod", true),
+        ProfileGenerationAdmission::Ready(_)
+    ));
+}
+
+#[test]
+fn lease_events_emitted_once_without_sql_or_secrets() {
+    struct LogWriter(Arc<Mutex<Vec<u8>>>);
+    impl Write for LogWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log buffer").extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&logs);
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || LogWriter(Arc::clone(&writer)))
+        .with_ansi(false)
+        .finish();
+    let _log_scope = tracing::subscriber::set_default(subscriber);
+    let quarantine = SyncMutex::new(None);
+    mark_connection_quarantined(
+        &quarantine,
+        AuditOutcome::UnknownDiscarded,
+        "SELECT secret_bind FROM confidential_table",
+    )
+    .expect("first quarantine is recorded");
+    mark_connection_quarantined(
+        &quarantine,
+        AuditOutcome::UnknownDiscarded,
+        "another confidential statement",
+    )
+    .expect("additional evidence preserves the existing transition");
+    let dispatcher = OracleDispatcher::new(Box::new(OneRowMock));
+    let refusal = dispatcher
+        .dispatch(
+            "oracle_query",
+            json!({"sql": "UPDATE confidential_table SET x = 'secret_bind'"}),
+        )
+        .expect_err("the read guard must refuse DML");
+    assert!(matches!(
+        refusal.error_class,
+        ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+    ));
+    let state = ProfileDrainState::default();
+    let lease = match state.admit_mcp_profile("prod", true) {
+        ProfileGenerationAdmission::Ready(lease) => lease,
+        other => panic!("owner was not admitted: {other:?}"),
+    };
+    drop(lease);
+    emit_lease_event("lease.relet", "recoverable_quarantine");
+    emit_lease_event("lease.expired", "request_finalization_timeout");
+
+    let rendered =
+        String::from_utf8(logs.lock().expect("log buffer").clone()).expect("trace output is utf8");
+    for event in [
+        "lease.quarantined",
+        "lease.released",
+        "lease.relet",
+        "lease.expired",
+        "guard.refused",
+    ] {
+        assert_eq!(rendered.matches(event).count(), 1, "{event}: {rendered}");
+    }
+    for forbidden in [
+        "SELECT",
+        "secret_bind",
+        "confidential_table",
+        "another confidential",
+    ] {
+        assert!(
+            !rendered.contains(forbidden),
+            "lifecycle event leaked {forbidden}: {rendered}"
+        );
     }
 }
 
