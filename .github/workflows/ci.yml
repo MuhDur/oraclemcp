@@ -921,15 +921,20 @@ jobs:
       - run: bash tests/container_supply_chain_contract_test.sh --context
 
   # Compile every cargo-fuzz target so it cannot silently rot: guard classifier
-  # + ALTER SESSION, audit-chain verification, and OAuth bearer validation.
-  # Build-only; campaigns run
-  # locally with `cargo +nightly-2026-05-11 fuzz run <target>`. Non-blocking:
-  # cargo-fuzz + build-std is inherently churn-prone, so a transient toolchain
-  # break here must not redden the rest of CI.
+  # + ALTER SESSION, audit-chain verification, OAuth bearer validation, and the
+  # config TOML loader. Build-only; campaigns run locally with
+  # `cargo +nightly-2026-05-11 fuzz run <target>` and in nightly fuzz.yml.
+  #
+  # This job is REQUIRED (no `continue-on-error`): a fuzz target that does not
+  # compile must redden CI. The previous non-blocking job hid an E0618 in
+  # grant_scope_match.rs (bead oraclemcp-znmel) while a bead claimed that
+  # target's campaign ran clean. Installer/toolchain churn is confined to the
+  # explicitly tolerant cargo-fuzz install (bounded retry); the build steps
+  # themselves are blocking, and the planted-negative step proves the lane
+  # fails on a broken target.
   fuzz-build:
     name: fuzz targets compile (nightly)
     runs-on: ubuntu-latest
-    continue-on-error: true
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -943,11 +948,39 @@ jobs:
           # PRs restore the main cache but never save (their short-lived
           # merge-ref caches would evict the useful main population).
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+      # The prebuilt install may flake; tolerate THAT step only. The bounded
+      # retry below either makes cargo-fuzz available or fails the job
+      # explicitly — it never lets a missing tool masquerade as a green build.
+      - name: Install cargo-fuzz (tolerant; retried below)
+        uses: taiki-e/install-action@07b4745e0c39a41822af610387492e3e53aa222b # v2
+        continue-on-error: true
         with:
           tool: cargo-fuzz
-        # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose
-        # static libc is incompatible with the ASan sanitizer.
+      - name: Ensure cargo-fuzz is available (bounded retry)
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if cargo +${{ env.RUST_TOOLCHAIN }} fuzz --version; then
+              exit 0
+            fi
+            echo "::warning::cargo-fuzz unavailable (attempt $attempt/3); retrying install" >&2
+            cargo +${{ env.RUST_TOOLCHAIN }} install cargo-fuzz --locked || true
+          done
+          echo "::error::cargo-fuzz unavailable after bounded retries" >&2
+          exit 1
+      # Each fuzz crate commits its own Cargo.lock. cargo-fuzz cannot forward
+      # --locked, so gate lockfile freshness directly: a stale lock turns into a
+      # red job instead of a silent rewrite (bead comment 2026-09-24).
+      - name: fuzz lockfiles are current (--locked)
+        run: |
+          set -euo pipefail
+          for crate in guard audit auth config; do
+            cargo +${{ env.RUST_TOOLCHAIN }} metadata \
+              --manifest-path "crates/oraclemcp-$crate/fuzz/Cargo.toml" \
+              --locked --format-version 1 >/dev/null
+          done
+      # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose
+      # static libc is incompatible with the ASan sanitizer.
       - name: Build guard fuzz targets
         run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
         working-directory: crates/oraclemcp-guard
@@ -957,3 +990,26 @@ jobs:
       - name: Build auth fuzz targets
         run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
         working-directory: crates/oraclemcp-auth
+      - name: Build config fuzz targets
+        run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
+        working-directory: crates/oraclemcp-config
+      # Planted-negative: the historical E0618 (a local binding shadows
+      # `fn resolved()` and the shadowed name is then called as a function)
+      # must make the same blocking build command fail. If this ever passes
+      # while the plant is present, the lane is not proving what it claims.
+      - name: planted-negative (a broken fuzz target must fail the build)
+        run: |
+          set -euo pipefail
+          cd crates/oraclemcp-guard
+          target="fuzz/fuzz_targets/grant_scope_match.rs"
+          backup="$(mktemp)"
+          cp "$target" "$backup"
+          restore() { cp "$backup" "$target"; rm -f "$backup"; }
+          trap restore EXIT
+          printf '\nfn __planted_shadow() { let resolved = 0i32; let _ = resolved(); }\n' >> "$target"
+          if cargo +${{ env.RUST_TOOLCHAIN }} fuzz build \
+              --target x86_64-unknown-linux-gnu grant_scope_match; then
+            echo "::error::planted broken fuzz target compiled; the fuzz lane cannot be trusted" >&2
+            exit 1
+          fi
+          echo "planted-negative: the broken target failed the build, as required"
