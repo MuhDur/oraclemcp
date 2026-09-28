@@ -2256,6 +2256,27 @@ mod profile_drain_state_tests {
     use super::*;
 
     #[test]
+    fn issue35_profile_trusted_views_reach_dispatch_policy() {
+        let config = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "trusted"
+            description = "trusted view proof profile"
+            connect_string = "trusted:1521/svc"
+            trusted_views = ["APP.REPORTING_VIEW"]
+            "#,
+        )
+        .expect("trusted-view profile config");
+        let drain = ProfileDrainState::from_config(config);
+        let lease = match drain.admit_mcp_profile("trusted", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("trusted profile was not admitted: {other:?}"),
+        };
+        let policy = profile_dispatch_policy(&lease).expect("profile policy");
+        assert_eq!(policy.trusted_views.as_ref(), ["APP.REPORTING_VIEW"]);
+    }
+
+    #[test]
     fn incompatible_generation_stays_drained_after_later_retain_reload() {
         let admin = OracleMcpConfig::from_toml_str(
             r#"

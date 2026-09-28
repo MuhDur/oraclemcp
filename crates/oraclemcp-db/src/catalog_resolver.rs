@@ -602,29 +602,33 @@ pub async fn resolved_relations_read_purity(
 /// views whose source can itself complete the same semantic proof.  The
 /// configuration is eligibility only: an unavailable, malformed, truncated,
 /// or non-read-only source remains unknown.
+struct TrustedViewProofPolicy<'a> {
+    cache: &'a OracleCatalogResolverCache,
+    fga_policy: FgaEvidencePolicy,
+    trusted_views: &'a [String],
+    view_depth: u8,
+}
+
 async fn resolved_relations_read_purity_with_trusted_views(
     cx: &Cx,
     conn: &dyn OracleConnection,
-    cache: &OracleCatalogResolverCache,
     relations: &[ResolvedObject],
     values: &[RawName],
-    fga_policy: FgaEvidencePolicy,
-    trusted_views: &[String],
-    view_depth: u8,
+    policy: TrustedViewProofPolicy<'_>,
 ) -> Result<Purity, DbError> {
     let mut policy_relations = Vec::with_capacity(relations.len());
     for relation in relations {
         if relation.kind == CatalogObjectKind::View
-            && trusted_view_identity_is_eligible(relation, trusted_views)
+            && trusted_view_identity_is_eligible(relation, policy.trusted_views)
         {
             if !trusted_view_source_is_proven(
                 cx,
                 conn,
-                cache,
+                policy.cache,
                 relation,
-                fga_policy,
-                trusted_views,
-                view_depth,
+                policy.fga_policy,
+                policy.trusted_views,
+                policy.view_depth,
             )
             .await?
             {
@@ -1955,12 +1959,14 @@ async fn prove_semantic_read_plan_inner(
     let purity = resolved_relations_read_purity_with_trusted_views(
         cx,
         conn,
-        cache,
         &relations,
         &values,
-        fga_policy,
-        trusted_views,
-        view_depth,
+        TrustedViewProofPolicy {
+            cache,
+            fga_policy,
+            trusted_views,
+            view_depth,
+        },
     )
     .await
     .map_err(ReadPlanProofError::Database)?;
