@@ -2204,6 +2204,99 @@ impl OracleConnection for OneRowMock {
     }
 }
 
+/// `oracle_read_clob` mock: dictionary reads delegate to [`OneRowMock`], while
+/// the LOB lookup is answered deterministically. `row_present == false`
+/// models a primary key with no matching row; `row_present == true` models a
+/// present row whose CLOB column is genuinely NULL. These two cases must not
+/// be conflated by the handler.
+struct ReadClobMock {
+    row_present: bool,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for ReadClobMock {
+    fn backend(&self) -> OracleBackend {
+        OneRowMock.backend()
+    }
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        OneRowMock.close(cx).await
+    }
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        OneRowMock.ping(cx).await
+    }
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        OneRowMock.describe(cx).await
+    }
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if sql.to_ascii_lowercase().contains("as lob_value") {
+            return Ok(if self.row_present {
+                vec![OracleRow {
+                    columns: vec![("LOB_VALUE".to_owned(), OracleCell::new("CLOB", None))],
+                }]
+            } else {
+                Vec::new()
+            });
+        }
+        OneRowMock.query_rows(cx, sql, binds).await
+    }
+    async fn execute(&self, cx: &Cx, sql: &str, binds: &[OracleBind]) -> Result<u64, DbError> {
+        OneRowMock.execute(cx, sql, binds).await
+    }
+    async fn commit(&self, cx: &Cx) -> Result<(), DbError> {
+        OneRowMock.commit(cx).await
+    }
+    async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
+        OneRowMock.rollback(cx).await
+    }
+}
+
+#[test]
+fn read_clob_missing_pk_is_object_not_found() {
+    let dispatcher = OracleDispatcher::new(Box::new(ReadClobMock { row_present: false }));
+    let error = dispatcher
+        .dispatch(
+            "oracle_read_clob",
+            json!({
+                "owner": "APP",
+                "table": "DOCS",
+                "clob_column": "BODY",
+                "pk_column": "ID",
+                "pk_value": "999"
+            }),
+        )
+        .expect_err("a missing primary key must not return an empty success");
+    assert_eq!(error.error_class, ErrorClass::ObjectNotFound, "{error:?}");
+    assert!(error.message.contains("APP.DOCS"), "{error:?}");
+    assert!(error.message.contains("ID"), "{error:?}");
+    assert!(error.message.contains("999"), "{error:?}");
+}
+
+#[test]
+fn read_clob_null_value_on_existing_row_succeeds() {
+    let dispatcher = OracleDispatcher::new(Box::new(ReadClobMock { row_present: true }));
+    let out = dispatcher
+        .dispatch(
+            "oracle_read_clob",
+            json!({
+                "owner": "APP",
+                "table": "DOCS",
+                "clob_column": "BODY",
+                "pk_column": "ID",
+                "pk_value": "42"
+            }),
+        )
+        .expect("a present row with a NULL CLOB is a successful read");
+    assert_eq!(out["row_count"], json!(1), "{out}");
+    assert!(out["clob"]["value"].is_null(), "{out}");
+    assert_eq!(out["clob"]["owner"], json!("APP"), "{out}");
+    assert_eq!(out["clob"]["pk_column"], json!("ID"), "{out}");
+}
+
 #[derive(Default)]
 struct DescribeCatalogState {
     calls: Mutex<Vec<(String, Vec<OracleBind>)>>,

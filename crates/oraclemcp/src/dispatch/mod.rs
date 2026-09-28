@@ -13335,44 +13335,63 @@ impl OracleDispatcher {
                     &scoped_level,
                 )
                 .await?;
-            let clob = response["rows"]
+            // A missing primary key and a present row whose CLOB column is NULL
+            // both serialize to a `clob` of null, but they are different
+            // outcomes: the former is a typed OBJECT_NOT_FOUND naming the key,
+            // the latter is a successful read of a genuinely NULL value. The
+            // only reliable discriminator is whether the read returned a row at
+            // all — so refuse before mapping the (absent) cell to null.
+            let Some(cell) = response["rows"]
                 .as_array()
                 .and_then(|rows| rows.first())
-                .map(|row| {
-                    let cell = &row["LOB_VALUE"];
-                    let (value, char_count, truncated) = match cell {
-                        Value::String(text) => (Some(text.clone()), text.chars().count(), false),
-                        Value::Object(fields) => {
-                            let value = fields
-                                .get("value")
-                                .and_then(Value::as_str)
-                                .map(str::to_owned);
-                            let char_count = fields
-                                .get("char_length")
-                                .and_then(Value::as_u64)
-                                .and_then(|length| usize::try_from(length).ok())
-                                .or_else(|| value.as_ref().map(|text| text.chars().count()))
-                                .unwrap_or(0);
-                            let truncated = fields
-                                .get("truncated")
-                                .and_then(Value::as_bool)
-                                .unwrap_or(false);
-                            (value, char_count, truncated)
-                        }
-                        _ => (None, 0, false),
-                    };
-                    json!({
-                        "owner": owner,
-                        "table": table,
-                        "column": a.clob_column.to_ascii_uppercase(),
-                        "pk_column": a.pk_column.to_ascii_uppercase(),
-                        "value": value,
-                        "char_count": char_count,
-                        "truncated": truncated,
-                    })
-                });
+                .map(|row| &row["LOB_VALUE"])
+            else {
+                let pk_column = a.pk_column.to_ascii_uppercase();
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::ObjectNotFound,
+                    format!(
+                        "no row in {owner}.{table} with {pk_column} = {:?}",
+                        a.pk_value
+                    ),
+                )
+                .with_suggested_tool("oracle_schema_inspect")
+                .with_next_step(format!(
+                    "verify the key column and value against {owner}.{table}"
+                ))
+                .with_next_step("call oracle_sample_rows to list rows in the table"));
+            };
+            let (value, char_count, truncated) = match cell {
+                Value::String(text) => (Some(text.clone()), text.chars().count(), false),
+                Value::Object(fields) => {
+                    let value = fields
+                        .get("value")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let char_count = fields
+                        .get("char_length")
+                        .and_then(Value::as_u64)
+                        .and_then(|length| usize::try_from(length).ok())
+                        .or_else(|| value.as_ref().map(|text| text.chars().count()))
+                        .unwrap_or(0);
+                    let truncated = fields
+                        .get("truncated")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    (value, char_count, truncated)
+                }
+                _ => (None, 0, false),
+            };
+            let clob = json!({
+                "owner": owner,
+                "table": table,
+                "column": a.clob_column.to_ascii_uppercase(),
+                "pk_column": a.pk_column.to_ascii_uppercase(),
+                "value": value,
+                "char_count": char_count,
+                "truncated": truncated,
+            });
             if let Value::Object(ref mut fields) = response {
-                fields.insert("clob".to_owned(), clob.unwrap_or(Value::Null));
+                fields.insert("clob".to_owned(), clob);
             }
             return Ok(response);
         }
