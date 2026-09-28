@@ -2109,7 +2109,7 @@
   "setup_ready_sql": "SELECT ID FROM ${owner}.V35_SIDE_${run_id} WHERE ROWNUM = 1",
   "profile_variant": "trusted_views",
   "call": {
-   "arguments": {"sql": "SELECT ID FROM ${owner}.V35_SIDE_${run_id} /* W4MARK_V35SIDE000001 */", "max_rows": 1},
+   "arguments": {"sql": "SELECT 1 AS RESULT FROM ${owner}.V35_SIDE_${run_id} /* W4MARK_V35SIDE000001 */", "max_rows": 1},
    "vsql_absent_marker": "W4MARK_V35SIDE000001"
   },
   "expect": {"error_class": "FORBIDDEN_STATEMENT"},

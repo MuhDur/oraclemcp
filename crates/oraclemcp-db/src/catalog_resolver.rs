@@ -17,7 +17,7 @@ use oraclemcp_guard::{
     QuoteSemantics, RawName, RawNamePart, Resolution, ResolveCtx, ResolvedContainer,
     ResolvedIdentity, ResolvedObject, ResolvedOverload, RoutineArgument, RoutineArgumentValue,
     RoutineIdentifier, RoutineRef, SemanticReadPlan, SideEffectOracle, StatementScope, SynonymHop,
-    SyntacticRole, semantic_read_plan_checked,
+    SyntacticRole, hard_parse_user_calls, semantic_read_plan_checked,
 };
 
 use crate::catalog_facts::read_closure_database_identity;
@@ -692,6 +692,13 @@ async fn trusted_view_source_is_proven(
         return Ok(false);
     };
     if text_length < 0 || usize::try_from(text_length).ok() != Some(source.chars().count()) {
+        return Ok(false);
+    }
+    // A trusted view is only a bounded relation wrapper.  Scalar calls in its
+    // definition can execute code even when the caller projects a constant,
+    // so their effects are not covered by the relation-only recursive proof.
+    // Tokenization uncertainty is likewise not proof.
+    if !matches!(hard_parse_user_calls(&source), Ok(calls) if calls.is_empty()) {
         return Ok(false);
     }
     let Ok(plan) = semantic_read_plan_checked(&source) else {
@@ -6292,6 +6299,47 @@ mod tests {
                 )
                 .await
                 .expect("truncated text is a normal unproven result")
+            );
+            assert_eq!(conn.queries.lock().expect("queries lock").len(), 1);
+        });
+    }
+
+    #[test]
+    fn issue35_trusted_view_with_user_function_is_refused_before_recursive_proof() {
+        run_with_cx(|cx| async move {
+            // This is the W4 disposable-owner shape: an owner-qualified
+            // autonomous function appears in a configured trusted view.
+            let source = "SELECT APP.F35_SIDE(ID) AS SIDE_ID FROM APP.T_PARENT";
+            let source_length = source.chars().count().to_string();
+            let text = row(&[
+                ("TEXT_VC", Some(source)),
+                ("TEXT_LENGTH", Some(source_length.as_str())),
+                ("EDITIONING_VIEW", Some("N")),
+            ]);
+            let conn = ScriptedRows::new([vec![text]]);
+            let mut view = dictionary_view_object("REPORTING_VIEW");
+            view.owner = "APP".to_owned();
+            view.synonym_chain.clear();
+            let cache = OracleCatalogResolverCache::new();
+            let trusted_views = ["APP.REPORTING_VIEW".to_owned()];
+
+            assert!(
+                !trusted_view_source_is_proven(
+                    &cx,
+                    &conn,
+                    &view,
+                    TrustedViewProofPolicy {
+                        cache: &cache,
+                        context: TrustedViewProofContext {
+                            fga_policy: FgaEvidencePolicy::RequireProof,
+                            trusted_views: &trusted_views,
+                            view_depth: 0,
+                            view_path: &[],
+                        },
+                    },
+                )
+                .await
+                .expect("user-defined source call is an ordinary refusal")
             );
             assert_eq!(conn.queries.lock().expect("queries lock").len(), 1);
         });
