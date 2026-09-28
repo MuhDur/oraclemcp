@@ -33,6 +33,7 @@ pub mod rewrite;
 pub mod scoped_grant;
 pub mod stepup;
 pub mod token;
+pub mod view_eligibility;
 
 pub use action_envelope::{
     ActionEnvelopeV1, ActionKind, BindEnvelope, CanonicalBind, ExecLimits, OracleBindType,
@@ -105,6 +106,7 @@ pub use stepup::{
     ChallengeStatus, CiToken, StepUpChallenge, StepUpOption, StepUpRegistry, StepUpResolution,
 };
 pub use token::{ALLOW_ONCE_TTL, AllowOnceError, AllowOnceStore, sql_digest};
+pub use view_eligibility::is_builtin_dictionary_view;
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;
