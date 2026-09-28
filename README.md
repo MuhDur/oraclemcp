@@ -190,7 +190,7 @@ The tables below are generated from the server's tool registry — the same desc
 | `oracle_search_source` | Oracle Search Source | Full-text search across ALL_SOURCE for a needle (row- and line-capped). | `READ_ONLY` | no |
 | `oracle_plscope_inspect` | Oracle PL/Scope Inspect | Inspect PL/Scope identifier and SQL statement metadata for one PL/SQL object when ALL_IDENTIFIERS/ALL_STATEMENTS are populated. | `READ_ONLY` | no |
 | `oracle_explain_plan` | Oracle Explain Plan | Explicit diagnostic-write EXPLAIN PLAN for a vetted SELECT; writes PLAN_TABLE, requires READ_WRITE plus allow_plan_table_write, and is disabled on read-only standby. | `READ_WRITE` | yes |
-| `oracle_top_queries` | Oracle Top Queries | Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS); live calls may narrow by exact `sql_id` or bounded `sql_text`. | `READ_ONLY` | no |
+| `oracle_top_queries` | Oracle Top Queries | Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). | `READ_ONLY` | no |
 | `oracle_plan_timeline` | Oracle Plan Timeline | Read-only historical optimizer plan and relative-cost timeline from AWR snapshots for one SQL ID. | `READ_ONLY` | no |
 | `oracle_db_health` | Oracle Db Health | Read-only DBA health-check suite. | `READ_ONLY` | no |
 | `oracle_plsql_parse` | Oracle Plsql Parse | Parse PL/SQL source with the offline plsql-intelligence lowerer and return declaration and diagnostic counts. | `READ_ONLY` | no |
