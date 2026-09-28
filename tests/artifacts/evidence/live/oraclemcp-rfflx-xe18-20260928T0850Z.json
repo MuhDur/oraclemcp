@@ -1,0 +1,27 @@
+{
+  "run_id": "orchestrator-local-verify-20260928T0850Z",
+  "lane": "xe18",
+  "source_sha": "e7472bfa2e7cb9261dc216dfc17731e135a0de90",
+  "kind": "live-oracle-invalid-objects-18c-fix",
+  "runner": "local swarm implementer; ORACLEMCP_LIVE_XE=1; XE18 localhost:1518/XEPDB1 as SYSTEM (18.0.0.0.0)",
+  "command": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target ORACLEMCP_LIVE_XE=1 ORACLEMCP_TEST_DSN=localhost:1518/XEPDB1 ORACLEMCP_TEST_USER=SYSTEM ORACLEMCP_TEST_PASSWORD=E2EOracle18 cargo +nightly-2026-05-11 test -p oraclemcp-db --features live-xe,oracledb --test live_oracle -- --nocapture live_db_health_suite_runs_all_subchecks_without_hard_failure",
+  "result": "1 passed; 0 failed; 0 ignored",
+  "planted_negative": {
+    "before_fix_tool_finding": "{\"attempted_views\":[\"DBA_OBJECTS\"],\"error_class\":\"INTERNAL\",\"ora_code\":1489,\"reason\":\"diagnostic query failed\",\"status\":\"failed\"}",
+    "before_fix_raw_sql": "oracledb DatabaseError ORA-01489: result of string concatenation is too long (code 1489) from the old query SELECT owner, object_type, COUNT(*) AS invalid_count, SUBSTR(LISTAGG(object_name, ',') WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects FROM DBA_OBJECTS WHERE status = 'INVALID' GROUP BY owner, object_type ORDER BY invalid_count DESC, owner, object_type",
+    "overflow_group": "PUBLIC/SYNONYM: 456 invalid objects, SUM(LENGTH(object_name)) = 6772 bytes > 4000",
+    "before_fix_rust": "test live_db_health_suite_runs_all_subchecks_without_hard_failure FAILED at live_oracle.rs:1888 assertion status Some(\"failed\") != Some(\"ok\")"
+  },
+  "after_fix": {
+    "xe18": "1 passed; 0 failed (test creates run-owned invalid procedure and asserts it is named in the invalid_objects SAMPLE_OBJECTS; the 456-row PUBLIC/SYNONYM group is bounded, no ORA-01489)",
+    "xe21": "1 passed; 0 failed (localhost:1520/XEPDB1)",
+    "free23": "1 passed; 0 failed (localhost:1523/FREEPDB1, 23ai)"
+  },
+  "direct_sql_probe": {
+    "command": "python-oracledb 4.0.2 CREATE OR REPLACE PROCEDURE SYSTEM.P_BAD_RFFLX_<epoch> AS BEGIN RFFLX_MISSING_PROC; END; then the generated query",
+    "xe18_result": "SYSTEM/PROCEDURE -> ('SYSTEM','PROCEDURE',1,'P_BAD_RFFLX_<epoch>'); PUBLIC/SYNONYM -> count 456, sample length 400 (bounded)",
+    "fixture_reported": true
+  },
+  "offline_unit": "cargo test -p oraclemcp-db --features live-xe,oracledb --lib -- health:: catalog_query::  => 33 passed; 0 failed (includes health_catalog_queries_match_the_diagnostic_builders: builder SQL == catalog-registry SQL)",
+  "note": "Local orchestrator run, not a scheduled CI lane. In-scope files (health.rs, catalog_query.rs, live_oracle.rs) match source_sha in the worktree; other agents' in-flight edits are unrelated and excluded. The W4 server-level case w4_db_health_invalid_objects_includes_fixture_invalid_proc was not executed end-to-end here (no release binary built); the in-process run_health path that case exercises is covered by the live_oracle test above."
+}

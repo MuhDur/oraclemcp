@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:50:53Z",
+  "bead_id": "oraclemcp-rfflx",
+  "scope": {
+    "summary": "Make oracle_db_health(invalid_objects) succeed on Oracle 18c by bounding the per-group LISTAGG sample so the 456 invalid PUBLIC synonyms on XE18 can no longer raise ORA-01489, while still reporting a run-owned invalid procedure; full DBA_OBJECTS list seen on 23ai/21c, bounded on 18c.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/health.rs",
+      "crates/oraclemcp-db/src/catalog_query.rs",
+      "crates/oraclemcp-db/tests/live_oracle.rs"
+    ],
+    "out_of_scope": [
+      "The W4 server-level case scripts/e2e/w4/cases/ops-tools.json (w4_db_health_invalid_objects_includes_fixture_invalid_proc) is unchanged; its fixture expectation is mirrored by the live_oracle regression test instead.",
+      "No release binary / MCP-server transport run was performed here; the exercised path is the in-process run_health live path plus a direct python-oracledb probe of the generated SQL.",
+      "Other agents' in-flight edits in this shared checkout (oraclemcp-config, oraclemcp-core, oraclemcp dispatch/main, scripts/*_lint.sh) are unrelated and excluded from the claimed-path tree_clean.",
+      "Raising the server's supported minimum above 12.1 was rejected, not implemented: the fix is deliberately 12.1-portable."
+    ]
+  },
+  "source": {
+    "sha": "e7472bfa2e7cb9261dc216dfc17731e135a0de90",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_db_health(health_type=invalid_objects) subcheck query",
+        "kind": "tool",
+        "trace": "crates/oraclemcp-db/src/health.rs invalid_objects_sql now prepends a bounded inline view: ROW_NUMBER caps sampled_name at 20 per (owner,object_type) and window COUNT(*) keeps the true count before LISTAGG; crates/oraclemcp-db/src/catalog_query.rs health_invalid_objects_sql! carries the identical executed text. cargo +nightly-2026-05-11 test -p oraclemcp-db --features live-xe,oracledb --lib -- health:: catalog_query:: => 33 passed; 0 failed, including health_catalog_queries_match_the_diagnostic_builders (builder SQL == catalog-registry SQL) and invalid_objects_sql_targets_the_right_view_and_predicate."
+      },
+      {
+        "name": "live invalid-objects health regression test (fixture reported)",
+        "kind": "cli",
+        "trace": "live_oracle::live_db_health_suite_runs_all_subchecks_without_hard_failure now creates SYSTEM.P_BAD_RFFLX_<epoch> (invalid), runs run_health, asserts its name is in the invalid_objects SAMPLE_OBJECTS, then drops it. Exact repro with ORACLEMCP_LIVE_XE=1: XE18 localhost:1518/XEPDB1 => 1 passed (0.26s); XE21 localhost:1520/XEPDB1 => 1 passed (0.26s); free23 23ai localhost:1523/FREEPDB1 => 1 passed (0.35s)."
+      },
+      {
+        "name": "direct SQL probe on XE18 (planted-negative + post-fix)",
+        "kind": "cli",
+        "trace": "python-oracledb 4.0.2 against XE18 18.0.0.0.0: the pre-fix query raised ORA-01489 code 1489 (PUBLIC/SYNONYM = 456 invalid objects, 6772 bytes of names > 4000) and the tool finding was {\"attempted_views\":[\"DBA_OBJECTS\"],\"error_class\":\"INTERNAL\",\"ora_code\":1489,\"status\":\"failed\"}. The post-fix query returns the PUBLIC/SYNONYM row with count 456 and a 400-char sample, and returns SYSTEM/PROCEDURE count 1 with SAMPLE_OBJECTS = P_BAD_RFFLX_<epoch> when the fixture exists."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "path": "tests/artifacts/evidence/live/oraclemcp-rfflx-xe18-20260928T0850Z.json"
+      }
+    ]
+  },
+  "limitations": [
+    "LISTAGG ... ON OVERFLOW TRUNCATE was implemented and validated first, then replaced before landing: it needs Oracle 12.2+, but the server supports 12.1+ (crates/oraclemcp-db/src/error.rs). The landed bounded pre-aggregation is 12.1-portable and is proven by re-execution on the 18c/21c/23ai lanes, not against a live 12.1 server.",
+    "The sample is now at most the first 20 object names per (owner, object_type) ordered by object_name, plus the outer 400-char SUBSTR cap. Previously, when a group did not overflow, the sample could carry more names up to 400 chars. The W4 expectations require the fixture group's exact single-name sample and the presence of a PUBLIC row; both are preserved.",
+    "The 20-name cap is a heuristic bound for 128-byte 12.2+ identifiers: 20*128 + 19 delimiters = 2579 < 4000. A future identifier-length increase would need the constant revisited.",
+    "Live proof ran as SYSTEM on the three local lanes, not in a scheduled CI lane, and the W4 release-binary transport case was not executed here; the in-process run_health code path it wraps is what the live_oracle test drives.",
+    "The fixture-owner assertion assumes no other invalid PROCEDURE exists for the connecting user on the lane; observed clean on all three lanes (the group reported exactly the run-owned procedure). A pre-existing invalid procedure would not break the assertion (it searches for the fixture name), only the exact-sample W4 pre23 expectation could differ."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}
