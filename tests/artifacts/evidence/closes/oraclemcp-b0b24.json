@@ -1,0 +1,60 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:10:09Z",
+  "bead_id": "oraclemcp-b0b24",
+  "scope": {
+    "summary": "W4 fixture teardown now waits a bounded window for the exact run-owned Oracle sessions to disappear and, if any remain, issues ALTER SYSTEM KILL SESSION only for sessions re-confirmed to belong to that same exact run, before DROP USER. A call-timeout's asynchronously-reaped server session can no longer cause ORA-01940 or leak fixture users, and no non-run-owned session is ever targeted.",
+    "in_scope": [
+      "scripts/e2e/w4/fixture.py"
+    ],
+    "out_of_scope": [
+      "The call-timeout case itself (scripts/e2e/w4/driver.py, unchanged): this is a teardown fix, not a case fix.",
+      "The W4 driver/serve paths and any crates/** source.",
+      "The registry binding, ownership sentinel, DROP-target selection, and janitor prefix-discovery rules (all preserved unchanged).",
+      "xe18, xe21, and ADB lanes; the live proof is on the loopback free23 lab lane only."
+    ]
+  },
+  "source": {
+    "sha": "cbe50c1b7240dc66cce3a61e209d1ccbb8f31ac0",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "fixture teardown CLI: python3 scripts/e2e/w4/fixture.py teardown --lane free23 --run-id <id>",
+        "kind": "cli",
+        "trace": "tests/artifacts/evidence/live/oraclemcp-b0b24-session-reap.json records connected_user_bounded_teardown: a live exact-run owner session is present, teardown_one emits kill_session for that exact run and then drop_user, verdict PASS, elapsed 10.643s within the 45s bound; a foreign run's session survives."
+      },
+      {
+        "name": "W4 driver teardown path: scripts/e2e/w4/driver.py finally -> fixture.teardown -> teardown_one",
+        "kind": "cli",
+        "trace": "teardown_one is the single DROP USER path the driver invokes (driver.py ~line 1891); the bounded reap runs before every DROP USER it issues, so the observed immediate-post-case teardown is covered by the same code path."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "live-session-reap",
+        "path": "tests/artifacts/evidence/live/oraclemcp-b0b24-session-reap.json",
+        "sha": "cbe50c1b7240dc66cce3a61e209d1ccbb8f31ac0"
+      }
+    ]
+  },
+  "limitations": [
+    "The call-timeout case is exercised by driver.py, not by the fixture selftest; the selftest creates the lingering session directly as the exact run-owned owner user, which is a strictly stronger connected-user condition than an async-reaped timeout.",
+    "Oracle offers no conditional kill, so a theoretical SID-reuse race remains between the pre-kill re-check of USERNAME by SID+SERIAL# and the ALTER SYSTEM KILL SESSION; exact-name filtering bounds the blast radius to this run's schemas.",
+    "Proven on free23 only; xe18/xe21/ADB teardown timing is not exercised.",
+    "Teardown is bounded, not guaranteed: if a run session survives both windows the run is reported FAIL with sessions_remaining populated rather than waiting indefinitely."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}
