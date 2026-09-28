@@ -142,6 +142,45 @@ pub enum ErrorClass {
 }
 
 impl ErrorClass {
+    /// Every currently defined wire error class, in deterministic wire order.
+    pub const ALL: [Self; 23] = [
+        Self::AtCapacity, Self::Busy, Self::ChallengeRequired, Self::ConnectionFailed,
+        Self::FlashbackCapabilityUnavailable, Self::FlashbackDefinitionChanged,
+        Self::FlashbackNotFlashbackable, Self::FlashbackRetentionExceeded,
+        Self::ForbiddenStatement, Self::InsufficientPrivilege, Self::Internal,
+        Self::InvalidArguments, Self::LeaseRequired, Self::ObjectNotFound,
+        Self::OperatingLevelTooLow, Self::PolicyDenied, Self::RepreviewRequired,
+        Self::RequestCancelled, Self::RuntimeStateRequired, Self::SnapshotTooOld, Self::Transient,
+        Self::SyntaxError, Self::Timeout,
+    ];
+
+    /// The canonical safe action for this refusal family.
+    #[must_use]
+    pub const fn next_action(self) -> &'static str {
+        match self {
+            Self::ObjectNotFound => "inspect the visible schema, then use an exact visible object name",
+            Self::InsufficientPrivilege => "ask the database administrator for the least-privilege grant named by the refusal",
+            Self::SyntaxError => "submit one syntactically valid static SQL statement",
+            Self::ConnectionFailed | Self::RuntimeStateRequired => "connect a configured profile, then retry the read once",
+            Self::ChallengeRequired => "complete the required operator confirmation before retrying",
+            Self::RepreviewRequired => "preview the exact SQL, binds, and modes again before confirmation",
+            Self::LeaseRequired => "start or resume a stateful session before using this operation",
+            Self::ForbiddenStatement => "submit a provably read-only static statement or use a reviewed guarded tool",
+            Self::OperatingLevelTooLow => "request the required operating level with oracle_set_session_level; operator confirmation is required",
+            Self::Busy | Self::AtCapacity => "wait for the advertised retry interval, then retry the idempotent request",
+            Self::InvalidArguments => "correct the request arguments to the documented tool schema",
+            Self::PolicyDenied => "use an object and statement allowed by the active profile policy",
+            Self::Timeout => "narrow the request or increase an authorized timeout, then retry only if idempotent",
+            Self::RequestCancelled => "inspect the reported statement outcome before deciding whether a new request is safe",
+            Self::Transient => "retry this idempotent request once on a fresh connection",
+            Self::FlashbackRetentionExceeded | Self::SnapshotTooOld => "choose a newer SCN or timestamp, or narrow the requested history",
+            Self::FlashbackDefinitionChanged => "use a snapshot before the definition change or query the current definition",
+            Self::FlashbackNotFlashbackable => "query a local flashback-capable object without a database link",
+            Self::FlashbackCapabilityUnavailable => "use a profile/database with DBMS_FLASHBACK support; do not substitute a current read",
+            Self::Internal => "stop and report the sanitized error to the operator; do not retry a write automatically",
+        }
+    }
+
     /// The default built-in tool an agent should reach for to recover from
     /// this class, if any.
     #[must_use]
@@ -241,6 +280,42 @@ pub enum ReasonCategory {
     SecurityFeatureVisibilityUnknown,
     /// A refusal that does not fit the categories above.
     Other,
+}
+
+impl ReasonCategory {
+    /// Every currently defined structured refusal category, in deterministic wire order.
+    pub const ALL: [Self; 19] = [
+        Self::BlockListed, Self::CostBudgetExceeded, Self::DynamicSql, Self::EditionsNotEnabled,
+        Self::MultiStatementBatch, Self::NotEditionable, Self::OneChildEdition,
+        Self::OperatorOnlyStatement, Self::Other, Self::PlSqlBlock, Self::PolicyDenied,
+        Self::ProtectedByOls, Self::ProtectedByRas, Self::ProtectedByRedaction,
+        Self::RequiresHigherLevel, Self::SecurityFeatureVisibilityUnknown,
+        Self::TransactionControl, Self::UnbalancedBlock, Self::UnprovenSideEffect,
+    ];
+
+    /// The canonical safe action for this exact refusal cause.
+    #[must_use]
+    pub const fn next_action(self) -> &'static str {
+        match self {
+            Self::MultiStatementBatch => "submit each statement separately through the guarded tool",
+            Self::DynamicSql => "submit static SQL; put required logic in an operator-reviewed package tool",
+            Self::TransactionControl => "let the server own transaction control; remove COMMIT, ROLLBACK, SAVEPOINT, and SET TRANSACTION",
+            Self::UnbalancedBlock => "correct the block delimiters and literals, then submit one static statement",
+            Self::PlSqlBlock => "use pure static SQL or an operator-reviewed package tool instead of an inline PL/SQL block",
+            Self::RequiresHigherLevel => "request the required operating level with oracle_set_session_level",
+            Self::CostBudgetExceeded => "add a selective predicate or lower the requested row/page limit",
+            Self::BlockListed => "choose a statement that does not use the operator-blocked construct",
+            Self::UnprovenSideEffect => "use only relations and functions whose read-only closure can be proven",
+            Self::OperatorOnlyStatement => "use the authenticated operator workflow; never submit this as agent SQL",
+            Self::PolicyDenied => "use an object and statement allowed by the active profile policy",
+            Self::OneChildEdition => "retire or merge the existing child before proposing the next linear edition",
+            Self::NotEditionable => "stage only editionable views or PL/SQL units; plan table and data changes separately",
+            Self::EditionsNotEnabled => "ask the database administrator to enable editions for the exact schema and object type",
+            Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => "use a profile authorized for the protected relation or ask the policy owner for a safe access path",
+            Self::SecurityFeatureVisibilityUnknown => "ask the administrator to grant the minimum security-catalog visibility needed for proof",
+            Self::Other => "inspect the structured refusal reason and choose a documented guarded tool",
+        }
+    }
 }
 
 /// A sanitized optimizer-plan row attached to a query cost refusal. It carries
@@ -448,7 +523,7 @@ impl ErrorEnvelope {
             ora_code: None,
             suggested_tool: error_class.default_suggested_tool().map(str::to_owned),
             fuzzy_matches: Vec::new(),
-            next_steps: Vec::new(),
+            next_steps: vec![error_class.next_action().to_owned()],
             retry_after_ms: None,
             structured_reason: None,
             statement_outcome: None,
@@ -480,6 +555,9 @@ impl ErrorEnvelope {
     /// Append a remediation step.
     #[must_use]
     pub fn with_next_step(mut self, step: impl Into<String>) -> Self {
+        if self.next_steps.len() == 1 && self.next_steps[0] == self.error_class.next_action() {
+            self.next_steps.clear();
+        }
         self.next_steps.push(step.into());
         self
     }
@@ -494,6 +572,9 @@ impl ErrorEnvelope {
     /// Attach the structured "why blocked" reason (K8).
     #[must_use]
     pub fn with_structured_reason(mut self, reason: StructuredReason) -> Self {
+        if self.next_steps.len() == 1 && self.next_steps[0] == self.error_class.next_action() {
+            self.next_steps[0] = reason.category.next_action().to_owned();
+        }
         self.structured_reason = Some(reason);
         self
     }
@@ -940,8 +1021,11 @@ mod tests {
             json["fuzzy_matches"],
             serde_json::json!(["EMPLOYEES", "EMPLOYEE"])
         );
-        // next_steps and retry_after_ms are omitted when empty.
-        assert!(json.get("next_steps").is_none());
+        // Every public refusal construction carries a canonical safe action.
+        assert_eq!(
+            json["next_steps"],
+            serde_json::json!([ErrorClass::ObjectNotFound.next_action()])
+        );
         assert!(json.get("retry_after_ms").is_none());
         assert!(json.get("statement_outcome").is_none());
     }
@@ -1247,5 +1331,34 @@ mod tests {
         assert!(ErrorClass::Transient.is_retryable());
         assert!(!ErrorClass::ObjectNotFound.is_retryable());
         assert!(!ErrorClass::ForbiddenStatement.is_retryable());
+    }
+
+    #[test]
+    fn every_error_class_has_next_action() {
+        for class in ErrorClass::ALL {
+            assert!(!class.next_action().trim().is_empty(), "{class:?}");
+        }
+    }
+
+    #[test]
+    fn every_reason_category_has_next_action() {
+        for category in ReasonCategory::ALL {
+            assert!(!category.next_action().trim().is_empty(), "{category:?}");
+        }
+    }
+
+    #[test]
+    fn refusal_envelopes_never_have_empty_next_steps() {
+        for class in ErrorClass::ALL {
+            assert!(
+                !ErrorEnvelope::new(class, "synthetic refusal").next_steps.is_empty(),
+                "{class:?}"
+            );
+        }
+        for category in ReasonCategory::ALL {
+            let envelope = ErrorEnvelope::new(ErrorClass::ForbiddenStatement, "synthetic refusal")
+                .with_structured_reason(StructuredReason::new(category));
+            assert_eq!(envelope.next_steps, [category.next_action()]);
+        }
     }
 }
