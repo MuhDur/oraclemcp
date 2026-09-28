@@ -10,7 +10,7 @@
 //! `pub(crate)` because `main_tests.rs` constructs the arg structs and reads
 //! their fields; visibility is the only change, never behaviour.
 
-use super::DEFAULT_SETUP_CONFIG_PATH;
+use super::{DEFAULT_SETUP_CONFIG_PATH, selftest::SelftestCliArgs};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -201,24 +201,6 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: RefusalCorpusCommand,
     },
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct SelftestCliArgs {
-    /// Named connection profile from the loaded config to run the field round
-    /// against. The run derives a READ_ONLY-ceiling profile from it.
-    #[arg(long)]
-    pub(crate) profile: String,
-    /// Write one sanitized Markdown issue draft per defect into this directory.
-    /// Drafts are local-only; nothing is sent anywhere.
-    #[arg(long = "issue-draft", value_name = "DIR")]
-    pub(crate) issue_draft: Option<PathBuf>,
-    /// Also probe a running Streamable HTTP listener at this base URL.
-    #[arg(long, value_name = "URL")]
-    pub(crate) http: Option<String>,
-    /// Overall run budget in seconds; probes not reached report `skipped: budget`.
-    #[arg(long, default_value_t = 300)]
-    pub(crate) budget: u64,
 }
 
 #[derive(Subcommand, Debug)]

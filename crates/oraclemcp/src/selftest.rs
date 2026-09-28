@@ -32,13 +32,32 @@ use std::process::{Child, Command, ExitCode, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
+use clap::Args;
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::redacted::{REDACTED, redact_operator_text};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use toml_edit::{DocumentMut, value};
 
-use crate::SelftestCliArgs;
+/// Arguments for the selftest field round. They live with the implementation
+/// so the main command registry remains a compact list of top-level commands.
+#[derive(Args, Debug, Clone)]
+pub(crate) struct SelftestCliArgs {
+    /// Named connection profile from the loaded config to run the field round
+    /// against. The run derives a READ_ONLY-ceiling profile from it.
+    #[arg(long)]
+    pub(crate) profile: String,
+    /// Write one sanitized Markdown issue draft per defect into this directory.
+    /// Drafts are local-only; nothing is sent anywhere.
+    #[arg(long = "issue-draft", value_name = "DIR")]
+    pub(crate) issue_draft: Option<PathBuf>,
+    /// Also probe a running Streamable HTTP listener at this base URL.
+    #[arg(long, value_name = "URL")]
+    pub(crate) http: Option<String>,
+    /// Overall run budget in seconds; probes not reached report `skipped: budget`.
+    #[arg(long, default_value_t = 300)]
+    pub(crate) budget: u64,
+}
 
 /// Default per-probe timeout.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
