@@ -990,6 +990,9 @@
               "detail": {
                 "rows": [
                   {
+                    "OWNER": "PUBLIC"
+                  },
+                  {
                     "OWNER": "${owner}",
                     "OBJECT_TYPE": "PROCEDURE",
                     "SAMPLE_OBJECTS": "P_BAD_${run_id}"
