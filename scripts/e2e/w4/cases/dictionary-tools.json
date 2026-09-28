@@ -673,6 +673,11 @@
   },
   "db_reread": [],
   "audit_expect": [],
+  "cleanup": [
+   {
+    "sql": "DROP TABLE ${owner}.D7_VCOL_${run_id}"
+   }
+  ],
   "on_unsupported": {
    "error_class": "INVALID_ARGUMENTS"
   }
