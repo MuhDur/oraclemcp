@@ -72,7 +72,7 @@ macro_rules! top_sql_live {
             "ROUND(RATIO_TO_REPORT(",
             $order,
             ") OVER () * 100, 2) AS pct_of_total ",
-            "FROM v$sqlstats WHERE (:1 IS NULL OR sql_id = :1) AND (:2 IS NULL OR INSTR(UPPER(sql_text), UPPER(:2)) > 0) ORDER BY ",
+            "FROM v$sqlstats WHERE (:1 IS NULL OR sql_id = :2) AND (:3 IS NULL OR INSTR(UPPER(sql_text), UPPER(:4)) > 0) ORDER BY ",
             $order,
             " DESC NULLS LAST) WHERE ",
             $filter,
@@ -818,8 +818,21 @@ impl CatalogQueryId {
         const N2II: BindSchema = BindSchema(&[NullableText, NullableText, Integer, Integer]);
         const NI: BindSchema = BindSchema(&[NullableText, Integer]);
         const NII: BindSchema = BindSchema(&[NullableText, Integer, Integer]);
-        const III: BindSchema = BindSchema(&[NullableText, NullableText, Integer]);
-        const IV: BindSchema = BindSchema(&[NullableText, NullableText, Integer, Integer]);
+        const N4I: BindSchema = BindSchema(&[
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            Integer,
+        ]);
+        const N4II: BindSchema = BindSchema(&[
+            NullableText,
+            NullableText,
+            NullableText,
+            NullableText,
+            Integer,
+            Integer,
+        ]);
         let (sql, binds, purpose, output_policy, audit_class) = match self {
             Self::SessionContext => (
                 SESSION_CONTEXT_SQL,
@@ -1826,57 +1839,57 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::TopSqlLiveElapsed => (
-                top_sql_live!("elapsed_time", "", ":3"),
-                III,
+                top_sql_live!("elapsed_time", "", ":5"),
+                N4I,
                 "read bounded live top SQL by elapsed time",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveCpu => (
-                top_sql_live!("cpu_time", "", ":3"),
-                III,
+                top_sql_live!("cpu_time", "", ":5"),
+                N4I,
                 "read bounded live top SQL by CPU time",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveBufferGets => (
-                top_sql_live!("buffer_gets", "", ":3"),
-                III,
+                top_sql_live!("buffer_gets", "", ":5"),
+                N4I,
                 "read bounded live top SQL by logical reads",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveDiskReads => (
-                top_sql_live!("disk_reads", "", ":3"),
-                III,
+                top_sql_live!("disk_reads", "", ":5"),
+                N4I,
                 "read bounded live top SQL by physical reads",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveElapsedPct => (
-                top_sql_live!("elapsed_time", "pct_of_total >= :3 AND ", ":4"),
-                IV,
+                top_sql_live!("elapsed_time", "pct_of_total >= :5 AND ", ":6"),
+                N4II,
                 "read bounded live top SQL by elapsed time and share",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveCpuPct => (
-                top_sql_live!("cpu_time", "pct_of_total >= :3 AND ", ":4"),
-                IV,
+                top_sql_live!("cpu_time", "pct_of_total >= :5 AND ", ":6"),
+                N4II,
                 "read bounded live top SQL by CPU time and share",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveBufferGetsPct => (
-                top_sql_live!("buffer_gets", "pct_of_total >= :3 AND ", ":4"),
-                IV,
+                top_sql_live!("buffer_gets", "pct_of_total >= :5 AND ", ":6"),
+                N4II,
                 "read bounded live top SQL by logical reads and share",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TopSqlLiveDiskReadsPct => (
-                top_sql_live!("disk_reads", "pct_of_total >= :3 AND ", ":4"),
-                IV,
+                top_sql_live!("disk_reads", "pct_of_total >= :5 AND ", ":6"),
+                N4II,
                 "read bounded live top SQL by physical reads and share",
                 DictionaryMetadata,
                 Diagnostic,

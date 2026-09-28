@@ -264,12 +264,16 @@ pub fn top_sql_query_filtered(
     let binds = match (source, min_pct_of_total) {
         (DiagnosticsSource::LiveCursor, Some(pct)) => vec![
             sql_id.map_or(OracleBind::Null, OracleBind::from),
+            sql_id.map_or(OracleBind::Null, OracleBind::from),
+            sql_text.map_or(OracleBind::Null, OracleBind::from),
             sql_text.map_or(OracleBind::Null, OracleBind::from),
             OracleBind::I64(i64::from(pct.min(100))),
             n,
         ],
         (DiagnosticsSource::LiveCursor, None) => vec![
             sql_id.map_or(OracleBind::Null, OracleBind::from),
+            sql_id.map_or(OracleBind::Null, OracleBind::from),
+            sql_text.map_or(OracleBind::Null, OracleBind::from),
             sql_text.map_or(OracleBind::Null, OracleBind::from),
             n,
         ],
@@ -822,10 +826,16 @@ mod tests {
         let q = id.spec().sql;
         assert!(q.to_ascii_lowercase().contains("v$sqlstats"));
         assert!(q.contains("ORDER BY elapsed_time DESC"));
-        assert!(q.contains("rownum <= :3"));
+        assert!(q.contains("rownum <= :5"));
         assert_eq!(
             binds,
-            [OracleBind::Null, OracleBind::Null, OracleBind::I64(10)]
+            [
+                OracleBind::Null,
+                OracleBind::Null,
+                OracleBind::Null,
+                OracleBind::Null,
+                OracleBind::I64(10),
+            ]
         );
     }
 
@@ -844,7 +854,13 @@ mod tests {
             );
             assert_eq!(
                 binds,
-                [OracleBind::Null, OracleBind::Null, OracleBind::I64(5)]
+                [
+                    OracleBind::Null,
+                    OracleBind::Null,
+                    OracleBind::Null,
+                    OracleBind::Null,
+                    OracleBind::I64(5),
+                ]
             );
         }
     }
@@ -860,11 +876,13 @@ mod tests {
             Some("W4MARK"),
         )
         .expect("live filters are accepted");
-        assert!(id.spec().sql.contains("sql_id = :1"));
+        assert!(id.spec().sql.contains("sql_id = :2"));
         assert_eq!(
             binds,
             [
                 OracleBind::from("abc123def4567"),
+                OracleBind::from("abc123def4567"),
+                OracleBind::from("W4MARK"),
                 OracleBind::from("W4MARK"),
                 OracleBind::I64(7)
             ]
