@@ -447,7 +447,7 @@ default_level = "READ_ONLY"
 # | `profiles.cumulative_query_cost_budget.window_seconds` | integer | required | yes | no | 2 | Arc G: duration of one cumulative-cost accounting window, in seconds. |
 # | `profiles.connect_timeout_seconds` | integer | 20 | yes | no | 1 | Oracle Net transport connect timeout, in seconds, bounding connect/auth reads. |
 # | `profiles.inactivity_timeout_seconds` | integer | none | yes | no | 1 | Per-read inactivity deadline on an established session; 0 is unset. |
-# | `profiles.keepalive_minutes` | integer | none | yes | no | 1 | Oracle EXPIRE_TIME dead-connection-detection probe interval, in minutes. |
+# | `profiles.keepalive_minutes` | integer | 10 | yes | no | 1 | Oracle EXPIRE_TIME dead-connection-detection probe interval, in minutes. |
 # | `profiles.sdu` | integer | none | yes | no | 1 | Thin Session Data Unit request size (512..=65535). |
 # | `profiles.max_level` | enum(READ_ONLY\|READ_WRITE\|DDL\|ADMIN) | READ_ONLY | yes | no | 1 | Per-target operating-level ceiling; session elevation cannot exceed it. |
 # | `profiles.default_level` | enum(READ_ONLY\|READ_WRITE\|DDL\|ADMIN) | READ_ONLY | yes | no | 1 | Level a fresh session starts at; must not exceed max_level. |
@@ -455,6 +455,8 @@ default_level = "READ_ONLY"
 # | `profiles.require_signed_tools` | bool | false | yes | no | 1 | Require an HMAC signature for every operator-defined custom tool on this profile. |
 # | `profiles.read_only_standby` | bool | false | yes | no | 1 | Force READ_ONLY regardless of max_level for an Active Data Guard standby. |
 # | `profiles.explain_plan_table` | string(OWNER.TABLE) | none | yes | no | 1 | Optional operator-owned global temporary table for EXPLAIN PLAN; its Oracle object identity is pinned on first verification. |
+# | `profiles.trusted_views` | array of string(OWNER.VIEW) | none | yes | no | 2 | Exact application views eligible only to attempt recursive read-purity proof; never an allow-only admission. |
+# | `profiles.trusted_policy_functions` | array of string(OWNER.FUNCTION\|OWNER.PACKAGE.FUNCTION) | none | yes | no | 2 | Exact VPD policy functions eligible only to attempt routine-purity proof; unknown proof remains refused. |
 # | `profiles.allow_change_notification` | bool | false | yes | no | 2 | Permit CQN registration (still classifier/step-up/audit gated; never widens SQL admission). |
 # | `profiles.require_fga_evidence` | bool | false | yes | no | 2 | Refuse reads when ALL_AUDIT_POLICIES is unreadable (default admits them with an fga_evidence: unavailable observation + audit record; a proven FGA handler always refuses). |
 # | `profiles.require_security_feature_evidence` | bool | false | yes | no | 2 | Refuse reads when OLS/RAS/Data Redaction evidence is unreadable (default admits them with keyed security_feature_evidence: unavailable observations + audit record; a proven policy always refuses; protected profiles imply strict mode). |
