@@ -6,13 +6,13 @@
   "scope": {
     "summary": "Refuse call_timeout_seconds=0 at config load and replace the four disagreeing profile->timeout mappings with one saturating RequestBudget::from_profile budget whose whole-request deadline is never None.",
     "in_scope": [
-      "crates/oraclemcp-config/src/profile.rs (validate_thin_routing refuses call_timeout_seconds == 0; new #48 and 6si2 proptest tests)",
-      "crates/oraclemcp-config/src/lib.rs (ConfigError::CallTimeoutBelowMinimum)",
-      "crates/oraclemcp-config/fuzz/corpus/config_toml (seed_call_timeout_zero, seed_call_timeout_u64_max, seed_protected_max_level_admin, seed_level_ceiling_merge)",
-      "crates/oraclemcp-core/src/request_budget.rs (from_profile, per_call_timeout, per_call_timeout_seconds + named unit tests)",
-      "crates/oraclemcp-core/src/connect.rs (delete resolve_call_timeout; derive call_timeout from from_profile; migrate tests)",
-      "crates/oraclemcp/src/dispatch/mod.rs (delete profile_request_timeout; derive request_timeout from from_profile)",
-      "crates/oraclemcp/src/main.rs (delete whole_request_timeout and doctor_call_timeout; derive both from from_profile)"
+      "crates/oraclemcp-config/src/profile.rs",
+      "crates/oraclemcp-config/src/lib.rs",
+      "crates/oraclemcp-config/fuzz/corpus/config_toml",
+      "crates/oraclemcp-core/src/request_budget.rs",
+      "crates/oraclemcp-core/src/connect.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/main.rs"
     ],
     "out_of_scope": [
       "Live FREE 23ai external-client case w4_runtime_issue48_timeout_zero_refused_and_budget_cuts: no Oracle instance was available to this implementer lane; not run.",
