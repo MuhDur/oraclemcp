@@ -112,6 +112,50 @@ fn string_literals(source: &str) -> Vec<String> {
     let mut literals = Vec::new();
     let mut index = 0;
     while index < bytes.len() {
+        if bytes[index] == b'\'' || (bytes[index] == b'b' && bytes.get(index + 1) == Some(&b'\'')) {
+            let mut cursor = index + usize::from(bytes[index] == b'b') + 1;
+            let mut closed = false;
+            while cursor < bytes.len() && bytes[cursor] != b'\n' {
+                match bytes[cursor] {
+                    b'\\' => cursor += 2,
+                    b'\'' => {
+                        closed = true;
+                        cursor += 1;
+                        break;
+                    }
+                    _ => cursor += 1,
+                }
+            }
+            if closed {
+                index = cursor;
+                continue;
+            }
+        }
+        if bytes.get(index..index + 2) == Some(b"//") {
+            index = bytes[index..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(bytes.len(), |newline| index + newline + 1);
+            continue;
+        }
+        if bytes.get(index..index + 2) == Some(b"/*") {
+            let mut depth = 1usize;
+            index += 2;
+            while index < bytes.len() && depth > 0 {
+                match bytes.get(index..index + 2) {
+                    Some(b"/*") => {
+                        depth += 1;
+                        index += 2;
+                    }
+                    Some(b"*/") => {
+                        depth -= 1;
+                        index += 2;
+                    }
+                    _ => index += 1,
+                }
+            }
+            continue;
+        }
         if bytes[index] != b'"' {
             index += 1;
             continue;
@@ -211,4 +255,23 @@ fn the_scanner_sees_the_defect_it_was_written_for() {
     assert_eq!(counts.get(&1), Some(&2));
     assert_eq!(counts.len(), 1);
     assert!(positional_placeholders("2020-03-08T03:01:00-04:00").is_empty());
+}
+
+#[test]
+fn string_scanner_ignores_comment_quotes_but_keeps_sql_reuse_visible() {
+    let source = r#"
+        const DOUBLE_QUOTE: u8 = b'"';
+        // The documentation says ":1 :1".
+        /* And this block comment says ":33 then :1..:32". */
+        const SQL: &str = "SELECT 1 FROM dual WHERE first_value = :1 OR second_value = :1";
+    "#;
+
+    let literals = string_literals(source);
+    assert_eq!(literals.len(), 1, "comment text is not a string literal");
+    let counts = positional_placeholders(&literals[0]);
+    assert_eq!(
+        counts.get(&1),
+        Some(&2),
+        "real SQL reuse remains an offender"
+    );
 }
