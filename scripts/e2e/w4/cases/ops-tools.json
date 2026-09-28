@@ -552,13 +552,13 @@
       {
         "tool": "oracle_execute",
         "decision": "ALLOWED",
-        "outcome": "SUCCEEDED",
-        "rows_affected": 1
+        "outcome": "PENDING"
       },
       {
-        "tool": "oracle_diff",
+        "tool": "oracle_execute",
         "decision": "ALLOWED",
-        "outcome": "SUCCEEDED"
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
       }
     ],
     "on_unsupported": {
