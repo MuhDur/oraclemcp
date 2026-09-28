@@ -22,7 +22,7 @@
   },
   "source": {
     "sha": "2d9b94de0e7735cc06ec95a4485ad3397412b576",
-    "tree_clean": false,
+    "tree_clean": true,
     "branch": "main"
   },
   "proofs": [],
@@ -39,7 +39,8 @@
     "No prose-content gate exists for these files (scripts/ci_taxonomy.py --check reads only docs/ci_taxonomy.json and the workflows; scripts/docs_generate.sh owns README.md, docs/configuration.md and oraclemcp.example.toml). The planted-negative analogue is therefore the git before/after grep, not a failing-then-passing gate: `git show 2d9b94de^:docs/test-tiers.md` had '1-shaped but advisory | advisory' vs '1 | required' at 2d9b94de, and `rg -n -i 'fuzz.{0,80}(advisory|best-effort|continue-on-error|not a gate)' docs/` has no post-change match scoping fuzz-build advisory.",
     "The bead's synthetic UI fixture could not be aligned in lane because it is generated from Rust (crates/oraclemcp-core/src/operator_protocol.rs); editing the fixture alone breaks generated_operator_schema_artifacts_match_rust_contract.",
     "A committed gate (crate_local_ci_taxonomy_matches_repo_root) is red at this commit because crates/oraclemcp-core/ci_taxonomy.json still carries tier=advisory; that file is outside the declared lane and is embedded in production code. `diff docs/ci_taxonomy.json crates/oraclemcp-core/ci_taxonomy.json` is non-zero with the fuzz-build tier as the only semantic difference.",
-    "The cargo tests were not executed in this session: the shared checkout carries other agents' uncommitted crates/** edits (constitution rules 13/14), so the crate-local equality failure is proven textually against the test's assert_eq! rather than by running it."
+    "The cargo tests were not executed in this session: the shared checkout carries other agents' uncommitted crates/** edits (constitution rules 13/14), so the crate-local equality failure is proven textually against the test's assert_eq! rather than by running it.",
+    "source.tree_clean=true is scoped to the five in-scope paths, derived with `python3 scripts/audit_bead_closes.py --template oraclemcp-dybi5 --scope <each in-scope path>` (constitution rule 14: derive rather than assert). The tree as a whole is not clean because other agents hold uncommitted crates/** edits, which are outside this bead's lane and in_scope."
   ],
   "known_defects": [],
   "follow_ups": [],
