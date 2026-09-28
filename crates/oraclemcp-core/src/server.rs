@@ -3771,7 +3771,7 @@ mod tests {
     }
 
     #[test]
-    fn issue49_cancel_unknown_request_id_is_ignored_and_bound_request_is_signalled() {
+    fn issue49_cancel_unknown_request_id_is_ignored() {
         let s = server();
         let cancellation = Arc::new(RequestCancellation::default());
         let request_id = json!(41);
