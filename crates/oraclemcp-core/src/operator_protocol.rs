@@ -660,7 +660,7 @@ pub fn operator_fixture_values() -> Vec<(&'static str, Value)> {
                     "summary": { "posture": "not_green", "total": 2, "success": 1, "not_green": 1, "unknown": 0 },
                     "lanes": [{
                         "check_name": "fuzz targets compile (nightly)",
-                        "tier": "advisory",
+                        "tier": "required",
                         "workflow": "CI",
                         "workflow_file": "ci.yml",
                         "job_id": "fuzz-build",

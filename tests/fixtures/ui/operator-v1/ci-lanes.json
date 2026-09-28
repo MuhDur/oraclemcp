@@ -24,7 +24,7 @@
           "conclusion": "success",
           "count": 4
         },
-        "tier": "advisory",
+        "tier": "required",
         "workflow": "CI",
         "workflow_file": "ci.yml"
       },
