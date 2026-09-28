@@ -1,0 +1,11 @@
+{
+  "committed": true,
+  "danger": "GUARDED",
+  "executed": true,
+  "non_transactional_effect": false,
+  "objects_affected": [],
+  "reason": "classified 1 statement(s) as Guarded",
+  "required_level": "READ_WRITE",
+  "rolled_back": false,
+  "rows_affected": 1
+}

@@ -14,7 +14,7 @@
       "reuse_after_cancel": true,
       "cancel_audit": true
     },
-    "expect": {"json_subset": {"error_class": "REQUEST_CANCELLED", "cancel_outcome": "cancel_confirmed"}},
+    "expect": {"golden": "issue49-cancel-read.${lane}.json"},
     "db_reread": [],
     "audit_expect": [],
     "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
@@ -35,7 +35,7 @@
       "lock_sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 1",
       "cancel_mutation_audit": true
     },
-    "expect": {"error_classes": ["REQUEST_CANCELLED", "CONNECTION_FAILED"]},
+    "expect": {"goldens": ["issue49-cancel-blocked-update.${lane}.json", "issue49-cancel-blocked-update.rolled-back.json"]},
     "db_reread": [
       {"sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID = 1", "rows": [[1, "parent-1"]]}
     ],
@@ -63,7 +63,7 @@
       "mutation": true,
       "cancel_after_completion": true
     },
-    "expect": {"json_subset": {"executed": true, "committed": true, "rolled_back": false, "rows_affected": 1}},
+    "expect": {"golden": "issue49-commit-race.${lane}.json"},
     "db_reread": [
       {"sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID = 2", "rows": [[2, "w4-commit-race"]]}
     ],
@@ -89,7 +89,7 @@
       "reuse_after_cancel": true,
       "cancel_audit": true
     },
-    "expect": {"json_subset": {"error_class": "REQUEST_CANCELLED", "cancel_outcome": "cancel_confirmed"}},
+    "expect": {"golden": "issue49-progress.${lane}.json"},
     "db_reread": [],
     "audit_expect": [],
     "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},

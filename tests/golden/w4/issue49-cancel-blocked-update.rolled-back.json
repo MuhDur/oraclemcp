@@ -1,0 +1,10 @@
+{
+  "cancel_outcome": "cancel_confirmed",
+  "error_class": "REQUEST_CANCELLED",
+  "isError": true,
+  "message": "tool dispatch cancelled before completion: user: MCP notifications/cancelled",
+  "next_steps": [
+    "Retry only if the client did not intentionally cancel the request."
+  ],
+  "statement_outcome": "rolled_back"
+}

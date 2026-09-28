@@ -53,7 +53,7 @@ LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
 CAPTURE = re.compile(r"\$\{cap:([a-z][a-z0-9_]{0,31})\}")
-EXPECT_KINDS = {"rows", "error_class", "error_classes", "json_subset", "golden"}
+EXPECT_KINDS = {"rows", "error_class", "error_classes", "json_subset", "golden", "goldens"}
 CURRENT_SESSION = object()
 
 
@@ -219,7 +219,7 @@ def verify_envelope(reply, descriptor=None):
 
 def verify_expect(expect, reply, golden_root=None):
     require(isinstance(expect, dict) and len(EXPECT_KINDS & expect.keys()) == 1,
-            "expect needs exactly one rows/error_class/json_subset/golden selector")
+            "expect needs exactly one rows/error_class/json_subset/golden/goldens selector")
     payload = tool_payload(reply)
     structured = payload.get("structuredContent", {})
     require(isinstance(structured, dict), "structuredContent must be an object")
@@ -240,13 +240,25 @@ def verify_expect(expect, reply, golden_root=None):
                 "wrong typed refusal class")
     elif "json_subset" in expect:
         require(deep_subset(expect["json_subset"], structured), "JSON subset differs")
-    else:
+    elif "golden" in expect:
         require(golden_root is not None, "golden root missing")
         name = expect["golden"]
         require(re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name) is not None,
                 "unsafe golden filename")
         golden = json.loads((golden_root / name).read_text())
         require(scrub(structured) == golden, "scrubbed golden differs")
+    else:
+        require(golden_root is not None, "golden root missing")
+        names = expect["goldens"]
+        require(isinstance(names, list) and len(names) == 2,
+                "goldens needs exactly the proved rollback and unknown terminal variants")
+        goldens = []
+        for name in names:
+            require(isinstance(name, str) and re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name),
+                    "unsafe golden filename")
+            goldens.append(json.loads((golden_root / name).read_text()))
+        require(scrub(structured) in goldens,
+                "scrubbed result differs from both proved terminal-outcome goldens")
     return scrub(structured)
 
 
@@ -616,6 +628,19 @@ def verify_expect_shape(expect):
             concrete = name if lane is None else name.replace("${lane}", lane)
             require(re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", concrete) is not None, "invalid golden filename")
             require((ROOT / "tests/golden/w4" / concrete).is_file(), f"golden file {concrete} is missing")
+    if "goldens" in expect:
+        names = expect["goldens"]
+        require(isinstance(names, list) and len(names) == 2,
+                "goldens needs exactly two terminal-outcome golden names")
+        for name in names:
+            require(isinstance(name, str) and name.count("${lane}") <= 1
+                    and re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name.replace("${lane}", "lane")),
+                    "invalid golden filename")
+            lanes = (("free23", "xe18", "xe21") if "${lane}" in name else (None,))
+            for lane in lanes:
+                concrete = name if lane is None else name.replace("${lane}", lane)
+                require((ROOT / "tests/golden/w4" / concrete).is_file(),
+                        f"golden file {concrete} is missing")
 
 
 def merge_expectation(base, overlay):
@@ -2799,6 +2824,8 @@ def selftest():
     rejected("cancel_after_completion_without_committed_mutation", lambda: validate_case(
         {**replay_case, "call": {"arguments": {}, "cancel_after_completion": True}},
         "selftest"))
+    rejected("goldens_not_exactly_two", lambda: verify_expect_shape(
+        {"goldens": ["issue49-cancel-read.free23.json"]}))
     rejected("missing_positive_case", lambda: verify_coverage({"oracle_query": {}}, []))
     manifest_enforcement_integration()
     left, right = [], []

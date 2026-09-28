@@ -40,7 +40,9 @@
             "properties": {"arguments": {"type": "object"}, "expect": {"type": "object"},
               "plan_contains": {"type": "string", "minLength": 1}}}}
       }},
-      "expect": {"type": "object", "minProperties": 1},
+      "expect": {"type": "object", "minProperties": 1,
+        "properties": {"goldens": {"type": "array", "minItems": 2, "maxItems": 2,
+          "items": {"type": "string", "pattern": "^[a-zA-Z0-9_.-]+\\.json$"}}}},
       "cleanup": {"type": "array", "items": {"type": "object", "additionalProperties": false,
         "required": ["sql"], "properties": {"sql": {"type": "string", "minLength": 1}}}},
       "expect_by_version": {"type": "object", "additionalProperties": false,

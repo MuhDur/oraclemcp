@@ -1,0 +1,12 @@
+{
+  "cancel_outcome": "outcome_unknown",
+  "error_class": "CONNECTION_FAILED",
+  "isError": true,
+  "message": "database session quarantined (unknown_discarded): execute failed and rollback cleanup failed: database session quarantined (unknown_discarded): rollback cleanup failed; the thin connection was discarded: Oracle connection lost: rollback: DPY-4011: the database or network closed the connection: socket timed out while recovering from previous call timeout",
+  "next_steps": [
+    "discard this lease/session and acquire a fresh connection",
+    "do not reuse the quarantined session"
+  ],
+  "statement_outcome": "protocol_unsynchronized",
+  "suggested_tool": "oracle_connection_info"
+}
