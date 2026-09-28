@@ -3561,6 +3561,31 @@ fn edition_merge_and_rollback_use_executor_not_oracle_execute() {
 }
 
 #[test]
+fn edition_flip_routes_refuse_non_operator_before_proposal_or_dispatch() {
+    // The edition executor is deliberately reachable only through the operator
+    // API.  Test both fixed routes directly so a future route-table change
+    // cannot accidentally inherit a more permissive browser/workbench path.
+    let cfg = HttpTransportConfig::default();
+    for path in [
+        "/operator/v1/edition-proposals/merge",
+        "/operator/v1/edition-proposals/rollback",
+    ] {
+        let response = handle_http_request(
+            &test_server(),
+            &cfg,
+            operator_json_post(path, &serde_json::json!({ "proposal_id": "synthetic" }))
+                .with_peer_loopback(false),
+        );
+        assert_eq!(response.status, 403, "{path} must require operator authority");
+        assert_eq!(
+            response_json(&response)["error"],
+            serde_json::json!("operator_authority_required"),
+            "{path} must be refused before proposal lookup or edition dispatch"
+        );
+    }
+}
+
+#[test]
 fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
