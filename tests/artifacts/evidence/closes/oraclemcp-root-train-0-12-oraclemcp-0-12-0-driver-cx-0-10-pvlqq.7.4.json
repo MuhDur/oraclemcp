@@ -1,0 +1,127 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:47:47Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4",
+  "scope": {
+    "summary": "Refuse call_timeout_seconds=0 at config load and replace the four disagreeing profile->timeout mappings with one saturating RequestBudget::from_profile budget whose whole-request deadline is never None.",
+    "in_scope": [
+      "crates/oraclemcp-config/src/profile.rs (validate_thin_routing refuses call_timeout_seconds == 0; new #48 and 6si2 proptest tests)",
+      "crates/oraclemcp-config/src/lib.rs (ConfigError::CallTimeoutBelowMinimum)",
+      "crates/oraclemcp-config/fuzz/corpus/config_toml (seed_call_timeout_zero, seed_call_timeout_u64_max, seed_protected_max_level_admin, seed_level_ceiling_merge)",
+      "crates/oraclemcp-core/src/request_budget.rs (from_profile, per_call_timeout, per_call_timeout_seconds + named unit tests)",
+      "crates/oraclemcp-core/src/connect.rs (delete resolve_call_timeout; derive call_timeout from from_profile; migrate tests)",
+      "crates/oraclemcp/src/dispatch/mod.rs (delete profile_request_timeout; derive request_timeout from from_profile)",
+      "crates/oraclemcp/src/main.rs (delete whole_request_timeout and doctor_call_timeout; derive both from from_profile)"
+    ],
+    "out_of_scope": [
+      "Live FREE 23ai external-client case w4_runtime_issue48_timeout_zero_refused_and_budget_cuts: no Oracle instance was available to this implementer lane; not run.",
+      "Server-side cancellation of the cut statement (T2.4) and deadline-accounted queueing (T2.5) are not proven here.",
+      "crates/oraclemcp-core/src/doctor.rs check_call_timeout still carries an advisory string for an authored 0 that config load now refuses before doctor sees it; left untouched (outside this lane).",
+      "Process-level 'server refuses to start' e2e: the load gate is oracle_config::OracleMcpConfig::load, but only the in-process load refusal was executed."
+    ]
+  },
+  "source": {
+    "sha": "5f0e3809d9f480ec780d848bd385bf237362fddb",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [
+    {
+      "name": "issue48_zero_call_timeout_refused_at_load",
+      "kind": "unit",
+      "command": "CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-config --lib -- issue48_zero_call_timeout_refused_at_load",
+      "result": "PASS: test profile::tests::issue48_zero_call_timeout_refused_at_load ... ok (1 passed; 0 failed) at commit 5f0e3809",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    },
+    {
+      "name": "request_budget_from_profile_table",
+      "kind": "unit",
+      "command": "CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-core --lib -- request_budget",
+      "result": "PASS: request_budget_from_profile_table ... ok; None/1/30 -> 30s/1s/30s per-call and Some(admitted+timeout) deadline; u64::MAX saturates to Duration::from_nanos(u64::MAX) and deadline Some(Time::MAX); 17 passed; 0 failed",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    },
+    {
+      "name": "all_timeout_consumers_use_request_budget",
+      "kind": "unit",
+      "command": "CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-core --lib -- connect::tests::all_timeout",
+      "result": "PASS: connect::tests::all_timeout_consumers_use_request_budget ... ok; connect-path driver call_timeout, RequestBudget per_call_timeout and SessionContext request budget agree for unset/1/30",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    },
+    {
+      "name": "issue48_whole_request_budget_cuts_slow_call",
+      "kind": "unit",
+      "command": "CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-core --lib -- request_budget",
+      "result": "PASS: issue48_whole_request_budget_cuts_slow_call ... ok; a Some(1) profile admits at +999ms and is cut with DbError::Cancelled(\"deadline\") at +1s+1ns",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    },
+    {
+      "name": "merged_max_level_never_exceeds_any_source + protected_profile_always_read_only",
+      "kind": "property",
+      "command": "CARGO_TARGET_DIR=$PWD/target cargo test -p oraclemcp-config --lib -- merged_max_level_never_exceeds_any_source protected_profile_always_read_only",
+      "result": "PASS: both proptest properties ok (96 cases each): merged base-inherited ceiling never above any authored source; every protected profile that loads resolves READ_ONLY; every refusal is ProtectedNotReadOnly or DefaultLevelExceedsMax",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    },
+    {
+      "name": "bounded config_toml fuzz run on the new seeds",
+      "kind": "fuzz",
+      "command": "scripts/build_lease.sh -- bash -lc 'cd crates/oraclemcp-config && cargo +nightly-2026-05-11 fuzz run config_toml -- -max_total_time=25 -runs=200000'",
+      "result": "PASS: Done 136495 runs in 26 second(s); exit 0; zero crashes with the timeout/level-ceiling seeds in corpus",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    },
+    {
+      "name": "planted negative: without the guard the zero config loads",
+      "kind": "unit",
+      "command": "temporarily disabled the call_timeout_seconds==0 check, then: cargo test -p oraclemcp-config --lib -- issue48_zero_call_timeout_refused_at_load",
+      "result": "RED as designed: test FAILED with 'call_timeout_seconds = 0 must fail config load: OracleMcpConfig { ... call_timeout_seconds: Some(0) ... }'; guard restored and the test passes. Proves the refusal actually fires and was absent before.",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    },
+    {
+      "name": "code gates",
+      "kind": "lint",
+      "command": "cargo fmt --all -- --check (my files); CARGO_TARGET_DIR=$PWD/target cargo clippy -p oraclemcp-config -p oraclemcp-core -p oraclemcp --all-targets -- -D warnings",
+      "result": "PASS: my files fmt-clean; clippy Finished with zero warnings; full config lib 153/153, core lib 820/820, oraclemcp lib 534/534",
+      "evidence_path": "tests/artifacts/evidence/closes/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.4.json"
+    }
+  ],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "profiles.toml load (oracle_config::OracleMcpConfig::load -> into_validated -> ConnectionProfile::validate_thin_routing)",
+        "kind": "config-load",
+        "trace": "issue48_zero_call_timeout_refused_at_load asserts from_toml_str with call_timeout_seconds=0 returns Err(ConfigError::CallTimeoutBelowMinimum) naming profiles.dev.call_timeout_seconds and the minimum 1"
+      },
+      {
+        "name": "profile->driver call timeout (oraclemcp-core connect.rs profile_to_options_for_level)",
+        "kind": "library",
+        "trace": "all_timeout_consumers_use_request_budget asserts options.call_timeout == RequestBudget::from_profile(...).per_call_timeout() for unset/1/30"
+      },
+      {
+        "name": "profile->dispatch whole-request ceiling (oraclemcp dispatch/mod.rs profile_dispatch_policy)",
+        "kind": "library",
+        "trace": "request_timeout is Some(from_profile(Time::ZERO, seconds).per_call_timeout()); value equals the connect/driver value and is never None"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No FREE 23ai instance was reachable from this implementer lane, so the required live external-client case w4_runtime_issue48_timeout_zero_refused_and_budget_cuts (server refuses to start on a 0 profile; DBMS_SESSION.SLEEP(30) cut with call_timeout_seconds=2) was NOT run. This bead is not closeable on local evidence alone.",
+    "Only a toolchain scoped clippy/fmt/test was run; no workspace-wide cargo test was executed (build-lease discipline).",
+    "Process-level 'server does not start' was not executed end to end; only the in-process load refusal was proven.",
+    "The doctor.rs call_timeout warning for an authored 0 is now unreachable dead detail; it was not removed because doctor.rs is outside this bead's file lane.",
+    "tree_clean=false: other agents had uncommitted tracked edits (oraclemcp-db, scripts, fixtures) and untracked .beads files when the evidence was generated; a dedicated clean worktree reproducibility proof at my commit was not produced by this lane (rule 14 is the closer's step)."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "Run the FREE 23ai live case w4_runtime_issue48_timeout_zero_refused_and_budget_cuts (T2/W2 batch verify) to satisfy the live proof class.",
+    "Remove the now-unreachable call_timeout_seconds=0 advisory in crates/oraclemcp-core/src/doctor.rs (outside this lane).",
+    "T6.3 release notes: call_timeout_seconds=0 is now a hard config error (breaking change) even though config_docs.rs already documented min 1."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
