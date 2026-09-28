@@ -1654,6 +1654,18 @@ impl OracleMcpConfig {
                         reason: error.reason,
                     })?;
             }
+            validate_trusted_proof_targets(
+                &prof.name,
+                "trusted_views",
+                prof.trusted_views.as_deref(),
+                2,
+            )?;
+            validate_trusted_proof_targets(
+                &prof.name,
+                "trusted_policy_functions",
+                prof.trusted_policy_functions.as_deref(),
+                3,
+            )?;
             if let Some(entries) = &prof.app_context {
                 AppContextConfig::validate_list(&prof.name, entries)?;
             }
@@ -1957,6 +1969,41 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.sql_policy == after.sql_policy
 }
 
+fn validate_trusted_proof_targets(
+    profile: &str,
+    field: &'static str,
+    entries: Option<&[String]>,
+    parts: usize,
+) -> Result<(), ConfigError> {
+    for entry in entries.unwrap_or_default() {
+        let valid = entry.split('.').count() == parts
+            && entry.split('.').all(|part| {
+                let bytes = part.as_bytes();
+                let simple = !part.is_empty()
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes.iter().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#')
+                    });
+                let quoted = bytes.len() >= 3
+                    && bytes.first() == Some(&b'"')
+                    && bytes.last() == Some(&b'"')
+                    && bytes[1..bytes.len() - 1].iter().all(|byte| {
+                        byte.is_ascii_graphic() && !matches!(byte, b'"' | b'*' | b'%' | b'.')
+                    });
+                simple || quoted
+            });
+        if !valid {
+            return Err(ConfigError::InvalidTrustedProofTarget {
+                profile: profile.to_owned(),
+                field,
+                entry: entry.clone(),
+                reason: "expected exact quoted-or-simple Oracle identifier components; wildcards are not supported",
+            });
+        }
+    }
+    Ok(())
+}
+
 /// Configuration load / validation error.
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -1964,6 +2011,18 @@ pub enum ConfigError {
     /// figment parse / extract failure (unknown keys, type errors, …).
     #[error("config error: {0}")]
     Figment(String),
+    /// A configured trusted-proof target was not an exact Oracle identity.
+    #[error("connection profile `{profile}` has invalid {field} entry `{entry}`: {reason}")]
+    InvalidTrustedProofTarget {
+        /// Profile containing the invalid entry.
+        profile: String,
+        /// Configuration field containing the entry.
+        field: &'static str,
+        /// Invalid non-secret identifier entry.
+        entry: String,
+        /// Stable validation failure reason.
+        reason: &'static str,
+    },
     /// `$ORACLEMCP_CONFIG` was set to an explicit path that cannot be used as a
     /// config file. An explicit operator pointer must resolve to a real file:
     /// silently ignoring it (booting with zero profiles) would violate

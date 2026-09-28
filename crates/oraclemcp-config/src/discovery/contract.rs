@@ -213,6 +213,16 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Mark target as a read-only Active Data Guard standby: forces READ_ONLY regardless of max_level.",
     },
     FieldDisposition {
+        field: "trusted_views",
+        disposition: Disposition::Commented,
+        help: "Exact application views eligible only to attempt recursive read-purity proof; never an allow-only admission.",
+    },
+    FieldDisposition {
+        field: "trusted_policy_functions",
+        disposition: Disposition::Commented,
+        help: "Exact VPD policy functions eligible only to attempt routine-purity proof; unknown proof stays refused.",
+    },
+    FieldDisposition {
         field: "allow_change_notification",
         disposition: Disposition::Commented,
         help: "Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.",
@@ -377,6 +387,8 @@ mod tests {
             require_signed_tools: Some(false),
             read_only_standby: Some(false),
             explain_plan_table: None,
+            trusted_views: Some(vec!["APP.REPORTING_VIEW".to_owned()]),
+            trusted_policy_functions: Some(vec!["APP.POLICY_PKG.CHECK_ACCESS".to_owned()]),
             allow_change_notification: Some(false),
             require_fga_evidence: Some(true),
             require_security_feature_evidence: Some(true),
@@ -434,8 +446,8 @@ mod tests {
         // Diagnostics Pack licensing is a separate explicit opt-in.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            40,
-            "ConnectionProfile has 40 serde fields"
+            42,
+            "ConnectionProfile has 42 serde fields"
         );
     }
 

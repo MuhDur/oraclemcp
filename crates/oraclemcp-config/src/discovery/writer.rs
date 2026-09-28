@@ -225,6 +225,12 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
             "protected" => push_commented_scalar(&mut scalars, fd, "true"),
             "require_signed_tools" => push_commented_scalar(&mut scalars, fd, "true"),
             "read_only_standby" => push_commented_scalar(&mut scalars, fd, "false"),
+            "trusted_views" => {
+                push_commented_scalar(&mut scalars, fd, "[\"APP.REPORTING_VIEW\"]");
+            }
+            "trusted_policy_functions" => {
+                push_commented_scalar(&mut scalars, fd, "[\"APP.POLICY_PKG.CHECK_ACCESS\"]");
+            }
             // CQN registration is a separate privileged operation and stays
             // disabled until an operator explicitly opts this profile in.
             "allow_change_notification" => push_commented_scalar(&mut scalars, fd, "false"),

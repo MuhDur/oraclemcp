@@ -75,6 +75,8 @@ fn fully_populated_profile() -> ConnectionProfile {
         require_signed_tools: Some(false),
         read_only_standby: Some(false),
         explain_plan_table: None,
+        trusted_views: Some(vec!["APP.REPORTING_VIEW".to_owned()]),
+        trusted_policy_functions: Some(vec!["APP.POLICY_PKG.CHECK_ACCESS".to_owned()]),
         allow_change_notification: Some(false),
         require_fga_evidence: Some(true),
         require_security_feature_evidence: Some(true),

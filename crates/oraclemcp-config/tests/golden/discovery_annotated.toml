@@ -72,6 +72,10 @@ default_level = "READ_ONLY"
 # require_signed_tools = true
 # Mark target as a read-only Active Data Guard standby: forces READ_ONLY regardless of max_level.
 # read_only_standby = false
+# Exact application views eligible only to attempt recursive read-purity proof; never an allow-only admission.
+# trusted_views = ["APP.REPORTING_VIEW"]
+# Exact VPD policy functions eligible only to attempt routine-purity proof; unknown proof stays refused.
+# trusted_policy_functions = ["APP.POLICY_PKG.CHECK_ACCESS"]
 # Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
 # allow_change_notification = false
 # Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.
@@ -179,6 +183,10 @@ default_level = "READ_ONLY"
 # require_signed_tools = true
 # Mark target as a read-only Active Data Guard standby: forces READ_ONLY regardless of max_level.
 # read_only_standby = false
+# Exact application views eligible only to attempt recursive read-purity proof; never an allow-only admission.
+# trusted_views = ["APP.REPORTING_VIEW"]
+# Exact VPD policy functions eligible only to attempt routine-purity proof; unknown proof stays refused.
+# trusted_policy_functions = ["APP.POLICY_PKG.CHECK_ACCESS"]
 # Explicit CQN-registration opt-in; default false, and every registration still needs a proven query, confirmed step-up, and durable audit record.
 # allow_change_notification = false
 # Refuse reads when this account cannot read ALL_AUDIT_POLICIES; default false admits them with an fga_evidence: unavailable observation, an audit record, and a doctor warning.

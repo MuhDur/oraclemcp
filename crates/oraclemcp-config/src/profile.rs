@@ -873,6 +873,12 @@ pub struct ConnectionProfile {
     /// Oracle object id for the lifetime of this server process.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explain_plan_table: Option<String>,
+    /// Exact application views eligible to attempt recursive read-purity proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_views: Option<Vec<String>>,
+    /// Exact VPD policy functions eligible to attempt routine-purity proof.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_policy_functions: Option<Vec<String>>,
     /// Explicitly permit Continuous Query Notification (CQN) registration for
     /// this profile. Defaults to `false`; a permitted registration still needs
     /// a classifier-proven query, an active confirmed step-up, and an audit
@@ -974,6 +980,8 @@ impl std::fmt::Debug for ConnectionProfile {
         let app_context_count = self.app_context.as_ref().map(Vec::len);
         let masking_rule_count = self.masking.as_ref().map(|masking| masking.rules.len());
         let sql_policy_rule_count = self.sql_policy.as_ref().map(|policy| policy.rules.len());
+        let trusted_view_count = self.trusted_views.as_ref().map(Vec::len);
+        let trusted_policy_function_count = self.trusted_policy_functions.as_ref().map(Vec::len);
         f.debug_struct("ConnectionProfile")
             .field("name", &self.name)
             .field("description", &self.description)
@@ -1006,6 +1014,11 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("protected", &self.protected)
             .field("require_signed_tools", &self.require_signed_tools)
             .field("read_only_standby", &self.read_only_standby)
+            .field("trusted_view_count", &trusted_view_count)
+            .field(
+                "trusted_policy_function_count",
+                &trusted_policy_function_count,
+            )
             .field("allow_change_notification", &self.allow_change_notification)
             .field("require_fga_evidence", &self.require_fga_evidence)
             .field(
@@ -1208,6 +1221,8 @@ impl ConnectionProfile {
             require_signed_tools,
             read_only_standby,
             explain_plan_table,
+            trusted_views,
+            trusted_policy_functions,
             allow_change_notification,
             require_fga_evidence,
             require_security_feature_evidence,
@@ -1437,6 +1452,8 @@ mod tests {
             require_signed_tools: None,
             read_only_standby: None,
             explain_plan_table: None,
+            trusted_views: None,
+            trusted_policy_functions: None,
             allow_change_notification: None,
             require_fga_evidence: None,
             require_security_feature_evidence: None,

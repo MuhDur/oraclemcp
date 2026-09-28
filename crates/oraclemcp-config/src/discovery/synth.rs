@@ -248,6 +248,8 @@ pub fn synthesize_profiles(
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,
+            trusted_views: None,
+            trusted_policy_functions: None,
             explain_plan_table: None,
             allow_change_notification: None,
             require_fga_evidence: None,
