@@ -1056,11 +1056,21 @@ jobs:
   # target's campaign ran clean. Installer/toolchain churn is confined to the
   # explicitly tolerant cargo-fuzz install (bounded retry); the build steps
   # themselves are blocking, and the planted-negative step proves the lane
-  # fails on a broken target.
+  # fails on a broken target. These workspaces do not share a target directory:
+  # each required matrix shard compiles one crate, so wall-clock is the slowest
+  # crate rather than the serial sum of all four.
   fuzz-build:
-    name: fuzz targets compile (nightly)
+    name: fuzz targets compile (nightly, ${{ matrix.crate }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - crate: guard
+          - crate: audit
+          - crate: auth
+          - crate: config
     steps:
       - uses: actions/checkout@v7
         with:
@@ -1070,6 +1080,8 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
+          workspaces: crates/oraclemcp-${{ matrix.crate }}/fuzz -> target
+          shared-key: fuzz-build-${{ matrix.crate }}
           # PRs restore the main cache but never save (their short-lived
           # merge-ref caches would evict the useful main population).
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -1094,35 +1106,25 @@ jobs:
           echo "::error::cargo-fuzz unavailable after bounded retries" >&2
           exit 1
       # Each fuzz crate commits its own Cargo.lock. cargo-fuzz cannot forward
-      # --locked, so gate lockfile freshness directly: a stale lock turns into a
-      # red job instead of a silent rewrite (bead comment 2026-09-24).
-      - name: fuzz lockfiles are current (--locked)
+      # --locked, so gate this shard's lockfile freshness directly: a stale lock
+      # turns into a red job instead of a silent rewrite (bead comment 2026-09-24).
+      - name: fuzz lockfile is current (--locked)
         run: |
           set -euo pipefail
-          for crate in guard audit auth config; do
-            cargo +${{ env.RUST_TOOLCHAIN }} metadata \
-              --manifest-path "crates/oraclemcp-$crate/fuzz/Cargo.toml" \
-              --locked --format-version 1 >/dev/null
-          done
+          cargo +${{ env.RUST_TOOLCHAIN }} metadata \
+            --manifest-path "crates/oraclemcp-${{ matrix.crate }}/fuzz/Cargo.toml" \
+            --locked --format-version 1 >/dev/null
       # Pin the gnu target: cargo-fuzz otherwise defaults to musl here, whose
       # static libc is incompatible with the ASan sanitizer.
-      - name: Build guard fuzz targets
+      - name: Build ${{ matrix.crate }} fuzz targets
         run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
-        working-directory: crates/oraclemcp-guard
-      - name: Build audit fuzz targets
-        run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
-        working-directory: crates/oraclemcp-audit
-      - name: Build auth fuzz targets
-        run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
-        working-directory: crates/oraclemcp-auth
-      - name: Build config fuzz targets
-        run: cargo +${{ env.RUST_TOOLCHAIN }} fuzz build --target x86_64-unknown-linux-gnu
-        working-directory: crates/oraclemcp-config
+        working-directory: crates/oraclemcp-${{ matrix.crate }}
       # Planted-negative: the historical E0618 (a local binding shadows
       # `fn resolved()` and the shadowed name is then called as a function)
       # must make the same blocking build command fail. If this ever passes
       # while the plant is present, the lane is not proving what it claims.
       - name: planted-negative (a broken fuzz target must fail the build)
+        if: ${{ matrix.crate == 'guard' }}
         run: |
           set -euo pipefail
           cd crates/oraclemcp-guard

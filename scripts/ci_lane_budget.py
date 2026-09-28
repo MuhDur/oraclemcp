@@ -42,10 +42,11 @@ ROOT = Path(__file__).resolve().parent.parent
 
 # A fuzz shard may sit on a runner this long. The point of sharding is that the
 # lane's wall clock is one shard, not the sum, so this is the lane budget too.
-DEFAULT_SHARD_CEILING_MINUTES = 120
+DEFAULT_SHARD_CEILING_MINUTES = 20
 DIFFERENTIAL_FUZZ_TARGETS = {
     ("oraclemcp-guard", "alter_session_parse"): 4,
 }
+COMPILE_FUZZ_CRATES = {"guard", "audit", "auth", "config"}
 
 
 def _fail(code: str, message: str) -> int:
@@ -156,6 +157,27 @@ def _validate_fuzz_shards(where: str, job: dict) -> list[str]:
     return findings
 
 
+def _validate_fuzz_compile_shards(where: str, job: dict) -> list[str]:
+    """Require one required compile shard for every independent fuzz workspace."""
+    entries = _matrix_entries(job)
+    if not entries:
+        return [f"{where}: matrix.include is required so compile shards are explicit"]
+
+    crates = [entry.get("crate") for entry in entries]
+    if any(not isinstance(crate, str) for crate in crates):
+        return [f"{where}: every compile matrix row must name a crate"]
+    named = set(crates)
+    findings: list[str] = []
+    if named != COMPILE_FUZZ_CRATES:
+        findings.append(
+            f"{where}: compile shards must be exactly {sorted(COMPILE_FUZZ_CRATES)}, "
+            f"got {sorted(named)}"
+        )
+    if len(crates) != len(named):
+        findings.append(f"{where}: each fuzz crate must have exactly one compile shard")
+    return findings
+
+
 def fuzz_bound(workflows: list[Path], ceiling: int) -> int:
     findings: list[str] = []
     inspected = 0
@@ -182,11 +204,14 @@ def fuzz_bound(workflows: list[Path], ceiling: int) -> int:
                     f"{where}: not sharded ({shards} shard); one runner carries the whole lane"
                 )
             text = _job_text(job)
-            if "max_total_time" not in text:
-                findings.append(
-                    f"{where}: no -max_total_time; libFuzzer would run until the job timeout"
-                )
-            findings.extend(_validate_fuzz_shards(where, job))
+            if "fuzz build" in text:
+                findings.extend(_validate_fuzz_compile_shards(where, job))
+            else:
+                if "max_total_time" not in text:
+                    findings.append(
+                        f"{where}: no -max_total_time; libFuzzer would run until the job timeout"
+                    )
+                findings.extend(_validate_fuzz_shards(where, job))
 
     if inspected == 0:
         return _fail("E_NO_FUZZ_JOB", "no fuzz job found in the given workflows")
@@ -196,7 +221,7 @@ def fuzz_bound(workflows: list[Path], ceiling: int) -> int:
         return _fail("E_UNBOUNDED_FUZZ_LANE", f"{len(findings)} unbounded fuzz lane finding(s)")
     print(
         f"ci-lane-budget: OK — {inspected} fuzz job(s) sharded and bounded "
-        f"(shard ceiling {ceiling}m, each shard carries -max_total_time)"
+        f"(shard ceiling {ceiling}m; campaigns carry -max_total_time)"
     )
     return 0
 
@@ -437,7 +462,12 @@ def selftest() -> int:
     )
 
     fuzz = ROOT / ".github" / "workflows" / "fuzz.yml"
-    expect(fuzz_bound([fuzz], DEFAULT_SHARD_CEILING_MINUTES), 0, "this repo's fuzz lane is bounded")
+    ci = ROOT / ".github" / "workflows" / "ci.yml"
+    expect(
+        fuzz_bound([fuzz, ci], DEFAULT_SHARD_CEILING_MINUTES),
+        0,
+        "this repo's fuzz lanes are bounded",
+    )
     expect(fuzz_bound([fuzz], 1), 65, "a ceiling the lane exceeds is refused")
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -543,6 +573,30 @@ def selftest() -> int:
         expect(fuzz_bound([accepted], DEFAULT_SHARD_CEILING_MINUTES), 0, "differential fuzz shard shape is accepted")
         expect(fuzz_bound([unsharded], DEFAULT_SHARD_CEILING_MINUTES), 65, "unsharded differential fuzz target is refused")
         expect(fuzz_bound([no_seed], DEFAULT_SHARD_CEILING_MINUTES), 65, "unseeded differential fuzz shards are refused")
+        compile_unsharded = tmp_path / "compile-unsharded-fuzz.yml"
+        compile_unsharded.write_text(
+            textwrap.dedent(
+                """
+                name: CI
+                jobs:
+                  fuzz-build:
+                    timeout-minutes: 20
+                    strategy:
+                      matrix:
+                        include:
+                          - crate: guard
+                    steps:
+                      - run: cargo fuzz build --target x86_64-unknown-linux-gnu
+                """
+            ).strip()
+            + "\n",
+            encoding="utf-8",
+        )
+        expect(
+            fuzz_bound([compile_unsharded], DEFAULT_SHARD_CEILING_MINUTES),
+            65,
+            "unsharded fuzz compilation is refused",
+        )
 
     print(f"ci-lane-budget: self-test OK ({checks} checks)")
     return 0
@@ -570,7 +624,10 @@ def main() -> int:
     if args.selftest:
         return selftest()
     if args.command == "fuzz-bound":
-        workflows = args.workflow or [ROOT / ".github" / "workflows" / "fuzz.yml"]
+        workflows = args.workflow or [
+            ROOT / ".github" / "workflows" / "fuzz.yml",
+            ROOT / ".github" / "workflows" / "ci.yml",
+        ]
         return fuzz_bound(workflows, args.ceiling_minutes)
     if args.command == "rq-prep":
         if args.runs_json:

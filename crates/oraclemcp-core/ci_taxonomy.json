@@ -183,7 +183,46 @@
       "path_filtered": false
     },
     {
-      "check_name": "fuzz targets compile (nightly)",
+      "check_name": "fuzz targets compile (nightly, audit)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "fuzz-build",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz targets compile (nightly, auth)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "fuzz-build",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz targets compile (nightly, config)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "fuzz-build",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "fuzz targets compile (nightly, guard)",
       "tier": "required",
       "workflow": "CI",
       "workflow_file": "ci.yml",
@@ -824,7 +863,10 @@
         "clippy (-D warnings)",
         "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
         "feature powerset (cargo hack)",
-        "fuzz targets compile (nightly)",
+        "fuzz targets compile (nightly, audit)",
+        "fuzz targets compile (nightly, auth)",
+        "fuzz targets compile (nightly, config)",
+        "fuzz targets compile (nightly, guard)",
         "installer lint and built-artifact smoke",
         "multi-nightly early-warning (nightly)",
         "public-API lock (cargo public-api + semver-checks)",
@@ -998,7 +1040,10 @@
       "cargo test",
       "clippy (-D warnings)",
       "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
-      "fuzz targets compile (nightly)",
+      "fuzz targets compile (nightly, audit)",
+      "fuzz targets compile (nightly, auth)",
+      "fuzz targets compile (nightly, config)",
+      "fuzz targets compile (nightly, guard)",
       "installer lint and built-artifact smoke",
       "public-API lock (cargo public-api + semver-checks)",
       "release acceptance suite (B.12)",
