@@ -482,13 +482,15 @@ pub async fn preflight(cx: &Cx, conn: &dyn OracleConnection) -> Result<Preflight
 /// C2 — invalid objects grouped by owner/type, with a per-group count and a
 /// small sample of object names. `*_OBJECTS.STATUS = 'INVALID'`.
 ///
-/// The sample uses `LISTAGG(... ON OVERFLOW TRUNCATE)` (12.2+). Plain
-/// `LISTAGG` raises `ORA-01489` when one owner/type group's concatenated names
-/// exceed the 4000-byte SQL string limit — routine on an 18c catalog (XE18
-/// ships 456 invalid `PUBLIC` synonyms, ~6.7 KB of names) — which would fail
-/// the whole subcheck instead of reporting the invalid objects. `ON OVERFLOW
-/// TRUNCATE` bounds the aggregate; the outer `SUBSTR(..., 1, 400)` still caps
-/// the reported sample.
+/// The sample is bounded before aggregation: the inline view tags each row's
+/// position within its `(owner, object_type)` group and keeps only the first
+/// `INVALID_SAMPLE_MAX_NAMES` names (NULL for the rest, which `LISTAGG`
+/// ignores), while the window `COUNT(*)` preserves the true per-group count.
+/// This avoids `ORA-01489` when a group's concatenated names exceed the
+/// 4000-byte SQL string limit — routine on an 18c catalog (XE18 ships 456
+/// invalid `PUBLIC` synonyms, ~6.7 KB of names) — without the 12.2-only
+/// `LISTAGG ... ON OVERFLOW` syntax, since this server supports Oracle 12.1+.
+/// The outer `SUBSTR(..., 1, 400)` still caps the reported sample.
 #[must_use]
 pub fn invalid_objects_sql(tier: ViewTier) -> (&'static str, String) {
     let view = match tier {
@@ -496,13 +498,23 @@ pub fn invalid_objects_sql(tier: ViewTier) -> (&'static str, String) {
         ViewTier::All => "ALL_OBJECTS",
     };
     let sql = format!(
-        "SELECT owner, object_type, COUNT(*) AS invalid_count, \
-                SUBSTR(LISTAGG(object_name, ',' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects \
-         FROM {view} WHERE status = 'INVALID' \
-         GROUP BY owner, object_type ORDER BY invalid_count DESC, owner, object_type"
+        "SELECT owner, object_type, invalid_count, \
+                SUBSTR(LISTAGG(sampled_name, ',') WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects \
+         FROM (SELECT owner, object_type, object_name, \
+                      CASE WHEN ROW_NUMBER() OVER (PARTITION BY owner, object_type ORDER BY object_name) <= {INVALID_SAMPLE_MAX_NAMES} \
+                           THEN object_name END AS sampled_name, \
+                      COUNT(*) OVER (PARTITION BY owner, object_type) AS invalid_count \
+               FROM {view} WHERE status = 'INVALID') \
+         GROUP BY owner, object_type, invalid_count \
+         ORDER BY invalid_count DESC, owner, object_type"
     );
     (view, sql)
 }
+
+/// Maximum distinct object names folded into one group's `sample_objects`
+/// before `SUBSTR` truncation. Bounds the `LISTAGG` input below the 4000-byte
+/// SQL limit even with 128-byte 12.2+ identifiers.
+const INVALID_SAMPLE_MAX_NAMES: usize = 20;
 
 /// C3 — unusable indexes. `*_INDEXES.STATUS = 'UNUSABLE'` (partitioned indexes
 /// also expose `N/A`; we flag the plain UNUSABLE state). Unused-index

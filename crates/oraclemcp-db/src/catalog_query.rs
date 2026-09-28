@@ -115,14 +115,20 @@ macro_rules! top_sql_statspack {
 macro_rules! health_invalid_objects_sql {
     ($view:literal) => {
         concat!(
-            "SELECT owner, object_type, COUNT(*) AS invalid_count, ",
-            // ON OVERFLOW TRUNCATE (12.2+) prevents ORA-01489 when one
-            // owner/type group's concatenated names exceed the 4000-byte SQL
-            // limit (e.g. 456 invalid PUBLIC synonyms on 18c XE); the outer
-            // SUBSTR still caps the reported sample at 400 chars.
-            "SUBSTR(LISTAGG(object_name, ',' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects ",
-            "FROM ", $view, " WHERE status = 'INVALID' ",
-            "GROUP BY owner, object_type ORDER BY invalid_count DESC, owner, object_type"
+            "SELECT owner, object_type, invalid_count, ",
+            // Bound the per-group sample before LISTAGG so a group whose
+            // concatenated names exceed the 4000-byte SQL limit (e.g. 456
+            // invalid PUBLIC synonyms on 18c XE) cannot raise ORA-01489. The
+            // window COUNT(*) keeps the true group count. Portable to 12.1: no
+            // 12.2-only `LISTAGG ... ON OVERFLOW`.
+            "SUBSTR(LISTAGG(sampled_name, ',') WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects ",
+            "FROM (SELECT owner, object_type, object_name, ",
+            "CASE WHEN ROW_NUMBER() OVER (PARTITION BY owner, object_type ORDER BY object_name) <= 20 ",
+            "THEN object_name END AS sampled_name, ",
+            "COUNT(*) OVER (PARTITION BY owner, object_type) AS invalid_count ",
+            "FROM ", $view, " WHERE status = 'INVALID') ",
+            "GROUP BY owner, object_type, invalid_count ",
+            "ORDER BY invalid_count DESC, owner, object_type"
         )
     };
 }
