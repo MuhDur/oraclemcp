@@ -842,6 +842,56 @@
     }
   },
   {
+    "case_id": "w4_diagnostics_licensed_profile_serves_awr",
+    "tool": "oracle_plan_timeline",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql_id": "${cap:awr_sql_id}",
+        "max_points": 1
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "points": [
+          {}
+        ]
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "POLICY_DENIED"
+    },
+    "profile_variant": "synthetic_licensed",
+    "steps": [
+      {
+        "tool": "oracle_top_queries",
+        "arguments": {
+          "historical": true,
+          "top_n": 1
+        },
+        "expect": {
+          "json_subset": {
+            "source": "awr_ash",
+            "rows": [
+              {}
+            ]
+          }
+        },
+        "capture": {
+          "awr_sql_id": "/rows/0/SQL_ID"
+        }
+      }
+    ]
+  },
+  {
     "case_id": "w4_db_health_invalid_objects_includes_fixture_invalid_proc",
     "tool": "oracle_db_health",
     "level": "READ_ONLY",

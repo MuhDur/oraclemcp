@@ -45,7 +45,7 @@ OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "au
                         "steps", "expect_by_version", "cleanup", "plan_contains"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
-                    "synthetic_cross_security_strict", "protected", "capped_rw"}
+                    "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
@@ -917,6 +917,16 @@ username = "system"
 credential_ref = "env:W4_DB_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
+
+[[profiles]]
+name = "{lane}_licensed"
+description = "synthetic W4 lane with an explicit Diagnostics Pack license attestation"
+connect_string = "{dsn}"
+username = "system"
+credential_ref = "env:W4_DB_PASSWORD"
+max_level = "ADMIN"
+default_level = "READ_ONLY"
+diagnostics_pack_licensed = true
 '''
     if owner is not None:
         require(re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", owner) is not None,
@@ -1833,6 +1843,7 @@ def run_lane(args):
                 for case in cases:
                     variant = case.get("profile_variant")
                     desired_profile = (args.lane + "_raw" if variant == "synthetic_raw"
+                                       else args.lane + "_licensed" if variant == "synthetic_licensed"
                                        else args.lane + "_owner" if variant == "synthetic_owner"
                                        else args.lane + "_owner_rw" if variant == "synthetic_owner_rw"
                                        else args.lane + "_cross_rw" if variant == "synthetic_cross_rw"
