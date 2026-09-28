@@ -127,10 +127,11 @@ pub use catalog_resolver::{
     OraclePolicyCatalogVisibility, OracleSessionSecurityContext, OracleVpdRlsObservation,
     OracleVpdRlsObservationStatus, OracleVpdRlsPolicy, ReadPlanProof, ReadPlanProofError,
     RelationSecurityFeature, RelationSecurityKey, RelationSecurityObservation,
-    RelationSecurityProofError, RelationSecurityState, fga_closure, observe_relation_security,
-    observe_vpd_rls_for_relations, observe_vpd_rls_for_schema, ols_installation_evidence,
-    prove_semantic_read_plan, read_catalog_resolve_context, read_session_security_context,
-    resolve_semantic_read_relations, resolved_relations_read_purity,
+    RelationSecurityProofError, RelationSecurityState, bounded_policy_catalog_probe, fga_closure,
+    observe_relation_security, observe_vpd_rls_for_relations,
+    observe_vpd_rls_for_relations_with_probe, observe_vpd_rls_for_schema,
+    ols_installation_evidence, prove_semantic_read_plan, read_catalog_resolve_context,
+    read_session_security_context, resolve_semantic_read_relations, resolved_relations_read_purity,
 };
 pub use connection::{
     CqnDriverNotification, CqnNotificationOutcome, CqnNotificationReceiver, CqnQueryRegistration,

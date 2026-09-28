@@ -8,6 +8,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::RwLock;
+use std::time::Duration;
 
 use asupersync::Cx;
 use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReason};
@@ -44,6 +45,12 @@ const MAX_SESSION_ROLES: usize = 256;
 
 /// Maximum VPD/RLS policy rows surfaced in one diagnostic observation.
 pub const MAX_VPD_RLS_POLICY_ROWS: usize = 64;
+
+/// A visibility observation must never consume the caller's read budget.
+///
+/// This is deliberately a diagnostic bound, not an admission bound: a timeout
+/// becomes an explicit unavailable observation under R36.
+pub const RLS_VPD_VISIBILITY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Session-security context observed through Oracle's own `USERENV` and role
 /// catalog for VPD/RLS diagnostics.
@@ -216,6 +223,7 @@ struct ResolverCacheState {
     generation: u64,
     exhausted: bool,
     entries: HashMap<ResolverCacheKey, Resolution>,
+    policy_catalog_probe: Option<OraclePolicyCatalogProbe>,
 }
 
 /// Bounded generation-scoped resolution cache for one lane/profile.
@@ -249,6 +257,7 @@ impl OracleCatalogResolverCache {
                 generation: 1,
                 exhausted: false,
                 entries: HashMap::new(),
+                policy_catalog_probe: None,
             }),
         }
     }
@@ -291,6 +300,7 @@ impl OracleCatalogResolverCache {
             return oraclemcp_guard::CatalogGeneration(u64::MAX);
         };
         state.entries.clear();
+        state.policy_catalog_probe = None;
         match state.generation.checked_add(1) {
             Some(next) if !state.exhausted => state.generation = next,
             _ => {
@@ -299,6 +309,27 @@ impl OracleCatalogResolverCache {
             }
         }
         oraclemcp_guard::CatalogGeneration(state.generation)
+    }
+
+    /// Return the `ALL_POLICIES` visibility observation for this exact session
+    /// generation, if it has already been collected.
+    #[must_use]
+    pub fn policy_catalog_probe(&self) -> Option<OraclePolicyCatalogProbe> {
+        self.state
+            .read()
+            .ok()
+            .and_then(|state| state.policy_catalog_probe.clone())
+    }
+
+    /// Cache one non-authorizing visibility observation for the current
+    /// generation. This is intentionally separate from resolution evidence:
+    /// it can only enrich a response, never admit a read.
+    pub fn cache_policy_catalog_probe(&self, probe: OraclePolicyCatalogProbe) {
+        if let Ok(mut state) = self.state.write()
+            && !state.exhausted
+        {
+            state.policy_catalog_probe = Some(probe);
+        }
     }
 
     /// Load missing names from the live session into the current generation.
@@ -2036,6 +2067,26 @@ pub async fn observe_vpd_rls_for_relations(
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
 ) -> OracleVpdRlsObservation {
+    observe_vpd_rls_for_relations_inner(cx, conn, relations, None).await
+}
+
+/// Observe visible policies using a previously bounded, generation-scoped
+/// `ALL_POLICIES` visibility observation.
+pub async fn observe_vpd_rls_for_relations_with_probe(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+    probe: OraclePolicyCatalogProbe,
+) -> OracleVpdRlsObservation {
+    observe_vpd_rls_for_relations_inner(cx, conn, relations, Some(probe)).await
+}
+
+async fn observe_vpd_rls_for_relations_inner(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+    cached_probe: Option<OraclePolicyCatalogProbe>,
+) -> OracleVpdRlsObservation {
     let session = read_session_security_context(cx, conn).await.ok();
     let mut policies = Vec::new();
     let mut policy_error = None;
@@ -2067,7 +2118,10 @@ pub async fn observe_vpd_rls_for_relations(
             break;
         }
     }
-    let probe = query_policy_catalog_probe(cx, conn).await;
+    let probe = match cached_probe {
+        Some(probe) => probe,
+        None => query_policy_catalog_probe(cx, conn).await,
+    };
     build_vpd_rls_observation(
         "relations".to_owned(),
         session,
@@ -2075,6 +2129,34 @@ pub async fn observe_vpd_rls_for_relations(
         policies,
         policy_error,
     )
+}
+
+/// Bound the non-authorizing `ALL_POLICIES` visibility observation.
+///
+/// The caller is expected to cache the returned value for its session
+/// generation. A timeout is a truthful R36 observation, never a refusal and
+/// never evidence of policy absence.
+pub async fn bounded_policy_catalog_probe(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> OraclePolicyCatalogProbe {
+    match asupersync::time::timeout(
+        cx.now(),
+        RLS_VPD_VISIBILITY_PROBE_TIMEOUT,
+        query_policy_catalog_probe(cx, conn),
+    )
+    .await
+    {
+        Ok(probe) => probe,
+        Err(_) => OraclePolicyCatalogProbe {
+            visibility: OraclePolicyCatalogVisibility::Unavailable,
+            visible_policy_rows_probe: None,
+            detail: format!(
+                "ALL_POLICIES visibility probe exceeded its {} ms observation deadline; policy absence is not proven",
+                RLS_VPD_VISIBILITY_PROBE_TIMEOUT.as_millis()
+            ),
+        },
+    }
 }
 
 struct DictionaryLookup<'a> {
@@ -3801,6 +3883,53 @@ mod tests {
                 .expect("responses lock")
                 .pop_front()
                 .unwrap_or_else(|| Err(DbError::Query("unexpected dictionary query".to_owned())))
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            Err(DbError::Execute("unexpected execute".to_owned()))
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(DbError::Execute("unexpected commit".to_owned()))
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            Err(DbError::Execute("unexpected rollback".to_owned()))
+        }
+    }
+
+    struct StalledPolicyProbe;
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for StalledPolicyProbe {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            std::future::pending().await
         }
 
         async fn execute(
@@ -6302,6 +6431,34 @@ mod tests {
             assert_eq!(cache.resolve(&name, &context), Resolution::Unresolved);
             prior = next;
         }
+    }
+
+    #[test]
+    fn policy_catalog_probe_is_generation_scoped_and_non_authorizing() {
+        let cache = OracleCatalogResolverCache::new();
+        let probe = OraclePolicyCatalogProbe {
+            visibility: OraclePolicyCatalogVisibility::Unavailable,
+            visible_policy_rows_probe: None,
+            detail: "ALL_POLICIES visibility probe exceeded its 1000 ms observation deadline; policy absence is not proven".to_owned(),
+        };
+        cache.cache_policy_catalog_probe(probe.clone());
+        assert_eq!(cache.policy_catalog_probe(), Some(probe));
+
+        cache.invalidate(CatalogInvalidation::Reconnect);
+        assert_eq!(cache.policy_catalog_probe(), None);
+    }
+
+    #[test]
+    fn stalled_policy_catalog_probe_degrades_to_a_typed_observation() {
+        run_with_cx(|cx| async move {
+            let probe = bounded_policy_catalog_probe(&cx, &StalledPolicyProbe).await;
+            assert_eq!(probe.visibility, OraclePolicyCatalogVisibility::Unavailable);
+            assert_eq!(probe.visible_policy_rows_probe, None);
+            assert!(
+                probe.detail.contains("1000 ms observation deadline"),
+                "timeout must be visible to the caller: {probe:?}"
+            );
+        });
     }
 
     #[test]

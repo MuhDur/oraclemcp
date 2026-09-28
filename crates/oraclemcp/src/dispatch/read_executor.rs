@@ -1455,6 +1455,7 @@ impl<'a> GuardedReadExecutor<'a> {
                 cx,
                 PreparedQueryRuntime {
                     conn,
+                    catalog_cache: &state.catalog_cache,
                     request_budget,
                     active_profile,
                     export_access,
@@ -1815,6 +1816,7 @@ impl<'a> GuardedReadExecutor<'a> {
         let (prepared, provenance) = admitted.into_parts();
         let PreparedQueryRuntime {
             conn,
+            catalog_cache,
             request_budget,
             active_profile,
             export_access,
@@ -2098,8 +2100,22 @@ impl<'a> GuardedReadExecutor<'a> {
                     }
                 };
                 if !rls_vpd_relations.is_empty() {
+                    let probe = match catalog_cache.policy_catalog_probe() {
+                        Some(probe) => probe,
+                        None => {
+                            let probe = bounded_policy_catalog_probe(cx, &read_conn).await;
+                            catalog_cache.cache_policy_catalog_probe(probe.clone());
+                            probe
+                        }
+                    };
                     response.rls_vpd = Some(
-                        observe_vpd_rls_for_relations(cx, &read_conn, &rls_vpd_relations).await,
+                        observe_vpd_rls_for_relations_with_probe(
+                            cx,
+                            &read_conn,
+                            &rls_vpd_relations,
+                            probe,
+                        )
+                        .await,
                     );
                 }
                 if let Some(audit_certificate) = audit_certificate.as_ref() {
