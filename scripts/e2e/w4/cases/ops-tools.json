@@ -8,11 +8,7 @@
       "http"
     ],
     "requires": [],
-    "setup": [
-      {
-        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL=LABEL WHERE ID=1"
-      }
-    ],
+    "setup": [],
     "call": {
       "arguments": {}
     },
