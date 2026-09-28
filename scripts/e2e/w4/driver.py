@@ -2288,6 +2288,16 @@ def selftest():
         [alias_enum["case_id"]])
     require(selected_enum == [alias_enum],
             "--case must select a generated enum contract case after descriptor discovery")
+    # A requested stdio-only file case is absent from HTTP's local family, but
+    # remains selected for the whole run after its stdio pass succeeds.
+    stdio_only = {"case_id": "w4_stdio_only", "transports": ["stdio"]}
+    selected_case_ids = set()
+    for file_cases in ([stdio_only], []):
+        requested_here = {"w4_stdio_only"} & {case["case_id"] for case in file_cases}
+        selected_case_ids.update(requested_here)
+        select_requested_cases(file_cases, [], requested_here)
+    require(selected_case_ids == {"w4_stdio_only"},
+            "--case selection lost a stdio-only case during the HTTP pass")
     sql_id = schema_placeholder(
         {"type": "string", "minLength": 13, "maxLength": 13}, "sql_id")
     require(isinstance(sql_id, str) and len(sql_id) == 13,
