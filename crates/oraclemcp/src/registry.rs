@@ -1371,7 +1371,7 @@ pub fn tool_registry() -> ToolRegistry {
         ToolDescriptor::new(
             "oracle_top_queries",
             ToolTier::FoundationLiveDb,
-            "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Historical AWR requires the profile's explicit Diagnostics Pack license attestation and Oracle's active pack setting; without attestation the request returns POLICY_DENIED before database access. An attested profile may use Statspack when AWR is not active.",
+            "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS); live calls may narrow by exact sql_id or bounded sql_text. Historical AWR requires the profile's explicit Diagnostics Pack license attestation and Oracle's active pack setting; without attestation the request returns POLICY_DENIED before database access. An attested profile may use Statspack when AWR is not active.",
         )
         .with_input_schema(object_schema(
             props_with(
