@@ -984,6 +984,9 @@ fn probe_http_transport(url: &str) -> (Class, String) {
     let authority = base
         .strip_prefix("http://")
         .or_else(|| base.strip_prefix("https://"))
+        .unwrap_or(base)
+        .split('/')
+        .next()
         .unwrap_or(base);
     let mcp_path = if base.ends_with("/mcp") { "" } else { "/mcp" };
     let Some(addr) = authority
