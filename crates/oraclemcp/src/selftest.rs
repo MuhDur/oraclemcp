@@ -99,7 +99,12 @@ fn classify_elevation(tool: &str, observed: &Observed) -> (Class, Option<String>
             let class = normalize_class(class);
             if is_expected_refusal_class(&class) {
                 (Class::ExpectedRefusal, Some(class))
-            } else if is_environment_class(&class) || is_synthetic_input_class(&class) {
+            } else if is_synthetic_input_class(&class) {
+                // The write sweep intentionally sends schema-shaped markers.
+                // Argument validation is a safe refusal of that marker, not an
+                // environmental failure to exercise a write.
+                (Class::ExpectedRefusal, Some(class))
+            } else if is_environment_class(&class) {
                 (Class::Environment, Some(class))
             } else {
                 (Class::Defect, Some(class))
@@ -1889,6 +1894,15 @@ mod tests {
         let (writes, _) = tool_kinds();
         assert!(writes.iter().any(|tool| tool == "oracle_execute"));
         assert!(writes.iter().any(|tool| tool == "oracle_create_or_replace"));
+    }
+
+    #[test]
+    fn synthetic_write_argument_rejection_is_expected_refusal() {
+        let observed = Observed::Error {
+            class: "INVALID_ARGUMENTS".to_owned(),
+            message: String::new(),
+        };
+        assert_eq!(classify_write_observed(&observed).0, Class::ExpectedRefusal);
     }
 
     #[test]
