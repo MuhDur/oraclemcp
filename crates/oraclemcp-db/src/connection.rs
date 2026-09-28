@@ -10739,12 +10739,17 @@ mod driver_seam {
 
         // The official backend path is a violation; its protocol/workspace
         // neighbours and comment mentions are not.
-        assert!(names_official_path(&format!("use {}::Connection;", "oracledb")));
+        assert!(names_official_path(&format!(
+            "use {}::Connection;",
+            "oracledb"
+        )));
         assert!(names_official_path(&format!(
             "    let _ = {} :: connect(cfg);",
             "oracledb"
         )));
-        assert!(!names_official_path("// oracledb::Connection is thread-confined"));
+        assert!(!names_official_path(
+            "// oracledb::Connection is thread-confined"
+        ));
         assert!(!names_official_path("use oraclemcp_driver_cx::Connection;"));
         assert!(!names_official_path("oracledb_protocol::x"));
         assert!(!names_official_path("use oraclemcp_db::OracleCell;"));
