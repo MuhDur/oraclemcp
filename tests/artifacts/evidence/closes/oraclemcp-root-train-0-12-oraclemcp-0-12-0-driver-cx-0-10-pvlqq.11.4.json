@@ -1,0 +1,65 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:37:11Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.4",
+  "scope": {
+    "summary": "Prove the installer E2E contract suite is honestly green on the post-T6.1 tree, and harden npm_release_channel_is_retired so a retired npm publish channel re-added under ANY workflow filename is caught.",
+    "in_scope": [
+      "crates/oraclemcp/tests/installer_e2e.rs"
+    ],
+    "out_of_scope": [
+      "The Homebrew/winget/npm removal itself (T6.1, bead .3.1, already closed); this close only proves the survivor suite asserts a current, true contract on that post-retirement tree.",
+      "A real online install from a published GitHub release (explicit no-claim boundary; that is R.7).",
+      "The Windows durable-state install step (T10.3); the Windows installer PSSA/dry-run lane (job windows-installer) remains separate and unaffected.",
+      "Any .github/workflows/ci.yml edit: the tier-A `test` job's `cargo test --workspace --all-targets` step already builds and runs tests/installer_e2e.rs, so the `installer` job does not need a duplicate scoped step.",
+      "Other agents' uncommitted Rust edits present in this shared checkout (reported by the scaffold as 49 dirty paths outside this scope); excluded from tree_clean by the scaffold's scope computation."
+    ]
+  },
+  "source": {
+    "sha": "dfe67632dd8908f18a8128acd0ec6ef0b3af8dc7",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo test -p oraclemcp --test installer_e2e --no-fail-fast (tier-A CI job `test`, step `cargo test --workspace --all-targets`, .github/workflows/ci.yml)",
+        "kind": "cli",
+        "trace": "At source.sha dfe67632 (my file identical at current HEAD 2d9b94de): `test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.13s`. All 11 tests: installer_lint_and_offline_smoke_passes, install_manual_preserves_detailed_contract_and_readme_stays_install_first, windows_installer_verifies_before_mutating_and_requires_service_consent, unix_installer_reinstall_is_idempotent_for_identical_files, installer_ci_runs_built_artifact_and_windows_pssa_gates, release_sbom_workflow_merges_dashboard_and_rust_sboms, release_sbom_merge_script_includes_rust_and_dashboard_components, npm_release_channel_is_retired, cargo_binstall_metadata_matches_release_assets, binstall_metadata_valid_and_no_distribution_manifests_ship, installers_offer_consent_gated_tns_discovery_via_the_binary. Command: CARGO_TARGET_DIR=<checkout>/target cargo test -p oraclemcp --test installer_e2e --no-fail-fast. CI coverage: the `test` job (name `cargo test`) runs `cargo test --workspace --all-targets` (ci.yml:135-139), which includes every integration test target; the `installer` job (name `installer lint and built-artifact smoke`) runs the offline smoke only."
+      },
+      {
+        "name": "scripts/installer_lint_and_offline_smoke.sh --log with shellcheck required and the built binary (tier-A CI job `installer`, step `installer offline smoke`, .github/workflows/ci.yml:284-288)",
+        "kind": "cli",
+        "trace": "`ORACLEMCP_INSTALLER_REQUIRE_SHELLCHECK=1 ORACLEMCP_INSTALLER_BUILT_BINARY=$PWD/target/debug/oraclemcp bash scripts/installer_lint_and_offline_smoke.sh --log` -> exit 0, final line `installer-smoke: OK`. JSONL suite_summary event outcome=pass message=`installer acceptance cases passed: static, agent dry-run, TTY, cosign, update, rollback, service, offline, uninstall`. The built-artifact path is exercised (`built artifact offline install and idempotent reinstall` pass event). shellcheck present at /usr/bin/shellcheck so the REQUIRE_SHELLCHECK=1 branch did not skip."
+      },
+      {
+        "name": "planted negative: retired npm channel re-added (npm_release_channel_is_retired load-bearing)",
+        "kind": "cli",
+        "trace": "(1) Re-added .github/workflows/publish-npm.yml containing `npm publish` + NPM_TOKEN: `cargo test -p oraclemcp --test installer_e2e npm_release_channel_is_retired -- --exact` FAILED -> `panicked at crates/oraclemcp/tests/installer_e2e.rs:593:9: retired npm channel file must not exist: .github/workflows/publish-npm.yml`; `test result: FAILED. 0 passed; 1 failed; ...`. (2) Removed it and planted a differently-named .github/workflows/zz-npm-renegade.yml containing only `npm publish`, proving the new whole-directory scan (not just the absence list) is load-bearing: FAILED -> `panicked at ...:620:13: /home/durakovic/projects/oraclemcp/.github/workflows/zz-npm-renegade.yml must not publish to a retired npm channel: npm publish`. Temp file removed; `.github/workflows/` has no npm workflow and no zz-* file. Neither run silenced stderr."
+      },
+      {
+        "name": "retired brew/winget and binstall contract (binstall_metadata_valid_and_no_distribution_manifests_ship, cargo_binstall_metadata_matches_release_assets)",
+        "kind": "config-gate",
+        "trace": "Both tests green at source.sha. binstall metadata retained ([package.metadata.binstall] + windows-msvc override); retired packaging/homebrew, packaging/winget, scripts/render_distribution_manifests.sh asserted absent; .github/workflows/release.yml asserted free of distribution-manifests/render_distribution_manifests/Homebrew/homebrew/winget."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No CI job URL: this implementer session must not push (AGENTS.md; the operator prompt forbids push). The tier-A job/step names are recorded (job `test`, step `cargo test --workspace --all-targets`; job `installer`, step `installer offline smoke`); the green run at the HEAD commit is expected but not observed from GitHub.",
+    "The scoped suite and the offline smoke ran in the shared multi-agent checkout, so the Rust compile saw other agents' uncommitted edits to oraclemcp-config/core/db/oraclemcp-main. Those files do not touch installer scripts, docs/install.md, workflows, or Cargo.toml binstall metadata, and the suite's assertions read those surfaces directly; tree_clean=true is computed over this bead's single in-scope path at source.sha.",
+    "The offline smoke used the host x86_64-unknown-linux-gnu debug binary (target/debug/oraclemcp), not the musl target the CI installer job builds (target/x86_64-unknown-linux-musl/debug/oraclemcp); the smoke's built-artifact path is exercised either way, but the exact CI musl binary was not run locally.",
+    "The planted-negative runs temporarily create a workflow file under .github/workflows/ and remove it; a concurrently running agent's test could in principle observe the file in that sub-second window. It was created and removed only for the two demonstration runs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
