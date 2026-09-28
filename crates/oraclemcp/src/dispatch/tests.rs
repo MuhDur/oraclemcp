@@ -2963,6 +2963,7 @@ struct ExecRecordingMock {
 #[derive(Default)]
 struct EditionLifecycleState {
     child_already_exists: AtomicBool,
+    create_preflight_barrier: Mutex<Option<Arc<Barrier>>>,
     queries: Mutex<Vec<(String, Vec<OracleBind>)>>,
     executed: Mutex<Vec<String>>,
     commits: AtomicUsize,
@@ -3093,13 +3094,35 @@ impl OracleConnection for EditionLifecycleMock {
             .lock()
             .expect("edition query mutex")
             .push((sql.to_owned(), binds.to_vec()));
-        if sql.to_ascii_lowercase().contains("from all_editions")
-            && self.state.child_already_exists.load(Ordering::SeqCst)
+        let lower_sql = sql.to_ascii_lowercase();
+        if lower_sql.contains("sys_context('userenv','dbid')")
+            && lower_sql.contains("sys_context('userenv','con_uid')")
         {
-            return Ok(vec![semantic_row(&[(
-                "EDITION_NAME",
-                Some("APP_RELEASE_CURRENT"),
-            )])]);
+            return Ok(vec![semantic_row(&[
+                ("DBID", Some("synthetic-db")),
+                ("CON_UID", Some("synthetic-pdb")),
+            ])]);
+        }
+        if lower_sql.contains("from all_editions") {
+            // Snapshot the Oracle dictionary answer before the optional test
+            // barrier. This models two independent services that both observe
+            // the same empty parent at preflight, then race at CREATE.
+            let child_already_exists = self.state.child_already_exists.load(Ordering::SeqCst);
+            if let Some(barrier) = self
+                .state
+                .create_preflight_barrier
+                .lock()
+                .expect("edition race barrier mutex")
+                .as_ref()
+            {
+                barrier.wait();
+            }
+            if child_already_exists {
+                return Ok(vec![semantic_row(&[(
+                    "EDITION_NAME",
+                    Some("APP_RELEASE_CURRENT"),
+                )])]);
+            }
         }
         Ok(Vec::new())
     }
@@ -3110,6 +3133,14 @@ impl OracleConnection for EditionLifecycleMock {
             .lock()
             .expect("edition execute mutex")
             .push(sql.to_owned());
+        if sql.to_ascii_uppercase().contains("CREATE EDITION")
+            && self.state.child_already_exists.swap(true, Ordering::SeqCst)
+        {
+            return Err(DbError::ServerExecute(
+                "ORA-38807: implementation restriction: cannot create more than one child edition"
+                    .to_owned(),
+            ));
+        }
         Ok(0)
     }
 
@@ -8731,21 +8762,54 @@ fn edition_second_child_is_refused_before_oracle_with_a_typed_one_child_envelope
 }
 
 #[test]
+fn two_independent_services_reconcile_same_parent_create_against_oracle() {
+    let state = Arc::new(EditionLifecycleState::default());
+    let first_dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+    let second_dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+    execute_confirmed_edition_sql(
+        &first_dispatcher,
+        "CREATE EDITION first_child AS CHILD OF shared_parent",
+    )
+    .expect("the first service creates the sole child");
+    let loser = execute_confirmed_edition_sql(
+        &second_dispatcher,
+        "CREATE EDITION second_child AS CHILD OF shared_parent",
+    )
+    .expect_err("the second independent service must reconcile against Oracle");
+    assert!(
+        loser.ora_code == Some(38_807),
+        "the database's one-child rule is authoritative: {loser:?}"
+    );
+    assert_eq!(
+        state.executed.lock().expect("edition execute mutex").len(),
+        1,
+        "the second service reads the shared Oracle dictionary and never creates a fork"
+    );
+}
+
+#[test]
 fn edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionary_oracle_io() {
     let create = "CREATE EDITION competing_child AS CHILD OF inflight_parent";
     let parent = match parse_edition_lifecycle_sql(create) {
         EditionLifecycleParse::Parsed(EditionLifecycleSql::CreateChild { parent, .. }) => parent,
         other => panic!("test fixture must be an exact edition create: {other:?}"),
     };
-    let local_only_scope = oraclemcp_db::PdbIdentityScope::LocalOnly {
-        observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
+    let pdb_scope = oraclemcp_db::PdbIdentityScope::ServiceStateStore {
+        identity: oraclemcp_db::PdbIdentity {
+            dbid: "synthetic-db".to_owned(),
+            con_uid: "synthetic-pdb".to_owned(),
+        },
     };
-    let _first_proposal =
-        reserve_edition_child_slot(&parent, &local_only_scope, Some("d2-edition-test"))
-            .expect("first proposal reserves the parent's only child slot");
-
     let state = Arc::new(EditionLifecycleState::default());
     let dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+    let _first_proposal = reserve_edition_child_slot(
+        &parent,
+        &pdb_scope,
+        Some("d2-edition-test"),
+        &dispatcher.edition_creation_reservations,
+    )
+    .expect("first proposal reserves the parent's only child slot");
+
     let error = execute_confirmed_edition_sql(&dispatcher, create)
         .expect_err("an in-flight first proposal owns the only child slot");
     assert_eq!(

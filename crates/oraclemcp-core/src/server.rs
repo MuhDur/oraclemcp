@@ -352,6 +352,15 @@ pub type McpSurfaceOutcome = Outcome<Option<McpSurfaceState>, ErrorEnvelope>;
 /// Dynamic MCP surface snapshot future.
 pub type McpSurfaceFuture<'a> = Pin<Box<dyn Future<Output = McpSurfaceOutcome> + 'a>>;
 
+/// PDB identity evidence used only to scope service-local operator state.
+///
+/// This is deliberately a dispatcher capability rather than an HTTP request
+/// field: the connection that serves the active profile is the authority for
+/// its DBID/CON_UID. A dispatcher without a database session returns its
+/// explicit local-only observation instead of fabricating shared identity.
+pub type PdbIdentityScopeFuture<'a> =
+    Pin<Box<dyn Future<Output = oraclemcp_db::PdbIdentityScope> + 'a>>;
+
 /// Boxed dispatcher lifecycle future. Like [`DispatchFuture`], this is not
 /// `Send` because stateful cleanup must run on the lane/runtime that owns the
 /// Oracle session.
@@ -824,6 +833,23 @@ pub trait ToolDispatch: Send + Sync + 'static {
         _detail: McpSurfaceDetail,
     ) -> McpSurfaceFuture<'a> {
         Box::pin(async { Outcome::Ok(None) })
+    }
+
+    /// Read server-derived PDB identity for service-state coordination.
+    ///
+    /// The operator HTTP transport calls this before persisting an edition
+    /// proposal. It is not an MCP tool and no caller-supplied value can reach
+    /// this boundary.
+    fn service_state_pdb_identity<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+    ) -> PdbIdentityScopeFuture<'a> {
+        Box::pin(async {
+            oraclemcp_db::PdbIdentityScope::LocalOnly {
+                observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
+            }
+        })
     }
 }
 
@@ -1469,6 +1495,24 @@ impl OracleMcpServer {
                     "operator edition lane policy could not be verified",
                 )),
             }
+        })
+    }
+
+    /// Obtain PDB identity from the active server-owned dispatcher before an
+    /// operator draft enters the durable service state store.
+    pub(crate) fn service_state_pdb_identity_blocking_with_context(
+        &self,
+        context: DispatchContext<'_>,
+    ) -> oraclemcp_db::PdbIdentityScope {
+        crate::lane::block_on_lane_bridge(async {
+            let Some(cx) = Cx::current() else {
+                return oraclemcp_db::PdbIdentityScope::LocalOnly {
+                    observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
+                };
+            };
+            self.dispatcher
+                .service_state_pdb_identity(&cx, context)
+                .await
         })
     }
 

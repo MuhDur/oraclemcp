@@ -3322,6 +3322,14 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
         draft_json["data"]["proposal"]["status"],
         serde_json::json!("requested")
     );
+    assert_eq!(
+        draft_json["data"]["proposal"]["coordination_scope"],
+        serde_json::json!({
+            "coordination_scope": "service_state_store",
+            "identity": {"dbid": "synthetic-db", "con_uid": "synthetic-pdb"}
+        }),
+        "the HTTP JSON draft cannot supply coordination scope; the served dispatcher does"
+    );
     let proposal_id = draft_json["data"]["proposal"]["proposal_id"]
         .as_str()
         .expect("proposal id")
@@ -3402,6 +3410,48 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 
+#[test]
+fn edition_draft_rejects_client_supplied_pdb_coordination_scope() {
+    let (auditor, _sink) = operator_auditor();
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
+        calls: Arc::new(AtomicUsize::new(0)),
+        profile: "synthetic_stage",
+        deny: false,
+    }));
+    let dir = dashboard_test_dir("edition-draft-untrusted-scope");
+    let store = Arc::new(
+        crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+            .expect("proposal store"),
+    );
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(store),
+        ..Default::default()
+    };
+    let response = handle_http_request(
+        &server,
+        &cfg,
+        operator_json_post(
+            "/operator/v1/edition-proposals/draft",
+            &serde_json::json!({
+                "profile": "stage",
+                "child_edition": "synthetic_child",
+                "base_edition": "ora$base",
+                "objects": ["SYNTHETIC_VIEW"],
+                "coordination_scope": {
+                    "coordination_scope": "service_state_store",
+                    "identity": {"dbid": "forged-db", "con_uid": "forged-pdb"}
+                }
+            }),
+        ),
+    );
+    assert_eq!(response.status, 400);
+    assert_eq!(
+        response_json(&response)["data"]["error"],
+        serde_json::json!("invalid_edition_proposal")
+    );
+}
+
 struct EditionDispatch {
     calls: Arc<AtomicUsize>,
     profile: &'static str,
@@ -3454,6 +3504,21 @@ impl ToolDispatch for EditionDispatch {
                 },
                 connection: ConnectionStatus::default(),
             }))
+        })
+    }
+
+    fn service_state_pdb_identity<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+    ) -> crate::server::PdbIdentityScopeFuture<'a> {
+        Box::pin(async {
+            oraclemcp_db::PdbIdentityScope::ServiceStateStore {
+                identity: oraclemcp_db::PdbIdentity {
+                    dbid: "synthetic-db".to_owned(),
+                    con_uid: "synthetic-pdb".to_owned(),
+                },
+            }
         })
     }
 }
@@ -3576,7 +3641,10 @@ fn edition_flip_routes_refuse_non_operator_before_proposal_or_dispatch() {
             operator_json_post(path, &serde_json::json!({ "proposal_id": "synthetic" }))
                 .with_peer_loopback(false),
         );
-        assert_eq!(response.status, 403, "{path} must require operator authority");
+        assert_eq!(
+            response.status, 403,
+            "{path} must require operator authority"
+        );
         assert_eq!(
             response_json(&response)["error"],
             serde_json::json!("operator_authority_required"),

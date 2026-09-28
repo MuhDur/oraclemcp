@@ -238,6 +238,21 @@ impl ToolDispatch for WorkbenchDispatch {
             }))
         })
     }
+
+    fn service_state_pdb_identity<'a>(
+        &'a self,
+        _cx: &'a Cx,
+        _context: DispatchContext<'a>,
+    ) -> crate::server::PdbIdentityScopeFuture<'a> {
+        Box::pin(async {
+            oraclemcp_db::PdbIdentityScope::ServiceStateStore {
+                identity: oraclemcp_db::PdbIdentity {
+                    dbid: "synthetic-db".to_owned(),
+                    con_uid: "synthetic-pdb".to_owned(),
+                },
+            }
+        })
+    }
 }
 
 struct SourceHistoryDispatch {

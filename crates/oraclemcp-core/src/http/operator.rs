@@ -1717,8 +1717,7 @@ fn handle_operator_edition_proposal_route(
             if !content_type_is_json(request) {
                 return empty_response(415);
             }
-            let draft = match serde_json::from_slice::<EditionProposalCreateRequest>(&request.body)
-            {
+            let draft = match serde_json::from_slice::<EditionProposalDraftRequest>(&request.body) {
                 Ok(draft) => draft,
                 Err(_) => {
                     return operator_json_response(
@@ -1732,6 +1731,15 @@ fn handle_operator_edition_proposal_route(
                     );
                 }
             };
+            let operator_key = operator_subject.legacy_agent_identity();
+            let scope_context = request_context
+                .scope_grant
+                .map(DispatchContext::with_scope_grant)
+                .unwrap_or_default()
+                .with_principal_key(&operator_key);
+            let draft = draft.with_server_scope(
+                server.service_state_pdb_identity_blocking_with_context(scope_context),
+            );
             match store.create_edition_proposal(draft) {
                 Ok(proposal) => operator_json_response(
                     200,
@@ -1818,6 +1826,34 @@ struct EditionProposalFlipRequest {
     confirm: Option<String>,
     #[serde(default)]
     idempotency_key: Option<String>,
+}
+
+/// Caller-supplied metadata for an edition proposal draft.
+///
+/// PDB coordination scope is intentionally absent. The HTTP handler obtains it
+/// from the active server connection immediately before persistence.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditionProposalDraftRequest {
+    profile: String,
+    child_edition: String,
+    base_edition: String,
+    objects: Vec<String>,
+}
+
+impl EditionProposalDraftRequest {
+    fn with_server_scope(
+        self,
+        coordination_scope: oraclemcp_db::PdbIdentityScope,
+    ) -> EditionProposalCreateRequest {
+        EditionProposalCreateRequest {
+            profile: self.profile,
+            child_edition: self.child_edition,
+            base_edition: self.base_edition,
+            objects: self.objects,
+            coordination_scope,
+        }
+    }
 }
 
 /// Merge to a proposal child, or re-flip to its base edition.

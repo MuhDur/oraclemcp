@@ -98,13 +98,6 @@ use oraclemcp_guard::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-/// Parents currently being created in this process. The dictionary is the
-/// durable source of truth after a successful DDL call; this reservation closes
-/// the check-then-create race between two active lanes before either second
-/// create can reach Oracle.
-static EDITION_CREATION_RESERVATIONS: LazyLock<SyncMutex<HashSet<String>>> =
-    LazyLock::new(|| SyncMutex::new(HashSet::new()));
-
 /// Restart invalidates every signed scoped-grant reference. The grant store
 /// remains lane-local and its binding prevents cross-lane replay.
 static SCOPED_GRANT_KEY: LazyLock<[u8; 32]> = LazyLock::new(|| {
@@ -609,6 +602,10 @@ pub struct OracleDispatcher {
     /// Append-only, redacted refusal corpus. This is an observer only: a
     /// corpus failure cannot alter the original guard refusal.
     refusal_corpus: Option<Arc<RefusalCorpusWriter>>,
+    /// Per-service, in-process CREATE EDITION preflight reservations. Separate
+    /// served services deliberately do not share this advisory state; Oracle
+    /// remains the authority that reconciles their cross-service race.
+    edition_creation_reservations: Arc<SyncMutex<HashSet<String>>>,
 }
 
 impl OracleDispatcher {
@@ -714,6 +711,7 @@ impl OracleDispatcher {
             profile_drain,
             write_intents: None,
             refusal_corpus: None,
+            edition_creation_reservations: Arc::new(SyncMutex::new(HashSet::new())),
         }
     }
 
@@ -811,6 +809,7 @@ impl OracleDispatcher {
             refusal_corpus: Some(Arc::new(RefusalCorpusWriter::new(
                 default_refusal_corpus_path(),
             ))),
+            edition_creation_reservations: Arc::new(SyncMutex::new(HashSet::new())),
         }
     }
 
@@ -7663,6 +7662,7 @@ struct DbToolCtx<'a> {
     current_schema: Option<&'a str>,
     audit: AuditCtx<'a>,
     quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
+    edition_creation_reservations: &'a Arc<SyncMutex<HashSet<String>>>,
 }
 
 /// In-process reservation held from the one-child dictionary preflight through
@@ -7670,11 +7670,12 @@ struct DbToolCtx<'a> {
 /// await, so it cannot block unrelated database I/O or cancellation cleanup.
 struct EditionCreationReservation {
     key: String,
+    reservations: Arc<SyncMutex<HashSet<String>>>,
 }
 
 impl Drop for EditionCreationReservation {
     fn drop(&mut self) {
-        if let Ok(mut reservations) = EDITION_CREATION_RESERVATIONS.lock() {
+        if let Ok(mut reservations) = self.reservations.lock() {
             reservations.remove(&self.key);
         }
     }
@@ -7728,6 +7729,7 @@ fn reserve_edition_child_slot(
     parent: &EditionIdentifier,
     pdb_identity_scope: &PdbIdentityScope,
     active_profile: Option<&str>,
+    reservations: &Arc<SyncMutex<HashSet<String>>>,
 ) -> Result<EditionCreationReservation, ErrorEnvelope> {
     let key = match pdb_identity_scope {
         PdbIdentityScope::ServiceStateStore { identity } => {
@@ -7744,16 +7746,19 @@ fn reserve_edition_child_slot(
             parent.as_str()
         ),
     };
-    let mut reservations = EDITION_CREATION_RESERVATIONS.lock().map_err(|_| {
+    let mut held_reservations = reservations.lock().map_err(|_| {
         ErrorEnvelope::new(
             ErrorClass::Internal,
             "edition lifecycle reservation lock is poisoned; refusing CREATE EDITION",
         )
     })?;
-    if !reservations.insert(key.clone()) {
+    if !held_reservations.insert(key.clone()) {
         return Err(one_child_edition_error());
     }
-    Ok(EditionCreationReservation { key })
+    Ok(EditionCreationReservation {
+        key,
+        reservations: Arc::clone(reservations),
+    })
 }
 
 async fn reserve_checked_edition_child_slot(
@@ -7761,7 +7766,12 @@ async fn reserve_checked_edition_child_slot(
     parent: &EditionIdentifier,
 ) -> Result<EditionCreationReservation, ErrorEnvelope> {
     let pdb_identity_scope = read_pdb_identity_scope(ctx.cx, ctx.conn).await;
-    let reservation = reserve_edition_child_slot(parent, &pdb_identity_scope, ctx.active_profile)?;
+    let reservation = reserve_edition_child_slot(
+        parent,
+        &pdb_identity_scope,
+        ctx.active_profile,
+        ctx.edition_creation_reservations,
+    )?;
     let rows = run_catalog_query(
         ctx.cx,
         ctx.conn,
@@ -12448,6 +12458,21 @@ impl ToolDispatch for OracleDispatcher {
             }
         })
     }
+
+    fn service_state_pdb_identity<'a>(
+        &'a self,
+        cx: &'a Cx,
+        _context: DispatchContext<'a>,
+    ) -> oraclemcp_core::server::PdbIdentityScopeFuture<'a> {
+        Box::pin(async move {
+            let Ok(state) = self.state.lock(cx).await else {
+                return PdbIdentityScope::LocalOnly {
+                    observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
+                };
+            };
+            read_pdb_identity_scope(cx, state.conn.as_ref()).await
+        })
+    }
 }
 
 /// Canonical export ownership copied out of the request context before the
@@ -13382,6 +13407,7 @@ impl OracleDispatcher {
                 current_schema: current_schema.as_deref(),
                 audit,
                 quarantine: &self.quarantine,
+                edition_creation_reservations: &self.edition_creation_reservations,
             };
             let result = execute_sql(tool_ctx, "oracle_execute", execute_args).await;
             if changes_session_context {
@@ -13421,6 +13447,7 @@ impl OracleDispatcher {
                 current_schema: current_schema.as_deref(),
                 audit,
                 quarantine: &self.quarantine,
+                edition_creation_reservations: &self.edition_creation_reservations,
             };
             return deploy_ddl(tool_ctx, a).await;
         }
@@ -13842,6 +13869,7 @@ impl OracleDispatcher {
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
+                    edition_creation_reservations: &self.edition_creation_reservations,
                 };
                 let result = execute_sql(tool_ctx, "oracle_execute", a).await;
                 if changes_session_context {
@@ -13874,6 +13902,7 @@ impl OracleDispatcher {
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
+                    edition_creation_reservations: &self.edition_creation_reservations,
                 };
                 return open_checkpoint(tool_ctx, a).await;
             }
@@ -13902,6 +13931,7 @@ impl OracleDispatcher {
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
+                    edition_creation_reservations: &self.edition_creation_reservations,
                 };
                 return preview_dml(tool_ctx, a).await;
             }
@@ -13930,6 +13960,7 @@ impl OracleDispatcher {
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
+                    edition_creation_reservations: &self.edition_creation_reservations,
                 };
                 return undo_to_checkpoint(tool_ctx, a).await;
             }
@@ -13958,6 +13989,7 @@ impl OracleDispatcher {
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
+                    edition_creation_reservations: &self.edition_creation_reservations,
                 };
                 return compile_object(tool_ctx, name, a).await;
             }
@@ -13986,6 +14018,7 @@ impl OracleDispatcher {
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
+                    edition_creation_reservations: &self.edition_creation_reservations,
                 };
                 return create_or_replace(tool_ctx, name, a).await;
             }
@@ -14014,6 +14047,7 @@ impl OracleDispatcher {
                     current_schema: current_schema.as_deref(),
                     audit,
                     quarantine: &self.quarantine,
+                    edition_creation_reservations: &self.edition_creation_reservations,
                 };
                 let (value, preview_entry) = patch_source(tool_ctx, name, a).await?;
                 // Mutate the state-owned preview log only after the connection
@@ -15501,6 +15535,7 @@ impl OracleDispatcher {
                             current_schema: current_schema.as_deref(),
                             audit,
                             quarantine: &self.quarantine,
+                            edition_creation_reservations: &self.edition_creation_reservations,
                         };
                         let execute_args = custom_tool_execute_args(other, loaded, &args)?;
                         execute_sql(tool_ctx, other, execute_args).await
