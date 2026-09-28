@@ -32,11 +32,12 @@ evidence is the CI run for that commit (linked below at release time).
 | Driver-adapter seam | `scripts/oraclemcp_driver_seam_lint.sh` | `boundary` |
 | Honesty framing | `scripts/oraclemcp_honesty_grep.sh` | `boundary` |
 | Sensitive-data lint | `scripts/secret_scan.sh` (structural + rendered surfaces) | `sensitive-data` |
+| Fuzz targets compile | `cargo fuzz build` (guard, audit, auth, config fuzz crates) | `fuzz-build` |
 | Release acceptance suite | `scripts/release_acceptance_ci_suite.sh` | `release-acceptance` |
 | Release version surfaces (D3.1) | `scripts/release_surface_sync_check.sh` | `release-acceptance` (via `release_acceptance_ci_suite.sh`) |
 | Release metadata sync | `scripts/release_preflight.sh` | `release.yml` `checks` on the tag (no per-push job; run it locally first, step 2 below) |
 
-All thirteen run on the pinned nightly (every toolchain-bearing job derives its
+All fourteen run on the pinned nightly (every toolchain-bearing job derives its
 toolchain from `env.RUST_TOOLCHAIN` in `ci.yml`).
 
 ### Tier C: dispatched on the frozen RC SHA
@@ -100,11 +101,11 @@ documented there as an operator-run extra, not a gate requirement.
 
 ### Advisory (not release-blocking)
 
-These jobs run but do **not** gate the tag; a red square is a signal to
-investigate, not a blocker:
-
-- `fuzz-build` — compiles the cargo-fuzz targets so they cannot rot
-  (`continue-on-error`; cargo-fuzz + `build-std` is churn-prone).
+`windows-rust` and `plsql-intelligence` are advisory per-PR lanes (see
+[`test-tiers.md`](test-tiers.md) §3) and do **not** gate the tag; a red square
+there is a signal to investigate, not a blocker. `fuzz-build` is **required**:
+only its cargo-fuzz *install* step tolerates a flake (a bounded retry), while
+the four target builds and the planted-negative step block.
 
 ---
 
@@ -142,8 +143,10 @@ investigate, not a blocker:
      bash scripts/installer_lint_and_offline_smoke.sh --log
    ```
 4. **Confirm CI is green on the RC commit.** Open the CI run for that exact SHA
-   and confirm every **required** gate in the table above is green. The advisory
-   jobs (`fuzz-build`, `multi-nightly`) may be red without blocking.
+   and confirm every **required** gate in the table above is green, including
+   `fuzz-build`. The advisory `windows-rust` and `plsql-intelligence` lanes may
+   be red without blocking; the tier-C jobs (Kani, loom, feature-powerset,
+   `multi-nightly`) are dispatched separately and bound into the release proof.
 5. **Link the run as evidence.** Record the CI run URL for the RC commit in the
    release notes / `CHANGELOG.md` entry for `vX.Y.Z`. For the current
    field-hardening train, also attach

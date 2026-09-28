@@ -20,10 +20,11 @@ downgrade that required result.
 | B | `scheduled` | cron (fuzz shards, the CI heartbeat) | watched by `scripts/ci_heartbeat.sh`; never part of `ci_green` |
 | C | `release` | the tag pipeline (`release.yml`) and `workflow_dispatch` with a `candidate_sha` input: `kani-safety.yml`, `loom.yml`, and the `feature-powerset` and `multi-nightly` jobs of `ci.yml` | run on the exact release-candidate revision (the job refuses any other checkout); the result enters the release proof, not the per-push check |
 
-`advisory` (`continue-on-error: true`) is reserved for the explicitly
-experimental `fuzz-build` and for the lanes other beads are restoring
-(`windows-rust`, `plsql-intelligence`). `api-lock` is required again: its
-planned 0.12.0 SemVer scope is documented in `CHANGELOG.md`, and its committed
+`advisory` (`continue-on-error: true`) is reserved for the lanes other beads are
+restoring (`windows-rust`, `plsql-intelligence`). `fuzz-build` is required: only
+its cargo-fuzz *install* step is tolerant (a bounded retry), while the target
+builds and the planted-negative step are blocking. `api-lock` is required again:
+its planned 0.12.0 SemVer scope is documented in `CHANGELOG.md`, and its committed
 public-API snapshots enforce reviewed surface changes. `manual` is a
 `workflow_dispatch` lane without `candidate_sha` (repair and acceptance
 workflows). When one check name exists in two workflows (`ci.yml` and

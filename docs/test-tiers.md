@@ -79,7 +79,7 @@ exactly. Their result enters the release proof, not the per-push check.
 | release metadata sync (`release_preflight.sh`) | `release.yml:checks` (the per-push `release-metadata` job was removed) | tag push `v*`, and locally before tagging | 3 | release |
 | release-acceptance suite (B.12) | `ci.yml:release-acceptance` **and** `release.yml:release-acceptance` | every push+PR, **and again** at tag push | 1 and 3 | required (PR copy) / release (tag copy) |
 | `multi-nightly` floating-toolchain early warning | `ci.yml:multi-nightly` | `workflow_dispatch` with `candidate_sha` (tier C) | 3 | release |
-| fuzz targets **compile** check (4 targets across `oraclemcp-guard`, `oraclemcp-audit`, and `oraclemcp-auth`; `cargo fuzz build`) | `ci.yml:fuzz-build` | every push+PR | 1-shaped but advisory | advisory |
+| fuzz targets **compile** check (4 targets across `oraclemcp-guard`, `oraclemcp-audit`, and `oraclemcp-auth`; `cargo fuzz build`) | `ci.yml:fuzz-build` | every push+PR | 1 | required |
 | bounded coverage-guided fuzz campaigns (8 matrix shards: classifier; four differential `ALTER SESSION`; config, audit, auth) | `fuzz.yml:fuzz` | daily + manual dispatch | 2 | scheduled |
 | gvenzl 23ai matrix + VECTOR smoke (real live DB) | `ci.yml:oracle-free23` (`scripts/e2e/oracle_version_matrix.sh --log --lane free23`) | every push+PR | 1 (should be 2; see §4.1) | required |
 | gvenzl full ladder (XE 18 / XE 21 / FREE 23ai) | `scripts/e2e/oracle_version_matrix.sh --log` | operator/agent-run, no schedule | 2-shaped, executed as 3 | manual |
@@ -111,9 +111,11 @@ prevent. As of this writing:
    workflow restructuring is out of scope for H4/H7 (test-integrity hardening
    only); tracked as follow-up work, not silently dropped.
 2. **`fuzz-build` is named "nightly" but triggers on every push/PR**, not on
-   a schedule; it earns its advisory status from `continue-on-error` as the
-   explicitly experimental lane. (`multi-nightly` used to share this shape; it
-   is now tier C.)
+   a schedule; it is a Tier 1 **required** lane. Only its cargo-fuzz *install*
+   step tolerates a prebuilt-install flake, via a bounded retry that fails the
+   job explicitly if the tool never becomes available; the four `cargo fuzz
+   build` steps and the planted-negative step are blocking. (`multi-nightly`
+   used to share this shape; it is now tier C.)
 3. **Partially closed by D4: bounded campaigns now exist; the target-count goal
    remains aspirational.** `fuzz-build` still provides a per-PR compile-only
    check for the 4 guard/audit/auth targets. Separately,

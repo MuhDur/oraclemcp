@@ -88,9 +88,12 @@ chase the newest nightly for its own sake. Trigger a bump when:
   is real and unavoidable on the path you need, then schedule the re-pin.
 - **A security or soundness fix you need lands only in a newer nightly.**
 
-Do **not** re-pin to clear a transient `fuzz-build` failure: that job is
-`continue-on-error` because cargo-fuzz + `build-std` is inherently churn-prone,
-and a flake there is not a toolchain-pin problem.
+Do **not** re-pin to clear a transient `fuzz-build` failure. The job's
+cargo-fuzz *install* step is the only tolerant one — a bounded retry makes the
+tool available or fails the job explicitly — and cargo-fuzz + `build-std` is
+inherently churn-prone, so a flake there is not a toolchain-pin problem. The
+four target builds and the planted-negative step are blocking, though, so a
+genuinely red `fuzz-build` is a real signal to triage rather than re-pin around.
 
 ---
 
