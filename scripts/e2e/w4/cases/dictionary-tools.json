@@ -2064,5 +2064,50 @@
    "error_class": "FORBIDDEN_STATEMENT"
   },
   "profile_variant": "synthetic_raw"
+ },
+ {
+  "case_id": "w4_query_issue35_trusted_view_rows",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": [],
+  "setup": [
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.V35_INNER_${run_id} AS SELECT 1 AS ID FROM ${owner}.T_PARENT_${run_id}"},
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.V35_OUTER_${run_id} AS SELECT 1 AS ID FROM ${owner}.V35_INNER_${run_id}"}
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT ID FROM ${owner}.V35_OUTER_${run_id} WHERE ID = 1",
+  "profile_variant": "trusted_views",
+  "call": {"arguments": {"sql": "SELECT 1 AS RESULT FROM ${owner}.V35_OUTER_${run_id}", "max_rows": 1}},
+  "expect": {"rows": [{"RESULT": "1"}]},
+  "db_reread": [],
+  "audit_expect": [
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+  ],
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_issue35_trusted_view_function_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": ["priv:SELECT_V_SQL"],
+  "setup": [
+   {"sql": "CREATE OR REPLACE FUNCTION ${owner}.F35_SIDE_${run_id}(P_ID NUMBER) RETURN NUMBER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (P_ID); COMMIT; RETURN P_ID; END;"},
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.V35_SIDE_${run_id} AS SELECT ID, ${owner}.F35_SIDE_${run_id}(ID) AS SIDE_ID FROM ${owner}.T_PARENT_${run_id}"}
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT ID FROM ${owner}.V35_SIDE_${run_id} WHERE ROWNUM = 1",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {"sql": "SELECT ID FROM ${owner}.V35_SIDE_${run_id} /* W4MARK_V35SIDE000001 */", "max_rows": 1},
+   "vsql_absent_marker": "W4MARK_V35SIDE000001"
+  },
+  "expect": {"error_class": "FORBIDDEN_STATEMENT"},
+  "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}", "rows": [[0]]}],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
  }
 ]

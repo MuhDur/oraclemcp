@@ -371,7 +371,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "kill_served_session_user", "kill_served_session_dml_user"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -424,7 +424,12 @@ def validate_case(case, filename):
         require(type(case["call"]["repeat_count"]) is int and 2 <= case["call"]["repeat_count"] <= 20,
                 "repeat_count must be a bounded integer in 2..20")
         if "repeat_expect" in case["call"]:
-            verify_expect_shape(case["call"]["repeat_expect"])
+                verify_expect_shape(case["call"]["repeat_expect"])
+    if "scn_cache_expect" in case["call"]:
+        require(case["call"]["scn_cache_expect"] is True
+                and case["case_id"] == "w4_runtime_issue46_scn_probe_cached"
+                and case["call"].get("repeat_count") == 20,
+                "SCN cache expectation is reserved for the 20-read issue46 case")
     if "parallel" in case["call"]:
         workers = case["call"]["parallel"]
         require(isinstance(workers, list) and 2 <= len(workers) <= 8,
@@ -1668,6 +1673,18 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                 replies.append(repeated)
             row["actual"] = {"repeat_count": len(replies),
                              "last": scrub(tool_payload(replies[-1]))}
+            if case["call"].get("scn_cache_expect"):
+                payloads = [tool_payload(item) for item in replies]
+                require(all(payload.get("structuredContent", {}).get("observed_scn") is None
+                            for payload in payloads),
+                        "no-grant SCN cache case observed a non-null SCN")
+                records = audit_records(audit_path)[before:]
+                probes = [record for record in records
+                          if record.get("tool") == "scn_capability_probe"]
+                require(len(probes) == 1 and probes[0].get("outcome") == "FAILED",
+                        "no-grant SCN cache case needs exactly one degraded probe audit")
+                row["scn_cache"] = {"observed_scn_null_reads": len(payloads),
+                                    "degraded_probe_audits": len(probes)}
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env))

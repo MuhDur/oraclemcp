@@ -1271,14 +1271,17 @@
     "case_id": "w4_runtime_issue46_scn_probe_cached",
     "tool": "oracle_query",
     "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
     "transports": ["stdio"],
     "requires": [],
     "setup": [],
     "call": {
       "arguments": {"sql": "SELECT 1 AS C FROM dual"},
-      "repeat_count": 20
+      "repeat_count": 20,
+      "scn_cache_expect": true
     },
-    "expect": {"rows": [{"C": "<masked>"}]},
+    "expect": {"rows": [{"C": "1"}]},
     "db_reread": [],
     "audit_expect": [],
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
