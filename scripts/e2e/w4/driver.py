@@ -2377,16 +2377,22 @@ def run_lane(args):
                                     "failed to drop between case levels")
                         elevate(client, case["level"])
                         current_level = case["level"]
-                    rows.append(run_case(client, case, transport, args.lane, capabilities, connection,
-                                         barriers, binary, audit_path, client_env,
-                                         discovered.get(case["tool"])))
-                    if "kill_served_session_dml_user" in case["call"]:
-                        # The intentionally killed owner_rw connection cannot service the
-                        # harness's normal level drop. Start a fresh MCP process at the
-                        # lane's READ_ONLY baseline before continuing into another profile.
+                    row = run_case(client, case, transport, args.lane, capabilities, connection,
+                                   barriers, binary, audit_path, client_env,
+                                   discovered.get(case["tool"]))
+                    rows.append(row)
+                    rollback_unknown = (
+                        row.get("cancel_mutation_audit", {}).get("terminal_outcome")
+                        == "UNKNOWN_DISCARDED"
+                    )
+                    if "kill_served_session_dml_user" in case["call"] or rollback_unknown:
+                        # A killed or rollback-uncertain session is quarantined and cannot
+                        # service the normal level drop. Restart at the lane's READ_ONLY
+                        # baseline before another selected W4 case uses this transport.
                         client.close()
                         client = (StdioClient(binary, args.lane, client_env) if transport == "stdio"
-                                  else HttpClient(binary, args.lane, client_env, port, secret, audience))
+                                  else HttpClient(binary, args.lane, client_env, port, secret, audience,
+                                                  streaming=needs_streaming))
                         initialize(client)
                         current_profile = args.lane
                         current_level = "READ_ONLY"
