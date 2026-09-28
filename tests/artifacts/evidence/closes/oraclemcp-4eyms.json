@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:01:18Z",
+  "bead_id": "oraclemcp-4eyms",
+  "scope": {
+    "summary": "Repair live_oracle::live_top_queries_resolves_source_and_runs_including_statspack_fallback so it proves the b37214d8 Diagnostics Pack license gate instead of asserting a bare successful historical resolve: unattested history is asserted to be a typed PolicyDenied refusal, and the operator-attested path is exercised against the real instance posture with real AWR rows.",
+    "in_scope": [
+      "crates/oraclemcp-db/tests/live_oracle.rs"
+    ],
+    "out_of_scope": [
+      "No production code changed: the license gate in crates/oraclemcp-db/src/awr.rs was intentionally tightened by b37214d8 and is not modified, bypassed or weakened here.",
+      "crates/oraclemcp-db/src/catalog_query.rs, health.rs and connection.rs are untouched; connection.rs and scripts/*_lint.sh dirt in this shared checkout belongs to other agents mid-edit.",
+      "The test is live-only (feature live-xe) and was re-executed manually on the three local lanes, not in a scheduled CI lane.",
+      "The Statspack branch is retained and exercised only by the resolver's fallback/Unavailable arms; no lane has PERFSTAT installed, so the populated-Statspack real-data path was not exercised live."
+    ]
+  },
+  "source": {
+    "sha": "8ae87ca645713774bba40b41267ccfcd2f6afc87",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_top_queries historical=true (AWR/Statspack license-gated path)",
+        "kind": "tool",
+        "trace": "live_oracle::live_top_queries_resolves_source_and_runs_including_statspack_fallback re-run on free23/xe18/xe21 via cargo +nightly-2026-05-11 test -p oraclemcp-db --features live-xe,oracledb --test live_oracle -- --nocapture --test-threads=1 live_top_queries with ORACLEMCP_LIVE_XE=1 => 1 passed; 0 failed on each lane. Unresolved-attestation historical resolve returns DbError::Refused(ErrorClass::PolicyDenied) naming the Diagnostics Pack, and resolve_top_sql_source_with_license(..., true, true) selects AwrAsh and returns 5 ranked rows (dba_hist_sqlstat 7337/2597/2910 rows). Raw output in tests/artifacts/evidence/live/oraclemcp-4eyms-3lane-20260928T0901Z.json."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "live-oracle-top-queries-diagnostics-license-gate",
+        "path": "tests/artifacts/evidence/live/oraclemcp-4eyms-3lane-20260928T0901Z.json",
+        "sha": "8ae87ca645713774bba40b41267ccfcd2f6afc87"
+      }
+    ]
+  },
+  "limitations": [
+    "Live proof is manual local-lane execution (free23 23ai, xe18 18c, xe21 21c) as SYSTEM, not a scheduled CI lane; python-oracledb 4.0.2 and the thin driver are the only clients exercised.",
+    "All three lab lanes report control_management_pack_access=DIAGNOSTIC+TUNING, so the attested arm resolves to AwrAsh everywhere; the Statspack branch (PERFSTAT installed, pack inactive) and the Unavailable branch were not reached live. Their typed behaviour remains covered by the awr.rs unit tests (attested_but_unavailable_pack_falls_back_to_statspack, licensed_history_with_both_catalogs_absent_degrades_to_typed_refusal).",
+    "The refusal assertion is about the operator license attestation, not the instance parameter: because the parameter is DIAGNOSTIC on these Free/Express lanes, the test specifically proves that technical activation alone does not satisfy the gate. It does not attempt to prove commercial licensing of any lane.",
+    "Only the scoped cargo test / clippy / rustfmt gates were run in this lane; no workspace-wide required-proof graph was executed."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

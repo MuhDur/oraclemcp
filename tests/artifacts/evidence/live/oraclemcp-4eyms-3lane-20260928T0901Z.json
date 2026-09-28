@@ -1,0 +1,30 @@
+{
+  "run_id": "oraclemcp-4eyms-local-3lane-20260928T0901Z",
+  "lane": "free23+xe18+xe21",
+  "lane_name": "local-swarm-implementer",
+  "source_sha": "8ae87ca645713774bba40b41267ccfcd2f6afc87",
+  "kind": "live-oracle-top-queries-diagnostics-license-gate",
+  "runner": "local swarm implementer; ORACLEMCP_LIVE_XE=1; python-oracledb 4.0.2; SYSTEM on free23 localhost:1523/FREEPDB1 (23.26.2.0.0), xe18 localhost:1518/XEPDB1 (18.4.0.0.0), xe21 localhost:1520/XEPDB1 (21.3.0.0.0)",
+  "command": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target ORACLEMCP_LIVE_XE=1 ORACLEMCP_TEST_DSN=<lane> ORACLEMCP_TEST_USER=SYSTEM ORACLEMCP_TEST_PASSWORD=<lane-pw> cargo +nightly-2026-05-11 test -p oraclemcp-db --features live-xe,oracledb --test live_oracle -- --nocapture --test-threads=1 live_top_queries",
+  "result": "1 passed; 0 failed; 0 ignored on each of free23, xe18, xe21",
+  "planted_negative": {
+    "state": "pre-fix live_oracle.rs at HEAD cc4d0e14 (before work commit 8ae87ca6)",
+    "command": "same repro on free23 localhost:1523/FREEPDB1",
+    "exit": 101,
+    "raw": "thread 'live_top_queries_resolves_source_and_runs_including_statspack_fallback' panicked at crates/oraclemcp-db/tests/live_oracle.rs:2103:14: historical top-SQL source probe remains certain: Refused(ErrorEnvelope { is_error: true, error_class: PolicyDenied, message: \"historical top-SQL query requires an explicit Oracle Diagnostics Pack license attestation and active DIAGNOSTIC access\", next_steps: [\"enable the Diagnostics Pack only when your Oracle license permits it, then retry\", \"use oracle_top_queries without historical=true for free live cursor-cache diagnostics\"] })",
+    "test_result": "FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 37 filtered out"
+  },
+  "after_fix": {
+    "free23": "1 passed; 0 failed (localhost:1523/FREEPDB1, 23.26.2.0.0). unattested history -> typed PolicyDenied; attested -> AwrAsh; ranked AWR top-SQL returned 5 rows while dba_hist_sqlstat held 7337.",
+    "xe18": "1 passed; 0 failed (localhost:1518/XEPDB1, 18.4.0.0.0). unattested -> typed PolicyDenied; attested -> AwrAsh; 5 rows returned, dba_hist_sqlstat held 2597.",
+    "xe21": "1 passed; 0 failed (localhost:1520/XEPDB1, 21.3.0.0.0). unattested -> typed PolicyDenied; attested -> AwrAsh; 5 rows returned, dba_hist_sqlstat held 2910."
+  },
+  "observed_instance_posture": {
+    "free23": "control_management_pack_access=DIAGNOSTIC+TUNING; PERFSTAT.STATS$SNAPSHOT absent (ORA-00942); DBA_HIST_SQLSTAT populated",
+    "xe18": "control_management_pack_access=DIAGNOSTIC+TUNING; PERFSTAT.STATS$SNAPSHOT absent (ORA-00942); DBA_HIST_SQLSTAT populated",
+    "xe21": "control_management_pack_access=DIAGNOSTIC+TUNING; PERFSTAT.STATS$SNAPSHOT absent (ORA-00942); DBA_HIST_SQLSTAT populated"
+  },
+  "license_gate_not_weakened": "The unattested arm calls resolve_top_sql_source(historical=true), which returns DbError::Refused(ErrorClass::PolicyDenied) before any probe; the test asserts that typed refusal and does not bypass it. The attested arm uses the public resolve_top_sql_source_with_license(..., true, true) operator-attestation API added by the policy commit and proves real data.",
+  "unit_tests": "cargo +nightly-2026-05-11 clippy -p oraclemcp-db --features live-xe,oracledb --all-targets -- -D warnings => clean; rustfmt --check crates/oraclemcp-db/tests/live_oracle.rs => clean.",
+  "note": "Local orchestrator run, not a scheduled CI lane. In-scope file (crates/oraclemcp-db/tests/live_oracle.rs) matches source_sha; other agents' in-flight edits in this shared checkout are unrelated and excluded."
+}
