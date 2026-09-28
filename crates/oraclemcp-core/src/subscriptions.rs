@@ -460,6 +460,7 @@ async fn prove_cqn_live_read_only(
         cache,
         &plan,
         oraclemcp_db::FgaEvidencePolicy::RequireProof,
+        &[],
     )
     .await
     .map_err(|_| CqnRegistrationError::LiveReadProofUnavailable)?;

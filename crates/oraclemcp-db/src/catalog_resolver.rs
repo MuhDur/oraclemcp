@@ -1738,6 +1738,7 @@ pub async fn prove_semantic_read_plan(
     cache: &OracleCatalogResolverCache,
     plan: &SemanticReadPlan,
     fga_policy: FgaEvidencePolicy,
+    _trusted_views: &[String],
 ) -> Result<ReadPlanProof, ReadPlanProofError> {
     if plan.blocks.len() > 128 || plan.relations.len() > 256 {
         return Err(ReadPlanProofError::Unproven("relation_plan_cap_exceeded"));

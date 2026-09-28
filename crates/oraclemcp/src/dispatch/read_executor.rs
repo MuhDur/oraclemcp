@@ -626,6 +626,7 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
     verified_local_vector_embedding: bool,
     fga_policy: FgaEvidencePolicy,
     require_security_feature_evidence: bool,
+    trusted_views: &[String],
 ) -> Result<ResolvedRead, ErrorEnvelope> {
     let initial = if verified_local_vector_embedding {
         SEMANTIC_READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
@@ -635,7 +636,7 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
     ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
     let plan = semantic_read_plan_checked(sql)
         .map_err(|error| unresolved_semantic_read(error.as_str()))?;
-    let proof = prove_semantic_read_plan(cx, conn, cache, &plan, fga_policy)
+    let proof = prove_semantic_read_plan(cx, conn, cache, &plan, fga_policy, trusted_views)
         .await
         .map_err(|error| match error {
             ReadPlanProofError::Database(error) => error.into_envelope(),
@@ -839,6 +840,7 @@ impl AdmittedWitnessRead {
             false,
             FgaEvidencePolicy::RequireProof,
             true,
+            &[],
         )
         .await?;
         Ok(Self { sql, binds })
@@ -1590,6 +1592,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     false,
                     state.fga_evidence_policy,
                     state.require_security_feature_evidence,
+                    &[],
                 )
                 .await;
                 let (
