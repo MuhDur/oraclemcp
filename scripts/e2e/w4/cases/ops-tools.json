@@ -1275,5 +1275,21 @@
         "sql": "DROP TABLE ${owner}.OTF_T_${run_id} PURGE"
       }
     ]
+  },
+  {
+    "case_id": "w4_runtime_issue46_scn_probe_cached",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": ["stdio"],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {"sql": "SELECT 1 AS C FROM dual"},
+      "repeat_count": 20
+    },
+    "expect": {"rows": [{"C": "<masked>"}]},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
   }
 ]

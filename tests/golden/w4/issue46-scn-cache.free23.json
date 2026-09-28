@@ -1,0 +1,65 @@
+{
+  "columns": [
+    "C"
+  ],
+  "mask_certificate": {
+    "audit_entry_hash": "sha256:f80b7a0d5f63c8cb0a21841dc74bcd074bd9555973cd6a9d0d6978939fd5ace5",
+    "decisions": [
+      {
+        "action": "mask",
+        "column": "C",
+        "oracle_type": "NUMBER",
+        "source": "mask_unknown_default"
+      }
+    ],
+    "policy_id": "sha256:fa9ebd4225df218e28a719ebc1b33fe101543ee52e6f834b32ea7524bd574b93",
+    "profile": "free23",
+    "schema_version": 1
+  },
+  "rls_vpd": {
+    "all_policies_probe": {
+      "detail": "ALL_POLICIES returned at least one row visible to this principal",
+      "visibility": "policy_rows_visible",
+      "visible_policy_rows_probe": true
+    },
+    "detail": "ALL_POLICIES is readable, but no matching VPD/RLS policies were visible for relations; this is observed catalog evidence only",
+    "policies": [],
+    "scope": "relations",
+    "session": {
+      "current_schema": "SYSTEM",
+      "edition_name": "ORA$BASE",
+      "enabled_roles": [
+        "ACCHK_READ",
+        "AQ_ADMINISTRATOR_ROLE",
+        "CAPTURE_ADMIN",
+        "DATAPUMP_EXP_FULL_DATABASE",
+        "DATAPUMP_IMP_FULL_DATABASE",
+        "DBA",
+        "DGPDB_ROLE",
+        "EXECUTE_CATALOG_ROLE",
+        "EXP_FULL_DATABASE",
+        "GATHER_SYSTEM_STATISTICS",
+        "HS_ADMIN_EXECUTE_ROLE",
+        "HS_ADMIN_SELECT_ROLE",
+        "IMP_FULL_DATABASE",
+        "OLAP_XS_ADMIN",
+        "OPTIMIZER_PROCESSING_RATE",
+        "PPLB_ROLE",
+        "SCHEDULER_ADMIN",
+        "SELECT_CATALOG_ROLE",
+        "XDBADMIN",
+        "XDB_SET_INVOKER"
+      ],
+      "session_user": "SYSTEM"
+    },
+    "status": "no_visible_matching_policies"
+  },
+  "row_count": 1,
+  "rows": [
+    {
+      "C": "<masked>"
+    }
+  ],
+  "total_bytes": 16,
+  "truncated": false
+}

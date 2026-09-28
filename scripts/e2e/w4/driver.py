@@ -344,7 +344,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -379,6 +379,11 @@ def validate_case(case, filename):
     if "retry_expect" in case["call"]:
         require(case["call"].get("retry") is True, "retry_expect requires retry")
         verify_expect_shape(case["call"]["retry_expect"])
+    if "repeat_count" in case["call"]:
+        require(type(case["call"]["repeat_count"]) is int and 2 <= case["call"]["repeat_count"] <= 20,
+                "repeat_count must be a bounded integer in 2..20")
+        if "repeat_expect" in case["call"]:
+            verify_expect_shape(case["call"]["repeat_expect"])
     if "parallel" in case["call"]:
         workers = case["call"]["parallel"]
         require(isinstance(workers, list) and 2 <= len(workers) <= 8,
@@ -1435,6 +1440,11 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         input_value["raw_arguments"] = case["call"]["raw_arguments"]
     if case["call"].get("retry"):
         input_value["retry"] = True
+    if "repeat_count" in case["call"]:
+        repeat_count = case["call"]["repeat_count"]
+        require(type(repeat_count) is int and 2 <= repeat_count <= 20,
+                "repeat_count must be a bounded integer in 2..20")
+        input_value["repeat_count"] = repeat_count
     if case["call"].get("mutation"):
         input_value["mutation"] = True
     if "parallel" in case["call"]:
@@ -1506,6 +1516,17 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                           ROOT / "tests/golden/w4")
             if supported:
                 verify_case_rereads(connection, case, row)
+        if "repeat_count" in case["call"]:
+            replies = [reply]
+            for _ in range(case["call"]["repeat_count"] - 1):
+                repeated = client.rpc("tools/call", {"name": case["tool"],
+                                                       "arguments": case["call"]["arguments"]})
+                verify_envelope(repeated, descriptor)
+                verify_expect(case["call"].get("repeat_expect", expected), repeated,
+                              ROOT / "tests/golden/w4")
+                replies.append(repeated)
+            row["actual"] = {"repeat_count": len(replies),
+                             "last": scrub(tool_payload(replies[-1]))}
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env))
