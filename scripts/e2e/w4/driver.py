@@ -1778,9 +1778,11 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                           if record.get("tool") == "scn_capability_probe"]
                 require(len(probes) == 1 and probes[0].get("outcome") == "FAILED",
                         "no-grant SCN cache case needs exactly one degraded probe audit")
-                reads = [record for record in records if record.get("tool") == "oracle_query"]
+                reads = [record for record in records
+                         if record.get("tool") == "oracle_query" and record.get("outcome") == "SUCCEEDED"]
                 require(len(reads) == len(replies)
-                        and all(record.get("observed_scn") is None for record in reads),
+                        and all(record.get("verdict_certificate", {}).get("observed_scn") is None
+                                for record in reads),
                         "no-grant SCN cache needs null observed_scn on every audited read")
                 row["scn_cache"] = {"observed_scn_null_reads": len(reads),
                                     "degraded_probe_audits": len(probes)}
