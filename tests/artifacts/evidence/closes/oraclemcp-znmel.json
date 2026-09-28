@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:14:59Z",
+  "bead_id": "oraclemcp-znmel",
+  "scope": {
+    "summary": "Make the ci.yml fuzz-targets-compile job blocking (no continue-on-error), confine cargo-fuzz install flake to a tolerant bounded retry, gate stale per-crate fuzz lockfiles with --locked, compile the config fuzz target too, and prove with a planted-negative step that a broken fuzz target fails the job.",
+    "in_scope": [
+      ".github/workflows/ci.yml",
+      "docs/ci_taxonomy.json",
+      "crates/oraclemcp-audit/fuzz/Cargo.lock",
+      "crates/oraclemcp-auth/fuzz/Cargo.lock",
+      "crates/oraclemcp-config/fuzz/Cargo.lock"
+    ],
+    "out_of_scope": [
+      "Running fuzz campaigns in PR CI (unchanged: campaigns stay in fuzz.yml, scheduled/nightly plus manual dispatch).",
+      "Re-fixing the historical E0618 in crates/oraclemcp-guard/fuzz/fuzz_targets/grant_scope_match.rs: it was already fixed on main by commit 5c52430f (binding renamed to mutated_target), so this close verifies the target compiles at source.sha instead of re-applying a fix.",
+      "Updating prose that still calls fuzz-build advisory (docs/test-tiers.md, docs/toolchain.md, docs/ci-taxonomy.md, docs/release-checklist.md, docs/threat-model.md) and the synthetic UI fixture tests/fixtures/ui/operator-v1/ci-lanes.json; all are outside this bead's file lane.",
+      "GitHub-hosted runner behaviour; proof is on the pinned local toolchain with cargo-fuzz 0.13.1, not a hosted runner.",
+      "Other agents' uncommitted Rust edits present in this shared checkout (excluded from tree_clean by the scaffold's scope computation)."
+    ]
+  },
+  "source": {
+    "sha": "00117a8321987b6d26a25f5d6232f7590cd9e9a3",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "CI gate `fuzz targets compile (nightly)` (job fuzz-build in .github/workflows/ci.yml)",
+        "kind": "config-gate",
+        "trace": "At source.sha the job has no continue-on-error (python3 -c YAML check: job coe None; only the cargo-fuzz install step carries coe=True). `python3 scripts/ci_taxonomy.py --check` reclassifies the job advisory->required and docs/ci_taxonomy.json is regenerated to match. `python3 scripts/ci_step_tool_order_lint.py` and `bash scripts/workflow_supply_chain_check.sh` pass; `python3 scripts/ci_lane_budget.py fuzz-bound` still passes. Locally `cargo +nightly-2026-05-11 fuzz build --target x86_64-unknown-linux-gnu grant_scope_match` (working-dir crates/oraclemcp-guard) exits 0."
+      },
+      {
+        "name": "planted-negative step (same job, .github/workflows/ci.yml)",
+        "kind": "config-gate",
+        "trace": "The step replants the historical E0618 (`let resolved = 0i32; let _ = resolved();`) into grant_scope_match.rs and runs the same blocking `cargo fuzz build ... grant_scope_match`. Reproduced locally: that build exits 1 with `error[E0618]: expected function, found i32` (log /tmp/fuzz-guard-planted.log), while the unplanted target exited 0. The EXIT trap restored the file (git status clean for the target)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The job is blocking, but the prebuilt cargo-fuzz install step stays tolerant by design; if the prebuilt action fails AND three bounded `cargo install cargo-fuzz --locked` retries fail, the build steps redden the lane. That is the intended explicit failure, not a hidden one, and it is not exercised here (cargo-fuzz 0.13.1 was already installed).",
+    "Local fuzz proof built a single target (`grant_scope_match`), not every target of every crate: the whole-crate `cargo fuzz build` commands that CI runs for guard/audit/auth/config were not executed end-to-end here. The other crates' freshness and compileability were proven with `cargo +nightly-2026-05-11 check --manifest-path <crate>/fuzz/Cargo.toml --locked` (exit 0 for guard/audit/auth/config), which is weaker than cargo-fuzz's release+ASan+libFuzzer link but does type-check the targets.",
+    "cargo-fuzz cannot forward `--locked` (verified: `cargo fuzz build --locked` is an unexpected argument), so the lockfile-freshness guarantee is a separate `cargo metadata --manifest-path <crate>/fuzz/Cargo.toml --locked` step that runs before the builds.",
+    "The audit/auth/config fuzz Cargo.lock files were stale on main (a `--locked` metadata check failed for exactly those three, matching the bead comment). They are regenerated here against the current crates.io index; the auth/config diffs are large (additive lock materialization) and are verified only by locked metadata + `cargo check` (exit 0), not by a full fuzz-campaign run.",
+    "The planted-negative step mutates a tracked file at runtime and depends on its EXIT trap to restore it; that is safe on an ephemeral CI runner and was verified restored locally, but a killed runner mid-step would leave the file broken in that runner only.",
+    "Prose docs and the synthetic operator UI fixture still label fuzz-build advisory; no committed doc was updated because that is outside this bead's file lane."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
