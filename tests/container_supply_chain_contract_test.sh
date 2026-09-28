@@ -109,21 +109,40 @@ def validate_ci(workflow: str) -> None:
         f'  PYTHON_ORACLEDB_VERSION: "{PYTHON_ORACLEDB_VERSION}"' in workflow,
         "python-oracledb fixture policy version is not exact",
     )
+    jobs = dict(re.findall(
+        r"^  (?P<name>[A-Za-z0-9_-]+):\n(?P<body>.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+        workflow,
+        re.MULTILINE | re.DOTALL,
+    ))
+    oracledb_jobs = {
+        name: body for name, body in jobs.items()
+        if "python3 -m pip install" in body and "oracledb" in body
+    }
+    require(oracledb_jobs, "CI has no python-oracledb fixture installation")
     require(
-        workflow.count("PYTHON_ORACLEDB_VERSION") == 2,
-        "python-oracledb version assertion is missing or unexpectedly overridden",
+        workflow.count("PYTHON_ORACLEDB_VERSION") == len(oracledb_jobs) + 1,
+        "python-oracledb policy is missing or overridden outside its fixture jobs",
     )
-    require("--require-hashes" in workflow, "Python fixture installation does not enforce wheel hashes")
-    require("containers/python-oracledb-requirements.lock" in workflow,
-            "Python fixture installation does not use the committed transitive lock")
-    require("--no-index" in workflow and "--find-links \"$wheelhouse\"" in workflow,
-            "Python fixture is not installed from its hash-verified wheelhouse")
-    require('test "$(python3 -c' in workflow and '"3.12"' in workflow,
-            "Python fixture interpreter is not pinned to the wheel lock platform")
-    require(
-        'if oracledb.__version__ != expected:' in workflow,
-        "loaded python-oracledb version is not asserted",
-    )
+    for name, body in oracledb_jobs.items():
+        require(
+            "--require-hashes --dest \"$wheelhouse\" -r containers/python-oracledb-requirements.lock" in body,
+            f"{name} does not download python-oracledb from the committed hash lock",
+        )
+        require(
+            "--no-index" in body
+            and "--find-links \"$wheelhouse\" --require-hashes" in body
+            and "-r containers/python-oracledb-requirements.lock" in body,
+            f"{name} does not install python-oracledb from its hash-verified wheelhouse",
+        )
+        require(
+            'test "$(python3 -c' in body and '"3.12"' in body,
+            f"{name} does not pin the Python fixture interpreter to the wheel-lock platform",
+        )
+        require(
+            'expected = os.environ["PYTHON_ORACLEDB_VERSION"]' in body
+            and "if oracledb.__version__ != expected:" in body,
+            f"{name} does not assert the loaded python-oracledb version",
+        )
 
     images = service_images(workflow)
     require(images, "workflow has no service image to lint")
@@ -468,6 +487,12 @@ rejects(
     ci.replace(" -RequiredVersion $env:PSSCRIPTANALYZER_VERSION", "", 1),
 )
 rejects("python-oracledb version drift", validate_ci, ci.replace('"4.0.2"', '"4.0.3"', 1))
+w4_start = ci.index("  oracle-free23-w4:\n")
+rejects(
+    "python-oracledb W4 fixture bypasses wheelhouse",
+    validate_ci,
+    ci[:w4_start] + ci[w4_start:].replace("--no-index", "", 1),
+)
 rejects("mutated Python wheel hash", validate_python_lock,
         python_lock.replace("579f2c568433523a990cde5bea73c980d144754dc54d3ab2cd37efd670dc31d6", "0" * 64, 1))
 rejects("tag-only service", validate_ci, ci.replace(ORACLE_SERVICE, "gvenzl/oracle-free:23-slim", 1))
