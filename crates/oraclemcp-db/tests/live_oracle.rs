@@ -42,6 +42,7 @@ use oraclemcp_db::{
     probe_dependents, resolve_plan_table, search_objects,
 };
 use oraclemcp_db::{OraclePool, PoolSettings, SerializeOptions, serialize_row};
+use oraclemcp_error::OracleRetryAction;
 use serde_json::json;
 use std::time::{Duration, Instant};
 
@@ -1827,6 +1828,53 @@ fn live_cancelled_query_context_leaves_pool_usable() {
             .query_rows(&cx, "SELECT 7 AS n FROM dual", vec![])
             .await
             .expect("pool remains usable after cancelled request context");
+        assert_eq!(rows[0].parse_i64("N"), Some(7));
+    });
+}
+
+/// A call timeout which arrives after Oracle has begun executing records its
+/// recovery disposition. This backend drains it, so the pinned session is
+/// explicitly reusable rather than silently treated as clean.
+#[test]
+fn live_midflight_oracle_timeout_keeps_pinned_connection_usable() {
+    run_with_cx(|cx| async move {
+        let test_name = "live_midflight_oracle_timeout_keeps_pinned_connection_usable";
+        let Some(conn) = connect_or_skip(&cx, test_name, test_opts()).await else {
+            return;
+        };
+        conn.set_call_timeout(Some(Duration::from_millis(100))).ok();
+
+        let cancelled = conn
+            .execute(&cx, "BEGIN DBMS_SESSION.SLEEP(2); END;", &[])
+            .await;
+        let Err(cancelled) = cancelled else {
+            panic!("{test_name}: a 100ms call deadline must interrupt DBMS_SESSION.SLEEP");
+        };
+        if let DbError::Query(message) | DbError::Execute(message) = &cancelled
+            && (message.contains("ORA-01031") || message.contains("PLS-00201"))
+        {
+            eprintln!(
+                "[live-xe] SKIP {test_name}: DBMS_SESSION.SLEEP is not granted ({cancelled})"
+            );
+            return;
+        }
+        assert!(
+            matches!(
+                cancelled,
+                DbError::CallTimeout {
+                    retry_action: OracleRetryAction::RetrySameConnection,
+                    ..
+                }
+            ),
+            "{test_name}: in-flight Oracle timeout must disclose reusable recovery, got {cancelled:?}"
+        );
+
+        let rows = conn
+            .query_rows(&cx, "SELECT 7 AS n FROM dual", &[])
+            .await
+            .expect(
+                "the timeout's RetrySameConnection disposition keeps the pinned session usable",
+            );
         assert_eq!(rows[0].parse_i64("N"), Some(7));
     });
 }

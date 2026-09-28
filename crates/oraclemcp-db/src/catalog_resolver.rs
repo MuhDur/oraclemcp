@@ -2420,6 +2420,30 @@ async fn collect_vpd_rls_relation_inputs(
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
 ) -> VpdRlsRelationInputs {
+    match asupersync::time::timeout(
+        cx.now(),
+        RLS_VPD_VISIBILITY_PROBE_TIMEOUT,
+        collect_vpd_rls_relation_inputs_inner(cx, conn, relations),
+    )
+    .await
+    {
+        Ok(inputs) => inputs,
+        Err(_) => VpdRlsRelationInputs {
+            session: None,
+            policies: Vec::new(),
+            policy_error: Some(format!(
+                "relation policy/session observation exceeded its {} ms deadline; policy absence is not proven",
+                RLS_VPD_VISIBILITY_PROBE_TIMEOUT.as_millis()
+            )),
+        },
+    }
+}
+
+async fn collect_vpd_rls_relation_inputs_inner(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> VpdRlsRelationInputs {
     let session = read_session_security_context(cx, conn).await.ok();
     let mut policies = Vec::new();
     let mut policy_error = None;
@@ -2467,7 +2491,7 @@ async fn observe_vpd_rls_for_relations_inner(
     let inputs = collect_vpd_rls_relation_inputs(cx, conn, relations).await;
     let probe = match cached_probe {
         Some(probe) => probe,
-        None => query_policy_catalog_probe(cx, conn).await,
+        None => bounded_policy_catalog_probe(cx, conn).await,
     };
     build_vpd_rls_observation(
         "relations".to_owned(),
@@ -7132,6 +7156,27 @@ mod tests {
                 probe.detail.contains("1000 ms observation deadline"),
                 "timeout must be visible to the caller: {probe:?}"
             );
+        });
+    }
+
+    #[test]
+    fn stalled_relation_policy_and_session_observation_degrades_without_refusal() {
+        run_with_cx(|cx| async move {
+            let observation =
+                observe_vpd_rls_for_relations(&cx, &StalledPolicyProbe, &[table_object()]).await;
+            assert_eq!(
+                observation.status,
+                OracleVpdRlsObservationStatus::VisibilityUnavailable
+            );
+            assert_eq!(
+                observation.all_policies_probe.visibility,
+                OraclePolicyCatalogVisibility::Unavailable
+            );
+            assert!(
+                observation.detail.contains("1000 ms deadline"),
+                "the bounded relation/session observation must remain explicit: {observation:?}"
+            );
+            assert!(observation.policies.is_empty());
         });
     }
 

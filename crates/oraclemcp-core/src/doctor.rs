@@ -26,10 +26,11 @@ use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as Cap
 use oraclemcp_audit::AuditLockProbe;
 use oraclemcp_db::{
     CatalogQueryId, DRIVER_VERSION, DbError, DiagnosticsSource, HardParseEffectClosureV1,
-    OracleBind, OracleConnection, OracleVpdRlsObservation, OracleVpdRlsObservationStatus,
-    canonical_nls_statements, detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema,
-    preflight, probe_privileges, probe_write_posture, prove_hard_parse_effect_closure,
-    resolve_plan_table, run_catalog_query, supported_wallet_modes,
+    OracleBind, OracleConnection, OraclePolicyCatalogProbe, OraclePolicyCatalogVisibility,
+    OracleVpdRlsObservation, OracleVpdRlsObservationStatus, canonical_nls_statements,
+    detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema, preflight, probe_privileges,
+    probe_write_posture, prove_hard_parse_effect_closure, resolve_plan_table, run_catalog_query,
+    supported_wallet_modes,
 };
 use oraclemcp_db::{ConnectPhaseReached, connect_hint_for};
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
@@ -2592,6 +2593,7 @@ async fn check_privilege_tier(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
 async fn check_rls_vpd_visibility(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 17;
     const NAME: &str = "RLS/VPD visibility";
+    const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(1);
 
     if ctx.connection_error.is_some() {
         return CheckResult::new(
@@ -2610,7 +2612,30 @@ async fn check_rls_vpd_visibility(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResu
         );
     };
 
-    let observation = observe_vpd_rls_for_schema(cx, conn, "").await;
+    let observation = match asupersync::time::timeout(
+        cx.now(),
+        OBSERVATION_TIMEOUT,
+        observe_vpd_rls_for_schema(cx, conn, ""),
+    )
+    .await
+    {
+        Ok(observation) => observation,
+        Err(_) => OracleVpdRlsObservation {
+            status: OracleVpdRlsObservationStatus::VisibilityUnavailable,
+            scope: "schema:unavailable".to_owned(),
+            session: None,
+            all_policies_probe: OraclePolicyCatalogProbe {
+                visibility: OraclePolicyCatalogVisibility::Unavailable,
+                visible_policy_rows_probe: None,
+                detail: format!(
+                    "RLS/VPD observation exceeded its {} ms deadline; policy absence is not proven",
+                    OBSERVATION_TIMEOUT.as_millis()
+                ),
+            },
+            policies: Vec::new(),
+            detail: "RLS/VPD observation unavailable within the bounded doctor check".to_owned(),
+        },
+    };
     rls_vpd_check_from_observation(ctx, observation)
 }
 
@@ -3998,6 +4023,7 @@ mod tests {
 
     struct VpdRlsDoctorMock {
         policy_visible: bool,
+        stall_catalog_observation: bool,
     }
 
     #[async_trait::async_trait(?Send)]
@@ -4020,6 +4046,9 @@ mod tests {
             sql: &str,
             _b: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            if self.stall_catalog_observation {
+                std::future::pending().await
+            }
             let normalized = sql.to_ascii_lowercase();
             if normalized.contains("sys_context('userenv', 'session_user')") {
                 return Ok(vec![doctor_row(&[
@@ -4588,6 +4617,7 @@ mod tests {
     fn doctor_rls_vpd_visibility_names_visible_policy() {
         let conn = VpdRlsDoctorMock {
             policy_visible: true,
+            stall_catalog_observation: false,
         };
         let report = doctor(&DoctorContext {
             conn: Some(&conn),
@@ -4621,6 +4651,7 @@ mod tests {
     fn doctor_rls_vpd_visibility_warns_on_empty_policy_catalog() {
         let conn = VpdRlsDoctorMock {
             policy_visible: false,
+            stall_catalog_observation: false,
         };
         let report = doctor(&DoctorContext {
             conn: Some(&conn),
@@ -4631,6 +4662,38 @@ mod tests {
         assert!(
             check.detail.contains("zero visible rows"),
             "empty ALL_POLICIES must not render as no RLS/VPD: {}",
+            check.detail
+        );
+    }
+
+    #[test]
+    fn doctor_rls_vpd_visibility_timeout_is_an_explicit_warn_not_a_refusal() {
+        let conn = VpdRlsDoctorMock {
+            policy_visible: false,
+            stall_catalog_observation: true,
+        };
+        let ctx = DoctorContext {
+            conn: Some(&conn),
+            ..DoctorContext::default()
+        };
+        let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .expect("current-thread runtime");
+        let check = runtime.block_on(async {
+            let cx = Cx::current().expect("block_on installs a current Cx");
+            check_rls_vpd_visibility(&cx, &ctx).await
+        });
+        assert_eq!(check.status, CheckStatus::Warn, "{}", check.detail);
+        assert!(
+            check.detail.contains("1000 ms deadline"),
+            "the timeout must remain an auditable observation: {}",
+            check.detail
+        );
+        assert!(
+            check.detail.contains("policy absence is not proven"),
+            "the timeout must not imply a safe catalog: {}",
             check.detail
         );
     }
