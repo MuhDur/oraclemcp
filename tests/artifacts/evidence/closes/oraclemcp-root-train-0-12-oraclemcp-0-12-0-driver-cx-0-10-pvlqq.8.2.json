@@ -1,0 +1,78 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:20:20Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.2",
+  "scope": {
+    "summary": "Complete the W4 source-tool case rework for the object_type work: the already-landed w4_get_source_view_text setup (b206ff40) is confirmed self-contained, and the isolation audit of the other .8.2 object_type cases in source-tools.json found and fixed the same order dependency in w4_get_source_package_body_line_range and w4_get_ddl_package, which read PKG_SRC_<run_id> that only existed because an earlier create_or_replace case had created it; each now owns a setup (CREATE OR REPLACE PACKAGE + PACKAGE BODY matching the earlier DDL so the get_ddl golden is unchanged) and a matching teardown. The in-lane Rust enum/VIEW/object_types code was already landed in 9a61bbf6/48565243/b206ff40 and is not changed here.",
+    "in_scope": [
+      "scripts/e2e/w4/cases/source-tools.json",
+      "crates/oraclemcp/src/registry.rs",
+      "crates/oraclemcp/src/dispatch/args.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp-db/src/intelligence.rs"
+    ],
+    "out_of_scope": [
+      "The in-lane Rust feature code (object_type enums in registry.rs, the get_source VIEW branch in intelligence.rs, the object_types array in dispatch/args.rs and dispatch/mod.rs) was already implemented and committed in 9a61bbf6, 48565243 and b206ff40; this close does not modify it. The w4_get_source_view_text self-contained setup+teardown was likewise already landed by b206ff40.",
+      "The 10 remaining order-dependent cases in source-tools.json are NOT .8.2/object_type cases and are left untouched: w4_compile_object_{procedure,function,package,view,trigger,type}_valid, w4_patch_source_{ambiguous_anchor_refused,readonly_refused}, w4_compile_errors_{lists_exact_line_and_text,none_for_valid_object}. They fail only under --case isolation and pass in the full suite; they belong to the compile_object/patch_source/compile_errors beads and are reported as an audit finding, not fixed here.",
+      "Other agents' uncommitted edits in this shared checkout (crates/oraclemcp-core/*, crates/oraclemcp-db/src/connection.rs, crates/oraclemcp-db/tests/live_oracle.rs, .github/workflows/ci.yml and scripts/oraclemcp_*_lint.sh) are not this bead's file lane and are excluded from the scoped tree_clean derivation.",
+      "The w4_search_objects_object_types_filter case (#41, dictionary-tools.json) already owned its setup and was not changed; it is re-run here only as isolated evidence.",
+      "No scheduled CI lane was used: all live proof is manual local-lane execution against the three disposable rig lanes."
+    ]
+  },
+  "source": {
+    "sha": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "isolated W4 case: w4_get_source_view_text (#39) over stdio and HTTP",
+        "kind": "cli",
+        "trace": "At fddb3710, `ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --case w4_get_source_view_text --case w4_get_source_package_body_line_range --case w4_get_ddl_package --case w4_search_objects_object_types_filter` exits 0 with 8/8 rows pass on free23, xe18 and xe21 (4 cases x stdio+http); results.json records checkout_sha fddb3710. Before the fix, running the same case with the pre-fix `setup: []` (temporarily restored from the working tree) failed with OBJECT_NOT_FOUND on stdio and http. Raw per-lane JSONL in tests/artifacts/evidence/live/oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.2-3lane-20260928T092002Z.json; raw logs /tmp/opencode/w4-8.2/final/isolated_<lane>.cases.jsonl."
+      },
+      {
+        "name": "isolated W4 case: w4_get_source_package_body_line_range (object_type=PACKAGE_BODY)",
+        "kind": "cli",
+        "trace": "Pre-fix at fddb3710^/working tree (setup: []) this case fails with OBJECT_NOT_FOUND 'package body W4O_<run_id>.PKG_SRC_<run_id> was not found or is not visible to this session' on stdio and http (raw /tmp/opencode/w4-8.2/preedit_negatives_release_free23.cases.jsonl). Post-fix at fddb3710 it passes on free23/xe18/xe21 over stdio and http (8/8 isolated rows). The case now creates PKG_SRC_<run_id> spec+body itself and drops the package in cleanup."
+      },
+      {
+        "name": "isolated W4 case: w4_get_ddl_package (object_type=PACKAGE) against its per-lane golden",
+        "kind": "tool",
+        "trace": "Pre-fix at the working tree (setup: []) it fails on stdio and http with OBJECT_NOT_FOUND (failure detail 'scrubbed golden differs'), raw /tmp/opencode/w4-8.2/preedit_negatives_release_free23.cases.jsonl. Post-fix at fddb3710 the setup recreates the same PKG_SRC spec+body the earlier create_or_replace case used, so source-tools.get_ddl_package.<lane>.json still matches and the case passes on all three lanes over stdio and http."
+      },
+      {
+        "name": "full source-tools.json suite over stdio and HTTP",
+        "kind": "cli",
+        "trace": "At fddb3710, `driver.py --lane <lane> --binary target/release/oraclemcp` with all 40 source-tools case_ids passed as --case (file order preserved) exits 0 with 80/80 rows pass (40 cases x stdio+http) on free23, xe18 and xe21; results.json checkout_sha fddb3710 on each lane. Raw /tmp/opencode/w4-8.2/final/full_source_tools_<lane>.cases.jsonl and .results.json, summarised in the live artifact."
+      },
+      {
+        "name": "w4_search_objects_object_types_filter (#41) isolated re-run",
+        "kind": "tool",
+        "trace": "Included in the isolated 4-case run above; passes over stdio and http on all three lanes at fddb3710 (setup already creates OTF_T_/OTF_I_/OTF_V_<run_id>). This is the manifest case for issue #41."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Live proof is manual local-lane execution against the disposable rig lanes free23 (23ai), xe18 (18c) and xe21 (21c) as SYSTEM, driven over the raw MCP stdio and HTTP transports; it is not a scheduled CI lane. Raw artifacts are referenced from integration_evidence and persisted under tests/artifacts/evidence/live/.",
+    "The isolated --case runs used the HEAD-context release binary target/release/oraclemcp (sha256 62503ef712a33d25bcacc069a836ef28d553aba4d9f63fb95db14809ce39f4cb) built under the build lease with CARGO_TARGET_DIR=target; the failure mode being fixed is JSON-fixture driven (missing setup -> OBJECT_NOT_FOUND from the tool), so the profile does not affect the verdict.",
+    "The named rework case w4_get_source_view_text was already made self-contained by b206ff40; this close confirms it at fddb3710 rather than changing it. The pre-fix OBJECT_NOT_FOUND is reproduced by temporarily restoring that commit's parent state (setup: []) in the working tree, then discarded.",
+    "A full-source-tools isolation audit (40 cases, one --case per invocation on free23) leaves 10 non-.8.2 cases failing in isolation because they depend on objects created by earlier cases in the file: w4_compile_object_{procedure,function,package,view,trigger,type}_valid, w4_patch_source_{ambiguous_anchor_refused,readonly_refused}, w4_compile_errors_{lists_exact_line_and_text,none_for_valid_object}. All 10 pass inside the full suite and all 30 other cases (including every get_source/get_ddl object_type case) pass in isolation. Fixing them is outside this bead's .8.2 scope and is reported as an audit finding.",
+    "tree_clean is scoped: git status is empty for every in_scope path at fddb3710; the shared checkout carries other agents' uncommitted edits outside this lane.",
+    "No Rust source changed here, so no cargo build/test/clippy gate is claimed; the change is a W4 case fixture validated by scripts/e2e/w4/driver.py --selftest (pass) and the live runs above."
+  ],
+  "known_defects": [],
+  "follow_ups": [
+    "The other 10 order-dependent source-tools.json cases listed in limitations would each need their own setup+teardown to pass in --case isolation; they belong to the compile_object/patch_source/compile_errors beads."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

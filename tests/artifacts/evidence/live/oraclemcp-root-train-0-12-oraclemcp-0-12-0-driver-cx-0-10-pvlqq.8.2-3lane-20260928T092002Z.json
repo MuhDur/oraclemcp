@@ -1,0 +1,207 @@
+{
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.2",
+  "binary": "target/release/oraclemcp",
+  "binary_sha256": "62503ef712a33d25bcacc069a836ef28d553aba4d9f63fb95db14809ce39f4cb",
+  "driver": "scripts/e2e/w4/driver.py",
+  "generated_at": "20260928T092002Z",
+  "isolated_audit_source_tools": {
+    "fail": [
+      "w4_compile_object_procedure_valid",
+      "w4_compile_object_function_valid",
+      "w4_compile_object_package_valid",
+      "w4_compile_object_view_valid",
+      "w4_compile_object_trigger_valid",
+      "w4_compile_object_type_valid",
+      "w4_patch_source_ambiguous_anchor_refused",
+      "w4_patch_source_readonly_refused",
+      "w4_compile_errors_lists_exact_line_and_text",
+      "w4_compile_errors_none_for_valid_object"
+    ],
+    "pass": 30,
+    "total": 40
+  },
+  "lanes": {
+    "free23": {
+      "binary_sha256": "62503ef712a33d25bcacc069a836ef28d553aba4d9f63fb95db14809ce39f4cb",
+      "checkout_sha": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717",
+      "full_source_tools_cases": 40,
+      "full_source_tools_pass": 80,
+      "full_source_tools_red": [],
+      "full_source_tools_rows": 80,
+      "isolated_cases": [
+        "w4_get_ddl_package",
+        "w4_get_source_package_body_line_range",
+        "w4_get_source_view_text",
+        "w4_search_objects_object_types_filter"
+      ],
+      "isolated_rows": [
+        {
+          "case_id": "w4_search_objects_object_types_filter",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_package_body_line_range",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_view_text",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_ddl_package",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_search_objects_object_types_filter",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_package_body_line_range",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_view_text",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_ddl_package",
+          "transport": "http",
+          "verdict": "pass"
+        }
+      ],
+      "isolated_transports": [
+        "http",
+        "stdio"
+      ]
+    },
+    "xe18": {
+      "binary_sha256": "62503ef712a33d25bcacc069a836ef28d553aba4d9f63fb95db14809ce39f4cb",
+      "checkout_sha": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717",
+      "full_source_tools_cases": 40,
+      "full_source_tools_pass": 80,
+      "full_source_tools_red": [],
+      "full_source_tools_rows": 80,
+      "isolated_cases": [
+        "w4_get_ddl_package",
+        "w4_get_source_package_body_line_range",
+        "w4_get_source_view_text",
+        "w4_search_objects_object_types_filter"
+      ],
+      "isolated_rows": [
+        {
+          "case_id": "w4_search_objects_object_types_filter",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_package_body_line_range",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_view_text",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_ddl_package",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_search_objects_object_types_filter",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_package_body_line_range",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_view_text",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_ddl_package",
+          "transport": "http",
+          "verdict": "pass"
+        }
+      ],
+      "isolated_transports": [
+        "http",
+        "stdio"
+      ]
+    },
+    "xe21": {
+      "binary_sha256": "62503ef712a33d25bcacc069a836ef28d553aba4d9f63fb95db14809ce39f4cb",
+      "checkout_sha": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717",
+      "full_source_tools_cases": 40,
+      "full_source_tools_pass": 80,
+      "full_source_tools_red": [],
+      "full_source_tools_rows": 80,
+      "isolated_cases": [
+        "w4_get_ddl_package",
+        "w4_get_source_package_body_line_range",
+        "w4_get_source_view_text",
+        "w4_search_objects_object_types_filter"
+      ],
+      "isolated_rows": [
+        {
+          "case_id": "w4_search_objects_object_types_filter",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_package_body_line_range",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_view_text",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_ddl_package",
+          "transport": "stdio",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_search_objects_object_types_filter",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_package_body_line_range",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_source_view_text",
+          "transport": "http",
+          "verdict": "pass"
+        },
+        {
+          "case_id": "w4_get_ddl_package",
+          "transport": "http",
+          "verdict": "pass"
+        }
+      ],
+      "isolated_transports": [
+        "http",
+        "stdio"
+      ]
+    }
+  },
+  "schema": "bead-live-evidence/v1",
+  "work_commit": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717"
+}
