@@ -6144,6 +6144,23 @@ mod tests {
     }
 
     #[test]
+    fn issue35_untrusted_and_quote_exact_application_views_are_not_eligible() {
+        let mut view = dictionary_view_object("REPORTING_VIEW");
+        view.owner = "APP".to_owned();
+        view.synonym_chain.clear();
+        assert!(trusted_view_identity_is_eligible(
+            &view,
+            &["APP.REPORTING_VIEW".to_owned()]
+        ));
+        assert!(!trusted_view_identity_is_eligible(&view, &[]));
+        view.quote_exact = true;
+        assert!(!trusted_view_identity_is_eligible(
+            &view,
+            &["APP.REPORTING_VIEW".to_owned()]
+        ));
+    }
+
+    #[test]
     fn issue35_dictionary_view_admitted_only_with_oracle_maintained_closure() {
         run_with_cx(|cx| async move {
             let conn = ScriptedRows::new([
