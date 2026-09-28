@@ -9389,7 +9389,9 @@ mod tests {
 
         assert_eq!(
             connect.connect_string(),
-            "localhost:1521/FREEPDB1?transport_connect_timeout=7"
+            // The default DCD policy is effective for thin EZConnect paths,
+            // alongside an explicitly configured transport timeout.
+            "localhost:1521/FREEPDB1?transport_connect_timeout=7&expire_time=10"
         );
     }
 
@@ -9925,7 +9927,12 @@ mod tests {
             ..Default::default()
         };
         let connect = driver::to_connect_options(&opts).expect("ezconnect options");
-        assert_eq!(connect.connect_string(), "db.example:1521/svc");
+        // Wallet discovery does not turn EZConnect into an alias; the default
+        // DCD option is appended only after that classification succeeds.
+        assert_eq!(
+            connect.connect_string(),
+            "db.example:1521/svc?expire_time=10"
+        );
     }
 
     #[test]

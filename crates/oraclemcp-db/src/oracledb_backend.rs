@@ -915,7 +915,11 @@ fn validate_supported_connect_options(options: &OracleConnectOptions) -> Result<
     if options.sdu.is_some()
         || options.connect_timeout.is_some()
         || options.inactivity_timeout.is_some()
-        || options.keepalive_minutes.is_some()
+        // The safe default is implemented by driver-cx's EZConnect handling.
+        // The official backend has no EXPIRE_TIME setter, so it may ignore the
+        // default rather than reject otherwise supported password profiles.
+        // An explicit keepalive request remains a typed unsupported feature.
+        || (options.keepalive_minutes.is_some() && !options.keepalive_defaulted)
         || !options.app_context.is_empty()
         || options.session_identity.is_some()
     {
