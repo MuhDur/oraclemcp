@@ -1326,8 +1326,16 @@ mod tests {
     }
 
     fn edition_request(scope: PdbIdentityScope, child: &str) -> EditionProposalCreateRequest {
+        edition_request_for_profile("synthetic-profile", scope, child)
+    }
+
+    fn edition_request_for_profile(
+        profile: &str,
+        scope: PdbIdentityScope,
+        child: &str,
+    ) -> EditionProposalCreateRequest {
         EditionProposalCreateRequest {
-            profile: "synthetic-profile".to_owned(),
+            profile: profile.to_owned(),
             child_edition: child.to_owned(),
             base_edition: "ORA$BASE".to_owned(),
             objects: vec!["SYNTHETIC_VIEW".to_owned()],
@@ -1339,13 +1347,15 @@ mod tests {
     fn edition_proposals_conflict_only_for_the_same_identified_pdb() {
         let store = ChangeProposalStore::open(store_root("pdb-scope")).expect("store");
         store
-            .create_edition_proposal(edition_request(
+            .create_edition_proposal(edition_request_for_profile(
+                "profile_one",
                 identified_scope("db-a", "pdb-1"),
                 "CHILD_A",
             ))
             .expect("first PDB request");
         let conflict = store
-            .create_edition_proposal(edition_request(
+            .create_edition_proposal(edition_request_for_profile(
+                "profile_two",
                 identified_scope("db-a", "pdb-1"),
                 "CHILD_B",
             ))
