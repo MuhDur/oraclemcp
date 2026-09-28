@@ -44,6 +44,11 @@
         "trace": "cargo xwin clippy -p oraclemcp --all-targets --target x86_64-pc-windows-msvc -- -D warnings => Finished, 0 warnings, exit 0 (crates/oraclemcp, source 736318fd)."
       },
       {
+        "name": "host clippy",
+        "kind": "cli",
+        "trace": "cargo +nightly-2026-05-11 clippy -p oraclemcp-core -p oraclemcp --all-targets -- -D warnings => Finished, 0 warnings, exit 0 on the Linux host (source 736318fd)."
+      },
+      {
         "name": "host regression check",
         "kind": "cli",
         "trace": "cargo +nightly-2026-05-11 check -p oraclemcp-core -p oraclemcp --all-targets => Finished, 0 warnings, exit 0 on the Linux host (source 736318fd)."
