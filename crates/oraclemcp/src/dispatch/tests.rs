@@ -3608,6 +3608,12 @@ fn every_registry_tool_routes_and_deserializes_offline() {
         if name == "oracle_plan_timeline" {
             let error = result.expect_err("offline mock cannot prove a Diagnostics Pack");
             assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+        } else if name == "oracle_semantic_search" {
+            // The offline mock cannot prove a 23ai VECTOR capability, so the
+            // tool must route and return the typed version refusal (never a
+            // misleading success or OBJECT_NOT_FOUND) rather than succeed.
+            let error = result.expect_err("offline mock cannot prove a 23ai VECTOR capability");
+            assert_eq!(error.error_class, ErrorClass::RuntimeStateRequired);
         } else {
             let out =
                 result.unwrap_or_else(|e| panic!("{name} should route + succeed offline: {e:?}"));
