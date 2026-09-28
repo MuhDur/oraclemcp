@@ -43,6 +43,7 @@ const MAX_SYNONYM_HOPS: usize = 16;
 const MAX_ARGUMENT_ROWS: usize = 512;
 const MAX_SESSION_ROLES: usize = 256;
 const MAX_DICTIONARY_VIEW_DEPENDENCIES: usize = 256;
+const MAX_TRUSTED_VIEW_DEPTH: u8 = 8;
 
 /// Maximum VPD/RLS policy rows surfaced in one diagnostic observation.
 pub const MAX_VPD_RLS_POLICY_ROWS: usize = 64;
@@ -609,13 +610,24 @@ async fn resolved_relations_read_purity_with_trusted_views(
     values: &[RawName],
     fga_policy: FgaEvidencePolicy,
     trusted_views: &[String],
+    view_depth: u8,
 ) -> Result<Purity, DbError> {
     let mut policy_relations = Vec::with_capacity(relations.len());
     for relation in relations {
         if relation.kind == CatalogObjectKind::View
             && trusted_view_identity_is_eligible(relation, trusted_views)
         {
-            if !trusted_view_source_is_proven(cx, conn, cache, relation, fga_policy).await? {
+            if !trusted_view_source_is_proven(
+                cx,
+                conn,
+                cache,
+                relation,
+                fga_policy,
+                trusted_views,
+                view_depth,
+            )
+            .await?
+            {
                 return Ok(Purity::Unknown);
             }
             let mut policy_relation = relation.clone();
@@ -641,7 +653,12 @@ async fn trusted_view_source_is_proven(
     cache: &OracleCatalogResolverCache,
     relation: &ResolvedObject,
     fga_policy: FgaEvidencePolicy,
+    trusted_views: &[String],
+    view_depth: u8,
 ) -> Result<bool, DbError> {
+    if view_depth >= MAX_TRUSTED_VIEW_DEPTH {
+        return Ok(false);
+    }
     let rows = run_catalog_query(
         cx,
         conn,
@@ -667,13 +684,14 @@ async fn trusted_view_source_is_proven(
     let Ok(plan) = semantic_read_plan_checked(&source) else {
         return Ok(false);
     };
-    Ok(Box::pin(prove_semantic_read_plan(
+    Ok(Box::pin(prove_semantic_read_plan_inner(
         cx,
         conn,
         cache,
         &plan,
         fga_policy,
-        &[],
+        trusted_views,
+        view_depth + 1,
     ))
     .await
     .is_ok())
@@ -1820,7 +1838,19 @@ pub async fn prove_semantic_read_plan(
     cache: &OracleCatalogResolverCache,
     plan: &SemanticReadPlan,
     fga_policy: FgaEvidencePolicy,
-    _trusted_views: &[String],
+    trusted_views: &[String],
+) -> Result<ReadPlanProof, ReadPlanProofError> {
+    prove_semantic_read_plan_inner(cx, conn, cache, plan, fga_policy, trusted_views, 0).await
+}
+
+async fn prove_semantic_read_plan_inner(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    cache: &OracleCatalogResolverCache,
+    plan: &SemanticReadPlan,
+    fga_policy: FgaEvidencePolicy,
+    trusted_views: &[String],
+    view_depth: u8,
 ) -> Result<ReadPlanProof, ReadPlanProofError> {
     if plan.blocks.len() > 128 || plan.relations.len() > 256 {
         return Err(ReadPlanProofError::Unproven("relation_plan_cap_exceeded"));
@@ -1929,7 +1959,8 @@ pub async fn prove_semantic_read_plan(
         &relations,
         &values,
         fga_policy,
-        _trusted_views,
+        trusted_views,
+        view_depth,
     )
     .await
     .map_err(ReadPlanProofError::Database)?;
