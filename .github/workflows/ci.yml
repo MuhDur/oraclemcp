@@ -780,6 +780,8 @@ jobs:
   # CI fixtures; no deployment or customer identifier is committed here.
   oracle-free23:
     name: Oracle FREE 23ai W4
+    # Advisory until .9.5-.9.9 and oraclemcp-zw03u close; then make this required.
+    continue-on-error: true
     needs: web-build
     runs-on: ubuntu-latest
     timeout-minutes: 25

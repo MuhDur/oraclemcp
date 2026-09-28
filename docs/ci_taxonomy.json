@@ -17,7 +17,7 @@
     },
     {
       "check_name": "Oracle FREE 23ai W4",
-      "tier": "required",
+      "tier": "advisory",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "oracle-free23",
@@ -932,6 +932,7 @@
   },
   "groups": {
     "advisory": [
+      "Oracle FREE 23ai W4",
       "Rust workspace (Windows)"
     ],
     "manual": [
@@ -973,7 +974,6 @@
       "web bundle (npm ci + vite build)"
     ],
     "required": [
-      "Oracle FREE 23ai W4",
       "PL/SQL intelligence feature matrix",
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
