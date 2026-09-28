@@ -1905,19 +1905,22 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                                    "ora_code": cancelled[0]["failure"]["ora_code"]}
         if case["call"].get("cancel_mutation_audit"):
             structured = tool_payload(reply)["structuredContent"]
-            terminal = ("ROLLED_BACK" if structured.get("cancel_outcome") == "cancel_confirmed"
-                        else "UNKNOWN_DISCARDED")
-            expected_response = ({"error_class": "REQUEST_CANCELLED",
-                                  "cancel_outcome": "cancel_confirmed",
-                                  "statement_outcome": "rolled_back"}
+            writes = [record for record in audit_records(audit_path)[before:]
+                      if record.get("tool") == case["tool"]]
+            require(len(writes) == 2 and writes[0].get("decision") == "ALLOWED"
+                    and writes[0].get("outcome") == "PENDING",
+                    "cancelled mutation needs exactly one pending audit before its terminal audit")
+            terminal = writes[1].get("outcome")
+            expected_response = ({"error_class": "INTERNAL", "ora_code": 1013,
+                                  "cancel_outcome": "outcome_unknown",
+                                  "statement_outcome": "protocol_unsynchronized"}
                                  if terminal == "ROLLED_BACK" else
                                  {"error_class": "CONNECTION_FAILED",
                                   "cancel_outcome": "outcome_unknown",
                                   "statement_outcome": "protocol_unsynchronized"})
-            require(deep_subset(expected_response, structured),
+            require(terminal in {"ROLLED_BACK", "UNKNOWN_DISCARDED"}
+                    and deep_subset(expected_response, structured),
                     "cancelled mutation response does not match its proved terminal outcome")
-            writes = [record for record in audit_records(audit_path)[before:]
-                      if record.get("tool") == case["tool"]]
             require([(record.get("decision"), record.get("outcome")) for record in writes]
                     == [("ALLOWED", "PENDING"), ("ALLOWED", terminal)],
                     "cancelled mutation needs one pending audit and one terminal no-retry audit")
@@ -2381,14 +2384,11 @@ def run_lane(args):
                                    barriers, binary, audit_path, client_env,
                                    discovered.get(case["tool"]))
                     rows.append(row)
-                    rollback_unknown = (
-                        row.get("cancel_mutation_audit", {}).get("terminal_outcome")
-                        == "UNKNOWN_DISCARDED"
-                    )
-                    if "kill_served_session_dml_user" in case["call"] or rollback_unknown:
-                        # A killed or rollback-uncertain session is quarantined and cannot
-                        # service the normal level drop. Restart at the lane's READ_ONLY
-                        # baseline before another selected W4 case uses this transport.
+                    cancelled_mutation = case["call"].get("cancel_mutation_audit") is True
+                    if "kill_served_session_dml_user" in case["call"] or cancelled_mutation:
+                        # A killed session, and every cancelled mutation whose wire outcome
+                        # dispatch quarantined, cannot service the normal level drop. Restart
+                        # at the lane's READ_ONLY baseline before another selected W4 case.
                         client.close()
                         client = (StdioClient(binary, args.lane, client_env) if transport == "stdio"
                                   else HttpClient(binary, args.lane, client_env, port, secret, audience,

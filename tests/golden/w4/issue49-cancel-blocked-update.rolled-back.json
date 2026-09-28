@@ -1,10 +1,8 @@
 {
-  "cancel_outcome": "cancel_confirmed",
-  "error_class": "REQUEST_CANCELLED",
+  "cancel_outcome": "outcome_unknown",
+  "error_class": "INTERNAL",
   "isError": true,
-  "message": "tool dispatch cancelled before completion: user: MCP notifications/cancelled",
-  "next_steps": [
-    "Retry only if the client did not intentionally cancel the request."
-  ],
-  "statement_outcome": "rolled_back"
+  "message": "execute: ORA-01013: user requested cancel of current operation",
+  "ora_code": 1013,
+  "statement_outcome": "protocol_unsynchronized"
 }
