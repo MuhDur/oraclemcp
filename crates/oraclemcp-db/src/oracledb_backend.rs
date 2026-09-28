@@ -18,7 +18,7 @@ use serde_json::{Number, Value, json};
 use crate::auth_adapter::AuthAdapter;
 use crate::connection::{
     DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart, WalletFileChoice,
-    project_tsltz_rows, timestamp_tz_wall_clock,
+    db_checkpoint, project_tsltz_rows, timestamp_tz_wall_clock,
 };
 use crate::error::QuarantineOutcome;
 use crate::oracledb_actor::{
@@ -109,7 +109,7 @@ impl OfficialOracleConnection {
         cx: &Cx,
         options: OracleConnectOptions,
     ) -> Result<Self, ConnectFailure> {
-        checkpoint(cx, "official Oracle connect before actor startup")
+        db_checkpoint(cx, "official Oracle connect before actor startup")
             .map_err(ConnectFailure::RawAcquisition)?;
         validate_supported_connect_options(&options).map_err(ConnectFailure::RawAcquisition)?;
 
@@ -163,7 +163,7 @@ impl OfficialOracleConnection {
             Self::discard_failed_connect(&adapter.actor);
             return Err(error);
         }
-        if let Err(error) = checkpoint(cx, "official Oracle connect after actor startup") {
+        if let Err(error) = db_checkpoint(cx, "official Oracle connect after actor startup") {
             Self::discard_failed_connect(&adapter.actor);
             return Err(ConnectFailure::PostConnectSetup(error));
         }
@@ -185,7 +185,7 @@ impl OfficialOracleConnection {
         phase: &'static str,
     ) -> Result<OfficialReply, DbError> {
         self.require_open()?;
-        checkpoint(cx, phase)?;
+        db_checkpoint(cx, phase)?;
         let budget = self.effective_budget(cx, phase)?;
         self.actor
             .call_with_deadline(cx, budget.deadline, command.with_timeout(budget.timeout))
@@ -199,7 +199,7 @@ impl OfficialOracleConnection {
         phase: &'static str,
     ) -> Result<OfficialReply, DbError> {
         self.require_open()?;
-        checkpoint(cx, phase)?;
+        db_checkpoint(cx, phase)?;
         let budget = self.effective_budget(cx, phase)?;
         self.actor
             .call_terminal_with_deadline(cx, budget.deadline, command.with_timeout(budget.timeout))
@@ -1365,11 +1365,6 @@ fn expect_connect_reply(reply: OfficialReply) -> Result<(), ConnectFailure> {
             "official Oracle actor returned an unexpected connect reply".to_owned(),
         ))),
     }
-}
-
-fn checkpoint(cx: &Cx, phase: &str) -> Result<(), DbError> {
-    cx.checkpoint()
-        .map_err(|error| DbError::Cancelled(format!("{phase}: {error}")))
 }
 
 fn stream_effective_budget(
