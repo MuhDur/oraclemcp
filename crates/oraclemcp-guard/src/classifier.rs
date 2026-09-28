@@ -3177,6 +3177,12 @@ pub fn semantic_read_plan(sql: &str) -> Option<SemanticReadPlan> {
 
 /// Build and independently cross-check every lexical query block.
 pub fn semantic_read_plan_checked(sql: &str) -> Result<SemanticReadPlan, PlanMismatch> {
+    // This public production read-path API calls sqlparser directly, so it must
+    // enforce the same pre-parser budget as classify_raw.  In particular, no
+    // caller may reach parser backtracking for an input the classifier refuses.
+    if exceeds_sqlparser_square_bracket_budget(sql) {
+        return Err(PlanMismatch::ParserWorkBudgetExceeded);
+    }
     let parser_sql = normalize_vector_embedding_for_parser(sql);
     let statements = Parser::parse_sql(&OracleDialect {}, &parser_sql)
         .map_err(|_| PlanMismatch::UnsupportedShape)?;

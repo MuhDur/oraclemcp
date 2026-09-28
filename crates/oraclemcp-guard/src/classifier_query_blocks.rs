@@ -13,6 +13,7 @@ const MAX_PLANNED_VALUES: usize = 1024;
 pub enum PlanMismatch {
     RelationPlanMismatch,
     RelationPlanCapExceeded,
+    ParserWorkBudgetExceeded,
     UnsupportedShape,
     RecursiveCte,
 }
@@ -22,6 +23,7 @@ impl PlanMismatch {
         match self {
             Self::RelationPlanMismatch => "relation_plan_mismatch",
             Self::RelationPlanCapExceeded => "relation_plan_cap_exceeded",
+            Self::ParserWorkBudgetExceeded => "parser_work_budget_exceeded",
             Self::UnsupportedShape => "query scope is not exactly representable",
             Self::RecursiveCte => "recursive CTE dependency is not supported",
         }

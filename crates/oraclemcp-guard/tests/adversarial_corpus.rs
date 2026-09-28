@@ -14,9 +14,31 @@ use oraclemcp_guard::policy::{
     SqlPolicyEffectConfig, SqlPolicyEvaluationContext, SqlPolicyMatchConfig, SqlPolicyRuleConfig,
     SqlPolicyVerb,
 };
-use oraclemcp_guard::{Classifier, ClassifierConfig, DangerLevel};
+use oraclemcp_guard::{
+    Classifier, ClassifierConfig, DangerLevel, PlanMismatch, semantic_read_plan_checked,
+};
 
 const CLASSIFY_FUZZ_TIMEOUT_REGRESSION: &str = "IF[IFIF[IFIF[IFIF[IFIIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[I_.F[IFBEGINYF.Y:N.FQ/-y].YN.YFIF[IF_F.YN/-YF.YN.YFIF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/F[IFIIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/-y].YN.YFIF[I5_F.YN.YF-YF.YN.YFIF[IF_F.YN.-.-YF.YN.";
+const SEMANTIC_READ_PLAN_SLOW_UNIT_REGRESSIONS: &[&str] = &[
+    concat!(
+        "IF[IFIF[IFIF[IFIF[IFIIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[I_.F[IFBEGINYF.Y:N.",
+        "FQ/-y].YN.YFIF[IF_F.YN/-YF.YN.YFIF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/F[IF",
+        "IIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/-y].YN.YF",
+        "IF[I5_F.YN.YF-YF.YN.YFIF[IF_F.YN.-.-YF.YN.\n"
+    ),
+    concat!(
+        "IF[IFIF[IFIF[IFIF[IFIIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[I_.F[IFBEGINYF.Y:N.",
+        "FQ/-y].YN.YFIF[IF_F.YN/-Y@.YN.YFIF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/F[IF",
+        "IIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/-y].YN.YF",
+        "IF[I5_F.YN.YF-YF.YN.YFIF[IF_F.YN.-.-YF.YN.\n"
+    ),
+    concat!(
+        "IF[IFIF[IFIF[IFIF[IFIIF[IFYF.Y:N.FQ/-YF.YN.FQ/-y].YN.YFIF[IF_F.YN/-YF",
+        ".YN.YFIF[N.-YF.YN.IF[IFYF.Y:N.FQ/-y].YN.YFIF[I3_F.YN.YF-YF.YN.YFIF[IF",
+        "_EF[IF_F.YN.-YF.YN.IF[IYFIBEF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/-y].YN.YF",
+        "IF[I3_F.YN.YF-YF.YN.YFIF[IF_F.YN.-.-YF.YN.\n"
+    ),
+];
 
 #[test]
 fn classifier_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
@@ -39,6 +61,23 @@ fn classifier_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
         "classifier took {:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn semantic_read_plan_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
+    for sql in std::iter::once(CLASSIFY_FUZZ_TIMEOUT_REGRESSION)
+        .chain(SEMANTIC_READ_PLAN_SLOW_UNIT_REGRESSIONS.iter().copied())
+    {
+        let started = std::time::Instant::now();
+        let result = semantic_read_plan_checked(sql);
+
+        assert_eq!(result, Err(PlanMismatch::ParserWorkBudgetExceeded));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "semantic read plan took {:?}",
+            started.elapsed()
+        );
+    }
 }
 
 #[test]
