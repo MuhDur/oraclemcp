@@ -31,6 +31,7 @@
         "reuse_after_cancel": {"const": true},
         "cancel_audit": {"const": true},
         "lock_sql": {"type": "string", "minLength": 1},
+        "cancel_mutation_audit": {"const": true},
         "cancel_after_completion": {"const": true},
         "retry": {"type": "boolean"}, "retry_expect": {"type": "object"},
         "mutation": {"type": "boolean"},

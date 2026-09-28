@@ -32,16 +32,14 @@
       "arguments": {"sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-cancelled-update' WHERE ID = 1 /* W4MARK_123456789ABE */"},
       "mutation": true,
       "cancel_marker": "W4MARK_123456789ABE",
-      "lock_sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 1"
+      "lock_sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 1",
+      "cancel_mutation_audit": true
     },
-    "expect": {"json_subset": {"error_class": "CONNECTION_FAILED", "cancel_outcome": "outcome_unknown", "statement_outcome": "protocol_unsynchronized"}},
+    "expect": {"error_classes": ["REQUEST_CANCELLED", "CONNECTION_FAILED"]},
     "db_reread": [
       {"sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID = 1", "rows": [[1, "parent-1"]]}
     ],
-    "audit_expect": [
-      {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "PENDING"},
-      {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "UNKNOWN_DISCARDED"}
-    ],
+    "audit_expect": [],
     "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
   },
   {

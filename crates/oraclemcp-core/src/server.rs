@@ -2496,7 +2496,7 @@ impl OracleMcpServer {
                 // notably a completed/committed statement must retain its
                 // real result or uncertain terminal outcome.
                 if cancelled_by_transport
-                    && let Some(cancelled) = transport_cancel_error(&envelope, &cancellation)
+                    && let Some(cancelled) = transport_cancel_error(name, &envelope, &cancellation)
                 {
                     let response = jsonrpc_result(id, tool_result_err_json(&cancelled));
                     return Outcome::Err(JsonRpcDispatchError::new(response));
@@ -3225,6 +3225,7 @@ fn cancelled_dispatch_envelope(reason: &CancelReason) -> ErrorEnvelope {
 /// A driver break normally surfaces as a timeout only after drain/rollback has
 /// confirmed cancellation. A quarantined mutation instead remains uncertain.
 fn transport_cancel_error(
+    tool_name: &str,
     envelope: &ErrorEnvelope,
     cancellation: &RequestCancellation,
 ) -> Option<ErrorEnvelope> {
@@ -3235,6 +3236,21 @@ fn transport_cancel_error(
             envelope
                 .clone()
                 .with_cancel_outcome(CancelOutcome::OutcomeUnknown),
+        );
+    }
+    if tool_name == "oracle_execute"
+        && envelope.error_class == ErrorClass::Internal
+        && envelope.ora_code == Some(1013)
+        && envelope.statement_outcome == Some(StatementOutcome::ProtocolUnsynchronized)
+    {
+        // `oracle_execute` reaches this branch only after its bounded
+        // rollback completed; it is therefore a confirmed cancellation with
+        // a proved rolled-back mutation, unlike a wire-loss quarantine.
+        return Some(
+            cancelled_dispatch_envelope(
+                &cancellation.reason().unwrap_or_else(CancelReason::timeout),
+            )
+            .with_statement_outcome(StatementOutcome::RolledBack),
         );
     }
     (envelope.error_class == ErrorClass::Timeout).then(|| {
@@ -4080,7 +4096,7 @@ mod tests {
         )
         .with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
 
-        let mapped = transport_cancel_error(&error, &cancellation)
+        let mapped = transport_cancel_error("oracle_execute", &error, &cancellation)
             .expect("cancelled quarantine has a typed terminal envelope");
         assert_eq!(mapped.error_class, ErrorClass::ConnectionFailed);
         assert_eq!(mapped.cancel_outcome, Some(CancelOutcome::OutcomeUnknown));
@@ -4088,6 +4104,21 @@ mod tests {
             mapped.statement_outcome,
             Some(StatementOutcome::ProtocolUnsynchronized)
         );
+    }
+
+    #[test]
+    fn issue49_cancelled_update_with_rollback_reports_confirmed_rollback() {
+        let cancellation = RequestCancellation::default();
+        cancellation.cancel(CancelReason::user("test cancellation"));
+        let error = ErrorEnvelope::new(ErrorClass::Internal, "execute: ORA-01013")
+            .with_ora_code(1013)
+            .with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
+
+        let mapped = transport_cancel_error("oracle_execute", &error, &cancellation)
+            .expect("rolled-back cancellation has a typed terminal envelope");
+        assert_eq!(mapped.error_class, ErrorClass::RequestCancelled);
+        assert_eq!(mapped.cancel_outcome, Some(CancelOutcome::CancelConfirmed));
+        assert_eq!(mapped.statement_outcome, Some(StatementOutcome::RolledBack));
     }
 
     #[test]

@@ -376,7 +376,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "cancel_after_completion", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "cancel_mutation_audit", "cancel_after_completion", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -419,6 +419,11 @@ def validate_case(case, filename):
                 and isinstance(case["call"]["lock_sql"], str)
                 and case["call"]["lock_sql"].strip(),
                 "lock_sql is only meaningful for a marked cancellation call")
+    if "cancel_mutation_audit" in case["call"]:
+        require(case["call"]["cancel_mutation_audit"] is True
+                and case["call"].get("mutation") is True
+                and "cancel_marker" in case["call"],
+                "cancel_mutation_audit needs a marked mutation")
     if "cancel_after_completion" in case["call"]:
         require(case["call"]["cancel_after_completion"] is True
                 and case["call"].get("mutation") is True
@@ -496,7 +501,8 @@ def validate_case(case, filename):
     if case["call"].get("mutation"):
         step_audits = any("audit_record" in step or "audit_records" in step
                           for step in case.get("steps", []))
-        require(case["db_reread"] and (case["audit_expect"] or step_audits),
+        require(case["db_reread"] and (case["audit_expect"] or step_audits
+                                         or case["call"].get("cancel_mutation_audit")),
                 "mutating case needs independent DB re-read and audit expectations")
     require(isinstance(case["on_unsupported"], dict)
             and isinstance(case["on_unsupported"].get("error_class"), str),
@@ -1750,6 +1756,7 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
     if "cancel_marker" in case["call"]:
         input_value["cancel_marker"] = case["call"]["cancel_marker"]
     for field in ("cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql",
+                  "cancel_mutation_audit",
                   "cancel_after_completion"):
         if field in case["call"]:
             input_value[field] = case["call"][field]
@@ -1871,6 +1878,26 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                     "cancelled query needs exactly one terminal FAILED ORA-01013 audit record")
             row["cancel_audit"] = {"terminal_outcome": cancelled[0]["outcome"],
                                    "ora_code": cancelled[0]["failure"]["ora_code"]}
+        if case["call"].get("cancel_mutation_audit"):
+            structured = tool_payload(reply)["structuredContent"]
+            terminal = ("ROLLED_BACK" if structured.get("cancel_outcome") == "cancel_confirmed"
+                        else "UNKNOWN_DISCARDED")
+            expected_response = ({"error_class": "REQUEST_CANCELLED",
+                                  "cancel_outcome": "cancel_confirmed",
+                                  "statement_outcome": "rolled_back"}
+                                 if terminal == "ROLLED_BACK" else
+                                 {"error_class": "CONNECTION_FAILED",
+                                  "cancel_outcome": "outcome_unknown",
+                                  "statement_outcome": "protocol_unsynchronized"})
+            require(deep_subset(expected_response, structured),
+                    "cancelled mutation response does not match its proved terminal outcome")
+            writes = [record for record in audit_records(audit_path)[before:]
+                      if record.get("tool") == case["tool"]]
+            require([(record.get("decision"), record.get("outcome")) for record in writes]
+                    == [("ALLOWED", "PENDING"), ("ALLOWED", terminal)],
+                    "cancelled mutation needs one pending audit and one terminal no-retry audit")
+            row["cancel_mutation_audit"] = {"terminal_outcome": terminal,
+                                             "write_attempts": len(writes)}
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env))
@@ -2764,6 +2791,10 @@ def selftest():
         "selftest"))
     rejected("lock_sql_without_marked_call", lambda: validate_case(
         {**replay_case, "call": {"arguments": {}, "lock_sql": "UPDATE T SET X = 1"}},
+        "selftest"))
+    rejected("cancel_mutation_audit_without_marked_mutation", lambda: validate_case(
+        {**replay_case, "call": {"arguments": {}, "cancel_marker": "W4MARK_123456789ABC",
+                                   "cancel_mutation_audit": True}},
         "selftest"))
     rejected("cancel_after_completion_without_committed_mutation", lambda: validate_case(
         {**replay_case, "call": {"arguments": {}, "cancel_after_completion": True}},
