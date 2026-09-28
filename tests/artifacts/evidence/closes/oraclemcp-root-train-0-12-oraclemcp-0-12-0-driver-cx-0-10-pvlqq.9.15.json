@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:52:06Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.9.15",
+  "scope": {
+    "summary": "In-lane selftest core: CLI surface, forced-READ_ONLY derived profile, typed outcome classifier, redactor, and embedded read-only case subset, with unit tests and an offline end-to-end invocation.",
+    "in_scope": [
+      "crates/oraclemcp/src/cli.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/src/selftest.rs",
+      "crates/oraclemcp/selftest/readonly_cases.json"
+    ],
+    "out_of_scope": [
+      "scripts/e2e/w4/export_selftest_cases.py",
+      "scripts/e2e/selftest.sh",
+      "scripts/e2e/run_all.sh",
+      "docs/operations.md",
+      "python3 scripts/e2e/w4/export_selftest_cases.py --check",
+      "selftest_e2e_clean_lane_exit_0",
+      "selftest_e2e_forced_readonly_on_admin_profile",
+      "selftest_e2e_injected_defect_exit_2",
+      "selftest_e2e_missing_grant_exit_3",
+      "selftest_e2e_redaction_canaries"
+    ]
+  },
+  "source": {
+    "sha": "f5081bf3a62177549b3271326d5a9c81927edea8",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oraclemcp selftest",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp --bin oraclemcp selftest:: -> 7 passed; target/debug/oraclemcp --json selftest --profile lab_admin -> exit 3, forced_readonly_effective_access pass (effective_access.max_level=READ_ONLY, writes_permitted_now=false), 52 advertised tools classified, synthetic canaries absent"
+      },
+      {
+        "name": "oraclemcp selftest --issue-draft",
+        "kind": "cli",
+        "trace": "selftest against a non-MCP HTTP listener -> exit 2 and one sanitized draft tests/artifacts/... (draft content checked by selftest::tests::issue_drafts_are_redacted)"
+      },
+      {
+        "name": "selftest redactor",
+        "kind": "cli",
+        "trace": "selftest::tests::redactor_removes_identifiers and selftest::tests::redactor_scrubs_connect_strings"
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "No live Oracle database or lab lane was reachable in this session, so the bead's lab-lane e2e cases (selftest_e2e_*) and export_selftest_cases.py --check were not run; the run exercised the served stdio transport against an unreachable profile and reported the expected environment findings (exit 3).",
+    "scripts/e2e/w4/export_selftest_cases.py, scripts/e2e/selftest.sh, run_all.sh registration, and docs/operations.md are outside this agent's file lane and were not delivered; the embedded case subset's read-only/W4 lineage is covered by selftest::tests::selftest_cases_are_readonly_subset_of_w4.",
+    "Forced READ_ONLY is proven offline by the derived profile ceiling and the served oracle_connection_info effective_access, plus the audit scan; on this host the write/elevation probes short-circuit at CONNECTION_FAILED before the level gate, so the live level-refusal path is not exercised here.",
+    "The run's audit file was empty (0 records) offline, so forced_readonly_audit is vacuously clean rather than positively evidenced by READ_ONLY records.",
+    "Observed pre-existing dispatch behaviour (not touched by this bead): the second oracle_connection_info call on a session returns CONNECTION_FAILED after a first success."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
