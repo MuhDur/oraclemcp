@@ -5652,9 +5652,11 @@ async fn resolve_read_only_relations_inner(
         cache,
         sql,
         verified_local_vector_embedding,
-        fga_policy,
-        require_security_feature_evidence,
-        &[],
+        read_executor::ReadProofPolicy {
+            fga_evidence: fga_policy,
+            require_security_feature_evidence,
+            trusted_views: &[],
+        },
     )
     .await
 }
@@ -15207,9 +15209,11 @@ impl OracleDispatcher {
                     &state.catalog_cache,
                     &a.sql,
                     false,
-                    state.fga_evidence_policy,
-                    state.require_security_feature_evidence,
-                    state.trusted_views.as_ref(),
+                    read_executor::ReadProofPolicy {
+                        fga_evidence: state.fga_evidence_policy,
+                        require_security_feature_evidence: state.require_security_feature_evidence,
+                        trusted_views: state.trusted_views.as_ref(),
+                    },
                 )
                 .await?;
                 let fga_evidence = read.fga_evidence;

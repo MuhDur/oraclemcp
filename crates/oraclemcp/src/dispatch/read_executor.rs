@@ -593,6 +593,13 @@ pub(super) struct ResolvedRead {
     pub(super) relation_security: Vec<RelationSecurityObservation>,
 }
 
+/// Per-read proof policy supplied by the active dispatcher profile.
+pub(super) struct ReadProofPolicy<'a> {
+    pub(super) fga_evidence: FgaEvidencePolicy,
+    pub(super) require_security_feature_evidence: bool,
+    pub(super) trusted_views: &'a [String],
+}
+
 /// Resolve relation identities for EXPLAIN's hard-parse closure before the
 /// ordinary purity proof can return a less specific policy refusal.
 pub(super) async fn resolve_hard_parse_relations(
@@ -624,9 +631,7 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
     cache: &OracleCatalogResolverCache,
     sql: &str,
     verified_local_vector_embedding: bool,
-    fga_policy: FgaEvidencePolicy,
-    require_security_feature_evidence: bool,
-    trusted_views: &[String],
+    policy: ReadProofPolicy<'_>,
 ) -> Result<ResolvedRead, ErrorEnvelope> {
     let initial = if verified_local_vector_embedding {
         SEMANTIC_READ_PRECHECK_CLASSIFIER.classify_verified_local_vector_embedding(sql)
@@ -636,20 +641,27 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
     ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
     let plan = semantic_read_plan_checked(sql)
         .map_err(|error| unresolved_semantic_read(error.as_str()))?;
-    let proof = prove_semantic_read_plan(cx, conn, cache, &plan, fga_policy, trusted_views)
-        .await
-        .map_err(|error| match error {
-            ReadPlanProofError::Database(error) => error.into_envelope(),
-            ReadPlanProofError::MissingRelation(name) => missing_semantic_relation(&name),
-            ReadPlanProofError::MissingColumn(name) => missing_semantic_column(&name),
-            ReadPlanProofError::Unproven(reason) => unresolved_semantic_read(reason),
-            ReadPlanProofError::FgaHandlerAutonomous => fga_refusal("fga_handler_autonomous"),
-            ReadPlanProofError::FgaEvidenceUnknown => fga_refusal("fga_evidence_unknown"),
-        })?;
+    let proof = prove_semantic_read_plan(
+        cx,
+        conn,
+        cache,
+        &plan,
+        policy.fga_evidence,
+        policy.trusted_views,
+    )
+    .await
+    .map_err(|error| match error {
+        ReadPlanProofError::Database(error) => error.into_envelope(),
+        ReadPlanProofError::MissingRelation(name) => missing_semantic_relation(&name),
+        ReadPlanProofError::MissingColumn(name) => missing_semantic_column(&name),
+        ReadPlanProofError::Unproven(reason) => unresolved_semantic_read(reason),
+        ReadPlanProofError::FgaHandlerAutonomous => fga_refusal("fga_handler_autonomous"),
+        ReadPlanProofError::FgaEvidenceUnknown => fga_refusal("fga_evidence_unknown"),
+    })?;
     let relations = proof.relations.clone();
     let fga_evidence = proof.fga_evidence;
     let relation_security = proof.relation_security.clone();
-    if require_security_feature_evidence
+    if policy.require_security_feature_evidence
         && let Some(observation) = relation_security.iter().find(|observation| {
             observation.ols == RelationSecurityState::Unavailable
                 || observation.ras == RelationSecurityState::Unavailable
@@ -838,9 +850,11 @@ impl AdmittedWitnessRead {
             cache,
             &sql,
             false,
-            FgaEvidencePolicy::RequireProof,
-            true,
-            &[],
+            ReadProofPolicy {
+                fga_evidence: FgaEvidencePolicy::RequireProof,
+                require_security_feature_evidence: true,
+                trusted_views: &[],
+            },
         )
         .await?;
         Ok(Self { sql, binds })
@@ -1590,9 +1604,11 @@ impl<'a> GuardedReadExecutor<'a> {
                     &state.catalog_cache,
                     &executed_sql,
                     false,
-                    state.fga_evidence_policy,
-                    state.require_security_feature_evidence,
-                    state.trusted_views.as_ref(),
+                    ReadProofPolicy {
+                        fga_evidence: state.fga_evidence_policy,
+                        require_security_feature_evidence: state.require_security_feature_evidence,
+                        trusted_views: state.trusted_views.as_ref(),
+                    },
                 )
                 .await;
                 let (
