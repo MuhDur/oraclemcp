@@ -16,6 +16,19 @@
       "path_filtered": false
     },
     {
+      "check_name": "Oracle FREE 23ai W4",
+      "tier": "advisory",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "oracle-free23-w4",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "Oracle FREE 23ai matrix + VECTOR smoke",
       "tier": "required",
       "workflow": "CI",
@@ -48,7 +61,9 @@
       "workflow_file": "ci.yml",
       "job_id": "windows-rust",
       "triggers": [
-        "pull_request"
+        "pull_request",
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
@@ -796,6 +811,7 @@
         "workflow_dispatch"
       ],
       "jobs": [
+        "Oracle FREE 23ai W4",
         "Oracle FREE 23ai matrix + VECTOR smoke",
         "PL/SQL intelligence feature matrix",
         "Rust workspace (Windows)",
@@ -930,6 +946,7 @@
   },
   "groups": {
     "advisory": [
+      "Oracle FREE 23ai W4",
       "Rust workspace (Windows)"
     ],
     "manual": [
