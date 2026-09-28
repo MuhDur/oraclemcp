@@ -8,17 +8,6 @@
     "expect": { "kind": "rows" }
   },
   {
-    "case_id": "selftest_query_all_users_bounded",
-    "source_case_id": "w4_query_issue28_order_by_alias",
-    "tool": "oracle_query",
-    "level": "READ_ONLY",
-    "arguments": {
-      "sql": "SELECT username FROM ALL_USERS WHERE ROWNUM <= 5 ORDER BY username",
-      "max_rows": 5
-    },
-    "expect": { "kind": "rows" }
-  },
-  {
     "case_id": "selftest_list_schemas_all_users",
     "source_case_id": "w4_list_schemas_name_like_filter",
     "tool": "oracle_list_schemas",

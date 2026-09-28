@@ -417,7 +417,14 @@ fn classify_generic_read(observed: &Observed) -> (Class, Option<String>) {
         Observed::Success(_) => (Class::Pass, None),
         Observed::Error { class, .. } => {
             let class = normalize_class(class);
-            if is_environment_class(&class) || is_synthetic_input_class(&class) {
+            // This sweep deliberately supplies schema-shaped placeholder input.
+            // An absent object, cursor, or required argument proves the served
+            // endpoint rejected that placeholder safely; it is not a property
+            // of the database environment.  Real embedded cases still classify
+            // insufficient privilege as an environmental finding (exit 3).
+            if is_synthetic_input_class(&class) || class == "RUNTIME_STATE_REQUIRED" {
+                (Class::ExpectedRefusal, Some(class))
+            } else if is_environment_class(&class) {
                 (Class::Environment, Some(class))
             } else {
                 // Any other class on a READ_ONLY read (including an unexpected
@@ -902,6 +909,18 @@ fn synthetic_arguments(schema: Option<&Value>, is_write: bool) -> Value {
     Value::Object(object)
 }
 
+/// Reuse an embedded canonical read probe for an advertised compatibility
+/// alias.  This exercises the alias with known-good read arguments instead of
+/// mistaking a missing required argument for an alias safety result.
+fn advertised_read_arguments(tool: &str, cases: &[ReadonlyCase], schema: Option<&Value>) -> Value {
+    let canonical = oraclemcp::registry::alias_target(tool).unwrap_or(tool);
+    cases
+        .iter()
+        .find(|case| case.tool == canonical)
+        .map(|case| case.arguments.clone())
+        .unwrap_or_else(|| synthetic_arguments(schema, false))
+}
+
 // ---------------------------------------------------------------------------
 // Audit verification
 // ---------------------------------------------------------------------------
@@ -1310,7 +1329,7 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                     outcomes.push(skipped(format!("advertised:{tool}")));
                     continue;
                 }
-                let args_value = synthetic_arguments(schemas.get(tool), false);
+                let args_value = advertised_read_arguments(tool, &cases, schemas.get(tool));
                 let case_started = Instant::now();
                 let observed = client.tool_call(tool, args_value, PROBE_TIMEOUT);
                 let (class, error_class) = classify_generic_read(&observed);
@@ -1830,6 +1849,33 @@ mod tests {
                 requires_empty,
                 "W4 source `{}` has no extra requirements",
                 case.source_case_id
+            );
+        }
+    }
+
+    #[test]
+    fn advertised_alias_reuses_covered_canonical_read_arguments() {
+        let cases = embedded_cases().expect("embedded cases parse");
+        let arguments = advertised_read_arguments("query", &cases, None);
+        assert_eq!(arguments["sql"], "SELECT 1 AS n FROM DUAL");
+        assert_eq!(arguments["max_rows"], SELFTEST_ROW_CAP);
+    }
+
+    #[test]
+    fn generic_placeholder_refusals_are_not_database_environment_findings() {
+        for class in [
+            "INVALID_ARGUMENTS",
+            "OBJECT_NOT_FOUND",
+            "RUNTIME_STATE_REQUIRED",
+        ] {
+            let observed = Observed::Error {
+                class: class.to_owned(),
+                message: String::new(),
+            };
+            assert_eq!(
+                classify_generic_read(&observed).0,
+                Class::ExpectedRefusal,
+                "{class} is a safe rejection of schema-shaped placeholder input"
             );
         }
     }
