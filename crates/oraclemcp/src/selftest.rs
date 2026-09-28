@@ -385,7 +385,12 @@ fn classify_write_observed(observed: &Observed) -> (Class, Option<String>) {
             let class = normalize_class(class);
             if is_expected_refusal_class(&class) {
                 (Class::ExpectedRefusal, Some(class))
-            } else if is_environment_class(&class) || is_synthetic_input_class(&class) {
+            } else if is_synthetic_input_class(&class) {
+                // The write sweep intentionally sends schema-shaped markers.
+                // Argument validation is a safe refusal of that marker, not an
+                // environmental failure to exercise a write.
+                (Class::ExpectedRefusal, Some(class))
+            } else if is_environment_class(&class) {
                 (Class::Environment, Some(class))
             } else {
                 (Class::Defect, Some(class))
