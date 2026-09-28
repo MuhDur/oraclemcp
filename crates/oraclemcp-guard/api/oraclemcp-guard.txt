@@ -11902,6 +11902,8 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::token::AllowOnceStore
 pub fn oraclemcp_guard::token::AllowOnceStore::vzip(self) -> V
 pub const oraclemcp_guard::token::ALLOW_ONCE_TTL: core::time::Duration
 pub fn oraclemcp_guard::token::sql_digest(&str) -> alloc::string::String
+pub mod oraclemcp_guard::view_eligibility
+pub fn oraclemcp_guard::view_eligibility::is_builtin_dictionary_view(&str, &str) -> bool
 pub enum oraclemcp_guard::ActionKind
 pub oraclemcp_guard::ActionKind::ChangeRequestPromote
 pub oraclemcp_guard::ActionKind::CompileObject
@@ -20428,6 +20430,7 @@ pub fn oraclemcp_guard::enforce_sql_policy_with_effects(&oraclemcp_guard::policy
 pub fn oraclemcp_guard::function_free_virtual_column_expression(&str) -> bool
 pub fn oraclemcp_guard::hard_parse_user_calls(&str) -> core::result::Result<alloc::vec::Vec<oraclemcp_guard::purity::ObjectRef>, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::is_allowed_alter_session(&str) -> bool
+pub fn oraclemcp_guard::is_builtin_dictionary_view(&str, &str) -> bool
 pub fn oraclemcp_guard::named_bind_placeholders(&str) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_guard::parse_edition_lifecycle_sql(&str) -> oraclemcp_guard::edition_lifecycle::EditionLifecycleParse
 pub fn oraclemcp_guard::read_only_setup_statements(oraclemcp_guard::levels::OperatingLevel) -> alloc::vec::Vec<&'static str>
