@@ -288,6 +288,10 @@ pub enum CatalogQueryId {
     ClosureIdentity,
     /// Stable database and PDB identity for service-local coordination.
     PdbIdentity,
+    /// Exact Oracle-maintained marker for one eligible dictionary view.
+    DictionaryViewIdentity,
+    /// Bounded dependency closure for one eligible dictionary view.
+    DictionaryViewDependencies,
     /// Exact identity and validity for one closure member.
     ClosureMemberObject,
     /// AUTHID of one exact standalone routine or package member.
@@ -568,7 +572,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 172] = [
+    pub const ALL: [Self; 174] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -735,6 +739,8 @@ impl CatalogQueryId {
         Self::ExtractPlscopeIdentifiers,
         Self::ClosureIdentity,
         Self::PdbIdentity,
+        Self::DictionaryViewIdentity,
+        Self::DictionaryViewDependencies,
         Self::ClosureMemberObject,
         Self::ClosureRoutineAuthid,
         Self::ClosureCompilerSettings,
@@ -838,6 +844,20 @@ impl CatalogQueryId {
                 "resolve synonym identity",
                 InternalProof,
                 NameResolution,
+            ),
+            Self::DictionaryViewIdentity => (
+                "SELECT oracle_maintained, edition_name FROM all_objects WHERE owner = :1 AND object_name = :2 AND object_type = 'VIEW' AND status = 'VALID' AND ROWNUM <= 2",
+                TT,
+                "prove one eligible dictionary view is Oracle maintained",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::DictionaryViewDependencies => (
+                "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, o.oracle_maintained, o.edition_name FROM (SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name FROM all_dependencies WHERE owner = :1 AND name = :2 AND type = 'VIEW' ORDER BY referenced_owner, referenced_name, referenced_type) d LEFT JOIN all_objects o ON o.owner = d.referenced_owner AND o.object_name = d.referenced_name AND o.object_type = d.referenced_type WHERE ROWNUM <= :3",
+                TTI,
+                "prove one eligible dictionary view has a bounded Oracle-maintained dependency closure",
+                InternalProof,
+                ReadPurity,
             ),
             Self::StandaloneArguments => (
                 STANDALONE_ARGUMENTS_SQL,

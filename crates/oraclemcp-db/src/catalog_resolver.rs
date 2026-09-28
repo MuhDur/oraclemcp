@@ -42,6 +42,7 @@ const MAX_CANDIDATES: usize = 32;
 const MAX_SYNONYM_HOPS: usize = 16;
 const MAX_ARGUMENT_ROWS: usize = 512;
 const MAX_SESSION_ROLES: usize = 256;
+const MAX_DICTIONARY_VIEW_DEPENDENCIES: usize = 256;
 
 /// Maximum VPD/RLS policy rows surfaced in one diagnostic observation.
 pub const MAX_VPD_RLS_POLICY_ROWS: usize = 64;
@@ -490,10 +491,11 @@ impl CatalogResolver for OracleCatalogResolverCache {
 /// Prove that exact resolved relations cannot invoke user-controlled code on a
 /// plain fetch under the currently visible catalog and statement value names.
 ///
-/// The lean server deliberately proves only ordinary tables with no enabled
-/// SELECT VPD policy or executable virtual-column dependency. Views and every unknown object
-/// kind remain `Unknown`: their defining query can hide function invocation and
-/// cannot be cleared by object-type syntax alone.
+/// Ordinary tables need no enabled SELECT VPD policy or executable virtual
+/// column dependency. A narrow built-in dictionary-view set may additionally
+/// be proven only from its exact public-synonym identity and a complete,
+/// Oracle-maintained dependency closure. Every other view and object kind
+/// remains `Unknown`.
 pub async fn resolved_relations_read_purity(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -507,11 +509,17 @@ pub async fn resolved_relations_read_purity(
         return Ok(oraclemcp_guard::Purity::Unknown);
     }
     for relation in relations {
-        if relation.db_link.is_some()
-            || !matches!(relation.kind, CatalogObjectKind::Table)
-            || relation.identity.object_id == 0
-        {
+        if relation.db_link.is_some() || relation.identity.object_id == 0 {
             return Ok(oraclemcp_guard::Purity::Unknown);
+        }
+        match relation.kind {
+            CatalogObjectKind::Table => {}
+            CatalogObjectKind::View if dictionary_view_identity_is_eligible(relation) => {
+                if !dictionary_view_closure_is_proven(cx, conn, relation).await? {
+                    return Ok(oraclemcp_guard::Purity::Unknown);
+                }
+            }
+            _ => return Ok(oraclemcp_guard::Purity::Unknown),
         }
     }
     for chunk in relations.chunks(32) {
@@ -587,6 +595,71 @@ pub async fn resolved_relations_read_purity(
     prove_policy_catalog_readable(cx, conn).await?;
     prove_target_column_catalog_readable(cx, conn, &relations[0]).await?;
     Ok(oraclemcp_guard::Purity::ProvenReadOnly)
+}
+
+/// A dictionary spelling is eligible only when Oracle resolved it through its
+/// sole PUBLIC synonym to the exact uppercase SYS view. Local objects, private
+/// synonyms, direct SYS qualification, quoted lookalikes, and synonym chains
+/// are deliberately outside this narrow eligibility boundary.
+fn dictionary_view_identity_is_eligible(relation: &ResolvedObject) -> bool {
+    !relation.quote_exact
+        && oraclemcp_guard::is_builtin_dictionary_view(&relation.owner, &relation.name)
+        && matches!(
+            relation.synonym_chain.as_slice(),
+            [SynonymHop { owner, name, .. }] if owner == "PUBLIC" && name == &relation.name
+        )
+}
+
+/// Prove the evidence boundary for one already-eligible dictionary view.
+///
+/// Oracle-maintained status is established for the exact resolved view and
+/// every visible dependency. A capped result, remote dependency, missing cell,
+/// edition mismatch, or an empty closure is insufficient evidence and stays
+/// unproven. This is intentionally stricter than an allowlist: the allowlist
+/// merely permits these catalog reads.
+async fn dictionary_view_closure_is_proven(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relation: &ResolvedObject,
+) -> Result<bool, DbError> {
+    let identity = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::DictionaryViewIdentity,
+        &[
+            OracleBind::from(relation.owner.as_str()),
+            OracleBind::from(relation.name.as_str()),
+        ],
+    )
+    .await?;
+    if identity.len() != 1
+        || identity[0].text("ORACLE_MAINTAINED") != Some("Y")
+        || optional_text(&identity[0], "EDITION_NAME") != relation.identity.edition
+    {
+        return Ok(false);
+    }
+
+    let dependencies = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::DictionaryViewDependencies,
+        &[
+            OracleBind::from(relation.owner.as_str()),
+            OracleBind::from(relation.name.as_str()),
+            OracleBind::from((MAX_DICTIONARY_VIEW_DEPENDENCIES + 1) as i64),
+        ],
+    )
+    .await?;
+    if dependencies.is_empty() || dependencies.len() > MAX_DICTIONARY_VIEW_DEPENDENCIES {
+        return Ok(false);
+    }
+    Ok(dependencies.iter().all(|row| {
+        required_text(row, "REFERENCED_OWNER").is_some()
+            && required_text(row, "REFERENCED_NAME").is_some()
+            && required_text(row, "REFERENCED_TYPE").is_some()
+            && row.text("REFERENCED_LINK_NAME").is_none()
+            && row.text("ORACLE_MAINTAINED") == Some("Y")
+    }))
 }
 
 /// Statement class used to match Oracle FGA policy flags. The mutation effect
@@ -5035,7 +5108,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 172);
+        assert_eq!(specs.len(), 174);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -5934,6 +6007,113 @@ mod tests {
                 );
                 assert!(no_io.queries.lock().expect("queries lock").is_empty());
             }
+        });
+    }
+
+    fn dictionary_view_object(name: &str) -> ResolvedObject {
+        ResolvedObject {
+            owner: "SYS".to_owned(),
+            name: name.to_owned(),
+            kind: CatalogObjectKind::View,
+            container: None,
+            member: None,
+            overloads: Vec::new(),
+            quote_exact: false,
+            synonym_chain: vec![SynonymHop {
+                owner: "PUBLIC".to_owned(),
+                name: name.to_owned(),
+                identity: ResolvedIdentity {
+                    object_id: 77,
+                    edition: None,
+                },
+            }],
+            db_link: None,
+            identity: ResolvedIdentity {
+                object_id: 88,
+                edition: None,
+            },
+        }
+    }
+
+    fn dictionary_dependency_row() -> OracleRow {
+        row(&[
+            ("REFERENCED_OWNER", Some("SYS")),
+            ("REFERENCED_NAME", Some("OBJ$")),
+            ("REFERENCED_TYPE", Some("TABLE")),
+            ("REFERENCED_LINK_NAME", None),
+            ("ORACLE_MAINTAINED", Some("Y")),
+            ("EDITION_NAME", None),
+        ])
+    }
+
+    #[test]
+    fn issue35_dictionary_view_admitted_only_with_oracle_maintained_closure() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([
+                vec![row(&[
+                    ("ORACLE_MAINTAINED", Some("Y")),
+                    ("EDITION_NAME", None),
+                ])],
+                vec![dictionary_dependency_row()],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ]);
+            assert_eq!(
+                resolved_relations_read_purity(
+                    &cx,
+                    &conn,
+                    &[dictionary_view_object("USER_OBJECTS")],
+                    &[],
+                )
+                .await
+                .expect("complete Oracle-maintained closure"),
+                Purity::ProvenReadOnly
+            );
+            let queries = conn.queries.lock().expect("queries lock");
+            assert_eq!(queries.len(), 6);
+            assert_eq!(
+                queries[0].0,
+                CatalogQueryId::DictionaryViewIdentity.spec().sql
+            );
+            assert_eq!(
+                queries[1].0,
+                CatalogQueryId::DictionaryViewDependencies.spec().sql
+            );
+        });
+    }
+
+    #[test]
+    fn issue35_local_object_named_like_dictionary_view_is_not_eligible() {
+        run_with_cx(|cx| async move {
+            let mut local = dictionary_view_object("USER_OBJECTS");
+            local.owner = "APP".to_owned();
+            local.synonym_chain.clear();
+            let conn = ScriptedRows::new([]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &conn, &[local], &[])
+                    .await
+                    .expect("ineligible view stays unknown"),
+                Purity::Unknown
+            );
+            assert!(conn.queries.lock().expect("queries lock").is_empty());
+        });
+    }
+
+    #[test]
+    fn issue35_private_synonym_shadow_is_not_eligible() {
+        run_with_cx(|cx| async move {
+            let mut private = dictionary_view_object("USER_OBJECTS");
+            private.synonym_chain[0].owner = "APP".to_owned();
+            let conn = ScriptedRows::new([]);
+            assert_eq!(
+                resolved_relations_read_purity(&cx, &conn, &[private], &[])
+                    .await
+                    .expect("private synonym remains unproven"),
+                Purity::Unknown
+            );
+            assert!(conn.queries.lock().expect("queries lock").is_empty());
         });
     }
 
