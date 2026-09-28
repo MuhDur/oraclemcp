@@ -1305,7 +1305,7 @@
       "arguments": {"sql": "SELECT 1 AS C FROM dual"},
       "kill_served_session_user": "${owner}"
     },
-    "expect": {"rows": [{"C": "<masked>"}]},
+    "expect": {"rows": [{"C": "1"}]},
     "db_reread": [],
     "audit_expect": [],
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}

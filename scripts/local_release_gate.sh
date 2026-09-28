@@ -14,6 +14,7 @@ export E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
 
 run_real_adb=false
 run_oci_tier_c=false
+run_w4_tier_c=false
 commit_proof=false
 proof_dir=""
 
@@ -31,6 +32,9 @@ Options:
                    --tier-c): one Always Free ADB per free-enabled version,
                    zero-cost checks, destroy; results under target/e2e only.
                    With --dry-run, runs the lane's offline --selftest instead
+  --w4-tier-c      also run the XE18, XE21, and FREE 23ai W4 release runner
+                   (scripts/rig/tier_c.sh) for the checked-out release SHA;
+                   its signed-off summary is consumed fail-closed here
   --commit-proof   write the sanitized synthetic proof under tests/artifacts/local_gate
   --proof-dir DIR  override the synthetic proof output directory
 USAGE
@@ -57,6 +61,9 @@ while [ "$#" -gt 0 ]; do
           ;;
         --oci-tier-c)
           run_oci_tier_c=true
+          ;;
+        --w4-tier-c)
+          run_w4_tier_c=true
           ;;
         --commit-proof)
           commit_proof=true
@@ -183,6 +190,25 @@ if [ "$run_oci_tier_c" = true ]; then
   fi
 else
   e2e_log_event "oci_tier_c_deferred" "assert" "skipped" 0 "tier-C OCI lane runs only with --oci-tier-c (release candidate SHA)"
+fi
+
+if [ "$run_w4_tier_c" = true ]; then
+  tier_c_args=(--sha "$source_sha")
+  [ "$E2E_DRY_RUN" = "1" ] && tier_c_args+=(--dry-run)
+  if ! e2e_run_command "act" bash scripts/rig/tier_c.sh "${tier_c_args[@]}"; then
+    e2e_finish_fail "tier-C W4 runner failed"
+  fi
+  tier_c_summary="$ROOT/target/e2e/tier_c/$(git rev-parse HEAD)/summary.json"
+  if ! jq -e --arg sha "$(git rev-parse HEAD)" '
+      .sha == $sha
+      and (.clients.verdict == "pass")
+      and ([.lanes[] | select(.lane != "adb") | .verdict] | length > 0 and all(.[]; . == "pass"))
+    ' "$tier_c_summary" >/dev/null; then
+    e2e_finish_fail "tier-C W4 summary is missing or has a non-passing lane/client verdict: $tier_c_summary"
+  fi
+  e2e_log_event "w4_tier_c_consumed" "assert" "pass" 0 "$tier_c_summary"
+else
+  e2e_log_event "w4_tier_c_deferred" "assert" "skipped" 0 "tier-C W4 runner runs only with --w4-tier-c (release candidate SHA)"
 fi
 
 if [ "$commit_proof" = true ] && [ "$E2E_DRY_RUN" != "1" ]; then

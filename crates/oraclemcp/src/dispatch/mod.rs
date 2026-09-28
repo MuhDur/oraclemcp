@@ -13277,7 +13277,7 @@ impl OracleDispatcher {
         // is identical; the conditional `args` move is confined to this diverging
         // branch, so `args` stays owned for the non-query match below.
         if matches!(tool, "oracle_query" | "oracle_semantic_search") {
-            return GuardedReadExecutor::new(self)
+            let result = GuardedReadExecutor::new(self)
                 .run_caller_read(
                     cx,
                     &mut state,
@@ -13293,6 +13293,26 @@ impl OracleDispatcher {
                     ReadQueryProvenance::CallerRead,
                 )
                 .await;
+            // Some read admission probes (catalog/FGA/audit provenance) run
+            // before the read executor reaches its per-query connection
+            // decorator. A typed fresh-connection transient from one of those
+            // probes still proves this pinned wire is dead. Quarantine it now;
+            // the *next* statement, after this lock is released, performs the
+            // only permitted re-lease. No in-flight statement is replayed.
+            if let Err(error) = &result
+                && error.error_class == ErrorClass::Transient
+                && error
+                    .next_steps
+                    .iter()
+                    .any(|step| step.contains("fresh connection"))
+            {
+                mark_connection_quarantined_recoverable(
+                    &self.quarantine,
+                    AuditOutcome::UnknownDiscarded,
+                    format!("{tool} admission probe lost the Oracle connection"),
+                )?;
+            }
+            return result;
         }
         if tool == "oracle_sample_rows" {
             let a: SampleRowsArgs = parse_args(name, args)?;

@@ -779,10 +779,10 @@ jobs:
   # VECTOR SQL surface. All connection values below are synthetic disposable
   # CI fixtures; no deployment or customer identifier is committed here.
   oracle-free23:
-    name: Oracle FREE 23ai matrix + VECTOR smoke
+    name: Oracle FREE 23ai W4
     needs: web-build
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 25
     services:
       free23:
         image: gvenzl/oracle-free:23-slim@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
@@ -791,7 +791,7 @@ jobs:
           APP_USER: E2E_ORACLE
           APP_USER_PASSWORD: E2EOracle23
         ports:
-          - 1522:1521
+          - 1523:1521
         options: >-
           --health-cmd "healthcheck.sh"
           --health-interval 10s
@@ -819,13 +819,7 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
-      - name: Grant DBMS_FLASHBACK to the 23ai app user for SCN capture
-        # The governed read path captures the snapshot SCN via
-        # DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER (V$DATABASE only as a fallback).
-        # The gvenzl app user has neither by default, so every governed read on
-        # this lane fails closed (ORA-00904 then ORA-00942). Grant the capability
-        # the design expects. Synthetic disposable CI DB; the SYSTEM password is
-        # the committed fixture value in this job's service env.
+      - name: Install pinned python-oracledb for the W4 fixture
         run: |
           set -euo pipefail
           test "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12"
@@ -843,63 +837,56 @@ jobs:
           expected = os.environ["PYTHON_ORACLEDB_VERSION"]
           if oracledb.__version__ != expected:
               raise RuntimeError(f"loaded python-oracledb {oracledb.__version__}; expected exactly {expected}")
-          c = oracledb.connect(user='sys', password='E2EOracle23', dsn='localhost:1522/FREEPDB1', mode=oracledb.AUTH_MODE_SYSDBA)
-          c.cursor().execute('GRANT EXECUTE ON DBMS_FLASHBACK TO E2E_ORACLE')
-          c.commit()
-          print('granted EXECUTE ON DBMS_FLASHBACK to E2E_ORACLE')
+          print(f"loaded pinned python-oracledb {oracledb.__version__}")
           PY
-      - name: 23ai matrix lane, VECTOR_DISTANCE, and PL/SQL round-trip smoke
-        id: free23-matrix
+      - name: FREE 23ai W4 (stdio and HTTP)
         env:
           ORACLEMCP_LIVE_XE: "1"
-          ORACLEMCP_ORACLE_MATRIX_BINARY: target/debug/oraclemcp
-          ORACLE_MATRIX_FREE23_DSN: localhost:1522/FREEPDB1
-          ORACLE_MATRIX_FREE23_USER: E2E_ORACLE
-          ORACLE_MATRIX_FREE23_PASSWORD: E2EOracle23
+          ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD: E2EOracle23
         run: |
           set -euo pipefail
-          mkdir -p target/test-attestation-evidence
-          bash scripts/e2e/oracle_version_matrix.sh --log --lane free23 2>&1 \
-            | tee target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
-      - name: Derive e2e attestation outcome
+          bash scripts/e2e/w4.sh --log --lane free23 --binary target/debug/oraclemcp
+      - name: Validate FREE 23ai W4 verdict and summarize duration
         if: always()
-        id: e2e-attestation
         run: |
           set -euo pipefail
-          case "${{ steps.free23-matrix.outcome }}" in
-            success) outcome=PASS ;;
-            failure) outcome=FAIL ;;
-            cancelled|skipped) outcome=SKIP ;;
-            *) outcome=FAIL ;;
-          esac
-          echo "tests=e2e:oracle-version-matrix-free23=$outcome" >> "$GITHUB_OUTPUT"
-          printf 'e2e:oracle-version-matrix-free23=%s\n' "$outcome"
-      - name: Record e2e-lane attestation status
-        if: always()
-        uses: ./.github/actions/test-attestation
-        env:
-          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
-          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
-        with:
-          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
-          trusted-context: ${{ github.event_name == 'push' }}
-          lane: e2e-oracle-free23
-          command: bash scripts/e2e/oracle_version_matrix.sh --log --lane free23
-          tests: ${{ steps.e2e-attestation.outputs.tests }}
-          artifacts: target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
-          output-name: e2e-oracle-free23.jsonl
-      - name: Verify the e2e attestation this lane produced
-        if: always()
-        run: |
-          python3 scripts/check_test_attestations.py --selftest
-          python3 scripts/check_test_attestations.py target/test-attestations
+          results=target/e2e/w4/free23/results.json
+          mapfile -t capabilities < <(python3 - "$results" <<'PY'
+          import json
+          import sys
+
+          for capability in json.load(open(sys.argv[1]))["capabilities"]:
+              print(capability)
+          PY
+          )
+          manifest_args=()
+          for capability in "${capabilities[@]}"; do
+            manifest_args+=(--capability "$capability")
+          done
+          python3 scripts/e2e/cases/validate_manifest.py --check-results "$results" --lane free23 --transport stdio "${manifest_args[@]}"
+          python3 scripts/e2e/cases/validate_manifest.py --check-results "$results" --lane free23 --transport http "${manifest_args[@]}"
+          python3 - "$results" "$GITHUB_STEP_SUMMARY" <<'PY'
+          import json, sys
+          results, summary = map(__import__('pathlib').Path, sys.argv[1:])
+          rows = json.loads(results.read_text())['cases']
+          by_transport = {}
+          for row in rows:
+              transport = row['transport']
+              slot = by_transport.setdefault(transport, [0, 0])
+              slot[0] += 1
+              slot[1] += row.get('duration_ms', 0)
+          with summary.open('a') as out:
+              out.write('| W4 family | Transport | Passed cases | Duration ms |\\n|---|---|---:|---:|\\n')
+              for transport, (cases, duration) in sorted(by_transport.items()):
+                  out.write(f'| base | {transport} | {cases} | {duration} |\\n')
+          PY
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: e2e-oracle-free23-attestation-${{ github.run_number }}
+          name: e2e-oracle-free23-w4-${{ github.run_number }}
           path: |
-            target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
-            target/test-attestations/
+            target/e2e/w4/free23/results.json
+            target/e2e/w4/free23/*.jsonl
           if-no-files-found: error
           retention-days: 30
 

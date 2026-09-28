@@ -16,7 +16,7 @@
       "path_filtered": false
     },
     {
-      "check_name": "Oracle FREE 23ai matrix + VECTOR smoke",
+      "check_name": "Oracle FREE 23ai W4",
       "tier": "required",
       "workflow": "CI",
       "workflow_file": "ci.yml",
@@ -798,7 +798,7 @@
         "workflow_dispatch"
       ],
       "jobs": [
-        "Oracle FREE 23ai matrix + VECTOR smoke",
+        "Oracle FREE 23ai W4",
         "PL/SQL intelligence feature matrix",
         "Rust workspace (Windows)",
         "Windows installer PSSA and dry-run",
@@ -973,7 +973,7 @@
       "web bundle (npm ci + vite build)"
     ],
     "required": [
-      "Oracle FREE 23ai matrix + VECTOR smoke",
+      "Oracle FREE 23ai W4",
       "PL/SQL intelligence feature matrix",
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
