@@ -1,0 +1,70 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T07:56:13Z",
+  "bead_id": "oraclemcp-it7iq",
+  "scope": {
+    "summary": "struct-atomicity now resolves the changed struct to its defining crate-root module and only counts literal sites whose name resolves to that module, ending the rule-17 false positive where two unrelated private structs in different modules shared a name; genuine orphaned initializers are still refused and every ambiguous name fails closed.",
+    "in_scope": [
+      "scripts/swarm_discipline.sh (struct-atomicity subcommand and --selftest)"
+    ],
+    "out_of_scope": [
+      "No type-aware analysis beyond module/import resolution: re-exports, macro-generated modules and items, and cross-crate aliasing are deliberately unresolved and therefore fail closed (site kept as a candidate).",
+      "No weakening of the refusal: a name that cannot be placed, a glob import, a re-export, or an unresolvable qualified path all keep the site as a candidate, so a real orphan still exits 65.",
+      "The existing --staged per-file touched rule is unchanged: an un-updated literal inside the same touched file is still not detected (pre-existing limitation, not addressed here).",
+      "Other dirty paths in the shared multi-agent checkout (crates/**, docs/ci_taxonomy.json, .beads/**, refactor/**, web/**) are other agents mid-edit and are excluded from this scope."
+    ]
+  },
+  "source": {
+    "sha": "5e3d3a9c9d7bfcad0f844eaed74208b2f04f9edc",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash scripts/swarm_discipline.sh --selftest",
+        "kind": "cli",
+        "trace": "Run 2026-09-28 at 5e3d3a9c; exit 0. All 25 cases print PASS, including the three new rule-17 cases: 'a same-named private struct in another module is not an orphaned initializer', 'an un-updated literal of the changed struct is still refused; unrelated same-named ones are not', and 'a qualified/imported initializer of the changed struct is still counted'. The 22 pre-existing cases also pass unchanged."
+      },
+      {
+        "name": "Pre-fix negative control: scripts/swarm_discipline.sh from HEAD~1 (pre-it7iq) on the same fixture",
+        "kind": "cli",
+        "trace": "Run 2026-09-28 from the repository-root HEAD~1 copy of the script (git show HEAD~1:scripts/swarm_discipline.sh) against a throwaway git repo with two private `struct Ctx` in crates/demo/src/pa.rs and crates/demo/src/pb.rs, adding field `b` to pb and updating only pb's literal. Pre-fix exit 65 with 'crates/demo/src/pa.rs:6: Ctx used without `..` but crates/demo/src/pb.rs adds field `b` ...'; the new script on the same staged diff exits 0. This proves the new positive case is not vacuous."
+      },
+      {
+        "name": "Fail-closed negative controls: different-import and glob-import fixtures",
+        "kind": "cli",
+        "trace": "Run 2026-09-28 with the new script. (a) A site importing a DIFFERENT same-named Ctx (use crate::other::Ctx while pb::Ctx changes) exits 0, so unrelated imported structs are not flagged. (b) A glob import (use crate::pb::*) of the changed name exits 65 and reports the orphan, confirming an ambiguous/glob binding fails closed rather than being skipped."
+      },
+      {
+        "name": "bash scripts/swarm_discipline.sh unbounded-wait-lint scripts/swarm_discipline.sh",
+        "kind": "cli",
+        "trace": "Run 2026-09-28; exit 0, 'no unbounded waits in 1 shell file(s)'. The added embedded-Python loops do not trip the rule-16 lint. shellcheck (default severity) is also clean on the file."
+      },
+      {
+        "name": "bash scripts/swarm_discipline.sh struct-atomicity --staged / --commit HEAD (real repo)",
+        "kind": "cli",
+        "trace": "Run 2026-09-28 from the repo root; both exit 0 with '0 added struct field(s); no orphaned initializer sites', confirming the new module-resolution precompute completes on the full workspace tree without error."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified on the local Linux multi-agent host only; no CI run on this SHA was observed, so readiness stays not-ready / scoped-test.",
+    "The module resolver recognises file modules (lib.rs/main.rs, foo.rs, foo/mod.rs and their nested layout) and module-scope inline `mod name { }` blocks; it does not parse macro-generated modules. A name it cannot place is treated as a candidate, so the miss cannot hide an orphan.",
+    "Re-exports (`pub use ...`) are not followed: if a use target module does not itself define the item, the site fails closed and stays a candidate. This can retain a false positive in a re-export layout, but never a false negative.",
+    "The pre-existing per-file touched rule still means an un-updated literal inside the same file that adds the field is not flagged; that behaviour is unchanged by this bead.",
+    "The negative acceptance case necessarily uses a crate-visible (pub(crate)) changed struct imported by an untouched module, because a private struct cannot be referenced from another module; the false-positive half of the pair remains two truly private same-named structs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
