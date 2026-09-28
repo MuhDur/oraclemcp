@@ -1228,21 +1228,26 @@ impl OracleMcpServer {
                 write_jsonrpc_response(&mut writer, &response)?;
                 next_response_sequence += 1;
             }
-            for notification in self.drain_resource_updated_notifications(
-                crate::subscriptions::STDIO_SUBSCRIPTION_OWNER,
-            ) {
-                write_jsonrpc_response(&mut writer, &notification)?;
-            }
-            for notification in
-                self.drain_server_notifications(crate::notifications::STDIO_NOTIFICATION_OWNER)
-            {
-                write_jsonrpc_response(&mut writer, &notification)?;
-            }
-
             let frame = match frame_rx.recv_timeout(Duration::from_millis(10)) {
                 Ok(Ok(frame)) => frame,
                 Ok(Err(error)) => return Err(error),
-                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                    // No request is ready to establish a response-ordering
+                    // barrier, so server notifications may make progress.
+                    // When a request is already readable, its response must
+                    // be emitted before an older queued notification.
+                    for notification in self.drain_resource_updated_notifications(
+                        crate::subscriptions::STDIO_SUBSCRIPTION_OWNER,
+                    ) {
+                        write_jsonrpc_response(&mut writer, &notification)?;
+                    }
+                    for notification in self
+                        .drain_server_notifications(crate::notifications::STDIO_NOTIFICATION_OWNER)
+                    {
+                        write_jsonrpc_response(&mut writer, &notification)?;
+                    }
+                    continue;
+                }
                 Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
             };
             let decoded = crate::strict_json::decode_strict_value(&frame).ok();
