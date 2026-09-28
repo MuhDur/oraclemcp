@@ -376,7 +376,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -411,6 +411,9 @@ def validate_case(case, filename):
     if "reuse_after_cancel" in case["call"]:
         require(case["call"]["reuse_after_cancel"] is True and "cancel_marker" in case["call"],
                 "reuse_after_cancel is only meaningful after a marked cancellation")
+    if "cancel_audit" in case["call"]:
+        require(case["call"]["cancel_audit"] is True and "cancel_marker" in case["call"],
+                "cancel_audit is only meaningful after a marked cancellation")
     if "kill_served_session_user" in case["call"]:
         user = case["call"]["kill_served_session_user"]
         require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
@@ -739,7 +742,7 @@ class StdioClient:
 
 
 class HttpClient:
-    def __init__(self, binary, profile, env, port, secret, audience):
+    def __init__(self, binary, profile, env, port, secret, audience, streaming=False):
         self.port, self.secret, self.audience = port, secret, audience
         self.session_id = None
         self.next_id = 0
@@ -747,10 +750,15 @@ class HttpClient:
         self.session_lock = threading.Lock()
         self.notifications = []
         self.notifications_lock = threading.Lock()
+        self.last_response_frames = []
         self.stderr_tail = collections.deque(maxlen=20)
+        command = [str(binary), "--json", "serve", "--listen", f"127.0.0.1:{port}",
+                   "--http-stateful"]
+        if not streaming:
+            command.append("--http-json-response")
+        command.extend(["--profile", profile])
         self.process = subprocess.Popen(
-            [str(binary), "--json", "serve", "--listen", f"127.0.0.1:{port}",
-             "--http-stateful", "--http-json-response", "--profile", profile],
+            command,
             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True)
         threading.Thread(target=self._drain, args=(self.process.stdout, None), daemon=True).start()
@@ -828,12 +836,16 @@ class HttpClient:
     @staticmethod
     def decode_body(body, client=None):
         try:
-            return json.loads(body)
+            decoded = json.loads(body)
+            if client is not None:
+                client.last_response_frames = [decoded]
+            return decoded
         except json.JSONDecodeError:
             frames = [json.loads(line[6:]) for line in body.decode().splitlines()
                       if line.startswith("data: ") and line[6:] != "null"]
             require(frames, "HTTP SSE response had no JSON frame")
             if client is not None:
+                client.last_response_frames = frames
                 with client.notifications_lock:
                     client.notifications.extend(frame for frame in frames if "method" in frame)
             replies = [frame for frame in frames if "id" in frame]
@@ -1428,16 +1440,20 @@ def parallel_http_call(client, case, barriers):
                 tool_payload(reply).get("structuredContent", {}) for reply in replies]}}}
 
 
-def wait_cancel_barrier(connection, pipe_name):
+def wait_cancel_barrier(connection, pipe_name, worker):
     """Wait for the fixture function's DBMS_PIPE signal, never a timing guess."""
     cursor = connection.cursor()
-    status = cursor.var(int)
-    cursor.execute(
-        "BEGIN :status := DBMS_PIPE.RECEIVE_MESSAGE(:pipe_name, 20); END;",
-        {"status": status, "pipe_name": pipe_name},
-    )
-    require(status.getvalue() == 0,
-            f"DBMS_PIPE cancellation barrier {pipe_name} was not signalled before its deadline")
+    for _ in range(20):
+        status = cursor.var(int)
+        cursor.execute(
+            "BEGIN :status := DBMS_PIPE.RECEIVE_MESSAGE(:pipe_name, 1); END;",
+            {"status": status, "pipe_name": pipe_name},
+        )
+        if status.getvalue() == 0:
+            return
+        if not worker.is_alive():
+            return
+    raise DriverError(f"DBMS_PIPE cancellation barrier {pipe_name} was not signalled before its deadline")
 
 
 def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
@@ -1461,7 +1477,7 @@ def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
     worker.start()
     barrier = case["call"].get("cancel_barrier")
     if barrier:
-        wait_cancel_barrier(connection, barrier)
+        wait_cancel_barrier(connection, barrier, worker)
         observed = True
     else:
         deadline = time.monotonic() + 20
@@ -1471,6 +1487,11 @@ def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
                 observed = True
                 break
             time.sleep(0.05)
+    if barrier and not worker.is_alive():
+        if "error" in result:
+            raise result["error"]
+        raise DriverError("marked cancellation call completed before the DBMS_PIPE barrier: "
+                          + compact(scrub(tool_payload(result.get("reply", {}))))[:400])
     if not observed:
         if worker.is_alive():
             client.notify("notifications/cancelled", {
@@ -1494,6 +1515,17 @@ def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
                     and frame.get("params", {}).get("progressToken") == token
                     for frame in notifications),
                 "progressToken request received no in-flight progress notification")
+        if hasattr(client, "last_response_frames"):
+            progress_indices = [index for index, frame in enumerate(client.last_response_frames)
+                                if frame.get("method") == "notifications/progress"
+                                and frame.get("params", {}).get("progressToken") == token]
+            reply_indices = [index for index, frame in enumerate(client.last_response_frames)
+                             if "id" in frame]
+            require(progress_indices and reply_indices and min(progress_indices) < max(reply_indices),
+                    "HTTP progress notification was not emitted before completion")
+    else:
+        require(not any(frame.get("method") == "notifications/progress" for frame in notifications),
+                "request without progressToken emitted a progress notification")
     if case["call"].get("reuse_after_cancel"):
         reuse = client.rpc("tools/call", {
             "name": "oracle_query", "arguments": {"sql": "SELECT 1 AS C FROM dual"}})
@@ -1685,7 +1717,7 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         input_value["vsql_absent_marker"] = case["call"]["vsql_absent_marker"]
     if "cancel_marker" in case["call"]:
         input_value["cancel_marker"] = case["call"]["cancel_marker"]
-    for field in ("cancel_barrier", "progress_token", "reuse_after_cancel"):
+    for field in ("cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit"):
         if field in case["call"]:
             input_value[field] = case["call"][field]
     if "steps" in case:
@@ -1786,6 +1818,16 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                         "no-grant SCN cache needs null observed_scn on every audited read")
                 row["scn_cache"] = {"observed_scn_null_reads": len(reads),
                                     "degraded_probe_audits": len(probes)}
+        if case["call"].get("cancel_audit"):
+            records = audit_records(audit_path)[before:]
+            cancelled = [record for record in records
+                         if record.get("tool") == case["tool"]
+                         and record.get("outcome") == "FAILED"
+                         and record.get("failure", {}).get("ora_code") == 1013]
+            require(len(cancelled) == 1,
+                    "cancelled query needs exactly one terminal FAILED ORA-01013 audit record")
+            row["cancel_audit"] = {"terminal_outcome": cancelled[0]["outcome"],
+                                   "ora_code": cancelled[0]["failure"]["ora_code"]}
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env))
@@ -2170,8 +2212,13 @@ def run_lane(args):
                         apply_setup(connection, case["setup"])
                         if "setup_ready_sql" in case:
                             wait_for_setup_ready(settings, password, case["setup_ready_sql"])
+                needs_streaming = any(
+                    "progress_token" in case.get("call", {})
+                    and (not args.case or case["case_id"] in args.case)
+                    for case in expanded_family)
                 client = (StdioClient(binary, args.lane, client_env) if transport == "stdio"
-                          else HttpClient(binary, args.lane, client_env, port, secret, audience))
+                          else HttpClient(binary, args.lane, client_env, port, secret, audience,
+                                          streaming=needs_streaming))
                 initialize(client)
                 if not args.case:
                     rows.append(run_malformed_frame(client, args.lane, transport))
@@ -2668,6 +2715,9 @@ def selftest():
             "cancellation did not wait for marker and send bound request id")
     rejected("cancel_barrier_without_marked_call", lambda: validate_case(
         {**replay_case, "call": {"arguments": {}, "cancel_barrier": "W4PIPE_SELFTEST"}},
+        "selftest"))
+    rejected("cancel_audit_without_marked_call", lambda: validate_case(
+        {**replay_case, "call": {"arguments": {}, "cancel_audit": True}},
         "selftest"))
     rejected("missing_positive_case", lambda: verify_coverage({"oracle_query": {}}, []))
     manifest_enforcement_integration()
