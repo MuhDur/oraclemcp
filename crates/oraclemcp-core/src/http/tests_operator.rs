@@ -4005,8 +4005,23 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
         .status,
         200
     );
-    let second = draft("synthetic_child_b");
-    assert_eq!(second.status, 200);
+    // The HTTP draft route serializes two live requests for the same identified
+    // PDB.  Model instead a valid record replayed into the durable board after
+    // that admission check: apply must still catch this fork before Oracle.
+    let first_path = dir
+        .join("state")
+        .join("edition-proposals")
+        .join(format!("{first_id}.json"));
+    let mut replayed: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&first_path).expect("first durable proposal"))
+            .expect("first proposal JSON");
+    replayed["proposal_id"] = serde_json::json!("edition-replayed-child-b");
+    replayed["child_edition"] = serde_json::json!("SYNTHETIC_CHILD_B");
+    std::fs::write(
+        first_path.with_file_name("edition-replayed-child-b.json"),
+        serde_json::to_vec(&replayed).expect("replayed proposal JSON"),
+    )
+    .expect("replayed durable proposal");
 
     // The second non-withdrawn child is ambiguous board state.  Refuse before
     // the confirmation is consumed or a database can report ORA-38807 late.
@@ -4021,7 +4036,7 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
             }),
         ),
     );
-    assert_eq!(forked.status, 409);
+    assert_eq!(forked.status, 409, "{}", response_json(&forked));
     assert_eq!(
         response_json(&forked)["data"]["error"],
         serde_json::json!("edition_linear_chain_required")
@@ -4066,7 +4081,7 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
 
     let records = sink.records();
-    assert_eq!(records.len(), 12);
+    assert_eq!(records.len(), 10);
     assert_operator_audit_pair(
         &records[0..2],
         AuditDecision::Allowed,
@@ -4077,21 +4092,53 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
         AuditDecision::Allowed,
         AuditOutcome::Succeeded,
     );
-    assert_operator_audit_pair(
-        &records[4..6],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
+    assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
     assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
     assert_operator_audit_pair(
         &records[8..10],
         AuditDecision::Blocked,
         AuditOutcome::Failed,
     );
-    assert_operator_audit_pair(
-        &records[10..12],
-        AuditDecision::Blocked,
-        AuditOutcome::Failed,
+}
+
+#[test]
+fn edition_draft_refuses_a_second_live_request_for_the_same_identified_pdb() {
+    let (auditor, _sink) = operator_auditor();
+    let server = server_with_dispatch(Arc::new(EditionDispatch {
+        calls: Arc::new(AtomicUsize::new(0)),
+        profile: "synthetic_stage",
+        deny: false,
+    }));
+    let dir = dashboard_test_dir("edition-live-pdb-conflict");
+    let cfg = HttpTransportConfig {
+        operator_auditor: Some(auditor),
+        change_proposals: Some(Arc::new(
+            crate::change_proposal::ChangeProposalStore::open(dir.join("state"))
+                .expect("proposal store"),
+        )),
+        ..Default::default()
+    };
+    let draft = |child: &str| {
+        handle_http_request(
+            &server,
+            &cfg,
+            operator_json_post(
+                "/operator/v1/edition-proposals/draft",
+                &serde_json::json!({
+                    "profile": "synthetic_stage",
+                    "child_edition": child,
+                    "base_edition": "synthetic_base",
+                    "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
+                }),
+            ),
+        )
+    };
+    assert_eq!(draft("synthetic_child_a").status, 200);
+    let conflict = draft("synthetic_child_b");
+    assert_eq!(conflict.status, 409);
+    assert_eq!(
+        response_json(&conflict)["data"]["error"],
+        serde_json::json!("pdb_request_already_open")
     );
 }
 
