@@ -5,7 +5,7 @@
 //! transports do not need ambient runtime handles to preserve the fail-closed
 //! tool surface.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -1211,11 +1211,22 @@ impl OracleMcpServer {
                 }
             }
         });
-        let (response_tx, response_rx) = std_mpsc::channel::<Value>();
+        // Tool calls run concurrently so the reader can accept cancellation,
+        // but stdout remains a deterministic request-ordered JSON-RPC stream.
+        // A later synchronous request must not overtake an earlier tool call
+        // merely because that tool awaits its lane.
+        let (response_tx, response_rx) = std_mpsc::channel::<(u64, Value)>();
+        let mut pending_responses = BTreeMap::new();
+        let mut next_response_sequence = 0_u64;
+        let mut response_sequence = 0_u64;
         let mut workers = Vec::new();
         loop {
-            while let Ok(response) = response_rx.try_recv() {
+            while let Ok((sequence, response)) = response_rx.try_recv() {
+                pending_responses.insert(sequence, response);
+            }
+            while let Some(response) = pending_responses.remove(&next_response_sequence) {
                 write_jsonrpc_response(&mut writer, &response)?;
+                next_response_sequence += 1;
             }
             for notification in self.drain_resource_updated_notifications(
                 crate::subscriptions::STDIO_SUBSCRIPTION_OWNER,
@@ -1234,15 +1245,19 @@ impl OracleMcpServer {
                 Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            let is_tool_call = crate::strict_json::decode_strict_value(&frame)
-                .ok()
-                .and_then(|value| {
-                    value
-                        .get("method")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                })
+            let decoded = crate::strict_json::decode_strict_value(&frame).ok();
+            let is_tool_call = decoded
+                .as_ref()
+                .and_then(|value| value.get("method").and_then(Value::as_str))
                 .is_some_and(|method| method == "tools/call");
+            let is_notification = decoded
+                .as_ref()
+                .is_some_and(|value| value.get("method").is_some() && value.get("id").is_none());
+            let frame_response_sequence = (!is_notification).then(|| {
+                let sequence = response_sequence;
+                response_sequence += 1;
+                sequence
+            });
             // Do not move a pre-initialize tools/call onto a worker: the
             // lifecycle gate is intentionally ordered with the synchronous
             // initialize frame.  Once initialization succeeded (or auth is
@@ -1255,8 +1270,10 @@ impl OracleMcpServer {
                 let auth = auth.clone();
                 let response_tx = response_tx.clone();
                 workers.push(std::thread::spawn(move || {
-                    if let Some(response) = server.handle_stdio_frame(&frame, &auth) {
-                        let _ = response_tx.send(response);
+                    if let Some(response) = server.handle_stdio_frame(&frame, &auth)
+                        && let Some(sequence) = frame_response_sequence
+                    {
+                        let _ = response_tx.send((sequence, response));
                     }
                 }));
             } else {
@@ -1270,8 +1287,19 @@ impl OracleMcpServer {
                     self.handle_stdio_frame(&frame, auth)
                 };
                 if let Some(response) = response {
-                    write_jsonrpc_response(&mut writer, &response)?;
+                    if let Some(sequence) = frame_response_sequence {
+                        pending_responses.insert(sequence, response);
+                    } else {
+                        write_jsonrpc_response(&mut writer, &response)?;
+                    }
                 }
+            }
+            while let Ok((sequence, response)) = response_rx.try_recv() {
+                pending_responses.insert(sequence, response);
+            }
+            while let Some(response) = pending_responses.remove(&next_response_sequence) {
+                write_jsonrpc_response(&mut writer, &response)?;
+                next_response_sequence += 1;
             }
             // E1: after handling a request, flush any queued
             // `notifications/resources/updated` for subscribed, changed
@@ -1299,8 +1327,12 @@ impl OracleMcpServer {
         for worker in workers {
             let _ = worker.join();
         }
-        while let Ok(response) = response_rx.try_recv() {
+        while let Ok((sequence, response)) = response_rx.try_recv() {
+            pending_responses.insert(sequence, response);
+        }
+        while let Some(response) = pending_responses.remove(&next_response_sequence) {
             write_jsonrpc_response(&mut writer, &response)?;
+            next_response_sequence += 1;
         }
         // EOF commonly follows a single stdio request in embedding and golden
         // clients.  Worker-dispatched calls may have enqueued progress or a
@@ -3229,28 +3261,19 @@ fn transport_cancel_error(
     envelope: &ErrorEnvelope,
     cancellation: &RequestCancellation,
 ) -> Option<ErrorEnvelope> {
-    if envelope.error_class == ErrorClass::ConnectionFailed
-        && envelope.statement_outcome == Some(StatementOutcome::ProtocolUnsynchronized)
+    if envelope.statement_outcome == Some(StatementOutcome::ProtocolUnsynchronized)
+        && (envelope.error_class == ErrorClass::ConnectionFailed
+            || (tool_name == "oracle_execute"
+                && envelope.error_class == ErrorClass::Internal
+                && envelope.ora_code == Some(1013)))
     {
+        // Dispatch quarantines these uncertain wires even if Oracle's
+        // rollback established the mutation was absent.  A confirmed cancel
+        // promises a reusable post-break connection, so do not claim it here.
         return Some(
             envelope
                 .clone()
                 .with_cancel_outcome(CancelOutcome::OutcomeUnknown),
-        );
-    }
-    if tool_name == "oracle_execute"
-        && envelope.error_class == ErrorClass::Internal
-        && envelope.ora_code == Some(1013)
-        && envelope.statement_outcome == Some(StatementOutcome::ProtocolUnsynchronized)
-    {
-        // `oracle_execute` reaches this branch only after its bounded
-        // rollback completed; it is therefore a confirmed cancellation with
-        // a proved rolled-back mutation, unlike a wire-loss quarantine.
-        return Some(
-            cancelled_dispatch_envelope(
-                &cancellation.reason().unwrap_or_else(CancelReason::timeout),
-            )
-            .with_statement_outcome(StatementOutcome::RolledBack),
         );
     }
     (envelope.error_class == ErrorClass::Timeout).then(|| {
@@ -4107,7 +4130,7 @@ mod tests {
     }
 
     #[test]
-    fn issue49_cancelled_update_with_rollback_reports_confirmed_rollback() {
+    fn issue49_cancelled_update_on_quarantined_wire_remains_outcome_unknown() {
         let cancellation = RequestCancellation::default();
         cancellation.cancel(CancelReason::user("test cancellation"));
         let error = ErrorEnvelope::new(ErrorClass::Internal, "execute: ORA-01013")
@@ -4116,9 +4139,12 @@ mod tests {
 
         let mapped = transport_cancel_error("oracle_execute", &error, &cancellation)
             .expect("rolled-back cancellation has a typed terminal envelope");
-        assert_eq!(mapped.error_class, ErrorClass::RequestCancelled);
-        assert_eq!(mapped.cancel_outcome, Some(CancelOutcome::CancelConfirmed));
-        assert_eq!(mapped.statement_outcome, Some(StatementOutcome::RolledBack));
+        assert_eq!(mapped.error_class, ErrorClass::Internal);
+        assert_eq!(mapped.cancel_outcome, Some(CancelOutcome::OutcomeUnknown));
+        assert_eq!(
+            mapped.statement_outcome,
+            Some(StatementOutcome::ProtocolUnsynchronized)
+        );
     }
 
     #[test]
