@@ -130,7 +130,7 @@ def json_pointer(document, pointer):
 
 
 def freshen_vsql_marker(case):
-    marker = case["call"].get("vsql_absent_marker")
+    marker = case["call"].get("vsql_absent_marker") or case["call"].get("cancel_marker")
     if marker is None:
         return case
     require(marker in compact(case["call"]["arguments"]),
@@ -371,7 +371,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -393,6 +393,19 @@ def validate_case(case, filename):
                 "cancel case cannot use parallel or raw arguments")
         require(case["call"]["cancel_marker"] in compact(case["call"]["arguments"]),
                 "cancel marker must appear in the tool arguments")
+    if "cancel_barrier" in case["call"]:
+        require("cancel_marker" in case["call"]
+                and isinstance(case["call"]["cancel_barrier"], str)
+                and case["call"]["cancel_barrier"],
+                "cancel_barrier needs a marked cancellation call and a nonempty DBMS_PIPE name")
+    if "progress_token" in case["call"]:
+        require("cancel_marker" in case["call"]
+                and isinstance(case["call"]["progress_token"], str)
+                and case["call"]["progress_token"],
+                "progress_token needs a marked cancellation call and a nonempty token")
+    if "reuse_after_cancel" in case["call"]:
+        require(case["call"]["reuse_after_cancel"] is True and "cancel_marker" in case["call"],
+                "reuse_after_cancel is only meaningful after a marked cancellation")
     if "kill_served_session_user" in case["call"]:
         user = case["call"]["kill_served_session_user"]
         require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
@@ -640,6 +653,8 @@ class StdioClient:
             text=True, bufsize=1)
         self.lines = queue.Queue()
         self.stderr_tail = collections.deque(maxlen=20)
+        self.notifications = []
+        self.notifications_lock = threading.Lock()
         self.next_id = 0
         threading.Thread(target=self._read, daemon=True).start()
         threading.Thread(target=self._drain, daemon=True).start()
@@ -679,6 +694,17 @@ class StdioClient:
             reply = json.loads(line)
             if reply.get("id") == self.next_id:
                 return reply
+            if "method" in reply:
+                with self.notifications_lock:
+                    self.notifications.append(reply)
+
+    def notifications_since(self, start):
+        with self.notifications_lock:
+            return list(self.notifications[start:])
+
+    def notification_count(self):
+        with self.notifications_lock:
+            return len(self.notifications)
 
     def notify(self, method, params=None):
         frame = {"jsonrpc": "2.0", "method": method}
@@ -714,6 +740,8 @@ class HttpClient:
         self.next_id = 0
         self.session_ids = {}
         self.session_lock = threading.Lock()
+        self.notifications = []
+        self.notifications_lock = threading.Lock()
         self.stderr_tail = collections.deque(maxlen=20)
         self.process = subprocess.Popen(
             [str(binary), "--json", "serve", "--listen", f"127.0.0.1:{port}",
@@ -790,17 +818,30 @@ class HttpClient:
         if method == "initialize":
             self.session_id = headers.get("mcp-session-id")
             require(self.session_id, "stateful HTTP initialize lacked session id")
-        return self.decode_body(body)
+        return self.decode_body(body, self)
 
     @staticmethod
-    def decode_body(body):
+    def decode_body(body, client=None):
         try:
             return json.loads(body)
         except json.JSONDecodeError:
             frames = [json.loads(line[6:]) for line in body.decode().splitlines()
                       if line.startswith("data: ") and line[6:] != "null"]
             require(frames, "HTTP SSE response had no JSON frame")
-            return frames[-1]
+            if client is not None:
+                with client.notifications_lock:
+                    client.notifications.extend(frame for frame in frames if "method" in frame)
+            replies = [frame for frame in frames if "id" in frame]
+            require(replies, "HTTP SSE response had no JSON-RPC reply")
+            return replies[-1]
+
+    def notifications_since(self, start):
+        with self.notifications_lock:
+            return list(self.notifications[start:])
+
+    def notification_count(self):
+        with self.notifications_lock:
+            return len(self.notifications)
 
     def notify(self, method, params=None):
         request = {"jsonrpc": "2.0", "method": method}
@@ -1382,29 +1423,49 @@ def parallel_http_call(client, case, barriers):
                 tool_payload(reply).get("structuredContent", {}) for reply in replies]}}}
 
 
+def wait_cancel_barrier(connection, pipe_name):
+    """Wait for the fixture function's DBMS_PIPE signal, never a timing guess."""
+    cursor = connection.cursor()
+    status = cursor.var(int)
+    cursor.execute(
+        "BEGIN :status := DBMS_PIPE.RECEIVE_MESSAGE(:pipe_name, 20); END;",
+        {"status": status, "pipe_name": pipe_name},
+    )
+    require(status.getvalue() == 0,
+            f"DBMS_PIPE cancellation barrier {pipe_name} was not signalled before its deadline")
+
+
 def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
     marker = case["call"]["cancel_marker"]
     require(marker_probe(connection, marker) == 0,
             "cancellation marker already present before call")
     request_id = client.next_id + 1
     result = {}
+    notification_start = client.notification_count() if hasattr(client, "notification_count") else 0
 
     def invoke():
         try:
-            result["reply"] = client.rpc("tools/call", {
-                "name": case["tool"], "arguments": case["call"]["arguments"]})
+            params = {"name": case["tool"], "arguments": case["call"]["arguments"]}
+            if "progress_token" in case["call"]:
+                params["_meta"] = {"progressToken": case["call"]["progress_token"]}
+            result["reply"] = client.rpc("tools/call", params)
         except Exception as exc:
             result["error"] = exc
 
     worker = threading.Thread(target=invoke, daemon=True)
     worker.start()
-    deadline = time.monotonic() + 20
-    observed = False
-    while time.monotonic() < deadline and worker.is_alive():
-        if marker_probe(connection, marker) > 0:
-            observed = True
-            break
-        time.sleep(0.05)
+    barrier = case["call"].get("cancel_barrier")
+    if barrier:
+        wait_cancel_barrier(connection, barrier)
+        observed = True
+    else:
+        deadline = time.monotonic() + 20
+        observed = False
+        while time.monotonic() < deadline and worker.is_alive():
+            if marker_probe(connection, marker) > 0:
+                observed = True
+                break
+            time.sleep(0.05)
     if not observed:
         if worker.is_alive():
             client.notify("notifications/cancelled", {
@@ -1420,6 +1481,26 @@ def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
     if "error" in result:
         raise result["error"]
     require("reply" in result, "cancelled call produced no response")
+    notifications = (client.notifications_since(notification_start)
+                     if hasattr(client, "notifications_since") else [])
+    if "progress_token" in case["call"]:
+        token = case["call"]["progress_token"]
+        require(any(frame.get("method") == "notifications/progress"
+                    and frame.get("params", {}).get("progressToken") == token
+                    for frame in notifications),
+                "progressToken request received no in-flight progress notification")
+    if case["call"].get("reuse_after_cancel"):
+        reuse = client.rpc("tools/call", {
+            "name": "oracle_query", "arguments": {"sql": "SELECT 1 AS C FROM dual"}})
+        verify_envelope(reuse)
+        require(tool_payload(reuse).get("isError") is not True,
+                "served session was not reusable after confirmed cancellation")
+    client.last_cancel_observation = {
+        "request_id": request_id,
+        "barrier": barrier,
+        "progress_notifications": scrub(notifications),
+        "session_reused": bool(case["call"].get("reuse_after_cancel")),
+    }
     return result["reply"]
 
 
@@ -1599,6 +1680,9 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         input_value["vsql_absent_marker"] = case["call"]["vsql_absent_marker"]
     if "cancel_marker" in case["call"]:
         input_value["cancel_marker"] = case["call"]["cancel_marker"]
+    for field in ("cancel_barrier", "progress_token", "reuse_after_cancel"):
+        if field in case["call"]:
+            input_value[field] = case["call"][field]
     if "steps" in case:
         input_value["steps"] = case["steps"]
     row = {"case_id": case["case_id"], "test_id": case.get("test_id", case["case_id"]),
@@ -1634,6 +1718,7 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             row["killed_session_recovery"] = recovery_actual
         elif "cancel_marker" in case["call"] and supported:
             reply = cancelled_call(client, case, connection)
+            row["cancel_observation"] = client.last_cancel_observation
         elif "parallel" in case["call"] and supported:
             require(transport == "http", "parallel case requires HTTP transport")
             reply = parallel_http_call(client, case, barriers)
@@ -2565,6 +2650,9 @@ def selftest():
                 "notifications/cancelled", {"requestId": 1,
                                             "reason": "synthetic W4 cancellation"}),
             "cancellation did not wait for marker and send bound request id")
+    rejected("cancel_barrier_without_marked_call", lambda: validate_case(
+        {**replay_case, "call": {"arguments": {}, "cancel_barrier": "W4PIPE_SELFTEST"}},
+        "selftest"))
     rejected("missing_positive_case", lambda: verify_coverage({"oracle_query": {}}, []))
     manifest_enforcement_integration()
     left, right = [], []

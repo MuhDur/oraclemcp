@@ -1,0 +1,59 @@
+[
+  {
+    "case_id": "w4_runtime_issue49_cancel_long_read_confirmed",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "setup_ready_sql": "SELECT RESULT FROM ${owner}.V_CANCEL_LONG_${run_id} WHERE ROWNUM = 0",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [
+      {"sql": "CREATE OR REPLACE FUNCTION ${owner}.F_CANCEL_LONG_${run_id} RETURN NUMBER AUTHID DEFINER AS status NUMBER; BEGIN status := DBMS_PIPE.SEND_MESSAGE('W4PIPE_${run_id}', 0); DBMS_SESSION.SLEEP(30); RETURN 1; END;"},
+      {"sql": "CREATE OR REPLACE VIEW ${owner}.V_CANCEL_LONG_${run_id} AS SELECT ${owner}.F_CANCEL_LONG_${run_id}() AS RESULT FROM dual"}
+    ],
+    "call": {
+      "arguments": {"sql": "SELECT /* W4MARK_123456789ABC */ RESULT FROM ${owner}.V_CANCEL_LONG_${run_id}"},
+      "cancel_marker": "W4MARK_123456789ABC",
+      "cancel_barrier": "W4PIPE_${run_id}",
+      "reuse_after_cancel": true
+    },
+    "expect": {"json_subset": {"error_class": "REQUEST_CANCELLED", "cancel_outcome": "cancel_confirmed"}},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
+    "cleanup": [
+      {"sql": "DROP VIEW ${owner}.V_CANCEL_LONG_${run_id}"},
+      {"sql": "DROP FUNCTION ${owner}.F_CANCEL_LONG_${run_id}"}
+    ]
+  },
+  {
+    "case_id": "w4_runtime_issue49_progress_with_token",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "setup_ready_sql": "SELECT RESULT FROM ${owner}.V_CANCEL_PROGRESS_${run_id} WHERE ROWNUM = 0",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [
+      {"sql": "CREATE OR REPLACE FUNCTION ${owner}.F_CANCEL_PROGRESS_${run_id} RETURN NUMBER AUTHID DEFINER AS status NUMBER; BEGIN status := DBMS_PIPE.SEND_MESSAGE('W4PIPEP_${run_id}', 0); DBMS_SESSION.SLEEP(30); RETURN 1; END;"},
+      {"sql": "CREATE OR REPLACE VIEW ${owner}.V_CANCEL_PROGRESS_${run_id} AS SELECT ${owner}.F_CANCEL_PROGRESS_${run_id}() AS RESULT FROM dual"}
+    ],
+    "call": {
+      "arguments": {"sql": "SELECT /* W4MARK_123456789ABD */ RESULT FROM ${owner}.V_CANCEL_PROGRESS_${run_id}"},
+      "cancel_marker": "W4MARK_123456789ABD",
+      "cancel_barrier": "W4PIPEP_${run_id}",
+      "progress_token": "w4-cancel-progress",
+      "reuse_after_cancel": true
+    },
+    "expect": {"json_subset": {"error_class": "REQUEST_CANCELLED", "cancel_outcome": "cancel_confirmed"}},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
+    "cleanup": [
+      {"sql": "DROP VIEW ${owner}.V_CANCEL_PROGRESS_${run_id}"},
+      {"sql": "DROP FUNCTION ${owner}.F_CANCEL_PROGRESS_${run_id}"}
+    ]
+  }
+]
