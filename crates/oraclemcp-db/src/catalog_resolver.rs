@@ -612,11 +612,14 @@ fn dictionary_view_identity_is_eligible(relation: &ResolvedObject) -> bool {
 
 /// Prove the evidence boundary for one already-eligible dictionary view.
 ///
-/// Oracle-maintained status is established for the exact resolved view and
-/// every visible dependency. A capped result, remote dependency, missing cell,
-/// edition mismatch, or an empty closure is insufficient evidence and stays
-/// unproven. This is intentionally stricter than an allowlist: the allowlist
-/// merely permits these catalog reads.
+/// Oracle-maintained status is established for the exact resolved view and for
+/// each dependency owner. `ALL_OBJECTS` intentionally hides internal SYS
+/// objects from a least-privilege principal, while `ALL_DEPENDENCIES` still
+/// supplies their exact identities; `ALL_USERS.ORACLE_MAINTAINED` is the
+/// visible maintenance evidence for those owners. A capped result, remote
+/// dependency, missing cell, edition mismatch, or an empty closure is
+/// insufficient evidence and stays unproven. This is intentionally stricter
+/// than an allowlist: the allowlist merely permits these catalog reads.
 async fn dictionary_view_closure_is_proven(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -653,13 +656,14 @@ async fn dictionary_view_closure_is_proven(
     if dependencies.is_empty() || dependencies.len() > MAX_DICTIONARY_VIEW_DEPENDENCIES {
         return Ok(false);
     }
-    Ok(dependencies.iter().all(|row| {
+    let complete = dependencies.iter().all(|row| {
         required_text(row, "REFERENCED_OWNER").is_some()
             && required_text(row, "REFERENCED_NAME").is_some()
             && required_text(row, "REFERENCED_TYPE").is_some()
             && row.text("REFERENCED_LINK_NAME").is_none()
-            && row.text("ORACLE_MAINTAINED") == Some("Y")
-    }))
+            && row.text("OWNER_ORACLE_MAINTAINED") == Some("Y")
+    });
+    Ok(complete)
 }
 
 /// Statement class used to match Oracle FGA policy flags. The mutation effect
@@ -3749,7 +3753,10 @@ fn cache_lock_error<T>(_error: std::sync::PoisonError<T>) -> DbError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{OracleBackend, OracleCell, OracleConnectionInfo};
+    use crate::{
+        AuthAdapter, OracleBackend, OracleCell, OracleConnectOptions, OracleConnectionInfo,
+        RustOracleConnection,
+    };
     use asupersync::runtime::RuntimeBuilder;
     use std::collections::VecDeque;
     use std::path::PathBuf;
@@ -6041,8 +6048,7 @@ mod tests {
             ("REFERENCED_NAME", Some("OBJ$")),
             ("REFERENCED_TYPE", Some("TABLE")),
             ("REFERENCED_LINK_NAME", None),
-            ("ORACLE_MAINTAINED", Some("Y")),
-            ("EDITION_NAME", None),
+            ("OWNER_ORACLE_MAINTAINED", Some("Y")),
         ])
     }
 
@@ -6114,6 +6120,58 @@ mod tests {
                 Purity::Unknown
             );
             assert!(conn.queries.lock().expect("queries lock").is_empty());
+        });
+    }
+
+    #[test]
+    fn issue35_free23_dictionary_views_live_e2e_oracle() {
+        if std::env::var("ORACLEMCP_ISSUE35_LIVE").as_deref() != Ok("1") {
+            eprintln!("[issue35-live] SKIP; set ORACLEMCP_ISSUE35_LIVE=1");
+            return;
+        }
+        run_with_cx(|cx| async move {
+            let password = std::env::var("ORACLE_MATRIX_FREE23_PASSWORD")
+                .expect("FREE23 E2E_ORACLE password missing");
+            let dsn = std::env::var("ORACLE_MATRIX_FREE23_DSN")
+                .unwrap_or_else(|_| "localhost:1523/FREEPDB1".to_owned());
+            assert!(
+                dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"),
+                "issue35 live proof runs only against the local FREE23 lab"
+            );
+            let conn = RustOracleConnection::connect(
+                &cx,
+                OracleConnectOptions {
+                    connect_string: dsn,
+                    username: Some("E2E_ORACLE".to_owned()),
+                    password: Some(password),
+                    auth_adapter: AuthAdapter::Password,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("FREE23 E2E_ORACLE connection");
+            let cache = OracleCatalogResolverCache::default();
+            for name in ["USER_OBJECTS", "USER_TAB_COLUMNS", "USER_SEQUENCES"] {
+                let plan = oraclemcp_guard::semantic_read_plan_checked(&format!(
+                    "SELECT * FROM {name} WHERE 1 = 0"
+                ))
+                .expect("dictionary read has a bounded semantic plan");
+                let relations = resolve_semantic_read_relations(&cx, &conn, &cache, &plan)
+                    .await
+                    .expect("dictionary identity resolves through PUBLIC");
+                assert_eq!(relations.len(), 1, "exact dictionary relation: {name}");
+                let purity = resolved_relations_read_purity(&cx, &conn, &relations, &[])
+                    .await
+                    .expect("dictionary closure catalog query succeeds");
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "case_id": format!("issue35_{name}").to_ascii_lowercase(),
+                        "purity": format!("{purity:?}"),
+                    })
+                );
+                assert_eq!(purity, Purity::ProvenReadOnly, "{name} closure");
+            }
         });
     }
 
