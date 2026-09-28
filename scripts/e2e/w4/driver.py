@@ -2163,6 +2163,7 @@ def run_lane(args):
                             case["retention_probe"] = retention_probe
                 for case in expanded_family:
                     if (case.get("setup_phase") == "before_server"
+                            and (not args.case or case["case_id"] in args.case)
                             and set(case["requires"]) <= capabilities):
                         apply_setup(connection, case["setup"])
                         if "setup_ready_sql" in case:
