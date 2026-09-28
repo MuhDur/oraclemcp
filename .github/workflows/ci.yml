@@ -903,6 +903,30 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  # No deployment-specific identifiers or secrets may reach the public repo.
+  # Generic heuristics run here; operators add a site denylist locally via
+  # $ORACLEMCP_SENSITIVE_DENYLIST_FILE + a pre-push hook (see the script).
+  sensitive-data:
+    name: sensitive-data lint
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - run: bash scripts/secret_scan.sh
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - run: bash scripts/container_python_lock_selftest.sh
+      - run: bash tests/container_supply_chain_contract_test.sh --context
+
+
   oracle-free23-w4:
     name: Oracle FREE 23ai W4
     # Advisory until .9.5-.9.9 and oraclemcp-zw03u close; then make this required.
@@ -1016,29 +1040,6 @@ jobs:
             target/e2e/w4/free23/*.jsonl
           if-no-files-found: error
           retention-days: 30
-
-  # No deployment-specific identifiers or secrets may reach the public repo.
-  # Generic heuristics run here; operators add a site denylist locally via
-  # $ORACLEMCP_SENSITIVE_DENYLIST_FILE + a pre-push hook (see the script).
-  sensitive-data:
-    name: sensitive-data lint
-    needs: web-build
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@v8
-        with:
-          name: oraclemcp-dashboard-dist
-          path: web/dist
-      - run: bash scripts/secret_scan.sh
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-      - run: bash scripts/container_python_lock_selftest.sh
-      - run: bash tests/container_supply_chain_contract_test.sh --context
 
   # Compile every cargo-fuzz target so it cannot silently rot: guard classifier
   # + ALTER SESSION, audit-chain verification, OAuth bearer validation, and the
