@@ -485,13 +485,62 @@ fn exact_sha256(sql: &str) -> String {
 /// This must precede all tokenizer calls. A lexer-based budget would leave an
 /// adversarial malformed quote/bracket sequence free to consume unbounded lexer
 /// or parser work before the budget is observable. Oracle has no square-bracket
-/// grouping grammar, so counting these bytes only narrows malformed input (and
-/// unusually bracket-heavy literal text) to a typed fail-closed refusal.
+/// grouping grammar, so count only syntax bytes: brackets in string literals or
+/// comments are ordinary data and must not consume this budget.
 fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
-    sql.bytes()
-        .filter(|byte| *byte == b'[')
-        .nth(MAX_SQLPARSER_SQUARE_BRACKETS)
-        .is_some()
+    #[derive(Clone, Copy)]
+    enum State {
+        Code,
+        String,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut state = State::Code;
+    let mut index = 0;
+    let mut brackets = 0;
+    while index < bytes.len() {
+        match state {
+            State::Code => match bytes[index] {
+                b'\'' => state = State::String,
+                b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                    state = State::LineComment;
+                    index += 1;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = State::BlockComment;
+                    index += 1;
+                }
+                b'[' => {
+                    brackets += 1;
+                    if brackets > MAX_SQLPARSER_SQUARE_BRACKETS {
+                        return true;
+                    }
+                }
+                _ => {}
+            },
+            State::String => {
+                if bytes[index] == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 1;
+                    } else {
+                        state = State::Code;
+                    }
+                }
+            }
+            State::LineComment if bytes[index] == b'\n' || bytes[index] == b'\r' => {
+                state = State::Code;
+            }
+            State::BlockComment if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') => {
+                state = State::Code;
+                index += 1;
+            }
+            State::LineComment | State::BlockComment => {}
+        }
+        index += 1;
+    }
+    false
 }
 
 /// PL/SQL side-effect markers that force fail-closed handling (P1-1a).

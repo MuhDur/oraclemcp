@@ -81,10 +81,14 @@ fn semantic_read_plan_fuzz_square_bracket_budget_refuses_without_parser_backtrac
 }
 
 #[test]
-fn classifier_square_bracket_budget_spares_ordinary_literal_data() {
-    let sql = "SELECT '[[[[[[[[' AS bracket_data FROM dual";
-    let decision = Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql);
-    assert_eq!(decision.danger, DangerLevel::Safe, "{decision:?}");
+fn classifier_square_bracket_budget_spares_literal_and_comment_data() {
+    for sql in [
+        "SELECT '[[[[[[[[[' AS bracket_data FROM dual",
+        "SELECT 1 /* [[[[[[[[[ */ AS bracket_data FROM dual",
+    ] {
+        let decision = Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql);
+        assert_eq!(decision.danger, DangerLevel::Safe, "{sql}: {decision:?}");
+    }
 }
 
 /// Served/strict-mode corpus (beads .82 + .102). Each entry is a statement the
