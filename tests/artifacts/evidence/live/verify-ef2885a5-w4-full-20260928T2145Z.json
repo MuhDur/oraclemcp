@@ -1,0 +1,15 @@
+{
+  "run_id": "verifier-ef2885a5-w4-full-20260928T2145Z",
+  "lane": "free23,xe21,xe18",
+  "source_sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+  "kind": "w4-full-unscoped-lane",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; clean git-archive export of ef2885a5 with export HEAD = ef2885a5 (git status --porcelain empty); release binary built there with cargo build --release -p oraclemcp --bin oraclemcp, sha256 8ff171b07c60c0fa5abc4caf2fbd6b43e5d853950abeb86246fd9b7be2d003ac",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha ef2885a5942ec31dddc8bf213b5ed83487db0313 (no --case: full unscoped lane)",
+  "result": "No lane aborted with 'failed to drop before profile switch': every lane executed all 716 case rows over stdio and HTTP (including the intentional killed-session DML case followed by later profile switches) and reached the final release-manifest coverage gate. All orient (sections_exact, include_filter, external_client) and describe_table (columns_exact, virtual_invisible_flags) rows pass on both transports on all 3 lanes. Driver still exits 1 on every lane: (a) release-manifest gate reports 18 missing rel012_* scenarios on stdio (tracked by oraclemcp-bb5qm); (b) red rows: w4_runtime_issue46_scn_probe_cached (all lanes, stdio), w4_query_cte_read (all lanes, both transports), w4_query_issue35_trusted_view_function_refused (all lanes, both transports), w4_contract_oracle_plsql_blast_radius_mode_wrong_enum (xe21, xe18), w4_db_health_invalid_objects_includes_fixture_invalid_proc (xe18). None of these is a fixture leak or profile-switch abort.",
+  "runs": [
+    {"lane": "free23", "fixture_runs": {"http": "W42140BC4962", "stdio": "W42138B8392F"}, "checkout_sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313", "results_sha256": "470c5d23e733d7e041dcba1f77f3ffeaf2a32ca6ea0c97fb4ec302107419b941", "rows": 716, "pass": 711, "fail": 5, "duration": "21:38:55Z-21:41:20Z"},
+    {"lane": "xe21", "fixture_runs": {"http": "W4213608B051", "stdio": "W42135E5B64E"}, "checkout_sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313", "results_sha256": "dece5533089f1a4c11ad65db61ccb83caa346c28ea9f9ad0aaec810cb913fbbc", "rows": 716, "pass": 709, "fail": 7, "duration": "21:35:32Z-21:37:51Z"},
+    {"lane": "xe18", "fixture_runs": {"http": "W421360FFF17", "stdio": "W42135AA1CD7"}, "checkout_sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313", "results_sha256": "98701c26705c0b01c2aaba417f3fdfada135336200ff8785295803cf3fe27c1e", "rows": 716, "pass": 707, "fail": 9, "duration": "21:35:32Z-21:37:51Z"}
+  ],
+  "post_run_fixture_check": "After the runs, xe21 and xe18 hold no W4O_/W4X_ fixture users and no D7_* tables. free23 still holds W4O_/W4X_W418406C2390 (created 2026-09-28 18:40, before this verification, including a leaked D7_DESC table) and W4O_/W4X_W42141978EA3 (a concurrent run by another agent); neither belongs to the verifier's fixture runs."
+}

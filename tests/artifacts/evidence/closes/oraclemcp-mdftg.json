@@ -1,0 +1,57 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T21:45:00Z",
+  "bead_id": "oraclemcp-mdftg",
+  "scope": {
+    "summary": "The parser square-bracket pre-budget counts only code brackets: string literals, Oracle q-quoted literals, line/block comments and (since 5fe1cf0f) double-quoted identifiers do not consume it, while the b41nq reproducer and the IF\"'\" quoted-identifier bypass stay bounded and refused.",
+    "in_scope": [
+      "crates/oraclemcp-guard/src/classifier.rs",
+      "crates/oraclemcp-guard/tests/adversarial_corpus.rs",
+      "crates/oraclemcp-guard/fuzz/corpus/classify_fuzz/timeout_quoted_identifier_square_brackets"
+    ],
+    "out_of_scope": [
+      "Other classifier budgets and the served strict-mode semantic proof."
+    ]
+  },
+  "source": {
+    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "semantic_read_plan_checked / Classifier::classify (public guard API used by the served read path)",
+        "kind": "api",
+        "trace": "Out-of-tree release harness against a clean export of ef2885a5: original b41nq reproducer 11.7us (plan) / 62us (classify, Forbidden 'parser square-bracket budget'); IF\"'\" bypass 0.5us / 1.4us; 15 verifier-invented q-quote-in-identifier prefixes plus CR-comment and doubled-quote variants all refused in <=258us; bracket data in literal, q-quote, quoted identifier, block and line comment admitted Safe with a plan."
+      },
+      {
+        "name": "guard regression tests (verifier re-execution)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-guard --test adversarial_corpus: 18 passed (semantic_read_plan_fuzz_square_bracket_budget_refuses_without_parser_backtracking includes the quoted-identifier bypass; classifier_square_bracket_budget_spares_literal_and_comment_data includes the quoted identifier); cargo test -p oraclemcp-guard --lib: 369 passed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "guard-bracket-budget-timing",
+        "path": "tests/artifacts/evidence/live/verify-ef2885a5-oraclemcp-mdftg-20260928T2145Z.json",
+        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+      }
+    ]
+  },
+  "limitations": [
+    "The >=300s classify_fuzz campaign was not re-run by the verifier (instructed not to hold the build lease for fuzz builds); the implementer's campaign log was read and ran from the shared checkout, not from a clean tree at ef2885a5.",
+    "Timing is a bounded-work proof on this host, not a formal complexity bound."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

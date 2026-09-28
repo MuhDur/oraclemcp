@@ -1,0 +1,49 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T21:55:00Z",
+  "bead_id": "oraclemcp-4g1m1",
+  "scope": {
+    "summary": "After the intentional killed-session DML case, the W4 driver starts a fresh MCP client at the lane's READ_ONLY baseline instead of sending a level drop to the dead session, so a full unscoped lane no longer aborts with 'failed to drop before profile switch'.",
+    "in_scope": [
+      "scripts/e2e/w4/driver.py"
+    ],
+    "out_of_scope": [
+      "Missing rel012 release-manifest scenarios (oraclemcp-bb5qm) and other red W4 cases."
+    ]
+  },
+  "source": {
+    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "python3 scripts/e2e/w4/driver.py --lane <lane> (full unscoped lane, release binary)",
+        "kind": "cli",
+        "trace": "Full unscoped lanes at ef2885a5 on free23, xe21 and xe18: each ran all 716 rows over stdio and HTTP (w4_runtime_issue47_killed_session_dml_not_replayed passed and later profile-variant cases continued), reaching the final manifest gate. No lane printed 'failed to drop before profile switch'. Fix commit: 04008004 (close and reinitialize the client after kill_served_session_dml_user; reset tracked profile and level)."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-full-unscoped-lane",
+        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-full-20260928T2145Z.json",
+        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+      }
+    ]
+  },
+  "limitations": [
+    "The full lanes are still red overall: 18 rel012 manifest scenarios are missing (oraclemcp-bb5qm), and w4_runtime_issue46_scn_probe_cached, w4_query_cte_read and w4_query_issue35_trusted_view_function_refused fail on all lanes (plus two lane-specific rows). This bead claims only removing the profile-switch abort, so the advisory FREE23 W4 CI lane is not green yet."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T21:55:00Z",
+  "bead_id": "oraclemcp-nixpz",
+  "scope": {
+    "summary": "The D7 describe fixture drops its own table (and FK) in cleanup, and its setup runs only with its case (no before_server phase), so the D7_FK_DESC foreign key no longer leaks into the strict oracle_orient exact-order cases. The virtual-column describe fixture gets the same cleanup.",
+    "in_scope": [
+      "scripts/e2e/w4/cases/dictionary-tools.json"
+    ],
+    "out_of_scope": [
+      "oracle_orient product ordering (kept strict, unchanged)."
+    ]
+  },
+  "source": {
+    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "python3 scripts/e2e/w4/driver.py --lane <lane> (full unscoped and scoped runs, release binary)",
+        "kind": "cli",
+        "trace": "At ef2885a5 w4_orient_sections_exact, w4_orient_include_filter, w4_orient_external_client, w4_describe_table_columns_exact and w4_describe_table_virtual_invisible_flags pass over stdio and HTTP on free23, xe21 and xe18, both in the full unscoped lane (where every dictionary fixture is set up in the same run) and in a scoped --case run. Commits 1f1ea005, 0ef3731e, 286831b2; no golden changed."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-full-unscoped-lane",
+        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-full-20260928T2145Z.json",
+        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+      },
+      {
+        "kind": "w4-scoped-rerun",
+        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-scoped-20260928T2145Z.json",
+        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+      }
+    ]
+  },
+  "limitations": [
+    "The free23 lab still holds a D7_DESC table from a run at 18:40 (fixture W418406C2390, before the fix). It sits in another run's schema and does not affect run-owned orient cases, but it has not been cleaned up."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

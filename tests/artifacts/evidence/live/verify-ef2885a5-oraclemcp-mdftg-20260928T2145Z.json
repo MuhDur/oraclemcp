@@ -1,0 +1,15 @@
+{
+  "run_id": "verifier-ef2885a5-oraclemcp-mdftg-20260928T2145Z",
+  "lane": "offline-release-harness",
+  "source_sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+  "kind": "guard-bracket-budget-timing",
+  "runner": "independent verifier (Claude agent); clean git-archive export of ef2885a5 (export HEAD = ef2885a5, git status --porcelain empty); out-of-tree release-mode harness depending on crates/oraclemcp-guard by path, lockfile copied from the export",
+  "command": "cargo run --release --offline -p mdftg-harness (harness calls oraclemcp_guard::semantic_read_plan_checked, Classifier::default().classify and Classifier::engine_free_baseline(..).classify on each input); cargo test -p oraclemcp-guard --test adversarial_corpus -- --nocapture; cargo test -p oraclemcp-guard --lib",
+  "result": "All inputs bounded (max observed 258us). original b41nq reproducer: plan ParserWorkBudgetExceeded 11.7us, classify Forbidden 'parser square-bracket budget' 62us. IF\"'\" quoted-identifier bypass: plan ParserWorkBudgetExceeded 0.5us, classify Forbidden 1.4us. Additional verifier probes of lexer/tokenizer mismatch (q-quote embedded in an identifier such as IFq'[', 15 prefixes; CR-terminated line comment; doubled quote inside quoted identifier): all refused in <=258us. Admitted as Safe (baseline) with a successful plan: '[[[[[[[[[' literal, q'[..]' literal, \"[[[[[[[[[\" quoted identifier, block comment, line comment. adversarial_corpus 18 passed (in-test timings reproducer=2us, quoted_identifier_bypass=1us); guard lib 369 passed.",
+  "timings_us": {
+    "original_b41nq_reproducer": {"semantic_read_plan_checked": 11.7, "classify_default": 62.1},
+    "quoted_identifier_bypass": {"semantic_read_plan_checked": 0.5, "classify_default": 1.4},
+    "max_other_probe": 257.5
+  },
+  "note": "cargo fuzz was not re-run (verifier instruction: do not hold the build lease for fuzz builds); the implementer's 301s campaign log (/var/tmp/oraclemcp-greentiger-1415/mdftg-fuzz-300-campaign.log, 289418 runs, -timeout=10 matching fuzz.yml) was read, not reproduced."
+}

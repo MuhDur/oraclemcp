@@ -1,0 +1,66 @@
+{
+  "run_id": "verifier-32024974-oraclemcp-9wb12-20260928T2130Z",
+  "lane": "free23,xe18,xe21",
+  "source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+  "kind": "w4-top-queries-row-contains",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 32024974 (export repo HEAD = 32024974, git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 32024974bab0e97a54d3178ea2c2b39bfbefff01 --case <id>... (release binary built in the export with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "w4_top_queries_live_cursor_cache_contains_marker pass stdio+http on free23, xe21, xe18 (row_contains matcher enforced after json_subset)",
+  "runs": [
+    {
+      "lane": "xe18",
+      "invocation": "topq",
+      "fixture_runs": {
+        "http": "W41848F513E6",
+        "stdio": "W41848F5BD7A"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_top_queries_live_cursor_cache_contains_marker"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "topq",
+      "fixture_runs": {
+        "http": "W4184811D91A",
+        "stdio": "W41848FA314C"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_top_queries_live_cursor_cache_contains_marker"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "topq",
+      "fixture_runs": {
+        "http": "W4184964061B",
+        "stdio": "W418487EAC44"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_top_queries_live_cursor_cache_contains_marker"
+      ]
+    }
+  ],
+  "note": "Same runs as the twfpa artifact."
+}
