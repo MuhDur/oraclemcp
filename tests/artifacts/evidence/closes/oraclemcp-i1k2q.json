@@ -1,0 +1,51 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:53:48Z",
+  "bead_id": "oraclemcp-i1k2q",
+  "scope": {
+    "summary": "oracle_read_clob now refuses a primary key with no matching row as a typed OBJECT_NOT_FOUND naming owner.table and the key column/value, instead of returning isError:false with clob:null,row_count:0; a present row whose CLOB is NULL still succeeds with clob.value null.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs"
+    ],
+    "out_of_scope": [
+      "No change to crates/oraclemcp-db/src/**: the existing read_lob_sql is unchanged; the row-absence discrimination is made at the dispatch layer from the returned rowset.",
+      "crates/oraclemcp/src/cli.rs and crates/oraclemcp/src/main.rs are held by another agent and were not edited.",
+      "scripts/e2e/w4/** (cases and driver) and tests/golden/w4/** are another agent's lane and were not edited; the existing w4_read_clob_missing_pk_not_found case already expects OBJECT_NOT_FOUND.",
+      "The raw live pre/post JSON lives under /tmp/opencode/i1k2q/ and is not committed; this close claims scoped-test readiness, not a committed live artifact."
+    ]
+  },
+  "source": {
+    "sha": "14f72c8147d1de18ae452015eb64a7ca5e9cb916",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_read_clob MCP tool",
+        "kind": "tool",
+        "trace": "Unit: cargo test -p oraclemcp --lib read_clob_ -> read_clob_missing_pk_is_object_not_found + read_clob_null_value_on_existing_row_succeeds + audit_wiring::read_clob_masked_and_certified all pass. Live free23 (localhost:1523/FREEPDB1, SYSTEM) with a fixture SYSTEM.I1K2Q_DOCS(ID NUMBER PRIMARY KEY, BODY CLOB) holding row ID=1 BODY=NULL and no ID=999: pre-change release binary returned pk=999 isError=false clob=null row_count=0 and pk=1 isError=false clob.value=null row_count=1; post-change debug binary returned pk=999 isError=true error_class=OBJECT_NOT_FOUND message='no row in SYSTEM.I1K2Q_DOCS with ID = \"999\"' suggested_tool=oracle_schema_inspect, and pk=1 still isError=false clob.value=null row_count=1. Planted negative: with the guard temporarily removed the unit test read_clob_missing_pk_is_object_not_found failed ('a missing primary key must not return an empty success'); the temporary weakening was reverted before the work commit."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Readiness basis is scoped-test: the live pre/post outputs were captured manually against free23 but are under /tmp/opencode/i1k2q/ and not committed as an exact-SHA artifact, so live_evidence is not claimed.",
+    "The planted negative was a temporary local edit and was reverted before the work commit; it is not present in source.sha.",
+    "The full scoped suite cargo test -p oraclemcp --lib is 540 passed / 1 failed; the single failure (dispatch::tests::every_registry_tool_routes_and_deserializes_offline, oracle_semantic_search requires_23ai) reproduces with the read_clob change stashed out (verified at HEAD), so it is a pre-existing red in the semantic-search lane, not introduced by this change.",
+    "cargo fmt --all -- --check reports diffs only in crates/oraclemcp-db/src/connection.rs, which is unmodified in git status and outside this lane; the two changed files are fmt-clean.",
+    "No independent verifier re-ran the change; the swarm verifier must re-execute before closing."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
