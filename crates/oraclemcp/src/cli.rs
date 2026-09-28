@@ -85,6 +85,12 @@ pub(crate) enum Command {
         #[command(flatten)]
         args: DoctorArgs,
     },
+    /// Run a read-only field round from the installed binary against a live
+    /// database: forces the session to READ_ONLY, drives the served transport as
+    /// an external client, classifies every outcome, and exits 0 (clean), 2
+    /// (defect found) or 3 (environment findings only).
+    #[command(alias = "self-test")]
+    Selftest(SelftestCliArgs),
     /// List configured connection profiles without opening a database connection.
     #[command(alias = "list-profiles")]
     Profiles,
@@ -195,6 +201,24 @@ pub(crate) enum Command {
         #[command(subcommand)]
         command: RefusalCorpusCommand,
     },
+}
+
+#[derive(Args, Debug, Clone)]
+pub(crate) struct SelftestCliArgs {
+    /// Named connection profile from the loaded config to run the field round
+    /// against. The run derives a READ_ONLY-ceiling profile from it.
+    #[arg(long)]
+    pub(crate) profile: String,
+    /// Write one sanitized Markdown issue draft per defect into this directory.
+    /// Drafts are local-only; nothing is sent anywhere.
+    #[arg(long = "issue-draft", value_name = "DIR")]
+    pub(crate) issue_draft: Option<PathBuf>,
+    /// Also probe a running Streamable HTTP listener at this base URL.
+    #[arg(long, value_name = "URL")]
+    pub(crate) http: Option<String>,
+    /// Overall run budget in seconds; probes not reached report `skipped: budget`.
+    #[arg(long, default_value_t = 300)]
+    pub(crate) budget: u64,
 }
 
 #[derive(Subcommand, Debug)]

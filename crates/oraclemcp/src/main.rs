@@ -27,6 +27,7 @@ mod audit_evidence;
 mod discover;
 mod readiness;
 mod robot_docs;
+mod selftest;
 mod service_lifecycle;
 mod tls_config_material;
 
@@ -230,6 +231,7 @@ fn main() -> ExitCode {
                 args.fix,
             ),
         },
+        Command::Selftest(args) => selftest::run(robot_json, args),
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
         Command::Completions { shell } => run_completions_cmd(binary_name, shell),

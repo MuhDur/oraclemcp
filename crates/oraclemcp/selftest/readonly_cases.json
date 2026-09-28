@@ -1,0 +1,45 @@
+[
+  {
+    "case_id": "selftest_query_dual",
+    "source_case_id": "rel012_i28_order_alias",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "arguments": { "sql": "SELECT 1 AS n FROM DUAL", "max_rows": 5 },
+    "expect": { "kind": "rows" }
+  },
+  {
+    "case_id": "selftest_query_all_users_bounded",
+    "source_case_id": "w4_query_issue28_order_by_alias",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "arguments": {
+      "sql": "SELECT username FROM ALL_USERS WHERE ROWNUM <= 5 ORDER BY username",
+      "max_rows": 5
+    },
+    "expect": { "kind": "rows" }
+  },
+  {
+    "case_id": "selftest_list_schemas_all_users",
+    "source_case_id": "w4_list_schemas_name_like_filter",
+    "tool": "oracle_list_schemas",
+    "level": "READ_ONLY",
+    "arguments": { "name_like": "ALL" },
+    "expect": { "kind": "rows" }
+  },
+  {
+    "case_id": "selftest_connection_info",
+    "source_case_id": "w4_connection_info_effective_access_readonly_pinned",
+    "tool": "oracle_connection_info",
+    "level": "READ_ONLY",
+    "arguments": {},
+    "expect": { "kind": "rows" }
+  },
+  {
+    "case_id": "selftest_db_health",
+    "source_case_id": "w4_db_health_subcheck_filter",
+    "tool": "oracle_db_health",
+    "level": "READ_ONLY",
+    "arguments": {},
+    "expect": { "kind": "rows" }
+  }
+]
