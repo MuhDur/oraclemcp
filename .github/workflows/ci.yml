@@ -362,12 +362,9 @@ jobs:
 
   windows-rust:
     name: Rust workspace (Windows)
-    # Advisory lanes run on pull requests, not on direct pushes to main, so the
-    # main per-commit badge reflects only the required lanes. This lane's real
-    # state (the tracked audit-DACL failure, oraclemcp-xuaea) stays visible on
-    # every PR and is not hidden — it just no longer stamps a red check on the
-    # release commits that land straight on main.
-    if: github.event_name == 'pull_request'
+    # Keep this advisory until T5.3 promotes it, but run it on the existing
+    # push and dispatch triggers as well as pull requests so native-Windows
+    # proof can be recorded on successive main-equivalent revisions.
     needs: web-build
     runs-on: windows-latest
     # Advisory until the native-Windows audit-DACL hardening lands. Operator
@@ -415,6 +412,17 @@ jobs:
           # Save the compiled artifacts even on test failure so the NEXT run is
           # warm and fast; this is what lets us iterate on Windows test fixes.
           cache-on-failure: true
+      - name: Windows proof tier
+        env:
+          CARGO_PROFILE_TEST_DEBUG: "0"
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          cargo test -p oraclemcp-audit --lib -- windows_audit_
+          cargo test -p oraclemcp-core --lib -- file_store::windows
+          cargo test -p oraclemcp --lib --bins -- worm_parent_
+          cargo test -p oraclemcp --lib --bins -- startup_audit_parent_
+          cargo test -p oraclemcp --lib --bins -- build_auditor_
       - name: cargo test workspace on Windows
         env:
           # windows-msvc link time is dominated by debuginfo; drop it to cut the

@@ -48,7 +48,9 @@
       "workflow_file": "ci.yml",
       "job_id": "windows-rust",
       "triggers": [
-        "pull_request"
+        "pull_request",
+        "push",
+        "workflow_dispatch"
       ],
       "path_filtered": false
     },
