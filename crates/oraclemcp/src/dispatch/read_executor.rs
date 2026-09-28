@@ -1262,6 +1262,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     &executed_sql,
                     state.fga_evidence_policy,
                     state.require_security_feature_evidence,
+                    state.trusted_views.as_ref(),
                 )
                 .await
             } else {
@@ -1272,6 +1273,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     &executed_sql,
                     state.fga_evidence_policy,
                     state.require_security_feature_evidence,
+                    state.trusted_views.as_ref(),
                 )
                 .await
             };
@@ -2534,6 +2536,7 @@ impl OracleDispatcher {
             subject,
             fga_evidence_policy,
             require_security_feature_evidence,
+            trusted_views,
         } = request;
         let executed_sql = with_audit_marker(sql, active_profile, "oracle_diff");
         let admitted = resolve_read_only_relations_with_security_policy(
@@ -2543,6 +2546,7 @@ impl OracleDispatcher {
             &executed_sql,
             fga_evidence_policy,
             require_security_feature_evidence,
+            trusted_views,
         )
         .await?;
         let relations = admitted.relations;
@@ -2740,6 +2744,7 @@ impl OracleDispatcher {
                 &executed_sql,
                 policy.fga_evidence_policy,
                 policy.require_security_feature_evidence,
+                policy.trusted_views.as_ref(),
             )
             .await?;
             let relations = admitted.relations;

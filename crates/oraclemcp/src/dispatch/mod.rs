@@ -2274,6 +2274,33 @@ mod profile_drain_state_tests {
     }
 
     #[test]
+    fn issue35_served_read_proof_receives_profile_trusted_views() {
+        let config = OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "trusted"
+            description = "trusted view proof profile"
+            connect_string = "trusted:1521/svc"
+            trusted_views = ["APP.V35_OUTER"]
+            "#,
+        )
+        .expect("trusted-view profile config");
+        let drain = ProfileDrainState::from_config(config);
+        let lease = match drain.admit_mcp_profile("trusted", true) {
+            ProfileGenerationAdmission::Ready(lease) => lease,
+            other => panic!("trusted profile was not admitted: {other:?}"),
+        };
+        let policy = profile_dispatch_policy(&lease).expect("profile policy");
+
+        let read_policy = read_proof_policy(
+            policy.fga_evidence_policy,
+            policy.require_security_feature_evidence,
+            policy.trusted_views.as_ref(),
+        );
+        assert_eq!(read_policy.trusted_views, ["APP.V35_OUTER"]);
+    }
+
+    #[test]
     fn incompatible_generation_stays_drained_after_later_retain_reload() {
         let admin = OracleMcpConfig::from_toml_str(
             r#"
@@ -5612,7 +5639,15 @@ async fn resolve_read_only_relations(
     sql: &str,
     fga_policy: FgaEvidencePolicy,
 ) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
-    resolve_read_only_relations_inner(cx, conn, cache, sql, false, fga_policy, false).await
+    resolve_read_only_relations_inner(
+        cx,
+        conn,
+        cache,
+        sql,
+        false,
+        read_proof_policy(fga_policy, false, &[]),
+    )
+    .await
 }
 
 async fn resolve_read_only_relations_with_security_policy(
@@ -5622,6 +5657,7 @@ async fn resolve_read_only_relations_with_security_policy(
     sql: &str,
     fga_policy: FgaEvidencePolicy,
     require_security_feature_evidence: bool,
+    trusted_views: &[String],
 ) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
     resolve_read_only_relations_inner(
         cx,
@@ -5629,8 +5665,7 @@ async fn resolve_read_only_relations_with_security_policy(
         cache,
         sql,
         false,
-        fga_policy,
-        require_security_feature_evidence,
+        read_proof_policy(fga_policy, require_security_feature_evidence, trusted_views),
     )
     .await
 }
@@ -5642,6 +5677,7 @@ async fn resolve_read_only_relations_with_verified_local_vector_embedding_and_se
     sql: &str,
     fga_policy: FgaEvidencePolicy,
     require_security_feature_evidence: bool,
+    trusted_views: &[String],
 ) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
     resolve_read_only_relations_inner(
         cx,
@@ -5649,8 +5685,7 @@ async fn resolve_read_only_relations_with_verified_local_vector_embedding_and_se
         cache,
         sql,
         true,
-        fga_policy,
-        require_security_feature_evidence,
+        read_proof_policy(fga_policy, require_security_feature_evidence, trusted_views),
     )
     .await
 }
@@ -5661,8 +5696,7 @@ async fn resolve_read_only_relations_inner(
     cache: &OracleCatalogResolverCache,
     sql: &str,
     verified_local_vector_embedding: bool,
-    fga_policy: FgaEvidencePolicy,
-    require_security_feature_evidence: bool,
+    policy: read_executor::ReadProofPolicy<'_>,
 ) -> Result<read_executor::ResolvedRead, ErrorEnvelope> {
     read_executor::resolve_query_block_read_with_security_policy(
         cx,
@@ -5670,13 +5704,21 @@ async fn resolve_read_only_relations_inner(
         cache,
         sql,
         verified_local_vector_embedding,
-        read_executor::ReadProofPolicy {
-            fga_evidence: fga_policy,
-            require_security_feature_evidence,
-            trusted_views: &[],
-        },
+        policy,
     )
     .await
+}
+
+fn read_proof_policy<'a>(
+    fga_evidence: FgaEvidencePolicy,
+    require_security_feature_evidence: bool,
+    trusted_views: &'a [String],
+) -> read_executor::ReadProofPolicy<'a> {
+    read_executor::ReadProofPolicy {
+        fga_evidence,
+        require_security_feature_evidence,
+        trusted_views,
+    }
 }
 
 fn normalize_diff_key_columns(raw: Vec<String>) -> Result<Vec<String>, ErrorEnvelope> {
@@ -5783,6 +5825,7 @@ struct TimeDiffReadRequest<'a> {
     subject: &'a AuditSubject,
     fga_evidence_policy: FgaEvidencePolicy,
     require_security_feature_evidence: bool,
+    trusted_views: &'a [String],
 }
 
 struct TimeDiffRead {
@@ -14089,6 +14132,7 @@ impl OracleDispatcher {
                                             fga_evidence_policy: state.fga_evidence_policy,
                                             require_security_feature_evidence: state
                                                 .require_security_feature_evidence,
+                                            trusted_views: state.trusted_views.as_ref(),
                                         },
                                     )
                                     .await?;
