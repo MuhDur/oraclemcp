@@ -2948,6 +2948,7 @@ struct ExecState {
     call_timeout_sets: Mutex<Vec<Option<Duration>>>,
     cancel_on_commit: AtomicUsize,
     cancel_on_rollback: AtomicUsize,
+    rollback_error: Mutex<Option<DbError>>,
     cancel_on_execute: AtomicUsize,
     commits: AtomicUsize,
     rollbacks: AtomicUsize,
@@ -3492,6 +3493,15 @@ impl OracleConnection for ExecRecordingMock {
 
     async fn rollback(&self, cx: &Cx) -> Result<(), DbError> {
         self.state.rollbacks.fetch_add(1, Ordering::SeqCst);
+        if let Some(error) = self
+            .state
+            .rollback_error
+            .lock()
+            .expect("rollback error mutex")
+            .clone()
+        {
+            return Err(error);
+        }
         if self.state.cancel_on_rollback.load(Ordering::SeqCst) != 0 {
             cx.set_cancel_requested(true);
         }
@@ -4292,6 +4302,7 @@ fn issue47_desync_read_recycles_and_retries_once() {
     .with_profile_drain_state(state)
     .with_auditor(auditor);
 
+    let before_generation = catalog_generation(&dispatcher);
     let response = dispatcher
         .dispatch("oracle_query", json!({ "sql": "SELECT 1 AS C FROM dual" }))
         .expect("the one permitted retry re-leases and completes the proven read");
@@ -4303,7 +4314,16 @@ fn issue47_desync_read_recycles_and_retries_once() {
         1,
         "the retired pinned session is logically closed after recycle"
     );
-    assert!(replacement_counts.query.load(Ordering::SeqCst) >= 1);
+    assert_eq!(
+        replacement_counts.query.load(Ordering::SeqCst),
+        2,
+        "the replacement performs both its SCN proof and the retried caller read"
+    );
+    assert_eq!(
+        catalog_generation(&dispatcher),
+        before_generation + 3,
+        "the failed admitted read, reconnect, and retried semantic proof each refresh catalog evidence"
+    );
     assert!(
         dispatcher
             .connection_quarantine()
@@ -13247,6 +13267,39 @@ mod qa85_terminal_boundaries {
         );
         assert_eq!(state.commits.load(Ordering::SeqCst), 0);
         assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn issue49_cancel_rollback_failure_quarantines_connection() {
+        let state = Arc::new(ExecState::default());
+        *state.execute_error.lock().expect("execute error mutex") = Some(DbError::Cancelled(
+            "driver break acknowledged the blocked update".to_owned(),
+        ));
+        *state.rollback_error.lock().expect("rollback error mutex") = Some(DbError::Query(
+            "rollback drain was not confirmed".to_owned(),
+        ));
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+            Some("dev".to_owned()),
+            read_write_level(),
+        );
+        let sql = "UPDATE employees SET name = name WHERE employee_id = 100";
+
+        let error = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql, "commit": false }))
+            .expect_err("unconfirmed cancellation cleanup must refuse a result");
+        assert_eq!(error.error_class, ErrorClass::ConnectionFailed);
+        assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+        let quarantine = dispatcher
+            .connection_quarantine()
+            .expect("quarantine lock")
+            .expect("failed cancellation rollback quarantines the pinned connection");
+        assert_eq!(quarantine.outcome, AuditOutcome::UnknownDiscarded);
+
+        let retry = dispatcher
+            .dispatch("oracle_execute", json!({ "sql": sql, "commit": false }))
+            .expect_err("a quarantined cancelled mutation must never be replayed");
+        assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
     }
 
     /// F-DI1: a held statement's effect already ran inside the open workspace
