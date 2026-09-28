@@ -1,0 +1,108 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:37:32Z",
+  "bead_id": "oraclemcp-dybi5",
+  "scope": {
+    "summary": "PARTIAL, in-lane prose only; bead is NOT closable. The five prose docs that described the ci.yml `fuzz-build` job as advisory/best-effort now state it is a Tier 1 required, tag-blocking lane (only the cargo-fuzz install step is tolerant; the four target builds and the planted-negative block), matching the generated docs/ci_taxonomy.json tier=required. The synthetic UI fixture and the crate-local embedded taxonomy copy named by the bead remain tier=advisory because both are coupled to Rust source/production code outside this bead's declared file lane; one committed gate is red from the crate-local copy.",
+    "in_scope": [
+      "docs/test-tiers.md",
+      "docs/toolchain.md",
+      "docs/ci-taxonomy.md",
+      "docs/release-checklist.md",
+      "docs/behavior-inventory.md"
+    ],
+    "out_of_scope": [
+      "tests/fixtures/ui/operator-v1/ci-lanes.json: still tier=advisory. It is a generated artifact of crates/oraclemcp-core/src/operator_protocol.rs::operator_fixture_values(); editing the fixture alone makes operator_protocol::tests::generated_operator_schema_artifacts_match_rust_contract fail. Aligning it needs the forbidden crates/oraclemcp-core lane (edit operator_fixture_values, run UPDATE_OPERATOR_SCHEMA=1).",
+      "crates/oraclemcp-core/src/operator_protocol.rs: the inline Rust fixture (`\"tier\": \"advisory\"` for job_id fuzz-build) that generates the UI fixture above. Not edited; forbidden crates/** lane.",
+      "crates/oraclemcp-core/ci_taxonomy.json: a byte-identical embedded copy of docs/ci_taxonomy.json (include_str! in crates/oraclemcp-core/src/http/ci_lanes.rs, production code) that still says tier=advisory. Committed test crate_local_ci_taxonomy_matches_repo_root (crates/oraclemcp-core/src/http/tests_ci_lanes.rs:1051) asserts byte-equality with docs/ci_taxonomy.json and therefore FAILS at this work commit. Out of the declared lane (crates/**); the fix is to copy docs/ci_taxonomy.json over the crate-local copy.",
+      ".github/workflows/ci.yml: explicitly out of lane, not edited.",
+      "docs/threat-model.md: listed by the bead but on inspection its only fuzz reference (line 80) already calls compile 'the gate' with no advisory claim; no change was needed (truthful null for that file)."
+    ]
+  },
+  "source": {
+    "sha": "2d9b94de0e7735cc06ec95a4485ad3397412b576",
+    "tree_clean": false,
+    "branch": "main"
+  },
+  "proofs": [
+    {
+      "name": "generated CI taxonomy is consistent with .github/workflows",
+      "kind": "command",
+      "command": "python3 scripts/ci_taxonomy.py --check",
+      "result": "exit 0; docs/ci_taxonomy.json job fuzz-build has tier=required and is listed in groups.required as 'fuzz targets compile (nightly)'.",
+      "trace": "oraclemcp-dybi5 evidence run 2026-09-28"
+    },
+    {
+      "name": "generated-docs drift gate",
+      "kind": "command",
+      "command": "bash scripts/docs_generate.sh --check",
+      "result": "exit 0; 'docs-generate: OK (README.md, docs/configuration.md, oraclemcp.example.toml match the registry/config types)'. No block this generator owns mentions fuzz-build.",
+      "trace": "oraclemcp-dybi5 evidence run 2026-09-28"
+    },
+    {
+      "name": "no prose doc still calls fuzz-build advisory/best-effort",
+      "kind": "command",
+      "command": "rg -n -i 'fuzz.{0,80}(advisory|best-effort|best effort|continue-on-error|non-blocking|not a gate)' docs/ --glob '!docs/plan/**' --glob '!docs/adr/**'",
+      "result": "no match after the change (only docs/release-checklist.md:147 'The advisory `windows-rust` and `plsql-intelligence` lanes', which scopes advisory to those two lanes, not fuzz).",
+      "trace": "oraclemcp-dybi5 evidence run 2026-09-28"
+    },
+    {
+      "name": "before/after under the changed docs (planted-negative analogue; no prose gate exists)",
+      "kind": "git",
+      "command": "git show 2d9b94de^:docs/test-tiers.md | rg -n 'fuzz-build' ; git show HEAD:docs/test-tiers.md | rg -n 'fuzz-build'",
+      "result": "Before: '| ... ] | `ci.yml:fuzz-build` | every push+PR | 1-shaped but advisory | advisory |' and 'earns its advisory status from continue-on-error'. After: '| ... | 1 | required |' and 'it is a Tier 1 required lane'. Same pre/post for docs/toolchain.md ('that job is continue-on-error' -> 'The job's cargo-fuzz install step is the only tolerant one ...') and docs/ci-taxonomy.md ('reserved for the explicitly experimental fuzz-build' -> 'fuzz-build is required'), docs/release-checklist.md (advisory bullet -> required table row; step 4 no longer lists fuzz-build as advisory), docs/behavior-inventory.md ('fuzz build best-effort' -> 'fuzz build (required)').",
+      "trace": "oraclemcp-dybi5 work commit 2d9b94de"
+    },
+    {
+      "name": "crate-local embedded taxonomy is still stale (red committed gate, by construction)",
+      "kind": "command",
+      "command": "diff docs/ci_taxonomy.json crates/oraclemcp-core/ci_taxonomy.json",
+      "result": "non-zero: only differing hunk is fuzz-build tier 'required' (docs) vs 'advisory' (crate-local), plus the derived groups membership. The committed test crate_local_ci_taxonomy_matches_repo_root asserts byte-equality, so it fails. Not run via cargo: the shared checkout carries other agents' uncommitted crates/** edits, so a build now is not a clean-HEAD revision (AGENTS.md rule 14).",
+      "trace": "oraclemcp-dybi5 evidence run 2026-09-28"
+    }
+  ],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "docs/test-tiers.md manifest row for ci.yml:fuzz-build",
+        "kind": "docs",
+        "trace": "line 82 now reads '| ... | every push+PR | 1 | required |'; §4 item 2 rewritten to name the required lane and the tolerant install step."
+      },
+      {
+        "name": "docs/release-checklist.md required-gates table",
+        "kind": "docs",
+        "trace": "new row '| Fuzz targets compile | cargo fuzz build (guard, audit, auth, config fuzz crates) | fuzz-build |'; count updated thirteen->fourteen; advisory section and step 4 corrected."
+      },
+      {
+        "name": "docs/toolchain.md re-pin guidance, docs/ci-taxonomy.md advisory definition, docs/behavior-inventory.md release-gates row",
+        "kind": "docs",
+        "trace": "each no longer assigns fuzz-build an advisory/best-effort status."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "This is a documentation-only change; no runtime code path changed, so no live/DB or binary behavior is claimed.",
+    "No prose-content gate exists for these files (scripts/ci_taxonomy.py --check reads only docs/ci_taxonomy.json and the workflows; scripts/docs_generate.sh owns README.md, docs/configuration.md and oraclemcp.example.toml). The planted-negative analogue is therefore the git before/after grep, not a failing-then-passing gate.",
+    "The bead's synthetic UI fixture could not be aligned in lane because it is generated from Rust (crates/oraclemcp-core/src/operator_protocol.rs); editing the fixture alone breaks generated_operator_schema_artifacts_match_rust_contract.",
+    "A committed gate (crate_local_ci_taxonomy_matches_repo_root) is red at this commit because crates/oraclemcp-core/ci_taxonomy.json still carries tier=advisory; that file is outside the declared lane and is embedded in production code.",
+    "The cargo tests were not executed in this session: the shared checkout is dirty with other agents' crates/** edits (rule 13/14), so the crate-local equality failure is proven textually (diff) against the test's assert_eq! rather than by running it."
+  ],
+  "known_defects": [
+    "crates/oraclemcp-core/ci_taxonomy.json is a byte-identical embedded copy of docs/ci_taxonomy.json that znmel did not regenerate; crate_local_ci_taxonomy_matches_repo_root is red until it is re-copied.",
+    "tests/fixtures/ui/operator-v1/ci-lanes.json and its Rust generator operator_fixture_values() still carry tier=advisory for job_id fuzz-build, so the synthetic operator UI example disagrees with the required taxonomy even though the fixture<->Rust contract test is internally green."
+  ],
+  "follow_ups": [
+    "crates/** owner: copy docs/ci_taxonomy.json over crates/oraclemcp-core/ci_taxonomy.json (byte-identical include_str! copy) so crate_local_ci_taxonomy_matches_repo_root goes green.",
+    "crates/oraclemcp-core owner: change operator_fixture_values() job_id fuzz-build `tier` advisory->required, then run UPDATE_OPERATOR_SCHEMA=1 (scripts/generate_operator_schema.sh) and commit the regenerated tests/fixtures/ui/operator-v1/ci-lanes.json plus any generated schema/TS diff.",
+    "Then re-run: python3 scripts/ci_taxonomy.py --check; bash scripts/docs_generate.sh --check; scripts/build_lease.sh -- cargo test -p oraclemcp-core --lib; and the operator UI fixture gate scripts/ui_fixtures_validate_against_rust_schema.sh."
+  ],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
