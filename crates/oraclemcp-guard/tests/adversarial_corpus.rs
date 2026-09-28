@@ -16,6 +16,38 @@ use oraclemcp_guard::policy::{
 };
 use oraclemcp_guard::{Classifier, ClassifierConfig, DangerLevel};
 
+const CLASSIFY_FUZZ_TIMEOUT_REGRESSION: &str = "IF[IFIF[IFIF[IFIF[IFIIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[I_.F[IFBEGINYF.Y:N.FQ/-y].YN.YFIF[IF_F.YN/-YF.YN.YFIF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/F[IFIIF[IFYF.Y:N.FQ/-YF.YN.YFIBEF[IF_F.YN.-YF.YN.IF[IFYF.Y:N.FQ/-y].YN.YFIF[I5_F.YN.YF-YF.YN.YFIF[IF_F.YN.-.-YF.YN.";
+
+#[test]
+fn classifier_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
+    let started = std::time::Instant::now();
+    let decision = Classifier::default().classify(CLASSIFY_FUZZ_TIMEOUT_REGRESSION);
+
+    assert_eq!(decision.danger, DangerLevel::Forbidden, "{decision:?}");
+    assert_eq!(
+        decision.reason_category,
+        Some(oraclemcp_error::ReasonCategory::Other),
+        "{decision:?}"
+    );
+    assert_eq!(
+        decision.offending_construct.as_deref(),
+        Some("parser square-bracket budget"),
+        "{decision:?}"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "classifier took {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn classifier_square_bracket_budget_spares_ordinary_literal_data() {
+    let sql = "SELECT '[[[[[[[[' AS bracket_data FROM dual";
+    let decision = Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql);
+    assert_eq!(decision.danger, DangerLevel::Safe, "{decision:?}");
+}
+
 /// Served/strict-mode corpus (beads .82 + .102). Each entry is a statement the
 /// **served/strict** classifier — the fail-closed posture of the raw-query gate
 /// — MUST classify at least as strictly as `min_danger`. These are the live

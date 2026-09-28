@@ -136,6 +136,12 @@ pub const VERDICT_CERTIFICATE_CLASSIFIER_VERSION: &str = concat!(
 const CERTIFICATE_CORE_HASH_DOMAIN: &str = "oraclemcp:verdict-certificate-core:v1\n";
 const CERTIFICATE_TERMINAL_RULE_ID: &str = "R16";
 
+// Oracle SQL has no square-bracket grouping grammar. Keep this deliberately
+// small raw-byte budget before every lexer/parser pass: deeply nested malformed
+// `[` input otherwise drives parser backtracking super-linearly before it can
+// return a parse error.
+const MAX_SQLPARSER_SQUARE_BRACKETS: usize = 8;
+
 impl VerdictCertificate {
     fn from_decision(sql: &str, decision: &GuardDecision) -> Self {
         let mut derivation = decision.certificate_derivation.clone();
@@ -472,6 +478,20 @@ fn exact_sha256(sql: &str) -> String {
         out.push_str(&format!("{b:02x}"));
     }
     out
+}
+
+/// Reject malformed syntax that would exceed the bounded parser work budget.
+///
+/// This must precede all tokenizer calls. A lexer-based budget would leave an
+/// adversarial malformed quote/bracket sequence free to consume unbounded lexer
+/// or parser work before the budget is observable. Oracle has no square-bracket
+/// grouping grammar, so counting these bytes only narrows malformed input (and
+/// unusually bracket-heavy literal text) to a typed fail-closed refusal.
+fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
+    sql.bytes()
+        .filter(|byte| *byte == b'[')
+        .nth(MAX_SQLPARSER_SQUARE_BRACKETS)
+        .is_some()
 }
 
 /// PL/SQL side-effect markers that force fail-closed handling (P1-1a).
@@ -4030,6 +4050,16 @@ impl Classifier {
                 verdict_certificate: None,
                 certificate_derivation: Vec::new(),
             };
+        }
+
+        if exceeds_sqlparser_square_bracket_budget(sql) {
+            return forbidden_decision(format!(
+                "statement exceeds the parser square-bracket budget of {MAX_SQLPARSER_SQUARE_BRACKETS}"
+            ))
+            .categorized(
+                ReasonCategory::Other,
+                Some("parser square-bracket budget".to_owned()),
+            );
         }
 
         // No agent path may preview, confirm, or execute a database-wide
