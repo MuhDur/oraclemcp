@@ -628,8 +628,7 @@ async fn resolved_relations_read_purity_with_trusted_views(
         if relation.kind == CatalogObjectKind::View
             && trusted_view_identity_is_eligible(relation, policy.context.trusted_views)
         {
-            if !trusted_view_source_is_proven(cx, conn, relation, policy).await?
-            {
+            if !trusted_view_source_is_proven(cx, conn, relation, policy).await? {
                 return Ok(Purity::Unknown);
             }
             let mut policy_relation = relation.clone();
@@ -6278,6 +6277,38 @@ mod tests {
                 )
                 .await
                 .expect("cycle is a normal unproven result")
+            );
+            assert!(conn.queries.lock().expect("queries lock").is_empty());
+        });
+    }
+
+    #[test]
+    fn issue35_view_depth_cap_refused_before_view_source_io() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::new([]);
+            let mut view = dictionary_view_object("REPORTING_VIEW");
+            view.owner = "APP".to_owned();
+            view.synonym_chain.clear();
+            let cache = OracleCatalogResolverCache::new();
+            let trusted_views = ["APP.REPORTING_VIEW".to_owned()];
+
+            assert!(
+                !trusted_view_source_is_proven(
+                    &cx,
+                    &conn,
+                    &view,
+                    TrustedViewProofPolicy {
+                        cache: &cache,
+                        context: TrustedViewProofContext {
+                            fga_policy: FgaEvidencePolicy::RequireProof,
+                            trusted_views: &trusted_views,
+                            view_depth: MAX_TRUSTED_VIEW_DEPTH,
+                            view_path: &[],
+                        },
+                    },
+                )
+                .await
+                .expect("depth cap is a normal unproven result")
             );
             assert!(conn.queries.lock().expect("queries lock").is_empty());
         });
