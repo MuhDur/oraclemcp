@@ -233,6 +233,103 @@ async fn probe_child_slot(
     Ok((!parent_rows.is_empty(), !fixture_rows.is_empty()))
 }
 
+/// The public HTTP draft route must persist the PDB identity derived from its
+/// live served connection, rather than accepting an identity from the caller.
+/// This is non-mutating: it only writes an isolated local review-board record.
+#[test]
+fn live_e2e_oracle_draft_persists_server_derived_pdb_scope() {
+    if std::env::var("ORACLEMCP_PDB_IDENTITY_LIVE").as_deref() != Ok("1") {
+        eprintln!(
+            "[live-xe] SKIP live_e2e_oracle_draft_persists_server_derived_pdb_scope: \
+             set ORACLEMCP_PDB_IDENTITY_LIVE=1"
+        );
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let served = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .expect("E2E_ORACLE served connection for PDB scope proof");
+        let dispatcher = Arc::new(OracleDispatcher::new_with_profile_level(
+            Box::new(served),
+            Some("live-e2e-pdb-scope".to_owned()),
+            admin_level(),
+        ));
+        let report = CapabilitiesReport::new(
+            "live-e2e-pdb-scope",
+            Vec::new(),
+            OperatingLevel::Admin,
+            FeatureTiers {
+                live_db: true,
+                engine: false,
+                http_transport: true,
+            },
+        );
+        let server = OracleMcpServer::new(
+            "live-e2e-pdb-scope",
+            ToolRegistry::new(),
+            report,
+            dispatcher,
+        );
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos();
+        let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target")
+            });
+        let store = Arc::new(
+            ChangeProposalStore::open(
+                target_dir
+                    .join("edition-e2e-pdb-scope")
+                    .join(format!("{}-{unique}", std::process::id())),
+            )
+            .expect("isolated proposal store"),
+        );
+        let audit_sink = Arc::new(MemoryAuditSink::default());
+        let auditor = Arc::new(Auditor::new(
+            Box::new(SharedAuditSink(audit_sink)),
+            SigningKey::new(
+                "live-e2e-pdb-scope",
+                b"0123456789abcdef0123456789abcdef".to_vec(),
+            )
+            .expect("synthetic test audit key"),
+        ));
+        let config = HttpTransportConfig {
+            operator_auditor: Some(auditor),
+            change_proposals: Some(store),
+            ..Default::default()
+        };
+        let draft = handle_http_request(
+            &server,
+            &config,
+            operator_post(
+                "/operator/v1/edition-proposals/draft",
+                json!({
+                    "profile": "live-e2e-pdb-scope",
+                    "child_edition": "ORACLEMCP_SCOPE_PROOF",
+                    "base_edition": BASE_EDITION,
+                    "objects": ["ORACLEMCP_SCOPE_PROOF_VIEW"]
+                }),
+            ),
+        );
+        assert_eq!(draft.status, 200, "draft: {:?}", operator_body(&draft));
+        let scope = &operator_body(&draft)["data"]["proposal"]["coordination_scope"];
+        assert_eq!(scope["coordination_scope"], json!("service_state_store"));
+        assert!(
+            scope["identity"]["dbid"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+        assert!(
+            scope["identity"]["con_uid"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+    });
+}
+
 /// A real Oracle creates one child edition, then the server refuses a second
 /// child before its CREATE reaches the driver. The test retires its exact
 /// synthetic edition through the same governed DDL path.
