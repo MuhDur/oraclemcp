@@ -2972,18 +2972,29 @@ struct SemanticSearchResponseMetadata {
     verified_local_vector_embedding: bool,
 }
 
-/// Return whether an Oracle `COMPATIBLE` value reaches the minimum 23.4
-/// contract for in-database `VECTOR_EMBEDDING`. Values we cannot parse are not
-/// evidence of support.
-fn compatible_supports_in_database_embedding(value: &str) -> bool {
+/// Parse the `<major>.<minor>` prefix of an Oracle `COMPATIBLE` setting.
+/// Values we cannot parse are not evidence of support.
+fn compatible_major_minor(value: &str) -> Option<(u16, u16)> {
     let mut components = value.trim().split('.');
-    let Some(major) = components.next().and_then(|part| part.parse::<u16>().ok()) else {
-        return false;
-    };
-    let Some(minor) = components.next().and_then(|part| part.parse::<u16>().ok()) else {
-        return false;
-    };
-    major > 23 || (major == 23 && minor >= 4)
+    let major = components.next()?.parse::<u16>().ok()?;
+    let minor = components.next()?.parse::<u16>().ok()?;
+    Some((major, minor))
+}
+
+/// Return whether an Oracle `COMPATIBLE` value reaches the minimum 23.4
+/// contract for in-database `VECTOR_EMBEDDING`.
+fn compatible_supports_in_database_embedding(value: &str) -> bool {
+    compatible_major_minor(value)
+        .is_some_and(|(major, minor)| major > 23 || (major == 23 && minor >= 4))
+}
+
+/// Return whether an Oracle `COMPATIBLE` value can resolve the native `VECTOR`
+/// type and `VECTOR_DISTANCE` at all. Both arrived with `VECTOR_MIN_MAJOR`
+/// (23ai), so an older server has no vector column to search; a value we cannot
+/// parse is not evidence of support.
+fn compatible_supports_vector(value: &str) -> bool {
+    compatible_major_minor(value)
+        .is_some_and(|(major, _)| major >= u16::from(oraclemcp_db::VECTOR_MIN_MAJOR))
 }
 
 /// Build a typed, fail-closed semantic-search capability refusal. The stable
@@ -2992,13 +3003,14 @@ fn semantic_search_capability_refusal(
     capability: &'static str,
     message: impl Into<String>,
     next_step: &'static str,
+    minimal_rewrite: &'static str,
 ) -> ErrorEnvelope {
     ErrorEnvelope::new(ErrorClass::RuntimeStateRequired, message)
         .with_next_step(next_step)
         .with_structured_reason(
             StructuredReason::new(ReasonCategory::Other)
                 .with_offending_construct(capability)
-                .with_minimal_rewrite("supply query_vector for a caller-provided local vector"),
+                .with_minimal_rewrite(minimal_rewrite),
         )
 }
 
@@ -3025,6 +3037,7 @@ async fn semantic_search_text_model(
             "requires_23ai",
             "oracle_semantic_search query_text requires Oracle COMPATIBLE >= 23.4; the active profile did not prove that capability",
             "use a 23.4-or-newer compatible profile, or supply query_vector",
+            "supply query_vector for a caller-provided local vector",
         ));
     }
 
@@ -3043,9 +3056,77 @@ async fn semantic_search_text_model(
             "no_in_db_model",
             "oracle_semantic_search query_text requires exactly one visible local ONNX embedding model; none or an ambiguous set was proven",
             "load one ONNX embedding model into the active schema, or supply query_vector",
+            "supply query_vector for a caller-provided local vector",
         ));
     };
     Ok(model.clone())
+}
+
+/// Prove the native `VECTOR` capability for the caller-supplied `query_vector`
+/// path. `VECTOR_DISTANCE` and the native `VECTOR` column type were introduced
+/// in 23ai, so a pre-23ai server cannot resolve the requested vector column at
+/// all. Refuse with the stable `requires_23ai` token *before* any relation or
+/// column resolution, so the capability gap is reported as the capability gap
+/// rather than a misleading `OBJECT_NOT_FOUND`. A probe that returns no
+/// parseable `COMPATIBLE` value is not evidence of support.
+async fn prove_semantic_search_vector_capability(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<(), ErrorEnvelope> {
+    let compatible = run_catalog_query(cx, conn, CatalogQueryId::SemanticSearchCompatible, &[])
+        .await
+        .ok()
+        .and_then(|rows| {
+            rows.into_iter()
+                .next()
+                .and_then(|row| row.text("COMPATIBLE").map(str::to_owned))
+        });
+    if compatible
+        .as_deref()
+        .is_some_and(compatible_supports_vector)
+    {
+        return Ok(());
+    }
+    Err(semantic_search_capability_refusal(
+        "requires_23ai",
+        "oracle_semantic_search query_vector requires Oracle Database 23ai+ (native VECTOR and VECTOR_DISTANCE); the active profile did not prove that capability",
+        "use a 23ai-or-newer compatible profile, or use query_text on a 23.4-or-newer compatible profile",
+        "use a 23ai-or-newer profile for a native VECTOR column",
+    ))
+}
+
+#[cfg(test)]
+mod semantic_search_capability_tests {
+    use super::{compatible_supports_in_database_embedding, compatible_supports_vector};
+
+    #[test]
+    fn vector_capability_gate_refuses_every_pre_23ai_compatible() {
+        for unsupported in [
+            "18.0.0.0.0",
+            "19.0.0.0.0",
+            "21.0.0.0.0",
+            "12.2.0.1.0",
+            "not-a-version",
+            "",
+        ] {
+            assert!(
+                !compatible_supports_vector(unsupported),
+                "{unsupported:?} must not admit the VECTOR path"
+            );
+        }
+        assert!(compatible_supports_vector("23.0.0.0.0"));
+        assert!(compatible_supports_vector(" 23.1 "));
+        assert!(compatible_supports_vector("23.26.0.0.0"));
+    }
+
+    #[test]
+    fn in_database_embedding_gate_still_requires_the_23_4_minimum() {
+        assert!(!compatible_supports_in_database_embedding("23.0.0.0.0"));
+        assert!(compatible_supports_in_database_embedding("23.4.0.0.0"));
+        assert!(compatible_supports_in_database_embedding("23.26.0.0.0"));
+        assert!(!compatible_supports_in_database_embedding("21.0.0.0.0"));
+        assert!(!compatible_supports_in_database_embedding("broken"));
+    }
 }
 
 /// Turn the constrained semantic-search request into the same internally-owned
@@ -3119,6 +3200,13 @@ async fn semantic_search_as_query_args(
     }
     let metric = SemanticSearchMetric::parse(args.metric.as_deref())
         .ok_or_else(|| invalid_args("metric must be COSINE, EUCLIDEAN, or DOT"))?;
+    if has_vector {
+        // The native VECTOR type and VECTOR_DISTANCE are 23ai-only. Establish
+        // the capability before resolving the relation/column so a pre-23ai
+        // server reports the version gap instead of a misleading
+        // OBJECT_NOT_FOUND for a vector column it cannot represent.
+        prove_semantic_search_vector_capability(cx, conn).await?;
+    }
     let (owner, table) =
         owner_and_name_arg(cx, conn, args.over.owner, args.over.table, "table").await?;
     let column = args.over.column.trim();
