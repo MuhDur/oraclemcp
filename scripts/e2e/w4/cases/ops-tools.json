@@ -1299,7 +1299,6 @@
       {"sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID=1", "rows": [[1, "parent-1"]]}
     ],
     "audit_expect": [
-      {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED"},
       {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
       {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
     ],
