@@ -1898,6 +1898,13 @@ def select_cases(file_cases, generated_cases, selected):
     return [case for case in file_cases + generated_cases if case["case_id"] in selected]
 
 
+def select_requested_cases(file_cases, generated_cases, requested):
+    """Resolve --case only after descriptors have generated contract cases."""
+    if not requested:
+        return list(file_cases) + list(generated_cases)
+    return select_cases(file_cases, generated_cases, set(requested))
+
+
 def probe_expired_retention_scn(connection):
     """Find a real expired SCN and prove it against the durable W4 registry.
 
@@ -1980,10 +1987,6 @@ def run_lane(args):
             "checkout revision changed while preparing the binary")
     binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     family_cases = load_cases()
-    if args.case:
-        available = {case["case_id"] for case in family_cases}
-        missing = set(args.case) - available
-        require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
     release_ids = {case["case_id"]: case["test_id"] for case in json.loads(
         (ROOT / "scripts/e2e/cases/release_0_12.json").read_text())}
     for case in family_cases:
@@ -2066,11 +2069,7 @@ def run_lane(args):
                         "could not return to READ_ONLY after discovery")
                 generated_cases = list(generic_contract_cases(
                     discovered, args.lane, contract_baselines(expanded_family)))
-                selected_here = set(args.case or ()) & {
-                    case["case_id"] for case in expanded_family + generated_cases
-                }
-                cases = (select_cases(list(expanded_family), generated_cases, selected_here)
-                         if args.case else list(expanded_family) + generated_cases)
+                cases = select_requested_cases(expanded_family, generated_cases, args.case)
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
@@ -2244,11 +2243,11 @@ def selftest():
             and alias_enum["call"]["arguments"] ==
             {"target_level": "__w4_wrong_enum__"},
             "enum alias cases must never send canonical and alias fields together")
-    selected_enum = select_cases(
+    selected_enum = select_requested_cases(
         [{"case_id": "w4_file_case"}], enum_cases,
-        {alias_enum["case_id"]})
+        [alias_enum["case_id"]])
     require(selected_enum == [alias_enum],
-            "--case must select a generated enum contract case")
+            "--case must select a generated enum contract case after descriptor discovery")
     sql_id = schema_placeholder(
         {"type": "string", "minLength": 13, "maxLength": 13}, "sql_id")
     require(isinstance(sql_id, str) and len(sql_id) == 13,
