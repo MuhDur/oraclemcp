@@ -345,7 +345,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "kill_served_session_user"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "kill_served_session_user", "kill_served_session_dml_user"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -374,6 +374,13 @@ def validate_case(case, filename):
         require(case["tool"] == "oracle_query" and case["transports"] == ["stdio"]
                 and case["level"] == "READ_ONLY" and not case["call"].get("mutation"),
                 "killed-session recovery is a read-only stdio oracle_query case")
+    if "kill_served_session_dml_user" in case["call"]:
+        user = case["call"]["kill_served_session_dml_user"]
+        require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
+                "kill_served_session_dml_user must be the exact run-owned owner")
+        require(case["tool"] == "oracle_execute" and case["transports"] == ["stdio"]
+                and case["level"] == "READ_WRITE" and case["call"].get("mutation"),
+                "killed-session DML is a mutating stdio oracle_execute case")
     require("retry" not in case["call"] or type(case["call"]["retry"]) is bool,
             "call.retry must be boolean")
     require("mutation" not in case["call"] or type(case["call"]["mutation"]) is bool,
@@ -1483,6 +1490,37 @@ def killed_session_recovery_call(client, case, connection, descriptor):
                        "recovered": scrub(tool_payload(recovered))}
 
 
+def killed_session_dml_call(client, case, connection, descriptor):
+    """Kill the exact disposable-owner wire before one governed DML attempt.
+
+    This proves the mutation is not replayed: the attempt must surface a typed
+    uncertain outcome, while the independent reread stays at the fixture value.
+    """
+    baseline = client.rpc("tools/call", {"name": "oracle_query",
+                                          "arguments": {"sql": "SELECT 1 AS C FROM dual"}})
+    verify_envelope(baseline, descriptor)
+    require(tool_payload(baseline).get("isError") is not True,
+            "baseline read failed before killed-session DML exercise")
+    user = case["call"]["kill_served_session_dml_user"]
+    sessions = connection.cursor().execute(
+        "SELECT SID, SERIAL# FROM V$SESSION "
+        "WHERE USERNAME=:1 AND TYPE='USER' AND STATUS <> 'KILLED' ORDER BY SID",
+        (user,)).fetchall()
+    require(sessions, "no exact run-owned served Oracle session found to kill")
+    cursor = connection.cursor()
+    for sid, serial in sessions:
+        cursor.execute(kill_session_sql(int(sid), int(serial)))
+    connection.commit()
+    lost = client.rpc("tools/call", {"name": case["tool"], "arguments": case["call"]["arguments"]})
+    verify_envelope(lost, descriptor)
+    payload = tool_payload(lost)
+    outcome = payload.get("structuredContent", {}).get("statement_outcome")
+    require(payload.get("isError") is True and outcome in {"protocol_unsynchronized", "commit_unknown", "rolled_back"},
+            "killed DML did not return a typed uncertain/rolled-back statement outcome")
+    return lost, {"baseline": scrub(tool_payload(baseline)), "killed_sessions": len(sessions),
+                  "loss": scrub(payload)}
+
+
 def run_case(client, case, transport, lane, capabilities, connection, barriers,
              binary, audit_path, env, descriptor=None):
     start = time.monotonic()
@@ -1535,6 +1573,9 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         captures = run_steps(client, case, row, binary, audit_path, env) if "steps" in case else {}
         if "kill_served_session_user" in case["call"] and supported:
             reply, recovery_actual = killed_session_recovery_call(client, case, connection, descriptor)
+            row["killed_session_recovery"] = recovery_actual
+        elif "kill_served_session_dml_user" in case["call"] and supported:
+            reply, recovery_actual = killed_session_dml_call(client, case, connection, descriptor)
             row["killed_session_recovery"] = recovery_actual
         elif "cancel_marker" in case["call"] and supported:
             reply = cancelled_call(client, case, connection)
@@ -1848,6 +1889,10 @@ def run_lane(args):
             "checkout revision changed while preparing the binary")
     binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     family_cases = load_cases()
+    if args.case:
+        available = {case["case_id"] for case in family_cases}
+        missing = set(args.case) - available
+        require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
     release_ids = {case["case_id"]: case["test_id"] for case in json.loads(
         (ROOT / "scripts/e2e/cases/release_0_12.json").read_text())}
     for case in family_cases:
@@ -1916,7 +1961,10 @@ def run_lane(args):
                         "could not return to READ_ONLY after discovery")
                 generated_cases = list(generic_contract_cases(
                     discovered, args.lane, contract_baselines(expanded_family)))
-                cases = (select_cases(list(expanded_family), generated_cases, set(args.case))
+                selected_here = set(args.case or ()) & {
+                    case["case_id"] for case in expanded_family + generated_cases
+                }
+                cases = (select_cases(list(expanded_family), generated_cases, selected_here)
                          if args.case else list(expanded_family) + generated_cases)
                 current_level = "READ_ONLY"
                 current_profile = args.lane
@@ -2145,6 +2193,13 @@ def selftest():
          "transports": ["stdio"],
          "call": {"arguments": {"sql": "SELECT 1 FROM dual"},
                   "kill_served_session_user": "SYSTEM"}}, "selftest"))
+    rejected("foreign_killed_session_dml_target", lambda: validate_case(
+        {**rejected_marker,
+         "tool": "oracle_execute",
+         "level": "READ_WRITE",
+         "transports": ["stdio"],
+         "call": {"arguments": {"sql": "UPDATE T SET X = 1"}, "mutation": True,
+                  "kill_served_session_dml_user": "SYSTEM"}}, "selftest"))
     rejected("wrong_row_order", lambda: verify_expect({"rows": [[2], [1]]}, correct))
     rejected("malformed_wire_envelope", lambda: verify_envelope({"result": {"content": []}}))
     rejected("missing_output_schema_key", lambda: verify_envelope(

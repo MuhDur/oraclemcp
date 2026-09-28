@@ -1293,6 +1293,33 @@
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
   },
   {
+    "case_id": "w4_runtime_issue47_killed_session_dml_not_replayed",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "profile_variant": "synthetic_owner_rw",
+    "setup_phase": "before_server",
+    "transports": ["stdio"],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE T_PARENT_${run_id} SET LABEL='changed' WHERE ID=1"
+      },
+      "mutation": true,
+      "kill_served_session_dml_user": "${owner}"
+    },
+    "expect": {"error_classes": ["CONNECTION_FAILED", "TRANSIENT"]},
+    "db_reread": [
+      {"sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID=1", "rows": [[1, "parent-1"]]}
+    ],
+    "audit_expect": [
+      {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED"},
+      {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
+      {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+    ],
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+  },
+  {
     "case_id": "w4_runtime_issue47_killed_session_recovers",
     "tool": "oracle_query",
     "level": "READ_ONLY",

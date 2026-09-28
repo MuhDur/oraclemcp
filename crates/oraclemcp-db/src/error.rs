@@ -855,6 +855,7 @@ impl DbError {
                 ErrorClass::ConnectionFailed,
                 format!("database session quarantined ({outcome}): {message}"),
             )
+            .with_statement_outcome(StatementOutcome::from(outcome))
             .with_next_step("discard this lease/session and acquire a fresh connection")
             .with_next_step(match outcome {
                 QuarantineOutcome::CommitInDoubt => {
@@ -1984,6 +1985,11 @@ mod tests {
             }
             .into_envelope();
             assert_eq!(env.error_class, ErrorClass::ConnectionFailed, "{outcome}");
+            assert_eq!(
+                env.statement_outcome,
+                Some(StatementOutcome::from(outcome)),
+                "{outcome}"
+            );
             assert!(
                 env.message.contains(outcome.as_str()),
                 "envelope must name the quarantine outcome: {}",
