@@ -206,6 +206,7 @@ pub fn register_tools(registry: &mut ToolRegistry) {
 }
 
 pub fn dispatch_static(tool: &str, args: Value) -> Result<Value, ErrorEnvelope> {
+    validate_advertised_enum_arguments(tool, &args)?;
     match tool {
         "oracle_plsql_parse" => run_parse(parse_args(tool, args)?),
         "oracle_plsql_analyze" => run_analyze(parse_args(tool, args)?),
@@ -218,6 +219,55 @@ pub fn dispatch_static(tool: &str, args: Value) -> Result<Value, ErrorEnvelope> 
             format!("unknown PL/SQL intelligence tool: {tool}"),
         )),
     }
+}
+
+/// Reject a value outside an advertised static-tool string enum before the
+/// handler can read the filesystem or construct an analysis run. The registry
+/// schema is the public contract, so this deliberately derives the accepted
+/// values from that schema rather than maintaining a second enum list here.
+fn validate_advertised_enum_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope> {
+    let schema = crate::registry::tool_registry()
+        .tools
+        .into_iter()
+        .find(|descriptor| descriptor.name == tool)
+        .and_then(|descriptor| descriptor.input_schema);
+    let Some(properties) = schema
+        .as_ref()
+        .and_then(|schema| schema.get("properties"))
+        .and_then(Value::as_object)
+    else {
+        return Ok(());
+    };
+    for (field, rule) in properties {
+        let Some(allowed) = rule.get("enum").and_then(Value::as_array) else {
+            continue;
+        };
+        let Some(value) = args.get(field) else {
+            continue;
+        };
+        let Some(value) = value.as_str() else {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::InvalidArguments,
+                format!("invalid arguments for {tool}: {field} must be a string"),
+            ));
+        };
+        if allowed
+            .iter()
+            .any(|candidate| candidate.as_str() == Some(value))
+        {
+            continue;
+        }
+        let expected = allowed
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!("invalid arguments for {tool}: {field} must be one of: {expected}"),
+        ));
+    }
+    Ok(())
 }
 
 pub async fn dispatch_live(
@@ -2784,6 +2834,37 @@ fn sast_rules() -> Vec<Box<dyn Rule>> {
 mod tests {
     use super::*;
     use oraclemcp_guard::{DangerLevel, OperatingLevel};
+
+    #[test]
+    fn advertised_static_enums_are_refused_before_tool_execution() {
+        for (tool, arguments) in [
+            (
+                "oracle_plsql_what_breaks",
+                json!({"mode": "__w4_wrong_enum__"}),
+            ),
+            (
+                "oracle_plsql_lineage",
+                json!({
+                    "project_root": "/must-not-be-read",
+                    "target": "APP.P",
+                    "direction": "__w4_wrong_enum__",
+                }),
+            ),
+            (
+                "oracle_plsql_sast",
+                json!({"project_root": "/must-not-be-read", "format": "__w4_wrong_enum__"}),
+            ),
+            ("oracle_plsql_doc", json!({"format": "__w4_wrong_enum__"})),
+        ] {
+            let error = dispatch_static(tool, arguments)
+                .expect_err("an advertised enum value must be rejected before execution");
+            assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{tool}");
+            assert!(
+                error.message.contains("must be one of"),
+                "{tool}: {error:?}"
+            );
+        }
+    }
 
     #[test]
     fn parse_reports_declarations_without_live_db() {

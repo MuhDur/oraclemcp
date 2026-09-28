@@ -1806,6 +1806,14 @@ def summary_table(rows):
     return {tool: dict(transports) for tool, transports in sorted(table.items())}
 
 
+def select_cases(file_cases, generated_cases, selected):
+    """Select file-backed or generated contract cases by their stable case id."""
+    available = {case["case_id"] for case in file_cases + generated_cases}
+    missing = selected - available
+    require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
+    return [case for case in file_cases + generated_cases if case["case_id"] in selected]
+
+
 def run_lane(args):
     settings = load_lane(HERE / "rig.toml", args.lane)
     config = json.loads(CAPABILITIES.read_text())
@@ -1840,12 +1848,6 @@ def run_lane(args):
             "checkout revision changed while preparing the binary")
     binary_sha256 = hashlib.sha256(binary.read_bytes()).hexdigest()
     family_cases = load_cases()
-    if args.case:
-        selected = set(args.case)
-        available = {case["case_id"] for case in family_cases}
-        require(selected <= available,
-                f"unknown scoped W4 case(s): {', '.join(sorted(selected - available))}")
-        family_cases = [case for case in family_cases if case["case_id"] in selected]
     release_ids = {case["case_id"]: case["test_id"] for case in json.loads(
         (ROOT / "scripts/e2e/cases/release_0_12.json").read_text())}
     for case in family_cases:
@@ -1912,10 +1914,10 @@ def run_lane(args):
                     "name": "oracle_set_session_level", "arguments": {"action": "drop"}}))
                 require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
                         "could not return to READ_ONLY after discovery")
-                cases = list(expanded_family)
-                if not args.case:
-                    cases += list(generic_contract_cases(
-                        discovered, args.lane, contract_baselines(expanded_family)))
+                generated_cases = list(generic_contract_cases(
+                    discovered, args.lane, contract_baselines(expanded_family)))
+                cases = (select_cases(list(expanded_family), generated_cases, set(args.case))
+                         if args.case else list(expanded_family) + generated_cases)
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
@@ -2088,6 +2090,11 @@ def selftest():
             and alias_enum["call"]["arguments"] ==
             {"target_level": "__w4_wrong_enum__"},
             "enum alias cases must never send canonical and alias fields together")
+    selected_enum = select_cases(
+        [{"case_id": "w4_file_case"}], enum_cases,
+        {alias_enum["case_id"]})
+    require(selected_enum == [alias_enum],
+            "--case must select a generated enum contract case")
     sql_id = schema_placeholder(
         {"type": "string", "minLength": 13, "maxLength": 13}, "sql_id")
     require(isinstance(sql_id, str) and len(sql_id) == 13,
