@@ -48,21 +48,24 @@
     ]
   },
   "live_evidence": {
-    "claimed": true,
-    "artifacts": [
-      "target/e2e/w4/free23/cases.jsonl",
-      "target/e2e/w4/xe18/cases.jsonl",
-      "target/e2e/w4/xe21/cases.jsonl"
-    ]
+    "claimed": false,
+    "artifacts": []
   },
   "limitations": [
     "The full ops-tools family is 23/26 green on free23; the three reds are pre-existing product/harness blockers (filed) and are preserved red, not weakened.",
     "Golden regeneration for list_profiles is justified by a legitimate product change (the profile set grew to 11 with the _licensed and _cross_security profiles), not by forcing green.",
-    "The external-client driver still aborts a scoped run if a case's cleanup fails after a deliberately removed setup (observed while proving the planted negative); cleanup is not tolerant of a missing fixture."
+    "The external-client driver still aborts a scoped run if a case's cleanup fails after a deliberately removed setup (observed while proving the planted negative); cleanup is not tolerant of a missing fixture.",
+    "Live W4 results were only in uncommitted target/e2e/w4/<lane>/cases.jsonl, so no live artifact is claimed here; a close needs committed live artifacts."
   ],
   "known_defects": [
-    "oraclemcp-ww2n3",
-    "oraclemcp-9wb12"
+    {
+      "description": "W4 oracle_diff SCN cases blocked: no external-client SCN source",
+      "bead_id": "oraclemcp-ww2n3"
+    },
+    {
+      "description": "W4 top_queries live-cursor marker case needs a row-contains matcher",
+      "bead_id": "oraclemcp-9wb12"
+    }
   ],
   "follow_ups": [
     "oraclemcp-ww2n3",
