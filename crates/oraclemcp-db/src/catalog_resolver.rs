@@ -31,7 +31,7 @@ use crate::catalog_query::{
     VPD_RLS_POLICY_BY_SCHEMA_SQL,
 };
 use crate::catalog_query::{CatalogQueryId, run_catalog_query};
-use crate::{DbError, OracleBind, OracleConnection, OracleRow};
+use crate::{DbError, OracleBind, OracleConnection, OracleRow, ScnCapabilityUnavailable};
 
 /// Maximum number of syntactic names loaded into one immutable resolver.
 pub const MAX_CATALOG_NAMES: usize = 64;
@@ -91,6 +91,23 @@ pub struct OraclePolicyCatalogProbe {
     pub visible_policy_rows_probe: Option<bool>,
     /// Human-readable, non-secret explanation of the observation boundary.
     pub detail: String,
+}
+
+/// The `DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER` capability observed for one
+/// pinned Oracle session generation. This caches only whether the expression
+/// is usable; a usable session still obtains a fresh SCN for every audited
+/// read so audit provenance remains exact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScnCapability {
+    /// No audited read has probed the capability in this generation.
+    Unprobed,
+    /// The expression succeeded in this generation.
+    Granted,
+    /// Oracle proved that the expression is unavailable to this session.
+    NotGranted {
+        /// The typed Oracle capability refusal observed for this session.
+        reason: ScnCapabilityUnavailable,
+    },
 }
 
 /// One visible Oracle VPD/RLS policy row.
@@ -224,6 +241,7 @@ struct ResolverCacheState {
     exhausted: bool,
     entries: HashMap<ResolverCacheKey, Resolution>,
     policy_catalog_probe: Option<OraclePolicyCatalogProbe>,
+    scn_capability: ScnCapability,
 }
 
 /// Bounded generation-scoped resolution cache for one lane/profile.
@@ -258,6 +276,7 @@ impl OracleCatalogResolverCache {
                 exhausted: false,
                 entries: HashMap::new(),
                 policy_catalog_probe: None,
+                scn_capability: ScnCapability::Unprobed,
             }),
         }
     }
@@ -295,12 +314,28 @@ impl OracleCatalogResolverCache {
     /// Generation exhaustion permanently disables publication and resolution
     /// rather than wrapping to a value that could make ancient evidence appear
     /// current again.
-    pub fn invalidate(&self, _reason: CatalogInvalidation) -> oraclemcp_guard::CatalogGeneration {
+    pub fn invalidate(&self, reason: CatalogInvalidation) -> oraclemcp_guard::CatalogGeneration {
         let Ok(mut state) = self.state.write() else {
             return oraclemcp_guard::CatalogGeneration(u64::MAX);
         };
         state.entries.clear();
         state.policy_catalog_probe = None;
+        // An SCN capability belongs to the physical session/security context,
+        // not to catalog object proof. Ordinary served reads deliberately
+        // refresh semantic catalog proof, and DDL refreshes object metadata,
+        // but neither alone changes whether this pinned session can execute
+        // DBMS_FLASHBACK. Reset only when the session or its security context
+        // may have changed.
+        if matches!(
+            reason,
+            CatalogInvalidation::CurrentSchema
+                | CatalogInvalidation::Edition
+                | CatalogInvalidation::Roles
+                | CatalogInvalidation::Reconnect
+                | CatalogInvalidation::SessionContextChanged
+        ) {
+            state.scn_capability = ScnCapability::Unprobed;
+        }
         match state.generation.checked_add(1) {
             Some(next) if !state.exhausted => state.generation = next,
             _ => {
@@ -329,6 +364,28 @@ impl OracleCatalogResolverCache {
             && !state.exhausted
         {
             state.policy_catalog_probe = Some(probe);
+        }
+    }
+
+    /// Return the SCN capability observed for this exact session generation.
+    #[must_use]
+    pub fn scn_capability(&self) -> ScnCapability {
+        self.state
+            .read()
+            .map(|state| state.scn_capability.clone())
+            .unwrap_or(ScnCapability::Unprobed)
+    }
+
+    /// Publish an SCN capability observation for the current generation.
+    ///
+    /// This deliberately stores capability rather than an SCN value. The
+    /// caller must still issue the server-owned SCN query for every audited
+    /// read after a `Granted` observation.
+    pub fn cache_scn_capability(&self, capability: ScnCapability) {
+        if let Ok(mut state) = self.state.write()
+            && !state.exhausted
+        {
+            state.scn_capability = capability;
         }
     }
 

@@ -249,7 +249,62 @@ fn parse_observed_scn(rows: &[crate::types::OracleRow], source: &str) -> Result<
         .map_err(|_| DbError::Query(format!("Oracle returned a non-numeric {source}: {value:?}")))
 }
 
+/// Typed proof that the current session cannot evaluate the server-owned SCN
+/// expression. Kept distinct from an empty response: an empty response is a
+/// transport/protocol desync and must never be cached as a missing grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ScnCapabilityUnavailable {
+    /// Sanitized Oracle diagnostic for the unavailable expression.
+    pub message: String,
+    /// The originating Oracle code, when Oracle supplied one.
+    pub ora_code: Option<i32>,
+}
+
+/// Result of one `DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER` capability probe.
+/// The result is deliberately capability-shaped: callers cache `Granted` or
+/// `NotGranted`, never the returned SCN value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ScnProbeOutcome {
+    /// The expression succeeded and produced this fresh SCN.
+    Granted(u64),
+    /// Oracle proved the expression is unavailable to this session.
+    NotGranted(ScnCapabilityUnavailable),
+    /// Oracle returned no SCN row; callers must not cache this outcome.
+    Desync,
+}
+
 impl AsOf {
+    /// Probe the server-owned SCN expression while preserving the distinction
+    /// between an unavailable capability and an empty Oracle response.
+    pub async fn probe_current_system_change_number(
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+    ) -> Result<ScnProbeOutcome, DbError> {
+        let rows = match run_catalog_query(cx, conn, CatalogQueryId::CurrentScn, &[]).await {
+            Ok(rows) => rows,
+            Err(error) if current_scn_expression_is_unavailable(&error) => {
+                let message = match &error {
+                    DbError::Query(message) => message.clone(),
+                    other => other.to_string(),
+                };
+                return Ok(ScnProbeOutcome::NotGranted(ScnCapabilityUnavailable {
+                    message,
+                    ora_code: Some(904),
+                }));
+            }
+            Err(error) => return Err(error),
+        };
+        match parse_observed_scn(&rows, "current system change number") {
+            Ok(scn) => Ok(ScnProbeOutcome::Granted(scn)),
+            Err(DbError::Query(message))
+                if message == "Oracle returned no current system change number" =>
+            {
+                Ok(ScnProbeOutcome::Desync)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Capture the SCN of the current read-only transaction snapshot.
     ///
     /// Call this as the first query after `SET TRANSACTION READ ONLY`: Oracle
@@ -275,26 +330,20 @@ impl AsOf {
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<u64, DbError> {
-        let rows = match run_catalog_query(cx, conn, CatalogQueryId::CurrentScn, &[]).await {
-            Ok(rows) => rows,
-            // 23ai accepts the package expression above only without
-            // parentheses. A privilege, connection, or any other error stays
-            // fail-closed and propagates untouched below; only ORA-00904 gets
-            // the typed capability-unavailable treatment.
-            Err(error) if current_scn_expression_is_unavailable(&error) => {
-                let message = match &error {
-                    DbError::Query(message) => message.clone(),
-                    other => other.to_string(),
-                };
-                return Err(DbError::FlashbackRefusal {
-                    kind: FlashbackRefusalKind::CapabilityUnavailable,
-                    message,
-                    ora_code: Some(904),
-                });
-            }
-            Err(error) => return Err(error),
-        };
-        parse_observed_scn(&rows, "current system change number")
+        match Self::probe_current_system_change_number(cx, conn).await? {
+            ScnProbeOutcome::Granted(scn) => Ok(scn),
+            ScnProbeOutcome::NotGranted(reason) => Err(DbError::FlashbackRefusal {
+                kind: FlashbackRefusalKind::CapabilityUnavailable,
+                message: reason.message,
+                ora_code: reason.ora_code,
+            }),
+            // Keep today's externally visible error until T2.2b owns the
+            // connection-loss classification. Crucially this result is not
+            // cached as a missing privilege.
+            ScnProbeOutcome::Desync => Err(DbError::Query(
+                "Oracle returned no current system change number".to_owned(),
+            )),
+        }
     }
 
     /// Resolve this structured flashback target to the exact SCN used for

@@ -60,18 +60,18 @@ use oraclemcp_db::{
     PlanCostEstimate, PlanStatementId, PlanTableUnavailable, QuarantineOutcome, QueryCaps,
     QueryDiffSource, QueryResponse, QueryRowStream, QueryRowStreamStart, ReadQueryProvenance,
     ResultColumnMatch, ResultMaskingAction, ResultMaskingCertificate, ResultMaskingDecisionAction,
-    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, SemanticSearchMetric,
-    SerializeOptions, SourceReadOptions, StructuredDecodeCaps, VerifiedPlanTable,
-    bounded_policy_catalog_probe, compile_errors, compile_object_statements, describe_columns,
-    describe_constraints, describe_index, describe_trigger, describe_view, diff_query_responses,
-    execute_immediate_audit, explain_plan, find_unused_declarations, get_ddl, get_source,
-    get_sources_by_name, incomparable_masked_columns, list_objects, list_objects_page,
-    list_schema_projection_page, list_schemas, observe_vpd_rls_for_relations_with_probe,
-    paginated_sql, plan_cost_estimate, plscope_identifiers, plscope_statements,
-    primary_key_columns, probe_dependents, prove_hard_parse_effect_closure, read_query,
-    read_query_as_of, resolve_plan_table, run_catalog_query, search_objects,
-    search_objects_by_types, search_source, semantic_search_query,
-    semantic_search_query_with_filter, semantic_search_text_query,
+    ResultMaskingDecisionSource, ResultMaskingPolicy, ResultMaskingRule, ScnCapability,
+    ScnProbeOutcome, SemanticSearchMetric, SerializeOptions, SourceReadOptions,
+    StructuredDecodeCaps, VerifiedPlanTable, bounded_policy_catalog_probe, compile_errors,
+    compile_object_statements, describe_columns, describe_constraints, describe_index,
+    describe_trigger, describe_view, diff_query_responses, execute_immediate_audit, explain_plan,
+    find_unused_declarations, get_ddl, get_source, get_sources_by_name,
+    incomparable_masked_columns, list_objects, list_objects_page, list_schema_projection_page,
+    list_schemas, observe_vpd_rls_for_relations_with_probe, paginated_sql, plan_cost_estimate,
+    plscope_identifiers, plscope_statements, primary_key_columns, probe_dependents,
+    prove_hard_parse_effect_closure, read_query, read_query_as_of, resolve_plan_table,
+    run_catalog_query, search_objects, search_objects_by_types, search_source,
+    semantic_search_query, semantic_search_query_with_filter, semantic_search_text_query,
     semantic_search_text_query_with_filter, serialize_row,
 };
 use oraclemcp_db::{
@@ -8202,26 +8202,41 @@ fn attach_hard_parse_evidence(response: &mut Value, observations: &[&'static str
 async fn observed_scn_for_audit(
     cx: &Cx,
     conn: &dyn OracleConnection,
+    catalog_cache: &OracleCatalogResolverCache,
     ctx: AuditEntryCtx<'_>,
 ) -> Result<Option<u64>, DbError> {
-    match AsOf::current_system_change_number(cx, conn).await {
-        Ok(scn) => Ok(Some(scn)),
-        Err(DbError::FlashbackRefusal {
-            kind: FlashbackRefusalKind::CapabilityUnavailable,
-            message,
-            ora_code,
-        }) => {
+    if matches!(
+        catalog_cache.scn_capability(),
+        ScnCapability::NotGranted { .. }
+    ) {
+        return Ok(None);
+    }
+    match AsOf::probe_current_system_change_number(cx, conn).await? {
+        ScnProbeOutcome::Granted(scn) => {
+            catalog_cache.cache_scn_capability(ScnCapability::Granted);
+            Ok(Some(scn))
+        }
+        ScnProbeOutcome::NotGranted(reason) => {
             let failure = DbError::FlashbackRefusal {
                 kind: FlashbackRefusalKind::CapabilityUnavailable,
-                message,
-                ora_code,
+                message: reason.message.clone(),
+                ora_code: reason.ora_code,
             }
             .into_envelope();
-            append_scn_capability_degraded_audit(ctx, &failure)
-                .map_err(|error| DbError::Refused(Box::new(error)))?;
+            let was_not_granted = matches!(
+                catalog_cache.scn_capability(),
+                ScnCapability::NotGranted { .. }
+            );
+            catalog_cache.cache_scn_capability(ScnCapability::NotGranted { reason });
+            if !was_not_granted {
+                append_scn_capability_degraded_audit(ctx, &failure)
+                    .map_err(|error| DbError::Refused(Box::new(error)))?;
+            }
             Ok(None)
         }
-        Err(error) => Err(error),
+        ScnProbeOutcome::Desync => Err(DbError::Query(
+            "Oracle returned no current system change number".to_owned(),
+        )),
     }
 }
 
@@ -13508,10 +13523,12 @@ impl OracleDispatcher {
         };
         let guarded_conn = GuardedGeneratedReadConn {
             inner: &observed_conn,
+            catalog_cache: &state.catalog_cache,
             audit: generated_read_audit,
         };
         let guarded_metadata_conn = GuardedGeneratedReadConn {
             inner: &observed_metadata_conn,
+            catalog_cache: &state.catalog_cache,
             audit: generated_read_audit,
         };
 

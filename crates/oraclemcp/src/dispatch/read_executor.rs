@@ -340,6 +340,7 @@ pub(super) struct GeneratedReadAuditCtx<'a> {
 
 pub(super) struct GuardedGeneratedReadConn<'a> {
     pub(super) inner: &'a dyn OracleConnection,
+    pub(super) catalog_cache: &'a OracleCatalogResolverCache,
     pub(super) audit: GeneratedReadAuditCtx<'a>,
 }
 
@@ -393,7 +394,9 @@ impl GuardedGeneratedReadConn<'_> {
         // checked bind schema; caller text never receives the catalog label.
         let danger = audit_danger_string(DangerLevel::Safe);
         let observed_scn = match self.audit.entry.auditor {
-            Some(_) => observed_scn_for_audit(cx, self.inner, self.audit.entry).await?,
+            Some(_) => {
+                observed_scn_for_audit(cx, self.inner, self.catalog_cache, self.audit.entry).await?
+            }
             None => None,
         };
         append_audit_with_observed_scn(
@@ -2014,7 +2017,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     (Some(_), Some(AsOf::Timestamp(_))) => unreachable!(
                         "audited timestamp flashback targets are resolved to SCNs before execution"
                     ),
-                    (Some(_), None) => observed_scn_for_audit(cx, &read_conn, read_audit)
+                    (Some(_), None) => observed_scn_for_audit(cx, &read_conn, catalog_cache, read_audit)
                         .await
                         .map_err(DbError::into_envelope)?,
                     (None, _) => None,

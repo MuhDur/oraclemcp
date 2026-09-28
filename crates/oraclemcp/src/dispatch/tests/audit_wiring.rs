@@ -61,8 +61,10 @@ pub(super) async fn generated_read_guard_refusal_with_audit(
 ) -> (ErrorEnvelope, Vec<AuditRecord>) {
     let (auditor, sink) = auditor_with_sink();
     let subject = system_generated_read_subject();
+    let catalog_cache = OracleCatalogResolverCache::new();
     let guarded = GuardedGeneratedReadConn {
         inner: &OneRowMock,
+        catalog_cache: &catalog_cache,
         audit: GeneratedReadAuditCtx {
             entry: AuditEntryCtx {
                 auditor: Some(&auditor),
@@ -422,10 +424,8 @@ impl OracleConnection for ScnCapabilityUnavailableMock {
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
-        if sql
-            .to_ascii_lowercase()
-            .contains("get_system_change_number")
-        {
+        if sql == "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL" {
+            eprintln!("scn query");
             return Err(DbError::Query(
                 "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
             ));
@@ -446,6 +446,194 @@ impl OracleConnection for ScnCapabilityUnavailableMock {
     async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
+}
+
+/// Counting SCN fixture for the generation-cache wiring. The served query and
+/// dictionary proof use the same synthetic semantics as `OneRowMock`; only
+/// the server-owned SCN expression is controlled by the test.
+struct ScnCapabilityCountingMock {
+    scn_queries: Arc<std::sync::atomic::AtomicUsize>,
+    unavailable: Arc<std::sync::atomic::AtomicBool>,
+    empty: Arc<std::sync::atomic::AtomicBool>,
+    sqls: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for ScnCapabilityCountingMock {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.sqls.lock().expect("SQL recorder").push(sql.to_owned());
+        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
+            return Ok(rows);
+        }
+        if sql
+            .to_ascii_lowercase()
+            .contains("get_system_change_number")
+        {
+            self.scn_queries
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.empty.load(std::sync::atomic::Ordering::SeqCst) {
+                return Ok(Vec::new());
+            }
+            if self.unavailable.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(DbError::Query(
+                    "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
+                ));
+            }
+            return Ok(vec![OracleRow {
+                columns: vec![(
+                    "OBSERVED_SCN".to_owned(),
+                    OracleCell::new("NUMBER", Some("424242".to_owned())),
+                )],
+            }]);
+        }
+        Ok(vec![OracleRow {
+            columns: vec![(
+                "C".to_owned(),
+                OracleCell::new("NUMBER", Some("1".to_owned())),
+            )],
+        }])
+    }
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Ok(0)
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+fn counting_scn_dispatcher(
+    auditor: Arc<Auditor>,
+    unavailable: Arc<std::sync::atomic::AtomicBool>,
+    empty: Arc<std::sync::atomic::AtomicBool>,
+) -> (OracleDispatcher, Arc<std::sync::atomic::AtomicUsize>) {
+    let scn_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let dispatcher = dispatcher_with_conn(
+        Box::new(ScnCapabilityCountingMock {
+            scn_queries: Arc::clone(&scn_queries),
+            unavailable,
+            empty,
+            sqls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+        ddl_level(),
+        auditor,
+    );
+    (dispatcher, scn_queries)
+}
+
+fn dispatcher_scn_capability(dispatcher: &OracleDispatcher) -> ScnCapability {
+    asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds")
+        .block_on(async {
+            let cx = Cx::current().expect("runtime installs Cx");
+            dispatcher
+                .state
+                .lock(&cx)
+                .await
+                .expect("dispatcher state lock")
+                .catalog_cache
+                .scn_capability()
+        })
+}
+
+#[test]
+fn issue46_reconnect_reprobes_once() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("runtime installs Cx");
+        let (auditor, _sink) = auditor_with_sink();
+        let subject = system_generated_read_subject();
+        let cache = OracleCatalogResolverCache::new();
+        let scn_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connection = ScnCapabilityCountingMock {
+            scn_queries: Arc::clone(&scn_queries),
+            unavailable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            empty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sqls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let ctx = AuditEntryCtx {
+            auditor: Some(&auditor),
+            subject: &subject,
+            db_evidence: None,
+        };
+        assert_eq!(
+            observed_scn_for_audit(&cx, &connection, &cache, ctx)
+                .await
+                .expect("degraded SCN"),
+            None
+        );
+        assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+        cache.invalidate(CatalogInvalidation::Reconnect);
+        assert_eq!(
+            observed_scn_for_audit(&cx, &connection, &cache, ctx)
+                .await
+                .expect("reconnected degraded SCN"),
+            None
+        );
+        assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+    });
+}
+
+#[test]
+fn scn_never_substitutes_v_database() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("runtime installs Cx");
+        let (auditor, _sink) = auditor_with_sink();
+        let subject = system_generated_read_subject();
+        let cache = OracleCatalogResolverCache::new();
+        let sqls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let connection = ScnCapabilityCountingMock {
+            scn_queries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            unavailable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            empty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sqls: Arc::clone(&sqls),
+        };
+        let ctx = AuditEntryCtx {
+            auditor: Some(&auditor),
+            subject: &subject,
+            db_evidence: None,
+        };
+        assert_eq!(
+            observed_scn_for_audit(&cx, &connection, &cache, ctx)
+                .await
+                .expect("degraded SCN"),
+            None
+        );
+        assert!(
+            sqls.lock()
+                .expect("SQL recorder")
+                .iter()
+                .all(|sql| !sql.to_ascii_uppercase().contains("V$DATABASE.CURRENT_SCN"))
+        );
+    });
 }
 
 /// F-S1 / SEC-4 discriminating test (bead oraclemcp-eng-program-bp8ia.8.3):
@@ -512,6 +700,134 @@ fn scn_capability_absent_degrades_explicitly_and_audits_instead_of_silently_fall
             .as_ref()
             .is_some_and(|certificate| certificate.matches_record(&records[2])),
         "Succeeded record still carries a bound verdict certificate"
+    );
+}
+
+#[test]
+fn issue46_not_granted_probe_runs_once_per_generation() {
+    let unavailable = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (auditor, _sink) = auditor_with_sink();
+    let (dispatcher, scn_queries) = counting_scn_dispatcher(auditor, unavailable, empty);
+    dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect("missing SCN capability degrades the served read");
+    assert!(matches!(
+        dispatcher_scn_capability(&dispatcher),
+        ScnCapability::NotGranted { .. }
+    ));
+    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    for _ in 0..2 {
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("missing SCN capability degrades the served read");
+    }
+    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+}
+
+#[test]
+fn issue46_not_granted_audited_once_per_generation() {
+    let unavailable = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (auditor, sink) = auditor_with_sink();
+    let (dispatcher, _) = counting_scn_dispatcher(auditor, unavailable, empty);
+    for _ in 0..3 {
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("missing SCN capability degrades the served read");
+    }
+    let records = sink.records();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.tool == "scn_capability_probe")
+            .count(),
+        1
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.tool == "oracle_query")
+            .count(),
+        6
+    );
+    assert!(
+        records
+            .iter()
+            .filter(|record| record.tool == "oracle_query")
+            .all(|record| record.observed_scn.is_none())
+    );
+}
+
+#[test]
+fn issue46_granted_session_reads_scn_per_audited_read() {
+    let unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (auditor, sink) = auditor_with_sink();
+    let (dispatcher, scn_queries) = counting_scn_dispatcher(auditor, unavailable, empty);
+    for _ in 0..3 {
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("granted SCN capability serves the read");
+    }
+    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 3);
+    assert!(
+        sink.records()
+            .iter()
+            .filter(|record| record.tool == "oracle_query")
+            .all(|record| record.observed_scn == Some(424_242))
+    );
+}
+
+#[test]
+fn issue46_empty_scn_result_is_desync_not_cached() {
+    let unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let empty = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let (auditor, _sink) = auditor_with_sink();
+    let (dispatcher, scn_queries) = counting_scn_dispatcher(auditor, unavailable, empty);
+    for _ in 0..2 {
+        let error = dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect_err("an empty SCN response remains an error until T2.2b classifies desync");
+        assert!(error.message.contains("no current system change number"));
+    }
+    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+}
+
+#[test]
+fn issue46_revoked_capability_downgrades_and_audits_once() {
+    let unavailable = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let empty = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (auditor, sink) = auditor_with_sink();
+    let (dispatcher, scn_queries) =
+        counting_scn_dispatcher(auditor, Arc::clone(&unavailable), empty);
+    dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect("initial granted capability serves the read");
+    unavailable.store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 0..2 {
+        dispatcher
+            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+            .expect("revoked capability degrades the served read");
+    }
+    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let records = sink.records();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record.tool == "scn_capability_probe")
+            .count(),
+        1
+    );
+    let reads: Vec<_> = records
+        .iter()
+        .filter(|record| record.tool == "oracle_query")
+        .collect();
+    assert_eq!(reads[0].observed_scn, Some(424_242));
+    assert!(
+        reads[2..]
+            .iter()
+            .all(|record| record.observed_scn.is_none())
     );
 }
 

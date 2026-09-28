@@ -127,8 +127,8 @@ pub use catalog_resolver::{
     OraclePolicyCatalogVisibility, OracleSessionSecurityContext, OracleVpdRlsObservation,
     OracleVpdRlsObservationStatus, OracleVpdRlsPolicy, ReadPlanProof, ReadPlanProofError,
     RelationSecurityFeature, RelationSecurityKey, RelationSecurityObservation,
-    RelationSecurityProofError, RelationSecurityState, bounded_policy_catalog_probe, fga_closure,
-    observe_relation_security, observe_vpd_rls_for_relations,
+    RelationSecurityProofError, RelationSecurityState, ScnCapability, bounded_policy_catalog_probe,
+    fga_closure, observe_relation_security, observe_vpd_rls_for_relations,
     observe_vpd_rls_for_relations_with_probe, observe_vpd_rls_for_schema,
     ols_installation_evidence, prove_semantic_read_plan, read_catalog_resolve_context,
     read_session_security_context, resolve_semantic_read_relations, resolved_relations_read_purity,
@@ -209,8 +209,8 @@ pub use privileges::{
     probe_write_posture, requirement_matrix,
 };
 pub use query::{
-    AsOf, QueryCaps, QueryResponse, cursor_to_offset, paginated_sql, read_lob_sql, read_query,
-    read_query_as_of, read_query_named, sample_rows_sql,
+    AsOf, QueryCaps, QueryResponse, ScnCapabilityUnavailable, ScnProbeOutcome, cursor_to_offset,
+    paginated_sql, read_lob_sql, read_query, read_query_as_of, read_query_named, sample_rows_sql,
 };
 pub use schema_diff::{
     ChangeKind, MigrationStep, OracleIdentifier, SchemaDiff, SchemaDiffError, SchemaObject,
