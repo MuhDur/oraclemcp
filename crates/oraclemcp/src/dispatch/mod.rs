@@ -8234,7 +8234,7 @@ async fn observed_scn_for_audit(
             }
             Ok(None)
         }
-        ScnProbeOutcome::Desync => Err(DbError::Query(
+        ScnProbeOutcome::Desync => Err(DbError::ConnectionLost(
             "Oracle returned no current system change number".to_owned(),
         )),
     }
@@ -13520,6 +13520,7 @@ impl OracleDispatcher {
                 db_evidence: generated_read_db_evidence.as_ref(),
             },
             tool,
+            quarantine: &self.quarantine,
         };
         let guarded_conn = GuardedGeneratedReadConn {
             inner: &observed_conn,

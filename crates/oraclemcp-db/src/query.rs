@@ -337,10 +337,10 @@ impl AsOf {
                 message: reason.message,
                 ora_code: reason.ora_code,
             }),
-            // Keep today's externally visible error until T2.2b owns the
-            // connection-loss classification. Crucially this result is not
-            // cached as a missing privilege.
-            ScnProbeOutcome::Desync => Err(DbError::Query(
+            // An empty SCN response cannot be associated with a sound server
+            // state. It is not a missing capability and must quarantine the
+            // session for a between-statement re-lease.
+            ScnProbeOutcome::Desync => Err(DbError::ConnectionLost(
                 "Oracle returned no current system change number".to_owned(),
             )),
         }
@@ -1427,6 +1427,7 @@ mod tests {
         fail_read: bool,
         fail_read_message: Option<String>,
         current_scn_error: Option<String>,
+        empty_current_scn: bool,
         fail_enable_message: Option<String>,
         fail_disable_call: Option<usize>,
         fail_disable_message: Option<String>,
@@ -1466,6 +1467,9 @@ mod tests {
                 && let Some(message) = &self.current_scn_error
             {
                 return Err(DbError::Query(message.clone()));
+            }
+            if sql == CURRENT_SCN_SQL && self.empty_current_scn {
+                return Ok(Vec::new());
             }
             if self.fail_read && sql != CURRENT_SCN_SQL && sql != TIMESTAMP_TO_SCN_SQL {
                 return Err(DbError::Query(
@@ -1652,6 +1656,23 @@ mod tests {
         });
 
         assert!(matches!(error, DbError::Query(message) if message.contains("ORA-01031")));
+        assert_eq!(events, vec![format!("query[0]:{CURRENT_SCN_SQL}")]);
+    }
+
+    #[test]
+    fn empty_scn_result_is_connection_lost() {
+        let conn = FlashbackRecorder {
+            empty_current_scn: true,
+            ..Default::default()
+        };
+        let (error, events) = run_with_cx(|cx| async move {
+            let error = AsOf::current_system_change_number(&cx, &conn)
+                .await
+                .expect_err("an empty SCN response must discard the session");
+            (error, conn.events.into_inner().expect("events"))
+        });
+        assert!(matches!(error, DbError::ConnectionLost(message)
+            if message == "Oracle returned no current system change number"));
         assert_eq!(events, vec![format!("query[0]:{CURRENT_SCN_SQL}")]);
     }
 

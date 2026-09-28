@@ -62,6 +62,7 @@ pub(super) async fn generated_read_guard_refusal_with_audit(
     let (auditor, sink) = auditor_with_sink();
     let subject = system_generated_read_subject();
     let catalog_cache = OracleCatalogResolverCache::new();
+    let quarantine = SyncMutex::new(None);
     let guarded = GuardedGeneratedReadConn {
         inner: &OneRowMock,
         catalog_cache: &catalog_cache,
@@ -72,6 +73,7 @@ pub(super) async fn generated_read_guard_refusal_with_audit(
                 db_evidence: None,
             },
             tool: "oracle_describe",
+            quarantine: &quarantine,
         },
     };
     let error = guarded

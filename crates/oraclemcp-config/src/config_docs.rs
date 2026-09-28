@@ -108,7 +108,7 @@ static DOCS: &[ConfigFieldDoc] = &[
     doc!("profiles.cumulative_query_cost_budget.window_seconds", "integer", "required", true, false, "2", "Arc G: duration of one cumulative-cost accounting window, in seconds."),
     doc!("profiles.connect_timeout_seconds", "integer", "20", true, false, "1", "Oracle Net transport connect timeout, in seconds, bounding connect/auth reads."),
     doc!("profiles.inactivity_timeout_seconds", "integer", "none", true, false, "1", "Per-read inactivity deadline on an established session; 0 is unset."),
-    doc!("profiles.keepalive_minutes", "integer", "none", true, false, "1", "Oracle EXPIRE_TIME dead-connection-detection probe interval, in minutes."),
+    doc!("profiles.keepalive_minutes", "integer", "10", true, false, "1", "Oracle EXPIRE_TIME dead-connection-detection probe interval, in minutes."),
     doc!("profiles.sdu", "integer", "none", true, false, "1", "Thin Session Data Unit request size (512..=65535)."),
     doc!("profiles.max_level", "enum(READ_ONLY|READ_WRITE|DDL|ADMIN)", "READ_ONLY", true, false, "1", "Per-target operating-level ceiling; session elevation cannot exceed it."),
     doc!("profiles.default_level", "enum(READ_ONLY|READ_WRITE|DDL|ADMIN)", "READ_ONLY", true, false, "1", "Level a fresh session starts at; must not exceed max_level."),

@@ -852,10 +852,14 @@ pub struct OracleConnectOptions {
     /// keeps the driver's unbounded-read behavior. Wired to the driver via
     /// `ConnectOptions::with_inactivity_timeout`.
     pub inactivity_timeout: Option<Duration>,
-    /// Optional Oracle EXPIRE_TIME dead-connection-detection probe interval, in
-    /// MINUTES. `None` disables DCD probes. Injected into the connect string as
-    /// `expire_time=N` (the thin driver has no `ConnectOptions` setter for it).
+    /// Oracle EXPIRE_TIME dead-connection-detection probe interval, in MINUTES.
+    /// Injected into the connect string as `expire_time=N` (the thin driver has
+    /// no `ConnectOptions` setter for it).
     pub keepalive_minutes: Option<u64>,
+    /// Whether `keepalive_minutes` came from the runtime default rather than
+    /// an explicit profile setting. Defaulted DCD is deliberately not injected
+    /// into a full descriptor, which owns its own Oracle Net settings.
+    pub keepalive_defaulted: bool,
     /// Oracle per-round-trip call timeout. Defaults to
     /// [`DEFAULT_ORACLE_CALL_TIMEOUT`]; set `None` only for an explicit
     /// operator-controlled opt-out.
@@ -893,7 +897,8 @@ impl Default for OracleConnectOptions {
             statement_cache_size: None,
             connect_timeout: None,
             inactivity_timeout: None,
-            keepalive_minutes: None,
+            keepalive_minutes: Some(10),
+            keepalive_defaulted: true,
             call_timeout: Some(DEFAULT_ORACLE_CALL_TIMEOUT),
             session_statements: Vec::new(),
             session_release_statements: Vec::new(),
@@ -942,6 +947,7 @@ impl std::fmt::Debug for OracleConnectOptions {
             .field("connect_timeout", &self.connect_timeout)
             .field("inactivity_timeout", &self.inactivity_timeout)
             .field("keepalive_minutes", &self.keepalive_minutes)
+            .field("keepalive_defaulted", &self.keepalive_defaulted)
             .field("call_timeout", &self.call_timeout)
             .field("session_statement_count", &session_statement_count)
             .field(

@@ -27,7 +27,8 @@ import sys
 import threading
 import time
 
-from fixture import admin_password, load_lane, new_run_id, setup as fixture_setup, teardown as fixture_teardown
+from fixture import (admin_password, kill_session_sql, load_lane, new_run_id,
+                     setup as fixture_setup, teardown as fixture_teardown)
 from scrub import scrub
 
 
@@ -344,7 +345,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "kill_served_session_user"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -366,6 +367,13 @@ def validate_case(case, filename):
                 "cancel case cannot use parallel or raw arguments")
         require(case["call"]["cancel_marker"] in compact(case["call"]["arguments"]),
                 "cancel marker must appear in the tool arguments")
+    if "kill_served_session_user" in case["call"]:
+        user = case["call"]["kill_served_session_user"]
+        require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
+                "kill_served_session_user must be the exact run-owned owner")
+        require(case["tool"] == "oracle_query" and case["transports"] == ["stdio"]
+                and case["level"] == "READ_ONLY" and not case["call"].get("mutation"),
+                "killed-session recovery is a read-only stdio oracle_query case")
     require("retry" not in case["call"] or type(case["call"]["retry"]) is bool,
             "call.retry must be boolean")
     require("mutation" not in case["call"] or type(case["call"]["mutation"]) is bool,
@@ -1429,6 +1437,46 @@ def verify_case_rereads(connection, case, row):
                 f"{case['case_id']}: independent DB re-read differed")
 
 
+def killed_session_recovery_call(client, case, connection, descriptor):
+    """Kill only this W4 run's served session, then prove next-call re-lease.
+
+    The first query establishes the pinned session. The second call is expected
+    to observe the dead wire and quarantine it; only the third, separate
+    statement may obtain a replacement. This deliberately proves no in-flight
+    statement is replayed.
+    """
+    arguments = case["call"]["arguments"]
+    first = client.rpc("tools/call", {"name": case["tool"], "arguments": arguments})
+    verify_envelope(first, descriptor)
+    require(tool_payload(first).get("isError") is not True,
+            "baseline read failed before killed-session exercise")
+    user = case["call"]["kill_served_session_user"]
+    sessions = connection.cursor().execute(
+        "SELECT SID, SERIAL# FROM V$SESSION "
+        "WHERE USERNAME=:1 AND TYPE='USER' AND STATUS <> 'KILLED' ORDER BY SID",
+        (user,)).fetchall()
+    require(sessions, "no exact run-owned served Oracle session found to kill")
+    cursor = connection.cursor()
+    for sid, serial in sessions:
+        cursor.execute(kill_session_sql(int(sid), int(serial)))
+    connection.commit()
+    lost = client.rpc("tools/call", {"name": case["tool"], "arguments": arguments})
+    verify_envelope(lost, descriptor)
+    lost_payload = tool_payload(lost)
+    require(lost_payload.get("isError") is True
+            and lost_payload.get("structuredContent", {}).get("error_class") == "TRANSIENT",
+            "killed read was not reported as transient connection loss")
+    recovered = client.rpc("tools/call", {"name": case["tool"], "arguments": arguments})
+    verify_envelope(recovered, descriptor)
+    require(tool_payload(recovered).get("isError") is not True,
+            "next statement did not recover with a fresh pinned session: "
+            + compact(scrub(tool_payload(recovered)))[:400])
+    return recovered, {"baseline": scrub(tool_payload(first)),
+                       "killed_sessions": len(sessions),
+                       "loss": scrub(lost_payload),
+                       "recovered": scrub(tool_payload(recovered))}
+
+
 def run_case(client, case, transport, lane, capabilities, connection, barriers,
              binary, audit_path, env, descriptor=None):
     start = time.monotonic()
@@ -1479,7 +1527,10 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                     "V$SQL marker already present before refusal test")
         before = len(audit_records(audit_path))
         captures = run_steps(client, case, row, binary, audit_path, env) if "steps" in case else {}
-        if "cancel_marker" in case["call"] and supported:
+        if "kill_served_session_user" in case["call"] and supported:
+            reply, recovery_actual = killed_session_recovery_call(client, case, connection, descriptor)
+            row["killed_session_recovery"] = recovery_actual
+        elif "cancel_marker" in case["call"] and supported:
             reply = cancelled_call(client, case, connection)
         elif "parallel" in case["call"] and supported:
             require(transport == "http", "parallel case requires HTTP transport")
@@ -2075,6 +2126,12 @@ def selftest():
         else:
             raise DriverError(f"selftest accepted planted {label}")
     rejected("invalid_vsql_marker", lambda: validate_case(rejected_marker, "selftest"))
+    rejected("foreign_killed_session_target", lambda: validate_case(
+        {**rejected_marker,
+         "tool": "oracle_query",
+         "transports": ["stdio"],
+         "call": {"arguments": {"sql": "SELECT 1 FROM dual"},
+                  "kill_served_session_user": "SYSTEM"}}, "selftest"))
     rejected("wrong_row_order", lambda: verify_expect({"rows": [[2], [1]]}, correct))
     rejected("malformed_wire_envelope", lambda: verify_envelope({"result": {"content": []}}))
     rejected("missing_output_schema_key", lambda: verify_envelope(

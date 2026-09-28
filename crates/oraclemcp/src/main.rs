@@ -473,6 +473,7 @@ fn resolve_profile_options_from_config_with(
     )?;
 
     let mut ctx = oraclemcp_core::build_session_context(chosen, password, wallet_password, false)?;
+    let keepalive_minutes = ctx.options.keepalive_minutes;
     let iam_token_source = doctor_iam_token_source_observation(chosen);
     // B16a: configure the server-side OCI IAM database-token source at connect
     // time, so the B2 adapter wires a refreshable source through the driver
@@ -494,7 +495,7 @@ fn resolve_profile_options_from_config_with(
         iam_token_source,
         connect_timeout_seconds: chosen.connect_timeout_seconds,
         inactivity_timeout_seconds: chosen.inactivity_timeout_seconds,
-        keepalive_minutes: chosen.keepalive_minutes,
+        keepalive_minutes,
     }))
 }
 
@@ -7165,7 +7166,11 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
         ),
         connect_timeout_seconds: chosen.connect_timeout_seconds,
         inactivity_timeout_seconds: chosen.inactivity_timeout_seconds,
-        keepalive_minutes: chosen.keepalive_minutes,
+        keepalive_minutes: match chosen.keepalive_minutes {
+            None => Some(10),
+            Some(0) => None,
+            Some(minutes) => Some(minutes),
+        },
         proxy_user: chosen
             .proxy_auth
             .as_ref()

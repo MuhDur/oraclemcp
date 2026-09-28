@@ -1051,7 +1051,16 @@ fn server_sql_error_envelope(message: &str) -> ErrorEnvelope {
 /// [`DbError::is_uncertain_session_state`] flags from the kind. This list only
 /// catches strings we cannot restructure because they arrive from the driver.
 fn message_is_uncertain_connection_state(message: &str) -> bool {
-    const MARKERS: &[&str] = &["dpy-4011", "call timeout", "ora-01013"];
+    const MARKERS: &[&str] = &[
+        "dpy-4011",
+        "call timeout",
+        "ora-01013",
+        "ora-03113",
+        "ora-03114",
+        "ora-03135",
+        "unknown ttc message type",
+        "returned no current system change number",
+    ];
     let message = message.to_ascii_lowercase();
     matches!(
         oracle_retry_action_from_message(&message),
@@ -2049,6 +2058,11 @@ mod tests {
             "the connection is closed",
             "Broken pipe (os error 32)",
             "connection reset by peer",
+            "ORA-03113: end-of-file on communication channel",
+            "ORA-03114: not connected to ORACLE",
+            "ORA-03135: connection lost contact",
+            "unknown TTC message type 84",
+            "Oracle returned no current system change number",
         ];
         for marker in MARKERS {
             assert!(

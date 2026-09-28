@@ -2646,11 +2646,15 @@ mod driver {
     fn connect_string_with_expire_time(
         connect_string: &str,
         keepalive_minutes: Option<u64>,
+        keepalive_defaulted: bool,
     ) -> Result<String, DbError> {
         let Some(minutes) = keepalive_minutes.filter(|&minutes| minutes > 0) else {
             return Ok(connect_string.to_owned());
         };
         if connect_string.trim_start().starts_with('(') {
+            if keepalive_defaulted {
+                return Ok(connect_string.to_owned());
+            }
             return Err(DbError::UnsupportedAuth(
                 "keepalive_minutes cannot be injected into a full Oracle Net descriptor; \
                  set EXPIRE_TIME inside the descriptor instead"
@@ -2659,6 +2663,9 @@ mod driver {
         }
         let lower = connect_string.to_ascii_lowercase();
         if lower.contains("expire_time=") {
+            if keepalive_defaulted {
+                return Ok(connect_string.to_owned());
+            }
             return Err(DbError::UnsupportedAuth(
                 "keepalive_minutes conflicts with an existing expire_time value in \
                  connect_string; configure it in only one place"
@@ -2783,8 +2790,11 @@ mod driver {
             &selected_target.connect_string,
             opts.connect_timeout,
         )?;
-        let connect_string =
-            connect_string_with_expire_time(&connect_string, opts.keepalive_minutes)?;
+        let connect_string = connect_string_with_expire_time(
+            &connect_string,
+            opts.keepalive_minutes,
+            opts.keepalive_defaulted,
+        )?;
         let mut connect_options =
             oraclemcp_driver_cx::ConnectOptions::new(&connect_string, user, password, identity);
         if let Some(iam_auth) = iam_auth {
@@ -6664,12 +6674,10 @@ mod driver {
                 retry_action: oraclemcp_error::OracleRetryAction::RetrySameConnection,
             };
         }
-        // TTC message type 129 is a transient protocol desynchronization in
-        // the metadata/direct-path response family. The pinned driver raises
-        // it as `ProtocolError::UnknownMessageType` but deliberately reports
-        // that variant as reusable; the server must discard this session so
-        // the pool can perform its single fresh-connection retry.
-        let lost = err.is_connection_lost() || is_transient_ttc_129(&err);
+        // Protocol desynchronization is not a retry-on-this-wire condition.
+        // The pinned driver reports several malformed TTC/TNS replies as
+        // reusable; discard the session so recovery can use a fresh socket.
+        let lost = err.is_connection_lost() || is_protocol_desync(&err);
         let detail = sanitize_driver_error(err, opts);
         let message = match context {
             Some(context) => format!("{context}: {detail}"),
@@ -6682,15 +6690,18 @@ mod driver {
         }
     }
 
-    fn is_transient_ttc_129(error: &oraclemcp_driver_cx::Error) -> bool {
+    fn is_protocol_desync(error: &oraclemcp_driver_cx::Error) -> bool {
+        use oraclemcp_driver_cx::protocol::ProtocolError;
         matches!(
             error,
             oraclemcp_driver_cx::Error::Protocol(
-                oraclemcp_driver_cx::protocol::ProtocolError::UnknownMessageType {
-                    message_type: 129,
-                    ..
-                }
-            )
+                ProtocolError::TruncatedHeader { .. }
+                    | ProtocolError::InvalidPacketLength { .. }
+                    | ProtocolError::IncompletePacket { .. }
+                    | ProtocolError::PacketTooLarge { .. }
+                    | ProtocolError::TtcDecode(_)
+                    | ProtocolError::UnknownMessageType { .. }
+            ) | oraclemcp_driver_cx::Error::UnexpectedPacket(_)
         )
     }
 
@@ -9438,6 +9449,7 @@ mod tests {
             username: Some("APP".to_owned()),
             password: Some("secret".to_owned()),
             keepalive_minutes: Some(10),
+            keepalive_defaulted: false,
             ..Default::default()
         };
 
@@ -9459,6 +9471,7 @@ mod tests {
             password: Some("secret".to_owned()),
             connect_timeout: Some(Duration::from_secs(7)),
             keepalive_minutes: Some(10),
+            keepalive_defaulted: false,
             ..Default::default()
         };
 
@@ -9493,6 +9506,7 @@ mod tests {
             username: Some("APP".to_owned()),
             password: Some("secret".to_owned()),
             keepalive_minutes: Some(10),
+            keepalive_defaulted: false,
             ..Default::default()
         };
 
@@ -9509,12 +9523,28 @@ mod tests {
             username: Some("APP".to_owned()),
             password: Some("secret".to_owned()),
             keepalive_minutes: Some(10),
+            keepalive_defaulted: false,
             ..Default::default()
         };
 
         let err = driver::to_connect_options(&opts).expect_err("descriptor injection refused");
         assert!(matches!(err, DbError::UnsupportedAuth(_)));
         assert!(err.to_string().contains("descriptor"), "{err}");
+    }
+
+    #[test]
+    fn thin_connect_options_default_keepalive_skips_full_descriptor() {
+        let opts = OracleConnectOptions {
+            connect_string: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=svc)))"
+                .to_owned(),
+            username: Some("APP".to_owned()),
+            password: Some("secret".to_owned()),
+            ..Default::default()
+        };
+
+        let connect =
+            driver::to_connect_options(&opts).expect("default DCD must not rewrite descriptor");
+        assert_eq!(connect.connect_string(), opts.connect_string);
     }
 
     #[test]
@@ -10269,17 +10299,17 @@ mod tests {
     }
 
     #[test]
-    fn ttc_129_is_promoted_to_fresh_connection_retry() {
+    fn ttc_84_is_connection_lost() {
         let opts = ezconnect_opts();
         let err = oraclemcp_driver_cx::Error::Protocol(
             oraclemcp_driver_cx::protocol::ProtocolError::UnknownMessageType {
-                message_type: 129,
+                message_type: 84,
                 position: 35,
             },
         );
         assert!(
             !err.is_connection_lost(),
-            "driver exposes TTC-129 as reusable"
+            "driver exposes TTC-84 as reusable"
         );
         let mapped = driver::driver_query_error(err, &opts, Some("metadata probe"));
         assert!(matches!(mapped, DbError::ConnectionLost(_)));

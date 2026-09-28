@@ -336,6 +336,9 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
 pub(super) struct GeneratedReadAuditCtx<'a> {
     pub(super) entry: AuditEntryCtx<'a>,
     pub(super) tool: &'a str,
+    /// Catalog/audit probes run before the served read and therefore need the
+    /// same recoverable-loss quarantine as the read itself.
+    pub(super) quarantine: &'a SyncMutex<Option<ConnectionQuarantine>>,
 }
 
 pub(super) struct GuardedGeneratedReadConn<'a> {
@@ -395,7 +398,12 @@ impl GuardedGeneratedReadConn<'_> {
         let danger = audit_danger_string(DangerLevel::Safe);
         let observed_scn = match self.audit.entry.auditor {
             Some(_) => {
-                observed_scn_for_audit(cx, self.inner, self.catalog_cache, self.audit.entry).await?
+                let observed = ReadUncertaintyConn {
+                    inner: self.inner,
+                    quarantine: Some(self.audit.quarantine),
+                    provenance: ReadQueryProvenance::ServerRead,
+                };
+                observed_scn_for_audit(cx, &observed, self.catalog_cache, self.audit.entry).await?
             }
             None => None,
         };

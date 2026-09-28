@@ -845,8 +845,8 @@ pub struct ConnectionProfile {
     pub inactivity_timeout_seconds: Option<u64>,
     /// Optional Oracle EXPIRE_TIME dead-connection-detection probe interval, in
     /// MINUTES (Oracle's EXPIRE_TIME granularity). Injected into the connect
-    /// string as `expire_time=N`. `None` disables DCD probes; `0` is treated as
-    /// unset.
+    /// string as `expire_time=N`. Omitting this field uses the ten-minute
+    /// runtime default; `0` explicitly disables the probe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub keepalive_minutes: Option<u64>,
     /// Optional Session Data Unit request size for the thin driver.
@@ -1683,6 +1683,19 @@ mod tests {
         )
         .expect_err("misspelled keepalive field must be rejected");
         assert!(err.to_string().contains("keepalive_minute"));
+    }
+
+    #[test]
+    fn keepalive_defaults_to_10_minutes() {
+        let cfg = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "defaulted-keepalive"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
+        )
+        .expect("profile without an explicit keepalive is valid");
+        assert_eq!(cfg.profiles[0].keepalive_minutes, None);
     }
 
     #[test]

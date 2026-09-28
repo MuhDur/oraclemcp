@@ -1291,5 +1291,23 @@
     "db_reread": [],
     "audit_expect": [],
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+  },
+  {
+    "case_id": "w4_runtime_issue47_killed_session_recovers",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": ["stdio"],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {"sql": "SELECT 1 AS C FROM dual"},
+      "kill_served_session_user": "${owner}"
+    },
+    "expect": {"rows": [{"C": "<masked>"}]},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
   }
 ]

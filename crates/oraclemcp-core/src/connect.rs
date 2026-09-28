@@ -272,7 +272,15 @@ fn profile_to_options_for_level(
         statement_cache_size: profile.pool.as_ref().map(|pool| pool.statement_cache_size),
         connect_timeout: resolve_connect_timeout(profile.connect_timeout_seconds),
         inactivity_timeout: resolve_connect_timeout(profile.inactivity_timeout_seconds),
-        keepalive_minutes: profile.keepalive_minutes.filter(|&m| m > 0),
+        // An omitted setting adopts DCD's conservative ten-minute default. An
+        // explicit zero remains an opt-out, and provenance is retained so a
+        // complete Oracle Net descriptor can keep its own EXPIRE_TIME setting.
+        keepalive_minutes: match profile.keepalive_minutes {
+            None => Some(10),
+            Some(0) => None,
+            Some(minutes) => Some(minutes),
+        },
+        keepalive_defaulted: profile.keepalive_minutes.is_none(),
         call_timeout: Some(
             crate::request_budget::RequestBudget::from_profile(
                 asupersync::Time::ZERO,
