@@ -47,15 +47,20 @@ fn same_identified_pdb(left: &PdbIdentityScope, right: &PdbIdentityScope) -> boo
     )
 }
 
-fn same_service_local_branch_scope(left: &EditionProposal, right: &EditionProposal) -> bool {
-    same_identified_pdb(&left.coordination_scope, &right.coordination_scope)
-        || matches!(
-            (&left.coordination_scope, &right.coordination_scope),
+fn same_service_local_branch_scope(
+    left_scope: &PdbIdentityScope,
+    left_profile: &str,
+    right_scope: &PdbIdentityScope,
+    right_profile: &str,
+) -> bool {
+    same_identified_pdb(left_scope, right_scope)
+        || (matches!(
+            (left_scope, right_scope),
             (
                 PdbIdentityScope::LocalOnly { .. },
                 PdbIdentityScope::LocalOnly { .. }
             )
-        ) && left.profile == right.profile
+        ) && left_profile == right_profile)
 }
 
 /// Proposal review is a text-only classification phase. Applying a proposal
@@ -279,7 +284,12 @@ impl ChangeProposalStore {
             .into_iter()
             .find(|candidate| {
                 candidate.proposal_id != proposal.proposal_id
-                    && same_service_local_branch_scope(candidate, proposal)
+                    && same_service_local_branch_scope(
+                        &candidate.coordination_scope,
+                        &candidate.profile,
+                        &proposal.coordination_scope,
+                        &proposal.profile,
+                    )
                     && candidate.base_edition == proposal.base_edition
                     && candidate.child_edition != proposal.child_edition
                     && candidate.status != EditionProposalStatus::Withdrawn
