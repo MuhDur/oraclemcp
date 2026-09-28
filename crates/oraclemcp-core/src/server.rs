@@ -11,6 +11,7 @@ use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -1134,7 +1135,7 @@ impl OracleMcpServer {
         }
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
-        self.serve_stdio_with_io(stdin.lock(), stdout.lock(), auth)
+        self.serve_stdio_with_io(stdin, stdout.lock(), auth)
     }
 
     /// Serve a native stdio JSON-RPC session over arbitrary blocking IO. This
@@ -1147,7 +1148,7 @@ impl OracleMcpServer {
         auth: &StdioAuthPolicy,
     ) -> std::io::Result<()>
     where
-        R: Read,
+        R: Read + Send + 'static,
         W: Write,
     {
         // One stdio serve loop == one MCP session (bead oraclemcp-s693): reset
@@ -1160,28 +1161,83 @@ impl OracleMcpServer {
         let _ = self
             .notifications
             .drain(crate::notifications::STDIO_NOTIFICATION_OWNER);
-        let mut reader = BufReader::new(reader);
-        let mut frame = Vec::new();
+        let (frame_tx, frame_rx) = std_mpsc::channel::<std::io::Result<Vec<u8>>>();
+        let reader_thread = std::thread::spawn(move || {
+            let mut reader = BufReader::new(reader);
+            let mut frame = Vec::new();
+            loop {
+                frame.clear();
+                match reader.read_until(b'\n', &mut frame) {
+                    Ok(0) => return,
+                    Ok(_) => {
+                        if frame.iter().all(u8::is_ascii_whitespace) {
+                            continue;
+                        }
+                        if frame_tx.send(Ok(frame.clone())).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = frame_tx.send(Err(error));
+                        return;
+                    }
+                }
+            }
+        });
+        let (response_tx, response_rx) = std_mpsc::channel::<Value>();
+        let mut workers = Vec::new();
         loop {
-            frame.clear();
-            let read = reader.read_until(b'\n', &mut frame)?;
-            if read == 0 {
-                break;
-            }
-            if frame.iter().all(u8::is_ascii_whitespace) {
-                continue;
-            }
-            let response = if frame.len() > STDIO_MAX_FRAME_BYTES {
-                Some(jsonrpc_error(
-                    Value::Null,
-                    JSONRPC_INVALID_REQUEST,
-                    "JSON-RPC frame exceeds stdio limit",
-                ))
-            } else {
-                self.handle_stdio_frame(&frame, auth)
-            };
-            if let Some(response) = response {
+            while let Ok(response) = response_rx.try_recv() {
                 write_jsonrpc_response(&mut writer, &response)?;
+            }
+            for notification in self.drain_resource_updated_notifications(
+                crate::subscriptions::STDIO_SUBSCRIPTION_OWNER,
+            ) {
+                write_jsonrpc_response(&mut writer, &notification)?;
+            }
+            for notification in
+                self.drain_server_notifications(crate::notifications::STDIO_NOTIFICATION_OWNER)
+            {
+                write_jsonrpc_response(&mut writer, &notification)?;
+            }
+
+            let frame = match frame_rx.recv_timeout(Duration::from_millis(10)) {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(error)) => return Err(error),
+                Err(std_mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
+            };
+            let is_tool_call = crate::strict_json::decode_strict_value(&frame)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
+                .is_some_and(|method| method == "tools/call");
+            if is_tool_call && frame.len() <= STDIO_MAX_FRAME_BYTES {
+                let server = self.clone();
+                let auth = auth.clone();
+                let response_tx = response_tx.clone();
+                workers.push(std::thread::spawn(move || {
+                    if let Some(response) = server.handle_stdio_frame(&frame, &auth) {
+                        let _ = response_tx.send(response);
+                    }
+                }));
+            } else {
+                let response = if frame.len() > STDIO_MAX_FRAME_BYTES {
+                    Some(jsonrpc_error(
+                        Value::Null,
+                        JSONRPC_INVALID_REQUEST,
+                        "JSON-RPC frame exceeds stdio limit",
+                    ))
+                } else {
+                    self.handle_stdio_frame(&frame, auth)
+                };
+                if let Some(response) = response {
+                    write_jsonrpc_response(&mut writer, &response)?;
+                }
             }
             // E1: after handling a request, flush any queued
             // `notifications/resources/updated` for subscribed, changed
@@ -1206,6 +1262,13 @@ impl OracleMcpServer {
                 write_jsonrpc_response(&mut writer, &notification)?;
             }
         }
+        for worker in workers {
+            let _ = worker.join();
+        }
+        while let Ok(response) = response_rx.try_recv() {
+            write_jsonrpc_response(&mut writer, &response)?;
+        }
+        let _ = reader_thread.join();
         Ok(())
     }
 
