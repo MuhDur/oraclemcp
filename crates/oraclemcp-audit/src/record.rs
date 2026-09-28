@@ -47,7 +47,12 @@ const AUDIT_ENTRY_HASH_DOMAIN_V12: &[u8] = b"oraclemcp:audit-entry-hash:v12\n";
 /// constant. A constant is deliberately used instead of a best-effort SQL
 /// scrubber: malformed Oracle quoting, comments, or PL/SQL can never make source
 /// text escape into the signed record.
-pub(crate) const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
+/// Canonical marker for a report-safe SQL preview.
+///
+/// New records persist exactly this value. Consumers that render old signed
+/// records must use this marker rather than the historical `sql_preview`
+/// field, which can contain a truncated raw statement.
+pub const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
 pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V12;
