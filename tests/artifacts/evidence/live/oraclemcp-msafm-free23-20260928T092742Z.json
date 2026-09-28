@@ -1,0 +1,41 @@
+{
+  "run_id": "w4-d770508b3ba88aa1",
+  "lane": "free23",
+  "source_sha": "5104c021e1f354d6ab1f2c5b5dd1d7e092620b78",
+  "kind": "live-oracle-w4-case-run",
+  "runner": "subagent; ORACLEMCP_LIVE_XE=1; free23 localhost:1523/FREEPDB1 as SYSTEM; release binary target/release/oraclemcp built at source 5104c021 (sha256 0aa47142ec86a0890779adb2ebead806d46566bbaf0373a1546b7428c699c829)",
+  "command": "CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target ORACLEMCP_RIG_L1_FREE23_ADMIN_PASSWORD=<redacted> ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane free23 --case w4_diagnostics_licensed_profile_serves_awr --binary target/release/oraclemcp --binary-source-sha 5104c021e1f354d6ab1f2c5b5dd1d7e092620b78",
+  "result": "verdict pass (2 cases: stdio, http)",
+  "driver_output": "{\"cases\":2,\"lane\":\"free23\",\"registry_count\":69,\"results\":\"/home/durakovic/projects/oraclemcp/target/e2e/w4/free23/results.json\",\"verdict\":\"pass\"}",
+  "capabilities": [
+    "edition:FREE",
+    "feature:JSON_TYPE",
+    "feature:VECTOR",
+    "feature:VPD",
+    "priv:CREATE_PROCEDURE",
+    "priv:CREATE_TABLE",
+    "priv:CREATE_TYPE",
+    "priv:SELECT_V_SQL",
+    "version:23"
+  ],
+  "cases": [
+    {
+      "case_id": "w4_diagnostics_licensed_profile_serves_awr",
+      "lane": "free23",
+      "transport": "stdio",
+      "profile_variant": "synthetic_licensed",
+      "result": "step oracle_top_queries(historical=true) => source=awr_ash, row_count=1, SQL_ID=b39m8n96gxk7c; primary oracle_plan_timeline => points=1 (snapshot_id=2) for the same SQL_ID",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "w4_diagnostics_licensed_profile_serves_awr",
+      "lane": "free23",
+      "transport": "http",
+      "profile_variant": "synthetic_licensed",
+      "result": "step oracle_top_queries(historical=true) => source=awr_ash, row_count=1, SQL_ID=b39m8n96gxk7c; primary oracle_plan_timeline => points=1 (snapshot_id=2) for the same SQL_ID",
+      "verdict": "pass"
+    }
+  ],
+  "contrast": "On the same lane and binary, the default (unlicensed) profile's refusal cases w4_top_queries_historical_without_licence_typed_refusal and w4_plan_timeline_awr_or_typed_refusal both return typed POLICY_DENIED (stdio+http). The synthetic_licensed profile differs only by diagnostics_pack_licensed=true, and the lane capability matrix declares licences=[].",
+  "note": "Local subagent run, not a scheduled CI lane; the W4 driver is runtime-gated, so this gated run is the live proof for the licensed path. Raw results: target/e2e/w4/msafm/results-licensed-5104c021.json (gitignored run output)."
+}

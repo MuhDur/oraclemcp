@@ -1,60 +1,61 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T08:29:31Z",
+  "generated_at": "2026-09-28T09:27:42Z",
   "bead_id": "oraclemcp-msafm",
   "scope": {
-    "summary": "PARTIAL, in-lane only; bead is NOT closable. The fail-closed Diagnostics Pack license admission for historical oracle_top_queries/oracle_plan_timeline already landed on main at b37214d8; this commit adds the one missing awr-layer test (licensed attestation + both historical catalogs positively absent degrades to a typed POLICY_DENIED refusal, never an empty/AWR success). The orchestrator's REWORK (restore the three deleted dispatch tests with the license attestation set, add one licensed live W4 case) requires the forbidden dispatch/config lane and is outstanding.",
+    "summary": "Restores the three dispatch-level licensed-Diagnostics-Pack tests deleted by b37214d8, binding them to an explicit diagnostics_pack_licensed=true profile lease, keeps the license-refusal tests, and adds one live W4 case proving the licensed profile still gets AWR top_queries/plan_timeline data on free23.",
     "in_scope": [
-      "crates/oraclemcp-db/src/awr.rs"
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp-db/src/awr.rs",
+      "scripts/e2e/w4/driver.py",
+      "scripts/e2e/w4/cases/ops-tools.json"
     ],
     "out_of_scope": [
-      "crates/oraclemcp/src/dispatch/** (including crates/oraclemcp/src/dispatch/tests.rs): restoring the three deleted tests (uncertain_historical_probe_stops_fallback_and_quarantines_pinned_session, guarded_ora_00942_historical_probes_degrade_without_internal_error, serves_a_snapshot_bounded_plan_cost_timeline) with an explicit Diagnostics Pack license attestation. Forbidden this wave (held by dispatch owner 7.4).",
-      "crates/oraclemcp-config/src/profile.rs: the operator attestation field diagnostics_pack_licensed and a profile variant that sets it for a licensed live W4 case. Forbidden this wave.",
-      "scripts/e2e/w4/** (driver.py, cases, rig.toml): adding the licensed-profile live W4 case the orchestrator requested. Outside this bead's declared file lane.",
-      "crates/oraclemcp-core/src/capabilities.rs: no change made; the capability report only forwards oraclemcp_db::PrivilegeProfile and has no admission logic to fail closed. No concrete consumer for a new field was identified, so none was added (anti-ceremony).",
-      "crates/oraclemcp-db/src/health.rs: the oracle_db_health preflight still labels the Oracle activation probe result diagnostics_pack_licensed; changing that conflation needs privileges.rs/health.rs, outside this lane.",
-      "Live W4 re-run: not attempted because the shared checkout carries other agents' uncommitted edits (dispatch/mod.rs #48, config/lib.rs, core/connect.rs, core/request_budget.rs, db/catalog_*.rs, main.rs), so a binary built now would not be a clean-HEAD revision (constitution rule 14)."
+      "No change to the db-layer Diagnostics Pack refusal semantics shipped in b37214d8; awr.rs and dispatch/mod.rs are included only as the pre-wired call sites the restored tests exercise.",
+      "Not pushed and the bead is not closed here; this document is close evidence for an independent verifier to review."
     ]
   },
   "source": {
-    "sha": "7282fe117c1f7f50c9a40df3424828f2ff2f2494",
-    "tree_clean": false,
+    "sha": "5104c021e1f354d6ab1f2c5b5dd1d7e092620b78",
+    "tree_clean": true,
     "branch": "main"
   },
   "proofs": [],
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "oracle_top_queries historical=true / oracle_plan_timeline (stdio + HTTP)",
-        "kind": "cli",
-        "trace": "cargo test -p oraclemcp-db --lib awr:: => 24 passed 0 failed (was 23 pre-change). New test awr::tests::licensed_history_with_both_catalogs_absent_degrades_to_typed_refusal asserts resolve_top_sql_source_with_license(licensed=true) with both guarded probes returning ORA-00942 yields DiagnosticsSource::Unavailable and top_sql_query then returns ErrorClass::PolicyDenied, with exactly the v$parameter and perfstat.stats$snapshot probes issued and no dba_hist_* read."
+        "name": "oracle_top_queries(historical=true) and oracle_plan_timeline tools",
+        "kind": "tool",
+        "trace": "Live W4 case w4_diagnostics_licensed_profile_serves_awr on free23 (stdio+http) under the synthetic_licensed profile (diagnostics_pack_licensed=true) returns source=awr_ash with a real SQL_ID, then a plan_timeline point for that SQL_ID; live artifact tests/artifacts/evidence/live/oraclemcp-msafm-free23-20260928T092742Z.json."
       },
       {
-        "name": "planted negative (pre-fix fail-open)",
-        "kind": "git",
-        "trace": "git show b37214d8^:crates/oraclemcp-db/src/awr.rs shows resolve_top_sql_source(historical=true) returning Ok(AwrAsh) whenever detect_diagnostics_pack_for_preflight is true, with no operator attestation, and plan_cost_timeline running the AWR query and returning Ok(timeline) (empty points) instead of a typed refusal. At HEAD both require diagnostics_pack_licensed and refuse before any DBA_HIST_* IO, proven by awr::tests::enabled_oracle_parameter_without_operator_license_is_refused_before_io and awr::tests::plan_timeline_refuses_unlicensed_before_any_awr_query."
+        "name": "W4 driver scoped run",
+        "kind": "cli",
+        "trace": "python3 scripts/e2e/w4/driver.py --lane free23 --case w4_diagnostics_licensed_profile_serves_awr --binary target/release/oraclemcp --binary-source-sha 5104c021... => verdict pass (cases=2, stdio+http); the same lane/binary returns typed POLICY_DENIED for the unlicensed refusal cases."
       }
     ]
   },
   "live_evidence": {
-    "claimed": false,
-    "artifacts": []
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "live-oracle-w4-case",
+        "path": "tests/artifacts/evidence/live/oraclemcp-msafm-free23-20260928T092742Z.json",
+        "sha": "5104c021e1f354d6ab1f2c5b5dd1d7e092620b78"
+      }
+    ]
   },
   "limitations": [
-    "No live W4 run in this session: the shared checkout is dirty with other agents' edits, so no verified-clean HEAD build was possible within the bounded window (rule 14). The live refusal behaviour was proven at the unit layer only.",
-    "The orchestrator REWORK (three dispatch tests + one licensed live W4 case) is not delivered by this commit and cannot be delivered from this lane without editing forbidden crates/oraclemcp/src/dispatch/** and crates/oraclemcp-config/src/profile.rs.",
-    "The orchestrator ruling of 2026-09-25T09:38Z ('REWORK, not closable yet') remains in force."
+    "The three restored tests are restored from git history with their assertions intact but now run against a config-backed licensed profile lease; the two new refusal tests are retained.",
+    "Only free23 was re-exercised live in this session; xe18 and xe21 were not re-run.",
+    "The release binary was built at source 5104c021; the crates/ and scripts/ trees at the W4 run's checkout were byte-identical to it (only .beads and tests/artifacts advanced between source and the run)."
   ],
-  "known_defects": [
-    "oracle_db_health preflight (crates/oraclemcp-db/src/health.rs) reports diagnostics_pack_licensed from the Oracle control_management_pack_access activation probe, not the operator license attestation; a lane can therefore show the capability as licensed while the tool correctly refuses. Fix belongs in health.rs/privileges.rs, outside this lane."
-  ],
-  "follow_ups": [
-    "Dispatch owner (7.4): restore the three tests deleted by b37214d8 in crates/oraclemcp/src/dispatch/tests.rs, each configuring an explicit Diagnostics Pack license attestation, and keep the new refusal tests.",
-    "Add one live W4 case proving a licensed profile (diagnostics_pack_licensed=true) still gets top_queries/plan_timeline data, or a typed unavailable where AWR is absent on that lane."
-  ],
+  "known_defects": [],
+  "follow_ups": [],
   "readiness": {
     "claim": "not-ready",
-    "basis": "scoped-test"
+    "basis": "live-evidence"
   }
 }
