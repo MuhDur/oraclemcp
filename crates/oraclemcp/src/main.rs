@@ -24,6 +24,7 @@
 static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod audit_evidence;
+mod audit_report;
 mod discover;
 mod readiness;
 mod robot_docs;
@@ -48,6 +49,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+use sha2::{Digest, Sha256};
 
 static CONNECT_DETAIL_ENV: OnceLock<bool> = OnceLock::new();
 
@@ -295,6 +298,12 @@ fn main() -> ExitCode {
                 key_id,
                 with_db_evidence,
             } => run_audit_verify(robot_json, &file, key_id.as_deref(), with_db_evidence),
+            AuditCommand::Report {
+                file,
+                format,
+                out,
+                key_id,
+            } => run_audit_report(robot_json, &file, format, out.as_deref(), key_id.as_deref()),
         },
         Command::Incident { command } => match command {
             IncidentCommand::Capture(args) => run_incident_capture(robot_json, args),
@@ -6116,6 +6125,112 @@ fn rewind_audit_verification_file(
             path.display()
         )
     })
+}
+
+fn audit_file_digest(file: &mut cap_std::fs::File, path: &Path) -> Result<String, String> {
+    rewind_audit_verification_file(file, path, "digesting")?;
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let read = file.read(&mut buffer).map_err(|error| {
+            format!(
+                "failed to read audit log {} for digest: {error}",
+                path.display()
+            )
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    rewind_audit_verification_file(file, path, "verification after digest")?;
+    let mut encoded = String::from("sha256:");
+    for byte in digest.finalize() {
+        use std::fmt::Write as _;
+        write!(&mut encoded, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(encoded)
+}
+
+fn run_audit_report(
+    robot_json: bool,
+    file: &Path,
+    format: audit_report::AuditReportFormat,
+    out: Option<&Path>,
+    key_id_override: Option<&str>,
+) -> ExitCode {
+    use std::io::BufReader;
+
+    let keyring = match audit_verification_keyring(key_id_override) {
+        Ok(keyring) => keyring,
+        Err(message) => {
+            emit_status_error(robot_json, "ORACLEMCP_AUDIT_KEY_REQUIRED", &message);
+            return ExitCode::from(2);
+        }
+    };
+    let mut audit_file = match open_audit_verification_file(file) {
+        Ok(file) => file,
+        Err(error) => {
+            emit_status_error(
+                robot_json,
+                "ORACLEMCP_AUDIT_READ_FAILED",
+                &error.to_string(),
+            );
+            return ExitCode::from(2);
+        }
+    };
+    let digest = match audit_file_digest(&mut audit_file.file, file) {
+        Ok(digest) => digest,
+        Err(message) => {
+            emit_status_error(robot_json, "ORACLEMCP_AUDIT_READ_FAILED", &message);
+            return ExitCode::from(2);
+        }
+    };
+    let report = match audit_report::verify_and_render(
+        BufReader::new(&mut audit_file.file),
+        keyring.verification_keys(),
+        &digest,
+        format,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            emit_status_error(robot_json, "ORACLEMCP_AUDIT_MALFORMED", &error.to_string());
+            return ExitCode::from(2);
+        }
+    };
+    if let Some(path) = out
+        && let Err(error) = fs::write(path, &report.content)
+    {
+        emit_status_error(
+            robot_json,
+            "ORACLEMCP_AUDIT_REPORT_WRITE_FAILED",
+            &error.to_string(),
+        );
+        return ExitCode::from(1);
+    }
+    let output = if robot_json {
+        serde_json::json!({
+            "kind": "oraclemcp_audit_report",
+            "format": format.as_str(),
+            "file_digest": digest,
+            "verification": report.verdict.status(),
+            "report": report.content,
+        })
+        .to_string()
+    } else if out.is_some() {
+        format!("audit report written: {}", out.unwrap().display())
+    } else {
+        report.content
+    };
+    let exit = if matches!(
+        report.verdict,
+        audit_report::AuditReportVerdict::Verified { .. }
+    ) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(2)
+    };
+    stdout_exit(write_stdout_text(&output), exit)
 }
 
 fn run_audit_verify(

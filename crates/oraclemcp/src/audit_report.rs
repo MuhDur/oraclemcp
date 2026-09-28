@@ -493,10 +493,10 @@ fn is_refusal(decision: AuditDecision) -> bool {
 fn refusal_counts(records: &[AuditRecord]) -> Vec<(String, usize)> {
     let mut counts = std::collections::BTreeMap::new();
     for record in records.iter().filter(|record| is_refusal(record.decision)) {
-        let class = record
-            .failure
-            .as_ref()
-            .map_or_else(|| decision_name(record.decision).to_owned(), failure_name);
+        let class = record.failure.as_ref().map_or_else(
+            || decision_name(record.decision).to_owned(),
+            |failure| failure_name(Some(failure)),
+        );
         *counts.entry(class).or_insert(0) += 1;
     }
     counts.into_iter().collect()
@@ -650,7 +650,7 @@ mod tests {
         // the chain's authenticity.
         legacy_preview_record.sql_preview = CANARY_SQL.to_owned();
         for format in [AuditReportFormat::Markdown, AuditReportFormat::Html] {
-            let report = render(
+            let content = render(
                 &VerifiedAuditReport {
                     file_digest: "sha256:fixture",
                     records: std::slice::from_ref(&legacy_preview_record),
@@ -658,8 +658,8 @@ mod tests {
                 },
                 format,
             );
-            assert!(!report.content.contains(CANARY_SQL), "{format:?}");
-            assert!(report.content.contains("<sql text redacted>"), "{format:?}");
+            assert!(!content.contains(CANARY_SQL), "{format:?}");
+            assert!(content.contains("sql text redacted"), "{format:?}");
         }
     }
 

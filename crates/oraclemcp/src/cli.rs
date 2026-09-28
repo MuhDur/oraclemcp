@@ -10,7 +10,9 @@
 //! `pub(crate)` because `main_tests.rs` constructs the arg structs and reads
 //! their fields; visibility is the only change, never behaviour.
 
-use super::{DEFAULT_SETUP_CONFIG_PATH, selftest::SelftestCliArgs};
+use super::{
+    DEFAULT_SETUP_CONFIG_PATH, audit_report::AuditReportFormat, selftest::SelftestCliArgs,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
@@ -218,6 +220,20 @@ pub(crate) enum AuditCommand {
         /// Summarize signed database evidence and session-tag correlation.
         #[arg(long, visible_alias = "with_db_evidence")]
         with_db_evidence: bool,
+    },
+    /// Verify an audit chain and export a deterministic redacted session report.
+    Report {
+        /// Path to the append-only JSONL audit log.
+        file: PathBuf,
+        /// Human-facing report serialization.
+        #[arg(long, value_enum, default_value_t = AuditReportFormat::Markdown)]
+        format: AuditReportFormat,
+        /// Write the report to this file instead of standard output.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Override the active key id for a legacy env-only key.
+        #[arg(long)]
+        key_id: Option<String>,
     },
 }
 
