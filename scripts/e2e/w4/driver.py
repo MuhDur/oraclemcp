@@ -2139,6 +2139,16 @@ def run_lane(args):
                     rows.append(run_case(client, case, transport, args.lane, capabilities, connection,
                                          barriers, binary, audit_path, client_env,
                                          discovered.get(case["tool"])))
+                    if "kill_served_session_dml_user" in case["call"]:
+                        # The intentionally killed owner_rw connection cannot service the
+                        # harness's normal level drop. Start a fresh MCP process at the
+                        # lane's READ_ONLY baseline before continuing into another profile.
+                        client.close()
+                        client = (StdioClient(binary, args.lane, client_env) if transport == "stdio"
+                                  else HttpClient(binary, args.lane, client_env, port, secret, audience))
+                        initialize(client)
+                        current_profile = args.lane
+                        current_level = "READ_ONLY"
                     if "steps" in case:
                         # Steps may elevate, expire or drop the session level on
                         # their own; re-establish the tracked READ_ONLY baseline.
