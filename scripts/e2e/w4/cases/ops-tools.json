@@ -474,11 +474,10 @@
     ],
     "requires": [],
     "setup": [],
+    "runtime_retention_probe": true,
     "call": {
       "arguments": {
-        "sql": "SELECT RUN_ID, TOKEN FROM ${owner}.T_RUN_${run_id} ORDER BY RUN_ID",
-        "scn_a": 1,
-        "scn_b": 2,
+        "sql": "SELECT RUN_ID, TOKEN FROM W4_RIG.W4_RUNS ORDER BY RUN_ID",
         "key": [
           "RUN_ID"
         ]

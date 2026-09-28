@@ -43,7 +43,8 @@ RELEASE_MANIFEST = ROOT / "scripts/e2e/cases/release_0_12.json"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
-                        "steps", "expect_by_version", "cleanup", "plan_contains", "row_contains"}
+                        "steps", "expect_by_version", "cleanup", "plan_contains", "row_contains",
+                        "runtime_retention_probe"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -335,6 +336,11 @@ def validate_case(case, filename):
     if case.get("profile_variant") == "capped_rw":
         require(case["level"] in {"READ_ONLY", "READ_WRITE"},
                 "the capped_rw profile's ceiling is READ_WRITE")
+    if "runtime_retention_probe" in case:
+        require(case["runtime_retention_probe"] is True
+                and case["case_id"] == "w4_diff_retention_exceeded_typed"
+                and case["tool"] == "oracle_diff" and case["level"] == "READ_ONLY",
+                "runtime retention probing is reserved for the oracle_diff retention case")
     if "steps" in case:
         validate_steps(case)
     require(isinstance(case["transports"], list) and case["transports"]
@@ -1586,6 +1592,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
            "tool": case["tool"], "level": case["level"], "lane": lane,
            "transport": transport, "input_sha256": sha256(input_value),
            "expected": scrub(expected), "actual": None, "verdict": "fail", "duration_ms": 0}
+    if "retention_probe" in case:
+        row["retention_probe"] = scrub(case["retention_probe"])
     try:
         if case.get("setup_phase", "before_call") == "before_call":
             apply_setup(connection, case["setup"])
@@ -1890,6 +1898,54 @@ def select_cases(file_cases, generated_cases, selected):
     return [case for case in file_cases + generated_cases if case["case_id"] in selected]
 
 
+def probe_expired_retention_scn(connection):
+    """Find a real expired SCN and prove it against the durable W4 registry.
+
+    `V$UNDOSTAT` supplies the lab's current retention observation; the candidate
+    is accepted only when an independent system connection reproduces a
+    flashback retention error while reading `W4_RIG.W4_RUNS`.  This keeps the
+    served oracle_diff case free of invented SCNs and makes the fixture usable
+    despite lane-specific SCN rates and undo pressure.
+    """
+    cursor = connection.cursor()
+    retention = cursor.execute("SELECT MAX(TUNED_UNDORETENTION) FROM V$UNDOSTAT").fetchone()[0]
+    require(type(retention) is int and retention > 0,
+            "V$UNDOSTAT did not report a positive tuned undo retention")
+    current_scn = cursor.execute("SELECT CURRENT_SCN FROM V$DATABASE").fetchone()[0]
+    require(type(current_scn) is int and current_scn > 0,
+            "V$DATABASE did not report a positive current SCN")
+    for multiplier in (2, 4, 8, 16, 32):
+        seconds = retention * multiplier
+        try:
+            scn = cursor.execute(
+                "SELECT TIMESTAMP_TO_SCN(SYSTIMESTAMP - NUMTODSINTERVAL(:1,'SECOND')) FROM DUAL",
+                (seconds,)).fetchone()[0]
+        except Exception as exc:
+            message = str(exc)
+            require("ORA-08186" in message,
+                    f"retention SCN timestamp probe failed unexpectedly: {message[:180]}")
+            continue
+        require(type(scn) is int and scn > 0, "retention timestamp probe returned no SCN")
+        try:
+            cursor.execute("BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;", (scn,))
+            cursor.execute("SELECT COUNT(*) FROM W4_RIG.W4_RUNS").fetchone()
+        except Exception as exc:
+            message = str(exc)
+            try:
+                cursor.execute("BEGIN DBMS_FLASHBACK.DISABLE; END;")
+            except Exception:
+                pass
+            if any(code in message for code in ("ORA-01555", "ORA-08180", "ORA-08186")):
+                return {"tuned_undo_retention_seconds": retention,
+                        "seconds_past": seconds, "multiplier": multiplier,
+                        "scn_a": scn, "scn_b": current_scn,
+                        "external_error": message.split("\n", 1)[0]}
+            raise DriverError(f"retention candidate {scn} failed unexpectedly: {message[:180]}") from exc
+        else:
+            cursor.execute("BEGIN DBMS_FLASHBACK.DISABLE; END;")
+    raise DriverError("lab retained every SCN tested beyond its reported undo retention")
+
+
 def run_lane(args):
     settings = load_lane(HERE / "rig.toml", args.lane)
     config = json.loads(CAPABILITIES.read_text())
@@ -1962,10 +2018,24 @@ def run_lane(args):
                         connection.cursor().execute(f"GRANT SELECT ANY DICTIONARY TO {owner}")
                     write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
                                      owner=owner, cross="W4X_" + fixture_id)
+                needs_retention_probe = any(
+                    case.get("runtime_retention_probe")
+                    and (not args.case or case["case_id"] in args.case)
+                    and transport in case["transports"]
+                    for case in family_cases)
+                retention_probe = (probe_expired_retention_scn(connection)
+                                   if needs_retention_probe else None)
                 client_env = {**env, "XDG_STATE_HOME": str(state)}
                 expanded_family = ([] if args.contract_only else [
                     freshen_vsql_marker(expand_case(case, fixture_id, transport, args.lane)) for case in family_cases
                     if transport in case["transports"]])
+                if retention_probe is not None:
+                    for case in expanded_family:
+                        if case.get("runtime_retention_probe"):
+                            arguments = case["call"]["arguments"]
+                            arguments["scn_a"] = retention_probe["scn_a"]
+                            arguments["scn_b"] = retention_probe["scn_b"]
+                            case["retention_probe"] = retention_probe
                 for case in expanded_family:
                     if (case.get("setup_phase") == "before_server"
                             and set(case["requires"]) <= capabilities):
