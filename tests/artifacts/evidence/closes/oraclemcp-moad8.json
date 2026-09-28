@@ -1,0 +1,50 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:24:00Z",
+  "bead_id": "oraclemcp-moad8",
+  "scope": {
+    "summary": "oracle_get_source now returns a typed OBJECT_NOT_FOUND for a missing object instead of an empty success; delivered by 8.2's commit b206ff40 (report missing get_source objects as not found) with the W4 self-containment work.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/intelligence.rs"
+    ],
+    "out_of_scope": [
+      "The 8.2 enum/array/VIEW work (separate bead)."
+    ]
+  },
+  "source": {
+    "sha": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_get_source tool",
+        "kind": "tool",
+        "trace": "Isolated W4 case w4_get_source_missing_object_not_found on free23 (stdio+http) returns typed OBJECT_NOT_FOUND; live artifact tests/artifacts/evidence/live/oraclemcp-moad8-free23-20260928T1124Z.json."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "live-oracle-w4-case",
+        "path": "tests/artifacts/evidence/live/oraclemcp-moad8-free23-20260928T1124Z.json",
+        "sha": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717"
+      }
+    ]
+  },
+  "limitations": [
+    "The fix was delivered under bead 8.2's commit b206ff40; this close records the tool behaviour and the isolated live case.",
+    "No unit-level regression test is uniquely attributable to moad8; the db-layer not-found logic is covered by 8.2's tests."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}
