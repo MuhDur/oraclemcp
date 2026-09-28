@@ -13610,7 +13610,8 @@ pub const fn oraclemcp_db::source_object_types() -> &'static [&'static str]
 pub const fn oraclemcp_db::source_search_object_types() -> &'static [&'static str]
 pub fn oraclemcp_db::supported_wallet_modes() -> &'static [oraclemcp_db::WalletMode]
 pub fn oraclemcp_db::tablespace_usage_sql() -> (&'static str, alloc::string::String)
-pub fn oraclemcp_db::top_sql_query(oraclemcp_db::DiagnosticsSource, oraclemcp_db::TopSqlMetric, u32, core::option::Option<u8>) -> core::result::Result<(oraclemcp_db::CatalogQueryId, alloc::vec::Vec<oraclemcp_db::OracleBind>), oraclemcp_error::ErrorEnvelope>
+pub fn oraclemcp_db::top_sql_query(oraclemcp_db::DiagnosticsSource, oraclemcp_db::TopSqlMetric, u32, core::option::Option<u8>) -> core::result::Result<(oraclemcp_db::CatalogQueryId, alloc::vec::Vec<oraclemcp_db::OracleBind>), alloc::boxed::Box<oraclemcp_error::ErrorEnvelope>>
+pub fn oraclemcp_db::top_sql_query_filtered(oraclemcp_db::DiagnosticsSource, oraclemcp_db::TopSqlMetric, u32, core::option::Option<u8>, core::option::Option<&str>, core::option::Option<&str>) -> core::result::Result<(oraclemcp_db::CatalogQueryId, alloc::vec::Vec<oraclemcp_db::OracleBind>), alloc::boxed::Box<oraclemcp_error::ErrorEnvelope>>
 pub fn oraclemcp_db::unusable_indexes_sql(oraclemcp_db::ViewTier) -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::validate_adb_connect_string(&str) -> core::result::Result<oraclemcp_db::AdbConnectInfo, oraclemcp_db::OciError>
 pub fn oraclemcp_db::wallet_certificate_validity(&std::path::Path, core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::WalletCertValidity>, oraclemcp_db::WalletFileReadError>
