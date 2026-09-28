@@ -642,10 +642,9 @@ async fn resolved_relations_read_purity_with_trusted_views(
 }
 
 fn trusted_view_identity_is_eligible(relation: &ResolvedObject, trusted_views: &[String]) -> bool {
-    !relation.quote_exact
-        && trusted_views
-            .iter()
-            .any(|candidate| candidate == &format!("{}.{}", relation.owner, relation.name))
+    trusted_views
+        .iter()
+        .any(|candidate| candidate == &format!("{}.{}", relation.owner, relation.name))
 }
 
 async fn trusted_view_source_is_proven(
@@ -693,15 +692,24 @@ async fn trusted_view_source_is_proven(
         view_path: &next_path,
         ..policy.context
     };
-    Ok(Box::pin(prove_semantic_read_plan_inner(
+    let proof = Box::pin(prove_semantic_read_plan_inner(
         cx,
         conn,
         policy.cache,
         &plan,
         next_context,
     ))
-    .await
-    .is_ok())
+    .await;
+    if let Err(error) = &proof {
+        tracing::debug!(
+            owner = relation.owner,
+            view = relation.name,
+            depth = policy.context.view_depth,
+            reason = ?error,
+            "trusted view source closure was not proven"
+        );
+    }
+    Ok(proof.is_ok())
 }
 
 /// A dictionary spelling is eligible only when Oracle resolved it through its
@@ -6202,6 +6210,7 @@ mod tests {
         ));
         assert!(!trusted_view_identity_is_eligible(&view, &[]));
         view.quote_exact = true;
+        view.name = "reporting_view".to_owned();
         assert!(!trusted_view_identity_is_eligible(
             &view,
             &["APP.REPORTING_VIEW".to_owned()]
