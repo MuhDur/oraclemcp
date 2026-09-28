@@ -18,6 +18,19 @@ incapable of writing.
 > the same controls, and the project [`README.md`](../README.md) for the full
 > tool surface and profile schema.
 
+## Field round after an install
+
+Run the installed binary's read-only field round against a configured profile:
+
+```sh
+oraclemcp selftest --profile production-readonly --json --issue-draft ./selftest-drafts
+```
+
+`selftest` derives an immutable `READ_ONLY` ceiling even when the selected
+profile permits administration. It drives the served stdio transport, classifies
+every advertised tool, and writes only sanitized local issue drafts. Exit `0`
+means clean, `2` means a defect, and `3` means environment findings only.
+
 ---
 
 ## 1. The pinned nightly toolchain is build-time-only

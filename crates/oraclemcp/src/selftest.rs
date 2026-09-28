@@ -1062,6 +1062,13 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
             redactor.add(value.to_owned());
         }
     }
+    // An optional listener URL is operator supplied and may include an internal
+    // host, service path, or bearer material. A failed HTTP transport probe
+    // includes that URL in its diagnostic, so register it before any probe can
+    // emit a report or issue draft.
+    if let Some(http) = args.http.as_deref() {
+        redactor.add(http.to_owned());
+    }
 
     let derived = match derive_readonly_config(&args.profile, &source) {
         Ok(derived) => derived,
@@ -1888,6 +1895,16 @@ mod tests {
             body.contains(REDACTED),
             "draft should carry placeholders: {body}"
         );
+    }
+
+    #[test]
+    fn redactor_scrubs_optional_http_listener_url() {
+        let listener = "https://canary-selftest-host.invalid/mcp?token=canary-token";
+        let mut redactor = Redactor::default();
+        redactor.add(listener.to_owned());
+        let scrubbed = redactor.scrub(&format!("HTTP initialize failed for {listener}"));
+        assert!(!scrubbed.contains(listener));
+        assert!(scrubbed.contains(REDACTED));
     }
 
     #[test]
