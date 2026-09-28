@@ -675,6 +675,10 @@ pub(super) struct TopQueriesArgs {
     #[serde(default)]
     pub(super) min_pct_of_total: Option<u8>,
     #[serde(default)]
+    pub(super) sql_id: Option<String>,
+    #[serde(default)]
+    pub(super) sql_text: Option<String>,
+    #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
 }
 

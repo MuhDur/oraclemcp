@@ -217,6 +217,18 @@ pub fn top_sql_query(
     top_n: u32,
     min_pct_of_total: Option<u8>,
 ) -> Result<(CatalogQueryId, Vec<OracleBind>), ErrorEnvelope> {
+    top_sql_query_filtered(source, metric, top_n, min_pct_of_total, None, None)
+}
+
+/// Build the fixed top-SQL catalog query with optional live-cursor-only binds.
+pub fn top_sql_query_filtered(
+    source: DiagnosticsSource,
+    metric: TopSqlMetric,
+    top_n: u32,
+    min_pct_of_total: Option<u8>,
+    sql_id: Option<&str>,
+    sql_text: Option<&str>,
+) -> Result<(CatalogQueryId, Vec<OracleBind>), ErrorEnvelope> {
     use CatalogQueryId as C;
     let n = OracleBind::I64(i64::from(top_n.clamp(1, 100)));
     let id = match (source, metric, min_pct_of_total.is_some()) {
@@ -246,10 +258,24 @@ pub fn top_sql_query(
             "use the default live source, or install Statspack (free) / enable the Diagnostics Pack for history",
         )),
     };
+    if source != DiagnosticsSource::LiveCursor && (sql_id.is_some() || sql_text.is_some()) {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            "sql_id and sql_text filters are available only for the live cursor cache",
+        ));
+    }
     let binds = match (source, min_pct_of_total) {
-        (DiagnosticsSource::LiveCursor, Some(pct)) => {
-            vec![OracleBind::I64(i64::from(pct.min(100))), n]
-        }
+        (DiagnosticsSource::LiveCursor, Some(pct)) => vec![
+            sql_id.map_or(OracleBind::Null, OracleBind::from),
+            sql_text.map_or(OracleBind::Null, OracleBind::from),
+            OracleBind::I64(i64::from(pct.min(100))),
+            n,
+        ],
+        (DiagnosticsSource::LiveCursor, None) => vec![
+            sql_id.map_or(OracleBind::Null, OracleBind::from),
+            sql_text.map_or(OracleBind::Null, OracleBind::from),
+            n,
+        ],
         _ => vec![n],
     };
     Ok((id, binds))
@@ -799,8 +825,11 @@ mod tests {
         let q = id.spec().sql;
         assert!(q.to_ascii_lowercase().contains("v$sqlstats"));
         assert!(q.contains("ORDER BY elapsed_time DESC"));
-        assert!(q.contains("rownum <= :1"));
-        assert_eq!(binds, [OracleBind::I64(10)]);
+        assert!(q.contains("rownum <= :3"));
+        assert_eq!(
+            binds,
+            [OracleBind::Null, OracleBind::Null, OracleBind::I64(10)]
+        );
     }
 
     #[test]
@@ -816,8 +845,46 @@ mod tests {
                 q.contains(&format!("ORDER BY {col} DESC")),
                 "metric {m:?} should rank by {col}"
             );
-            assert_eq!(binds, [OracleBind::I64(5)]);
+            assert_eq!(
+                binds,
+                [OracleBind::Null, OracleBind::Null, OracleBind::I64(5)]
+            );
         }
+    }
+
+    #[test]
+    fn live_cursor_filters_are_bound_and_historical_filters_refuse() {
+        let (id, binds) = top_sql_query_filtered(
+            DiagnosticsSource::LiveCursor,
+            TopSqlMetric::Elapsed,
+            7,
+            None,
+            Some("abc123def4567"),
+            Some("W4MARK"),
+        )
+        .expect("live filters are accepted");
+        assert!(id.spec().sql.contains("sql_id = :1"));
+        assert_eq!(
+            binds,
+            [
+                OracleBind::from("abc123def4567"),
+                OracleBind::from("W4MARK"),
+                OracleBind::I64(7)
+            ]
+        );
+        assert_eq!(
+            top_sql_query_filtered(
+                DiagnosticsSource::AwrAsh,
+                TopSqlMetric::Elapsed,
+                7,
+                None,
+                Some("abc123def4567"),
+                None
+            )
+            .unwrap_err()
+            .error_class,
+            ErrorClass::InvalidArguments
+        );
     }
 
     #[test]
@@ -832,10 +899,18 @@ mod tests {
         let q = id.spec().sql;
         assert!(q.contains("RATIO_TO_REPORT"), "computes share of total");
         assert!(
-            q.contains("pct_of_total >= :1"),
+            q.contains("pct_of_total >= :3"),
             "keeps only the >=5% statements"
         );
-        assert_eq!(binds, [OracleBind::I64(5), OracleBind::I64(50)]);
+        assert_eq!(
+            binds,
+            [
+                OracleBind::Null,
+                OracleBind::Null,
+                OracleBind::I64(5),
+                OracleBind::I64(50)
+            ]
+        );
         let (unfiltered_id, unfiltered_binds) = top_sql_query(
             DiagnosticsSource::LiveCursor,
             TopSqlMetric::Elapsed,
@@ -843,8 +918,11 @@ mod tests {
             None,
         )
         .expect("unfiltered query");
-        assert!(!unfiltered_id.spec().sql.contains("pct_of_total >= :1"));
-        assert_eq!(unfiltered_binds, [OracleBind::I64(50)]);
+        assert!(!unfiltered_id.spec().sql.contains("pct_of_total >= :3"));
+        assert_eq!(
+            unfiltered_binds,
+            [OracleBind::Null, OracleBind::Null, OracleBind::I64(50)]
+        );
     }
 
     #[test]
@@ -901,7 +979,20 @@ mod tests {
                         "bounds must be binds, never interpolated"
                     );
                     if source == DiagnosticsSource::LiveCursor && pct.is_some() {
-                        assert_eq!(binds, [OracleBind::I64(5), OracleBind::I64(7)]);
+                        assert_eq!(
+                            binds,
+                            [
+                                OracleBind::Null,
+                                OracleBind::Null,
+                                OracleBind::I64(5),
+                                OracleBind::I64(7)
+                            ]
+                        );
+                    } else if source == DiagnosticsSource::LiveCursor {
+                        assert_eq!(
+                            binds,
+                            [OracleBind::Null, OracleBind::Null, OracleBind::I64(7)]
+                        );
                     } else {
                         assert_eq!(binds, [OracleBind::I64(7)]);
                     }

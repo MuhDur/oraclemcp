@@ -96,7 +96,7 @@ pub use awr::{
     DiagnosticsSource, PLAN_COST_TIMELINE_NOTE, PlanCostTimeline, PlanCostTimelinePoint,
     TopSqlMetric, detect_diagnostics_pack, detect_statspack, plan_cost_timeline,
     plan_cost_timeline_with_license, resolve_top_sql_source, resolve_top_sql_source_with_license,
-    select_diagnostics_source, top_sql_query,
+    select_diagnostics_source, top_sql_query, top_sql_query_filtered,
 };
 pub use catalog_editions::{
     EditionsCatalogCapabilities, EditionsCatalogColumn, EditionsEnabledProof,

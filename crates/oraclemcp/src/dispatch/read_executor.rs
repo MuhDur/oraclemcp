@@ -2320,8 +2320,14 @@ impl OracleDispatcher {
         )
         .await
         .map_err(DbError::into_envelope)?;
-        let (id, binds) =
-            oraclemcp_db::top_sql_query(source, metric, options.top_n, options.min_pct)?;
+        let (id, binds) = oraclemcp_db::top_sql_query_filtered(
+            source,
+            metric,
+            options.top_n,
+            options.min_pct,
+            options.sql_id.as_deref(),
+            options.sql_text.as_deref(),
+        )?;
         let rows = run_catalog_query(cx, conn, id, &binds)
             .await
             .map_err(DbError::into_envelope)?;
@@ -2826,6 +2832,8 @@ impl OracleDispatcher {
 pub(super) struct TopQueriesOptions {
     pub(super) top_n: u32,
     pub(super) min_pct: Option<u8>,
+    pub(super) sql_id: Option<String>,
+    pub(super) sql_text: Option<String>,
     pub(super) historical: bool,
     pub(super) diagnostics_pack_licensed: bool,
 }

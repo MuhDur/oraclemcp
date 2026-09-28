@@ -1380,6 +1380,8 @@ pub fn tool_registry() -> ToolRegistry {
                     "top_n": { "type": "integer", "minimum": 1, "maximum": 100, "description": "How many statements to return (1-100, default 20)." },
                     "historical": { "type": "boolean", "description": "If true, request historical diagnostics. Requires `profiles.diagnostics_pack_licensed = true` and Oracle pack activation for AWR; without an explicit attestation the server returns POLICY_DENIED. Defaults false (the free live cursor cache)." },
                     "min_pct_of_total": { "type": "integer", "minimum": 1, "maximum": 100, "description": "Live source only: keep only statements consuming at least this percent of the total selected metric (e.g. 5 for the 5%-of-total view)." }
+                    ,"sql_id": { "type": "string", "pattern": "^[0-9a-z]{13}$", "description": "Live source only: exact SQL_ID filter." }
+                    ,"sql_text": { "type": "string", "minLength": 1, "maxLength": 200, "description": "Live source only: case-insensitive SQL text substring filter." }
                 }),
                 &[timeout_seconds_prop()],
             ),

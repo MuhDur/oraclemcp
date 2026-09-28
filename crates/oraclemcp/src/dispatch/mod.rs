@@ -14900,8 +14900,8 @@ impl OracleDispatcher {
                             read_executor::TopQueriesOptions {
                                 top_n,
                                 min_pct,
-                                sql_id,
-                                sql_text,
+                                sql_id, // live cursor identity filter
+                                sql_text, // bounded live SQL-text filter
                                 historical,
                                 diagnostics_pack_licensed: state
                                     .profile_generation
