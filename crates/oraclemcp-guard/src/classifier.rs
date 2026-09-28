@@ -492,6 +492,7 @@ fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
     enum State {
         Code,
         String,
+        QQuote(u8),
         LineComment,
         BlockComment,
     }
@@ -503,6 +504,20 @@ fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
     while index < bytes.len() {
         match state {
             State::Code => match bytes[index] {
+                b'q' | b'Q'
+                    if bytes.get(index + 1) == Some(&b'\'') && bytes.get(index + 2).is_some() =>
+                {
+                    let delimiter = bytes[index + 2];
+                    let terminator = match delimiter {
+                        b'[' => b']',
+                        b'(' => b')',
+                        b'{' => b'}',
+                        b'<' => b'>',
+                        other => other,
+                    };
+                    state = State::QQuote(terminator);
+                    index += 2;
+                }
                 b'\'' => state = State::String,
                 b'-' if bytes.get(index + 1) == Some(&b'-') => {
                     state = State::LineComment;
@@ -529,6 +544,13 @@ fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
                     }
                 }
             }
+            State::QQuote(terminator)
+                if bytes[index] == terminator && bytes.get(index + 1) == Some(&b'\'') =>
+            {
+                state = State::Code;
+                index += 1;
+            }
+            State::QQuote(_) => {}
             State::LineComment if bytes[index] == b'\n' || bytes[index] == b'\r' => {
                 state = State::Code;
             }
