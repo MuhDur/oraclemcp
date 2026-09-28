@@ -2753,7 +2753,7 @@ async fn check_security_feature_catalog_visibility(
     let strict = ctx
         .profile_caps
         .as_ref()
-        .is_some_and(|caps| caps.protected || caps.require_security_feature_evidence);
+        .is_some_and(|caps| caps.require_security_feature_evidence);
     let probes = async {
         let ols = run_catalog_query(cx, conn, CatalogQueryId::OlsInstallationEvidence, &[]).await?;
         match ols.as_slice() {
@@ -2855,7 +2855,7 @@ fn security_feature_catalog_check(probe: Result<(), DbError>, strict: bool) -> C
             let (status, behavior) = if strict {
                 (
                     CheckStatus::Fail,
-                    "reads are refused because require_security_feature_evidence = true (protected profiles imply strict mode)",
+                    "reads are refused because require_security_feature_evidence = true",
                 )
             } else {
                 (

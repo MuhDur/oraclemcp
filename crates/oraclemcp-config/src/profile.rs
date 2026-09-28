@@ -1117,11 +1117,14 @@ impl ConnectionProfile {
         self.require_fga_evidence == Some(true)
     }
 
-    /// Whether reads require visible OLS/RAS/Data Redaction evidence. Protected
-    /// profiles are strict regardless of the explicit setting.
+    /// Whether reads require visible OLS/RAS/Data Redaction evidence.
+    ///
+    /// This is an explicit strict opt-in. A protected profile pins its
+    /// authority to `READ_ONLY`, but unavailable diagnostic evidence alone is
+    /// not positive policy evidence and therefore remains an R36 observation.
     #[must_use]
     pub fn require_security_feature_evidence(&self) -> bool {
-        self.protected() || self.require_security_feature_evidence == Some(true)
+        self.require_security_feature_evidence == Some(true)
     }
 
     /// Whether EXPLAIN and decisive cost gates require complete hard-parse
@@ -2922,7 +2925,7 @@ mod tests {
     }
 
     #[test]
-    fn security_feature_evidence_defaults_to_admit_and_protected_implies_strict() {
+    fn security_feature_evidence_is_explicit_even_on_protected_profiles() {
         let mut ordinary = p("ordinary");
         assert!(!ordinary.require_security_feature_evidence());
         ordinary.require_security_feature_evidence = Some(true);
@@ -2931,6 +2934,8 @@ mod tests {
         let mut protected = p("protected");
         protected.protected = Some(true);
         protected.require_security_feature_evidence = Some(false);
+        assert!(!protected.require_security_feature_evidence());
+        protected.require_security_feature_evidence = Some(true);
         assert!(protected.require_security_feature_evidence());
     }
 

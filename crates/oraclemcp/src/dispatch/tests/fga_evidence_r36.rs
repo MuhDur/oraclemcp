@@ -889,14 +889,14 @@ fn startup_profile_require_fga_evidence_is_installed_from_the_config_snapshot() 
 }
 
 #[test]
-fn startup_security_feature_evidence_policy_is_installed_and_protected_is_strict() {
+fn startup_security_feature_evidence_policy_is_installed_only_on_explicit_strict_opt_in() {
     for (toml_flags, expected_strict) in [
         ("", false),
         ("require_security_feature_evidence = false", false),
         ("require_security_feature_evidence = true", true),
         (
             "protected = true\nmax_level = \"READ_ONLY\"\nrequire_security_feature_evidence = false",
-            true,
+            false,
         ),
     ] {
         let config = OracleMcpConfig::from_toml_str(&format!(
@@ -924,7 +924,7 @@ fn startup_security_feature_evidence_policy_is_installed_and_protected_is_strict
         .with_profile_drain_state(ProfileDrainState::from_config(config));
         let outcome = dispatcher.dispatch("oracle_query", json!({"sql": READ}));
         if expected_strict {
-            let error = outcome.expect_err("strict and protected profiles refuse unknown evidence");
+            let error = outcome.expect_err("explicit strict profiles refuse unknown evidence");
             assert_eq!(
                 offending_construct(&error),
                 Some("security_feature_visibility_unknown"),
