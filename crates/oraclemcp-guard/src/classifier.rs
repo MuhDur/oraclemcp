@@ -492,6 +492,7 @@ fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
     enum State {
         Code,
         String,
+        QuotedIdentifier,
         QQuote(u8),
         LineComment,
         BlockComment,
@@ -519,6 +520,7 @@ fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
                     index += 2;
                 }
                 b'\'' => state = State::String,
+                b'"' => state = State::QuotedIdentifier,
                 b'-' if bytes.get(index + 1) == Some(&b'-') => {
                     state = State::LineComment;
                     index += 1;
@@ -538,6 +540,15 @@ fn exceeds_sqlparser_square_bracket_budget(sql: &str) -> bool {
             State::String => {
                 if bytes[index] == b'\'' {
                     if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 1;
+                    } else {
+                        state = State::Code;
+                    }
+                }
+            }
+            State::QuotedIdentifier => {
+                if bytes[index] == b'"' {
+                    if bytes.get(index + 1) == Some(&b'"') {
                         index += 1;
                     } else {
                         state = State::Code;

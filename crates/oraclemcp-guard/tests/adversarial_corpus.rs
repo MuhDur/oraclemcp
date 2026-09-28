@@ -65,7 +65,9 @@ fn classifier_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
 
 #[test]
 fn semantic_read_plan_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
+    let quoted_identifier_bypass = format!("IF\"'\"{CLASSIFY_FUZZ_TIMEOUT_REGRESSION}");
     for sql in std::iter::once(CLASSIFY_FUZZ_TIMEOUT_REGRESSION)
+        .chain(std::iter::once(quoted_identifier_bypass.as_str()))
         .chain(SEMANTIC_READ_PLAN_SLOW_UNIT_REGRESSIONS.iter().copied())
     {
         let started = std::time::Instant::now();
@@ -85,6 +87,7 @@ fn classifier_square_bracket_budget_spares_literal_and_comment_data() {
     for sql in [
         "SELECT '[[[[[[[[[' AS bracket_data FROM dual",
         "SELECT q'[it\'s [[[[[[[[[]' AS bracket_data FROM dual",
+        "SELECT \"[[[[[[[[[\" AS bracket_identifier FROM dual",
         "SELECT 1 /* [[[[[[[[[ */ AS bracket_data FROM dual",
     ] {
         let decision = Classifier::engine_free_baseline(ClassifierConfig::new()).classify(sql);
