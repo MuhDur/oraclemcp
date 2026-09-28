@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use asupersync::channel::{mpsc, oneshot};
 use asupersync::{Budget, CancelReason, Cx, Outcome, PanicPayload, Time};
-use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use oraclemcp_error::{CancelOutcome, ErrorClass, ErrorEnvelope, StatementOutcome};
 use serde_json::{Map, Value, json};
 
 use crate::capabilities::{CapabilitiesReport, ConnectionStatus, OperatingLevelReport};
@@ -3137,9 +3137,11 @@ fn tool_result_err_json(envelope: &ErrorEnvelope) -> Value {
 
 fn cancelled_dispatch_envelope(reason: &CancelReason) -> ErrorEnvelope {
     ErrorEnvelope::new(
-        ErrorClass::Timeout,
+        ErrorClass::RequestCancelled,
         format!("tool dispatch cancelled before completion: {reason}"),
     )
+    .with_cancel_outcome(CancelOutcome::CancelConfirmed)
+    .with_statement_outcome(StatementOutcome::ProtocolUnsynchronized)
     .with_next_step("Retry only if the client did not intentionally cancel the request.")
 }
 
@@ -3842,7 +3844,7 @@ mod tests {
     }
 
     #[test]
-    fn cancelled_tool_call_returns_timeout_and_quiesces_active_work() {
+    fn cancelled_tool_call_returns_typed_cancel_and_quiesces_active_work() {
         let mut registry = ToolRegistry::new();
         registry.register(ToolDescriptor::new(
             "oracle_query",
@@ -3880,7 +3882,11 @@ mod tests {
         assert_eq!(response["isError"], serde_json::json!(true));
         assert_eq!(
             response["structuredContent"]["error_class"],
-            serde_json::json!("TIMEOUT")
+            serde_json::json!("REQUEST_CANCELLED")
+        );
+        assert_eq!(
+            response["structuredContent"]["cancel_outcome"],
+            serde_json::json!("cancel_confirmed")
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(

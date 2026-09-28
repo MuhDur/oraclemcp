@@ -3,6 +3,55 @@ pub mod oraclemcp_error::fuzzy
 pub fn oraclemcp_error::fuzzy::enrich_oracle_error(&str, core::option::Option<&str>, &[&str]) -> oraclemcp_error::ErrorEnvelope
 pub fn oraclemcp_error::fuzzy::fuzzy_suggest(&str, &[&str], usize) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_error::fuzzy::levenshtein(&str, &str) -> usize
+#[non_exhaustive] pub enum oraclemcp_error::CancelOutcome
+pub oraclemcp_error::CancelOutcome::CancelConfirmed
+pub oraclemcp_error::CancelOutcome::CancelRequested
+pub oraclemcp_error::CancelOutcome::OutcomeUnknown
+impl core::clone::Clone for oraclemcp_error::CancelOutcome
+pub fn oraclemcp_error::CancelOutcome::clone(&self) -> oraclemcp_error::CancelOutcome
+impl core::cmp::Eq for oraclemcp_error::CancelOutcome
+impl core::cmp::PartialEq for oraclemcp_error::CancelOutcome
+pub fn oraclemcp_error::CancelOutcome::eq(&self, &oraclemcp_error::CancelOutcome) -> bool
+impl core::fmt::Debug for oraclemcp_error::CancelOutcome
+pub fn oraclemcp_error::CancelOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for oraclemcp_error::CancelOutcome
+pub fn oraclemcp_error::CancelOutcome::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for oraclemcp_error::CancelOutcome
+impl core::marker::StructuralPartialEq for oraclemcp_error::CancelOutcome
+impl serde_core::ser::Serialize for oraclemcp_error::CancelOutcome
+pub fn oraclemcp_error::CancelOutcome::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_error::CancelOutcome
+pub fn oraclemcp_error::CancelOutcome::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_error::CancelOutcome
+impl core::marker::Send for oraclemcp_error::CancelOutcome
+impl core::marker::Sync for oraclemcp_error::CancelOutcome
+impl core::marker::Unpin for oraclemcp_error::CancelOutcome
+impl core::marker::UnsafeUnpin for oraclemcp_error::CancelOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_error::CancelOutcome
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_error::CancelOutcome
+impl<T, U> core::convert::Into<U> for oraclemcp_error::CancelOutcome where U: core::convert::From<T>
+pub fn oraclemcp_error::CancelOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_error::CancelOutcome where U: core::convert::Into<T>
+pub type oraclemcp_error::CancelOutcome::Error = core::convert::Infallible
+pub fn oraclemcp_error::CancelOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_error::CancelOutcome where U: core::convert::TryFrom<T>
+pub type oraclemcp_error::CancelOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_error::CancelOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_error::CancelOutcome where T: core::clone::Clone
+pub type oraclemcp_error::CancelOutcome::Owned = T
+pub fn oraclemcp_error::CancelOutcome::clone_into(&self, &mut T)
+pub fn oraclemcp_error::CancelOutcome::to_owned(&self) -> T
+impl<T> core::any::Any for oraclemcp_error::CancelOutcome where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_error::CancelOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_error::CancelOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_error::CancelOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_error::CancelOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_error::CancelOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_error::CancelOutcome where T: core::clone::Clone
+pub unsafe fn oraclemcp_error::CancelOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_error::CancelOutcome
+pub fn oraclemcp_error::CancelOutcome::from(T) -> T
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::CancelOutcome where T: for<'de> serde_core::de::Deserialize<'de>
 #[non_exhaustive] pub enum oraclemcp_error::ErrorClass
 pub oraclemcp_error::ErrorClass::AtCapacity
 pub oraclemcp_error::ErrorClass::Busy
@@ -21,6 +70,7 @@ pub oraclemcp_error::ErrorClass::ObjectNotFound
 pub oraclemcp_error::ErrorClass::OperatingLevelTooLow
 pub oraclemcp_error::ErrorClass::PolicyDenied
 pub oraclemcp_error::ErrorClass::RepreviewRequired
+pub oraclemcp_error::ErrorClass::RequestCancelled
 pub oraclemcp_error::ErrorClass::RuntimeStateRequired
 pub oraclemcp_error::ErrorClass::SnapshotTooOld
 pub oraclemcp_error::ErrorClass::SyntaxError
@@ -282,6 +332,7 @@ impl<T> core::convert::From<T> for oraclemcp_error::StatementOutcome
 pub fn oraclemcp_error::StatementOutcome::from(T) -> T
 impl<T> serde_core::de::DeserializeOwned for oraclemcp_error::StatementOutcome where T: for<'de> serde_core::de::Deserialize<'de>
 pub struct oraclemcp_error::ErrorEnvelope
+pub oraclemcp_error::ErrorEnvelope::cancel_outcome: core::option::Option<oraclemcp_error::CancelOutcome>
 pub oraclemcp_error::ErrorEnvelope::error_class: oraclemcp_error::ErrorClass
 pub oraclemcp_error::ErrorEnvelope::fuzzy_matches: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_error::ErrorEnvelope::is_error: bool
@@ -295,6 +346,7 @@ pub oraclemcp_error::ErrorEnvelope::suggested_tool: core::option::Option<alloc::
 impl oraclemcp_error::ErrorEnvelope
 pub fn oraclemcp_error::ErrorEnvelope::new(oraclemcp_error::ErrorClass, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::to_json(&self) -> serde_json::value::Value
+pub fn oraclemcp_error::ErrorEnvelope::with_cancel_outcome(self, oraclemcp_error::CancelOutcome) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_fuzzy_matches(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_next_step(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_ora_code(self, i32) -> Self

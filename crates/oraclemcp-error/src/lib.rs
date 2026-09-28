@@ -48,6 +48,21 @@ pub enum StatementOutcome {
     ProtocolUnsynchronized,
 }
 
+/// What the server can prove about a client-requested cancellation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CancelOutcome {
+    /// The transport accepted the notification, but the statement had already
+    /// reached a terminal result.
+    CancelRequested,
+    /// Oracle acknowledged the break and the operation's cancellation was
+    /// confirmed after drain/rollback finalization.
+    CancelConfirmed,
+    /// Cancellation finalization could not prove the statement's terminal fate.
+    OutcomeUnknown,
+}
+
 /// Machine-stable classification of an agent-facing error.
 ///
 /// Serialized as `SCREAMING_SNAKE_CASE` so the wire value is a stable string
@@ -97,6 +112,9 @@ pub enum ErrorClass {
     PolicyDenied,
     /// The call exceeded its deadline (call timeout / cancellation).
     Timeout,
+    /// The client cancelled an in-flight MCP request and the server confirmed
+    /// the resulting statement fate.
+    RequestCancelled,
     /// A transient, retryable driver-classified Oracle condition (for example,
     /// a lost session or an idempotent-read-safe package-state reset).
     Transient,
@@ -413,6 +431,9 @@ pub struct ErrorEnvelope {
     /// Proven fate of the statement, when the dispatch path can name it.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub statement_outcome: Option<StatementOutcome>,
+    /// Proven state of an MCP cancellation request.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cancel_outcome: Option<CancelOutcome>,
 }
 
 impl ErrorEnvelope {
@@ -431,6 +452,7 @@ impl ErrorEnvelope {
             retry_after_ms: None,
             structured_reason: None,
             statement_outcome: None,
+            cancel_outcome: None,
         }
     }
 
@@ -480,6 +502,13 @@ impl ErrorEnvelope {
     #[must_use]
     pub fn with_statement_outcome(mut self, outcome: StatementOutcome) -> Self {
         self.statement_outcome = Some(outcome);
+        self
+    }
+
+    /// Attach the proven cancellation result for this request.
+    #[must_use]
+    pub fn with_cancel_outcome(mut self, outcome: CancelOutcome) -> Self {
+        self.cancel_outcome = Some(outcome);
         self
     }
 
