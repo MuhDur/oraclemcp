@@ -2111,20 +2111,12 @@ impl<'a> GuardedReadExecutor<'a> {
                     }
                 };
                 if !rls_vpd_relations.is_empty() {
-                    let probe = match catalog_cache.policy_catalog_probe() {
-                        Some(probe) => probe,
-                        None => {
-                            let probe = bounded_policy_catalog_probe(cx, &read_conn).await;
-                            catalog_cache.cache_policy_catalog_probe(probe.clone());
-                            probe
-                        }
-                    };
                     response.rls_vpd = Some(
-                        observe_vpd_rls_for_relations_with_probe(
+                        observe_vpd_rls_for_relations_with_cached_bounded_probe(
                             cx,
                             &read_conn,
                             &rls_vpd_relations,
-                            probe,
+                            catalog_cache,
                         )
                         .await,
                     );

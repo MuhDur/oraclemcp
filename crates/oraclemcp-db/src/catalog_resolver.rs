@@ -2138,12 +2138,44 @@ pub async fn observe_vpd_rls_for_relations_with_probe(
     observe_vpd_rls_for_relations_inner(cx, conn, relations, Some(probe)).await
 }
 
-async fn observe_vpd_rls_for_relations_inner(
+/// Observe relation policies before obtaining the bounded, generation-scoped
+/// visibility observation. The visibility result is diagnostic-only, so it
+/// must not move ahead of the post-read session-context observation.
+pub async fn observe_vpd_rls_for_relations_with_cached_bounded_probe(
     cx: &Cx,
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
-    cached_probe: Option<OraclePolicyCatalogProbe>,
+    cache: &OracleCatalogResolverCache,
 ) -> OracleVpdRlsObservation {
+    let inputs = collect_vpd_rls_relation_inputs(cx, conn, relations).await;
+    let probe = match cache.policy_catalog_probe() {
+        Some(probe) => probe,
+        None => {
+            let probe = bounded_policy_catalog_probe(cx, conn).await;
+            cache.cache_policy_catalog_probe(probe.clone());
+            probe
+        }
+    };
+    build_vpd_rls_observation(
+        "relations".to_owned(),
+        inputs.session,
+        probe,
+        inputs.policies,
+        inputs.policy_error,
+    )
+}
+
+struct VpdRlsRelationInputs {
+    session: Option<OracleSessionSecurityContext>,
+    policies: Vec<OracleVpdRlsPolicy>,
+    policy_error: Option<String>,
+}
+
+async fn collect_vpd_rls_relation_inputs(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> VpdRlsRelationInputs {
     let session = read_session_security_context(cx, conn).await.ok();
     let mut policies = Vec::new();
     let mut policy_error = None;
@@ -2175,16 +2207,30 @@ async fn observe_vpd_rls_for_relations_inner(
             break;
         }
     }
+    VpdRlsRelationInputs {
+        session,
+        policies,
+        policy_error,
+    }
+}
+
+async fn observe_vpd_rls_for_relations_inner(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+    cached_probe: Option<OraclePolicyCatalogProbe>,
+) -> OracleVpdRlsObservation {
+    let inputs = collect_vpd_rls_relation_inputs(cx, conn, relations).await;
     let probe = match cached_probe {
         Some(probe) => probe,
         None => query_policy_catalog_probe(cx, conn).await,
     };
     build_vpd_rls_observation(
         "relations".to_owned(),
-        session,
+        inputs.session,
         probe,
-        policies,
-        policy_error,
+        inputs.policies,
+        inputs.policy_error,
     )
 }
 
