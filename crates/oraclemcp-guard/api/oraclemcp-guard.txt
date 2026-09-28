@@ -405,6 +405,7 @@ pub fn oraclemcp_guard::action_envelope::bind_value_hmac(&[u8; 32], &[u8]) -> [u
 pub fn oraclemcp_guard::action_envelope::canonical_binds(&[oraclemcp_guard::action_envelope::CanonicalBind<'_>]) -> zeroize::Zeroizing<alloc::vec::Vec<u8>>
 pub mod oraclemcp_guard::classifier
 pub enum oraclemcp_guard::classifier::PlanMismatch
+pub oraclemcp_guard::classifier::PlanMismatch::ParserWorkBudgetExceeded
 pub oraclemcp_guard::classifier::PlanMismatch::RecursiveCte
 pub oraclemcp_guard::classifier::PlanMismatch::RelationPlanCapExceeded
 pub oraclemcp_guard::classifier::PlanMismatch::RelationPlanMismatch
@@ -13816,6 +13817,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::action_envelope::OracleBindType where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_guard::action_envelope::OracleBindType::vzip(self) -> V
 pub enum oraclemcp_guard::PlanMismatch
+pub oraclemcp_guard::PlanMismatch::ParserWorkBudgetExceeded
 pub oraclemcp_guard::PlanMismatch::RecursiveCte
 pub oraclemcp_guard::PlanMismatch::RelationPlanCapExceeded
 pub oraclemcp_guard::PlanMismatch::RelationPlanMismatch
