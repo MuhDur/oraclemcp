@@ -9518,7 +9518,7 @@ mod tests {
     }
 
     #[test]
-    fn thin_connect_options_reject_descriptor_expire_time_injection() {
+    fn explicit_keepalive_with_full_descriptor_still_errors() {
         let opts = OracleConnectOptions {
             connect_string: "(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=db)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=svc)))"
                 .to_owned(),
