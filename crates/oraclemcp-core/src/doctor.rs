@@ -447,6 +447,10 @@ pub struct DoctorContext<'a> {
     /// (B1). `None` disables DCD probes; an authored `0` is a misconfig the
     /// call-timeout check advises removing.
     pub keepalive_minutes: Option<u64>,
+    /// The ten-minute default was intentionally not injected because the
+    /// profile's complete Oracle Net descriptor owns its `EXPIRE_TIME`.
+    /// This is an observation, not a failed keepalive probe.
+    pub defaulted_keepalive_descriptor_skip: bool,
     /// Whether the optional plsql-intelligence engine is available to this
     /// server build (B5). Reported by the trio-stack provenance check. The full
     /// detection contract is B5.1; this is the honest present/absent signal the
@@ -3686,6 +3690,12 @@ fn check_call_timeout(ctx: &DoctorContext<'_>) -> CheckResult {
         )),
         None => details.push("no configured Oracle keepalive (EXPIRE_TIME); runtime application is not probed".to_owned()),
     }
+    if ctx.defaulted_keepalive_descriptor_skip {
+        details.push(
+            "the default keepalive was not injected because the complete Oracle Net descriptor owns EXPIRE_TIME"
+                .to_owned(),
+        );
+    }
 
     let mut result = CheckResult::new(
         ID,
@@ -4470,6 +4480,23 @@ mod tests {
                 .contains("configuration requests Oracle keepalive (EXPIRE_TIME) every 10m")
         );
         assert!(timeout.detail.contains("runtime application is not probed"));
+    }
+
+    #[test]
+    fn defaulted_descriptor_keepalive_skip_is_reported() {
+        let ctx = DoctorContext {
+            call_timeout_resolved: true,
+            call_timeout: Some(Duration::from_secs(30)),
+            keepalive_minutes: Some(10),
+            defaulted_keepalive_descriptor_skip: true,
+            ..DoctorContext::default()
+        };
+        let report = doctor(&ctx);
+        let timeout = report.checks.iter().find(|c| c.id == 12).unwrap();
+        assert_eq!(timeout.status, CheckStatus::Pass, "{}", timeout.detail);
+        assert!(timeout
+            .detail
+            .contains("default keepalive was not injected because the complete Oracle Net descriptor"));
     }
 
     #[test]

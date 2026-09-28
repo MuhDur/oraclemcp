@@ -382,6 +382,7 @@ struct ResolvedProfile {
     connect_timeout_seconds: Option<u64>,
     inactivity_timeout_seconds: Option<u64>,
     keepalive_minutes: Option<u64>,
+    defaulted_keepalive_descriptor_skip: bool,
 }
 
 fn selected_config_profile<'a>(
@@ -496,6 +497,7 @@ fn resolve_profile_options_from_config_with(
         connect_timeout_seconds: chosen.connect_timeout_seconds,
         inactivity_timeout_seconds: chosen.inactivity_timeout_seconds,
         keepalive_minutes,
+        defaulted_keepalive_descriptor_skip: defaulted_keepalive_descriptor_skip(chosen),
     }))
 }
 
@@ -6950,6 +6952,7 @@ struct DoctorProfileContext {
     connect_timeout_seconds: Option<u64>,
     inactivity_timeout_seconds: Option<u64>,
     keepalive_minutes: Option<u64>,
+    defaulted_keepalive_descriptor_skip: bool,
     proxy_user: bool,
     profile_caps: Option<DoctorProfileCaps>,
     auth_capabilities: Option<DoctorAuthCapabilities>,
@@ -6984,6 +6987,7 @@ impl DoctorProfileContext {
             connect_timeout_seconds: None,
             inactivity_timeout_seconds: None,
             keepalive_minutes: None,
+            defaulted_keepalive_descriptor_skip: false,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -7074,6 +7078,17 @@ fn doctor_profile_caps(
         require_security_feature_evidence: profile.require_security_feature_evidence(),
         require_hard_parse_evidence: profile.require_hard_parse_evidence(),
     }
+}
+
+/// Complete Oracle Net descriptors own transport settings. The default DCD
+/// interval must therefore be visible to doctor without attempting to splice a
+/// second `EXPIRE_TIME` into that descriptor.
+fn defaulted_keepalive_descriptor_skip(profile: &ConnectionProfile) -> bool {
+    profile.keepalive_minutes.is_none()
+        && profile.connect_string.as_deref().is_some_and(|connect_string| {
+            let lower = connect_string.trim_start().to_ascii_lowercase();
+            lower.starts_with('(') || lower.contains("expire_time=")
+        })
 }
 
 fn doctor_auth_capabilities_for_profile(
@@ -7171,6 +7186,7 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
             Some(0) => None,
             Some(minutes) => Some(minutes),
         },
+        defaulted_keepalive_descriptor_skip: defaulted_keepalive_descriptor_skip(chosen),
         proxy_user: chosen
             .proxy_auth
             .as_ref()
@@ -7253,6 +7269,7 @@ fn doctor_profile_context(profile: Option<&str>, online: bool) -> DoctorProfileC
             connect_timeout_seconds: None,
             inactivity_timeout_seconds: None,
             keepalive_minutes: None,
+            defaulted_keepalive_descriptor_skip: false,
             proxy_user: false,
             profile_caps: None,
             auth_capabilities: None,
@@ -7388,6 +7405,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
     let connect_timeout_seconds = resolved.connect_timeout_seconds;
     let inactivity_timeout_seconds = resolved.inactivity_timeout_seconds;
     let keepalive_minutes = resolved.keepalive_minutes;
+    let defaulted_keepalive_descriptor_skip = resolved.defaulted_keepalive_descriptor_skip;
     let pool_configured = resolved.pool_settings.is_some();
     let configured_connection_strategy = Some(
         if pool_configured {
@@ -7426,6 +7444,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 connect_timeout_seconds,
                 inactivity_timeout_seconds,
                 keepalive_minutes,
+                defaulted_keepalive_descriptor_skip,
                 proxy_user,
                 profile_caps,
                 auth_capabilities,
@@ -7457,6 +7476,7 @@ fn doctor_open_resolved_profile(resolved: ResolvedProfile) -> DoctorProfileConte
                 connect_timeout_seconds,
                 inactivity_timeout_seconds,
                 keepalive_minutes,
+                defaulted_keepalive_descriptor_skip,
                 proxy_user,
                 profile_caps,
                 auth_capabilities,
@@ -7767,6 +7787,7 @@ fn run_doctor_cmd(
         connect_timeout_seconds: profile_ctx.connect_timeout_seconds,
         inactivity_timeout_seconds: profile_ctx.inactivity_timeout_seconds,
         keepalive_minutes: profile_ctx.keepalive_minutes,
+        defaulted_keepalive_descriptor_skip: profile_ctx.defaulted_keepalive_descriptor_skip,
         // B5: honest trio-stack provenance — whether the optional
         // plsql-intelligence engine is compiled into this server build.
         plsql_intelligence_detected: cfg!(feature = "plsql-intelligence"),
