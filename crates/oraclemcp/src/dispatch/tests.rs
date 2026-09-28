@@ -344,6 +344,7 @@ struct SemanticGuardState {
     caller_binds: Mutex<Vec<Vec<OracleBind>>>,
     read_events: Mutex<Vec<String>>,
     compatible: Mutex<Option<String>>,
+    compatible_query_unavailable: Mutex<bool>,
     embedding_models: Mutex<Vec<String>>,
     fga_handler_table: Mutex<Option<String>>,
     /// R36: ALL_AUDIT_POLICIES answers ORA-00942, as for a least-privilege
@@ -363,6 +364,7 @@ impl Default for SemanticGuardState {
             caller_binds: Mutex::new(Vec::new()),
             read_events: Mutex::new(Vec::new()),
             compatible: Mutex::new(Some("23.4.0.0.0".to_owned())),
+            compatible_query_unavailable: Mutex::new(false),
             embedding_models: Mutex::new(vec!["LOCAL_ONNX_MODEL".to_owned()]),
             fga_handler_table: Mutex::new(None),
             fga_catalog_unreadable: Mutex::new(false),
@@ -600,6 +602,9 @@ impl OracleConnection for SemanticGuardMock {
             current_schema: Some("APP".to_owned()),
             session_user: Some("APP".to_owned()),
             current_edition: Some("ORA$BASE".to_owned()),
+            // This is independent connection metadata, not the catalog query
+            // exercised below. It models the FREE 23ai served-session proof.
+            server_version: Some("23.26.2.0.0".to_owned()),
             ..Default::default()
         })
     }
@@ -644,6 +649,16 @@ impl OracleConnection for SemanticGuardMock {
             return Ok(Vec::new());
         }
         if normalized.contains("from v$parameter") && normalized.contains("compatible") {
+            if *self
+                .state
+                .compatible_query_unavailable
+                .lock()
+                .expect("semantic capability error lock")
+            {
+                return Err(DbError::ServerQuery(
+                    "ORA-00942: table or view does not exist".to_owned(),
+                ));
+            }
             let compatible = self
                 .state
                 .compatible
@@ -1160,6 +1175,30 @@ fn semantic_text_search_requires_both_capabilities_before_a_read_can_escape() {
         1,
         "the capability refusal never executes a caller-visible query"
     );
+}
+
+#[test]
+fn semantic_vector_uses_served_connection_version_when_compatible_catalog_is_unavailable() {
+    let (dispatcher, state) = semantic_dispatcher();
+    *state
+        .compatible_query_unavailable
+        .lock()
+        .expect("semantic capability error lock") = true;
+
+    let response = dispatcher
+        .dispatch(
+            "oracle_semantic_search",
+            json!({
+                "over": {"table": "ORDERS", "column": "EMBEDDING"},
+                "query_vector": [1.0, 0.0, 0.0],
+                "k": 1,
+            }),
+        )
+        .expect(
+            "a live 23ai connection version proves native VECTOR when v$parameter is unavailable",
+        );
+    assert_eq!(response["rows"][0]["ID"], json!("1"));
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -8538,8 +8577,12 @@ fn edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionar
         EditionLifecycleParse::Parsed(EditionLifecycleSql::CreateChild { parent, .. }) => parent,
         other => panic!("test fixture must be an exact edition create: {other:?}"),
     };
-    let _first_proposal = reserve_edition_child_slot(&parent, Some("d2-edition-test"))
-        .expect("first proposal reserves the parent's only child slot");
+    let local_only_scope = oraclemcp_db::PdbIdentityScope::LocalOnly {
+        observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
+    };
+    let _first_proposal =
+        reserve_edition_child_slot(&parent, &local_only_scope, Some("d2-edition-test"))
+            .expect("first proposal reserves the parent's only child slot");
 
     let state = Arc::new(EditionLifecycleState::default());
     let dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));

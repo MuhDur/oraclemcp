@@ -3018,6 +3018,18 @@ fn compatible_supports_vector(value: &str) -> bool {
         .is_some_and(|(major, _)| major >= u16::from(oraclemcp_db::VECTOR_MIN_MAJOR))
 }
 
+/// Return whether a driver-supplied Oracle version banner proves native VECTOR
+/// support. Unlike `COMPATIBLE`, the server banner is not constrained to a
+/// dotted value (for example, it may be `Oracle Database 23ai`), so only its
+/// first numeric component is relevant here.
+fn server_version_supports_vector(value: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_digit())
+        .find(|component| !component.is_empty())
+        .and_then(|component| component.parse::<u16>().ok())
+        .is_some_and(|major| major >= u16::from(oraclemcp_db::VECTOR_MIN_MAJOR))
+}
+
 /// Build a typed, fail-closed semantic-search capability refusal. The stable
 /// `offending_construct` token lets MCP clients branch without scraping prose.
 fn semantic_search_capability_refusal(
@@ -3094,18 +3106,28 @@ async fn prove_semantic_search_vector_capability(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> Result<(), ErrorEnvelope> {
-    let compatible = run_catalog_query(cx, conn, CatalogQueryId::SemanticSearchCompatible, &[])
-        .await
-        .ok()
-        .and_then(|rows| {
-            rows.into_iter()
+    let proven =
+        match run_catalog_query(cx, conn, CatalogQueryId::SemanticSearchCompatible, &[]).await {
+            Ok(rows) => rows
+                .into_iter()
                 .next()
                 .and_then(|row| row.text("COMPATIBLE").map(str::to_owned))
-        });
-    if compatible
-        .as_deref()
-        .is_some_and(compatible_supports_vector)
-    {
+                .as_deref()
+                .is_some_and(compatible_supports_vector),
+            // `v$parameter` visibility is optional dictionary metadata, whereas
+            // the connection's negotiated server version is an independent typed
+            // proof of native VECTOR availability. Fall back only when the catalog
+            // read itself failed: an empty or malformed COMPATIBLE row remains no
+            // proof and therefore fails closed.
+            Err(_) => conn
+                .describe(cx)
+                .await
+                .ok()
+                .and_then(|info| info.server_version)
+                .as_deref()
+                .is_some_and(server_version_supports_vector),
+        };
+    if proven {
         return Ok(());
     }
     Err(semantic_search_capability_refusal(
@@ -3118,7 +3140,10 @@ async fn prove_semantic_search_vector_capability(
 
 #[cfg(test)]
 mod semantic_search_capability_tests {
-    use super::{compatible_supports_in_database_embedding, compatible_supports_vector};
+    use super::{
+        compatible_supports_in_database_embedding, compatible_supports_vector,
+        server_version_supports_vector,
+    };
 
     #[test]
     fn vector_capability_gate_refuses_every_pre_23ai_compatible() {
@@ -3147,6 +3172,14 @@ mod semantic_search_capability_tests {
         assert!(compatible_supports_in_database_embedding("23.26.0.0.0"));
         assert!(!compatible_supports_in_database_embedding("21.0.0.0.0"));
         assert!(!compatible_supports_in_database_embedding("broken"));
+    }
+
+    #[test]
+    fn server_version_fallback_requires_a_23ai_or_newer_numeric_banner() {
+        assert!(server_version_supports_vector("23.26.2.0.0"));
+        assert!(server_version_supports_vector("Oracle Database 23ai"));
+        assert!(!server_version_supports_vector("21c Express Edition"));
+        assert!(!server_version_supports_vector("unknown"));
     }
 }
 
