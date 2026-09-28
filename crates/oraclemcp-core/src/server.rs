@@ -1302,6 +1302,21 @@ impl OracleMcpServer {
         while let Ok(response) = response_rx.try_recv() {
             write_jsonrpc_response(&mut writer, &response)?;
         }
+        // EOF commonly follows a single stdio request in embedding and golden
+        // clients.  Worker-dispatched calls may have enqueued progress or a
+        // tools/list_changed notification after the final receive-loop drain;
+        // preserve the same response-then-notification delivery contract when
+        // joining those workers rather than silently dropping their queue.
+        for notification in self.drain_resource_updated_notifications(
+            crate::subscriptions::STDIO_SUBSCRIPTION_OWNER,
+        ) {
+            write_jsonrpc_response(&mut writer, &notification)?;
+        }
+        for notification in
+            self.drain_server_notifications(crate::notifications::STDIO_NOTIFICATION_OWNER)
+        {
+            write_jsonrpc_response(&mut writer, &notification)?;
+        }
         let _ = reader_thread.join();
         Ok(())
     }
