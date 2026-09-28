@@ -779,6 +779,131 @@ jobs:
   # VECTOR SQL surface. All connection values below are synthetic disposable
   # CI fixtures; no deployment or customer identifier is committed here.
   oracle-free23:
+    name: Oracle FREE 23ai matrix + VECTOR smoke
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      free23:
+        image: gvenzl/oracle-free:23-slim@sha256:fbbd3023d5abc33e36d3814816e6fd740e8efabeaa70cf470ddeab5874a3f6f8
+        env:
+          ORACLE_PASSWORD: E2EOracle23
+          APP_USER: E2E_ORACLE
+          APP_USER_PASSWORD: E2EOracle23
+        ports:
+          - 1522:1521
+        options: >-
+          --health-cmd "healthcheck.sh"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          # PRs restore the main cache but never save (their short-lived
+          # merge-ref caches would evict the useful main population).
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # CI supplies a prebuilt binary to the harness. Local execution keeps the
+      # harness on omcpb, which owns target isolation, memory caps, and the pin.
+      - run: cargo build -p oraclemcp --bin oraclemcp --features dashboard-bundle
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Grant DBMS_FLASHBACK to the 23ai app user for SCN capture
+        # The governed read path captures the snapshot SCN via
+        # DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER (V$DATABASE only as a fallback).
+        # The gvenzl app user has neither by default, so every governed read on
+        # this lane fails closed (ORA-00904 then ORA-00942). Grant the capability
+        # the design expects. Synthetic disposable CI DB; the SYSTEM password is
+        # the committed fixture value in this job's service env.
+        run: |
+          set -euo pipefail
+          test "$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" = "3.12"
+          wheelhouse="$RUNNER_TEMP/oracledb-wheelhouse"
+          mkdir -p "$wheelhouse"
+          python3 -m pip download --disable-pip-version-check --only-binary=:all: \
+            --require-hashes --dest "$wheelhouse" -r containers/python-oracledb-requirements.lock
+          python3 -m pip install --disable-pip-version-check --no-index \
+            --find-links "$wheelhouse" --require-hashes \
+            -r containers/python-oracledb-requirements.lock
+          python3 - <<'PY'
+          import os
+          import oracledb
+
+          expected = os.environ["PYTHON_ORACLEDB_VERSION"]
+          if oracledb.__version__ != expected:
+              raise RuntimeError(f"loaded python-oracledb {oracledb.__version__}; expected exactly {expected}")
+          c = oracledb.connect(user='sys', password='E2EOracle23', dsn='localhost:1522/FREEPDB1', mode=oracledb.AUTH_MODE_SYSDBA)
+          c.cursor().execute('GRANT EXECUTE ON DBMS_FLASHBACK TO E2E_ORACLE')
+          c.commit()
+          print('granted EXECUTE ON DBMS_FLASHBACK to E2E_ORACLE')
+          PY
+      - name: 23ai matrix lane, VECTOR_DISTANCE, and PL/SQL round-trip smoke
+        id: free23-matrix
+        env:
+          ORACLEMCP_LIVE_XE: "1"
+          ORACLEMCP_ORACLE_MATRIX_BINARY: target/debug/oraclemcp
+          ORACLE_MATRIX_FREE23_DSN: localhost:1522/FREEPDB1
+          ORACLE_MATRIX_FREE23_USER: E2E_ORACLE
+          ORACLE_MATRIX_FREE23_PASSWORD: E2EOracle23
+        run: |
+          set -euo pipefail
+          mkdir -p target/test-attestation-evidence
+          bash scripts/e2e/oracle_version_matrix.sh --log --lane free23 2>&1 \
+            | tee target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+      - name: Derive e2e attestation outcome
+        if: always()
+        id: e2e-attestation
+        run: |
+          set -euo pipefail
+          case "${{ steps.free23-matrix.outcome }}" in
+            success) outcome=PASS ;;
+            failure) outcome=FAIL ;;
+            cancelled|skipped) outcome=SKIP ;;
+            *) outcome=FAIL ;;
+          esac
+          echo "tests=e2e:oracle-version-matrix-free23=$outcome" >> "$GITHUB_OUTPUT"
+          printf 'e2e:oracle-version-matrix-free23=%s\n' "$outcome"
+      - name: Record e2e-lane attestation status
+        if: always()
+        uses: ./.github/actions/test-attestation
+        env:
+          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
+          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
+        with:
+          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
+          trusted-context: ${{ github.event_name == 'push' }}
+          lane: e2e-oracle-free23
+          command: bash scripts/e2e/oracle_version_matrix.sh --log --lane free23
+          tests: ${{ steps.e2e-attestation.outputs.tests }}
+          artifacts: target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+          output-name: e2e-oracle-free23.jsonl
+      - name: Verify the e2e attestation this lane produced
+        if: always()
+        run: |
+          python3 scripts/check_test_attestations.py --selftest
+          python3 scripts/check_test_attestations.py target/test-attestations
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-oracle-free23-attestation-${{ github.run_number }}
+          path: |
+            target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+            target/test-attestations/
+          if-no-files-found: error
+          retention-days: 30
+
+  oracle-free23-w4:
     name: Oracle FREE 23ai W4
     # Advisory until .9.5-.9.9 and oraclemcp-zw03u close; then make this required.
     continue-on-error: true
