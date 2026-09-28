@@ -1,6 +1,5 @@
 ---
 source: crates/oraclemcp/tests/golden_scrubber_framework.rs
-assertion_line: 155
 expression: rendered
 ---
 {
@@ -1209,14 +1208,30 @@ expression: rendered
             "type": "string"
           },
           "scn_a": {
-            "description": "System change number for side A. Required with scn_b when comparing one database at two points in time; optional in cross-database mode, where it pins side A to a flashback read instead of the current committed state.",
-            "minimum": 1,
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "pattern": "^[0-9]+$",
+                "type": "string"
+              }
+            ],
+            "description": "System change number for side A. A decimal string is accepted so the lossless NUMBER string returned by oracle_query can be captured directly; it must fit an unsigned 64-bit integer. Required with scn_b when comparing one database at two points in time; optional in cross-database mode, where it pins side A to a flashback read instead of the current committed state."
           },
           "scn_b": {
-            "description": "System change number for side B. See scn_a.",
-            "minimum": 1,
-            "type": "integer"
+            "anyOf": [
+              {
+                "minimum": 1,
+                "type": "integer"
+              },
+              {
+                "pattern": "^[0-9]+$",
+                "type": "string"
+              }
+            ],
+            "description": "System change number for side B. See scn_a."
           },
           "sql": {
             "description": "A single read-only SELECT/WITH. The same proven SQL is run on both compared sides; it is classified as a read against each database it runs on.",
@@ -4160,7 +4175,7 @@ expression: rendered
       "name": "oracle_top_queries",
       "title": "Oracle Top Queries",
       "tier": "foundation_live_db",
-      "summary": "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS). Historical AWR requires the profile's explicit Diagnostics Pack license attestation and Oracle's active pack setting; without attestation the request returns POLICY_DENIED before database access. An attested profile may use Statspack when AWR is not active.",
+      "summary": "Read-only top-SQL ranked by elapsed/CPU/buffer-gets/disk-reads over the free live cursor cache (V$SQLSTATS); live calls may narrow by exact sql_id or bounded sql_text. Historical AWR requires the profile's explicit Diagnostics Pack license attestation and Oracle's active pack setting; without attestation the request returns POLICY_DENIED before database access. An attested profile may use Statspack when AWR is not active.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
@@ -4183,6 +4198,17 @@ expression: rendered
             "maximum": 100,
             "minimum": 1,
             "type": "integer"
+          },
+          "sql_id": {
+            "description": "Live source only: exact SQL_ID filter.",
+            "pattern": "^[0-9a-z]{13}$",
+            "type": "string"
+          },
+          "sql_text": {
+            "description": "Live source only: case-insensitive SQL text substring filter.",
+            "maxLength": 200,
+            "minLength": 1,
+            "type": "string"
           },
           "timeout_seconds": {
             "description": "Tightens the profile's total request deadline and each Oracle round-trip cap for this tool call. It cannot widen the profile ceiling.",
