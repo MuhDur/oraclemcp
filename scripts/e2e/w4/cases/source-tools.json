@@ -2373,7 +2373,14 @@
       "http"
     ],
     "requires": [],
-    "setup": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PACKAGE ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER; -- w4src:package\nEND;"
+      },
+      {
+        "sql": "CREATE OR REPLACE PACKAGE BODY ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_ID * 2; -- w4src:package_body\n  END;\nEND;"
+      }
+    ],
     "call": {
       "arguments": {
         "owner": "${owner}",
@@ -2427,7 +2434,12 @@
     "audit_expect": [],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
-    }
+    },
+    "cleanup": [
+      {
+        "sql": "DROP PACKAGE ${owner}.PKG_SRC_${run_id}"
+      }
+    ]
   },
   {
     "case_id": "w4_get_source_view_text",
@@ -2699,7 +2711,14 @@
       "http"
     ],
     "requires": [],
-    "setup": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PACKAGE ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER; -- w4src:package\nEND;"
+      },
+      {
+        "sql": "CREATE OR REPLACE PACKAGE BODY ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_ID * 2; -- w4src:package_body\n  END;\nEND;"
+      }
+    ],
     "call": {
       "arguments": {
         "object_type": "PACKAGE",
@@ -2714,7 +2733,12 @@
     "audit_expect": [],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
-    }
+    },
+    "cleanup": [
+      {
+        "sql": "DROP PACKAGE ${owner}.PKG_SRC_${run_id}"
+      }
+    ]
   },
   {
     "case_id": "w4_get_ddl_cross_owner",
