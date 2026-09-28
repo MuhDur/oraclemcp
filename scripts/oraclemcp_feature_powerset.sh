@@ -4,7 +4,11 @@
 # Scope: only the three crates that actually define optional features
 #   - oraclemcp        (default plsql-intelligence, dashboard-bundle, mimalloc, live-xe)
 #   - oraclemcp-core   (dashboard-bundle)
-#   - oraclemcp-db     (live-xe, test-utils)
+#   - oraclemcp-db     (default oracledb, live-xe, test-utils)
+# `oracledb` is deliberately NOT excluded: the official Oracle backend must
+# compile with the feature ON and OFF, so the powerset enumerates both (verified
+# with `cargo hack ... --print-command-list`, which emits `--no-default-features`
+# and `--features ...,oracledb` combinations).
 # `--workspace` re-iterated every featureless crate under every combination for
 # no added coverage. `cargo clippy` already type-checks + compiles, so the prior
 # separate `cargo hack check` and `cargo hack test` passes were redundant here:

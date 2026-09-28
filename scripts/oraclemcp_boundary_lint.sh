@@ -8,7 +8,14 @@
 # gate that keeps the boundary structural and enforced, so the eventual
 # Phase-E extraction is a mechanical git-filter-repo, not a rewrite.
 #
-# Exit 0 = boundary holds. Exit 1 = a violation (a core crate imports plsql-*).
+# The forbidden-package gate (no Tokio/rmcp/Axum/Hyper/ODPI-C/r2d2/reqwest class
+# in the normal production graph) runs over TWO selections so the official
+# `oracledb` backend is proven clean both ON (workspace default) and OFF
+# (`oraclemcp-db --no-default-features`). `--selftest` plants a Tokio dependency
+# behind a feature named like that backend and requires the gate to fail.
+#
+# Exit 0 = boundary holds. Exit 1 = a violation (a core crate imports plsql-*,
+# or a forbidden package is present in the normal graph).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -55,28 +62,33 @@ ensure_build_lease() {
   exec "$ROOT/scripts/build_lease.sh" -- timeout 1800 bash "$SELF" "$@"
 }
 
-# --selftest: prove the lease inheritance and the preserved refusals without
-# taking the full dependency walk. The one heavy step is a real leased
-# `cargo tree --workspace` probe, so the integration is exercised end-to-end.
+# --selftest: (a) prove the lease inheritance and the preserved refusals, and
+# (b) prove the forbidden-package predicate itself fires on a planted Tokio
+# behind a feature named like the Oracle backend and passes a clean graph. The
+# fixture is a path-dependency crate named `tokio` (a local stub), so the
+# fixture cases are offline and need no registry access. The one heavy step is a
+# real leased `cargo tree --workspace` probe, so the lease integration is
+# exercised end-to-end. Each case prints {case_id, expected, actual}.
 selftest() {
   local pass=0 fail=0 rc got
-  selftest_check() { # WANT GOT DESCRIPTION
-    if [ "$2" = "$1" ]; then
-      echo "  PASS  $3 (got=$2)"
+  selftest_case() { # ID EXPECTED ACTUAL
+    local id="$1" expected="$2" actual="$3"
+    if [ "$expected" = "$actual" ]; then
+      echo "PASS {case_id=$id, expected=$expected, actual=$actual}"
       pass=$((pass + 1))
     else
-      echo "  FAIL  $3 (got=$2, want $1)" >&2
+      echo "FAIL {case_id=$id, expected=$expected, actual=$actual}" >&2
       fail=$((fail + 1))
     fi
   }
 
   # 1. Target-dir selection never runs the inspection against a shared cache.
   got="$( ( unset CARGO_TARGET_DIR; resolve_target_dir ) )"
-  selftest_check "$ROOT/target" "$got" "unset ambient target -> checkout target/"
+  selftest_case "boundary_target_dir_unset_ambient" "$ROOT/target" "$got"
   got="$(CARGO_TARGET_DIR="$HOME/.cache/cargo-target" resolve_target_dir)"
-  selftest_check "$ROOT/target" "$got" "shared ambient target -> checkout target/"
+  selftest_case "boundary_target_dir_shared_ambient" "$ROOT/target" "$got"
   got="$(CARGO_TARGET_DIR="$ROOT/target" resolve_target_dir)"
-  selftest_check "$ROOT/target" "$got" "dedicated ambient target honored"
+  selftest_case "boundary_target_dir_dedicated_ambient" "$ROOT/target" "$got"
 
   # 2. The guard still classifies the inspection as heavy and refuses it with no
   #    lease (planted negative), and still refuses a shared target by name.
@@ -85,16 +97,19 @@ selftest() {
       CARGO_SWARM_BUILD_LEASE_PID CI
     CARGO_TARGET_DIR="$ROOT/target" "$ROOT/scripts/check_build_lease.sh" -- \
       cargo tree --locked --workspace -i oraclemcp >/dev/null 2>&1 ) || rc=$?
-  selftest_check 75 "$rc" "un-leased 'cargo tree --workspace' refused"
+  selftest_case "boundary_unleased_workspace_tree_refused" 75 "$rc"
   rc=0
   ( unset CARGO_SWARM_BUILD_LEASE_DIR CARGO_SWARM_BUILD_LEASE_SLOT \
       CARGO_SWARM_BUILD_LEASE_PID CI
     CARGO_TARGET_DIR="$HOME/.cache/cargo-target" \
       "$ROOT/scripts/check_build_lease.sh" -- \
       cargo tree --locked --workspace -i oraclemcp >/dev/null 2>&1 ) || rc=$?
-  selftest_check 78 "$rc" "shared ambient target refused"
+  selftest_case "boundary_shared_target_refused" 78 "$rc"
 
-  # 3. A real leased probe of the exact heavy shape this fix unblocks succeeds.
+  # 3. Forbidden-package predicate vs the planted offline fixture.
+  boundary_selftest_fixture
+
+  # 4. A real leased probe of the exact heavy shape this fix unblocks succeeds.
   if [ -n "${CI:-}" ]; then
     echo "  SKIP  leased probe (single-tenant CI waives the lease)"
   else
@@ -103,7 +118,7 @@ selftest() {
       --timeout 240 --label boundary-lint-selftest -- \
       timeout 180 cargo tree --locked --workspace -e normal --target all \
       -i oraclemcp >/dev/null 2>&1 || rc=$?
-    selftest_check 0 "$rc" "leased 'cargo tree --workspace' probe succeeds"
+    selftest_case "boundary_leased_workspace_tree_probe" 0 "$rc"
   fi
 
   echo
@@ -114,13 +129,241 @@ selftest() {
   echo "oraclemcp-boundary-lint: selftest OK ($pass checks)"
 }
 
+# Build an isolated path-dependency fixture whose `oracledb` feature turns on a
+# dependency named `tokio` (a local stub, so no registry/network), exactly
+# modelling "the Oracle backend feature pulls the forbidden package", then run
+# the SAME forbidden-package gate the production pass uses against it.
+boundary_selftest_fixture() {
+  local dir saved_target saved_locked target_had=0 locked_had=0 got
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/oraclemcp-boundary-selftest.XXXXXX")"
+  mkdir -p "$dir/tokio/src" "$dir/src"
+  cat >"$dir/Cargo.toml" <<'EOF'
+[package]
+name = "boundary-selftest-fixture"
+version = "0.0.0"
+edition = "2021"
+
+[features]
+oracledb = ["dep:tokio"]
+
+[dependencies]
+tokio = { path = "tokio", optional = true }
+
+[workspace]
+EOF
+  cat >"$dir/tokio/Cargo.toml" <<'EOF'
+[package]
+name = "tokio"
+version = "0.0.0"
+edition = "2021"
+EOF
+  : >"$dir/src/lib.rs"
+  : >"$dir/tokio/src/lib.rs"
+
+  saved_target="${CARGO_TARGET_DIR-}"
+  [ -n "${CARGO_TARGET_DIR+x}" ] && target_had=1
+  saved_locked="${CARGO_TREE_LOCKED-}"
+  [ -n "${CARGO_TREE_LOCKED+x}" ] && locked_had=1
+
+  export CARGO_TREE_LOCKED=0
+  export CARGO_TARGET_DIR="$dir/target"
+  cd "$dir"
+
+  # Clean graph: the feature named like the Oracle backend is OFF, so the
+  # forbidden tokio is absent; the gate passes.
+  violations=0
+  check_forbidden_graph "selftest-clean" --offline >/dev/null 2>&1 || true
+  got=$([ "$violations" -eq 0 ] && echo pass || echo fail)
+  selftest_case "boundary_clean_graph_passes" "pass" "$got"
+
+  # Planted negative: turn the feature ON and the gate must fail.
+  violations=0
+  check_forbidden_graph "selftest-oracle-on" --offline --features oracledb \
+    >/dev/null 2>&1 || true
+  got=$([ "$violations" -gt 0 ] && echo fail || echo pass)
+  selftest_case "boundary_tokio_under_oracle_feature_fails" "fail" "$got"
+
+  cd "$ROOT"
+  if [ "$locked_had" = 1 ]; then export CARGO_TREE_LOCKED="$saved_locked"; else unset CARGO_TREE_LOCKED; fi
+  if [ "$target_had" = 1 ]; then export CARGO_TARGET_DIR="$saved_target"; else unset CARGO_TARGET_DIR; fi
+  rm -rf "$dir"
+}
+
+forbidden_production_packages=(
+  tokio
+  tokio-stream
+  tokio-util
+  asupersync-tokio-compat
+  rmcp
+  axum
+  hyper
+  hyper-util
+  oracle
+  odpic-sys
+  r2d2
+  reqwest
+  async-std
+  smol
+)
+
+indent_text() {
+  local line
+  while IFS= read -r line; do
+    printf '  %s\n' "$line"
+  done
+}
+
+tree_package_present() {
+  local label="$1"
+  local package="$2"
+  shift 2
+  local output
+  local status
+  local tree_args=(tree)
+  [ "${CARGO_TREE_LOCKED:-1}" = "1" ] && tree_args+=(--locked)
+  [ -n "${CARGO_TREE_MANIFEST:-}" ] && tree_args+=(--manifest-path "$CARGO_TREE_MANIFEST")
+
+  output="$(cargo "${tree_args[@]}" "$@" -i "$package" 2>&1)" && status=0 || status=$?
+  if [ "$status" -eq 0 ]; then
+    printf '%s\n' "$output"
+    return 0
+  fi
+
+  if grep -Eiq 'did not match|nothing to print|could not find package|not found' <<<"$output"; then
+    return 1
+  fi
+
+  echo "oraclemcp-boundary-lint: could not inspect dependency '$package' for $label graph:" >&2
+  indent_text <<<"$output" >&2
+  return 2
+}
+
+# Print the resolved feature set for a violating graph, so a failure names the
+# feature edge that pulled the forbidden package in, not just its presence.
+print_resolved_feature_set() {
+  local package="$1"
+  shift
+  local tree_args=(tree)
+  [ "${CARGO_TREE_LOCKED:-1}" = "1" ] && tree_args+=(--locked)
+  [ -n "${CARGO_TREE_MANIFEST:-}" ] && tree_args+=(--manifest-path "$CARGO_TREE_MANIFEST")
+  echo "oraclemcp-boundary-lint: resolved feature set for '$package' in this graph:"
+  cargo "${tree_args[@]}" "$@" -e features --target all -i "$package" 2>/dev/null | indent_text || true
+}
+
+# One forbidden-package gate over a single normal-dependency graph selection.
+# $1 is the label; the rest are the `cargo tree` selection args (--workspace, or
+# -p oraclemcp-db --no-default-features).
+check_forbidden_graph() {
+  local label="$1"
+  shift # selection args only: --workspace, or -p oraclemcp-db --no-default-features
+  echo "oraclemcp-boundary-lint: forbidden-package gate [$label]: cargo tree $* -e normal --target all -i <package>"
+
+  local package
+  local tree
+  for package in "${forbidden_production_packages[@]}"; do
+    if tree="$(tree_package_present "$label" "$package" "$@" -e normal --target all)"; then
+      echo "FORBIDDEN[$label]: '$package' is present in the normal dependency graph:" >&2
+      indent_text <<<"$tree" >&2
+      print_resolved_feature_set "$package" "$@"
+      violations=$((violations + 1))
+    else
+      case "$?" in
+        1) echo "OK[$label]: $package absent from the normal dependency graph." ;;
+        2) violations=$((violations + 1)) ;;
+      esac
+    fi
+  done
+}
+
+# The gate runs over TWO selections so the official backend is checked ON and
+# OFF: the workspace default carries `oracledb` ON, and `oraclemcp-db
+# --no-default-features` carries it OFF. A forbidden package must be absent from
+# both, which is what proves no Tokio is pulled in via the official backend.
+check_forbidden_graphs() {
+  echo "oraclemcp-boundary-lint: hard forbidden dependency gate over 2 graph selections:"
+  echo "  [default]      official oracledb ON  (cargo tree --workspace -e normal --target all -i <pkg>)"
+  echo "  [official-off] official oracledb OFF (cargo tree -p oraclemcp-db --no-default-features -e normal --target all -i <pkg>)"
+  check_forbidden_graph "default" --workspace
+  check_forbidden_graph "official-off" -p oraclemcp-db --no-default-features
+}
+
+show_all_target_dependency_graph() {
+  echo "oraclemcp-boundary-lint: all-target dependency visibility for forbidden package names."
+  echo "oraclemcp-boundary-lint: cargo tree -e all --workspace --target all -i <package>"
+
+  local package
+  local tree
+  for package in "${forbidden_production_packages[@]}"; do
+    if tree="$(tree_package_present "all-target" "$package" --workspace -e all --target all)"; then
+      echo "VISIBLE[all-target]: '$package' appears somewhere in all targets/edges:"
+      indent_text <<<"$tree"
+    else
+      case "$?" in
+        1) echo "OK[all-target]: $package absent from all workspace targets/edges." ;;
+        2) violations=$((violations + 1)) ;;
+      esac
+    fi
+  done
+}
+
+# Early-warning feature inspection (bead D4 / WP-D). opentelemetry-sdk is NOT a
+# forbidden package — the telemetry crate may legitimately grow an OTLP exporter
+# — but its `rt-tokio`/`rt-tokio-current-thread` runtime features pull Tokio in.
+# If an upstream opentelemetry-sdk release ever flips one of those on by default,
+# the Tokio gate above WILL fail; this check fires first and names the cause, so
+# the Tokio failure is diagnosed as "opentelemetry-sdk dragged in a runtime"
+# rather than chased blind. It complements the `-i tokio` / `-i reqwest` gates.
+# Advisory: it explains, it does not itself fail the build (the Tokio gate does).
+inspect_opentelemetry_runtime() {
+  # The crate resolves under the underscore spelling (`opentelemetry_sdk`); the
+  # hyphen form never matches `cargo tree -i`. Check the underscore name (and the
+  # hyphen as a belt-and-braces fallback) so the early-warning actually fires for
+  # the crate the asupersync `metrics` feature pulls in (bead D1/.1: catch an
+  # upstream rt-tokio default flip before the Tokio gate above fails blind).
+  local package
+  local tree
+  for package in opentelemetry_sdk opentelemetry-sdk; do
+    if tree="$(tree_package_present "opentelemetry runtime" "$package" --workspace -e normal --target all)"; then
+      echo "NOTE[otel]: '$package' is present in the production graph. Confirm no" \
+        "rt-tokio* feature is enabled (that would pull Tokio and fail the gate above):"
+      indent_text <<<"$tree"
+      # Surface the resolved features so an rt-tokio flip is visible in the log.
+      cargo tree --locked --workspace -e features --target all -i "$package" 2>/dev/null \
+        | grep -iE 'rt-tokio|tokio' | indent_text || true
+      return
+    fi
+    case "$?" in
+      2)
+        violations=$((violations + 1))
+        return
+        ;;
+      *) ;;
+    esac
+  done
+  echo "OK[otel]: opentelemetry_sdk absent from the production graph (no rt-tokio runtime risk)."
+}
+
+check_compat_markers() {
+  local hits
+
+  hits="$(grep -RIn 'COMPAT-REMOVE' "$ROOT/Cargo.toml" "$ROOT/crates" 2>/dev/null || true)"
+  if [ -n "$hits" ]; then
+    echo "FORBIDDEN[compat-marker]: temporary compat marker(s) remain in production paths:" >&2
+    indent_text <<<"$hits" >&2
+    echo "oraclemcp-boundary-lint: remove compat code or tie it to an open bead before release." >&2
+    violations=$((violations + 1))
+  else
+    echo "OK[compat-marker]: no COMPAT-REMOVE markers remain in production paths."
+  fi
+}
+
 case "${1:-}" in
   --selftest)
     selftest
     exit $?
     ;;
   --help | -h)
-    sed -n '2,12p' "$SELF" >&2
+    sed -n '2,18p' "$SELF" >&2
     exit 0
     ;;
 esac
@@ -172,143 +415,7 @@ fi
 
 echo "oraclemcp-boundary-lint: OK — ${#core_crates[@]} core crate(s) are engine-free."
 
-forbidden_production_packages=(
-  tokio
-  tokio-stream
-  tokio-util
-  asupersync-tokio-compat
-  rmcp
-  axum
-  hyper
-  hyper-util
-  oracle
-  odpic-sys
-  r2d2
-  reqwest
-  async-std
-  smol
-)
-
-indent_text() {
-  local line
-  while IFS= read -r line; do
-    printf '  %s\n' "$line"
-  done
-}
-
-tree_package_present() {
-  local label="$1"
-  local package="$2"
-  shift 2
-  local output
-  local status
-
-  output="$(cargo tree --locked --workspace "$@" -i "$package" 2>&1)" && status=0 || status=$?
-  if [ "$status" -eq 0 ]; then
-    printf '%s\n' "$output"
-    return 0
-  fi
-
-  if grep -Eiq 'did not match|nothing to print|could not find package|not found' <<<"$output"; then
-    return 1
-  fi
-
-  echo "oraclemcp-boundary-lint: could not inspect dependency '$package' for $label graph:" >&2
-  indent_text <<<"$output" >&2
-  return 2
-}
-
-check_production_dependency_graph() {
-  echo "oraclemcp-boundary-lint: hard forbidden dependency gate for normal production graph."
-  echo "oraclemcp-boundary-lint: cargo tree -e normal --workspace --target all -i <package>"
-
-  local package
-  local tree
-  for package in "${forbidden_production_packages[@]}"; do
-    if tree="$(tree_package_present "production" "$package" -e normal --target all)"; then
-      echo "FORBIDDEN[production]: '$package' is present in the normal workspace dependency graph:" >&2
-      indent_text <<<"$tree" >&2
-      violations=$((violations + 1))
-    else
-      case "$?" in
-        1) echo "OK[production]: $package absent from the normal workspace dependency graph." ;;
-        2) violations=$((violations + 1)) ;;
-      esac
-    fi
-  done
-}
-
-show_all_target_dependency_graph() {
-  echo "oraclemcp-boundary-lint: all-target dependency visibility for forbidden package names."
-  echo "oraclemcp-boundary-lint: cargo tree -e all --workspace --target all -i <package>"
-
-  local package
-  local tree
-  for package in "${forbidden_production_packages[@]}"; do
-    if tree="$(tree_package_present "all-target" "$package" -e all --target all)"; then
-      echo "VISIBLE[all-target]: '$package' appears somewhere in all targets/edges:"
-      indent_text <<<"$tree"
-    else
-      case "$?" in
-        1) echo "OK[all-target]: $package absent from all workspace targets/edges." ;;
-        2) violations=$((violations + 1)) ;;
-      esac
-    fi
-  done
-}
-
-# Early-warning feature inspection (bead D4 / WP-D). opentelemetry-sdk is NOT a
-# forbidden package — the telemetry crate may legitimately grow an OTLP exporter
-# — but its `rt-tokio`/`rt-tokio-current-thread` runtime features pull Tokio in.
-# If an upstream opentelemetry-sdk release ever flips one of those on by default,
-# the Tokio gate above WILL fail; this check fires first and names the cause, so
-# the Tokio failure is diagnosed as "opentelemetry-sdk dragged in a runtime"
-# rather than chased blind. It complements the `-i tokio` / `-i reqwest` gates.
-# Advisory: it explains, it does not itself fail the build (the Tokio gate does).
-inspect_opentelemetry_runtime() {
-  # The crate resolves under the underscore spelling (`opentelemetry_sdk`); the
-  # hyphen form never matches `cargo tree -i`. Check the underscore name (and the
-  # hyphen as a belt-and-braces fallback) so the early-warning actually fires for
-  # the crate the asupersync `metrics` feature pulls in (bead D1/.1: catch an
-  # upstream rt-tokio default flip before the Tokio gate above fails blind).
-  local package
-  local tree
-  for package in opentelemetry_sdk opentelemetry-sdk; do
-    if tree="$(tree_package_present "opentelemetry runtime" "$package" -e normal --target all)"; then
-      echo "NOTE[otel]: '$package' is present in the production graph. Confirm no" \
-        "rt-tokio* feature is enabled (that would pull Tokio and fail the gate above):"
-      indent_text <<<"$tree"
-      # Surface the resolved features so an rt-tokio flip is visible in the log.
-      cargo tree --locked --workspace -e features --target all -i "$package" 2>/dev/null \
-        | grep -iE 'rt-tokio|tokio' | indent_text || true
-      return
-    fi
-    case "$?" in
-      2)
-        violations=$((violations + 1))
-        return
-        ;;
-      *) ;;
-    esac
-  done
-  echo "OK[otel]: opentelemetry_sdk absent from the production graph (no rt-tokio runtime risk)."
-}
-
-check_compat_markers() {
-  local hits
-
-  hits="$(grep -RIn 'COMPAT-REMOVE' "$ROOT/Cargo.toml" "$ROOT/crates" 2>/dev/null || true)"
-  if [ -n "$hits" ]; then
-    echo "FORBIDDEN[compat-marker]: temporary compat marker(s) remain in production paths:" >&2
-    indent_text <<<"$hits" >&2
-    echo "oraclemcp-boundary-lint: remove compat code or tie it to an open bead before release." >&2
-    violations=$((violations + 1))
-  else
-    echo "OK[compat-marker]: no COMPAT-REMOVE markers remain in production paths."
-  fi
-}
-
-check_production_dependency_graph
+check_forbidden_graphs
 show_all_target_dependency_graph
 inspect_opentelemetry_runtime
 check_compat_markers

@@ -10447,23 +10447,34 @@ mod tests {
     }
 }
 
-/// Rust-level guard for the driver-adapter seam (B2; plan §8 release gate).
+/// Rust-level guard for the backend-adapter seam (B2; plan §8 release gate).
 ///
-/// Mirrors `scripts/oraclemcp_driver_seam_lint.sh` so `cargo test` catches an
-/// `oraclemcp_driver_cx::` driver call that leaks outside the adapter even when the shell
-/// lint is not run. The two enforcers share one allowlist: this file is the
-/// only adapter site. Add a new legitimate `oraclemcp_driver_cx::` site to BOTH the shell
-/// lint's `ADAPTER_ALLOWLIST` and `ADAPTER_ALLOWLIST` below, with a
-/// justification.
+/// Mirrors `scripts/oraclemcp_driver_seam_lint.sh` so `cargo test` catches a
+/// backend crate path that leaks outside its adapter even when the shell lint is
+/// not run. Each Oracle backend has EXACTLY ONE adapter:
+///
+///   * driver-cx -> `crates/oraclemcp-db/src/connection.rs`
+///   * official  -> `crates/oraclemcp-db/src/oracledb_backend.rs`
+///
+/// Add a new legitimate backend-crate site to BOTH the shell lint's allowlist
+/// and the matching allowlist below, with a justification. Adding a second file
+/// per backend is NOT an accepted fix.
 #[cfg(test)]
 mod driver_seam {
     use std::path::{Path, PathBuf};
 
-    /// Workspace-relative paths that ARE the adapter — the only sources allowed
-    /// to name an `oraclemcp_driver_cx::` driver path.
+    /// The driver-cx adapter — the only source allowed to name an
+    /// `oraclemcp_driver_cx::` path in code.
     const ADAPTER_ALLOWLIST: &[&str] = &[
         // B2 adapter: wraps the whole driver-cx surface.
         "crates/oraclemcp-db/src/connection.rs",
+    ];
+
+    /// The official `oracledb` adapter — the only source allowed to name an
+    /// `oracledb::` path in code.
+    const OFFICIAL_ADAPTER_ALLOWLIST: &[&str] = &[
+        // Official backend adapter: wraps the whole oracledb surface.
+        "crates/oraclemcp-db/src/oracledb_backend.rs",
     ];
 
     /// Walk to the workspace root from this crate's manifest dir
@@ -10562,7 +10573,12 @@ mod driver_seam {
         assert_eq!(
             ADAPTER_ALLOWLIST,
             ["crates/oraclemcp-db/src/connection.rs"],
-            "the driver adapter seam must remain a single source file"
+            "the driver-cx adapter seam must remain a single source file"
+        );
+        assert_eq!(
+            OFFICIAL_ADAPTER_ALLOWLIST,
+            ["crates/oraclemcp-db/src/oracledb_backend.rs"],
+            "the official oracledb adapter seam must remain a single source file"
         );
     }
 
@@ -10581,14 +10597,17 @@ mod driver_seam {
         assert!((desc.tcp_connect_timeout - 2.5).abs() < 1e-9);
     }
 
-    /// True iff `line` names the DRIVER crate path `oraclemcp_driver_cx::` (and not the
-    /// workspace crate `oraclemcp_db::`). Requires a non-identifier char (or
-    /// start of line) to the left of `oraclemcp_driver_cx`, then optional
-    /// whitespace, then `::`, matching the shell lint.
-    fn names_driver_path(line: &str) -> bool {
-        let bytes = line.as_bytes();
+    /// True iff `line` names the crate path `<ident>::` (and not a longer
+    /// identifier, nor a workspace/protocol crate). The `//`-to-end-of-line
+    /// portion is stripped first, so a doc-comment mention is not a violation;
+    /// the shell lint strips the same way. Requires a non-identifier char (or
+    /// start of line) to the left of `ident`, then optional whitespace, then
+    /// `::`.
+    fn names_crate_path(line: &str, ident: &str) -> bool {
+        let code = line.split("//").next().unwrap_or("");
+        let bytes = code.as_bytes();
         let mut search_from = 0;
-        while let Some(rel) = line[search_from..].find("oraclemcp_driver_cx") {
+        while let Some(rel) = code[search_from..].find(ident) {
             let start = search_from + rel;
             let left_ok = start == 0 || {
                 let c = bytes[start - 1];
@@ -10596,17 +10615,27 @@ mod driver_seam {
             };
             if left_ok {
                 // Skip past the crate identifier and any whitespace, expect "::".
-                let mut idx = start + "oraclemcp_driver_cx".len();
+                let mut idx = start + ident.len();
                 while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
                     idx += 1;
                 }
-                if line[idx..].starts_with("::") {
+                if code[idx..].starts_with("::") {
                     return true;
                 }
             }
-            search_from = start + "oraclemcp_driver_cx".len();
+            search_from = start + ident.len();
         }
         false
+    }
+
+    /// True iff `line` names the DRIVER crate path `oraclemcp_driver_cx::`.
+    fn names_driver_path(line: &str) -> bool {
+        names_crate_path(line, "oraclemcp_driver_cx")
+    }
+
+    /// True iff `line` names the official driver crate path `oracledb::`.
+    fn names_official_path(line: &str) -> bool {
+        names_crate_path(line, "oracledb")
     }
 
     #[test]
@@ -10648,6 +10677,44 @@ mod driver_seam {
     }
 
     #[test]
+    fn no_official_call_outside_adapter() {
+        let root = workspace_root();
+        let crates_dir = root.join("crates");
+        let mut files = Vec::new();
+        collect_rs_files(&crates_dir, &mut files);
+        files.sort();
+        assert!(!files.is_empty(), "no crate sources found under crates/");
+
+        let mut violations: Vec<String> = Vec::new();
+        for file in &files {
+            let rel = file
+                .strip_prefix(&root)
+                .expect("file under workspace root")
+                .to_string_lossy()
+                .replace('\\', "/");
+            if OFFICIAL_ADAPTER_ALLOWLIST.contains(&rel.as_str()) {
+                continue;
+            }
+            let contents = std::fs::read_to_string(file).expect("read Rust source for seam lint");
+            for (n, line) in contents.lines().enumerate() {
+                if names_official_path(line) {
+                    violations.push(format!("{rel}:{}: {}", n + 1, line.trim()));
+                }
+            }
+        }
+
+        assert!(
+            violations.is_empty(),
+            "official oracledb path(s) leaked outside the adapter \
+             ({:?}); move them behind an OracleConnection / adapter method, or \
+             add a legitimate new adapter site to OFFICIAL_ADAPTER_ALLOWLIST \
+             here AND in scripts/oraclemcp_driver_seam_lint.sh:\n{}",
+            OFFICIAL_ADAPTER_ALLOWLIST,
+            violations.join("\n"),
+        );
+    }
+
+    #[test]
     fn pattern_distinguishes_driver_from_workspace_crate() {
         // The DRIVER crate path is a violation.
         assert!(names_driver_path("use oraclemcp_driver_cx::Connection;"));
@@ -10669,6 +10736,18 @@ mod driver_seam {
         assert!(!names_driver_path(
             r#""driver": "pure-Rust driver-cx thin driver""#
         ));
+
+        // The official backend path is a violation; its protocol/workspace
+        // neighbours and comment mentions are not.
+        assert!(names_official_path(&format!("use {}::Connection;", "oracledb")));
+        assert!(names_official_path(&format!(
+            "    let _ = {} :: connect(cfg);",
+            "oracledb"
+        )));
+        assert!(!names_official_path("// oracledb::Connection is thread-confined"));
+        assert!(!names_official_path("use oraclemcp_driver_cx::Connection;"));
+        assert!(!names_official_path("oracledb_protocol::x"));
+        assert!(!names_official_path("use oraclemcp_db::OracleCell;"));
     }
 
     /// True iff `line` is a real `block_on(` CALL (not a doc-comment mention).
