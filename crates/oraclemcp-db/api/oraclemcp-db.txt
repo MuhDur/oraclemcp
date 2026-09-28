@@ -654,6 +654,7 @@ pub oraclemcp_db::AsOf::Scn(u64)
 pub oraclemcp_db::AsOf::Timestamp(alloc::string::String)
 impl oraclemcp_db::AsOf
 pub async fn oraclemcp_db::AsOf::current_system_change_number(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<u64, oraclemcp_db::DbError>
+pub async fn oraclemcp_db::AsOf::probe_current_system_change_number(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<oraclemcp_db::ScnProbeOutcome, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::AsOf::resolve_to_scn(&self, &asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<u64, oraclemcp_db::DbError>
 impl core::clone::Clone for oraclemcp_db::AsOf
 pub fn oraclemcp_db::AsOf::clone(&self) -> oraclemcp_db::AsOf
@@ -4312,6 +4313,119 @@ pub type oraclemcp_db::SchemaObjectType::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SchemaObjectType where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SchemaObjectType where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::SchemaObjectType::vzip(self) -> V
+pub enum oraclemcp_db::ScnCapability
+pub oraclemcp_db::ScnCapability::Granted
+pub oraclemcp_db::ScnCapability::NotGranted
+pub oraclemcp_db::ScnCapability::NotGranted::reason: oraclemcp_db::ScnCapabilityUnavailable
+pub oraclemcp_db::ScnCapability::Unprobed
+impl core::clone::Clone for oraclemcp_db::ScnCapability
+pub fn oraclemcp_db::ScnCapability::clone(&self) -> oraclemcp_db::ScnCapability
+impl core::cmp::Eq for oraclemcp_db::ScnCapability
+impl core::cmp::PartialEq for oraclemcp_db::ScnCapability
+pub fn oraclemcp_db::ScnCapability::eq(&self, &oraclemcp_db::ScnCapability) -> bool
+impl core::fmt::Debug for oraclemcp_db::ScnCapability
+pub fn oraclemcp_db::ScnCapability::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ScnCapability
+impl core::marker::Freeze for oraclemcp_db::ScnCapability
+impl core::marker::Send for oraclemcp_db::ScnCapability
+impl core::marker::Sync for oraclemcp_db::ScnCapability
+impl core::marker::Unpin for oraclemcp_db::ScnCapability
+impl core::marker::UnsafeUnpin for oraclemcp_db::ScnCapability
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ScnCapability
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ScnCapability
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ScnCapability where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ScnCapability where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ScnCapability where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapability::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ScnCapability where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ScnCapability where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ScnCapability where U: core::convert::From<T>
+pub fn oraclemcp_db::ScnCapability::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ScnCapability where U: core::convert::Into<T>
+pub type oraclemcp_db::ScnCapability::Error = core::convert::Infallible
+pub fn oraclemcp_db::ScnCapability::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ScnCapability where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ScnCapability::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ScnCapability::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ScnCapability where T: core::clone::Clone
+pub type oraclemcp_db::ScnCapability::Owned = T
+pub fn oraclemcp_db::ScnCapability::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ScnCapability::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ScnCapability
+impl<T> core::any::Any for oraclemcp_db::ScnCapability where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapability::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ScnCapability where T: ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapability::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ScnCapability where T: ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapability::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ScnCapability where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ScnCapability::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ScnCapability
+pub fn oraclemcp_db::ScnCapability::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ScnCapability
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ScnCapability
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ScnCapability
+impl<T> typenum::type_operators::Same for oraclemcp_db::ScnCapability
+pub type oraclemcp_db::ScnCapability::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ScnCapability where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ScnCapability where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ScnCapability::vzip(self) -> V
+pub enum oraclemcp_db::ScnProbeOutcome
+pub oraclemcp_db::ScnProbeOutcome::Desync
+pub oraclemcp_db::ScnProbeOutcome::Granted(u64)
+pub oraclemcp_db::ScnProbeOutcome::NotGranted(oraclemcp_db::ScnCapabilityUnavailable)
+impl core::clone::Clone for oraclemcp_db::ScnProbeOutcome
+pub fn oraclemcp_db::ScnProbeOutcome::clone(&self) -> oraclemcp_db::ScnProbeOutcome
+impl core::cmp::Eq for oraclemcp_db::ScnProbeOutcome
+impl core::cmp::PartialEq for oraclemcp_db::ScnProbeOutcome
+pub fn oraclemcp_db::ScnProbeOutcome::eq(&self, &oraclemcp_db::ScnProbeOutcome) -> bool
+impl core::fmt::Debug for oraclemcp_db::ScnProbeOutcome
+pub fn oraclemcp_db::ScnProbeOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ScnProbeOutcome
+impl core::marker::Freeze for oraclemcp_db::ScnProbeOutcome
+impl core::marker::Send for oraclemcp_db::ScnProbeOutcome
+impl core::marker::Sync for oraclemcp_db::ScnProbeOutcome
+impl core::marker::Unpin for oraclemcp_db::ScnProbeOutcome
+impl core::marker::UnsafeUnpin for oraclemcp_db::ScnProbeOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ScnProbeOutcome
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ScnProbeOutcome
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ScnProbeOutcome where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ScnProbeOutcome where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ScnProbeOutcome where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ScnProbeOutcome::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ScnProbeOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ScnProbeOutcome where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ScnProbeOutcome where U: core::convert::From<T>
+pub fn oraclemcp_db::ScnProbeOutcome::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ScnProbeOutcome where U: core::convert::Into<T>
+pub type oraclemcp_db::ScnProbeOutcome::Error = core::convert::Infallible
+pub fn oraclemcp_db::ScnProbeOutcome::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ScnProbeOutcome where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ScnProbeOutcome::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ScnProbeOutcome::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ScnProbeOutcome where T: core::clone::Clone
+pub type oraclemcp_db::ScnProbeOutcome::Owned = T
+pub fn oraclemcp_db::ScnProbeOutcome::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ScnProbeOutcome::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ScnProbeOutcome
+impl<T> core::any::Any for oraclemcp_db::ScnProbeOutcome where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ScnProbeOutcome::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ScnProbeOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_db::ScnProbeOutcome::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ScnProbeOutcome where T: ?core::marker::Sized
+pub fn oraclemcp_db::ScnProbeOutcome::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ScnProbeOutcome where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ScnProbeOutcome::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ScnProbeOutcome
+pub fn oraclemcp_db::ScnProbeOutcome::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ScnProbeOutcome
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ScnProbeOutcome
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ScnProbeOutcome
+impl<T> typenum::type_operators::Same for oraclemcp_db::ScnProbeOutcome
+pub type oraclemcp_db::ScnProbeOutcome::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ScnProbeOutcome where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ScnProbeOutcome where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ScnProbeOutcome::vzip(self) -> V
 pub enum oraclemcp_db::SearchDetailLevel
 pub oraclemcp_db::SearchDetailLevel::Full
 pub oraclemcp_db::SearchDetailLevel::Names
@@ -7560,12 +7674,16 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleCatalogResolver wh
 pub fn oraclemcp_db::OracleCatalogResolver::vzip(self) -> V
 pub struct oraclemcp_db::OracleCatalogResolverCache
 impl oraclemcp_db::OracleCatalogResolverCache
+pub fn oraclemcp_db::OracleCatalogResolverCache::cache_policy_catalog_probe(&self, oraclemcp_db::OraclePolicyCatalogProbe)
+pub fn oraclemcp_db::OracleCatalogResolverCache::cache_scn_capability(&self, oraclemcp_db::ScnCapability)
 pub fn oraclemcp_db::OracleCatalogResolverCache::generation(&self) -> oraclemcp_guard::resolver::CatalogGeneration
 pub fn oraclemcp_db::OracleCatalogResolverCache::invalidate(&self, oraclemcp_db::CatalogInvalidation) -> oraclemcp_guard::resolver::CatalogGeneration
 pub fn oraclemcp_db::OracleCatalogResolverCache::is_empty(&self) -> bool
 pub fn oraclemcp_db::OracleCatalogResolverCache::len(&self) -> usize
 pub fn oraclemcp_db::OracleCatalogResolverCache::new() -> Self
+pub fn oraclemcp_db::OracleCatalogResolverCache::policy_catalog_probe(&self) -> core::option::Option<oraclemcp_db::OraclePolicyCatalogProbe>
 pub async fn oraclemcp_db::OracleCatalogResolverCache::preload(&self, &asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::RawName], oraclemcp_guard::resolver::StatementScope) -> core::result::Result<oraclemcp_guard::resolver::ResolveCtx, oraclemcp_db::DbError>
+pub fn oraclemcp_db::OracleCatalogResolverCache::scn_capability(&self) -> oraclemcp_db::ScnCapability
 impl core::default::Default for oraclemcp_db::OracleCatalogResolverCache
 pub fn oraclemcp_db::OracleCatalogResolverCache::default() -> Self
 impl core::fmt::Debug for oraclemcp_db::OracleCatalogResolverCache
@@ -7691,6 +7809,7 @@ pub oraclemcp_db::OracleConnectOptions::iam_token: core::option::Option<alloc::s
 pub oraclemcp_db::OracleConnectOptions::iam_token_private_key: core::option::Option<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::iam_token_source: core::option::Option<oraclemcp_db::IamTokenSourceHandle>
 pub oraclemcp_db::OracleConnectOptions::inactivity_timeout: core::option::Option<core::time::Duration>
+pub oraclemcp_db::OracleConnectOptions::keepalive_defaulted: bool
 pub oraclemcp_db::OracleConnectOptions::keepalive_minutes: core::option::Option<u64>
 pub oraclemcp_db::OracleConnectOptions::logoff_statements: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_db::OracleConnectOptions::password: core::option::Option<alloc::string::String>
@@ -11286,6 +11405,61 @@ pub type oraclemcp_db::SchemaSnapshot::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::SchemaSnapshot where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::SchemaSnapshot where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::SchemaSnapshot::vzip(self) -> V
+pub struct oraclemcp_db::ScnCapabilityUnavailable
+pub oraclemcp_db::ScnCapabilityUnavailable::message: alloc::string::String
+pub oraclemcp_db::ScnCapabilityUnavailable::ora_code: core::option::Option<i32>
+impl core::clone::Clone for oraclemcp_db::ScnCapabilityUnavailable
+pub fn oraclemcp_db::ScnCapabilityUnavailable::clone(&self) -> oraclemcp_db::ScnCapabilityUnavailable
+impl core::cmp::Eq for oraclemcp_db::ScnCapabilityUnavailable
+impl core::cmp::PartialEq for oraclemcp_db::ScnCapabilityUnavailable
+pub fn oraclemcp_db::ScnCapabilityUnavailable::eq(&self, &oraclemcp_db::ScnCapabilityUnavailable) -> bool
+impl core::fmt::Debug for oraclemcp_db::ScnCapabilityUnavailable
+pub fn oraclemcp_db::ScnCapabilityUnavailable::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ScnCapabilityUnavailable
+impl core::marker::Freeze for oraclemcp_db::ScnCapabilityUnavailable
+impl core::marker::Send for oraclemcp_db::ScnCapabilityUnavailable
+impl core::marker::Sync for oraclemcp_db::ScnCapabilityUnavailable
+impl core::marker::Unpin for oraclemcp_db::ScnCapabilityUnavailable
+impl core::marker::UnsafeUnpin for oraclemcp_db::ScnCapabilityUnavailable
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ScnCapabilityUnavailable
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ScnCapabilityUnavailable
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ScnCapabilityUnavailable where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ScnCapabilityUnavailable where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ScnCapabilityUnavailable where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapabilityUnavailable::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ScnCapabilityUnavailable where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ScnCapabilityUnavailable where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ScnCapabilityUnavailable where U: core::convert::From<T>
+pub fn oraclemcp_db::ScnCapabilityUnavailable::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ScnCapabilityUnavailable where U: core::convert::Into<T>
+pub type oraclemcp_db::ScnCapabilityUnavailable::Error = core::convert::Infallible
+pub fn oraclemcp_db::ScnCapabilityUnavailable::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ScnCapabilityUnavailable where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ScnCapabilityUnavailable::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ScnCapabilityUnavailable::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ScnCapabilityUnavailable where T: core::clone::Clone
+pub type oraclemcp_db::ScnCapabilityUnavailable::Owned = T
+pub fn oraclemcp_db::ScnCapabilityUnavailable::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ScnCapabilityUnavailable::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ScnCapabilityUnavailable
+impl<T> core::any::Any for oraclemcp_db::ScnCapabilityUnavailable where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapabilityUnavailable::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ScnCapabilityUnavailable where T: ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapabilityUnavailable::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ScnCapabilityUnavailable where T: ?core::marker::Sized
+pub fn oraclemcp_db::ScnCapabilityUnavailable::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ScnCapabilityUnavailable where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ScnCapabilityUnavailable::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ScnCapabilityUnavailable
+pub fn oraclemcp_db::ScnCapabilityUnavailable::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ScnCapabilityUnavailable
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ScnCapabilityUnavailable
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ScnCapabilityUnavailable
+impl<T> typenum::type_operators::Same for oraclemcp_db::ScnCapabilityUnavailable
+pub type oraclemcp_db::ScnCapabilityUnavailable::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ScnCapabilityUnavailable where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ScnCapabilityUnavailable where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ScnCapabilityUnavailable::vzip(self) -> V
 pub struct oraclemcp_db::SearchColumn
 pub oraclemcp_db::SearchColumn::comment: core::option::Option<alloc::string::String>
 pub oraclemcp_db::SearchColumn::data_type: core::option::Option<alloc::string::String>
@@ -12933,6 +13107,7 @@ pub fn oraclemcp_db::RefreshableIamTokenSource::get_token(&self) -> oraclemcp_db
 pub async fn oraclemcp_db::apply_native_redaction_policy(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, bool, bool, &oraclemcp_db::NativeRedactionPolicy) -> core::result::Result<(), oraclemcp_db::NativeRedactionApplyError>
 pub fn oraclemcp_db::assemble_cost_estimate(&[oraclemcp_db::OracleRow]) -> core::option::Option<oraclemcp_db::PlanCostEstimate>
 pub fn oraclemcp_db::base64_encode(&[u8]) -> alloc::string::String
+pub async fn oraclemcp_db::bounded_policy_catalog_probe(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> oraclemcp_db::OraclePolicyCatalogProbe
 pub fn oraclemcp_db::buffer_cache_hit_ratio_sql() -> (&'static str, alloc::string::String)
 pub fn oraclemcp_db::canonical_nls_statements() -> alloc::vec::Vec<&'static str>
 pub fn oraclemcp_db::canonicalize_datetime(&str) -> alloc::string::String
@@ -12993,6 +13168,8 @@ pub fn oraclemcp_db::normalize_source_object_type(&str) -> core::option::Option<
 pub fn oraclemcp_db::normalize_source_search_object_type(&str) -> core::option::Option<&'static str>
 pub async fn oraclemcp_db::observe_relation_security(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject]) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::RelationSecurityObservation>, oraclemcp_db::RelationSecurityProofError>
 pub async fn oraclemcp_db::observe_vpd_rls_for_relations(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject]) -> oraclemcp_db::OracleVpdRlsObservation
+pub async fn oraclemcp_db::observe_vpd_rls_for_relations_with_cached_bounded_probe(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject], &oraclemcp_db::OracleCatalogResolverCache) -> oraclemcp_db::OracleVpdRlsObservation
+pub async fn oraclemcp_db::observe_vpd_rls_for_relations_with_probe(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &[oraclemcp_guard::resolver::ResolvedObject], oraclemcp_db::OraclePolicyCatalogProbe) -> oraclemcp_db::OracleVpdRlsObservation
 pub async fn oraclemcp_db::observe_vpd_rls_for_schema(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection, &str) -> oraclemcp_db::OracleVpdRlsObservation
 pub async fn oraclemcp_db::ols_installation_evidence(&asupersync::cx::cx::Cx, &dyn oraclemcp_db::OracleConnection) -> core::result::Result<bool, oraclemcp_db::DbError>
 pub fn oraclemcp_db::oracle_driver_compiled() -> bool
