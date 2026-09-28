@@ -1307,9 +1307,9 @@ impl OracleMcpServer {
         // tools/list_changed notification after the final receive-loop drain;
         // preserve the same response-then-notification delivery contract when
         // joining those workers rather than silently dropping their queue.
-        for notification in self.drain_resource_updated_notifications(
-            crate::subscriptions::STDIO_SUBSCRIPTION_OWNER,
-        ) {
+        for notification in self
+            .drain_resource_updated_notifications(crate::subscriptions::STDIO_SUBSCRIPTION_OWNER)
+        {
             write_jsonrpc_response(&mut writer, &notification)?;
         }
         for notification in
