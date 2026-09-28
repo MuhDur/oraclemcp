@@ -583,6 +583,8 @@ fn npm_release_channel_is_retired() {
 
     assert!(install_manual.contains("An npm/npx channel is not offered"));
     assert!(release_checklist.contains("There is no npm/npx release channel."));
+    // The retired npm channel is absent outright: no dedicated workflow,
+    // validator, or wrapper package file.
     for retired in [
         ".github/workflows/publish-npm.yml",
         "scripts/validate_npm_publish_input.sh",
@@ -592,6 +594,35 @@ fn npm_release_channel_is_retired() {
             !root.join(retired).exists(),
             "retired npm channel file must not exist: {retired}"
         );
+    }
+    // ...and no workflow anywhere may publish to npm or consume an NPM_TOKEN,
+    // so a channel re-added under any filename is caught, not only the
+    // historical publish-npm.yml.
+    let workflows_dir = root.join(".github/workflows");
+    let mut workflow_files = fs::read_dir(&workflows_dir)
+        .expect("read .github/workflows")
+        .map(|entry| entry.expect("workflow directory entry").path())
+        .filter(|path| {
+            matches!(
+                path.extension().and_then(|ext| ext.to_str()),
+                Some("yml" | "yaml")
+            )
+        })
+        .collect::<Vec<_>>();
+    workflow_files.sort();
+    assert!(
+        !workflow_files.is_empty(),
+        "expected at least one workflow under .github/workflows"
+    );
+    for path in &workflow_files {
+        let text = fs::read_to_string(path).expect("read workflow file");
+        for forbidden in ["npm publish", "NPM_TOKEN"] {
+            assert!(
+                !text.contains(forbidden),
+                "{} must not publish to a retired npm channel: {forbidden}",
+                path.display()
+            );
+        }
     }
     for forbidden in [
         "name: validate npm wrapper package",
