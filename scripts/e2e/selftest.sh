@@ -33,12 +33,32 @@ e2e_run_command assert python3 "$ROOT/scripts/e2e/w4/export_selftest_cases.py" -
 set +e; env -u ORACLEMCP_SELFTEST_BINARY -u ORACLEMCP_E2E_ARTIFACT_DIR "$binary" --json selftest --profile selftest_admin --budget 120 >"$run_dir/clean.json" 2>"$run_dir/clean.stderr"; clean_status=$?; set -e
 [ "$clean_status" -eq 0 ] || { cat "$run_dir/clean.stderr" >&2; e2e_finish_fail "selftest_e2e_clean_lane_exit_0 status=$clean_status"; }
 grep -Fq 'pinned max_level = READ_ONLY' "$run_dir/clean.json" || e2e_finish_fail "forced READ_ONLY not reported"
+python3 - "$run_dir/clean.json" <<'PY'
+import json
+import sys
+
+report = json.load(open(sys.argv[1], encoding="utf-8"))
+writes = [outcome for outcome in report["outcomes"] if outcome["probe"].startswith("write:")]
+if not writes or any(outcome["outcome"] != "expected_refusal" for outcome in writes):
+    raise SystemExit("selftest_e2e_forced_readonly_on_admin_profile: write sweep was not wholly expected_refusal")
+if report.get("audit_records") != 0:
+    raise SystemExit("selftest_e2e_forced_readonly_on_admin_profile: audit recorded a probe action")
+PY
 # The live Oracle listener accepts TCP but cannot speak MCP/HTTP.  That makes
 # this a deterministic transport defect (exit 2), unlike an unresolvable host
 # which is deliberately classified as an environmental finding (exit 3).
-canary="http://${ORACLEMCP_TEST_DSN#//}/oraclemcp-selftest-canary"
+canary_host='selftest-host-canary.invalid'
+canary_schema='SELFTEST_SCHEMA_CANARY'
+canary_table='SELFTEST_TABLE_CANARY'
+canary_bind='selftest-bind-canary'
+canary_password='selftest-password-canary'
+canary="http://${ORACLEMCP_TEST_DSN#//}/${canary_host}/${canary_schema}/${canary_table}?bind=${canary_bind}&password=${canary_password}"
 set +e; env -u ORACLEMCP_SELFTEST_BINARY -u ORACLEMCP_E2E_ARTIFACT_DIR "$binary" --json selftest --profile selftest_admin --http "$canary" --issue-draft "$run_dir/drafts" --budget 120 >"$run_dir/defect.json" 2>"$run_dir/defect.stderr"; defect_status=$?; set -e
 [ "$defect_status" -eq 2 ] || e2e_finish_fail "selftest_e2e_injected_defect_exit_2 status=$defect_status"
-grep -R -Fq "$canary" "$run_dir/defect.json" "$run_dir/drafts" && e2e_finish_fail "selftest_e2e_redaction_canaries leaked HTTP canary"
+for canary_marker in "$canary_host" "$canary_schema" "$canary_table" "$canary_bind" "$canary_password"; do
+  if grep -R -Fq "$canary_marker" "$run_dir/defect.json" "$run_dir/defect.stderr" "$run_dir/drafts"; then
+    e2e_finish_fail "selftest_e2e_redaction_canaries leaked $canary_marker"
+  fi
+done
 [ "$(find "$run_dir/drafts" -name 'selftest-*.md' -type f | wc -l)" -ge 1 ] || e2e_finish_fail "injected defect wrote no issue draft"
 e2e_finish_pass
