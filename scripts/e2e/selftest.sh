@@ -33,7 +33,7 @@ export ORACLEMCP_CONFIG="$profiles" E2E_SELFTEST_PASSWORD="$ORACLEMCP_TEST_PASSW
 e2e_run_command assert python3 "$ROOT/scripts/e2e/w4/export_selftest_cases.py" --check
 set +e; "$binary" --json selftest --profile selftest_admin --budget 120 >"$run_dir/clean.json" 2>"$run_dir/clean.stderr"; clean_status=$?; set -e
 [ "$clean_status" -eq 0 ] || { cat "$run_dir/clean.stderr" >&2; e2e_finish_fail "selftest_e2e_clean_lane_exit_0 status=$clean_status"; }
-grep -Fq 'pinned READ_ONLY' "$run_dir/clean.json" || e2e_finish_fail "forced READ_ONLY not reported"
+grep -Fq 'pinned max_level = READ_ONLY' "$run_dir/clean.json" || e2e_finish_fail "forced READ_ONLY not reported"
 canary='https://canary-selftest-host.invalid/mcp?token=canary-token'
 set +e; "$binary" --json selftest --profile selftest_admin --http "$canary" --issue-draft "$run_dir/drafts" --budget 120 >"$run_dir/defect.json" 2>"$run_dir/defect.stderr"; defect_status=$?; set -e
 [ "$defect_status" -eq 2 ] || e2e_finish_fail "selftest_e2e_injected_defect_exit_2 status=$defect_status"
