@@ -404,13 +404,35 @@ fn pdb_identity_free23_live_e2e_oracle() {
         )
         .await
         .expect("FREE23 E2E_ORACLE connection");
+        let rows = conn
+            .query_rows(
+                &cx,
+                "SELECT SYS_CONTEXT('USERENV','DBID') AS dbid, \
+                        SYS_CONTEXT('USERENV','CON_ID') AS con_id FROM dual",
+                &[],
+            )
+            .await
+            .expect("FREE23 PDB identity query");
+        assert_eq!(rows.len(), 1, "FREE23 PDB identity rows: {rows:?}");
+        assert!(
+            rows[0].text("DBID").is_some_and(|value| !value.is_empty()),
+            "FREE23 PDB identity DBID row: {:?}",
+            rows[0]
+        );
+        assert!(
+            rows[0]
+                .text("CON_ID")
+                .is_some_and(|value| !value.is_empty()),
+            "FREE23 PDB identity CON_ID row: {:?}",
+            rows[0]
+        );
         let scope = read_pdb_identity_scope(&cx, &conn).await;
         match scope {
             PdbIdentityScope::ServiceStateStore { identity } => {
                 assert!(!identity.dbid.is_empty(), "FREE23 DBID must be populated");
                 assert!(
                     !identity.con_uid.is_empty(),
-                    "FREE23 CON_UID must be populated"
+                    "FREE23 CON_ID must be populated"
                 );
                 println!(
                     "{}",

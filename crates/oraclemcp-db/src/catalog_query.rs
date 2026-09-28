@@ -2448,8 +2448,8 @@ order by owner, name, referenced_owner, referenced_name"#
                 ReadPurity,
             ),
             Self::PdbIdentity => (
-                "SELECT SYS_CONTEXT('USERENV','DBID') AS dbid, \\
-                        SYS_CONTEXT('USERENV','CON_UID') AS con_uid FROM dual",
+                "SELECT SYS_CONTEXT('USERENV','DBID') AS dbid, \
+                        SYS_CONTEXT('USERENV','CON_ID') AS con_id FROM dual",
                 EMPTY,
                 "read stable database and PDB identity for local coordination",
                 InternalProof,

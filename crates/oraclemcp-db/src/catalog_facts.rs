@@ -96,13 +96,14 @@ pub struct ClosureDatabaseIdentity {
 
 /// Stable Oracle PDB identity usable as a service-state-store coordination key.
 ///
-/// `DBID` identifies the database and `CON_UID` identifies a container within
-/// it. Unlike a container name, `CON_UID` is stable across a PDB rename.
+/// `DBID` identifies the database and `CON_ID` identifies its current container
+/// within that database. Both are available to an ordinary PDB session without
+/// catalog-view grants.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PdbIdentity {
     /// Database DBID read from USERENV.
     pub dbid: String,
-    /// Container UID read from USERENV.
+    /// Container coordination identifier read from USERENV's `CON_ID`.
     pub con_uid: String,
 }
 
@@ -124,7 +125,7 @@ pub enum PdbIdentityObservation {
 pub enum PdbIdentityScope {
     /// Stable identity permits coordination within this service state store.
     ServiceStateStore {
-        /// The stable DBID/CON_UID identity the store keys requests by.
+        /// The DBID/CON_ID identity the store keys requests by.
         identity: PdbIdentity,
     },
     /// Stable identity is unavailable; only local request observation is safe.
@@ -567,7 +568,7 @@ fn pdb_identity_scope_from_rows(rows: &[OracleRow]) -> PdbIdentityScope {
     };
     let (Some(dbid), Some(con_uid)) = (
         required_text(row, "DBID", "PDB identity").ok(),
-        required_text(row, "CON_UID", "PDB identity").ok(),
+        required_text(row, "CON_ID", "PDB identity").ok(),
     ) else {
         return PdbIdentityScope::LocalOnly {
             observation: PdbIdentityObservation::Unreadable,
@@ -940,7 +941,7 @@ mod tests {
         assert!(matches!(mapped, Err(Revalidation::Unknown(_))));
     }
 
-    fn pdb_identity_row(dbid: Option<&str>, con_uid: Option<&str>) -> OracleRow {
+    fn pdb_identity_row(dbid: Option<&str>, con_id: Option<&str>) -> OracleRow {
         OracleRow {
             columns: vec![
                 (
@@ -948,15 +949,15 @@ mod tests {
                     crate::OracleCell::new("VARCHAR2", dbid.map(str::to_owned)),
                 ),
                 (
-                    "CON_UID".into(),
-                    crate::OracleCell::new("VARCHAR2", con_uid.map(str::to_owned)),
+                    "CON_ID".into(),
+                    crate::OracleCell::new("VARCHAR2", con_id.map(str::to_owned)),
                 ),
             ],
         }
     }
 
     #[test]
-    fn pdb_identity_scope_uses_dbid_and_con_uid_not_container_name() {
+    fn pdb_identity_scope_uses_dbid_and_con_id_not_container_name() {
         assert_eq!(
             pdb_identity_scope_from_rows(&[pdb_identity_row(Some("424242"), Some("9001"))]),
             PdbIdentityScope::ServiceStateStore {

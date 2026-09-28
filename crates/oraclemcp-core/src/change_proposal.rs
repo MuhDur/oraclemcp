@@ -1316,11 +1316,11 @@ mod tests {
         assert!(matches!(replay, ChangeProposalError::Invalid(_)));
     }
 
-    fn identified_scope(dbid: &str, con_uid: &str) -> PdbIdentityScope {
+    fn identified_scope(dbid: &str, con_id: &str) -> PdbIdentityScope {
         PdbIdentityScope::ServiceStateStore {
             identity: oraclemcp_db::PdbIdentity {
                 dbid: dbid.to_owned(),
-                con_uid: con_uid.to_owned(),
+                con_uid: con_id.to_owned(),
             },
         }
     }

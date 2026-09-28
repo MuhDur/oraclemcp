@@ -3096,11 +3096,11 @@ impl OracleConnection for EditionLifecycleMock {
             .push((sql.to_owned(), binds.to_vec()));
         let lower_sql = sql.to_ascii_lowercase();
         if lower_sql.contains("sys_context('userenv','dbid')")
-            && lower_sql.contains("sys_context('userenv','con_uid')")
+            && lower_sql.contains("sys_context('userenv','con_id')")
         {
             return Ok(vec![semantic_row(&[
                 ("DBID", Some("synthetic-db")),
-                ("CON_UID", Some("synthetic-pdb")),
+                ("CON_ID", Some("synthetic-pdb")),
             ])]);
         }
         if lower_sql.contains("from all_editions") {

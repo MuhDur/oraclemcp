@@ -356,7 +356,7 @@ pub type McpSurfaceFuture<'a> = Pin<Box<dyn Future<Output = McpSurfaceOutcome> +
 ///
 /// This is deliberately a dispatcher capability rather than an HTTP request
 /// field: the connection that serves the active profile is the authority for
-/// its DBID/CON_UID. A dispatcher without a database session returns its
+/// its DBID/CON_ID. A dispatcher without a database session returns its
 /// explicit local-only observation instead of fabricating shared identity.
 pub type PdbIdentityScopeFuture<'a> =
     Pin<Box<dyn Future<Output = oraclemcp_db::PdbIdentityScope> + 'a>>;
