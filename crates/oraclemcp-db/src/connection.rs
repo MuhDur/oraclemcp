@@ -10321,6 +10321,37 @@ mod tests {
         assert!(!envelope.message.contains("TTC"));
     }
 
+    #[test]
+    fn every_protocol_desync_variant_is_connection_lost() {
+        use oraclemcp_driver_cx::protocol::ProtocolError;
+
+        let opts = ezconnect_opts();
+        let desyncs = [
+            oraclemcp_driver_cx::Error::Protocol(ProtocolError::TruncatedHeader { got: 1 }),
+            oraclemcp_driver_cx::Error::Protocol(ProtocolError::InvalidPacketLength {
+                length: 1,
+                minimum: 8,
+            }),
+            oraclemcp_driver_cx::Error::Protocol(ProtocolError::IncompletePacket {
+                declared: 8,
+                available: 1,
+            }),
+            oraclemcp_driver_cx::Error::Protocol(ProtocolError::PacketTooLarge { length: 65_536 }),
+            oraclemcp_driver_cx::Error::Protocol(ProtocolError::TtcDecode("synthetic")),
+            oraclemcp_driver_cx::Error::Protocol(ProtocolError::UnknownMessageType {
+                message_type: 84,
+                position: 0,
+            }),
+            oraclemcp_driver_cx::Error::UnexpectedPacket(17),
+        ];
+
+        for err in desyncs {
+            let mapped = driver::driver_query_error(err, &opts, Some("synthetic desync"));
+            assert!(matches!(mapped, DbError::ConnectionLost(_)), "{mapped:?}");
+            assert!(mapped.is_uncertain_session_state(), "{mapped:?}");
+        }
+    }
+
     // --- connect/handshake failure classification (bead bhw6.2) -----------
     //
     // These construct real `oraclemcp_driver_cx::Error` connect variants and assert the
