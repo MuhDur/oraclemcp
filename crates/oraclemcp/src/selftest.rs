@@ -1297,9 +1297,10 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                 if ELEVATION_TOOLS.contains(&tool.as_str()) {
                     continue;
                 }
-                if !advertised.iter().any(|name| name == tool) {
-                    continue;
-                }
+                // Guarded tools may be hidden from tools/list at a READ_ONLY
+                // ceiling.  They are still part of the installed server's
+                // governed surface, so directly probe them through the served
+                // transport and require their typed refusal.
                 if Instant::now().duration_since(started) >= budget {
                     outcomes.push(skipped(format!("write:{tool}")));
                     continue;
@@ -1881,6 +1882,13 @@ mod tests {
                 "{class} is a safe rejection of schema-shaped placeholder input"
             );
         }
+    }
+
+    #[test]
+    fn guarded_write_tools_are_planned_even_when_readonly_hides_them() {
+        let (writes, _) = tool_kinds();
+        assert!(writes.iter().any(|tool| tool == "oracle_execute"));
+        assert!(writes.iter().any(|tool| tool == "oracle_create_or_replace"));
     }
 
     #[test]
