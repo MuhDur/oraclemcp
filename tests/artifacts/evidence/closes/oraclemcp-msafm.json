@@ -7,8 +7,6 @@
     "summary": "Restores the three dispatch-level licensed-Diagnostics-Pack tests deleted by b37214d8, binding them to an explicit diagnostics_pack_licensed=true profile lease, keeps the license-refusal tests, and adds one live W4 case proving the licensed profile still gets AWR top_queries/plan_timeline data on free23.",
     "in_scope": [
       "crates/oraclemcp/src/dispatch/tests.rs",
-      "crates/oraclemcp/src/dispatch/mod.rs",
-      "crates/oraclemcp-db/src/awr.rs",
       "scripts/e2e/w4/driver.py",
       "scripts/e2e/w4/cases/ops-tools.json"
     ],
