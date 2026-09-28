@@ -224,6 +224,138 @@ if [[ -z "$verify_line" || -z "$extract_line" || "$verify_line" -ge "$extract_li
   failures=1
 fi
 
+# ---------------------------------------------------------------------------
+# R22: install_mcp_publisher must delete exactly the mcp-publisher.XXXXXX
+# directory it created on every exit path, and must not clobber a caller's
+# EXIT trap when the script is sourced. Fully offline: curl is stubbed through
+# PATH and the platform metadata is overridden with a locally built fixture.
+# ---------------------------------------------------------------------------
+check_installer_cleanup() {
+  local fixture_name="mcp-publisher_fixture.tar.gz"
+  local tmp_root stub_bin case_root build_dir fixture digest dest rc
+  local actual remains
+
+  tmp_root="$(mktemp -d "${TMPDIR:-/tmp}/mcp-installer-check.XXXXXX")"
+  stub_bin="$tmp_root/bin"
+  mkdir -p "$stub_bin"
+
+  cat >"$stub_bin/curl" <<'CURL_STUB'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+if [[ -n "${CURL_STUB_EXIT:-}" ]]; then
+  exit "${CURL_STUB_EXIT}"
+fi
+[[ -n "$out" ]] || exit 2
+cp "${CURL_STUB_FIXTURE:?missing CURL_STUB_FIXTURE}" "$out"
+CURL_STUB
+  chmod +x "$stub_bin/curl"
+
+  # One real tar.gz fixture with an executable member, so the success case
+  # exercises extraction and `install`, not just the cleanup trap.
+  build_dir="$tmp_root/build"
+  mkdir -p "$build_dir"
+  printf '#!/usr/bin/env bash\necho mcp-publisher-stub\n' >"$build_dir/mcp-publisher"
+  chmod +x "$build_dir/mcp-publisher"
+  fixture="$tmp_root/$fixture_name"
+  tar -czf "$fixture" -C "$build_dir" mcp-publisher
+  digest="$(sha256_file "$fixture")"
+
+  # want_sha is the digest the installer will expect; pass the real one for a
+  # success/short-circuit, 64 zeros for a genuine verify_sha256 mismatch.
+  run_cleanup_case() {
+    local id="$1" mode="$2" want_sha="$3"
+    case_root="$(mktemp -d "$tmp_root/case.XXXXXX")"
+    mkdir -p "$case_root/out"
+    dest="$case_root/out/mcp-publisher"
+
+    set +e
+    (
+      set -e
+      if [[ "$mode" == download_failure ]]; then
+        export CURL_STUB_EXIT=22
+      fi
+      mcp_publisher_platform() {
+        printf '%s\t%s\t%s\n' "$fixture_name" "$want_sha" "mcp-publisher"
+      }
+      export PATH="$stub_bin:$PATH"
+      export RUNNER_TEMP="$case_root" TMPDIR="$case_root" CURL_STUB_FIXTURE="$fixture"
+      install_mcp_publisher "$dest"
+    )
+    rc=$?
+    set -e
+
+    remains="$(find "$case_root" -maxdepth 1 -name 'mcp-publisher.*' -print -quit)"
+    if [[ -n "$remains" ]]; then actual="present"; else actual="absent"; fi
+    printf '{"case_id": "%s", "expected": "absent", "actual": "%s"}\n' "$id" "$actual"
+    [[ "$actual" == absent ]] || {
+      echo "$id: installer work dir was not removed: $remains" >&2
+      failures=1
+    }
+
+    if [[ "$mode" == success ]]; then
+      [[ "$rc" -eq 0 && -x "$dest" ]] || {
+        echo "$id: expected a successful install at $dest (rc=$rc)" >&2
+        failures=1
+      }
+    else
+      [[ "$rc" -ne 0 && ! -e "$dest" ]] || {
+        echo "$id: expected a failed install with no destination (rc=$rc)" >&2
+        failures=1
+      }
+    fi
+  }
+
+  run_cleanup_case mcp_publisher_workdir_removed_on_success success "$digest"
+  run_cleanup_case mcp_publisher_workdir_removed_on_sha_mismatch sha_mismatch \
+    "0000000000000000000000000000000000000000000000000000000000000000"
+  run_cleanup_case mcp_publisher_workdir_removed_on_download_failure download_failure "$digest"
+
+  # The subshell-function form must leave a caller's own EXIT trap intact when
+  # the installer is sourced. A fresh child shell is the honest simulation of
+  # the workflows' `source scripts/install_mcp_publisher.sh` contract.
+  case_root="$(mktemp -d "$tmp_root/case.XXXXXX")"
+  mkdir -p "$case_root/out"
+  dest="$case_root/out/mcp-publisher"
+  cat >"$case_root/caller.sh" <<'CALLER'
+#!/usr/bin/env bash
+set -euo pipefail
+trap 'printf fired >"$CALLER_MARKER"' EXIT
+source "$REPO_ROOT/scripts/install_mcp_publisher.sh"
+mcp_publisher_platform() {
+  printf '%s\t%s\t%s\n' "$FIXTURE_NAME" "$EXPECTED" "mcp-publisher"
+}
+export PATH="$STUB_BIN:$PATH"
+export RUNNER_TEMP="$CASE_ROOT" TMPDIR="$CASE_ROOT" CURL_STUB_FIXTURE="$FIXTURE"
+install_mcp_publisher "$DEST"
+CALLER
+  if env REPO_ROOT="$repo_root" STUB_BIN="$stub_bin" CASE_ROOT="$case_root" \
+    FIXTURE="$fixture" FIXTURE_NAME="$fixture_name" EXPECTED="$digest" \
+    DEST="$dest" CALLER_MARKER="$case_root/caller-trap-fired" \
+    bash "$case_root/caller.sh"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  if [[ -f "$case_root/caller-trap-fired" ]]; then actual="fired"; else actual="missing"; fi
+  printf '{"case_id": "%s", "expected": "caller-exit-trap-fired", "actual": "%s"}\n' \
+    "mcp_publisher_caller_exit_trap_intact" "$actual"
+  [[ "$actual" == fired && "$rc" -eq 0 ]] || {
+    echo "mcp_publisher_caller_exit_trap_intact: caller EXIT trap was clobbered (rc=$rc)" >&2
+    failures=1
+  }
+
+  rm -rf -- "$tmp_root"
+}
+
+check_installer_cleanup
+
 # This hermetic suite also invokes validate_release_security_workflows.sh and
 # supplies fake GitHub, registry, Docker, and cosign clients. Its own nested
 # policy checks use --action-pins-only, which deliberately returns above.

@@ -102,7 +102,10 @@ normalize_arch() {
   esac
 }
 
-install_mcp_publisher() {
+# The body runs in a subshell function `( ... )` so the R22 cleanup trap below
+# is scoped to this invocation and never clobbers a caller's EXIT trap when the
+# script is `source`d (scripts/workflow_supply_chain_check.sh does exactly that).
+install_mcp_publisher() (
   local destination="${1:-./mcp-publisher}"
   local os arch artifact expected executable metadata work_dir archive url
   os="$(normalize_os "$(uname -s)")"
@@ -111,6 +114,12 @@ install_mcp_publisher() {
   IFS=$'\t' read -r artifact expected executable <<<"$metadata"
 
   work_dir="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/mcp-publisher.XXXXXX")"
+  # R22: delete only the directory this invocation just created. Guard on a
+  # non-empty, existing directory so the trap never expands to an empty path
+  # (`set -u` is on) or to a caller-supplied value.
+  if [[ -n "$work_dir" && -d "$work_dir" ]]; then
+    trap 'rm -rf -- "$work_dir"' EXIT
+  fi
   archive="$work_dir/$artifact"
   url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/${artifact}"
 
@@ -120,7 +129,7 @@ install_mcp_publisher() {
   verify_sha256 "$archive" "$expected"
   tar -xzf "$archive" -C "$work_dir" "$executable"
   install -m 0755 "$work_dir/$executable" "$destination"
-}
+)
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
   install_mcp_publisher "${1:-./mcp-publisher}"
