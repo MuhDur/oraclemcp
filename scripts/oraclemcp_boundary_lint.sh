@@ -12,19 +12,123 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SELF="$ROOT/scripts/oraclemcp_boundary_lint.sh"
 CRATES_DIR="$ROOT/crates"
 violations=0
-cd "$ROOT"
 
-# `cargo tree --workspace` below is classified as a heavy Cargo operation by
-# the compiler guard because Cargo still starts rustc to inspect target-specific
-# configuration. Take a real lease for the full dependency-graph inspection so
-# the existing fail-closed guard can verify the nested Cargo process normally.
-# When called from an already leased command (or on a single-tenant CI runner),
-# the preflight succeeds and this script reuses that context.
-if ! "$ROOT/scripts/check_build_lease.sh" --require-lease >/dev/null 2>&1; then
-  exec "$ROOT/scripts/build_lease.sh" --slots 3 -- timeout 1800 bash "$0" "$@"
-fi
+# `cargo tree --workspace` below is classified as a HEAVY Cargo operation by the
+# compiler guard: Cargo starts rustc to probe target configuration, and the
+# guard intercepts that probe. The guard can refuse for two independent reasons,
+# and only the first is about the lease:
+#
+#   * exit 75 — no live build lease; re-enter through scripts/build_lease.sh so
+#     the nested Cargo probe inherits a verified flock.
+#   * exit 78 — the ambient CARGO_TARGET_DIR is a shared/RAM-backed cache the
+#     guard refuses by name; a lease alone cannot fix it. The inspection selects
+#     a dedicated per-agent target (the checkout's own target/) instead.
+#
+# resolve_target_dir() honors an ambient target dir only when the guard's own
+# --target-only rule accepts it, so the guard stays the single authority and
+# this script never widens or bypasses it.
+resolve_target_dir() {
+  local ambient="${CARGO_TARGET_DIR:-}"
+  if [ -n "$ambient" ] &&
+    "$ROOT/scripts/check_build_lease.sh" --target-only >/dev/null 2>&1; then
+    printf '%s\n' "$ambient"
+  else
+    printf '%s\n' "$ROOT/target"
+  fi
+}
+
+# Re-enter under build_lease.sh unless a live lease is already held by this
+# process or one of its ancestors. check_build_lease.sh verifies the live flock
+# itself; ORACLEMCP_BOUNDARY_LINT_LEASED only bounds the re-entry to one level so
+# a persistent preflight refusal can never become an unbounded re-exec loop.
+ensure_build_lease() {
+  if "$ROOT/scripts/check_build_lease.sh" --require-lease >/dev/null 2>&1; then
+    return 0
+  fi
+  if [ "${ORACLEMCP_BOUNDARY_LINT_LEASED:-0}" = "1" ]; then
+    return 0
+  fi
+  export ORACLEMCP_BOUNDARY_LINT_LEASED=1
+  exec "$ROOT/scripts/build_lease.sh" -- timeout 1800 bash "$SELF" "$@"
+}
+
+# --selftest: prove the lease inheritance and the preserved refusals without
+# taking the full dependency walk. The one heavy step is a real leased
+# `cargo tree --workspace` probe, so the integration is exercised end-to-end.
+selftest() {
+  local pass=0 fail=0 rc got
+  selftest_check() { # WANT GOT DESCRIPTION
+    if [ "$2" = "$1" ]; then
+      echo "  PASS  $3 (got=$2)"
+      pass=$((pass + 1))
+    else
+      echo "  FAIL  $3 (got=$2, want $1)" >&2
+      fail=$((fail + 1))
+    fi
+  }
+
+  # 1. Target-dir selection never runs the inspection against a shared cache.
+  got="$( ( unset CARGO_TARGET_DIR; resolve_target_dir ) )"
+  selftest_check "$ROOT/target" "$got" "unset ambient target -> checkout target/"
+  got="$(CARGO_TARGET_DIR="$HOME/.cache/cargo-target" resolve_target_dir)"
+  selftest_check "$ROOT/target" "$got" "shared ambient target -> checkout target/"
+  got="$(CARGO_TARGET_DIR="$ROOT/target" resolve_target_dir)"
+  selftest_check "$ROOT/target" "$got" "dedicated ambient target honored"
+
+  # 2. The guard still classifies the inspection as heavy and refuses it with no
+  #    lease (planted negative), and still refuses a shared target by name.
+  rc=0
+  ( unset CARGO_SWARM_BUILD_LEASE_DIR CARGO_SWARM_BUILD_LEASE_SLOT \
+      CARGO_SWARM_BUILD_LEASE_PID CI
+    CARGO_TARGET_DIR="$ROOT/target" "$ROOT/scripts/check_build_lease.sh" -- \
+      cargo tree --locked --workspace -i oraclemcp >/dev/null 2>&1 ) || rc=$?
+  selftest_check 75 "$rc" "un-leased 'cargo tree --workspace' refused"
+  rc=0
+  ( unset CARGO_SWARM_BUILD_LEASE_DIR CARGO_SWARM_BUILD_LEASE_SLOT \
+      CARGO_SWARM_BUILD_LEASE_PID CI
+    CARGO_TARGET_DIR="$HOME/.cache/cargo-target" \
+      "$ROOT/scripts/check_build_lease.sh" -- \
+      cargo tree --locked --workspace -i oraclemcp >/dev/null 2>&1 ) || rc=$?
+  selftest_check 78 "$rc" "shared ambient target refused"
+
+  # 3. A real leased probe of the exact heavy shape this fix unblocks succeeds.
+  if [ -n "${CI:-}" ]; then
+    echo "  SKIP  leased probe (single-tenant CI waives the lease)"
+  else
+    rc=0
+    CARGO_TARGET_DIR="$ROOT/target" "$ROOT/scripts/build_lease.sh" \
+      --timeout 240 --label boundary-lint-selftest -- \
+      timeout 180 cargo tree --locked --workspace -e normal --target all \
+      -i oraclemcp >/dev/null 2>&1 || rc=$?
+    selftest_check 0 "$rc" "leased 'cargo tree --workspace' probe succeeds"
+  fi
+
+  echo
+  if [ "$fail" -ne 0 ]; then
+    echo "oraclemcp-boundary-lint: selftest FAILED ($fail of $((pass + fail)))" >&2
+    exit 1
+  fi
+  echo "oraclemcp-boundary-lint: selftest OK ($pass checks)"
+}
+
+case "${1:-}" in
+  --selftest)
+    selftest
+    exit $?
+    ;;
+  --help | -h)
+    sed -n '2,12p' "$SELF" >&2
+    exit 0
+    ;;
+esac
+
+cd "$ROOT"
+CARGO_TARGET_DIR="$(resolve_target_dir)"
+export CARGO_TARGET_DIR
+ensure_build_lease "$@"
 
 mapfile -t core_crates < <(find "$CRATES_DIR" -maxdepth 1 -type d -name 'oraclemcp-*' | sort)
 
