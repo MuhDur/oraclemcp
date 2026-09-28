@@ -1,12 +1,19 @@
 {
-  "schema": "live-evidence/v1",
-  "bead_id": "oraclemcp-moad8",
+  "run_id": "orchestrator-local-verify-20260928T0924Z",
   "lane": "free23",
-  "case": "w4_get_source_missing_object_not_found",
   "source_sha": "fddb3710ad5fcf2bc7acf30caf1bf0a181c96717",
-  "binary": "target/release/oraclemcp",
-  "verdict": "pass",
-  "cases": 2,
-  "run_at": "2026-09-28T09:24:00Z",
-  "driver_output": "{\"cases\":2,\"lane\":\"free23\",\"registry_count\":69,\"results\":\"/home/durakovic/projects/oraclemcp/target/e2e/w4/free23/results.json\",\"verdict\":\"pass\"}"
+  "kind": "live-oracle-w4-case-run",
+  "runner": "orchestrator; ORACLEMCP_LIVE_XE=1; free23 localhost:1523/FREEPDB1 as SYSTEM; release binary target/release/oraclemcp (checkout fddb3710)",
+  "command": "python3 scripts/e2e/w4/driver.py --lane free23 --binary target/release/oraclemcp --binary-source-sha fddb3710ad5fcf2bc7acf30caf1bf0a181c96717 --case w4_get_source_missing_object_not_found",
+  "result": "verdict pass (2 cases: stdio, http)",
+  "driver_output": "{\"cases\":2,\"lane\":\"free23\",\"registry_count\":69,\"results\":\"/home/durakovic/projects/oraclemcp/target/e2e/w4/free23/results.json\",\"verdict\":\"pass\"}",
+  "cases": [
+    {
+      "case_id": "w4_get_source_missing_object_not_found",
+      "lane": "free23",
+      "result": "typed OBJECT_NOT_FOUND for a missing object",
+      "verdict": "pass"
+    }
+  ],
+  "note": "Local orchestrator run, not a scheduled CI lane; the driver is runtime-gated so this gated run is the live proof."
 }
