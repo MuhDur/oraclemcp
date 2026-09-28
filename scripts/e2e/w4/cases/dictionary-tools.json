@@ -110,7 +110,7 @@
   "profile_variant": "protected"
  },
  {
-  "case_id": "w4_schema_inspect_object_inventory_exact",
+ "case_id": "w4_schema_inspect_object_inventory_exact",
   "tool": "oracle_schema_inspect",
   "level": "READ_ONLY",
   "transports": [
@@ -118,99 +118,37 @@
    "http"
   ],
   "requires": [],
-  "setup": [],
+  "setup": [
+   {"sql": "CREATE TABLE ${owner}.D7I_TAB_${run_id} (ID NUMBER)"},
+   {"sql": "CREATE OR REPLACE FUNCTION ${owner}.D7I_FN_${run_id} RETURN NUMBER AS BEGIN RETURN 7; END;"},
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.D7I_VIEW_${run_id} AS SELECT ID FROM ${owner}.D7I_TAB_${run_id}"}
+  ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "name_like": "D7%"
+    "name_like": "D7I%"
    }
   },
   "expect": {
    "json_subset": {
     "owner": "${owner}",
-    "name_like": "D7%",
+    "name_like": "D7I%",
     "truncated": false,
     "objects": [
      {
-      "OBJECT_NAME": "D7_F_SIDE_${run_id}",
+      "OBJECT_NAME": "D7I_FN_${run_id}",
       "OBJECT_TYPE": "FUNCTION",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      },
      {
-      "OBJECT_NAME": "D7_GEN_F_${run_id}",
-      "OBJECT_TYPE": "FUNCTION",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_PK_DESC_${run_id}",
-      "OBJECT_TYPE": "INDEX",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_PK_MASK_${run_id}",
-      "OBJECT_TYPE": "INDEX",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_PK_SESS_${run_id}",
-      "OBJECT_TYPE": "INDEX",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_PK_STATS_${run_id}",
-      "OBJECT_TYPE": "INDEX",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_PKG_${run_id}",
-      "OBJECT_TYPE": "PACKAGE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_PKG_${run_id}",
-      "OBJECT_TYPE": "PACKAGE BODY",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_DESC_${run_id}",
+      "OBJECT_NAME": "D7I_TAB_${run_id}",
       "OBJECT_TYPE": "TABLE",
       "OWNER": "${owner}",
       "STATUS": "VALID"
      },
      {
-      "OBJECT_NAME": "D7_MASKLOB_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_SESS_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_STATS_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_V_SESS_${run_id}",
-      "OBJECT_TYPE": "VIEW",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_V_SIDE_${run_id}",
+      "OBJECT_NAME": "D7I_VIEW_${run_id}",
       "OBJECT_TYPE": "VIEW",
       "OWNER": "${owner}",
       "STATUS": "VALID"
@@ -220,68 +158,29 @@
   },
   "db_reread": [
    {
-    "sql": "SELECT OBJECT_TYPE, OBJECT_NAME FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME LIKE 'D7%' ORDER BY OBJECT_TYPE, OBJECT_NAME",
+    "sql": "SELECT OBJECT_TYPE, OBJECT_NAME FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME LIKE 'D7I%' ORDER BY OBJECT_TYPE, OBJECT_NAME",
     "rows": [
      [
       "FUNCTION",
-      "D7_F_SIDE_${run_id}"
-     ],
-     [
-      "FUNCTION",
-      "D7_GEN_F_${run_id}"
-     ],
-     [
-      "INDEX",
-      "D7_PK_DESC_${run_id}"
-     ],
-     [
-      "INDEX",
-      "D7_PK_MASK_${run_id}"
-     ],
-     [
-      "INDEX",
-      "D7_PK_SESS_${run_id}"
-     ],
-     [
-      "INDEX",
-      "D7_PK_STATS_${run_id}"
-     ],
-     [
-      "PACKAGE",
-      "D7_PKG_${run_id}"
-     ],
-     [
-      "PACKAGE BODY",
-      "D7_PKG_${run_id}"
+      "D7I_FN_${run_id}"
      ],
      [
       "TABLE",
-      "D7_DESC_${run_id}"
-     ],
-     [
-      "TABLE",
-      "D7_MASKLOB_${run_id}"
-     ],
-     [
-      "TABLE",
-      "D7_SESS_${run_id}"
-     ],
-     [
-      "TABLE",
-      "D7_STATS_${run_id}"
+      "D7I_TAB_${run_id}"
      ],
      [
       "VIEW",
-      "D7_V_SESS_${run_id}"
-     ],
-     [
-      "VIEW",
-      "D7_V_SIDE_${run_id}"
+      "D7I_VIEW_${run_id}"
      ]
     ]
    }
   ],
   "audit_expect": [],
+  "cleanup": [
+   {"sql": "DROP VIEW ${owner}.D7I_VIEW_${run_id}"},
+   {"sql": "DROP FUNCTION ${owner}.D7I_FN_${run_id}"},
+   {"sql": "DROP TABLE ${owner}.D7I_TAB_${run_id}"}
+  ],
   "on_unsupported": {
    "error_class": "INVALID_ARGUMENTS"
   }
@@ -332,7 +231,7 @@
   }
  },
  {
-  "case_id": "w4_schema_inspect_object_type_filter",
+ "case_id": "w4_schema_inspect_object_type_filter",
   "tool": "oracle_schema_inspect",
   "level": "READ_ONLY",
   "transports": [
@@ -340,12 +239,14 @@
    "http"
   ],
   "requires": [],
-  "setup": [],
+  "setup": [
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.D7V_VIEW_${run_id} AS SELECT ID FROM ${owner}.T_PARENT_${run_id}"}
+  ],
   "call": {
    "arguments": {
     "owner": "${owner}",
     "object_type": "VIEW",
-    "name_like": "D7%"
+    "name_like": "D7V%"
    }
   },
   "expect": {
@@ -354,13 +255,7 @@
     "truncated": false,
     "objects": [
      {
-      "OBJECT_NAME": "D7_V_SESS_${run_id}",
-      "OBJECT_TYPE": "VIEW",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_V_SIDE_${run_id}",
+      "OBJECT_NAME": "D7V_VIEW_${run_id}",
       "OBJECT_TYPE": "VIEW",
       "OWNER": "${owner}",
       "STATUS": "VALID"
@@ -370,6 +265,9 @@
   },
   "db_reread": [],
   "audit_expect": [],
+  "cleanup": [
+   {"sql": "DROP VIEW ${owner}.D7V_VIEW_${run_id}"}
+  ],
   "on_unsupported": {
    "error_class": "INVALID_ARGUMENTS"
   }
@@ -383,12 +281,16 @@
    "http"
   ],
   "requires": [],
-  "setup": [],
+  "setup": [
+   {"sql": "CREATE TABLE ${owner}.D7P_A_${run_id} (ID NUMBER)"},
+   {"sql": "CREATE TABLE ${owner}.D7P_B_${run_id} (ID NUMBER)"},
+   {"sql": "CREATE TABLE ${owner}.D7P_C_${run_id} (ID NUMBER)"}
+  ],
   "call": {
    "arguments": {
     "owner": "${owner}",
     "object_type": "TABLE",
-    "name_like": "D7%",
+    "name_like": "D7P%",
     "max_rows": 2,
     "cursor": "${cap:cursor}"
    }
@@ -397,13 +299,7 @@
    "json_subset": {
     "objects": [
      {
-      "OBJECT_NAME": "D7_SESS_${run_id}",
-      "OBJECT_TYPE": "TABLE",
-      "OWNER": "${owner}",
-      "STATUS": "VALID"
-     },
-     {
-      "OBJECT_NAME": "D7_STATS_${run_id}",
+      "OBJECT_NAME": "D7P_C_${run_id}",
       "OBJECT_TYPE": "TABLE",
       "OWNER": "${owner}",
       "STATUS": "VALID"
@@ -423,20 +319,20 @@
     "arguments": {
      "owner": "${owner}",
      "object_type": "TABLE",
-     "name_like": "D7%",
+     "name_like": "D7P%",
      "max_rows": 2
     },
     "expect": {
      "json_subset": {
       "objects": [
        {
-        "OBJECT_NAME": "D7_DESC_${run_id}",
+        "OBJECT_NAME": "D7P_A_${run_id}",
         "OBJECT_TYPE": "TABLE",
         "OWNER": "${owner}",
         "STATUS": "VALID"
        },
        {
-        "OBJECT_NAME": "D7_MASKLOB_${run_id}",
+        "OBJECT_NAME": "D7P_B_${run_id}",
         "OBJECT_TYPE": "TABLE",
         "OWNER": "${owner}",
         "STATUS": "VALID"
@@ -449,10 +345,15 @@
      "cursor": "/next_cursor"
     }
    }
+  ],
+  "cleanup": [
+   {"sql": "DROP TABLE ${owner}.D7P_C_${run_id}"},
+   {"sql": "DROP TABLE ${owner}.D7P_B_${run_id}"},
+   {"sql": "DROP TABLE ${owner}.D7P_A_${run_id}"}
   ]
  },
  {
-  "case_id": "w4_schema_inspect_cursor_refused_on_canonical_tool",
+ "case_id": "w4_schema_inspect_cursor_refused_on_canonical_tool",
   "tool": "oracle_schema_inspect",
   "level": "READ_ONLY",
   "transports": [
@@ -1970,7 +1871,7 @@
   }
  },
  {
-  "case_id": "w4_search_objects_detail_names_only",
+ "case_id": "w4_search_objects_detail_names_only",
   "tool": "oracle_search_objects",
   "level": "READ_ONLY",
   "transports": [
@@ -1978,39 +1879,23 @@
    "http"
   ],
   "requires": [],
-  "setup": [],
+  "setup": [
+   {"sql": "CREATE TABLE ${owner}.D7S_TAB_${run_id} (ID NUMBER CONSTRAINT D7S_PK_${run_id} PRIMARY KEY)"}
+  ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "name_like": "D7%",
+    "name_like": "D7S%",
     "object_type": "INDEX",
     "detail_level": "names"
    }
   },
   "expect": {
    "json_subset": {
-    "count": 4,
+    "count": 1,
     "results": [
      {
-      "object_name": "D7_PK_DESC_${run_id}",
-      "object_type": "INDEX",
-      "owner": "${owner}",
-      "status": "VALID"
-     },
-     {
-      "object_name": "D7_PK_MASK_${run_id}",
-      "object_type": "INDEX",
-      "owner": "${owner}",
-      "status": "VALID"
-     },
-     {
-      "object_name": "D7_PK_STATS_${run_id}",
-      "object_type": "INDEX",
-      "owner": "${owner}",
-      "status": "VALID"
-     },
-     {
-      "object_name": "D7_PK_VCOL_${run_id}",
+      "object_name": "D7S_PK_${run_id}",
       "object_type": "INDEX",
       "owner": "${owner}",
       "status": "VALID"
@@ -2020,6 +1905,9 @@
   },
   "db_reread": [],
   "audit_expect": [],
+  "cleanup": [
+   {"sql": "DROP TABLE ${owner}.D7S_TAB_${run_id}"}
+  ],
   "on_unsupported": {
    "error_class": "INVALID_ARGUMENTS"
   }
