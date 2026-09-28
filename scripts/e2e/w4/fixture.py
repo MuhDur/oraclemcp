@@ -41,6 +41,17 @@ OWNER_OBJECTS = (
     ("PACKAGE BODY", "PKG_W4_"),
 )
 CROSS_OBJECTS = (("TABLE", "T_RUN_"), ("TABLE", "T_CROSS_"))
+# Bounded teardown reaping: an async call-timeout leaves a server session that
+# Oracle cleans up only after a moment. Wait up to SESSION_GRACE seconds for the
+# exact run-owned sessions to vanish, then kill those exact sessions and wait up
+# to KILL_GRACE seconds for Oracle to reap them. Both windows are deadlines; a
+# reached deadline is a reported result, never a reason to wait again.
+SESSION_POLL_SECONDS = 0.25
+SESSION_GRACE_ENV = "ORACLEMCP_W4_SESSION_GRACE_SECONDS"
+SESSION_KILL_GRACE_ENV = "ORACLEMCP_W4_SESSION_KILL_GRACE_SECONDS"
+DEFAULT_SESSION_GRACE_SECONDS = 10.0
+DEFAULT_SESSION_KILL_GRACE_SECONDS = 20.0
+MAX_SESSION_WAIT_SECONDS = 300.0
 
 
 class FixtureError(RuntimeError):
@@ -350,6 +361,93 @@ def verify_sentinel(connection, run):
             refuse(f"{username}: ownership sentinel mismatch; refusing DROP")
 
 
+def session_wait_seconds(env_name, default):
+    raw = os.environ.get(env_name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        refuse(f"{env_name} must be a number of seconds")
+    if not (0 < value <= MAX_SESSION_WAIT_SECONDS):
+        refuse(f"{env_name} must be in (0, {MAX_SESSION_WAIT_SECONDS:g}] seconds")
+    return value
+
+
+def filter_run_owned_sessions(rows, run):
+    """Select V$SESSION rows whose USERNAME is exactly a schema of this run.
+
+    ``rows`` are ``(SID, SERIAL#, USERNAME)`` tuples. Matching is by exact
+    equality against the registry-bound owner/cross names; a name prefix, a
+    different run id, or a NULL/system user is never selected.
+    """
+    allowed = {run["owner"], run["cross"]}
+    return [(row[0], row[1], row[2]) for row in rows if row[2] in allowed]
+
+
+def run_owned_sessions(connection, run):
+    rows = connection.cursor().execute(
+        "SELECT SID, SERIAL#, USERNAME FROM V$SESSION WHERE USERNAME IN (:1,:2)",
+        (run["owner"], run["cross"])).fetchall()
+    return filter_run_owned_sessions(rows, run)
+
+
+def kill_session_sql(sid, serial):
+    if isinstance(sid, bool) or not isinstance(sid, int):
+        refuse("session SID must be an integer")
+    if isinstance(serial, bool) or not isinstance(serial, int):
+        refuse("session serial# must be an integer")
+    if sid <= 0 or serial < 0:
+        refuse("session SID/serial# out of range")
+    return f"ALTER SYSTEM KILL SESSION '{sid},{serial}' IMMEDIATE"
+
+
+def session_still_run_owned(connection, run, sid, serial):
+    row = connection.cursor().execute(
+        "SELECT USERNAME FROM V$SESSION WHERE SID=:1 AND SERIAL#=:2",
+        (sid, serial)).fetchone()
+    return row is not None and row[0] in {run["owner"], run["cross"]}
+
+
+def wait_for_run_sessions(connection, run, seconds):
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        rows = run_owned_sessions(connection, run)
+        if not rows:
+            return []
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return rows
+        time.sleep(min(SESSION_POLL_SECONDS, remaining))
+
+
+def quiesce_run_sessions(connection, run):
+    """Bounded reap of this run's sessions before DROP USER.
+
+    Phase 1 waits for the run's sessions to disappear on their own; phase 2
+    kills only sessions re-confirmed to belong to this exact run; phase 3 waits
+    for Oracle to finish reaping killed sessions. Returns the sessions that are
+    still present when every bounded window has elapsed (empty means clear).
+    No statement here targets a session that is not an exact run schema.
+    """
+    grace = session_wait_seconds(SESSION_GRACE_ENV, DEFAULT_SESSION_GRACE_SECONDS)
+    kill_grace = session_wait_seconds(SESSION_KILL_GRACE_ENV, DEFAULT_SESSION_KILL_GRACE_SECONDS)
+    remaining = wait_for_run_sessions(connection, run, grace)
+    if not remaining:
+        return []
+    killed = []
+    for sid, serial, username in remaining:
+        if not session_still_run_owned(connection, run, sid, serial):
+            continue
+        started = time.monotonic()
+        connection.cursor().execute(kill_session_sql(sid, serial))
+        killed.append({"sid": sid, "serial": serial, "username": username})
+        event(run["run_id"], username, "kill_session", True, started, f"{sid},{serial}")
+    if killed:
+        connection.commit()
+    return wait_for_run_sessions(connection, run, kill_grace)
+
+
 def inventory_status(connection, run, version):
     cursor = connection.cursor()
     actual = set(cursor.execute(
@@ -488,11 +586,19 @@ def verdict_path(lane, run_id):
 def teardown_one(connection, lane, run_id):
     run = recorded_run(connection, run_id_or_refuse(run_id))
     dropped, dropped_objects, errors = [], [], []
+    sessions_remaining = []
     try:
         # Verify both identities before any destructive statement. A name
         # alone is never proof that a schema still belongs to this run.
         verify_sentinel(connection, run)
         drop_policy_if_present(connection, run)
+        # DROP USER fails with ORA-01940 while any session of the schema is
+        # connected, and a call-timeout leaves one for Oracle to reap async.
+        # Clear this run's sessions (bounded) before dropping the schemas.
+        sessions_remaining = quiesce_run_sessions(connection, run)
+        if sessions_remaining:
+            for sid, serial, username in sessions_remaining:
+                errors.append(f"{username}: session {sid},{serial} still present after bounded reap")
         for username in (run["owner"], run["cross"]):
             if not user_exists(connection, username):
                 continue
@@ -515,7 +621,9 @@ def teardown_one(connection, lane, run_id):
     connection.commit()
     report = {"run_id": run_id, "lane": lane, "verdict": verdict,
               "dropped": dropped, "dropped_objects": dropped_objects,
-              "leftovers": leftovers, "errors": errors}
+              "leftovers": leftovers, "errors": errors,
+              "sessions_remaining": [{"sid": sid, "serial": serial, "username": username}
+                                     for sid, serial, username in sessions_remaining]}
     verdict_path(lane, run_id).write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"run_id": run_id, "lane": lane, "verdict": verdict,
                       "dropped": dropped, "dropped_object_count": len(dropped_objects),
@@ -642,17 +750,52 @@ def selftest():
         print(json.dumps({"case": "non_lab_lane", "verdict": "rejected"}))
     else:
         refuse("selftest accepted a non-lab lane")
+    # Connected-user teardown selection: only the exact run's schemas may ever
+    # be reaped; a foreign run, SYSTEM, or a NULL username must be excluded.
+    run = {"owner": owner_name(run_id), "cross": cross_name(run_id)}
+    foreign_run = "W45678FEDCBA"
+    session_rows = [
+        (101, 1001, run["owner"]),
+        (102, 1002, run["cross"]),
+        (103, 1003, owner_name(foreign_run)),
+        (104, 1004, cross_name(foreign_run)),
+        (105, 1005, "SYSTEM"),
+        (106, 1006, None),
+    ]
+    selected = filter_run_owned_sessions(session_rows, run)
+    expected_sessions = [(101, 1001, run["owner"]), (102, 1002, run["cross"])]
+    if selected != expected_sessions:
+        refuse(f"session selection was not bound to the exact run: {selected}")
+    print(json.dumps({"case": "exact_run_owned_session_selection",
+                      "selected": [row[2] for row in selected],
+                      "foreign_excluded": [owner_name(foreign_run), cross_name(foreign_run)],
+                      "verdict": "pass"}))
+    if kill_session_sql(101, 1001) != "ALTER SYSTEM KILL SESSION '101,1001' IMMEDIATE":
+        refuse("kill_session_sql did not render the exact integer target")
+    for planted in ((run_id, 1001), (101, "1001"), (101.5, 1001), ("101", 1001),
+                    (True, 1001), (0, 1001), (101, -1)):
+        try:
+            kill_session_sql(*planted)
+        except FixtureError:
+            pass
+        else:
+            refuse(f"selftest accepted a non-integer kill target {planted!r}")
+    print(json.dumps({"case": "kill_session_sql_rejects_non_integers", "verdict": "rejected"}))
     print("selftest: pass")
 
 
 def selftest_live(lane, settings):
-    first = second = stale = None
+    first = second = stale = connected = None
+    passwords = {}
     admin = None
     planted_created = False
+    linger = foreign_linger = None
     try:
         first = setup(lane, settings)
-        second = setup(lane, settings)
+        second = setup(lane, settings, owner_password_sink=lambda value: passwords.__setitem__("second", value))
         stale = setup(lane, settings)
+        connected = setup(lane, settings,
+                          owner_password_sink=lambda value: passwords.__setitem__("connected", value))
         planted = "W4O_" + new_run_id()
         admin, _ = connect_admin(lane, settings)
         if first == second or not user_exists(admin, owner_name(first)) or not user_exists(admin, owner_name(second)):
@@ -677,20 +820,68 @@ def selftest_live(lane, settings):
             refuse("first run teardown touched the second live run")
         print(json.dumps({"case": "overlapping_runs_stale_janitor_and_unregistered_user", "lane": lane,
                           "run_ids": [first, second, stale], "verdict": "pass"}, sort_keys=True))
+        # Connected-user path: hold a live session for the target run and one
+        # for a different registered run, then tear the target down. The
+        # target's session must be cleared within the bounded window; the
+        # foreign run's session must survive untouched (exact run-id binding).
+        import oracledb
+        linger = oracledb.connect(user=owner_name(connected), password=passwords["connected"],
+                                  dsn=settings["dsn"])
+        foreign_linger = oracledb.connect(user=owner_name(second), password=passwords["second"],
+                                          dsn=settings["dsn"])
+        linger.call_timeout = foreign_linger.call_timeout = 30000
+        target_run = recorded_run(admin, connected)
+        before = run_owned_sessions(admin, target_run)
+        if owner_name(connected) not in {username for _, _, username in before}:
+            refuse("connected-user case did not observe the target run's live session")
+        foreign_before = run_owned_sessions(admin, recorded_run(admin, second))
+        if owner_name(second) not in {username for _, _, username in foreign_before}:
+            refuse("connected-user case did not observe the planted foreign session")
+        started = time.monotonic()
+        teardown_one(admin, lane, connected)
+        elapsed = round(time.monotonic() - started, 3)
+        connected = None
+        target_id = target_run["run_id"]
+        if user_exists(admin, owner_name(target_id)) or user_exists(admin, cross_name(target_id)):
+            refuse("connected-user teardown left a run-owned schema behind")
+        foreign_after = run_owned_sessions(admin, recorded_run(admin, second))
+        if owner_name(second) not in {username for _, _, username in foreign_after}:
+            refuse("connected-user teardown killed a different run's session")
+        bound = DEFAULT_SESSION_GRACE_SECONDS + DEFAULT_SESSION_KILL_GRACE_SECONDS + 15.0
+        if elapsed > bound:
+            refuse(f"connected-user teardown exceeded the bounded window: {elapsed}s > {bound}s")
+        for connection in (linger, foreign_linger):
+            try:
+                connection.close()
+            except Exception:
+                # The target session may already be killed by the bounded reap.
+                pass
+        linger = foreign_linger = None
+        print(json.dumps({"case": "connected_user_bounded_teardown", "lane": lane,
+                          "run_id": target_id,
+                          "sessions_before": sorted(username for _, _, username in before),
+                          "foreign_run_id": second,
+                          "foreign_session_survived": True,
+                          "elapsed_s": elapsed, "bound_s": bound,
+                          "verdict": "pass"}, sort_keys=True))
     finally:
         if admin is None and first is not None:
             admin, _ = connect_admin(lane, settings)
         if admin is not None:
+            for connection in (linger, foreign_linger):
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception:
+                        pass
             if planted_created and user_exists(admin, planted):
                 # Test cleanup is an exact name created in this function.
                 # Janitor never reaches this path or selects by prefix.
                 admin.cursor().execute(exact_drop_sql(planted, planted.removeprefix("W4O_")))
-            if first is not None and (user_exists(admin, owner_name(first)) or user_exists(admin, cross_name(first))):
-                teardown_one(admin, lane, first)
-            if second is not None and (user_exists(admin, owner_name(second)) or user_exists(admin, cross_name(second))):
-                teardown_one(admin, lane, second)
-            if stale is not None and (user_exists(admin, owner_name(stale)) or user_exists(admin, cross_name(stale))):
-                teardown_one(admin, lane, stale)
+            for run_id in (first, second, stale, connected):
+                if run_id is not None and (user_exists(admin, owner_name(run_id))
+                                           or user_exists(admin, cross_name(run_id))):
+                    teardown_one(admin, lane, run_id)
             admin.close()
 
 
