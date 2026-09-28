@@ -786,13 +786,26 @@ fn issue46_empty_scn_result_is_desync_not_cached() {
     let empty = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let (auditor, _sink) = auditor_with_sink();
     let (dispatcher, scn_queries) = counting_scn_dispatcher(auditor, unavailable, empty);
-    for _ in 0..2 {
-        let error = dispatcher
-            .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
-            .expect_err("an empty SCN response remains an error until T2.2b classifies desync");
-        assert!(error.message.contains("no current system change number"));
-    }
-    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 2);
+    let error = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect_err("an empty SCN response is a connection loss for the active statement");
+    // .7.3 classifies an empty SCN as connection loss; the served transport
+    // deliberately suppresses the driver detail. The statement itself is not
+    // replayed, so its database outcome remains unknown.
+    assert_eq!(error.error_class, ErrorClass::Transient);
+    assert!(error.message.contains("detail suppressed"));
+    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(
+        dispatcher_scn_capability(&dispatcher),
+        ScnCapability::Unprobed
+    );
+
+    // Re-lease is allowed only before this next statement. Its new generation
+    // must not inherit the failed probe result as a cached capability.
+    dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 FROM dual" }))
+        .expect("the next statement runs on a freshly leased generation");
+    assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
 
 #[test]
