@@ -19,6 +19,7 @@
         "required": ["sql"], "properties": {"sql": {"type": "string", "minLength": 1}}}},
       "setup_phase": {"enum": ["before_call", "before_server"]},
       "setup_ready_sql": {"type": "string", "minLength": 1},
+      "flashback_grant_owner": {"const": true},
       "call": {"type": "object", "required": ["arguments"], "additionalProperties": false, "properties": {
         "arguments": {"type": "object"}, "raw_arguments": {"type": "string"},
         "baseline_arguments": {"type": "object"},

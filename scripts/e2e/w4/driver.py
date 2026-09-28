@@ -28,7 +28,7 @@ import threading
 import time
 
 from fixture import (admin_password, kill_session_sql, load_lane, new_run_id,
-                     setup as fixture_setup, teardown as fixture_teardown)
+                     set_flashback_grant, setup as fixture_setup, teardown as fixture_teardown)
 from scrub import scrub
 
 
@@ -44,7 +44,7 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "plan_contains", "row_contains",
-                        "runtime_retention_probe"}
+                        "runtime_retention_probe", "flashback_grant_owner"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -341,6 +341,11 @@ def validate_case(case, filename):
                 and case["case_id"] == "w4_diff_retention_exceeded_typed"
                 and case["tool"] == "oracle_diff" and case["level"] == "READ_ONLY",
                 "runtime retention probing is reserved for the oracle_diff retention case")
+    if "flashback_grant_owner" in case:
+        require(case["flashback_grant_owner"] is True
+                and case["case_id"] == "w4_diff_as_of_scn_detects_change"
+                and case.get("profile_variant") == "synthetic_owner_rw",
+                "flashback grant is reserved for the positive disposable-owner diff case")
     if "steps" in case:
         validate_steps(case)
     require(isinstance(case["transports"], list) and case["transports"]
@@ -1768,16 +1773,16 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             row["actual"] = {"repeat_count": len(replies),
                              "last": scrub(tool_payload(replies[-1]))}
             if case["call"].get("scn_cache_expect"):
-                payloads = [tool_payload(item) for item in replies]
-                require(all(payload.get("structuredContent", {}).get("observed_scn") is None
-                            for payload in payloads),
-                        "no-grant SCN cache case observed a non-null SCN")
                 records = audit_records(audit_path)[before:]
                 probes = [record for record in records
                           if record.get("tool") == "scn_capability_probe"]
                 require(len(probes) == 1 and probes[0].get("outcome") == "FAILED",
                         "no-grant SCN cache case needs exactly one degraded probe audit")
-                row["scn_cache"] = {"observed_scn_null_reads": len(payloads),
+                reads = [record for record in records if record.get("tool") == "oracle_query"]
+                require(len(reads) == len(replies)
+                        and all(record.get("observed_scn") is None for record in reads),
+                        "no-grant SCN cache needs null observed_scn on every audited read")
+                row["scn_cache"] = {"observed_scn_null_reads": len(reads),
                                     "degraded_probe_audits": len(probes)}
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
@@ -2112,6 +2117,7 @@ def run_lane(args):
             audit_path = state / "oraclemcp/audit/audit.jsonl"
             fixture_id = None
             client = None
+            flashback_grant_owner = None
             try:
                 if not args.contract_only:
                     fixture_id = new_run_id()
@@ -2130,6 +2136,11 @@ def run_lane(args):
                         # The disposable owner needs the same FGA catalog proof
                         # that every served relation read requires.
                         connection.cursor().execute(f"GRANT SELECT ANY DICTIONARY TO {owner}")
+                    if any(case.get("flashback_grant_owner")
+                           and (not args.case or case["case_id"] in args.case)
+                           and transport in case["transports"] for case in family_cases):
+                        set_flashback_grant(args.lane, settings, owner, True)
+                        flashback_grant_owner = owner
                     write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
                                      owner=owner, cross="W4X_" + fixture_id)
                 needs_retention_probe = any(
@@ -2254,6 +2265,8 @@ def run_lane(args):
             finally:
                 if client is not None:
                     client.close()
+                if flashback_grant_owner is not None:
+                    set_flashback_grant(args.lane, settings, flashback_grant_owner, False)
                 if fixture_id is not None:
                     with (work / "fixture.jsonl").open("a") as fixture_log:
                         with contextlib.redirect_stdout(fixture_log):
