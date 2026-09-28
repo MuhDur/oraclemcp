@@ -208,15 +208,12 @@ pub async fn resolve_top_sql_source_with_license(
 /// column set (`elapsed_time`/`cpu_time`/`buffer_gets`/`disk_reads`) plus
 /// `sql_id`, `sql_text`, and `executions`. SQL identifiers and structure are
 /// fixed by `CatalogQueryId`; row/share bounds are positional binds.
-// `ErrorEnvelope` is the deliberate agent-facing error payload (§8.2); boxing it
-// on this cold error path would add noise for no real benefit.
-#[allow(clippy::result_large_err)]
 pub fn top_sql_query(
     source: DiagnosticsSource,
     metric: TopSqlMetric,
     top_n: u32,
     min_pct_of_total: Option<u8>,
-) -> Result<(CatalogQueryId, Vec<OracleBind>), ErrorEnvelope> {
+) -> Result<(CatalogQueryId, Vec<OracleBind>), Box<ErrorEnvelope>> {
     top_sql_query_filtered(source, metric, top_n, min_pct_of_total, None, None)
 }
 
@@ -228,7 +225,7 @@ pub fn top_sql_query_filtered(
     min_pct_of_total: Option<u8>,
     sql_id: Option<&str>,
     sql_text: Option<&str>,
-) -> Result<(CatalogQueryId, Vec<OracleBind>), ErrorEnvelope> {
+) -> Result<(CatalogQueryId, Vec<OracleBind>), Box<ErrorEnvelope>> {
     use CatalogQueryId as C;
     let n = OracleBind::I64(i64::from(top_n.clamp(1, 100)));
     let id = match (source, metric, min_pct_of_total.is_some()) {
@@ -248,7 +245,7 @@ pub fn top_sql_query_filtered(
         (DiagnosticsSource::Statspack, TopSqlMetric::Cpu, _) => C::TopSqlStatspackCpu,
         (DiagnosticsSource::Statspack, TopSqlMetric::BufferGets, _) => C::TopSqlStatspackBufferGets,
         (DiagnosticsSource::Statspack, TopSqlMetric::DiskReads, _) => C::TopSqlStatspackDiskReads,
-        (DiagnosticsSource::Unavailable, _, _) => return Err(ErrorEnvelope::new(
+        (DiagnosticsSource::Unavailable, _, _) => return Err(Box::new(ErrorEnvelope::new(
             ErrorClass::PolicyDenied,
             "Historical performance diagnostics require a licensed Diagnostics Pack \
              (control_management_pack_access != NONE) or an installed Statspack (PERFSTAT). \
@@ -256,13 +253,13 @@ pub fn top_sql_query_filtered(
         )
         .with_next_step(
             "use the default live source, or install Statspack (free) / enable the Diagnostics Pack for history",
-        )),
+        ))),
     };
     if source != DiagnosticsSource::LiveCursor && (sql_id.is_some() || sql_text.is_some()) {
-        return Err(ErrorEnvelope::new(
+        return Err(Box::new(ErrorEnvelope::new(
             ErrorClass::InvalidArguments,
             "sql_id and sql_text filters are available only for the live cursor cache",
-        ));
+        )));
     }
     let binds = match (source, min_pct_of_total) {
         (DiagnosticsSource::LiveCursor, Some(pct)) => vec![

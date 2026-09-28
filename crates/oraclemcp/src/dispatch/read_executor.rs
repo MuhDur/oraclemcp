@@ -2327,7 +2327,8 @@ impl OracleDispatcher {
             options.min_pct,
             options.sql_id.as_deref(),
             options.sql_text.as_deref(),
-        )?;
+        )
+        .map_err(|error| *error)?;
         let rows = run_catalog_query(cx, conn, id, &binds)
             .await
             .map_err(DbError::into_envelope)?;
