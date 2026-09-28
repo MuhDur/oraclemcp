@@ -1,0 +1,82 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T09:02:11Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.11.11",
+  "scope": {
+    "summary": "Finish the driver boundary and seam lints: the forbidden-package boundary gate now proves no Tokio (or other forbidden package) enters the normal dependency graph with the official oracledb backend ON and OFF, and the seam lint enforces exactly one adapter file per backend (connection.rs for driver-cx, oracledb_backend.rs for official); each lint has a --selftest with the planted negative fixtures, and the tier-A boundary CI job runs both selftests.",
+    "in_scope": [
+      ".github/workflows/ci.yml",
+      "crates/oraclemcp-db/src/connection.rs",
+      "scripts/oraclemcp_arch_fitness_lint.sh",
+      "scripts/oraclemcp_boundary_lint.sh",
+      "scripts/oraclemcp_driver_seam_lint.sh",
+      "scripts/oraclemcp_feature_powerset.sh"
+    ],
+    "out_of_scope": [
+      "Runtime behaviour of either backend: a green static lint does not prove the official or the driver-cx backend does anything at runtime (bead no-claim boundary).",
+      "The full feature-powerset compile/lint matrix: only the enumeration (cargo hack --print-command-list) was run here; the compile pass is the CI feature-powerset job.",
+      "Other agents' uncommitted edits in this shared checkout (oraclemcp-config, oraclemcp-core, oraclemcp-db/catalog_query.rs, oraclemcp-db/health.rs, oraclemcp/dispatch, oraclemcp/main.rs) and the committed live_oracle.rs change at 8ae87ca; none are in this bead's file lane and all are excluded from tree_clean by the scoped derivation.",
+      "Changing deny.toml licence allow-lists (UPL-1.0 already done) and moving code between crates (bead non-goals).",
+      "T8.13's feature-level proof that nightly-outcome-try is absent (separate bead)."
+    ]
+  },
+  "source": {
+    "sha": "8ae87ca645713774bba40b41267ccfcd2f6afc87",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "boundary lint: forbidden-package gate over official ON and OFF",
+        "kind": "cli",
+        "trace": "At 8ae87ca `bash scripts/oraclemcp_boundary_lint.sh` exits 0. It prints gate [default] `cargo tree --workspace -e normal --target all -i <pkg>` (official oracledb ON) and gate [official-off] `cargo tree -p oraclemcp-db --no-default-features -e normal --target all -i <pkg>`; all 14 forbidden packages (tokio, tokio-stream, tokio-util, asupersync-tokio-compat, rmcp, axum, hyper, hyper-util, oracle, odpic-sys, r2d2, reqwest, async-std, smol) are reported absent from both selections, then the all-target visibility, otel rt-tokio advisory and compat-marker checks, then `rig-boundary-lint: OK` (raw log /tmp/11.11-boundary-main.log). Work commit fd8bc33b."
+      },
+      {
+        "name": "boundary --selftest (planted Tokio under the Oracle feature)",
+        "kind": "cli",
+        "trace": "`bash scripts/oraclemcp_boundary_lint.sh --selftest` exits 0 with 8/8 checks. It prints the required case IDs: `boundary_clean_graph_passes` and `boundary_tokio_under_oracle_feature_fails` (plus target-dir and lease checks and `boundary_leased_workspace_tree_probe`). The fixture is an offline path-dependency crate whose `oracledb` feature enables a local stub package named `tokio`; with the feature OFF the gate passes, with it ON the gate records a violation (raw log /tmp/11.11-boundary-selftest.log)."
+      },
+      {
+        "name": "seam lint: exactly one adapter per backend",
+        "kind": "cli",
+        "trace": "At 8ae87ca `bash scripts/oraclemcp_driver_seam_lint.sh` exits 0 and prints `driver-cx: crates/oraclemcp-db/src/connection.rs` and `official: crates/oraclemcp-db/src/oracledb_backend.rs`, with both confinements OK. `--selftest` exits 0 with the cases `seam_second_file_driver_cx_path_fails`, `seam_second_file_official_path_fails` (each plants a second file naming the respective crate path and the lint reports the offending path/line plus the allowlisted adapter), and `seam_comment_mention_passes` (raw logs /tmp/11.11-seam-main.log, /tmp/11.11-seam-selftest.log)."
+      },
+      {
+        "name": "driver_seam Rust mirror",
+        "kind": "cli",
+        "trace": "At fd8bc33b `CARGO_TARGET_DIR=.../target cargo test -p oraclemcp-db driver_seam` => 6 passed; 0 failed. Includes the new `no_official_call_outside_adapter` (mirrors the official allowlist) and the updated `pattern_distinguishes_driver_from_workspace_crate` with official-path assertions; `pin_is_0_9_3_and_seam_intact` now asserts both single-file allow lists (raw log /tmp/11.11-driver-seam-test.log)."
+      },
+      {
+        "name": "arch-fitness ratchet for the official adapter",
+        "kind": "cli",
+        "trace": "`bash scripts/oraclemcp_arch_fitness_lint.sh` exits 0 and prints `OK[file-size]`; the path_limits map now carries `crates/oraclemcp-db/src/oracledb_backend.rs=1666` and `crates/oraclemcp-db/src/oracledb_actor.rs=714` (measured via the lint's count_lines rule: lines before the first `#[cfg(test)]`). `--selftest` still catches its planted stdout/raw-read calls (raw log /tmp/11.11-arch-main.log)."
+      },
+      {
+        "name": "feature-powerset includes oracledb ON/OFF for oraclemcp-db",
+        "kind": "cli",
+        "trace": "`cargo hack clippy -p oraclemcp-db -p oraclemcp-core -p oraclemcp --feature-powerset --exclude-features live-xe,plsql-intelligence,default --all-targets --print-command-list` emits 14 combos, including oraclemcp-db with `--no-default-features` (oracledb OFF) and with `--features oracledb`/`--features oracledb,test-utils` (oracledb ON); oracledb is deliberately not in --exclude-features (raw list /tmp/11.11-powerset-commands.txt). The full compile of every combo is the CI job."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Static/offline proof only: the boundary and seam lints prove the dependency graph and source path confinement, not the runtime behaviour of either backend (bead no-claim boundary). No live Oracle was contacted.",
+    "The boundary --selftest's planted negative uses a local path-dependency stub package named `tokio` behind a fixture feature named `oracledb`; it exercises the exact detection predicate and gate loop, but it is not the real oracledb crate graph.",
+    "The full curated feature powerset (cargo hack clippy over every combination) was not compiled here; only cargo hack --print-command-list verified that the oracledb ON/OFF combinations are enumerated. Exhaustive compile is the tier-A feature-powerset CI job.",
+    "The scoped `cargo test -p oraclemcp-db driver_seam` was executed at work commit fd8bc33b; the derived source.sha 8ae87ca differs only by another agent's live_oracle.rs change, and `git diff 8ae87ca -- <in_scope>` is empty, so every in-scope path resolves identically at source.sha.",
+    "The boundary --selftest includes a real leased `cargo tree --workspace` probe that is skipped under CI (single-tenant lease waiver); it was exercised locally (boundary_leased_workspace_tree_probe actual=0).",
+    "readiness is not-ready because closure is the batch-verify orchestrator's independent step (implementers never self-close), not because any mandated check is missing: every positive, negative and test-plan item in the bead is green."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
