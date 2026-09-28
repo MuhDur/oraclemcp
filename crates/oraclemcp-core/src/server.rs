@@ -2488,6 +2488,22 @@ impl OracleMcpServer {
                         Some(&format!("{name} completed")),
                     );
                 }
+                // The driver reports a break it observed at the wire boundary
+                // as a timeout-shaped dispatch error.  When the transport's
+                // bound cancellation bridge requested that break, preserve the
+                // confirmed client-cancel contract rather than leaking the
+                // generic timeout envelope.  Other errors remain truthful:
+                // notably a completed/committed statement must retain its
+                // real result or uncertain terminal outcome.
+                if cancelled_by_transport && envelope.error_class == ErrorClass::Timeout {
+                    let response = jsonrpc_result(
+                        id,
+                        tool_result_err_json(&cancelled_dispatch_envelope(
+                            &cancellation.reason().unwrap_or_else(CancelReason::timeout),
+                        )),
+                    );
+                    return Outcome::Err(JsonRpcDispatchError::new(response));
+                }
                 let response = jsonrpc_result(id, tool_result_err_json(&envelope));
                 Outcome::Err(JsonRpcDispatchError::new(response))
             }
