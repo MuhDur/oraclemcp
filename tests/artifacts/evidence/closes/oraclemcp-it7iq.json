@@ -6,7 +6,7 @@
   "scope": {
     "summary": "struct-atomicity now resolves the changed struct to its defining crate-root module and only counts literal sites whose name resolves to that module, ending the rule-17 false positive where two unrelated private structs in different modules shared a name; genuine orphaned initializers are still refused and every ambiguous name fails closed.",
     "in_scope": [
-      "scripts/swarm_discipline.sh (struct-atomicity subcommand and --selftest)"
+      "scripts/swarm_discipline.sh"
     ],
     "out_of_scope": [
       "No type-aware analysis beyond module/import resolution: re-exports, macro-generated modules and items, and cross-crate aliasing are deliberately unresolved and therefore fail closed (site kept as a candidate).",
