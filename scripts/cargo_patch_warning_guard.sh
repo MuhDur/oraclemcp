@@ -9,7 +9,10 @@ set -euo pipefail
 
 output=""
 status=0
-if output="$(cargo metadata "$@" 2>&1)"; then
+# The diagnostics below are parsed as a line-oriented Cargo contract.  Cargo
+# honors an inherited CARGO_TERM_COLOR=always in CI, which otherwise inserts
+# escapes between the `warning` prefix and the unused-patch message.
+if output="$(CARGO_TERM_COLOR=never cargo metadata "$@" 2>&1)"; then
   status=0
 else
   status=$?

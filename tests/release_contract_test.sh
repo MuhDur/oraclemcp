@@ -319,9 +319,16 @@ RS
 cargo_target_dir="${CARGO_TARGET_DIR:-$ROOT/target}"
 metadata_args=(--manifest-path "$unused_patch_fixture/Cargo.toml" --format-version 1 --offline)
 set +e
-raw_output="$(CARGO_TARGET_DIR="$cargo_target_dir" cargo metadata "${metadata_args[@]}" 2>&1)"
+colorized_output="$(CARGO_TARGET_DIR="$cargo_target_dir" CARGO_TERM_COLOR=always \
+  cargo metadata "${metadata_args[@]}" 2>&1)"
+colorized_status=$?
+raw_output="$(CARGO_TARGET_DIR="$cargo_target_dir" CARGO_TERM_COLOR=never \
+  cargo metadata "${metadata_args[@]}" 2>&1)"
 raw_status=$?
 set -e
+[ "$colorized_status" -eq 0 ] || fail "forced-color unused-patch Cargo fixture failed: $colorized_output"
+[[ "$colorized_output" == *$'\033['*'warning'* ]] ||
+  fail "forced-color Cargo fixture did not contain ANSI-colored unused-patch diagnostics: $colorized_output"
 [ "$raw_status" -eq 0 ] || fail "unused-patch Cargo fixture failed before the guard: $raw_output"
 [[ "$raw_output" == *'warning: patch `serde v1.0.229'* ]] ||
   fail "mismatched Cargo fixture did not produce Cargo's unused-patch warning: $raw_output"
