@@ -914,12 +914,14 @@ mod tests {
         let q = id.spec().sql;
         assert!(q.contains("RATIO_TO_REPORT"), "computes share of total");
         assert!(
-            q.contains("pct_of_total >= :3"),
+            q.contains("pct_of_total >= :5"),
             "keeps only the >=5% statements"
         );
         assert_eq!(
             binds,
             [
+                OracleBind::Null,
+                OracleBind::Null,
                 OracleBind::Null,
                 OracleBind::Null,
                 OracleBind::I64(5),
@@ -933,10 +935,16 @@ mod tests {
             None,
         )
         .expect("unfiltered query");
-        assert!(!unfiltered_id.spec().sql.contains("pct_of_total >= :3"));
+        assert!(!unfiltered_id.spec().sql.contains("pct_of_total >= :5"));
         assert_eq!(
             unfiltered_binds,
-            [OracleBind::Null, OracleBind::Null, OracleBind::I64(50)]
+            [
+                OracleBind::Null,
+                OracleBind::Null,
+                OracleBind::Null,
+                OracleBind::Null,
+                OracleBind::I64(50),
+            ]
         );
     }
 
@@ -999,6 +1007,8 @@ mod tests {
                             [
                                 OracleBind::Null,
                                 OracleBind::Null,
+                                OracleBind::Null,
+                                OracleBind::Null,
                                 OracleBind::I64(5),
                                 OracleBind::I64(7)
                             ]
@@ -1006,7 +1016,13 @@ mod tests {
                     } else if source == DiagnosticsSource::LiveCursor {
                         assert_eq!(
                             binds,
-                            [OracleBind::Null, OracleBind::Null, OracleBind::I64(7)]
+                            [
+                                OracleBind::Null,
+                                OracleBind::Null,
+                                OracleBind::Null,
+                                OracleBind::Null,
+                                OracleBind::I64(7),
+                            ]
                         );
                     } else {
                         assert_eq!(binds, [OracleBind::I64(7)]);
