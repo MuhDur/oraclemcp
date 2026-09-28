@@ -1440,6 +1440,12 @@ def verify_case_rereads(connection, case, row):
 def killed_session_recovery_call(client, case, connection, descriptor):
     """Kill only this W4 run's served session, then prove next-call re-lease.
 
+    This case deliberately uses the disposable ``synthetic_owner`` profile so
+    its SYSDBA-side kill can target only the exact run-owned session. That
+    profile exposes the synthetic ``SELECT 1`` value, hence ``C: "1"`` is the
+    expected result here; it does not relax the normal masked-profile contract
+    (which remains covered by the issue-46 case).
+
     The first query establishes the pinned session. The second call is expected
     to observe the dead wire and quarantine it; only the third, separate
     statement may obtain a replacement. This deliberately proves no in-flight
