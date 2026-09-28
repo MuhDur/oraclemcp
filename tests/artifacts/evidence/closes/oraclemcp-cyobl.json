@@ -1,0 +1,58 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T07:51:00Z",
+  "bead_id": "oraclemcp-cyobl",
+  "scope": {
+    "summary": "The boundary lint now inherits a real build lease and selects a dedicated per-agent target dir, so its heavy `cargo tree --workspace` inspection runs un-leased-host clean while the compiler guard's refusals stay intact.",
+    "in_scope": [
+      "scripts/oraclemcp_boundary_lint.sh"
+    ],
+    "out_of_scope": [
+      "scripts/check_build_lease.sh and scripts/build_lease.sh are unchanged; no guard rule, exemption, or classifier was touched or weakened.",
+      "The validation never re-ran the full Required graph, so no `ready` claim is made.",
+      "Unrelated dirty files in the shared multi-agent checkout (crates/**/fuzz/Cargo.lock) are another agent's mid-edit and are excluded from this scope."
+    ]
+  },
+  "source": {
+    "sha": "c6e2ee745173f090e000fed5ee9c88ce9fec44a8",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "bash scripts/oraclemcp_boundary_lint.sh",
+        "kind": "cli",
+        "trace": "Run 2026-09-28 from the repo root with no pre-held build lease and the ambient CARGO_TARGET_DIR=/home/durakovic/.cache/cargo-target (the guard's denied shared cache). The lint resolved target/ for the checkout, re-executed under scripts/build_lease.sh (slot 0 acquired), completed the full dependency walk, and exited 0 with 'oraclemcp-boundary-lint: OK — thin-native dependency boundary holds.'"
+      },
+      {
+        "name": "bash scripts/oraclemcp_boundary_lint.sh --selftest",
+        "kind": "cli",
+        "trace": "Run 2026-09-28; 6 of 6 checks passed (exit 0): target-dir selection for unset/shared/dedicated ambient dirs; un-leased `cargo tree --workspace` refused at 75; shared ambient target refused at 78; a real leased `cargo tree --workspace` probe succeeded. The leased probe takes the machine build lease for real."
+      },
+      {
+        "name": "cargo test --workspace (unleased, planted negative)",
+        "kind": "cli",
+        "trace": "Run 2026-09-28 with a clean lease environment and dedicated target; Cargo exited 101 and each intercepted rustc exited 75 with 'check_build_lease: REFUSING un-leased heavy build (classified heavy: ... cargo test --workspace).' The guard refuses a genuinely unleased heavy workspace build exactly as before."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Verified on the local Linux multi-agent host only; the CI single-tenant waiver path in check_build_lease.sh was not re-exercised here, though the change leaves it untouched and falls through to it.",
+    "No clean-worktree whole-tree reproducibility proof was produced; the work was settled on the shared checkout with foreign files dirty under crates/**.",
+    "The full dependency walk was run once during verification, not as part of a Required-graph proof, so readiness stays scoped-test / not-ready.",
+    "The --selftest leased probe runs one real cargo tree invocation, not the full 28-invocation walk; the direct invocation covers the full walk."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
