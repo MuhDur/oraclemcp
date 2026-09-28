@@ -112,9 +112,10 @@ pub use catalog_facts::{
     ClosureFacts, ClosureMember, DependencyFact, DmlTarget, MAX_CLOSURE_DEPENDENCIES,
     MAX_CLOSURE_DML_TARGETS, MAX_CLOSURE_MEMBERS, MAX_CLOSURE_SOURCE_BYTES,
     MAX_CLOSURE_SOURCE_ROWS, MAX_CLOSURE_TOTAL_DEPENDENCIES, MAX_CLOSURE_TOTAL_SOURCE_ROWS,
-    MAX_CLOSURE_TOTAL_TRIGGERS, MAX_CLOSURE_TRIGGERS, MemberFact, Revalidation, RoutineClosure,
-    TriggerFact, extract_closure_facts, fact_record_valid, read_closure_database_identity,
-    revalidate,
+    MAX_CLOSURE_TOTAL_TRIGGERS, MAX_CLOSURE_TRIGGERS, MemberFact, PdbIdentity,
+    PdbIdentityObservation, PdbIdentityScope, Revalidation, RoutineClosure, TriggerFact,
+    extract_closure_facts, fact_record_valid, read_closure_database_identity,
+    read_pdb_identity_scope, revalidate,
 };
 pub use catalog_query::{
     BindSchema, CatalogAuditClass, CatalogBindKind, CatalogOutputPolicy, CatalogQueryId,

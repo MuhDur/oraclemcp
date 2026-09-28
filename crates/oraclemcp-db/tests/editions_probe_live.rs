@@ -18,8 +18,8 @@ use std::{
 use asupersync::{Cx, runtime::RuntimeBuilder};
 use oraclemcp_db::{
     AuthAdapter, DbError, EditionsProofStatus, OracleBackend, OracleConnectOptions,
-    OracleConnection, OracleConnectionInfo, OracleRow, RustOracleConnection,
-    probe_editions_catalog, probe_editions_enabled,
+    OracleConnection, OracleConnectionInfo, OracleRow, PdbIdentityScope, RustOracleConnection,
+    probe_editions_catalog, probe_editions_enabled, read_pdb_identity_scope,
 };
 use oraclemcp_error::{ErrorClass, ReasonCategory, StatementOutcome};
 
@@ -374,6 +374,57 @@ fn editions_probe_synthetic_owner_cleanup_runs_while_unwinding() {
             1,
             "the registered synthetic user must be dropped during unwind"
         );
+    });
+}
+
+#[test]
+fn pdb_identity_free23_live_e2e_oracle() {
+    if std::env::var("ORACLEMCP_PDB_IDENTITY_LIVE").as_deref() != Ok("1") {
+        eprintln!("[pdb-identity-live] SKIP; set ORACLEMCP_PDB_IDENTITY_LIVE=1");
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let password = std::env::var("ORACLE_MATRIX_FREE23_PASSWORD")
+            .expect("FREE23 E2E_ORACLE password missing");
+        let dsn = std::env::var("ORACLE_MATRIX_FREE23_DSN")
+            .unwrap_or_else(|_| "localhost:1523/FREEPDB1".to_owned());
+        assert!(
+            dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"),
+            "PDB identity live test runs only against the local FREE23 lab"
+        );
+        let conn = RustOracleConnection::connect(
+            &cx,
+            OracleConnectOptions {
+                connect_string: dsn,
+                username: Some("E2E_ORACLE".to_owned()),
+                password: Some(password),
+                auth_adapter: AuthAdapter::Password,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("FREE23 E2E_ORACLE connection");
+        let scope = read_pdb_identity_scope(&cx, &conn).await;
+        match scope {
+            PdbIdentityScope::ServiceStateStore { identity } => {
+                assert!(!identity.dbid.is_empty(), "FREE23 DBID must be populated");
+                assert!(
+                    !identity.con_uid.is_empty(),
+                    "FREE23 CON_UID must be populated"
+                );
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "case_id":"pdb_identity_free23_live_e2e_oracle",
+                        "coordination_scope":"service_state_store",
+                        "verdict":"pass"
+                    })
+                );
+            }
+            PdbIdentityScope::LocalOnly { observation } => {
+                panic!("FREE23 E2E_ORACLE PDB identity unexpectedly unavailable: {observation:?}");
+            }
+        }
     });
 }
 

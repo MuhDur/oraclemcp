@@ -94,6 +94,40 @@ pub struct ClosureDatabaseIdentity {
     pub edition: String,
 }
 
+/// Stable Oracle PDB identity usable as a service-state-store coordination key.
+///
+/// `DBID` identifies the database and `CON_UID` identifies a container within
+/// it. Unlike a container name, `CON_UID` is stable across a PDB rename.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PdbIdentity {
+    /// Database DBID read from USERENV.
+    pub dbid: String,
+    /// Container UID read from USERENV.
+    pub con_uid: String,
+}
+
+/// Why stable PDB identity could not be read for a request.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PdbIdentityObservation {
+    /// The closed session-identity query failed or returned an incomplete row.
+    Unreadable,
+}
+
+/// Coordination scope available to one request.
+///
+/// A service must continue an otherwise admissible request when identity
+/// evidence is unavailable (R36). In that case it records a local-only scope,
+/// which deliberately makes no claim about PDB-wide coordination.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "coordination_scope", rename_all = "snake_case")]
+pub enum PdbIdentityScope {
+    /// Stable identity permits coordination within this service state store.
+    ServiceStateStore { identity: PdbIdentity },
+    /// Stable identity is unavailable; only local request observation is safe.
+    LocalOnly { observation: PdbIdentityObservation },
+}
+
 /// Catalog identity for one closure object and its compiler state.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MemberFact {
@@ -502,6 +536,42 @@ pub async fn read_closure_database_identity(
     })
 }
 
+/// Read the least-privilege PDB identity for service-local coordination.
+///
+/// This helper never turns missing identity evidence into a request refusal:
+/// callers receive [`PdbIdentityScope::LocalOnly`] with an observation they can
+/// persist or expose in diagnostics.
+pub async fn read_pdb_identity_scope(cx: &Cx, conn: &dyn OracleConnection) -> PdbIdentityScope {
+    let rows = match query(cx, conn, CatalogQueryId::PdbIdentity, &[]).await {
+        Ok(rows) => rows,
+        Err(_) => {
+            return PdbIdentityScope::LocalOnly {
+                observation: PdbIdentityObservation::Unreadable,
+            };
+        }
+    };
+    pdb_identity_scope_from_rows(&rows)
+}
+
+fn pdb_identity_scope_from_rows(rows: &[OracleRow]) -> PdbIdentityScope {
+    let Some(row) = rows.first().filter(|_| rows.len() == 1) else {
+        return PdbIdentityScope::LocalOnly {
+            observation: PdbIdentityObservation::Unreadable,
+        };
+    };
+    let (Some(dbid), Some(con_uid)) = (
+        required_text(row, "DBID", "PDB identity").ok(),
+        required_text(row, "CON_UID", "PDB identity").ok(),
+    ) else {
+        return PdbIdentityScope::LocalOnly {
+            observation: PdbIdentityObservation::Unreadable,
+        };
+    };
+    PdbIdentityScope::ServiceStateStore {
+        identity: PdbIdentity { dbid, con_uid },
+    }
+}
+
 /// Compare stored facts with a new live extraction, mapping all incomplete reads to Unknown.
 pub async fn revalidate(
     cx: &Cx,
@@ -863,6 +933,55 @@ mod tests {
         let mapped = map_catalog_read(result);
         assert!(matches!(mapped, Err(Revalidation::Unknown(_))));
     }
+
+    fn pdb_identity_row(dbid: Option<&str>, con_uid: Option<&str>) -> OracleRow {
+        OracleRow {
+            columns: vec![
+                (
+                    "DBID".into(),
+                    crate::OracleCell::new("VARCHAR2", dbid.map(str::to_owned)),
+                ),
+                (
+                    "CON_UID".into(),
+                    crate::OracleCell::new("VARCHAR2", con_uid.map(str::to_owned)),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn pdb_identity_scope_uses_dbid_and_con_uid_not_container_name() {
+        assert_eq!(
+            pdb_identity_scope_from_rows(&[pdb_identity_row(Some("424242"), Some("9001"))]),
+            PdbIdentityScope::ServiceStateStore {
+                identity: PdbIdentity {
+                    dbid: "424242".into(),
+                    con_uid: "9001".into(),
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn pdb_identity_scope_is_local_only_when_identity_is_incomplete() {
+        assert_eq!(
+            pdb_identity_scope_from_rows(&[pdb_identity_row(Some("424242"), None)]),
+            PdbIdentityScope::LocalOnly {
+                observation: PdbIdentityObservation::Unreadable,
+            }
+        );
+    }
+
+    #[test]
+    fn pdb_identity_scope_is_local_only_when_identity_row_is_not_exactly_one() {
+        assert_eq!(
+            pdb_identity_scope_from_rows(&[]),
+            PdbIdentityScope::LocalOnly {
+                observation: PdbIdentityObservation::Unreadable,
+            }
+        );
+    }
+
     #[test]
     fn fact_wrapped_source_is_unknown() {
         let row = OracleRow {

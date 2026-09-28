@@ -286,6 +286,8 @@ pub enum CatalogQueryId {
     PlscopeStatements,
     /// Stable database, container and edition identity for persisted facts.
     ClosureIdentity,
+    /// Stable database and PDB identity for service-local coordination.
+    PdbIdentity,
     /// Exact identity and validity for one closure member.
     ClosureMemberObject,
     /// AUTHID of one exact standalone routine or package member.
@@ -732,6 +734,7 @@ impl CatalogQueryId {
         Self::ExtractPlscopeAvailability,
         Self::ExtractPlscopeIdentifiers,
         Self::ClosureIdentity,
+        Self::PdbIdentity,
         Self::ClosureMemberObject,
         Self::ClosureRoutineAuthid,
         Self::ClosureCompilerSettings,
@@ -2387,6 +2390,14 @@ order by owner, name, referenced_owner, referenced_name"#
                         SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS edition_name FROM dual",
                 EMPTY,
                 "read stable database, container and edition identity",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::PdbIdentity => (
+                "SELECT SYS_CONTEXT('USERENV','DBID') AS dbid, \\
+                        SYS_CONTEXT('USERENV','CON_UID') AS con_uid FROM dual",
+                EMPTY,
+                "read stable database and PDB identity for local coordination",
                 InternalProof,
                 ReadPurity,
             ),
