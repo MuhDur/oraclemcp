@@ -1,0 +1,58 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-28T08:32:00Z",
+  "bead_id": "oraclemcp-f1opb",
+  "scope": {
+    "summary": "Repaired the generated catalog-extract SQL so live free23 catalog rowset extraction succeeds: removed a stray double quote that turned the SELECT column list plus bind list into one over-long quoted identifier (ORA-00972), and reordered the synonyms/database_links PUBLIC-flag predicate so distinct placeholders first appear as :1..:N, matching Oracle's first-occurrence positional bind semantics (ORA-01722).",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_query.rs"
+    ],
+    "out_of_scope": [
+      "the live_oracle.rs test expectations, which were not modified",
+      "semantics of the extracted rowsets, which are unchanged (OR commutativity only)",
+      "least-privilege grant verification; the live proof ran as SYSTEM on the local free23 lane"
+    ]
+  },
+  "source": {
+    "sha": "745304c40c6598230658e819063fcc8478114652",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "live free23 catalog extraction target",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-db --features live-xe,oracledb --test live_oracle -- --nocapture --test-threads=1 live_catalog_extract_current_schema_rowsets passed against localhost:1523/FREEPDB1: '[live-xe] catalog extraction schema=[\"SYSTEM\"] batches=23 warnings=0', 1 passed / 0 failed."
+      },
+      {
+        "name": "scoped unit regression suite",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-db --lib: 650 passed / 0 failed, including new tests every_catalog_query_quotes_are_confined_to_string_literals and every_catalog_query_placeholders_follow_bind_position_order over all 171 CatalogQueryId variants. cargo clippy -p oraclemcp-db --all-targets -- -D warnings clean; cargo fmt -p oraclemcp-db -- --check clean."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "live-oracle-free23-catalog-extract",
+        "path": "tests/artifacts/evidence/live/f1opb-free23-20260928T0831Z.json",
+        "sha": "745304c40c6598230658e819063fcc8478114652"
+      }
+    ]
+  },
+  "limitations": [
+    "The live proof is a local implementer run on the free23 lane as SYSTEM, not a scheduled CI lane and not an independent verifier.",
+    "The fix is verified on Oracle Database 23ai Free only; no 18c/21c or non-Free lane was exercised.",
+    "Required-rowset extraction failures still surface the raw driver error without the rowset name, which is why identifying the second defect required temporary instrumentation; that diagnostic gap is unchanged and not part of this fix."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

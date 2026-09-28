@@ -1,0 +1,22 @@
+{
+  "run_id": "orchestrator-local-verify-20260928T0831Z",
+  "lane": "free23",
+  "source_sha": "745304c40c6598230658e819063fcc8478114652",
+  "kind": "live-oracle-free23-catalog-extract",
+  "runner": "swarm implementer subagent (oraclemcp-f1opb); local FREE 23ai localhost:1523/FREEPDB1 as SYSTEM; ORACLEMCP_LIVE_XE=1; dedicated CARGO_TARGET_DIR=/home/durakovic/projects/oraclemcp/target (shared cache refused with exit 78)",
+  "command": "cargo test -p oraclemcp-db --features live-xe,oracledb --test live_oracle -- --nocapture --test-threads=1 live_catalog_extract_current_schema_rowsets",
+  "result": "1 passed; 0 failed",
+  "before_fix": "FAILED: Query(\"query: server returned Oracle error: ORA-00972: The identifier HH24:MI:SS..., :7, :8, ... exceeds the maximum length of 128 bytes.\")",
+  "after_fix": "[live-xe] catalog extraction schema=[\"SYSTEM\"] batches=23 warnings=0 / test result: ok. 1 passed; 0 failed",
+  "planted_negative": "Pre-fix raw output captured at /tmp/f1opb-before.txt. Fixing the identifier exposed a second defect on the synonyms/database_links rowsets; a temporary rowset-naming probe showed 'rowset synonyms failed: ORA-01722 ... invalid string value: SYS'. An independent python-oracledb 4.0.2 probe proved binds are matched by first-occurrence position (SELECT :2, :1 with [10,20] -> (10,20)), reproduced the generated ':33-first' failure, and showed the reordered predicate returns 7888 rows. The new regression test every_catalog_query_placeholders_follow_bind_position_order fails on the pre-fix ordering ([33, 1, 2, ...]).",
+  "cases": [
+    {
+      "case_id": "live_catalog_extract_current_schema_rowsets",
+      "lane": "free23",
+      "account": "SYSTEM",
+      "result": "catalog extraction schema=[\"SYSTEM\"] batches=23 warnings=0",
+      "verdict": "pass"
+    }
+  ],
+  "note": "Local implementer run, not a scheduled CI lane; the live suite is runtime-gated, so this gated run is the live proof at source_sha. Unit regressions every_catalog_query_quotes_are_confined_to_string_literals and every_catalog_query_placeholders_follow_bind_position_order pass over all 171 CatalogQueryId variants; all 650 oraclemcp-db lib tests pass; scoped clippy -D warnings clean."
+}
