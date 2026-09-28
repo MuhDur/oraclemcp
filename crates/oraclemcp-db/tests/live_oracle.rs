@@ -31,6 +31,7 @@ use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 #[cfg(feature = "oracledb")]
 use oraclemcp_db::OfficialOracleConnection;
+use oraclemcp_db::error_envelope::ErrorClass;
 use oraclemcp_db::{
     AuthAdapter, CatalogExtractRequest, CatalogRowSetName, CqnNotificationOutcome, DbError,
     DependentsProbe, DrcpConfig, NativeRedactionAvailability, OracleBind, OracleConnectOptions,
@@ -2060,23 +2061,20 @@ fn live_dba_suite_preflight_reports_runnable_posture() {
     });
 }
 
-/// C8/C10 live: `oracle_top_queries` resolves to a working source and the
-/// resolved source's query runs as a pure read. The default (live cursor) path
-/// always works; the historical path resolves to AWR (only if the Diagnostics
-/// Pack is licensed) → Statspack (the free fallback) → a structured Unavailable
-/// error — never a silent empty success. Whichever source is resolved, its SQL
-/// is exercised against the live dictionary (the Statspack-fallback path is
-/// covered whenever PERFSTAT is installed but the pack is not licensed).
+/// C8/C10 live: `oracle_top_queries` resolves to a working source. The default
+/// (live cursor) path always works; historical history is **license-gated**:
+/// an unattested historical request must be a typed `PolicyDenied` refusal,
+/// while an operator who *attests* the Diagnostics Pack gets the real posture —
+/// AWR (pack active) → Statspack (free fallback installed) → a structured
+/// `Unavailable` error. Whichever source is resolved, its SQL is exercised
+/// against the live dictionary, and when that source's catalog holds snapshots
+/// the ranked query must return real rows — never a silent empty success. The
+/// free `V$SQLSTATS` live-cursor coverage is kept unconditionally.
 #[test]
 fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
+    const TEST: &str = "live_top_queries_resolves_source_and_runs_including_statspack_fallback";
     run_with_cx(|cx| async move {
-        let Some(conn) = connect_or_skip(
-            &cx,
-            "live_top_queries_resolves_source_and_runs_including_statspack_fallback",
-            test_opts(),
-        )
-        .await
-        else {
+        let Some(conn) = connect_or_skip(&cx, TEST, test_opts()).await else {
             return;
         };
         conn.ping(&cx).await.expect("top_queries ping");
@@ -2097,28 +2095,100 @@ fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
             .await
             .expect("live top-SQL runs as a pure read");
 
-        // Historical mode: resolve the real posture and exercise the resolved path.
-        let historical = oraclemcp_db::resolve_top_sql_source(&cx, &conn, true)
+        // Unattested history: a typed PolicyDenied refusal that precedes every
+        // database call. The instance's `control_management_pack_access` may well
+        // be DIAGNOSTIC (this dev Free container reports so) — which is exactly
+        // the point: technical activation is not a license, so the probe must not
+        // silently succeed without the operator's explicit attestation.
+        let unattested = oraclemcp_db::resolve_top_sql_source(&cx, &conn, true)
             .await
-            .expect("historical top-SQL source probe remains certain");
-        eprintln!("[live-xe] top_queries historical source resolved to {historical:?}");
-        match oraclemcp_db::top_sql_query(historical, oraclemcp_db::TopSqlMetric::Elapsed, 5, None)
-        {
-            Ok((id, binds)) => {
-                // AWR or Statspack: the SQL is valid against the live dictionary.
-                // (A privilege miss is acceptable; a success proves the path works.)
-                match oraclemcp_db::run_catalog_query(&cx, &conn, id, &binds).await {
-                    Ok(_) => eprintln!("[live-xe] historical top-SQL ran against {historical:?}"),
-                    Err(e) => eprintln!(
-                        "[live-xe] historical top-SQL ({historical:?}) degraded on a privilege/feature miss ({e})"
+            .expect_err("unattested historical top-SQL must be refused, not silently resolved");
+        let refusal = match unattested {
+            DbError::Refused(envelope) => *envelope,
+            other => panic!("expected a typed PolicyDenied refusal, got {other:?}"),
+        };
+        assert_eq!(
+            refusal.error_class,
+            ErrorClass::PolicyDenied,
+            "unattested history is a license refusal, not a generic query failure"
+        );
+        assert!(
+            refusal
+                .message
+                .to_ascii_lowercase()
+                .contains("diagnostics pack"),
+            "the refusal names the Diagnostics Pack license: {}",
+            refusal.message
+        );
+        eprintln!("[live-xe] unattested historical refusal: {refusal:?}");
+
+        // Attested history: with the operator license attestation the resolver
+        // inspects the real instance posture and selects AWR (pack active) →
+        // Statspack (free fallback installed) → Unavailable. Exercise whichever
+        // is genuinely available on this lane.
+        let historical = oraclemcp_db::resolve_top_sql_source_with_license(&cx, &conn, true, true)
+            .await
+            .expect("attested historical source probe remains certain");
+        eprintln!("[live-xe] attested historical source resolved to {historical:?}");
+
+        match historical {
+            oraclemcp_db::DiagnosticsSource::AwrAsh
+            | oraclemcp_db::DiagnosticsSource::Statspack => {
+                let (id, binds) = oraclemcp_db::top_sql_query(
+                    historical,
+                    oraclemcp_db::TopSqlMetric::Elapsed,
+                    5,
+                    None,
+                )
+                .expect("attested historical query builds");
+                let rows = match oraclemcp_db::run_catalog_query(&cx, &conn, id, &binds).await {
+                    Ok(rows) => rows,
+                    Err(e) => panic!(
+                        "attested historical top-SQL must run against the live dictionary: {e}"
                     ),
+                };
+                // Prove the registered data is real on this lane: when the source
+                // catalog holds snapshots, the ranked query must return rows.
+                let (probe_sql, label) = match historical {
+                    oraclemcp_db::DiagnosticsSource::AwrAsh => (
+                        "SELECT COUNT(*) AS n FROM dba_hist_sqlstat",
+                        "dba_hist_sqlstat",
+                    ),
+                    _ => (
+                        "SELECT COUNT(*) AS n FROM perfstat.stats$sql_summary",
+                        "perfstat.stats$sql_summary",
+                    ),
+                };
+                let total = conn
+                    .query_rows(&cx, probe_sql, &[])
+                    .await
+                    .expect("historical catalog probe")
+                    .first()
+                    .and_then(|row| row.parse_i64("N"))
+                    .unwrap_or(0);
+                eprintln!(
+                    "[live-xe] historical top-SQL ({historical:?}) ran and returned {} row(s); {label} holds {total}",
+                    rows.len()
+                );
+                if total > 0 {
+                    assert!(
+                        !rows.is_empty(),
+                        "a populated {label} ({total} rows) must yield ranked top-SQL rows"
+                    );
                 }
             }
-            Err(envelope) => {
-                // Unavailable: a clear structured error that offers Statspack —
-                // never an empty success.
-                assert_eq!(historical, oraclemcp_db::DiagnosticsSource::Unavailable);
+            oraclemcp_db::DiagnosticsSource::Unavailable => {
+                // No licensed pack and no Statspack: a clear structured refusal
+                // that offers Statspack — never an empty success.
+                let envelope = oraclemcp_db::top_sql_query(
+                    historical,
+                    oraclemcp_db::TopSqlMetric::Elapsed,
+                    5,
+                    None,
+                )
+                .expect_err("Unavailable history must be a typed refusal");
                 assert!(envelope.is_error);
+                assert_eq!(envelope.error_class, ErrorClass::PolicyDenied);
                 assert!(
                     envelope
                         .next_steps
@@ -2126,6 +2196,9 @@ fn live_top_queries_resolves_source_and_runs_including_statspack_fallback() {
                         .any(|s| s.to_lowercase().contains("statspack")),
                     "the unavailable error offers the free Statspack fallback"
                 );
+            }
+            oraclemcp_db::DiagnosticsSource::LiveCursor => {
+                panic!("historical resolution must never fall back to the free live cursor");
             }
         }
     });
