@@ -1532,20 +1532,13 @@ def killed_session_recovery_call(client, case, connection, descriptor):
     for sid, serial in sessions:
         cursor.execute(kill_session_sql(int(sid), int(serial)))
     connection.commit()
-    lost = client.rpc("tools/call", {"name": case["tool"], "arguments": arguments})
-    verify_envelope(lost, descriptor)
-    lost_payload = tool_payload(lost)
-    require(lost_payload.get("isError") is True
-            and lost_payload.get("structuredContent", {}).get("error_class") == "TRANSIENT",
-            "killed read was not reported as transient connection loss")
     recovered = client.rpc("tools/call", {"name": case["tool"], "arguments": arguments})
     verify_envelope(recovered, descriptor)
     require(tool_payload(recovered).get("isError") is not True,
-            "next statement did not recover with a fresh pinned session: "
+            "the first read after a killed session did not transparently re-lease: "
             + compact(scrub(tool_payload(recovered)))[:400])
     return recovered, {"baseline": scrub(tool_payload(first)),
                        "killed_sessions": len(sessions),
-                       "loss": scrub(lost_payload),
                        "recovered": scrub(tool_payload(recovered))}
 
 
@@ -1574,8 +1567,8 @@ def killed_session_dml_call(client, case, connection, descriptor):
     verify_envelope(lost, descriptor)
     payload = tool_payload(lost)
     outcome = payload.get("structuredContent", {}).get("statement_outcome")
-    require(payload.get("isError") is True and outcome in {"protocol_unsynchronized", "commit_unknown", "rolled_back"},
-            "killed DML did not return a typed uncertain/rolled-back statement outcome")
+    require(payload.get("isError") is True and outcome in {"protocol_unsynchronized", "commit_unknown"},
+            "killed DML did not return a typed uncertain statement outcome")
     return lost, {"baseline": scrub(tool_payload(baseline)), "killed_sessions": len(sessions),
                   "loss": scrub(payload)}
 
