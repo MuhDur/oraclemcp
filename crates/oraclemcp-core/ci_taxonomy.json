@@ -169,7 +169,7 @@
     },
     {
       "check_name": "fuzz targets compile (nightly)",
-      "tier": "advisory",
+      "tier": "required",
       "workflow": "CI",
       "workflow_file": "ci.yml",
       "job_id": "fuzz-build",
@@ -930,8 +930,7 @@
   },
   "groups": {
     "advisory": [
-      "Rust workspace (Windows)",
-      "fuzz targets compile (nightly)"
+      "Rust workspace (Windows)"
     ],
     "manual": [
       "OCI ADB acceptance",
@@ -982,6 +981,7 @@
       "cargo test",
       "clippy (-D warnings)",
       "engine-free boundary + surface + driver-seam + honesty + conformance accounting",
+      "fuzz targets compile (nightly)",
       "installer lint and built-artifact smoke",
       "public-API lock (cargo public-api + semver-checks)",
       "release acceptance suite (B.12)",
