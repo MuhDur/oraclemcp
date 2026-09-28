@@ -77,10 +77,60 @@ pub struct RequestBudget {
     shared_quota: DbRequestQuota,
 }
 
+/// Map a profile's `call_timeout_seconds` to the single shared per-call
+/// timeout. `None` uses the 30 s default; `Some(n)` is `n` seconds, with
+/// `Duration::from_secs` saturating in the runtime's [`Time`] representation.
+///
+/// `Some(0)` is refused at config load (see
+/// `oraclemcp_config::ConfigError::CallTimeoutBelowMinimum`); this function
+/// still treats it as the default as defence in depth so a hand-built profile
+/// DTO can never resurrect an unbounded timeout.
+#[must_use]
+pub fn per_call_timeout_seconds(call_timeout_seconds: Option<u64>) -> Duration {
+    match call_timeout_seconds {
+        None | Some(0) => DEFAULT_REQUEST_TIMEOUT,
+        Some(seconds) => Duration::from_secs(seconds),
+    }
+}
+
 impl RequestBudget {
-    /// Derive a request budget from a per-call timeout (or the default when
-    /// `None`), anchored to the instant the request entered dispatch (the
-    /// runtime/lab clock).
+    /// Derive the whole-request budget directly from a profile's
+    /// `call_timeout_seconds` — the single shared mapping every timeout
+    /// consumer uses, so the per-call timeout and the whole-request ceiling can
+    /// never disagree again.
+    ///
+    /// * `None` (unset) yields today's defaults: a 30 s per-call timeout and a
+    ///   30 s whole-request deadline.
+    /// * `Some(n)` with `n >= 1` bounds both the per-call timeout and the
+    ///   whole-request deadline at `n` seconds.
+    /// * `Some(0)` is treated as the default (defence in depth); config load
+    ///   refuses it, and a debug build asserts it never reaches here.
+    ///
+    /// The deadline is `admitted_at + timeout`, never `None`: [`Time`] addition
+    /// saturates, so `u64::MAX` seconds collapses to the runtime's maximum
+    /// representable instant rather than overflowing or panicking.
+    #[must_use]
+    pub fn from_profile(admitted_at: Time, call_timeout_seconds: Option<u64>) -> Self {
+        debug_assert_ne!(
+            call_timeout_seconds,
+            Some(0),
+            "call_timeout_seconds = 0 is refused at config load; \
+             from_profile only defaults it as defence in depth"
+        );
+        let timeout = per_call_timeout_seconds(call_timeout_seconds);
+        let budget = Budget::new()
+            .with_timeout(admitted_at, timeout)
+            .with_poll_quota(DEFAULT_REQUEST_POLL_QUOTA);
+        Self::from_budget_at(admitted_at, budget)
+    }
+
+    /// Derive a request budget from an already-resolved per-call timeout (or the
+    /// default when `None`), anchored to the instant the request entered
+    /// dispatch (the runtime/lab clock).
+    ///
+    /// Prefer [`Self::from_profile`] at every profile→timeout seam; this
+    /// Duration-based constructor is for callers that already hold a resolved
+    /// timeout (for example a lane budget tightened by a per-tool timeout).
     ///
     /// The deadline is `admitted_at + timeout`; the poll quota is
     /// [`DEFAULT_REQUEST_POLL_QUOTA`]. A zero timeout is floored to 1ns so the
@@ -95,6 +145,22 @@ impl RequestBudget {
             .with_timeout(admitted_at, timeout)
             .with_poll_quota(DEFAULT_REQUEST_POLL_QUOTA);
         Self::from_budget_at(admitted_at, budget)
+    }
+
+    /// The per-call (per-round-trip) timeout this budget enforces: the
+    /// whole-request window `deadline - admitted_at`. For a budget built by
+    /// [`Self::from_profile`] this is exactly the profile's resolved call
+    /// timeout; for any other budget it is the effective request window.
+    ///
+    /// Floored to 1ns so a budget admitted exactly at its deadline still hands
+    /// the driver a strictly-positive timeout.
+    #[must_use]
+    pub fn per_call_timeout(&self) -> Duration {
+        match self.budget.deadline {
+            Some(deadline) => Duration::from_nanos(deadline.duration_since(self.admitted_at))
+                .max(Duration::from_nanos(1)),
+            None => DEFAULT_REQUEST_TIMEOUT,
+        }
     }
 
     /// Wrap an explicit [`Budget`] anchored to request admission.
@@ -436,6 +502,80 @@ mod tests {
             !rb.is_exhausted_at(now),
             "a zero timeout still leaves a sub-ns sliver so it is not born dead at now"
         );
+    }
+
+    // #48: one shared profile→budget mapping. `None`, `1`, `30` and `u64::MAX`
+    // all yield a bounded per-call timeout AND a bounded (never `None`)
+    // whole-request deadline.
+    #[test]
+    fn request_budget_from_profile_table() {
+        let admitted_at = Time::ZERO;
+        for (seconds, expected) in [
+            (None, DEFAULT_REQUEST_TIMEOUT),
+            (Some(1), Duration::from_secs(1)),
+            (Some(30), Duration::from_secs(30)),
+            // `u64::MAX` seconds saturates to the runtime's maximum
+            // representable instant; it never overflows or panics.
+            (Some(u64::MAX), Duration::from_nanos(u64::MAX)),
+        ] {
+            let rb = RequestBudget::from_profile(admitted_at, seconds);
+            assert_eq!(
+                rb.per_call_timeout(),
+                expected,
+                "per-call timeout for {seconds:?}"
+            );
+            let deadline = rb
+                .deadline()
+                .unwrap_or_else(|| panic!("whole-request deadline is never None for {seconds:?}"));
+            assert_eq!(deadline, admitted_at + expected, "deadline for {seconds:?}");
+            assert!(
+                !rb.is_exhausted_at(admitted_at),
+                "a freshly admitted budget is not born exhausted for {seconds:?}"
+            );
+        }
+    }
+
+    // #48 integration (in-process): a whole-request budget built from
+    // `call_timeout_seconds = 1` cuts a call that runs past one second, mapping
+    // it to the timeout-class `Cancelled` well before any 30 s default.
+    #[test]
+    fn issue48_whole_request_budget_cuts_slow_call() {
+        let admitted_at = Time::from_secs(1_000);
+        let rb = RequestBudget::from_profile(admitted_at, Some(1));
+        assert_eq!(rb.per_call_timeout(), Duration::from_secs(1));
+        assert!(
+            rb.enforce_at(admitted_at + Duration::from_millis(999))
+                .is_ok(),
+            "a call still inside the 1s window is admitted"
+        );
+        let err = rb
+            .enforce_at(admitted_at + Duration::from_secs(1) + Duration::from_nanos(1))
+            .expect_err("a slow call is cut at the whole-request deadline");
+        assert!(
+            matches!(err, DbError::Cancelled(ref m) if m.contains("deadline")),
+            "the cut maps to the timeout-class Cancelled: {err:?}"
+        );
+    }
+
+    // #48 defence in depth: after config load refuses `0`, a hand-built profile
+    // DTO still cannot resurrect an unbounded timeout. A debug build flags it.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "call_timeout_seconds = 0")]
+    fn from_profile_zero_is_flagged_in_debug() {
+        let _ = RequestBudget::from_profile(Time::ZERO, Some(0));
+    }
+
+    // The per-call default and the whole-request default stay in lock-step: one
+    // number cannot drift from the other at the default seam.
+    #[test]
+    fn default_per_call_timeout_matches_request_default() {
+        assert_eq!(
+            per_call_timeout_seconds(None),
+            DEFAULT_REQUEST_TIMEOUT,
+            "the profile default must equal the request-budget default"
+        );
+        assert_eq!(per_call_timeout_seconds(Some(0)), DEFAULT_REQUEST_TIMEOUT);
     }
 
     // enforce() also observes a cancellation already pending on the cx,

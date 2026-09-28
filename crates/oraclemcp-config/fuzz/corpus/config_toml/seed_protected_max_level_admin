@@ -1,0 +1,6 @@
+[[profiles]]
+name = "protected-admin"
+connect_string = "prod:1521/svc"
+protected = true
+max_level = "ADMIN"
+default_level = "READ_WRITE"

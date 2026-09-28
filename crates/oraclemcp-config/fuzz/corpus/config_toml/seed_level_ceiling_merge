@@ -1,0 +1,10 @@
+[[profiles]]
+name = "parent"
+connect_string = "parent:1521/svc"
+max_level = "DDL"
+
+[[profiles]]
+name = "child"
+base = "parent"
+connect_string = "child:1521/svc"
+default_level = "ADMIN"

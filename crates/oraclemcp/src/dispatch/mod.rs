@@ -265,14 +265,6 @@ struct PreparedProfileSwitch {
     response: Value,
 }
 
-fn profile_request_timeout(call_timeout_seconds: Option<u64>) -> Option<Duration> {
-    match call_timeout_seconds {
-        None => Some(DEFAULT_REQUEST_TIMEOUT),
-        Some(0) => None,
-        Some(seconds) => Some(Duration::from_secs(seconds)),
-    }
-}
-
 fn standalone_read_only_policy() -> ProfileDispatchPolicy {
     ProfileDispatchPolicy {
         level: default_read_only_level(),
@@ -427,7 +419,13 @@ fn profile_dispatch_policy(
     };
     Ok(ProfileDispatchPolicy {
         level: oraclemcp_core::session_level_state(profile, false),
-        request_timeout: profile_request_timeout(profile.call_timeout_seconds),
+        // #48: the single shared profile→timeout mapping. The whole-request
+        // budget deadline and the per-call driver timeout are the same number,
+        // always bounded (never `None`).
+        request_timeout: Some(
+            RequestBudget::from_profile(Time::ZERO, profile.call_timeout_seconds)
+                .per_call_timeout(),
+        ),
         max_query_cost: profile.max_query_cost,
         cumulative_query_cost_budget: profile.cumulative_query_cost_budget.clone(),
         result_masking: result_masking_policy_from_profile(profile)

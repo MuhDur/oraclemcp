@@ -2142,13 +2142,6 @@ struct DispatcherWiring {
     unsigned_refusal_log: bool,
 }
 
-fn whole_request_timeout(call_timeout_seconds: Option<u64>) -> std::time::Duration {
-    match call_timeout_seconds {
-        Some(0) | None => DEFAULT_REQUEST_TIMEOUT,
-        Some(seconds) => std::time::Duration::from_secs(seconds),
-    }
-}
-
 fn apply_selected_profile_to_wiring(
     wiring: &mut DispatcherWiring,
     selected: SelectedRuntimeProfile,
@@ -2506,7 +2499,13 @@ fn stateful_lane_factory_builder(
         let request_timeout = profile_generation
             .as_ref()
             .and_then(|lease| lease.config()?.profile(lease.profile()))
-            .map(|profile| whole_request_timeout(profile.call_timeout_seconds))
+            .map(|profile| {
+                oraclemcp_core::RequestBudget::from_profile(
+                    asupersync::Time::ZERO,
+                    profile.call_timeout_seconds,
+                )
+                .per_call_timeout()
+            })
             .unwrap_or_else(|| wiring.request_timeout.unwrap_or(DEFAULT_REQUEST_TIMEOUT));
         let prepared_generation = Arc::new(Mutex::new(Some(profile_generation)));
         let factory_wiring = wiring.clone();
@@ -2868,7 +2867,13 @@ fn stateless_read_worker_factory_builder(
         let request_timeout = profile_generation
             .config()
             .and_then(|config| config.profile(profile_generation.profile()))
-            .map(|profile| whole_request_timeout(profile.call_timeout_seconds))
+            .map(|profile| {
+                oraclemcp_core::RequestBudget::from_profile(
+                    asupersync::Time::ZERO,
+                    profile.call_timeout_seconds,
+                )
+                .per_call_timeout()
+            })
             .ok_or_else(|| {
                 ErrorEnvelope::new(
                     ErrorClass::RuntimeStateRequired,
@@ -7042,14 +7047,6 @@ fn doctor_resolution_error_context(error: DbError) -> DoctorProfileContext {
     context
 }
 
-fn doctor_call_timeout(call_timeout_seconds: Option<u64>) -> Option<std::time::Duration> {
-    match call_timeout_seconds {
-        None => Some(oraclemcp_core::resilience::DEFAULT_CALL_TIMEOUT),
-        Some(0) => None,
-        Some(seconds) => Some(std::time::Duration::from_secs(seconds)),
-    }
-}
-
 fn doctor_profile_caps(
     profile: &oraclemcp_config::ConnectionProfile,
     level: &SessionLevelState,
@@ -7153,7 +7150,13 @@ fn doctor_profile_metadata_context(profile: &str) -> DoctorProfileContext {
             .to_owned(),
         ),
         call_timeout_resolved: true,
-        call_timeout: doctor_call_timeout(chosen.call_timeout_seconds),
+        call_timeout: Some(
+            oraclemcp_core::RequestBudget::from_profile(
+                asupersync::Time::ZERO,
+                chosen.call_timeout_seconds,
+            )
+            .per_call_timeout(),
+        ),
         connect_timeout_seconds: chosen.connect_timeout_seconds,
         inactivity_timeout_seconds: chosen.inactivity_timeout_seconds,
         keepalive_minutes: chosen.keepalive_minutes,

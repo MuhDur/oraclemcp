@@ -1,0 +1,4 @@
+[[profiles]]
+name = "zero-timeout"
+connect_string = "localhost:1521/FREEPDB1"
+call_timeout_seconds = 0

@@ -1256,6 +1256,15 @@ impl ConnectionProfile {
     }
 
     pub(crate) fn validate_thin_routing(&self) -> Result<(), ConfigError> {
+        // #48: `call_timeout_seconds = 0` cannot mean "unbounded" — it silently
+        // disabled both the per-call and the whole-request timeout. The
+        // documented minimum is 1; refuse it at load so no served or doctor
+        // path can derive an unbounded budget from it.
+        if self.call_timeout_seconds == Some(0) {
+            return Err(ConfigError::CallTimeoutBelowMinimum {
+                profile: self.name.clone(),
+            });
+        }
         if let Some(sdu) = self.sdu
             && !(SDU_MIN_BYTES..=SDU_MAX_BYTES).contains(&sdu)
         {
@@ -1401,6 +1410,7 @@ pub fn resolve_inheritance(profiles: &mut [ConnectionProfile]) -> Result<(), Con
 mod tests {
     use super::*;
     use oraclemcp_guard::SqlPolicyEffectConfig;
+    use proptest::prelude::*;
 
     fn p(name: &str) -> ConnectionProfile {
         ConnectionProfile {
@@ -2892,5 +2902,180 @@ mod tests {
         protected.protected = Some(true);
         protected.require_security_feature_evidence = Some(false);
         assert!(protected.require_security_feature_evidence());
+    }
+
+    // ------------------------------------------------------------------
+    // #48 / 6si2: config-load refusal + ceiling-merge properties.
+    // ------------------------------------------------------------------
+
+    /// Every operating level, as a proptest strategy.
+    fn any_level() -> impl Strategy<Value = OperatingLevel> {
+        prop_oneof![
+            Just(OperatingLevel::ReadOnly),
+            Just(OperatingLevel::ReadWrite),
+            Just(OperatingLevel::Ddl),
+            Just(OperatingLevel::Admin),
+        ]
+    }
+
+    /// #48: `call_timeout_seconds = 0` fails config load with a typed error that
+    /// names `profiles.<name>.call_timeout_seconds` and the minimum 1. It used
+    /// to load and silently removed both timeouts.
+    #[test]
+    fn issue48_zero_call_timeout_refused_at_load() {
+        let err = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            call_timeout_seconds = 0
+            "#,
+        )
+        .expect_err("call_timeout_seconds = 0 must fail config load");
+
+        assert!(
+            matches!(
+                &err,
+                ConfigError::CallTimeoutBelowMinimum { profile } if profile == "dev"
+            ),
+            "the refusal is typed and names the profile: {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("profiles.dev.call_timeout_seconds"),
+            "the message names the field path: {rendered}"
+        );
+        assert!(
+            rendered.contains("minimum 1"),
+            "the message names the minimum: {rendered}"
+        );
+
+        // The minimum itself is accepted, so the refusal is exactly at 0.
+        crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            call_timeout_seconds = 1
+            "#,
+        )
+        .expect("call_timeout_seconds = 1 is the accepted minimum");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(96))]
+
+        /// 6si2: the effective ceiling of a merged (base-inherited) profile is
+        /// never above any authored source, and a `protected` profile always
+        /// resolves to `READ_ONLY`.
+        #[test]
+        fn merged_max_level_never_exceeds_any_source(
+            parent_level in prop::option::of(any_level()),
+            child_level in prop::option::of(any_level()),
+            protected in any::<bool>(),
+        ) {
+            let parent_max = parent_level
+                .map(|level| format!("max_level = \"{}\"", level.as_str()))
+                .unwrap_or_default();
+            let child_max = child_level
+                .map(|level| format!("max_level = \"{}\"", level.as_str()))
+                .unwrap_or_default();
+            let protected_line = if protected { "protected = true" } else { "" };
+            let toml = format!(
+                r#"
+                [[profiles]]
+                name = "parent"
+                connect_string = "parent:1521/svc"
+                {parent_max}
+
+                [[profiles]]
+                name = "child"
+                base = "parent"
+                connect_string = "child:1521/svc"
+                {child_max}
+                {protected_line}
+                "#
+            );
+
+            match crate::OracleMcpConfig::from_toml_str(&toml) {
+                Ok(cfg) => {
+                    let child = cfg.profile("child").expect("child profile");
+                    let merged = child.max_level();
+                    let authored_max = [parent_level, child_level]
+                        .into_iter()
+                        .flatten()
+                        .max();
+                    if let Some(authored_max) = authored_max {
+                        prop_assert!(
+                            merged <= authored_max,
+                            "merged ceiling {merged:?} exceeds every authored source (max {authored_max:?})"
+                        );
+                    }
+                    if child.protected() {
+                        prop_assert_eq!(
+                            merged,
+                            OperatingLevel::ReadOnly,
+                            "a protected profile pins READ_ONLY"
+                        );
+                        prop_assert_eq!(child.default_level(), OperatingLevel::ReadOnly);
+                    }
+                }
+                Err(error) => {
+                    // Only the two documented fail-closed refusals may reject.
+                    prop_assert!(
+                        matches!(
+                            error,
+                            ConfigError::ProtectedNotReadOnly(_)
+                                | ConfigError::DefaultLevelExceedsMax { .. }
+                        ),
+                        "unexpected config error: {error:?}"
+                    );
+                }
+            }
+        }
+
+        /// 6si2: a `protected` profile never resolves above `READ_ONLY`; any
+        /// attempt is refused at load rather than silently widened.
+        #[test]
+        fn protected_profile_always_read_only(
+            max_level in any_level(),
+            default_level in any_level(),
+        ) {
+            let toml = format!(
+                r#"
+                [[profiles]]
+                name = "prod"
+                connect_string = "prod:1521/svc"
+                protected = true
+                max_level = "{}"
+                default_level = "{}"
+                "#,
+                max_level.as_str(),
+                default_level.as_str(),
+            );
+
+            match crate::OracleMcpConfig::from_toml_str(&toml) {
+                Ok(cfg) => {
+                    let profile = cfg.profile("prod").expect("prod profile");
+                    prop_assert!(profile.protected());
+                    prop_assert_eq!(
+                        profile.max_level(),
+                        OperatingLevel::ReadOnly,
+                        "a protected profile resolves to READ_ONLY"
+                    );
+                    prop_assert_eq!(profile.default_level(), OperatingLevel::ReadOnly);
+                }
+                Err(error) => {
+                    prop_assert!(
+                        matches!(
+                            error,
+                            ConfigError::ProtectedNotReadOnly(_)
+                                | ConfigError::DefaultLevelExceedsMax { .. }
+                        ),
+                        "a protected profile above READ_ONLY is refused with a typed error: {error:?}"
+                    );
+                }
+            }
+        }
     }
 }

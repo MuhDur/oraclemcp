@@ -1,0 +1,4 @@
+[[profiles]]
+name = "max-timeout"
+connect_string = "localhost:1521/FREEPDB1"
+call_timeout_seconds = 18446744073709551615

@@ -2070,6 +2070,16 @@ pub enum ConfigError {
         /// Maximum supported SDU.
         max: u32,
     },
+    /// A profile set `call_timeout_seconds = 0`. Before #48 that silently
+    /// removed both the per-call and the whole-request timeout (a query ran for
+    /// over 30 minutes); the documented minimum is 1, so refuse it at load.
+    #[error(
+        "profiles.{profile}.call_timeout_seconds = 0 is below the minimum 1 (0 disables both the per-call and whole-request timeout)"
+    )]
+    CallTimeoutBelowMinimum {
+        /// Profile name.
+        profile: String,
+    },
     /// A profile declared invalid DRCP routing settings.
     #[error("connection profile `{profile}` has invalid drcp.{field}: {reason}")]
     InvalidDrcp {

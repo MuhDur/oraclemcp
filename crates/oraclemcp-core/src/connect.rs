@@ -49,8 +49,10 @@ impl std::fmt::Debug for SessionContext {
 }
 
 impl SessionContext {
-    /// Derive this session's per-request resource budget (B6) from its
-    /// configured per-call timeout (or the default when unset), anchored to
+    /// Derive this session's per-request resource budget (B6) from
+    /// `options.call_timeout` — the per-call timeout already resolved by the
+    /// single `RequestBudget::from_profile` mapping in
+    /// `profile_to_options_for_level`, or the default when unset — anchored to
     /// `now` (pass the request `Cx`'s `cx.now()` so production and lab share one
     /// deterministic clock).
     ///
@@ -271,7 +273,13 @@ fn profile_to_options_for_level(
         connect_timeout: resolve_connect_timeout(profile.connect_timeout_seconds),
         inactivity_timeout: resolve_connect_timeout(profile.inactivity_timeout_seconds),
         keepalive_minutes: profile.keepalive_minutes.filter(|&m| m > 0),
-        call_timeout: resolve_call_timeout(profile.call_timeout_seconds),
+        call_timeout: Some(
+            crate::request_budget::RequestBudget::from_profile(
+                asupersync::Time::ZERO,
+                profile.call_timeout_seconds,
+            )
+            .per_call_timeout(),
+        ),
         session_statements: profile_session_statements(profile, level_state)?,
         session_release_statements: profile_hook_statements(
             profile,
@@ -290,27 +298,6 @@ fn resolve_connect_timeout(connect_timeout_seconds: Option<u64>) -> Option<Durat
     match connect_timeout_seconds {
         Some(seconds) if seconds > 0 => Some(Duration::from_secs(seconds)),
         _ => None,
-    }
-}
-
-/// Resolve the per-round-trip Oracle call timeout from a profile's
-/// `call_timeout_seconds`.
-///
-/// Liveness default (§10): the dispatcher holds the single per-connection lock
-/// across every DB `.await`, so an un-timeout-bounded socket read would hang
-/// every request indefinitely (a head-of-line DoS). We therefore make a bounded
-/// driver-level call timeout the **default**: when a profile omits
-/// `call_timeout_seconds`, we apply [`resilience::DEFAULT_CALL_TIMEOUT`] (30s),
-/// matching the `RequestBudget` default so the two layers agree.
-///
-/// Overrides: an explicit `Some(n)` (n >= 1) wins. The documented escape hatch
-/// `Some(0)` means *unbounded* (no driver-level deadline) for operators who
-/// knowingly opt out — the request budget still bounds the whole request.
-fn resolve_call_timeout(call_timeout_seconds: Option<u64>) -> Option<Duration> {
-    match call_timeout_seconds {
-        None => Some(crate::resilience::DEFAULT_CALL_TIMEOUT),
-        Some(0) => None,
-        Some(seconds) => Some(Duration::from_secs(seconds)),
     }
 }
 
@@ -567,8 +554,11 @@ mod tests {
     }
 
     #[test]
-    fn explicit_call_timeout_overrides_default_and_zero_means_unbounded() {
-        // An explicit value wins over the default...
+    fn explicit_call_timeout_overrides_default() {
+        // An explicit positive value wins over the default. `0` is refused at
+        // config load (#48), so it can never widen the bounded per-round-trip
+        // timeout back to unbounded; the load-time refusal is asserted in
+        // `oraclemcp-config`'s `issue48_zero_call_timeout_refused_at_load`.
         let p = profile(
             r#"
             [[profiles]]
@@ -579,19 +569,6 @@ mod tests {
         );
         let ctx = build_session_context(&p, None, None, false).expect("context");
         assert_eq!(ctx.options.call_timeout, Some(Duration::from_secs(7)));
-
-        // ...and the documented `0` escape hatch means unbounded (no driver
-        // deadline; the request budget still bounds the whole request).
-        let p0 = profile(
-            r#"
-            [[profiles]]
-            name = "dev"
-            connect_string = "localhost:1521/FREEPDB1"
-            call_timeout_seconds = 0
-            "#,
-        );
-        let ctx0 = build_session_context(&p0, None, None, false).expect("context");
-        assert_eq!(ctx0.options.call_timeout, None);
     }
 
     #[test]
@@ -621,17 +598,79 @@ mod tests {
         assert_eq!(ctx0.options.connect_timeout, None);
     }
 
+    // #48: every profile→timeout consumer resolves through the single
+    // `RequestBudget::from_profile` mapping, so the per-call driver timeout, the
+    // whole-request deadline and the request budget for one profile agree.
+    // The old `resolve_call_timeout` / `profile_request_timeout` /
+    // `whole_request_timeout` / `doctor_call_timeout` functions no longer exist
+    // (compile-level proof: the crate builds), so this test pins the shared
+    // values those four used to disagree on.
     #[test]
-    fn resolve_call_timeout_table() {
-        assert_eq!(
-            resolve_call_timeout(None),
-            Some(crate::resilience::DEFAULT_CALL_TIMEOUT)
+    fn all_timeout_consumers_use_request_budget() {
+        for (toml_timeout, expected) in [
+            ("", Duration::from_secs(30)),
+            ("call_timeout_seconds = 1", Duration::from_secs(1)),
+            ("call_timeout_seconds = 30", Duration::from_secs(30)),
+        ] {
+            let p = profile(&format!(
+                r#"
+                [[profiles]]
+                name = "dev"
+                connect_string = "localhost:1521/FREEPDB1"
+                {toml_timeout}
+                "#
+            ));
+            let ctx = build_session_context(&p, None, None, false).expect("context");
+
+            // The connect-path per-call driver timeout.
+            assert_eq!(
+                ctx.options.call_timeout,
+                Some(expected),
+                "driver call_timeout for {toml_timeout:?}"
+            );
+
+            // The shared budget mapping: per-call timeout and whole-request
+            // deadline both come from the same profile value.
+            let budget = crate::request_budget::RequestBudget::from_profile(
+                asupersync::Time::ZERO,
+                p.call_timeout_seconds,
+            );
+            assert_eq!(
+                budget.per_call_timeout(),
+                expected,
+                "budget per-call timeout for {toml_timeout:?}"
+            );
+            assert_eq!(
+                budget.deadline(),
+                Some(asupersync::Time::ZERO + expected),
+                "whole-request deadline for {toml_timeout:?}"
+            );
+
+            // The session budget (dispatch/stdin/service) agrees with the
+            // connect-path driver timeout.
+            let admitted_at = asupersync::Time::from_secs(1_000);
+            assert_eq!(
+                ctx.request_budget(admitted_at).per_call_timeout(),
+                expected,
+                "session request budget for {toml_timeout:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn omitted_call_timeout_and_default_budget_agree() {
+        let p = profile(
+            r#"
+            [[profiles]]
+            name = "dev"
+            connect_string = "localhost:1521/FREEPDB1"
+            "#,
         );
-        assert_eq!(resolve_call_timeout(Some(0)), None);
-        assert_eq!(resolve_call_timeout(Some(1)), Some(Duration::from_secs(1)));
+        let ctx = build_session_context(&p, None, None, false).expect("context");
         assert_eq!(
-            resolve_call_timeout(Some(120)),
-            Some(Duration::from_secs(120))
+            ctx.options.call_timeout,
+            Some(crate::resilience::DEFAULT_CALL_TIMEOUT),
+            "the driver default and the request-budget default must agree"
         );
     }
 
