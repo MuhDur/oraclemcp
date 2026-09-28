@@ -294,6 +294,8 @@ pub enum CatalogQueryId {
     DictionaryViewDependencies,
     /// Bounded source text and editioning marker for one exact application view.
     TrustedViewText,
+    /// Compatibility metadata when a legacy database does not expose `TEXT_VC`.
+    TrustedViewTextLegacyMetadata,
     /// Exact identity and validity for one closure member.
     ClosureMemberObject,
     /// AUTHID of one exact standalone routine or package member.
@@ -574,7 +576,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 175] = [
+    pub const ALL: [Self; 176] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -744,6 +746,7 @@ impl CatalogQueryId {
         Self::DictionaryViewIdentity,
         Self::DictionaryViewDependencies,
         Self::TrustedViewText,
+        Self::TrustedViewTextLegacyMetadata,
         Self::ClosureMemberObject,
         Self::ClosureRoutineAuthid,
         Self::ClosureCompilerSettings,
@@ -877,9 +880,16 @@ impl CatalogQueryId {
                 ReadPurity,
             ),
             Self::TrustedViewText => (
-                "SELECT text, editioning_view FROM all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
+                "SELECT text_vc, text_length, editioning_view FROM all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
                 TT,
-                "read bounded source for one exact profile-trusted application view",
+                "read bounded VARCHAR2 source and authoritative length for one exact profile-trusted application view",
+                InternalProof,
+                ReadPurity,
+            ),
+            Self::TrustedViewTextLegacyMetadata => (
+                "SELECT text_length, editioning_view FROM all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
+                TT,
+                "detect a legacy application view definition without reading its LONG source",
                 InternalProof,
                 ReadPurity,
             ),

@@ -660,26 +660,38 @@ async fn trusted_view_source_is_proven(
     if policy.context.view_path.contains(&identity) {
         return Ok(false);
     }
-    let rows = run_catalog_query(
-        cx,
-        conn,
-        CatalogQueryId::TrustedViewText,
-        &[
-            OracleBind::from(relation.owner.as_str()),
-            OracleBind::from(relation.name.as_str()),
-        ],
-    )
-    .await?;
+    let binds = [
+        OracleBind::from(relation.owner.as_str()),
+        OracleBind::from(relation.name.as_str()),
+    ];
+    let rows = match run_catalog_query(cx, conn, CatalogQueryId::TrustedViewText, &binds).await {
+        Ok(rows) => rows,
+        Err(error) if trusted_view_text_vc_is_unavailable(&error) => {
+            // Do not fall back to ALL_VIEWS.TEXT: it is a LONG, and a driver
+            // that cannot decode it must not turn an incomplete definition
+            // into a proof. The metadata query makes this legacy refusal
+            // observable without touching the LONG value.
+            let _ = run_catalog_query(
+                cx,
+                conn,
+                CatalogQueryId::TrustedViewTextLegacyMetadata,
+                &binds,
+            )
+            .await?;
+            return Ok(false);
+        }
+        Err(error) => return Err(error),
+    };
     let Some(row) = rows.first().filter(|_| rows.len() == 1) else {
         return Ok(false);
     };
-    let Some(source) = required_text(row, "TEXT") else {
+    let Some(source) = required_text(row, "TEXT_VC") else {
         return Ok(false);
     };
-    if row.cell("TEXT").is_some_and(|cell| {
-        cell.source_length
-            .is_some_and(|length| length > source.chars().count())
-    }) {
+    let Some(text_length) = row.parse_i64("TEXT_LENGTH") else {
+        return Ok(false);
+    };
+    if text_length < 0 || usize::try_from(text_length).ok() != Some(source.chars().count()) {
         return Ok(false);
     }
     let Ok(plan) = semantic_read_plan_checked(&source) else {
@@ -710,6 +722,14 @@ async fn trusted_view_source_is_proven(
         );
     }
     Ok(proof.is_ok())
+}
+
+fn trusted_view_text_vc_is_unavailable(error: &DbError) -> bool {
+    matches!(
+        error,
+        DbError::Query(detail) | DbError::ServerQuery(detail)
+            if detail.contains("ORA-00904")
+    )
 }
 
 /// A dictionary spelling is eligible only when Oracle resolved it through its
@@ -5262,7 +5282,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 175);
+        assert_eq!(specs.len(), 176);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -6220,16 +6240,11 @@ mod tests {
     #[test]
     fn issue35_truncated_view_text_refused_before_recursive_proof() {
         run_with_cx(|cx| async move {
-            let mut text = row(&[
-                ("TEXT", Some("SELECT 1 FROM APP.T")),
+            let text = row(&[
+                ("TEXT_VC", Some("SELECT 1 FROM APP.T")),
+                ("TEXT_LENGTH", Some("5000")),
                 ("EDITIONING_VIEW", Some("N")),
             ]);
-            text.columns
-                .iter_mut()
-                .find(|(name, _)| name == "TEXT")
-                .expect("view text cell")
-                .1
-                .source_length = Some(5_000);
             let conn = ScriptedRows::new([vec![text]]);
             let mut view = dictionary_view_object("REPORTING_VIEW");
             view.owner = "APP".to_owned();
@@ -6255,6 +6270,53 @@ mod tests {
                 .expect("truncated text is a normal unproven result")
             );
             assert_eq!(conn.queries.lock().expect("queries lock").len(), 1);
+        });
+    }
+
+    #[test]
+    fn issue35_legacy_text_vc_absence_refuses_without_reading_long_source() {
+        run_with_cx(|cx| async move {
+            let conn = ScriptedRows::results([
+                Err(DbError::Query(
+                    "ORA-00904: \"TEXT_VC\": invalid identifier".to_owned(),
+                )),
+                Ok(vec![row(&[
+                    ("TEXT_LENGTH", Some("19")),
+                    ("EDITIONING_VIEW", Some("N")),
+                ])]),
+            ]);
+            let mut view = dictionary_view_object("REPORTING_VIEW");
+            view.owner = "APP".to_owned();
+            view.synonym_chain.clear();
+            let cache = OracleCatalogResolverCache::new();
+            let trusted_views = ["APP.REPORTING_VIEW".to_owned()];
+
+            assert!(
+                !trusted_view_source_is_proven(
+                    &cx,
+                    &conn,
+                    &view,
+                    TrustedViewProofPolicy {
+                        cache: &cache,
+                        context: TrustedViewProofContext {
+                            fga_policy: FgaEvidencePolicy::RequireProof,
+                            trusted_views: &trusted_views,
+                            view_depth: 0,
+                            view_path: &[],
+                        },
+                    },
+                )
+                .await
+                .expect("legacy source metadata is an honest refusal")
+            );
+            let queries = conn.queries.lock().expect("queries lock");
+            assert_eq!(queries.len(), 2);
+            assert_eq!(queries[0].0, CatalogQueryId::TrustedViewText.spec().sql);
+            assert_eq!(
+                queries[1].0,
+                CatalogQueryId::TrustedViewTextLegacyMetadata.spec().sql
+            );
+            assert!(!queries[1].0.contains(" text "));
         });
     }
 
