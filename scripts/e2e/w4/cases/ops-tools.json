@@ -8,7 +8,11 @@
       "http"
     ],
     "requires": [],
-    "setup": [],
+    "setup": [
+      {
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL=LABEL WHERE ID=1"
+      }
+    ],
     "call": {
       "arguments": {}
     },
@@ -508,19 +512,12 @@
       "http"
     ],
     "requires": [],
-    "setup": [
-      {
-        "sql": "CREATE TABLE ${owner}.DIFF_T_${run_id} (ID NUMBER(10) PRIMARY KEY, N_VAL NUMBER)"
-      },
-      {
-        "sql": "INSERT INTO ${owner}.DIFF_T_${run_id} (ID, N_VAL) VALUES (1, 0)"
-      }
-    ],
+    "setup": [],
     "setup_phase": "before_server",
-    "setup_ready_sql": "SELECT ID FROM ${owner}.DIFF_T_${run_id} WHERE ROWNUM <= 1",
+    "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ID=1",
     "call": {
       "arguments": {
-        "sql": "SELECT ID, N_VAL FROM DIFF_T_${run_id} WHERE ID=1",
+        "sql": "SELECT ID, LABEL FROM T_PARENT_${run_id} WHERE ID=1",
         "key": [
           "ID"
         ],
@@ -542,11 +539,11 @@
     },
     "db_reread": [
       {
-        "sql": "SELECT ID,N_VAL FROM ${owner}.DIFF_T_${run_id} WHERE ID=1",
+        "sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID=1",
         "rows": [
           [
             1,
-            5
+            "parent-5"
           ]
         ]
       }
@@ -557,6 +554,11 @@
         "decision": "ALLOWED",
         "outcome": "SUCCEEDED",
         "rows_affected": 1
+      },
+      {
+        "tool": "oracle_diff",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED"
       }
     ],
     "on_unsupported": {
@@ -564,32 +566,18 @@
     },
     "cleanup": [
       {
-        "sql": "DROP TABLE ${owner}.DIFF_T_${run_id} PURGE"
+        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL='parent-1' WHERE ID=1"
       }
     ],
     "profile_variant": "synthetic_owner_rw",
     "steps": [
       {
-        "tool": "oracle_query",
-        "arguments": {
-          "sql": "SELECT ORA_ROWSCN FROM DIFF_T_${run_id} WHERE ID=1",
-          "max_rows": 1
-        },
-        "expect": {
-          "json_subset": {
-            "rows": [
-              {}
-            ]
-          }
-        },
-        "capture": {
-          "scn_a": "/rows/0/ORA_ROWSCN"
-        }
+        "external_scn_capture": "scn_a"
       },
       {
         "tool": "oracle_preview_sql",
         "arguments": {
-          "sql": "UPDATE DIFF_T_${run_id} SET N_VAL=N_VAL+5 WHERE ID=1",
+          "sql": "UPDATE T_PARENT_${run_id} SET LABEL='parent-5' WHERE ID=1",
           "commit": true
         },
         "expect": {
@@ -604,7 +592,7 @@
       {
         "tool": "oracle_execute",
         "arguments": {
-          "sql": "UPDATE DIFF_T_${run_id} SET N_VAL=N_VAL+5 WHERE ID=1",
+          "sql": "UPDATE T_PARENT_${run_id} SET LABEL='parent-5' WHERE ID=1",
           "commit": true,
           "confirm": "${cap:commit_token}"
         },
@@ -627,21 +615,7 @@
         }
       },
       {
-        "tool": "oracle_query",
-        "arguments": {
-          "sql": "SELECT ORA_ROWSCN FROM DIFF_T_${run_id} WHERE ID=1",
-          "max_rows": 1
-        },
-        "expect": {
-          "json_subset": {
-            "rows": [
-              {}
-            ]
-          }
-        },
-        "capture": {
-          "scn_b": "/rows/0/ORA_ROWSCN"
-        }
+        "external_scn_capture": "scn_b"
       }
     ]
   },

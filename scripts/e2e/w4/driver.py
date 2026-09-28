@@ -511,6 +511,12 @@ def validate_steps(case):
                             and pointer.startswith("/") for name, pointer in capture.items()),
                     "capture maps names to JSON pointers into structuredContent")
             known |= set(capture)
+        elif "external_scn_capture" in step:
+            require(set(step) == {"external_scn_capture"}
+                    and isinstance(step["external_scn_capture"], str)
+                    and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", step["external_scn_capture"]),
+                    "external_scn_capture needs one stable capture name")
+            known.add(step["external_scn_capture"])
         elif "wait_level" in step:
             require(set(step) == {"wait_level", "deadline_seconds"}
                     and step["wait_level"] in LEVELS
@@ -1424,12 +1430,21 @@ def session_level(client):
     return status.get("structuredContent", {}).get("session", {}).get("current_level")
 
 
-def run_steps(client, case, row, binary, audit_path, env):
+def run_steps(client, case, row, binary, audit_path, env, connection):
     """Run a multi-step case's steps in order; every step is verified, none is skipped."""
     captures, observed = {}, []
     audit_scope_start = len(audit_records(audit_path))
     for index, step in enumerate(case["steps"]):
-        if "tool" in step:
+        if "external_scn_capture" in step:
+            name = step["external_scn_capture"]
+            require(isinstance(name, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,31}", name),
+                    f"step {index}: external SCN capture needs a stable capture name")
+            scn = connection.cursor().execute("SELECT CURRENT_SCN FROM V$DATABASE").fetchone()[0]
+            require(type(scn) is int and scn > 0,
+                    f"step {index}: V$DATABASE did not return a positive integer SCN")
+            captures[name] = str(scn)
+            observed.append({"step": index, "external_scn_capture": name})
+        elif "tool" in step:
             audit_scope_start = len(audit_records(audit_path))
             reply = client.rpc("tools/call", {"name": step["tool"],
                                                "arguments": fill_captures(step["arguments"], captures)})
@@ -1616,7 +1631,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             require(vsql_marker_count(connection, marker) == 0,
                     "V$SQL marker already present before refusal test")
         before = len(audit_records(audit_path))
-        captures = run_steps(client, case, row, binary, audit_path, env) if "steps" in case else {}
+        captures = (run_steps(client, case, row, binary, audit_path, env, connection)
+                    if "steps" in case else {})
         if "kill_served_session_user" in case["call"] and supported:
             reply, recovery_actual = killed_session_recovery_call(client, case, connection, descriptor)
             row["killed_session_recovery"] = recovery_actual
