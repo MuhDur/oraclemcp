@@ -636,6 +636,45 @@ mod tests {
     }
 
     #[test]
+    fn licensed_history_with_both_catalogs_absent_degrades_to_typed_refusal() {
+        run_with_cx(|cx| async move {
+            // A licensed (attested) operator on a target where neither the
+            // Diagnostics Pack catalog nor Statspack is readable. Both guarded
+            // probes positively report ORA-00942 (proven absence, not
+            // uncertainty), so resolution degrades to `Unavailable` rather than
+            // aborting — and the query builder must then emit the typed
+            // POLICY_DENIED refusal instead of an empty or AWR-backed success.
+            let conn = ProbeMock::new(vec![
+                Err(DbError::Query(
+                    "ORA-00942: table or view does not exist".to_owned(),
+                )),
+                Err(DbError::Query(
+                    "ORA-00942: table or view does not exist".to_owned(),
+                )),
+            ]);
+
+            let source = resolve_top_sql_source_with_license(&cx, &conn, true, true)
+                .await
+                .expect("proven catalog absence degrades; it is not an uncertain session");
+
+            assert_eq!(source, DiagnosticsSource::Unavailable);
+
+            let sql = conn.sql();
+            assert_eq!(sql.len(), 2, "both guarded historical probes run");
+            assert!(sql[0].contains("v$parameter"));
+            assert!(
+                sql[1]
+                    .to_ascii_lowercase()
+                    .contains("perfstat.stats$snapshot")
+            );
+
+            let error = top_sql_query(source, TopSqlMetric::Elapsed, 20, None)
+                .expect_err("unavailable history is a typed refusal, never an empty success");
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+        });
+    }
+
+    #[test]
     fn arbitrary_oracle_probe_failure_does_not_select_fallback() {
         run_with_cx(|cx| async move {
             let conn = ProbeMock::new(vec![Err(DbError::Query(
