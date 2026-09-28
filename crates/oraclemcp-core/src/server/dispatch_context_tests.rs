@@ -38,3 +38,19 @@ fn owned_dispatch_context_preserves_lane_time_and_caller_budget() {
         "owned context clones must share consumed quota"
     );
 }
+
+#[test]
+fn owned_dispatch_context_preserves_request_cancellation_bridge() {
+    let cancellation = Arc::new(RequestCancellation::default());
+    let owned = DispatchContext::default()
+        .with_request_cancellation(&cancellation)
+        .to_owned_context();
+
+    cancellation.cancel(CancelReason::user("client sent notifications/cancelled"));
+    let reason = owned
+        .as_dispatch_context()
+        .request_cancellation()
+        .and_then(|request| request.reason())
+        .expect("mailbox-safe context preserves the transport cancellation bridge");
+    assert!(reason.to_string().contains("notifications/cancelled"));
+}

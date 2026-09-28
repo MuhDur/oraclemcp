@@ -46,8 +46,8 @@ use crate::request_budget::{DEFAULT_REQUEST_POLL_QUOTA, DEFAULT_REQUEST_TIMEOUT,
 use crate::server::{
     DispatchCloseFuture, DispatchCloseReason, DispatchContext, DispatchFuture, DispatchOutcome,
     DispatchReplyReceiver, DispatchStreamStartFuture, McpSurfaceDetail, McpSurfaceFuture,
-    McpSurfaceOutcome, OwnedDispatchContext, TerminalReplyWaitError, ToolDispatch,
-    ToolStreamSender, recv_terminal_after_cancel,
+    McpSurfaceOutcome, OwnedDispatchContext, RequestCancellation, TerminalReplyWaitError,
+    ToolDispatch, ToolStreamSender, recv_terminal_after_cancel,
 };
 
 mod runtime_lock;
@@ -249,6 +249,7 @@ enum LaneCommand {
 /// woken but has not yet been scheduled to publish the same reason below.
 struct LaneCallerSignal {
     source_cx: Cx,
+    request_cancellation: Option<Arc<RequestCancellation>>,
     cancelled: AtomicBool,
     reason: Mutex<Option<CancelReason>>,
     lane_waker: Mutex<Option<Waker>>,
@@ -305,9 +306,18 @@ fn tool_request_timeout_ceiling(profile_ceiling: Duration, args: &Value) -> Dura
 }
 
 impl LaneCallerSignal {
+    #[cfg(test)]
     fn new(cx: &Cx) -> Self {
+        Self::with_request_cancellation(cx, None)
+    }
+
+    fn with_request_cancellation(
+        cx: &Cx,
+        request_cancellation: Option<Arc<RequestCancellation>>,
+    ) -> Self {
         Self {
             source_cx: cx.clone(),
+            request_cancellation,
             cancelled: AtomicBool::new(false),
             reason: Mutex::new(None),
             lane_waker: Mutex::new(None),
@@ -333,6 +343,14 @@ impl LaneCallerSignal {
     }
 
     fn reason(&self) -> Option<CancelReason> {
+        if !self.cancelled.load(Ordering::Acquire)
+            && let Some(reason) = self
+                .request_cancellation
+                .as_ref()
+                .and_then(|request| request.reason())
+        {
+            self.cancel(reason);
+        }
         if !self.cancelled.load(Ordering::Acquire) && self.source_cx.is_cancel_requested() {
             let reason = self.source_cx.cancel_reason().unwrap_or_else(|| {
                 CancelReason::user("dispatch caller cancellation requested before lane execution")
@@ -789,7 +807,10 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, mut reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
-            let caller = Arc::new(LaneCallerSignal::new(cx));
+            let caller = Arc::new(LaneCallerSignal::with_request_cancellation(
+                cx,
+                context.request_cancellation().cloned(),
+            ));
             let command = LaneCommand::Dispatch {
                 caller: Arc::clone(&caller),
                 enqueued_at: Instant::now(),
@@ -884,7 +905,10 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
-            let caller = Arc::new(LaneCallerSignal::new(cx));
+            let caller = Arc::new(LaneCallerSignal::with_request_cancellation(
+                cx,
+                context.request_cancellation().cloned(),
+            ));
             let command = LaneCommand::DispatchStream {
                 caller: Arc::clone(&caller),
                 enqueued_at: Instant::now(),
@@ -944,7 +968,10 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, mut reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
-            let caller = Arc::new(LaneCallerSignal::new(cx));
+            let caller = Arc::new(LaneCallerSignal::with_request_cancellation(
+                cx,
+                context.request_cancellation().cloned(),
+            ));
             let command = LaneCommand::SurfaceState {
                 caller: Arc::clone(&caller),
                 enqueued_at: Instant::now(),

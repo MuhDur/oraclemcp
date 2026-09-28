@@ -5,10 +5,12 @@
 //! transports do not need ambient runtime handles to preserve the fail-closed
 //! tool surface.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 use std::time::{Duration, Instant};
@@ -93,6 +95,34 @@ const SERVER_INSTRUCTIONS: &str = "Call oracle_capabilities first to discover to
 /// round trip. Served stateful dispatch is marshaled through [`crate::lane`] so
 /// the real dispatcher is polled on its owning lane thread.
 pub type DispatchOutcome = Outcome<Value, ErrorEnvelope>;
+
+/// Transport-owned cancellation edge for one admitted MCP request.
+///
+/// The transport may receive `notifications/cancelled` on a different reader
+/// task than the lane which owns the database `Cx`.  The lane observes this
+/// tiny, request-scoped bridge and transfers its reason onto its owner-local
+/// `Cx`, which is what makes the driver send its break marker.  It deliberately
+/// carries no session or connection capability.
+#[derive(Debug, Default)]
+pub(crate) struct RequestCancellation {
+    requested: AtomicBool,
+    reason: parking_lot::Mutex<Option<CancelReason>>,
+}
+
+impl RequestCancellation {
+    /// Record cancellation once. The first reason is authoritative.
+    pub(crate) fn cancel(&self, reason: CancelReason) {
+        if !self.requested.swap(true, Ordering::AcqRel) {
+            *self.reason.lock() = Some(reason);
+        }
+    }
+
+    /// Return the requested cancellation reason, if any.
+    #[must_use]
+    pub(crate) fn reason(&self) -> Option<CancelReason> {
+        self.reason.lock().clone()
+    }
+}
 
 pub type DispatchFuture<'a> = Pin<Box<dyn Future<Output = DispatchOutcome> + 'a>>;
 
@@ -439,6 +469,7 @@ pub struct DispatchContext<'a> {
     local_transport: bool,
     notification_session_owner: Option<&'a str>,
     notification_request_owner: Option<&'a str>,
+    request_cancellation: Option<&'a Arc<RequestCancellation>>,
 }
 
 impl Default for DispatchContext<'_> {
@@ -459,6 +490,7 @@ impl Default for DispatchContext<'_> {
             local_transport: true,
             notification_session_owner: Some(crate::notifications::STDIO_NOTIFICATION_OWNER),
             notification_request_owner: Some(crate::notifications::STDIO_NOTIFICATION_OWNER),
+            request_cancellation: None,
         }
     }
 }
@@ -491,6 +523,16 @@ impl<'a> DispatchContext<'a> {
     ) -> Self {
         self.notification_session_owner = Some(session_owner);
         self.notification_request_owner = Some(request_owner);
+        self
+    }
+
+    /// Attach the transport's request-scoped cancellation bridge.
+    #[must_use]
+    pub(crate) fn with_request_cancellation(
+        mut self,
+        request_cancellation: &'a Arc<RequestCancellation>,
+    ) -> Self {
+        self.request_cancellation = Some(request_cancellation);
         self
     }
 
@@ -665,6 +707,12 @@ impl<'a> DispatchContext<'a> {
         self.notification_request_owner
     }
 
+    /// Request-scoped cancellation bridge, if this transport admitted one.
+    #[must_use]
+    pub(crate) fn request_cancellation(self) -> Option<&'a Arc<RequestCancellation>> {
+        self.request_cancellation
+    }
+
     /// Clone request-local borrowed authorization into a mailbox-safe context.
     #[must_use]
     pub fn to_owned_context(self) -> OwnedDispatchContext {
@@ -682,6 +730,7 @@ impl<'a> DispatchContext<'a> {
             local_transport: self.local_transport,
             notification_session_owner: self.notification_session_owner.map(str::to_owned),
             notification_request_owner: self.notification_request_owner.map(str::to_owned),
+            request_cancellation: self.request_cancellation.cloned(),
         }
     }
 }
@@ -704,6 +753,7 @@ pub struct OwnedDispatchContext {
     local_transport: bool,
     notification_session_owner: Option<String>,
     notification_request_owner: Option<String>,
+    request_cancellation: Option<Arc<RequestCancellation>>,
 }
 
 impl Default for OwnedDispatchContext {
@@ -730,6 +780,7 @@ impl OwnedDispatchContext {
             local_transport: self.local_transport,
             notification_session_owner: self.notification_session_owner.as_deref(),
             notification_request_owner: self.notification_request_owner.as_deref(),
+            request_cancellation: self.request_cancellation.as_ref(),
         }
     }
 }
@@ -888,6 +939,9 @@ pub struct OracleMcpServer {
     /// metadata, cursor, framing, and retained copy — before it reaches the wire
     /// or the replay store. See [`crate::response_budget`].
     response_budget: ResponseByteBudget,
+    /// Transport-scoped in-flight request cancellation bridges. Entries exist
+    /// only from tool-call admission through its terminal response.
+    inflight_cancellations: Arc<parking_lot::Mutex<HashMap<String, Arc<RequestCancellation>>>>,
 }
 
 impl OracleMcpServer {
@@ -934,6 +988,7 @@ impl OracleMcpServer {
             notifications: Arc::new(crate::notifications::NotificationHub::new()),
             stdio_negotiated: Arc::new(parking_lot::Mutex::new(None)),
             response_budget: ResponseByteBudget::default(),
+            inflight_cancellations: Arc::new(parking_lot::Mutex::new(HashMap::new())),
         }
     }
 
@@ -1750,6 +1805,10 @@ impl OracleMcpServer {
                 )
             }));
         }
+        if method == "notifications/cancelled" {
+            self.cancel_inflight_request(context, object.get("params"));
+            return Outcome::Ok(None);
+        }
         let Some(id) = id else {
             return Outcome::Ok(None);
         };
@@ -2256,6 +2315,13 @@ impl OracleMcpServer {
                 ));
             }
         };
+        let cancellation_key = self.inflight_cancellation_key(context, &id);
+        let cancellation = Arc::new(RequestCancellation::default());
+        self.inflight_cancellations
+            .lock()
+            .insert(cancellation_key.clone(), Arc::clone(&cancellation));
+        let context = context.with_request_cancellation(&cancellation);
+
         // E6: when the client supplied a `progressToken` (params._meta), bracket
         // the (potentially long) tool call with progress notifications — a 0/1
         // "started" before dispatch and a 1/1 "completed" after. The dispatch
@@ -2278,6 +2344,7 @@ impl OracleMcpServer {
         let outcome = span.in_scope(|| {
             self.run_tool_blocking_outcome_with_context(context, name.to_owned(), args)
         });
+        self.inflight_cancellations.lock().remove(&cancellation_key);
         match outcome {
             Outcome::Ok(result) => {
                 if let Some(token) = &progress_token
@@ -2310,6 +2377,23 @@ impl OracleMcpServer {
             }
             Outcome::Cancelled(reason) => Outcome::Cancelled(reason),
             Outcome::Panicked(payload) => Outcome::Panicked(payload),
+        }
+    }
+
+    fn inflight_cancellation_key(&self, context: DispatchContext<'_>, id: &Value) -> String {
+        format!("{}:{}", context.http_session_id().unwrap_or("stdio"), id)
+    }
+
+    fn cancel_inflight_request(&self, context: DispatchContext<'_>, params: Option<&Value>) {
+        let Some(request_id) = params.and_then(|params| params.get("requestId")) else {
+            return;
+        };
+        let key = self.inflight_cancellation_key(context, request_id);
+        if let Some(cancellation) = self.inflight_cancellations.lock().get(&key).cloned() {
+            // Do not copy client-provided reason text into logs, errors, or the
+            // durable audit trail. The request id selected an already-admitted
+            // operation; this fixed reason is all the lane requires.
+            cancellation.cancel(CancelReason::user("MCP notifications/cancelled"));
         }
     }
 
@@ -3619,6 +3703,46 @@ mod tests {
             })),
         );
         assert!(replies.is_empty(), "notifications produce no response");
+    }
+
+    #[test]
+    fn issue49_cancel_unknown_request_id_is_ignored_and_bound_request_is_signalled() {
+        let s = server();
+        let cancellation = Arc::new(RequestCancellation::default());
+        let request_id = json!(41);
+        let key = s.inflight_cancellation_key(DispatchContext::default(), &request_id);
+        s.inflight_cancellations
+            .lock()
+            .insert(key, Arc::clone(&cancellation));
+
+        let unknown = s.handle_jsonrpc_request(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": 42 }
+            }),
+            Some(&StdioAuthPolicy::Disabled),
+        );
+        assert!(unknown.is_none(), "cancellation is a JSON-RPC notification");
+        assert!(
+            cancellation.reason().is_none(),
+            "unknown id must be ignored"
+        );
+
+        let bound = s.handle_jsonrpc_request(
+            json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/cancelled",
+                "params": { "requestId": 41, "reason": "untrusted client text" }
+            }),
+            Some(&StdioAuthPolicy::Disabled),
+        );
+        assert!(bound.is_none(), "cancellation notification has no response");
+        assert!(
+            cancellation
+                .reason()
+                .is_some_and(|reason| reason.to_string().contains("notifications/cancelled"))
+        );
     }
 
     #[test]
