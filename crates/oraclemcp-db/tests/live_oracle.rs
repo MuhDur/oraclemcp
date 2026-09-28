@@ -1850,6 +1850,41 @@ fn live_db_health_suite_runs_all_subchecks_without_hard_failure() {
         };
         conn.ping(&cx).await.expect("health ping");
 
+        // Create a run-owned invalid procedure so the invalid-objects subcheck
+        // has a deterministic fixture it must report. `CREATE OR REPLACE`
+        // succeeds; the reference to a missing routine leaves the object
+        // INVALID. Mirrors the W4 ops-tools fixture
+        // `w4_db_health_invalid_objects_includes_fixture_invalid_proc`.
+        let owner = conn
+            .describe(&cx)
+            .await
+            .ok()
+            .and_then(|info| info.current_schema.or(info.session_user))
+            .unwrap_or_else(|| "SYSTEM".to_owned());
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let bad_proc = format!("P_BAD_RFFLX_{secs}");
+        let fixture_ok = match conn
+            .execute(
+                &cx,
+                &format!(
+                    "CREATE OR REPLACE PROCEDURE {owner}.{bad_proc} AS BEGIN RFFLX_MISSING_PROC; END;"
+                ),
+                &[],
+            )
+            .await
+        {
+            Ok(_) => true,
+            Err(e) => {
+                eprintln!(
+                    "[live-xe] SKIP invalid-objects fixture: create {owner}.{bad_proc} failed: {e}"
+                );
+                false
+            }
+        };
+        conn.commit(&cx).await.ok();
+
         let subchecks = oraclemcp_db::HealthSubcheck::all();
         let findings = oraclemcp_db::run_health(&cx, &conn, subchecks)
             .await
@@ -1888,6 +1923,57 @@ fn live_db_health_suite_runs_all_subchecks_without_hard_failure() {
                 assert_eq!(status, Some("ok"), "non-skip findings carry status=ok");
             }
         }
+
+        // The run-owned invalid procedure must be named in the invalid-objects
+        // finding. On 18c this is the regression guard for the LISTAGG
+        // ORA-01489 (a failing subcheck would already have tripped the status
+        // assertion above; this pins that the fixture is actually *reported*,
+        // not merely that the query stopped erroring).
+        if fixture_ok {
+            let invalid = findings
+                .iter()
+                .find(|f| f.subcheck == oraclemcp_db::HealthSubcheck::InvalidObjects)
+                .expect("an invalid_objects finding");
+            let status = invalid.detail.get("status").and_then(|v| v.as_str());
+            if status == Some("ok") {
+                let rows = invalid
+                    .detail
+                    .get("rows")
+                    .and_then(|v| v.as_array())
+                    .expect("invalid_objects rows array");
+                let reported = rows.iter().any(|row| {
+                    let row_owner = row.get("OWNER").and_then(|v| v.as_str()).unwrap_or("");
+                    let row_type = row
+                        .get("OBJECT_TYPE")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let sample = row
+                        .get("SAMPLE_OBJECTS")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    row_owner.eq_ignore_ascii_case(&owner)
+                        && row_type.eq_ignore_ascii_case("PROCEDURE")
+                        && sample
+                            .split(',')
+                            .any(|name| name.eq_ignore_ascii_case(&bad_proc))
+                });
+                assert!(
+                    reported,
+                    "invalid-objects health query must report the run-owned invalid procedure \
+                     {owner}.{bad_proc}; rows={rows:?}"
+                );
+            } else {
+                eprintln!(
+                    "[live-xe] SKIP invalid-objects fixture assertion: subcheck status={status:?}"
+                );
+            }
+        }
+
+        // Always tear down the throwaway procedure.
+        conn.execute(&cx, &format!("DROP PROCEDURE {owner}.{bad_proc}"), &[])
+            .await
+            .ok();
+        conn.commit(&cx).await.ok();
 
         // Verify the DBA_*->ALL_* degradation actually exercises a live view by
         // running each builder's SQL directly through the read path; a privilege

@@ -116,7 +116,11 @@ macro_rules! health_invalid_objects_sql {
     ($view:literal) => {
         concat!(
             "SELECT owner, object_type, COUNT(*) AS invalid_count, ",
-            "SUBSTR(LISTAGG(object_name, ',') WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects ",
+            // ON OVERFLOW TRUNCATE (12.2+) prevents ORA-01489 when one
+            // owner/type group's concatenated names exceed the 4000-byte SQL
+            // limit (e.g. 456 invalid PUBLIC synonyms on 18c XE); the outer
+            // SUBSTR still caps the reported sample at 400 chars.
+            "SUBSTR(LISTAGG(object_name, ',' ON OVERFLOW TRUNCATE) WITHIN GROUP (ORDER BY object_name), 1, 400) AS sample_objects ",
             "FROM ", $view, " WHERE status = 'INVALID' ",
             "GROUP BY owner, object_type ORDER BY invalid_count DESC, owner, object_type"
         )
