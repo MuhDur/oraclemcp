@@ -376,7 +376,7 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
             "unknown call field")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
@@ -414,6 +414,11 @@ def validate_case(case, filename):
     if "cancel_audit" in case["call"]:
         require(case["call"]["cancel_audit"] is True and "cancel_marker" in case["call"],
                 "cancel_audit is only meaningful after a marked cancellation")
+    if "lock_sql" in case["call"]:
+        require("cancel_marker" in case["call"]
+                and isinstance(case["call"]["lock_sql"], str)
+                and case["call"]["lock_sql"].strip(),
+                "lock_sql is only meaningful for a marked cancellation call")
     if "kill_served_session_user" in case["call"]:
         user = case["call"]["kill_served_session_user"]
         require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
@@ -1717,7 +1722,7 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         input_value["vsql_absent_marker"] = case["call"]["vsql_absent_marker"]
     if "cancel_marker" in case["call"]:
         input_value["cancel_marker"] = case["call"]["cancel_marker"]
-    for field in ("cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit"):
+    for field in ("cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql"):
         if field in case["call"]:
             input_value[field] = case["call"][field]
     if "steps" in case:
@@ -1754,7 +1759,14 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             reply, recovery_actual = killed_session_dml_call(client, case, connection, descriptor)
             row["killed_session_recovery"] = recovery_actual
         elif "cancel_marker" in case["call"] and supported:
-            reply = cancelled_call(client, case, connection)
+            lock_sql = case["call"].get("lock_sql")
+            if lock_sql:
+                connection.cursor().execute(lock_sql)
+            try:
+                reply = cancelled_call(client, case, connection)
+            finally:
+                if lock_sql:
+                    connection.rollback()
             row["cancel_observation"] = client.last_cancel_observation
         elif "parallel" in case["call"] and supported:
             require(transport == "http", "parallel case requires HTTP transport")
@@ -2718,6 +2730,9 @@ def selftest():
         "selftest"))
     rejected("cancel_audit_without_marked_call", lambda: validate_case(
         {**replay_case, "call": {"arguments": {}, "cancel_audit": True}},
+        "selftest"))
+    rejected("lock_sql_without_marked_call", lambda: validate_case(
+        {**replay_case, "call": {"arguments": {}, "lock_sql": "UPDATE T SET X = 1"}},
         "selftest"))
     rejected("missing_positive_case", lambda: verify_coverage({"oracle_query": {}}, []))
     manifest_enforcement_integration()

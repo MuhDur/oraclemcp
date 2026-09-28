@@ -21,6 +21,30 @@
     "cleanup": []
   },
   {
+    "case_id": "w4_runtime_issue49_cancel_blocked_update_rolled_back",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "profile_variant": "synthetic_owner_rw",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [],
+    "call": {
+      "arguments": {"sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-cancelled-update' WHERE ID = 1 /* W4MARK_123456789ABE */"},
+      "mutation": true,
+      "cancel_marker": "W4MARK_123456789ABE",
+      "lock_sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 1"
+    },
+    "expect": {"json_subset": {"error_class": "CONNECTION_FAILED", "cancel_outcome": "outcome_unknown", "statement_outcome": "protocol_unsynchronized"}},
+    "db_reread": [
+      {"sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID = 1", "rows": [[1, "parent-1"]]}
+    ],
+    "audit_expect": [
+      {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "PENDING"},
+      {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "UNKNOWN_DISCARDED"}
+    ],
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
+  },
+  {
     "case_id": "w4_runtime_issue49_progress_with_token",
     "tool": "oracle_query",
     "level": "READ_ONLY",

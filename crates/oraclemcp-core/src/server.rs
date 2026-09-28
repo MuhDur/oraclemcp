@@ -2495,21 +2495,15 @@ impl OracleMcpServer {
                 // generic timeout envelope.  Other errors remain truthful:
                 // notably a completed/committed statement must retain its
                 // real result or uncertain terminal outcome.
-                if cancelled_by_transport && envelope.error_class == ErrorClass::Timeout {
-                    let response = jsonrpc_result(
-                        id,
-                        tool_result_err_json(&cancelled_dispatch_envelope(
-                            &cancellation.reason().unwrap_or_else(CancelReason::timeout),
-                        )),
-                    );
+                if cancelled_by_transport
+                    && let Some(cancelled) = transport_cancel_error(&envelope, &cancellation)
+                {
+                    let response = jsonrpc_result(id, tool_result_err_json(&cancelled));
                     return Outcome::Err(JsonRpcDispatchError::new(response));
                 }
                 let response = jsonrpc_result(id, tool_result_err_json(&envelope));
                 Outcome::Err(JsonRpcDispatchError::new(response))
             }
-            // Keep the tool request id and its typed terminal outcome. Letting
-            // this escape to the outer router would turn it into an id-less
-            // generic JSON-RPC error after the lane has already finalized.
             Outcome::Cancelled(reason) => {
                 if cancelled_by_transport {
                     let response = jsonrpc_result(
@@ -2518,8 +2512,6 @@ impl OracleMcpServer {
                     );
                     Outcome::Err(JsonRpcDispatchError::new(response))
                 } else {
-                    // Deadlines and server-side cancellation retain the HTTP
-                    // transport's established terminal status mapping (499).
                     Outcome::Cancelled(reason)
                 }
             }
@@ -3227,6 +3219,27 @@ fn cancelled_dispatch_envelope(reason: &CancelReason) -> ErrorEnvelope {
     .with_cancel_outcome(CancelOutcome::CancelConfirmed)
     .with_statement_outcome(StatementOutcome::ProtocolUnsynchronized)
     .with_next_step("Retry only if the client did not intentionally cancel the request.")
+}
+
+/// Preserve the terminal certainty established below the transport bridge.
+/// A driver break normally surfaces as a timeout only after drain/rollback has
+/// confirmed cancellation. A quarantined mutation instead remains uncertain.
+fn transport_cancel_error(
+    envelope: &ErrorEnvelope,
+    cancellation: &RequestCancellation,
+) -> Option<ErrorEnvelope> {
+    if envelope.error_class == ErrorClass::ConnectionFailed
+        && envelope.statement_outcome == Some(StatementOutcome::ProtocolUnsynchronized)
+    {
+        return Some(
+            envelope
+                .clone()
+                .with_cancel_outcome(CancelOutcome::OutcomeUnknown),
+        );
+    }
+    (envelope.error_class == ErrorClass::Timeout).then(|| {
+        cancelled_dispatch_envelope(&cancellation.reason().unwrap_or_else(CancelReason::timeout))
+    })
 }
 
 fn panicked_dispatch_envelope(_payload: &PanicPayload) -> ErrorEnvelope {
@@ -4054,6 +4067,26 @@ mod tests {
             cancellation
                 .reason()
                 .is_some_and(|reason| reason.to_string().contains("notifications/cancelled"))
+        );
+    }
+
+    #[test]
+    fn issue49_cancelled_mutation_with_failed_rollback_remains_outcome_unknown() {
+        let cancellation = RequestCancellation::default();
+        cancellation.cancel(CancelReason::user("test cancellation"));
+        let error = ErrorEnvelope::new(
+            ErrorClass::ConnectionFailed,
+            "database session quarantined after rollback cleanup failed",
+        )
+        .with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
+
+        let mapped = transport_cancel_error(&error, &cancellation)
+            .expect("cancelled quarantine has a typed terminal envelope");
+        assert_eq!(mapped.error_class, ErrorClass::ConnectionFailed);
+        assert_eq!(mapped.cancel_outcome, Some(CancelOutcome::OutcomeUnknown));
+        assert_eq!(
+            mapped.statement_outcome,
+            Some(StatementOutcome::ProtocolUnsynchronized)
         );
     }
 

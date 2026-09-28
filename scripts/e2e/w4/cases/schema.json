@@ -30,6 +30,7 @@
         "progress_token": {"type": "string", "minLength": 1},
         "reuse_after_cancel": {"const": true},
         "cancel_audit": {"const": true},
+        "lock_sql": {"type": "string", "minLength": 1},
         "retry": {"type": "boolean"}, "retry_expect": {"type": "object"},
         "mutation": {"type": "boolean"},
         "parallel": {"type": "array", "minItems": 2, "maxItems": 8,
