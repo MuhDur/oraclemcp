@@ -2146,6 +2146,7 @@ struct DispatcherWiring {
     auditor: Option<Arc<Auditor>>,
     write_intents: Option<Arc<WriteIntentLog>>,
     exports: Arc<ExportRegistry>,
+    edition_creation_reservations: Arc<Mutex<HashSet<String>>>,
     unsigned_refusal_log: bool,
 }
 
@@ -2200,6 +2201,7 @@ fn build_oracle_dispatcher(
     .with_sql_policy(wiring.sql_policy.clone())
     .with_mcp_exposure(wiring.exposure.clone())
     .with_profile_drain_state(wiring.profile_drain.clone())
+    .with_edition_creation_reservations(Arc::clone(&wiring.edition_creation_reservations))
     .with_exports(Arc::clone(&wiring.exports));
     if let Some(query_cost_budgets) = &wiring.query_cost_budgets {
         dispatcher = dispatcher.with_query_cost_budget_store(Arc::clone(query_cost_budgets));
@@ -3262,6 +3264,7 @@ fn dispatcher_wiring(
         auditor: options.auditor,
         write_intents: options.write_intents,
         exports: Arc::clone(exports),
+        edition_creation_reservations: Arc::new(Mutex::new(HashSet::new())),
         unsigned_refusal_log: options.unsigned_refusal_log,
     }
 }

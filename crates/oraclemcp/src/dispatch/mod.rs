@@ -813,6 +813,19 @@ impl OracleDispatcher {
         }
     }
 
+    /// Install the service-owned CREATE EDITION reservation board.
+    ///
+    /// Stateful HTTP creates one dispatcher per session, so this board must be
+    /// supplied by the server wiring rather than allocated per dispatcher.
+    #[must_use]
+    pub fn with_edition_creation_reservations(
+        mut self,
+        reservations: Arc<SyncMutex<HashSet<String>>>,
+    ) -> Self {
+        self.edition_creation_reservations = reservations;
+        self
+    }
+
     /// Install the E5 connection-scope isolation policy (builder). The served
     /// binary calls this with the startup `mcp_exposed` snapshot. The shared
     /// reload state overlays later exposure changes so a hidden profile stays

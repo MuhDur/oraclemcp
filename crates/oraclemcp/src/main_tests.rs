@@ -399,6 +399,7 @@ fn fresh_stateful_lane_uses_reloaded_profile_ceiling_and_timeout() {
         write_intents: None,
         exports: Arc::new(ExportRegistry::new()),
         unsigned_refusal_log: true,
+        edition_creation_reservations: Arc::new(Mutex::new(HashSet::new())),
     };
 
     apply_selected_profile_to_wiring(&mut wiring, selected);
