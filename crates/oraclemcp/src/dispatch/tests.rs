@@ -8499,15 +8499,19 @@ fn edition_lifecycle_executes_a_legal_linear_child_and_retires_it_through_ddl_ga
     assert_eq!(created["required_level"], json!("DDL"));
     assert_eq!(created["danger"], json!("DESTRUCTIVE"));
     let queries = state.queries.lock().expect("edition query mutex");
-    assert_eq!(queries.len(), 1, "one-child check must run before CREATE");
+    assert_eq!(
+        queries.len(),
+        2,
+        "the lazy PDB identity read and one-child check must precede CREATE"
+    );
     assert!(
-        queries[0]
+        queries[1]
             .0
             .to_ascii_lowercase()
             .contains("from all_editions")
     );
     assert_eq!(
-        queries[0].1,
+        queries[1].1,
         vec![OracleBind::String("LEGAL_PARENT".to_owned())],
         "the parent is a positional bind, never SQL interpolation"
     );
@@ -8558,7 +8562,11 @@ fn edition_second_child_is_refused_before_oracle_with_a_typed_one_child_envelope
             .any(|step| step.contains("ORA-38807")),
         "the remediation must honestly name Oracle's one-child rule: {error:?}"
     );
-    assert_eq!(state.queries.lock().expect("edition query mutex").len(), 1);
+    assert_eq!(
+        state.queries.lock().expect("edition query mutex").len(),
+        2,
+        "the lazy PDB identity read occurs only on the edition proposal path before its one-child preflight"
+    );
     assert!(
         state
             .executed
@@ -8595,13 +8603,18 @@ fn edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionar
             .map(|reason| reason.category),
         Some(ReasonCategory::OneChildEdition)
     );
+    let queries = state.queries.lock().expect("edition query mutex");
+    assert_eq!(
+        queries.len(),
+        1,
+        "only the lazy PDB identity read is permitted"
+    );
     assert!(
-        state
-            .queries
-            .lock()
-            .expect("edition query mutex")
-            .is_empty(),
-        "the local reservation resolves the concurrent conflict before any dictionary round trip"
+        !queries[0]
+            .0
+            .to_ascii_lowercase()
+            .contains("from all_editions"),
+        "the local reservation resolves the concurrent conflict before the edition dictionary preflight"
     );
     assert!(
         state

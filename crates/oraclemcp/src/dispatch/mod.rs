@@ -246,6 +246,7 @@ struct ProfileDispatchPolicy {
     require_security_feature_evidence: bool,
     require_hard_parse_evidence: bool,
     require_query_cost_estimate: bool,
+    trusted_views: Arc<[String]>,
 }
 
 struct PreparedProfileSwitch {
@@ -263,6 +264,7 @@ struct PreparedProfileSwitch {
     require_security_feature_evidence: bool,
     require_hard_parse_evidence: bool,
     require_query_cost_estimate: bool,
+    trusted_views: Arc<[String]>,
     custom_catalog: CustomToolCatalog,
     response: Value,
 }
@@ -279,6 +281,7 @@ fn standalone_read_only_policy() -> ProfileDispatchPolicy {
         require_security_feature_evidence: false,
         require_hard_parse_evidence: false,
         require_query_cost_estimate: false,
+        trusted_views: Arc::from([]),
     }
 }
 
@@ -294,12 +297,14 @@ fn install_bound_read_evidence_policies(state: &mut DispatcherState) {
                 state.require_security_feature_evidence = policy.require_security_feature_evidence;
                 state.require_hard_parse_evidence = policy.require_hard_parse_evidence;
                 state.require_query_cost_estimate = policy.require_query_cost_estimate;
+                state.trusted_views = Arc::clone(&policy.trusted_views);
             }
             Err(_) => {
                 state.fga_evidence_policy = FgaEvidencePolicy::RequireProof;
                 state.require_security_feature_evidence = true;
                 state.require_hard_parse_evidence = true;
                 state.require_query_cost_estimate = true;
+                state.trusted_views = Arc::from([]);
             }
         }
     }
@@ -439,6 +444,7 @@ fn profile_dispatch_policy(
         require_security_feature_evidence: require_security_feature_evidence_for(profile),
         require_hard_parse_evidence: profile.require_hard_parse_evidence(),
         require_query_cost_estimate: profile.require_query_cost_estimate(),
+        trusted_views: profile.trusted_views.clone().unwrap_or_default().into(),
     })
 }
 
@@ -514,6 +520,7 @@ struct DispatcherState {
     require_security_feature_evidence: bool,
     require_hard_parse_evidence: bool,
     require_query_cost_estimate: bool,
+    trusted_views: Arc<[String]>,
 }
 
 #[derive(Clone, Debug)]
@@ -688,6 +695,7 @@ impl OracleDispatcher {
                 require_security_feature_evidence: false,
                 require_hard_parse_evidence: false,
                 require_query_cost_estimate: false,
+                trusted_views: Arc::from([]),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -782,6 +790,7 @@ impl OracleDispatcher {
                 require_security_feature_evidence: false,
                 require_hard_parse_evidence: false,
                 require_query_cost_estimate: false,
+                trusted_views: Arc::from([]),
             }),
             request_timeout: SyncMutex::new(Some(DEFAULT_REQUEST_TIMEOUT)),
             max_query_cost: SyncMutex::new(None),
@@ -1467,6 +1476,7 @@ impl OracleDispatcher {
             require_security_feature_evidence,
             require_hard_parse_evidence,
             require_query_cost_estimate,
+            trusted_views,
         } = profile_dispatch_policy(&profile_generation)?;
         let new_custom_catalog = match &self.custom_loader {
             Some(loader) => loader(&profile_generation, &level)?,
@@ -1541,6 +1551,7 @@ impl OracleDispatcher {
                 state.require_security_feature_evidence = require_security_feature_evidence;
                 state.require_hard_parse_evidence = require_hard_parse_evidence;
                 state.require_query_cost_estimate = require_query_cost_estimate;
+                state.trusted_views = trusted_views;
                 state.custom_catalog = custom_catalog;
                 state.grant_generation = state.grant_generation.saturating_add(1);
                 state.execute_grants.clear();
@@ -5643,6 +5654,7 @@ async fn resolve_read_only_relations_inner(
         verified_local_vector_embedding,
         fga_policy,
         require_security_feature_evidence,
+        &[],
     )
     .await
 }
@@ -7573,8 +7585,6 @@ struct DbToolCtx<'a> {
     /// consults it before committing and clears it at its transaction boundary.
     checkpoints: &'a CheckpointWorkspace,
     request_budget: RequestBudget,
-    /// Stable PDB scope for this request's service-local coordination policy.
-    pdb_identity_scope: PdbIdentityScope,
     active_profile: Option<&'a str>,
     session: &'a SessionLevelState,
     execute_grants: &'a ExecGrantStore,
@@ -7687,8 +7697,8 @@ async fn reserve_checked_edition_child_slot(
     ctx: &DbToolCtx<'_>,
     parent: &EditionIdentifier,
 ) -> Result<EditionCreationReservation, ErrorEnvelope> {
-    let reservation =
-        reserve_edition_child_slot(parent, &ctx.pdb_identity_scope, ctx.active_profile)?;
+    let pdb_identity_scope = read_pdb_identity_scope(ctx.cx, ctx.conn).await;
+    let reservation = reserve_edition_child_slot(parent, &pdb_identity_scope, ctx.active_profile)?;
     let rows = run_catalog_query(
         ctx.cx,
         ctx.conn,
@@ -12929,6 +12939,7 @@ impl OracleDispatcher {
                 require_security_feature_evidence: new_policy.require_security_feature_evidence,
                 require_hard_parse_evidence: new_policy.require_hard_parse_evidence,
                 require_query_cost_estimate: new_policy.require_query_cost_estimate,
+                trusted_views: new_policy.trusted_views,
                 custom_catalog: new_custom_catalog,
                 response,
             };
@@ -12961,6 +12972,7 @@ impl OracleDispatcher {
                 require_security_feature_evidence,
                 require_hard_parse_evidence,
                 require_query_cost_estimate,
+                trusted_views,
                 custom_catalog,
                 mut response,
             } = prepared;
@@ -13043,6 +13055,7 @@ impl OracleDispatcher {
                     state.require_security_feature_evidence = require_security_feature_evidence;
                     state.require_hard_parse_evidence = require_hard_parse_evidence;
                     state.require_query_cost_estimate = require_query_cost_estimate;
+                    state.trusted_views = trusted_views;
                     state.custom_catalog = custom_catalog;
                     state.grant_generation = state.grant_generation.saturating_add(1);
                     state.execute_grants.clear();
@@ -13280,7 +13293,6 @@ impl OracleDispatcher {
                 read_only_backstop: &state.read_only_backstop,
                 checkpoints: &state.checkpoints,
                 request_budget,
-                pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
                 execute_grants: &state.execute_grants,
@@ -13320,7 +13332,6 @@ impl OracleDispatcher {
                 read_only_backstop: &state.read_only_backstop,
                 checkpoints: &state.checkpoints,
                 request_budget,
-                pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                 active_profile: active_profile.as_deref(),
                 session: &scoped_level,
                 execute_grants: &state.execute_grants,
@@ -13742,7 +13753,6 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
-                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13775,7 +13785,6 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
-                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13804,7 +13813,6 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
-                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13833,7 +13841,6 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
-                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13862,7 +13869,6 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
-                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13891,7 +13897,6 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
-                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -13920,7 +13925,6 @@ impl OracleDispatcher {
                     read_only_backstop: &state.read_only_backstop,
                     checkpoints: &state.checkpoints,
                     request_budget,
-                    pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                     active_profile: state.active_profile.as_deref(),
                     session: &scoped_level,
                     execute_grants: &state.execute_grants,
@@ -15205,6 +15209,7 @@ impl OracleDispatcher {
                     false,
                     state.fga_evidence_policy,
                     state.require_security_feature_evidence,
+                    state.trusted_views.as_ref(),
                 )
                 .await?;
                 let fga_evidence = read.fga_evidence;
@@ -15400,7 +15405,6 @@ impl OracleDispatcher {
                             read_only_backstop: &state.read_only_backstop,
                             checkpoints: &state.checkpoints,
                             request_budget,
-                            pdb_identity_scope: read_pdb_identity_scope(cx, conn).await,
                             active_profile: active_profile.as_deref(),
                             session: &scoped_level,
                             execute_grants: &state.execute_grants,
