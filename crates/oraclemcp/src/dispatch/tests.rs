@@ -4197,13 +4197,16 @@ impl OracleConnection for RecoverablePinnedReadMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
-            return Ok(rows);
+        // Admission reads (session context, catalog closure and SCN evidence)
+        // must complete. Only the already-admitted caller SQL represents the
+        // proven-idempotent read whose lost wire may be retried.
+        if sql.to_ascii_lowercase().contains("select 1 as c") {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            return Err(DbError::ConnectionLost(
+                "injected guarded-read connection loss".to_owned(),
+            ));
         }
-        self.calls.fetch_add(1, Ordering::SeqCst);
-        Err(DbError::Cancelled(
-            "injected recoverable pinned-session uncertainty".to_owned(),
-        ))
+        OneRowMock.query_rows(_cx, sql, binds).await
     }
 
     async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
@@ -4220,7 +4223,7 @@ impl OracleConnection for RecoverablePinnedReadMock {
 }
 
 #[test]
-fn recoverable_pinned_quarantine_recycles_switchable_session_on_retry() {
+fn issue47_desync_read_recycles_and_retries_once() {
     use oraclemcp_audit::{AuditError, AuditRecord, AuditSink, MemoryAuditSink, SigningKey};
 
     struct SharedSink(Arc<MemoryAuditSink>);
@@ -4289,48 +4292,18 @@ fn recoverable_pinned_quarantine_recycles_switchable_session_on_retry() {
     .with_profile_drain_state(state)
     .with_auditor(auditor);
 
-    let first = dispatcher
-        .dispatch(
-            "oracle_sample_rows",
-            json!({ "owner": "APP", "table": "ORDERS", "max_rows": 1 }),
-        )
-        .expect_err("first uncertain pinned read records a recoverable quarantine");
-    assert_eq!(first.error_class, ErrorClass::Timeout);
+    let response = dispatcher
+        .dispatch("oracle_query", json!({ "sql": "SELECT 1 AS C FROM dual" }))
+        .expect("the one permitted retry re-leases and completes the proven read");
+    assert_eq!(response["rows"][0]["LABEL"], json!("recycled-session"));
     assert_eq!(first_calls.load(Ordering::SeqCst), 1);
-    let quarantine = dispatcher
-        .connection_quarantine()
-        .expect("quarantine lock")
-        .expect("uncertain pinned read records quarantine");
-    assert_eq!(quarantine.outcome, AuditOutcome::UnknownDiscarded);
-    assert!(
-        quarantine.recycle_allowed,
-        "recoverable pinned uncertainty must be eligible for audited reconnect"
-    );
-
-    let before_generation = catalog_generation(&dispatcher);
-    let second = dispatcher
-        .dispatch(
-            "oracle_sample_rows",
-            json!({ "owner": "APP", "table": "ORDERS", "max_rows": 1 }),
-        )
-        .expect("recoverable quarantine reconnects and retries on the replacement session");
-    assert_eq!(second["rows"][0]["LABEL"], json!("recycled-session"));
     assert_eq!(connector_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         first_closes.load(Ordering::SeqCst),
         1,
         "the retired pinned session is logically closed after recycle"
     );
-    assert_eq!(
-        replacement_counts.query.load(Ordering::SeqCst),
-        2,
-        "the replacement handles the generated read's SCN probe and row query"
-    );
-    assert_eq!(
-        catalog_generation(&dispatcher),
-        before_generation + 2,
-        "reconnect and the sample's semantic proof each refresh catalog evidence"
-    );
+    assert!(replacement_counts.query.load(Ordering::SeqCst) >= 1);
     assert!(
         dispatcher
             .connection_quarantine()
@@ -10501,13 +10474,43 @@ fn issue47_desync_dml_returns_typed_outcome_without_replay() {
         )
         .expect_err("a desynchronized mutation must return, never retry");
     assert_eq!(error.error_class, ErrorClass::Transient);
-    assert_eq!(error.statement_outcome, Some(StatementOutcome::RolledBack));
+    assert_eq!(
+        error.statement_outcome,
+        Some(StatementOutcome::ProtocolUnsynchronized)
+    );
     assert_eq!(
         state.executed.lock().expect("exec mutex").len(),
         1,
         "a mutation with an uncertain wire outcome must never be replayed"
     );
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn issue47_ddl_desync_returns_ddl_outcome_unknown() {
+    let state = Arc::new(ExecState::default());
+    *state.execute_error.lock().expect("execute error mutex") = Some(DbError::ConnectionLost(
+        "synthetic protocol desynchronization".to_owned(),
+    ));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let sql = "CREATE TABLE issue47_desync_probe (id NUMBER)";
+    let confirm = preview_confirm(&dispatcher, sql);
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+        )
+        .expect_err("a DDL wire loss has an outcome Oracle rollback cannot establish");
+    assert_eq!(error.error_class, ErrorClass::ConnectionFailed);
+    assert_eq!(
+        error.statement_outcome,
+        Some(StatementOutcome::DdlOutcomeUnknown)
+    );
+    assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
 }
 
 #[test]

@@ -77,7 +77,7 @@ use oraclemcp_db::{
 };
 use oraclemcp_db::{
     FgaEvidence, FgaEvidencePolicy, RelationSecurityObservation, RelationSecurityState,
-    SearchDetailLevel, SourceText, StatementOutcome,
+    RetryDecision, SearchDetailLevel, SourceText, StatementClass, StatementOutcome, retry_decision,
 };
 use oraclemcp_error::{
     ErrorClass, ErrorEnvelope, OptimizerPlanRow, QueryCostRefusal, ReasonCategory, StructuredReason,
@@ -10014,21 +10014,30 @@ async fn execute_sql_inner(
                 .into_envelope());
             }
             if outcome == AuditOutcome::UnknownDiscarded {
-                return Err(quarantined_db_error(
+                let mut envelope = quarantined_db_error(
                     QuarantineOutcome::UnknownDiscarded,
                     format!(
                         "execute failed after a non-transactional or otherwise uncertain boundary; rollback could not prove the effect absent: {e}"
                     ),
                 )
-                .into_envelope());
+                .into_envelope();
+                if statement_level >= OperatingLevel::Ddl {
+                    // Oracle DDL may have committed before the wire loss; a
+                    // rollback cannot turn that into a recoverable read-style
+                    // desynchronization. Preserve that distinct uncertainty
+                    // for callers and the no-retry policy.
+                    envelope = envelope.with_statement_outcome(StatementOutcome::DdlOutcomeUnknown);
+                }
+                return Err(envelope);
             }
             let mut envelope = DbError::into_envelope(e.clone());
             if e.is_uncertain_session_state() {
-                // A write may have crossed the wire even though this branch
-                // subsequently proved its transaction was rolled back.  Make
-                // that terminal knowledge machine-readable; callers must
-                // never infer that a transient DML error is replayable.
-                envelope = envelope.with_statement_outcome(StatementOutcome::RolledBack);
+                // The request crossed an uncertain wire boundary. A cleanup
+                // rollback may have succeeded, but it cannot establish the
+                // statement's wire outcome for a caller; preserve the
+                // no-replay protocol uncertainty rather than presenting a
+                // rollback as a retryable terminal result.
+                envelope = envelope.with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
             }
             return Err(envelope);
         }
@@ -12819,9 +12828,44 @@ impl OracleDispatcher {
         } else {
             None
         };
-        let mut response = self
+        let retry_args = args.clone();
+        let mut response = match self
             .dispatch_with_cx_inner_core(cx, context, name, args)
-            .await?;
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let decision = error.statement_outcome.and_then(|outcome| {
+                    (canonical_name == "oracle_query")
+                        .then(|| retry_decision(outcome, StatementClass::ProvenIdempotentRead))
+                });
+                if decision == Some(RetryDecision::AutoRetry) {
+                    // `ProtocolUnsynchronized` is minted only by the guarded
+                    // read executor after it quarantines the failed pinned
+                    // wire. The next core dispatch re-leases once before it
+                    // reaches Oracle; writes and unproven reads never enter
+                    // this branch.
+                    match self
+                        .dispatch_with_cx_inner_core(cx, context, name, retry_args)
+                        .await
+                    {
+                        Ok(response) => response,
+                        // A standalone dispatcher has no connector with which
+                        // to obtain the required fresh lease. Preserve the
+                        // original read-loss result rather than replacing it
+                        // with a misleading runtime-state failure.
+                        Err(retry_error)
+                            if retry_error.error_class == ErrorClass::RuntimeStateRequired =>
+                        {
+                            return Err(error);
+                        }
+                        Err(retry_error) => return Err(retry_error),
+                    }
+                } else {
+                    return Err(error);
+                }
+            }
+        };
         let Some(sql) = preview_sql else {
             return attach_preview_impact(response);
         };

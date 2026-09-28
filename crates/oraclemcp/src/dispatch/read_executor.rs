@@ -2128,7 +2128,16 @@ impl<'a> GuardedReadExecutor<'a> {
                                 Some(&failure),
                             )?;
                         }
-                        return Err(DbError::into_envelope(error));
+                        let mut envelope = DbError::into_envelope(error.clone());
+                        if error.is_uncertain_session_state() {
+                            // This is the sole proof boundary for an automatic
+                            // replay: the read executor admitted this exact SQL
+                            // as a guarded read and ReadUncertaintyConn already
+                            // quarantined the failed pinned wire.
+                            envelope = envelope
+                                .with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
+                        }
+                        return Err(envelope);
                     }
                 };
                 if !rls_vpd_relations.is_empty() {
