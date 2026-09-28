@@ -17,7 +17,7 @@
     ]
   },
   "source": {
-    "sha": "14f72c8147d1de18ae452015eb64a7ca5e9cb916",
+    "sha": "dbf6dea780a2638d1cee574f359bb598ea143beb",
     "tree_clean": true,
     "branch": "main"
   },
@@ -40,7 +40,8 @@
     "The planted negative was a temporary local edit and was reverted before the work commit; it is not present in source.sha.",
     "The full scoped suite cargo test -p oraclemcp --lib is 540 passed / 1 failed; the single failure (dispatch::tests::every_registry_tool_routes_and_deserializes_offline, oracle_semantic_search requires_23ai) reproduces with the read_clob change stashed out (verified at HEAD), so it is a pre-existing red in the semantic-search lane, not introduced by this change.",
     "cargo fmt --all -- --check reports diffs only in crates/oraclemcp-db/src/connection.rs, which is unmodified in git status and outside this lane; the two changed files are fmt-clean.",
-    "No independent verifier re-ran the change; the swarm verifier must re-execute before closing."
+    "No independent verifier re-ran the change; the swarm verifier must re-execute before closing.",
+    "source.sha advanced to dbf6dea7 because a subsequent test-only fix (semantic_search offline expectation) is the last commit touching the in-scope tests.rs; the read_clob tests are unchanged and pass at this revision."
   ],
   "known_defects": [],
   "follow_ups": [],
