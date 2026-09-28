@@ -47,6 +47,17 @@ fn same_identified_pdb(left: &PdbIdentityScope, right: &PdbIdentityScope) -> boo
     )
 }
 
+fn same_service_local_branch_scope(left: &EditionProposal, right: &EditionProposal) -> bool {
+    same_identified_pdb(&left.coordination_scope, &right.coordination_scope)
+        || matches!(
+            (&left.coordination_scope, &right.coordination_scope),
+            (
+                PdbIdentityScope::LocalOnly { .. },
+                PdbIdentityScope::LocalOnly { .. }
+            )
+        ) && left.profile == right.profile
+}
+
 /// Proposal review is a text-only classification phase. Applying a proposal
 /// always enters the dispatcher, which independently binds a live semantic
 /// proof before an `oracle_query` can reach Oracle. Keep this deliberate
@@ -268,10 +279,7 @@ impl ChangeProposalStore {
             .into_iter()
             .find(|candidate| {
                 candidate.proposal_id != proposal.proposal_id
-                    && same_identified_pdb(
-                        &candidate.coordination_scope,
-                        &proposal.coordination_scope,
-                    )
+                    && same_service_local_branch_scope(candidate, proposal)
                     && candidate.base_edition == proposal.base_edition
                     && candidate.child_edition != proposal.child_edition
                     && candidate.status != EditionProposalStatus::Withdrawn
