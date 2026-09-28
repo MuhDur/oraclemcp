@@ -66,18 +66,35 @@ fn classifier_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
 #[test]
 fn semantic_read_plan_fuzz_square_bracket_budget_refuses_without_parser_backtracking() {
     let quoted_identifier_bypass = format!("IF\"'\"{CLASSIFY_FUZZ_TIMEOUT_REGRESSION}");
-    for sql in std::iter::once(CLASSIFY_FUZZ_TIMEOUT_REGRESSION)
-        .chain(std::iter::once(quoted_identifier_bypass.as_str()))
-        .chain(SEMANTIC_READ_PLAN_SLOW_UNIT_REGRESSIONS.iter().copied())
+    for (name, sql) in [("reproducer", CLASSIFY_FUZZ_TIMEOUT_REGRESSION)]
+        .into_iter()
+        .chain(std::iter::once((
+            "quoted_identifier_bypass",
+            quoted_identifier_bypass.as_str(),
+        )))
+        .chain(
+            SEMANTIC_READ_PLAN_SLOW_UNIT_REGRESSIONS
+                .iter()
+                .enumerate()
+                .map(|(index, sql)| match index {
+                    0 => ("slow_variant_1", *sql),
+                    1 => ("slow_variant_2", *sql),
+                    _ => ("slow_variant_3", *sql),
+                }),
+        )
     {
         let started = std::time::Instant::now();
         let result = semantic_read_plan_checked(sql);
+        let elapsed = started.elapsed();
 
         assert_eq!(result, Err(PlanMismatch::ParserWorkBudgetExceeded));
+        eprintln!(
+            "[mdftg] {name} semantic_read_plan_checked={}us",
+            elapsed.as_micros()
+        );
         assert!(
-            started.elapsed() < std::time::Duration::from_secs(1),
-            "semantic read plan took {:?}",
-            started.elapsed()
+            elapsed < std::time::Duration::from_secs(1),
+            "semantic read plan took {elapsed:?}"
         );
     }
 }
