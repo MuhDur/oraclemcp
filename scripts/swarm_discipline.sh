@@ -481,6 +481,7 @@ struct_atomicity() {
   repo="$(repo_root)"
   [[ "$mode" == staged ]] && ref=""
   "$PYTHON_BIN" - "$repo" "$mode" "$ref" <<'PY'
+import posixpath
 import re
 import subprocess
 import sys
@@ -576,16 +577,342 @@ NOT_LITERAL = re.compile(
 PATH_QUALIFIER = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*$")
 
 
-def is_literal_use(code: str, name: str) -> bool:
-    """True when some `name {` on this line is a struct literal/pattern."""
+def literal_uses(code: str, name: str) -> list[str]:
+    """Qualifiers of every `name {` on this line that is a struct literal/pattern.
+
+    An empty qualifier is an unqualified `name {`; `a::b::` is the qualifier of
+    `a::b::name {`. A `name {` introduced by `->`, `impl`, `struct`, ... opens a
+    body, not a literal, and is not listed.
+    """
+    qualifiers: list[str] = []
     for match in re.finditer(rf"\b{name}\s*\{{", code):
-        prefix = PATH_QUALIFIER.sub("", code[: match.start()]).rstrip()
-        if not NOT_LITERAL.search(prefix):
-            return True
-    return False
+        prefix = code[: match.start()]
+        qmatch = PATH_QUALIFIER.search(prefix)
+        qualifier = qmatch.group(0) if qmatch else ""
+        rest = prefix[: len(prefix) - len(qualifier)].rstrip()
+        if not NOT_LITERAL.search(rest):
+            qualifiers.append(qualifier.rstrip(":"))
+    return qualifiers
 
 
-def literal_sites(name: str) -> list[tuple[str, int]]:
+# --------------------------------------------------------------------------
+# Module / import resolution (oraclemcp-it7iq): a bare `Name {` is not proof
+# that a site refers to the changed struct — two modules may define the same
+# private name. A site counts only when the name resolves to the changed
+# struct's defining module. Resolution is deliberately conservative: when it is
+# ambiguous the site counts, so a genuinely orphaned initializer is refused.
+# --------------------------------------------------------------------------
+
+# A module is (crate-root file, path parts), so two crates with `mod pb` never
+# collide on the bare module name.
+MOD_DECL = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+([A-Za-z_][A-Za-z0-9_]*)\s*\{"
+)
+USE_DECL = re.compile(r"^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+(.+?);\s*$")
+DEF_DECL = re.compile(
+    r"^\s*(?:pub(?:\([^)]*\))?\s+)?"
+    r"(?:struct|enum|union|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+_FILE_CACHE: dict[str, list[str]] = {}
+_SCAN_CACHE: dict[str, dict] = {}
+
+
+def file_at_cached(path: str) -> list[str]:
+    if path not in _FILE_CACHE:
+        _FILE_CACHE[path] = file_at(path)
+    return _FILE_CACHE[path]
+
+
+def list_rs() -> list[str]:
+    if revision:
+        out = git("ls-tree", "-r", "--name-only", revision)
+    else:
+        out = git("ls-files", "--cached")
+    return [path for path in out.splitlines() if path.endswith(".rs")]
+
+
+ALL_RS = list_rs()
+_RS_SET = set(ALL_RS)
+
+
+def crate_root_of(path: str) -> tuple[str, str] | None:
+    """The (root file, root directory) of the crate owning `path`, if any."""
+    directory = posixpath.dirname(path)
+    while True:
+        for candidate in ("lib.rs", "main.rs"):
+            root = f"{directory}/{candidate}" if directory else candidate
+            if root in _RS_SET:
+                return root, directory
+        parent = posixpath.dirname(directory)
+        if parent == directory:
+            return None
+        directory = parent
+
+
+def file_module(path: str) -> tuple[str, tuple[str, ...]] | None:
+    """Canonical module id for a .rs file, or None outside a known crate."""
+    found = crate_root_of(path)
+    if found is None:
+        return None
+    root, root_dir = found
+    if path == root:
+        return (root, ())
+    rel = posixpath.relpath(path, root_dir) if root_dir else path
+    if rel.endswith("/mod.rs"):
+        rel = rel[: -len("/mod.rs")]
+    elif rel == "mod.rs":
+        rel = ""
+    elif rel.endswith(".rs"):
+        rel = rel[:-3]
+    return (root, tuple(part for part in rel.split("/") if part))
+
+
+def _split_use_items(text: str) -> list[str]:
+    items: list[str] = []
+    depth = 0
+    current = ""
+    for char in text:
+        if char in "{(":
+            depth += 1
+        elif char in ")}":
+            depth -= 1
+        if char == "," and depth == 0:
+            items.append(current)
+            current = ""
+        else:
+            current += char
+    if current.strip():
+        items.append(current)
+    return [item.strip() for item in items if item.strip()]
+
+
+def _parse_use_tree(
+    text: str, prefix: list[str]
+) -> list[tuple[str | None, list[str], bool]]:
+    """Expand one use tree into (binding, path segments, is_glob) rows."""
+    text = text.strip()
+    if not text:
+        return []
+    brace = text.find("{")
+    if brace != -1:
+        head = text[:brace].rstrip().rstrip(":")
+        base = prefix + [part for part in head.split("::") if part]
+        inner = text[brace + 1 :]
+        depth = 1
+        end = len(inner)
+        for index, char in enumerate(inner):
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    end = index
+                    break
+        rows: list[tuple[str | None, list[str], bool]] = []
+        for item in _split_use_items(inner[:end]):
+            rows.extend(_parse_use_tree(item, base))
+        return rows
+    if text.endswith("*"):
+        head = text[:-1].rstrip().rstrip(":")
+        base = prefix + [part for part in head.split("::") if part]
+        return [(None, base, True)]
+    if " as " in text:
+        path, alias = text.split(" as ", 1)
+        segments = prefix + [part for part in path.strip().split("::") if part]
+        return [(alias.strip(), segments, False)]
+    segments = prefix + [part for part in text.split("::") if part]
+    if segments and segments[-1] == "self":
+        segments = segments[:-1]
+        return [(segments[-1] if segments else None, segments, False)]
+    return [(segments[-1] if segments else None, segments, False)]
+
+
+def scan_file(path: str) -> dict:
+    if path in _SCAN_CACHE:
+        return _SCAN_CACHE[path]
+    lines = file_at_cached(path)
+    module = file_module(path)
+    inline_stack: list[tuple[str, ...]] = [()] * (len(lines) + 1)
+    defs: dict[tuple[str, tuple[str, ...]], set[str]] = {}
+    imports: dict[tuple[str, tuple[str, ...]], list] = {}
+    stack: list[tuple[bool, str | None]] = []
+    for index, raw in enumerate(lines, 1):
+        code = raw.split("//", 1)[0]
+        inline_stack[index] = tuple(name for is_mod, name in stack if is_mod)
+        if module is not None and all(is_mod for is_mod, _ in stack):
+            mid = (module[0], module[1] + inline_stack[index])
+            item = DEF_DECL.match(code)
+            if item:
+                defs.setdefault(mid, set()).add(item.group(1))
+            use = USE_DECL.match(code)
+            if use:
+                for binding, segments, is_glob in _parse_use_tree(use.group(1), []):
+                    imports.setdefault(mid, []).append((binding, segments, is_glob))
+        pending = MOD_DECL.match(code)
+        pending_name = pending.group(1) if pending else None
+        for char in code:
+            if char == "{":
+                if pending_name is not None:
+                    stack.append((True, pending_name))
+                    pending_name = None
+                else:
+                    stack.append((False, None))
+            elif char == "}":
+                if stack:
+                    stack.pop()
+    result = {
+        "module": module,
+        "inline_stack": inline_stack,
+        "defs": defs,
+        "imports": imports,
+    }
+    _SCAN_CACHE[path] = result
+    return result
+
+
+MODULE_DEFS: dict[tuple[str, tuple[str, ...]], set[str]] = {}
+MODULE_IMPORTS: dict[tuple[str, tuple[str, ...]], list] = {}
+INLINE_MODULES: set[tuple[str, tuple[str, ...]]] = set()
+for _path in ALL_RS:
+    _scan = scan_file(_path)
+    _module = _scan["module"]
+    for _mid, _names in _scan["defs"].items():
+        MODULE_DEFS.setdefault(_mid, set()).update(_names)
+    for _mid, _rows in _scan["imports"].items():
+        MODULE_IMPORTS.setdefault(_mid, []).extend(_rows)
+    if _module is not None:
+        for _stack in _scan["inline_stack"]:
+            for _depth in range(1, len(_stack) + 1):
+                INLINE_MODULES.add((_module[0], _module[1] + _stack[:_depth]))
+
+
+def module_of_line(path: str, line: int) -> tuple[str, tuple[str, ...]] | None:
+    scan = scan_file(path)
+    module = scan["module"]
+    if module is None:
+        return None
+    stack = scan["inline_stack"]
+    if not 1 <= line < len(stack):
+        return None
+    return (module[0], module[1] + stack[line])
+
+
+def _module_layout(base: tuple[str, tuple[str, ...]]) -> tuple[str, str] | None:
+    root, parts = base
+    root_dir = posixpath.dirname(root)
+    if not parts:
+        return root, root_dir
+    rel = posixpath.join(root_dir, *parts) if root_dir else posixpath.join(*parts)
+    as_mod = f"{rel}/mod.rs"
+    as_file = f"{rel}.rs"
+    has_mod = as_mod in _RS_SET
+    has_file = as_file in _RS_SET
+    if has_mod and has_file:
+        return None
+    if has_mod or has_file:
+        return (as_mod if has_mod else as_file), rel
+    return None
+
+
+def module_descend(
+    base: tuple[str, tuple[str, ...]], segment: str
+) -> tuple[str, tuple[str, ...]] | None:
+    layout = _module_layout(base)
+    if layout is None:
+        return None
+    _, child_dir = layout
+    child_mod = f"{child_dir}/{segment}/mod.rs"
+    child_file = f"{child_dir}/{segment}.rs"
+    has_mod = child_mod in _RS_SET
+    has_file = child_file in _RS_SET
+    if has_mod and has_file:
+        return None
+    child = (base[0], base[1] + (segment,))
+    if has_mod or has_file:
+        return child
+    if child in INLINE_MODULES:
+        return child
+    return None
+
+
+def resolve_module_segments(
+    segments: list[str], base: tuple[str, tuple[str, ...]]
+) -> tuple[str, tuple[str, ...]] | None:
+    root, parts = base
+    index = 0
+    current = base
+    if segments and segments[0] == "crate":
+        current = (root, ())
+        index = 1
+    elif segments and segments[0] == "self":
+        index = 1
+    elif segments and segments[0] == "super":
+        count = 0
+        while index < len(segments) and segments[index] == "super":
+            count += 1
+            index += 1
+        if count > len(parts):
+            return None
+        current = (root, parts[: len(parts) - count])
+    for segment in segments[index:]:
+        current = module_descend(current, segment)
+        if current is None:
+            return None
+    return current
+
+
+def import_resolution(
+    module: tuple[str, tuple[str, ...]], name: str
+) -> tuple[str, tuple[str, tuple[str, ...]] | None, str | None]:
+    for binding, segments, is_glob in MODULE_IMPORTS.get(module, []):
+        if is_glob or binding != name or not segments:
+            continue
+        item = segments[-1]
+        target = resolve_module_segments(segments[:-1], module)
+        if target is None:
+            return ("unresolved", None, None)
+        if item in MODULE_DEFS.get(target, ()):
+            # The target module really defines this item: same name + module is
+            # the changed struct, anything else is provably a different type.
+            return ("type", target, item)
+        # Not a definition in the target (a re-export, a module, or a name we
+        # did not see): cannot be resolved => fail closed.
+        return ("unresolved", None, None)
+    return ("none", None, None)
+
+
+def site_may_be_def(
+    site_path: str,
+    site_line: int,
+    name: str,
+    qualifier: str,
+    def_module: tuple[str, tuple[str, ...]],
+    def_name: str,
+) -> bool:
+    """True when the site could refer to the changed struct (keep refusing)."""
+    module = module_of_line(site_path, site_line)
+    if module is None:
+        return True  # cannot place the site => fail closed
+    if qualifier:
+        segments = [part for part in qualifier.split("::") if part]
+        target = resolve_module_segments(segments, module)
+        if target is None:
+            return True  # ambiguous qualified path => fail closed
+        if name in MODULE_DEFS.get(target, ()):
+            return target == def_module and name == def_name
+        return True
+    if name in MODULE_DEFS.get(module, ()):
+        # A local item shadows every import; it is the changed struct only when
+        # it lives in the changed struct's defining module.
+        return module == def_module and name == def_name
+    kind, target, base_name = import_resolution(module, name)
+    if kind == "type":
+        return target == def_module and base_name == def_name
+    return True  # none, glob, or unresolved => fail closed
+
+
+def literal_sites(name: str) -> list[tuple[str, int, list[str]]]:
     # Read the SAME source the added field came from: the index for
     # --staged, the revision for --commit. A worktree grep would mix in
     # other agents' unstaged edits and shift line numbers against file_at.
@@ -612,9 +939,10 @@ def literal_sites(name: str) -> list[tuple[str, int]]:
         if revision:
             row = row[len(revision) + 1 :]
         path, number, text = row.split(":", 2)
-        if not is_literal_use(text.split("//", 1)[0], name):
+        qualifiers = literal_uses(text.split("//", 1)[0], name)
+        if not qualifiers:
             continue
-        sites.append((path, int(number)))
+        sites.append((path, int(number), qualifiers))
     return sites
 
 
@@ -635,22 +963,28 @@ def block_uses_rest(lines: list[str], start: int) -> bool:
 
 violations: list[str] = []
 for path, number, field in added:
-    lines = file_at(path)
+    lines = file_at_cached(path)
     if not lines:
         continue
     struct = enclosing_struct(lines, number)
     if struct is None:
         continue
-    for site_path, site_line in literal_sites(struct):
+    def_module = module_of_line(path, number)
+    for site_path, site_line, qualifiers in literal_sites(struct):
         if site_path in touched:
             continue
-        site_lines = file_at(site_path) or []
+        site_lines = file_at_cached(site_path)
         if not site_lines:
             continue
         text = site_lines[site_line - 1] if site_line <= len(site_lines) else ""
         if ITEM.match(text.split("//", 1)[0]):
             continue
         if block_uses_rest(site_lines, site_line):
+            continue
+        if def_module is not None and not any(
+            site_may_be_def(site_path, site_line, struct, qualifier, def_module, struct)
+            for qualifier in qualifiers
+        ):
             continue
         violations.append(
             f"{site_path}:{site_line}: {struct} used without `..` but "
@@ -1006,6 +1340,117 @@ PY
   [[ "$stale_out" == *"${other_sha:0:12}"* ]] \
     || die "selftest: the stale-verdict refusal did not name the record SHA: $stale_out"
   printf 'PASS selftest: a verdict describing another commit is refused and names both SHAs\n'
+
+  # Rule 17 precision: same-named structs in different modules (oraclemcp-it7iq).
+  # Bare-name matching treated every `Ctx { .. }` as the changed `Ctx`, so adding
+  # a field to one module's private `Ctx` flagged another module's unrelated
+  # private `Ctx` as an orphaned initializer. The check now resolves the changed
+  # struct to its defining module and only counts sites that resolve to it.
+  git -C "$work" add -A
+  git -C "$work" commit -qm "checkpoint before same-named struct fixtures"
+  printf '\nmod pa;\nmod pb;\nmod pc;\nmod pd;\n' >>"$work/crates/demo/src/lib.rs"
+  cat >"$work/crates/demo/src/pa.rs" <<'RS'
+struct Ctx {
+    a: u8,
+}
+
+fn pa_make() -> Ctx {
+    Ctx { a: 1 }
+}
+RS
+  cat >"$work/crates/demo/src/pb.rs" <<'RS'
+struct Ctx {
+    a: u8,
+}
+
+fn pb_make() -> Ctx {
+    Ctx { a: 2 }
+}
+RS
+  cat >"$work/crates/demo/src/pc.rs" <<'RS'
+pub(crate) struct Ctx {
+    a: u8,
+}
+
+fn pc_make() -> Ctx {
+    Ctx { a: 3 }
+}
+RS
+  cat >"$work/crates/demo/src/pd.rs" <<'RS'
+use crate::pc::Ctx;
+
+fn pd_make() -> Ctx {
+    Ctx { a: 4 }
+}
+RS
+  git -C "$work" add crates/demo/src/lib.rs crates/demo/src/pa.rs \
+    crates/demo/src/pb.rs crates/demo/src/pc.rs crates/demo/src/pd.rs
+  git -C "$work" commit -qm "two same-named private structs and one imported"
+
+  # Positive: add `b` to pb's private Ctx and update pb's own literal. pa's
+  # untouched literal is a DIFFERENT private Ctx and must not be flagged.
+  "$PYTHON_BIN" - "$work/crates/demo/src/pb.rs" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+assert "struct Ctx {\n    a: u8,\n}" in text, text
+text = text.replace("struct Ctx {\n    a: u8,\n}", "struct Ctx {\n    a: u8,\n    b: u8,\n}")
+assert "Ctx { a: 2 }" in text, text
+text = text.replace("Ctx { a: 2 }", "Ctx { a: 2, b: 2 }")
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PY
+  git -C "$work" add crates/demo/src/pb.rs
+  status=0
+  ( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" struct-atomicity --staged ) >/dev/null 2>&1 \
+    || status=$?
+  (( status == 0 )) || die "selftest: a field in one same-named private struct flagged another module's literals (exit $status)"
+  printf 'PASS selftest: a same-named private struct in another module is not an orphaned initializer\n'
+
+  git -C "$work" commit -qm "field b in pb::Ctx"
+
+  # Negative: add `c` to pc's pub(crate) Ctx, update pc's own literal, but leave
+  # pd's imported literal of the CHANGED struct un-updated. It must still refuse,
+  # and it must not name the unrelated private pa/pb literals.
+  "$PYTHON_BIN" - "$work/crates/demo/src/pc.rs" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+assert "struct Ctx {\n    a: u8,\n}" in text, text
+text = text.replace("struct Ctx {\n    a: u8,\n}", "struct Ctx {\n    a: u8,\n    c: u8,\n}")
+assert "Ctx { a: 3 }" in text, text
+text = text.replace("Ctx { a: 3 }", "Ctx { a: 3, c: 3 }")
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PY
+  git -C "$work" add crates/demo/src/pc.rs
+  status=0
+  report="$( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" struct-atomicity --staged 2>&1 )" \
+    || status=$?
+  (( status == 65 )) || die "selftest: an un-updated imported literal of the changed struct was accepted (exit $status)"
+  [[ "$report" == *"pd.rs:4"* ]] || die "selftest: the imported orphan in pd.rs was not reported: $report"
+  [[ "$report" != *"pa.rs"* && "$report" != *"pb.rs"* ]] \
+    || die "selftest: an unrelated same-named private struct was reported: $report"
+  printf 'PASS selftest: an un-updated literal of the changed struct is still refused; unrelated same-named ones are not\n'
+
+  "$PYTHON_BIN" - "$work/crates/demo/src/pd.rs" <<'PY'
+import sys
+path = sys.argv[1]
+with open(path, encoding="utf-8") as handle:
+    text = handle.read()
+assert "Ctx { a: 4 }" in text, text
+text = text.replace("Ctx { a: 4 }", "Ctx { a: 4, c: 4 }")
+with open(path, "w", encoding="utf-8") as handle:
+    handle.write(text)
+PY
+  git -C "$work" add crates/demo/src/pd.rs
+  status=0
+  ( cd "$work" && bash "$ROOT/scripts/swarm_discipline.sh" struct-atomicity --staged ) >/dev/null 2>&1 \
+    || status=$?
+  (( status == 0 )) || die "selftest: a complete cross-module change was refused (exit $status)"
+  printf 'PASS selftest: a qualified/imported initializer of the changed struct is still counted\n'
 }
 
 command_name="${1:-}"
