@@ -10208,6 +10208,37 @@ fn execute_rolls_back_dml_by_default() {
 }
 
 #[test]
+fn issue47_desync_dml_returns_typed_outcome_without_replay() {
+    let state = Arc::new(ExecState::default());
+    *state.execute_error.lock().expect("execute error mutex") = Some(DbError::ConnectionLost(
+        "synthetic protocol desynchronization".to_owned(),
+    ));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+        Some("dev".to_owned()),
+        read_write_level(),
+    );
+
+    let error = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": "UPDATE employees SET name = name WHERE employee_id = :1",
+                "binds": [100]
+            }),
+        )
+        .expect_err("a desynchronized mutation must return, never retry");
+    assert_eq!(error.error_class, ErrorClass::Transient);
+    assert_eq!(error.statement_outcome, Some(StatementOutcome::RolledBack));
+    assert_eq!(
+        state.executed.lock().expect("exec mutex").len(),
+        1,
+        "a mutation with an uncertain wire outcome must never be replayed"
+    );
+    assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn caller_transaction_control_is_refused_before_database_io() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(

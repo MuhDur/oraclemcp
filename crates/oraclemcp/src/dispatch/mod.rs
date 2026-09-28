@@ -9880,7 +9880,15 @@ async fn execute_sql_inner(
                 )
                 .into_envelope());
             }
-            return Err(DbError::into_envelope(e));
+            let mut envelope = DbError::into_envelope(e.clone());
+            if e.is_uncertain_session_state() {
+                // A write may have crossed the wire even though this branch
+                // subsequently proved its transaction was rolled back.  Make
+                // that terminal knowledge machine-readable; callers must
+                // never infer that a transient DML error is replayable.
+                envelope = envelope.with_statement_outcome(StatementOutcome::RolledBack);
+            }
+            return Err(envelope);
         }
     };
     if args.hold {
