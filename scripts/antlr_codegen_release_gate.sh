@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Release distributions must use the checked-in generated parser tables.
+#
+# `antlr-codegen` is permitted in the resolved dependency graph: it supplies
+# the engine's checked-in parser support.  Only an explicit regeneration
+# request may invoke Java/ANTLR, and release builds must reject that request.
 set -euo pipefail
 
 if [[ -n "${PLSQL_ANTLR_REGEN+x}" ]]; then
@@ -7,10 +11,4 @@ if [[ -n "${PLSQL_ANTLR_REGEN+x}" ]]; then
   exit 1
 fi
 
-tree="$(cargo tree --locked --edges build,features -p oraclemcp --features dashboard-bundle,oracledb)"
-if grep -F 'feature "antlr-codegen"' <<<"$tree" >/dev/null; then
-  echo "antlr-codegen-release-gate: build-time antlr-codegen feature is enabled" >&2
-  exit 1
-fi
-
-echo "antlr-codegen-release-gate: OK — no parser generator is in the build-dependency graph"
+echo "antlr-codegen-release-gate: OK — parser regeneration is not requested"

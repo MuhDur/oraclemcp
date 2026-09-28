@@ -310,7 +310,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Refuse parser regeneration and antlr-codegen
+      - name: Refuse parser regeneration
         run: bash scripts/antlr_codegen_release_gate.sh
 
       - name: Install Zig (aarch64 musl)

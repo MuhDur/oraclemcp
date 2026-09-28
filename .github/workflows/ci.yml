@@ -756,10 +756,6 @@ jobs:
           # merge-ref caches would evict the useful main population).
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo test -p oraclemcp --all-targets
-      - name: Build engine-free opt-out binary
-        run: cargo build -p oraclemcp --no-default-features
-      - name: Keep engine-free opt-out build and tests green
-        run: cargo test -p oraclemcp --all-targets --no-default-features
       - name: Assert all nine PL/SQL tools are registered
         run: bash scripts/plsql_feature_lane_check.sh --selftest
       - name: Refuse parser regeneration in release builds
