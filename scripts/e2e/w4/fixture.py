@@ -260,6 +260,29 @@ def create_fixture_user(admin, name):
     return password
 
 
+def grant_flashback_to_fixture_owner(lane, settings, name):
+    """Grant the positive SCN-diff capability to exactly one disposable owner.
+
+    `SYSTEM` can create the run user but cannot delegate SYS.DBMS_FLASHBACK on
+    these local images.  The exact owner is dropped by bounded teardown, which
+    removes this object grant; the paired cross user deliberately never gets it
+    so the no-grant W4 refusal remains meaningful.
+    """
+    exact_identifier(name)
+    import oracledb
+    sysdba = oracledb.connect(
+        user="sys",
+        password=admin_password(lane, settings),
+        dsn=settings["dsn"],
+        mode=oracledb.AUTH_MODE_SYSDBA,
+    )
+    try:
+        sysdba.cursor().execute(f"GRANT EXECUTE ON SYS.DBMS_FLASHBACK TO {name}")
+        sysdba.commit()
+    finally:
+        sysdba.close()
+
+
 def create_sentinel(connection, run_id, token):
     table = "T_RUN_" + run_id
     started = time.monotonic()
@@ -505,6 +528,7 @@ def setup(lane, settings, requested_id=None, owner_password_sink=None,
         register_run(admin, run_id, token)
         registered = True
         owner_password = create_fixture_user(admin, owner_name(run_id))
+        grant_flashback_to_fixture_owner(lane, settings, owner_name(run_id))
         if owner_password_sink is not None:
             owner_password_sink(owner_password)
         cross_password = create_fixture_user(admin, cross_name(run_id))

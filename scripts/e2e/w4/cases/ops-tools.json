@@ -514,9 +514,6 @@
       },
       {
         "sql": "INSERT INTO ${owner}.DIFF_T_${run_id} (ID, N_VAL) VALUES (1, 0)"
-      },
-      {
-        "sql": "GRANT EXECUTE ON DBMS_FLASHBACK TO ${owner}"
       }
     ],
     "setup_phase": "before_server",
@@ -568,9 +565,6 @@
     "cleanup": [
       {
         "sql": "DROP TABLE ${owner}.DIFF_T_${run_id} PURGE"
-      },
-      {
-        "sql": "REVOKE EXECUTE ON DBMS_FLASHBACK FROM ${owner}"
       }
     ],
     "profile_variant": "synthetic_owner_rw",
