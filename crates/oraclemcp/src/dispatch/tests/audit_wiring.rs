@@ -425,7 +425,6 @@ impl OracleConnection for ScnCapabilityUnavailableMock {
             return Ok(rows);
         }
         if sql == "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL" {
-            eprintln!("scn query");
             return Err(DbError::Query(
                 "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
             ));
