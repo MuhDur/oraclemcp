@@ -3322,27 +3322,6 @@ fn audit_verify_with_db_evidence_command_parses() {
         }) if file == Path::new("audit.jsonl")
     ));
 }
-
-#[test]
-fn audit_report_command_parses() {
-    let audit = Cli::try_parse_from([
-        "oraclemcp",
-        "audit",
-        "report",
-        "audit.jsonl",
-        "--format",
-        "html",
-        "--out",
-        "report.html",
-    ])
-    .expect("parse audit report");
-    assert!(matches!(
-        audit.command,
-        Some(Command::Audit { command: AuditCommand::Report { ref file, format: audit_report::AuditReportFormat::Html, out: Some(ref out), key_id: None } })
-            if file == Path::new("audit.jsonl") && out == Path::new("report.html")
-    ));
-}
-
 #[test]
 fn dashboard_command_parses() {
     let dashboard = Cli::try_parse_from([

@@ -25,6 +25,7 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod audit_evidence;
 mod audit_report;
+mod cli_audit_report;
 mod discover;
 mod readiness;
 mod robot_docs;
@@ -298,12 +299,13 @@ fn main() -> ExitCode {
                 key_id,
                 with_db_evidence,
             } => run_audit_verify(robot_json, &file, key_id.as_deref(), with_db_evidence),
-            AuditCommand::Report {
-                file,
-                format,
-                out,
-                key_id,
-            } => run_audit_report(robot_json, &file, format, out.as_deref(), key_id.as_deref()),
+            AuditCommand::Report(args) => run_audit_report(
+                robot_json,
+                &args.file,
+                args.format,
+                args.out.as_deref(),
+                args.key_id.as_deref(),
+            ),
         },
         Command::Incident { command } => match command {
             IncidentCommand::Capture(args) => run_incident_capture(robot_json, args),
@@ -8021,3 +8023,6 @@ mod stub {
 #[cfg(test)]
 #[path = "main_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod audit_report_tests;

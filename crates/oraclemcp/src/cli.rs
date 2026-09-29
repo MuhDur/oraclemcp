@@ -11,7 +11,7 @@
 //! their fields; visibility is the only change, never behaviour.
 
 use super::{
-    DEFAULT_SETUP_CONFIG_PATH, audit_report::AuditReportFormat, selftest::SelftestCliArgs,
+    DEFAULT_SETUP_CONFIG_PATH, cli_audit_report::AuditReportArgs, selftest::SelftestCliArgs,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -221,20 +221,7 @@ pub(crate) enum AuditCommand {
         #[arg(long, visible_alias = "with_db_evidence")]
         with_db_evidence: bool,
     },
-    /// Verify an audit chain and export a deterministic redacted session report.
-    Report {
-        /// Path to the append-only JSONL audit log.
-        file: PathBuf,
-        /// Human-facing report serialization.
-        #[arg(long, value_enum, default_value_t = AuditReportFormat::Markdown)]
-        format: AuditReportFormat,
-        /// Write the report to this file instead of standard output.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Override the active key id for a legacy env-only key.
-        #[arg(long)]
-        key_id: Option<String>,
-    },
+    Report(AuditReportArgs),
 }
 
 #[derive(Subcommand, Debug)]

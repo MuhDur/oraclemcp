@@ -7,30 +7,11 @@
 
 use std::io::BufRead;
 
-use clap::ValueEnum;
+use crate::cli_audit_report::AuditReportFormat;
 use oraclemcp_audit::{
     AuditDecision, AuditFailureCause, AuditOutcome, AuditRecord, JsonlError, REDACTED_SQL_PREVIEW,
     SigningKey, VerifyOutcome, verify_reader_with,
 };
-
-/// The human-facing serialization selected by `audit report`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub(crate) enum AuditReportFormat {
-    /// CommonMark suitable for an incident or change-review attachment.
-    Markdown,
-    /// A standalone document with only inline CSS.
-    Html,
-}
-
-impl AuditReportFormat {
-    /// Stable machine-facing name used in the JSON command envelope.
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Markdown => "markdown",
-            Self::Html => "html",
-        }
-    }
-}
 
 /// Verification information rendered in the header.
 #[derive(Clone, Debug, Eq, PartialEq)]
