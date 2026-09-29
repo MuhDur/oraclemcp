@@ -44,7 +44,7 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "plan_contains", "row_contains",
-                        "runtime_retention_probe", "flashback_grant_owner"}
+                        "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -277,6 +277,29 @@ def verify_row_contains(reply, expected_row):
     require(any(matches(row) for row in rows), "rows did not contain the expected row")
 
 
+def verify_finding_row_contains(reply, expected_row):
+    require(isinstance(expected_row, dict) and expected_row,
+            "finding_row_contains must be a nonempty object")
+    payload = tool_payload(reply)
+    require(payload.get("isError") is not True,
+            "finding_row_contains expected a successful tool result")
+    findings = payload.get("structuredContent", {}).get("findings")
+    require(isinstance(findings, list), "finding_row_contains requires a findings array")
+    rows = []
+    for finding in findings:
+        if isinstance(finding, dict):
+            detail = finding.get("detail")
+            if isinstance(detail, dict) and isinstance(detail.get("rows"), list):
+                rows.extend(detail["rows"])
+    def matches(row):
+        return isinstance(row, dict) and all(
+            key in row and (value in row[key] if isinstance(value, str) and isinstance(row[key], str)
+                            else row[key] == value)
+            for key, value in expected_row.items())
+    require(any(matches(row) for row in rows),
+            "findings did not contain the expected row")
+
+
 def verify_audit(expected, records, verified):
     require(verified, "audit chain verification failed")
     require(len(expected) == len(records),
@@ -343,6 +366,11 @@ def validate_case(case, filename):
             or (isinstance(case["row_contains"], dict) and case["row_contains"]
                 and all(isinstance(key, str) and key for key in case["row_contains"])),
             "row_contains must be a nonempty object with nonempty string keys")
+    require("finding_row_contains" not in case
+            or (isinstance(case["finding_row_contains"], dict) and case["finding_row_contains"]
+                and all(isinstance(key, str) and key
+                        for key in case["finding_row_contains"])),
+            "finding_row_contains must be a nonempty object with nonempty string keys")
     if case.get("profile_variant") == "protected":
         require(case["level"] == "READ_ONLY", "a protected profile is pinned at READ_ONLY")
     if case.get("profile_variant") == "capped_rw":
@@ -1992,6 +2020,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         verify_expect(expected, reply, ROOT / "tests/golden/w4")
         if "row_contains" in case:
             verify_row_contains(reply, case["row_contains"])
+        if "finding_row_contains" in case:
+            verify_finding_row_contains(reply, case["finding_row_contains"])
         if marker and supported:
             require(vsql_marker_count(connection, marker) == 0,
                     "refused SQL marker reached V$SQL")
@@ -2735,6 +2765,13 @@ def selftest():
     marker_rows = {"result": {"content": [], "isError": False,
                    "structuredContent": {"rows": [{"SQL_TEXT": "SELECT /* W4MARK */ 1 FROM DUAL"}]}}}
     verify_row_contains(marker_rows, {"SQL_TEXT": "W4MARK"})
+    finding_rows = {"result": {"content": [], "isError": False,
+                    "structuredContent": {"findings": [
+                        {"detail": {"rows": [{"OWNER": "W4O", "OBJECT_TYPE": "PROCEDURE",
+                                                "SAMPLE_OBJECTS": "P_BAD_W4MARK"}]}}]}}}
+    verify_finding_row_contains(finding_rows,
+                                {"OWNER": "W4O", "OBJECT_TYPE": "PROCEDURE",
+                                 "SAMPLE_OBJECTS": "P_BAD_W4MARK"})
     def rejected(label, operation):
         try:
             operation()
@@ -2759,6 +2796,9 @@ def selftest():
     rejected("wrong_row_order", lambda: verify_expect({"rows": [[2], [1]]}, correct))
     rejected("row_contains_marker_absent",
              lambda: verify_row_contains(marker_rows, {"SQL_TEXT": "OTHER_MARKER"}))
+    rejected("finding_row_contains_marker_absent",
+             lambda: verify_finding_row_contains(
+                 finding_rows, {"SAMPLE_OBJECTS": "P_BAD_OTHER_MARKER"}))
     rejected("malformed_wire_envelope", lambda: verify_envelope({"result": {"content": []}}))
     rejected("missing_output_schema_key", lambda: verify_envelope(
         correct, {"outputSchema": {"type": "object", "required": ["missing"]}}))

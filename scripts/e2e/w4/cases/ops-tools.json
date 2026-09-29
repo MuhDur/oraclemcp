@@ -965,53 +965,16 @@
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
     },
+    "finding_row_contains": {
+      "OWNER": "${owner}",
+      "OBJECT_TYPE": "PROCEDURE",
+      "SAMPLE_OBJECTS": "P_BAD_${run_id}"
+    },
     "cleanup": [
       {
         "sql": "DROP PROCEDURE ${owner}.P_BAD_${run_id}"
       }
-    ],
-    "expect_by_version": {
-      "23": {
-        "json_subset": {
-          "findings": [
-            {
-              "detail": {
-                "rows": [
-                  {
-                    "OWNER": "PUBLIC"
-                  },
-                  {
-                    "OWNER": "${owner}",
-                    "OBJECT_TYPE": "PROCEDURE",
-                    "SAMPLE_OBJECTS": "P_BAD_${run_id}"
-                  }
-                ]
-              }
-            }
-          ]
-        }
-      },
-      "pre23": {
-        "json_subset": {
-          "findings": [
-            {
-              "detail": {
-                "rows": [
-                  {
-                    "OWNER": "PUBLIC"
-                  },
-                  {
-                    "OWNER": "${owner}",
-                    "OBJECT_TYPE": "PROCEDURE",
-                    "SAMPLE_OBJECTS": "P_BAD_${run_id}"
-                  }
-                ]
-              }
-            }
-          ]
-        }
-      }
-    }
+    ]
   },
   {
     "case_id": "w4_db_health_subcheck_filter",
