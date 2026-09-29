@@ -7,10 +7,9 @@
 #![cfg(feature = "live-xe")]
 #![forbid(unsafe_code)]
 
-use std::time::Duration;
 use std::{
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Barrier, mpsc},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use asupersync::runtime::RuntimeBuilder;
@@ -198,7 +197,13 @@ async fn confirmed_execute(
     cx: &Cx,
     sql: &str,
 ) -> Result<Value, ErrorEnvelope> {
-    let preview = dispatch(dispatcher, cx, "oracle_preview_sql", json!({ "sql": sql })).await?;
+    let preview = dispatch(
+        dispatcher,
+        cx,
+        "oracle_preview_sql",
+        json!({ "sql": sql, "commit": true }),
+    )
+    .await?;
     let confirm = preview
         .pointer("/execute_confirmation/confirm")
         .and_then(Value::as_str)
@@ -210,6 +215,81 @@ async fn confirmed_execute(
         json!({ "sql": sql, "commit": true, "confirm": confirm }),
     )
     .await
+}
+
+#[derive(Debug)]
+enum LiveRaceOutcome {
+    Executed,
+    Refused(ErrorEnvelope),
+    Setup,
+}
+
+/// Run one independent service through preview and confirmed execution.  It
+/// sends its pre-execution state to the coordinator before entering the
+/// barrier, so neither side can observe the other side's CREATE first.
+fn independently_create_edition_child(
+    parent: String,
+    child: String,
+    ready: mpsc::Sender<Result<(), String>>,
+    start: Arc<Barrier>,
+) -> LiveRaceOutcome {
+    let reactor = asupersync::runtime::reactor::create_reactor().expect("race worker reactor");
+    let runtime = RuntimeBuilder::current_thread()
+        .with_reactor(reactor)
+        .build()
+        .expect("race worker runtime");
+    runtime.block_on(async move {
+        let cx = Cx::current().expect("race worker runtime installs a Cx");
+        let connection = match RustOracleConnection::connect(&cx, test_opts()).await {
+            Ok(connection) => connection,
+            Err(error) => {
+                let detail = format!("race worker could not connect: {error}");
+                let _ = ready.send(Err(detail.clone()));
+                start.wait();
+                return LiveRaceOutcome::Setup;
+            }
+        };
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(connection),
+            Some("live-d2-independent-service".to_owned()),
+            ddl_level(),
+        );
+        let sql = format!("CREATE EDITION {child} AS CHILD OF {parent}");
+        let preview = match dispatch(
+            &dispatcher,
+            &cx,
+            "oracle_preview_sql",
+            json!({ "sql": sql, "commit": true }),
+        )
+        .await
+        {
+            Ok(preview) => preview,
+            Err(error) => {
+                let detail = format!("race worker preview refused: {error:?}");
+                let _ = ready.send(Err(detail.clone()));
+                start.wait();
+                return LiveRaceOutcome::Setup;
+            }
+        };
+        let confirm = preview
+            .pointer("/execute_confirmation/confirm")
+            .and_then(Value::as_str)
+            .expect("DDL preview mints a confirmation")
+            .to_owned();
+        let _ = ready.send(Ok(()));
+        start.wait();
+        match dispatch(
+            &dispatcher,
+            &cx,
+            "oracle_execute",
+            json!({ "sql": sql, "commit": true, "confirm": confirm }),
+        )
+        .await
+        {
+            Ok(_) => LiveRaceOutcome::Executed,
+            Err(error) => LiveRaceOutcome::Refused(error),
+        }
+    })
 }
 
 async fn probe_child_slot(
@@ -399,6 +479,136 @@ fn edition_lifecycle_is_linear_live_and_second_child_never_executes() {
             .expect("the synthetic child retires through the governed DDL path");
         assert_eq!(retired["executed"], json!(true));
         assert_eq!(retired["required_level"], json!("DDL"));
+    });
+}
+
+/// Two isolated dispatcher services can both complete their dictionary
+/// preflight before Oracle sees either CREATE.  Oracle's one-child invariant is
+/// then the cross-service authority: one CREATE wins and the other reaches a
+/// real ORA-38807 terminal response.  The test is deliberately separately
+/// opted in because it creates and retires a disposable parent/child branch.
+#[test]
+fn live_two_independent_services_race_and_oracle_rejects_the_loser() {
+    if std::env::var("ORACLEMCP_LIVE_EDITION_RACE").as_deref() != Ok("1") {
+        eprintln!(
+            "[live-xe] SKIP live_two_independent_services_race_and_oracle_rejects_the_loser: \
+             set ORACLEMCP_LIVE_EDITION_RACE=1 for an authorized disposable local lab"
+        );
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let test_name = "live_two_independent_services_race_and_oracle_rejects_the_loser";
+        let Some(probe) = connect_or_skip(&cx, test_name).await else {
+            return;
+        };
+        let (base_has_child, _) = probe_child_slot(&cx, &probe)
+            .await
+            .unwrap_or_else(|error| panic!("{test_name}: cannot inspect ALL_EDITIONS: {error}"));
+        if base_has_child {
+            eprintln!(
+                "[live-xe] SKIP {test_name}: ORA$BASE already has a child; \
+                 never mutate a non-empty edition timeline"
+            );
+            return;
+        }
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock after epoch")
+            .as_nanos()
+            % 1_000_000_000;
+        let parent = format!("E2E_RP_{}_{}", std::process::id(), unique);
+        let first_child = format!("E2E_RA_{}_{}", std::process::id(), unique);
+        let second_child = format!("E2E_RB_{}_{}", std::process::id(), unique);
+
+        let served = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .unwrap_or_else(|error| panic!("{test_name}: create parent connection: {error}"));
+        let cleanup_dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(served),
+            Some("live-d2-race-cleanup".to_owned()),
+            ddl_level(),
+        );
+        let create_parent = format!("CREATE EDITION {parent} AS CHILD OF {BASE_EDITION}");
+        confirmed_execute(&cleanup_dispatcher, &cx, &create_parent)
+            .await
+            .unwrap_or_else(|error| panic!("{test_name}: create synthetic parent: {error:?}"));
+
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let start = Arc::new(Barrier::new(3));
+        let first = {
+            let ready = ready_tx.clone();
+            let start = Arc::clone(&start);
+            let parent = parent.clone();
+            let child = first_child.clone();
+            std::thread::spawn(move || {
+                independently_create_edition_child(parent, child, ready, start)
+            })
+        };
+        let second = {
+            let start = Arc::clone(&start);
+            let parent = parent.clone();
+            let child = second_child.clone();
+            std::thread::spawn(move || {
+                independently_create_edition_child(parent, child, ready_tx, start)
+            })
+        };
+        let readiness = [
+            ready_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("first independent service prepared"),
+            ready_rx
+                .recv_timeout(Duration::from_secs(30))
+                .expect("second independent service prepared"),
+        ];
+        start.wait();
+        let first = first.join().expect("first independent service joins");
+        let second = second.join().expect("second independent service joins");
+        let winning_child = match (&first, &second) {
+            (LiveRaceOutcome::Executed, _) => Some(first_child.as_str()),
+            (_, LiveRaceOutcome::Executed) => Some(second_child.as_str()),
+            _ => None,
+        };
+        let retire_parent = format!("DROP EDITION {parent} CASCADE");
+        let cleanup = match winning_child {
+            Some(child) => {
+                let retire_child = format!("DROP EDITION {child} CASCADE");
+                match confirmed_execute(&cleanup_dispatcher, &cx, &retire_child).await {
+                    Ok(_) => confirmed_execute(&cleanup_dispatcher, &cx, &retire_parent).await,
+                    Err(error) => Err(error),
+                }
+            }
+            None => confirmed_execute(&cleanup_dispatcher, &cx, &retire_parent).await,
+        };
+
+        assert!(
+            readiness.iter().all(Result::is_ok),
+            "both independent services must preview before CREATE: {readiness:?}"
+        );
+        cleanup.unwrap_or_else(|error| {
+            panic!("{test_name}: must retire the disposable parent after the race: {error:?}")
+        });
+        assert!(
+            matches!(first, LiveRaceOutcome::Executed)
+                ^ matches!(second, LiveRaceOutcome::Executed),
+            "exactly one independent service must create the child: {first:?} / {second:?}"
+        );
+        let loser = match (first, second) {
+            (LiveRaceOutcome::Refused(error), LiveRaceOutcome::Executed)
+            | (LiveRaceOutcome::Executed, LiveRaceOutcome::Refused(error)) => error,
+            (first, second) => {
+                panic!("race did not produce one Oracle refusal: {first:?} / {second:?}")
+            }
+        };
+        assert_eq!(
+            loser.error_class,
+            ErrorClass::ConnectionFailed,
+            "a DDL terminal failure quarantines the loser while retaining its Oracle diagnostic: {loser:?}"
+        );
+        assert!(
+            loser.message.contains("ORA-38807"),
+            "the independent loser must reach Oracle's one-child invariant, not a local preflight: {loser:?}"
+        );
     });
 }
 
