@@ -53,7 +53,7 @@ query text.
 | Guarded SQL workflow | Documented by `oraclemcp robot-docs guide` | `oracle_preview_sql`, `oracle_query`, `oracle_execute`, DDL/source-patch tools, `oracle_set_session_level` | SQL workbench read/execute/DDL modes | Aligned |
 | Schema/object metadata | `oraclemcp --json capabilities` advertises dictionary/source tools | `oracle_list_schemas`, `oracle_schema_inspect`, `oracle_search_objects`, `oracle_search_source`, `oracle_get_ddl`, `oracle_get_source` | Explorer schemas, objects, global object/source search, source/DDL detail | Aligned |
 | Service lifecycle and auth | `oraclemcp --json service ...`, `oraclemcp --json clients ...` | Stdio init token, HTTP OAuth, mTLS, client credentials | Pairing ticket, service health, active lanes | Aligned |
-| Audit-chain visibility | `oraclemcp audit verify <file>` | Privileged MCP actions append audit-chain records | Audit timeline, filters, proof export | Aligned |
+| Audit-chain visibility | `oraclemcp audit verify <file>` and `oraclemcp audit report <file> [--format markdown|html] [--out <path>]` | Privileged MCP actions append audit-chain records; the report verifies the signed chain before exporting a deterministic redacted session timeline | Audit timeline, filters, proof export | Aligned |
 
 ## MCP Surface
 
