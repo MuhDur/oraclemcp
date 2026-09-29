@@ -72,12 +72,13 @@ pub oraclemcp_error::ErrorClass::PolicyDenied
 pub oraclemcp_error::ErrorClass::RepreviewRequired
 pub oraclemcp_error::ErrorClass::RequestCancelled
 pub oraclemcp_error::ErrorClass::RuntimeStateRequired
+pub oraclemcp_error::ErrorClass::SessionBusy
 pub oraclemcp_error::ErrorClass::SnapshotTooOld
 pub oraclemcp_error::ErrorClass::SyntaxError
 pub oraclemcp_error::ErrorClass::Timeout
 pub oraclemcp_error::ErrorClass::Transient
 impl oraclemcp_error::ErrorClass
-pub const oraclemcp_error::ErrorClass::ALL: [Self; 23]
+pub const oraclemcp_error::ErrorClass::ALL: [Self; 24]
 pub fn oraclemcp_error::ErrorClass::default_suggested_tool(self) -> core::option::Option<&'static str>
 pub fn oraclemcp_error::ErrorClass::is_retryable(self) -> bool
 pub const fn oraclemcp_error::ErrorClass::meaning(self) -> &'static str
@@ -348,6 +349,7 @@ pub oraclemcp_error::ErrorEnvelope::is_error: bool
 pub oraclemcp_error::ErrorEnvelope::message: alloc::string::String
 pub oraclemcp_error::ErrorEnvelope::next_steps: alloc::vec::Vec<alloc::string::String>
 pub oraclemcp_error::ErrorEnvelope::ora_code: core::option::Option<i32>
+pub oraclemcp_error::ErrorEnvelope::queued_ms: core::option::Option<u64>
 pub oraclemcp_error::ErrorEnvelope::retry_after_ms: core::option::Option<u64>
 pub oraclemcp_error::ErrorEnvelope::statement_outcome: core::option::Option<oraclemcp_error::StatementOutcome>
 pub oraclemcp_error::ErrorEnvelope::structured_reason: core::option::Option<oraclemcp_error::StructuredReason>
@@ -359,6 +361,7 @@ pub fn oraclemcp_error::ErrorEnvelope::with_cancel_outcome(self, oraclemcp_error
 pub fn oraclemcp_error::ErrorEnvelope::with_fuzzy_matches(self, alloc::vec::Vec<alloc::string::String>) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_next_step(self, impl core::convert::Into<alloc::string::String>) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_ora_code(self, i32) -> Self
+pub fn oraclemcp_error::ErrorEnvelope::with_queued_ms(self, u64) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_retry_after_ms(self, u64) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_statement_outcome(self, oraclemcp_error::StatementOutcome) -> Self
 pub fn oraclemcp_error::ErrorEnvelope::with_structured_reason(self, oraclemcp_error::StructuredReason) -> Self

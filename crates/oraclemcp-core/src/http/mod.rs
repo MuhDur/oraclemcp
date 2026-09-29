@@ -2433,7 +2433,7 @@ fn jsonrpc_busy_retry_after_ms(response: &Value) -> Option<u64> {
     }
     let structured = result.get("structuredContent")?;
     let error_class = structured.get("error_class").and_then(Value::as_str);
-    if !matches!(error_class, Some("BUSY" | "AT_CAPACITY")) {
+    if !matches!(error_class, Some("BUSY" | "AT_CAPACITY" | "SESSION_BUSY")) {
         return None;
     }
     Some(

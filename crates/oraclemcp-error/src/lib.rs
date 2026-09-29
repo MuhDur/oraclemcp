@@ -103,6 +103,9 @@ pub enum ErrorClass {
     OperatingLevelTooLow,
     /// Admission control rejected the call before it touched the pool (§5.6).
     Busy,
+    /// A stateful pinned session could not begin the call before its caller
+    /// deadline. The request never reached the Oracle driver.
+    SessionBusy,
     /// Capacity admission refused a new lane/connection before touching Oracle.
     AtCapacity,
     /// The request arguments were malformed or failed validation.
@@ -143,15 +146,31 @@ pub enum ErrorClass {
 
 impl ErrorClass {
     /// Every currently defined wire error class, in deterministic wire order.
-    pub const ALL: [Self; 23] = [
-        Self::AtCapacity, Self::Busy, Self::ChallengeRequired, Self::ConnectionFailed,
-        Self::FlashbackCapabilityUnavailable, Self::FlashbackDefinitionChanged,
-        Self::FlashbackNotFlashbackable, Self::FlashbackRetentionExceeded,
-        Self::ForbiddenStatement, Self::InsufficientPrivilege, Self::Internal,
-        Self::InvalidArguments, Self::LeaseRequired, Self::ObjectNotFound,
-        Self::OperatingLevelTooLow, Self::PolicyDenied, Self::RepreviewRequired,
-        Self::RequestCancelled, Self::RuntimeStateRequired, Self::SnapshotTooOld, Self::Transient,
-        Self::SyntaxError, Self::Timeout,
+    pub const ALL: [Self; 24] = [
+        Self::AtCapacity,
+        Self::Busy,
+        Self::ChallengeRequired,
+        Self::ConnectionFailed,
+        Self::FlashbackCapabilityUnavailable,
+        Self::FlashbackDefinitionChanged,
+        Self::FlashbackNotFlashbackable,
+        Self::FlashbackRetentionExceeded,
+        Self::ForbiddenStatement,
+        Self::InsufficientPrivilege,
+        Self::Internal,
+        Self::InvalidArguments,
+        Self::LeaseRequired,
+        Self::ObjectNotFound,
+        Self::OperatingLevelTooLow,
+        Self::PolicyDenied,
+        Self::RepreviewRequired,
+        Self::RequestCancelled,
+        Self::RuntimeStateRequired,
+        Self::SessionBusy,
+        Self::SnapshotTooOld,
+        Self::Transient,
+        Self::SyntaxError,
+        Self::Timeout,
     ];
 
     /// Short operator-facing meaning for this stable refusal family.
@@ -169,6 +188,9 @@ impl ErrorClass {
             Self::ForbiddenStatement => "fail-closed guard refused the statement",
             Self::OperatingLevelTooLow => "session operating level is too low",
             Self::Busy => "admission control is temporarily busy",
+            Self::SessionBusy => {
+                "the pinned session could not serve this request before its deadline"
+            }
             Self::AtCapacity => "service lane or connection capacity is exhausted",
             Self::InvalidArguments => "tool arguments failed validation",
             Self::PolicyDenied => "active profile policy denied the request",
@@ -178,7 +200,9 @@ impl ErrorClass {
             Self::FlashbackRetentionExceeded => "requested flashback point is outside retention",
             Self::FlashbackDefinitionChanged => "flashback crossed a definition change",
             Self::FlashbackNotFlashbackable => "object or route cannot serve flashback query",
-            Self::FlashbackCapabilityUnavailable => "database lacks required DBMS_FLASHBACK capability",
+            Self::FlashbackCapabilityUnavailable => {
+                "database lacks required DBMS_FLASHBACK capability"
+            }
             Self::SnapshotTooOld => "Oracle undo snapshot aged out",
             Self::Internal => "unexpected sanitized server failure",
         }
@@ -199,15 +223,20 @@ impl ErrorClass {
             Self::ForbiddenStatement => "unprovable side effect or disallowed SQL construct",
             Self::OperatingLevelTooLow => "read-only or lower-level session cap",
             Self::Busy | Self::AtCapacity => "bounded service admission limit",
+            Self::SessionBusy => "pinned-session queue wait exhausted the request's start budget",
             Self::InvalidArguments => "request does not match the documented schema",
             Self::PolicyDenied => "protected profile or schema policy restriction",
             Self::Timeout => "query or operation exceeded configured time budget",
             Self::RequestCancelled => "caller cancelled before terminal completion",
             Self::Transient => "recoverable connection or package-state condition",
-            Self::FlashbackRetentionExceeded | Self::SnapshotTooOld => "requested history is older than retained undo",
+            Self::FlashbackRetentionExceeded | Self::SnapshotTooOld => {
+                "requested history is older than retained undo"
+            }
             Self::FlashbackDefinitionChanged => "object definition changed after requested point",
             Self::FlashbackNotFlashbackable => "remote or unsupported flashback object",
-            Self::FlashbackCapabilityUnavailable => "selected database/version lacks DBMS_FLASHBACK",
+            Self::FlashbackCapabilityUnavailable => {
+                "selected database/version lacks DBMS_FLASHBACK"
+            }
             Self::Internal => "sanitized unexpected server condition",
         }
     }
@@ -216,26 +245,58 @@ impl ErrorClass {
     #[must_use]
     pub const fn next_action(self) -> &'static str {
         match self {
-            Self::ObjectNotFound => "inspect the visible schema, then use an exact visible object name",
-            Self::InsufficientPrivilege => "ask the database administrator for the least-privilege grant named by the refusal",
+            Self::ObjectNotFound => {
+                "inspect the visible schema, then use an exact visible object name"
+            }
+            Self::InsufficientPrivilege => {
+                "ask the database administrator for the least-privilege grant named by the refusal"
+            }
             Self::SyntaxError => "submit one syntactically valid static SQL statement",
-            Self::ConnectionFailed | Self::RuntimeStateRequired => "connect a configured profile, then retry the read once",
-            Self::ChallengeRequired => "complete the required operator confirmation before retrying",
-            Self::RepreviewRequired => "preview the exact SQL, binds, and modes again before confirmation",
+            Self::ConnectionFailed | Self::RuntimeStateRequired => {
+                "connect a configured profile, then retry the read once"
+            }
+            Self::ChallengeRequired => {
+                "complete the required operator confirmation before retrying"
+            }
+            Self::RepreviewRequired => {
+                "preview the exact SQL, binds, and modes again before confirmation"
+            }
             Self::LeaseRequired => "start or resume a stateful session before using this operation",
-            Self::ForbiddenStatement => "submit a provably read-only static statement or use a reviewed guarded tool",
-            Self::OperatingLevelTooLow => "request the required operating level with oracle_set_session_level; operator confirmation is required",
-            Self::Busy | Self::AtCapacity => "wait for the advertised retry interval, then retry the idempotent request",
+            Self::ForbiddenStatement => {
+                "submit a provably read-only static statement or use a reviewed guarded tool"
+            }
+            Self::OperatingLevelTooLow => {
+                "request the required operating level with oracle_set_session_level; operator confirmation is required"
+            }
+            Self::Busy | Self::AtCapacity | Self::SessionBusy => {
+                "wait for the advertised retry interval, then retry the idempotent request"
+            }
             Self::InvalidArguments => "correct the request arguments to the documented tool schema",
-            Self::PolicyDenied => "use an object and statement allowed by the active profile policy",
-            Self::Timeout => "narrow the request or increase an authorized timeout, then retry only if idempotent",
-            Self::RequestCancelled => "inspect the reported statement outcome before deciding whether a new request is safe",
+            Self::PolicyDenied => {
+                "use an object and statement allowed by the active profile policy"
+            }
+            Self::Timeout => {
+                "narrow the request or increase an authorized timeout, then retry only if idempotent"
+            }
+            Self::RequestCancelled => {
+                "inspect the reported statement outcome before deciding whether a new request is safe"
+            }
             Self::Transient => "retry this idempotent request once on a fresh connection",
-            Self::FlashbackRetentionExceeded | Self::SnapshotTooOld => "choose a newer SCN or timestamp, or narrow the requested history",
-            Self::FlashbackDefinitionChanged => "use a snapshot before the definition change or query the current definition",
-            Self::FlashbackNotFlashbackable => "query a local flashback-capable object without a database link",
-            Self::FlashbackCapabilityUnavailable => "use a profile/database with DBMS_FLASHBACK support; do not substitute a current read",
-            Self::Internal => "stop and report the sanitized error to the operator; do not retry a write automatically",
+            Self::FlashbackRetentionExceeded | Self::SnapshotTooOld => {
+                "choose a newer SCN or timestamp, or narrow the requested history"
+            }
+            Self::FlashbackDefinitionChanged => {
+                "use a snapshot before the definition change or query the current definition"
+            }
+            Self::FlashbackNotFlashbackable => {
+                "query a local flashback-capable object without a database link"
+            }
+            Self::FlashbackCapabilityUnavailable => {
+                "use a profile/database with DBMS_FLASHBACK support; do not substitute a current read"
+            }
+            Self::Internal => {
+                "stop and report the sanitized error to the operator; do not retry a write automatically"
+            }
         }
     }
 
@@ -265,6 +326,7 @@ impl ErrorClass {
             self,
             ErrorClass::Busy
                 | ErrorClass::AtCapacity
+                | ErrorClass::SessionBusy
                 | ErrorClass::Transient
                 | ErrorClass::Timeout
                 | ErrorClass::SnapshotTooOld
@@ -343,12 +405,25 @@ pub enum ReasonCategory {
 impl ReasonCategory {
     /// Every currently defined structured refusal category, in deterministic wire order.
     pub const ALL: [Self; 19] = [
-        Self::BlockListed, Self::CostBudgetExceeded, Self::DynamicSql, Self::EditionsNotEnabled,
-        Self::MultiStatementBatch, Self::NotEditionable, Self::OneChildEdition,
-        Self::OperatorOnlyStatement, Self::Other, Self::PlSqlBlock, Self::PolicyDenied,
-        Self::ProtectedByOls, Self::ProtectedByRas, Self::ProtectedByRedaction,
-        Self::RequiresHigherLevel, Self::SecurityFeatureVisibilityUnknown,
-        Self::TransactionControl, Self::UnbalancedBlock, Self::UnprovenSideEffect,
+        Self::BlockListed,
+        Self::CostBudgetExceeded,
+        Self::DynamicSql,
+        Self::EditionsNotEnabled,
+        Self::MultiStatementBatch,
+        Self::NotEditionable,
+        Self::OneChildEdition,
+        Self::OperatorOnlyStatement,
+        Self::Other,
+        Self::PlSqlBlock,
+        Self::PolicyDenied,
+        Self::ProtectedByOls,
+        Self::ProtectedByRas,
+        Self::ProtectedByRedaction,
+        Self::RequiresHigherLevel,
+        Self::SecurityFeatureVisibilityUnknown,
+        Self::TransactionControl,
+        Self::UnbalancedBlock,
+        Self::UnprovenSideEffect,
     ];
 
     /// Short operator-facing meaning for this structured refusal cause.
@@ -372,7 +447,9 @@ impl ReasonCategory {
             Self::ProtectedByOls => "Oracle Label Security policy protects the relation",
             Self::ProtectedByRas => "Real Application Security policy protects the relation",
             Self::ProtectedByRedaction => "Data Redaction policy protects the relation",
-            Self::SecurityFeatureVisibilityUnknown => "required security catalog evidence is unavailable",
+            Self::SecurityFeatureVisibilityUnknown => {
+                "required security catalog evidence is unavailable"
+            }
             Self::Other => "structured cause has no narrower category",
         }
     }
@@ -395,8 +472,12 @@ impl ReasonCategory {
             Self::OneChildEdition => "existing or in-flight child would cause ORA-38807",
             Self::NotEditionable => "table or data change was proposed for an edition",
             Self::EditionsNotEnabled => "schema/object EBR capability was not established",
-            Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => "protected-relation access lacks an approved policy path",
-            Self::SecurityFeatureVisibilityUnknown => "least-privilege catalog read could not prove policy status",
+            Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => {
+                "protected-relation access lacks an approved policy path"
+            }
+            Self::SecurityFeatureVisibilityUnknown => {
+                "least-privilege catalog read could not prove policy status"
+            }
             Self::Other => "no more specific structured cause was supplied",
         }
     }
@@ -405,23 +486,57 @@ impl ReasonCategory {
     #[must_use]
     pub const fn next_action(self) -> &'static str {
         match self {
-            Self::MultiStatementBatch => "submit each statement separately through the guarded tool",
-            Self::DynamicSql => "submit static SQL; put required logic in an operator-reviewed package tool",
-            Self::TransactionControl => "let the server own transaction control; remove COMMIT, ROLLBACK, SAVEPOINT, and SET TRANSACTION",
-            Self::UnbalancedBlock => "correct the block delimiters and literals, then submit one static statement",
-            Self::PlSqlBlock => "use pure static SQL or an operator-reviewed package tool instead of an inline PL/SQL block",
-            Self::RequiresHigherLevel => "request the required operating level with oracle_set_session_level",
-            Self::CostBudgetExceeded => "add a selective predicate or lower the requested row/page limit",
-            Self::BlockListed => "choose a statement that does not use the operator-blocked construct",
-            Self::UnprovenSideEffect => "use only relations and functions whose read-only closure can be proven",
-            Self::OperatorOnlyStatement => "use the authenticated operator workflow; never submit this as agent SQL",
-            Self::PolicyDenied => "use an object and statement allowed by the active profile policy",
-            Self::OneChildEdition => "retire or merge the existing child before proposing the next linear edition",
-            Self::NotEditionable => "stage only editionable views or PL/SQL units; plan table and data changes separately",
-            Self::EditionsNotEnabled => "ask the database administrator to enable editions for the exact schema and object type",
-            Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => "use a profile authorized for the protected relation or ask the policy owner for a safe access path",
-            Self::SecurityFeatureVisibilityUnknown => "ask the administrator to grant the minimum security-catalog visibility needed for proof",
-            Self::Other => "inspect the structured refusal reason and choose a documented guarded tool",
+            Self::MultiStatementBatch => {
+                "submit each statement separately through the guarded tool"
+            }
+            Self::DynamicSql => {
+                "submit static SQL; put required logic in an operator-reviewed package tool"
+            }
+            Self::TransactionControl => {
+                "let the server own transaction control; remove COMMIT, ROLLBACK, SAVEPOINT, and SET TRANSACTION"
+            }
+            Self::UnbalancedBlock => {
+                "correct the block delimiters and literals, then submit one static statement"
+            }
+            Self::PlSqlBlock => {
+                "use pure static SQL or an operator-reviewed package tool instead of an inline PL/SQL block"
+            }
+            Self::RequiresHigherLevel => {
+                "request the required operating level with oracle_set_session_level"
+            }
+            Self::CostBudgetExceeded => {
+                "add a selective predicate or lower the requested row/page limit"
+            }
+            Self::BlockListed => {
+                "choose a statement that does not use the operator-blocked construct"
+            }
+            Self::UnprovenSideEffect => {
+                "use only relations and functions whose read-only closure can be proven"
+            }
+            Self::OperatorOnlyStatement => {
+                "use the authenticated operator workflow; never submit this as agent SQL"
+            }
+            Self::PolicyDenied => {
+                "use an object and statement allowed by the active profile policy"
+            }
+            Self::OneChildEdition => {
+                "retire or merge the existing child before proposing the next linear edition"
+            }
+            Self::NotEditionable => {
+                "stage only editionable views or PL/SQL units; plan table and data changes separately"
+            }
+            Self::EditionsNotEnabled => {
+                "ask the database administrator to enable editions for the exact schema and object type"
+            }
+            Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => {
+                "use a profile authorized for the protected relation or ask the policy owner for a safe access path"
+            }
+            Self::SecurityFeatureVisibilityUnknown => {
+                "ask the administrator to grant the minimum security-catalog visibility needed for proof"
+            }
+            Self::Other => {
+                "inspect the structured refusal reason and choose a documented guarded tool"
+            }
         }
     }
 }
@@ -606,6 +721,10 @@ pub struct ErrorEnvelope {
     /// For `Busy`/`Transient`: how long to wait before retrying.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub retry_after_ms: Option<u64>,
+    /// For a pinned-session queue refusal: how long this request waited before
+    /// it was refused without reaching the Oracle driver.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub queued_ms: Option<u64>,
     /// The structured "why blocked + minimal safe rewrite" reason (K8), when the
     /// refusal came from the fail-closed guard. Additive; absent for non-guard
     /// errors and for older readers.
@@ -633,6 +752,7 @@ impl ErrorEnvelope {
             fuzzy_matches: Vec::new(),
             next_steps: vec![error_class.next_action().to_owned()],
             retry_after_ms: None,
+            queued_ms: None,
             structured_reason: None,
             statement_outcome: None,
             cancel_outcome: None,
@@ -674,6 +794,13 @@ impl ErrorEnvelope {
     #[must_use]
     pub fn with_retry_after_ms(mut self, ms: u64) -> Self {
         self.retry_after_ms = Some(ms);
+        self
+    }
+
+    /// Attach the measured pinned-session queue wait (milliseconds).
+    #[must_use]
+    pub fn with_queued_ms(mut self, ms: u64) -> Self {
+        self.queued_ms = Some(ms);
         self
     }
 
@@ -1463,7 +1590,9 @@ mod tests {
     fn refusal_envelopes_never_have_empty_next_steps() {
         for class in ErrorClass::ALL {
             assert!(
-                !ErrorEnvelope::new(class, "synthetic refusal").next_steps.is_empty(),
+                !ErrorEnvelope::new(class, "synthetic refusal")
+                    .next_steps
+                    .is_empty(),
                 "{class:?}"
             );
         }

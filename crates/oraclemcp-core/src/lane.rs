@@ -2131,6 +2131,61 @@ fn audit_lane_finalization_timeout(name: &str, auditor: Option<&Auditor>) -> boo
     }
 }
 
+const MIN_STATEMENT_START_BUDGET: Duration = Duration::from_millis(250);
+
+fn session_busy_outcome(
+    name: &str,
+    enqueued_at: Instant,
+    profile_timeout: Duration,
+    auditor: Option<&Auditor>,
+) -> DispatchOutcome {
+    let queued_ms = u64::try_from(enqueued_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+    // The active command has just released the lane.  A fresh attempt needs a
+    // non-zero scheduling window, bounded by the active profile's own call
+    // ceiling; advertising zero would make a safe retry impossible.
+    let retry_after_ms = u64::try_from(MIN_STATEMENT_START_BUDGET.min(profile_timeout).as_millis())
+        .unwrap_or(u64::MAX)
+        .max(1);
+    if let Some(auditor) = auditor {
+        let draft = AuditEntryDraft {
+            subject: AuditSubject::new("lane", name),
+            db_evidence: None,
+            cancel: None,
+            result_masking: None,
+            tool: "session_busy".to_owned(),
+            sql: format!("SESSION_BUSY queued_ms={queued_ms} retry_after_ms={retry_after_ms}"),
+            danger_level: "READ_ONLY".to_owned(),
+            decision: AuditDecision::Blocked,
+            rows_affected: None,
+            outcome: AuditOutcome::Failed,
+        };
+        if let Err(error) = auditor.append(&draft, audit_timestamp(), true) {
+            tracing::error!(lane = %name, %error, "failed to append session-busy audit record");
+        }
+    }
+    Outcome::Err(
+        ErrorEnvelope::new(
+            ErrorClass::SessionBusy,
+            "pinned session remained busy until this request's start budget expired",
+        )
+        .with_queued_ms(queued_ms)
+        .with_retry_after_ms(retry_after_ms),
+    )
+}
+
+fn session_busy_before_start(
+    budget: &RequestBudget,
+    cx: &Cx,
+    name: &str,
+    enqueued_at: Instant,
+    profile_timeout: Duration,
+    auditor: Option<&Auditor>,
+) -> Option<DispatchOutcome> {
+    budget
+        .is_exhausted_at(cx.now())
+        .then(|| session_busy_outcome(name, enqueued_at, profile_timeout, auditor))
+}
+
 fn audit_timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -2209,6 +2264,17 @@ fn run_lane_loop_with_factory(
                     let factory_budget = request_budget.tighten_timeout(
                         tool_request_timeout_ceiling(config.factory_request_timeout, &args),
                     );
+                    if let Some(outcome) = session_busy_before_start(
+                        &factory_budget,
+                        &cx,
+                        &name,
+                        enqueued_at,
+                        config.factory_request_timeout,
+                        panic_auditor,
+                    ) {
+                        let _ = reply.send_blocking(outcome);
+                        return;
+                    }
                     if let Some(reason) = caller.reason() {
                         let _ = reply.send_blocking(Outcome::Cancelled(reason));
                         return;
@@ -2262,6 +2328,17 @@ fn run_lane_loop_with_factory(
                     };
                     let dispatch_budget = request_budget
                         .tighten_timeout(tool_request_timeout_ceiling(profile_timeout, &args));
+                    if let Some(outcome) = session_busy_before_start(
+                        &dispatch_budget,
+                        &cx,
+                        &name,
+                        enqueued_at,
+                        profile_timeout,
+                        panic_auditor,
+                    ) {
+                        let _ = reply.send_blocking(outcome);
+                        return;
+                    }
                     let borrowed_context = context
                         .as_dispatch_context()
                         .with_request_budget(&dispatch_budget);
@@ -2317,6 +2394,17 @@ fn run_lane_loop_with_factory(
                     let factory_budget = request_budget.tighten_timeout(
                         tool_request_timeout_ceiling(config.factory_request_timeout, &args),
                     );
+                    if let Some(outcome) = session_busy_before_start(
+                        &factory_budget,
+                        &cx,
+                        &name,
+                        enqueued_at,
+                        config.factory_request_timeout,
+                        panic_auditor,
+                    ) {
+                        let _ = reply.send_blocking(outcome);
+                        return;
+                    }
                     if let Some(reason) = caller.reason() {
                         let _ = reply.send_blocking(Outcome::Cancelled(reason));
                         return;
@@ -2365,6 +2453,17 @@ fn run_lane_loop_with_factory(
                     };
                     let dispatch_budget = request_budget
                         .tighten_timeout(tool_request_timeout_ceiling(profile_timeout, &args));
+                    if let Some(outcome) = session_busy_before_start(
+                        &dispatch_budget,
+                        &cx,
+                        &name,
+                        enqueued_at,
+                        profile_timeout,
+                        panic_auditor,
+                    ) {
+                        let _ = reply.send_blocking(outcome);
+                        return;
+                    }
                     let borrowed_context = context
                         .as_dispatch_context()
                         .with_request_budget(&dispatch_budget);
@@ -4525,7 +4624,7 @@ mod tests {
     }
 
     #[test]
-    fn lane_admission_timestamp_includes_mailbox_wait() {
+    fn issue50_queued_request_runs_when_budget_remains() {
         let (first_entered_tx, first_entered_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
         let (queue_wait_tx, queue_wait_rx) = std_mpsc::channel();
@@ -4589,6 +4688,81 @@ mod tests {
             deadline_remaining_nanos <= 175_000_000,
             "rebased caller deadline must lose mailbox time; {deadline_remaining_nanos}ns remained"
         );
+    }
+
+    #[test]
+    fn issue50_second_request_gets_session_busy_not_zero_ms() {
+        let (entered_tx, entered_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let lane = LaneRuntime::spawn(
+            "issue50-session-busy",
+            Arc::new(BlockingDispatch {
+                entered: entered_tx,
+                release: Mutex::new(release_rx),
+            }),
+            2,
+        );
+        let first_lane = lane.clone();
+        let first = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                let cx = Cx::current().expect("bridge installs first caller Cx");
+                first_lane
+                    .dispatch(&cx, DispatchContext::default(), "first", Value::Null)
+                    .await
+            })
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("first command blocks the lane");
+
+        let queued_lane = lane.clone();
+        let queued_cx = testing_cx_with_timeout(Duration::from_millis(100));
+        let queued = thread::spawn(move || {
+            block_on_lane_bridge(async move {
+                queued_lane
+                    .dispatch(
+                        &queued_cx,
+                        DispatchContext::default(),
+                        "queued",
+                        Value::Null,
+                    )
+                    .await
+            })
+        });
+        wait_for_queued_lane_command(&lane);
+        thread::sleep(Duration::from_millis(150));
+        release_tx.send(()).expect("release first command");
+        assert!(matches!(
+            first.join().expect("first joined"),
+            Outcome::Ok(_)
+        ));
+        let Outcome::Err(error) = queued.join().expect("queued joined") else {
+            panic!("expired queued request must return SESSION_BUSY");
+        };
+        assert_eq!(error.error_class, ErrorClass::SessionBusy);
+        assert!(error.retry_after_ms.is_some_and(|ms| ms > 0));
+        assert!(error.queued_ms.is_some_and(|ms| ms >= 100));
+        assert!(
+            entered_rx.recv_timeout(Duration::from_millis(250)).is_err(),
+            "SESSION_BUSY request must never enter the dispatcher"
+        );
+    }
+
+    #[test]
+    fn issue50_retry_after_is_positive_and_bounded() {
+        let started = Instant::now();
+        let Outcome::Err(short) =
+            session_busy_outcome("issue50", started, Duration::from_millis(100), None)
+        else {
+            panic!("busy helper must return an error envelope");
+        };
+        assert_eq!(short.retry_after_ms, Some(100));
+        let Outcome::Err(normal) =
+            session_busy_outcome("issue50", started, Duration::from_secs(30), None)
+        else {
+            panic!("busy helper must return an error envelope");
+        };
+        assert_eq!(normal.retry_after_ms, Some(250));
     }
 
     #[cfg(debug_assertions)]
