@@ -4690,8 +4690,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn issue50_second_request_gets_session_busy_not_zero_ms() {
+    fn assert_issue50_session_busy_executes_nothing() {
         let (entered_tx, entered_rx) = std_mpsc::channel();
         let (release_tx, release_rx) = std_mpsc::channel();
         let lane = LaneRuntime::spawn(
@@ -4746,6 +4745,16 @@ mod tests {
             entered_rx.recv_timeout(Duration::from_millis(250)).is_err(),
             "SESSION_BUSY request must never enter the dispatcher"
         );
+    }
+
+    #[test]
+    fn issue50_second_request_gets_session_busy_not_zero_ms() {
+        assert_issue50_session_busy_executes_nothing();
+    }
+
+    #[test]
+    fn issue50_session_busy_executes_nothing() {
+        assert_issue50_session_busy_executes_nothing();
     }
 
     #[test]
