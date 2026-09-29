@@ -6209,14 +6209,25 @@ fn run_audit_report(
         return ExitCode::from(1);
     }
     let output = if robot_json {
-        serde_json::json!({
+        let mut payload = serde_json::json!({
             "kind": "oraclemcp_audit_report",
             "format": format.as_str(),
             "file_digest": digest,
             "verification": report.verdict.status(),
             "report": report.content,
-        })
-        .to_string()
+        });
+        if let Some(code) = report.verdict.error_code()
+            && let Some(object) = payload.as_object_mut()
+        {
+            object.insert(
+                "error".to_owned(),
+                serde_json::json!({
+                    "code": code,
+                    "message": "audit hash chain verification failed; report contains no timeline",
+                }),
+            );
+        }
+        payload.to_string()
     } else if out.is_some() {
         format!("audit report written: {}", out.unwrap().display())
     } else {

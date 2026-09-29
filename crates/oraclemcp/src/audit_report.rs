@@ -53,6 +53,14 @@ impl AuditReportVerdict {
             Self::Broken { .. } => "broken",
         }
     }
+
+    /// Stable typed refusal emitted alongside a rendered broken report.
+    pub(crate) const fn error_code(&self) -> Option<&'static str> {
+        match self {
+            Self::Verified { .. } => None,
+            Self::Broken { .. } => Some("ORACLEMCP_AUDIT_CHAIN_BROKEN"),
+        }
+    }
 }
 
 /// Inputs whose provenance has already been established by the command layer.
@@ -751,5 +759,9 @@ mod tests {
         ));
         assert!(report.content.contains("CHAIN BROKEN at seq 1"));
         assert!(!report.content.contains("oracle_execute"));
+        assert_eq!(
+            report.verdict.error_code(),
+            Some("ORACLEMCP_AUDIT_CHAIN_BROKEN")
+        );
     }
 }
