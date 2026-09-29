@@ -31,6 +31,60 @@ profile permits administration. It drives the served stdio transport, classifies
 every advertised tool, and writes only sanitized local issue drafts. Exit `0`
 means clean, `2` means a defect, and `3` means environment findings only.
 
+## Refusal catalogue
+
+The following table is generated from the server's closed error and refusal
+vocabularies. It names only guarded next actions; it never suggests bypassing
+the classifier or policy.
+
+<!-- generated:refusals -->
+| Kind | Wire name | Meaning | Typical cause | Safe next action | Suggested tool |
+| --- | --- | --- | --- | --- | --- |
+| error class | `AT_CAPACITY` | service lane or connection capacity is exhausted | bounded service admission limit | wait for the advertised retry interval, then retry the idempotent request | `—` |
+| error class | `BUSY` | admission control is temporarily busy | bounded service admission limit | wait for the advertised retry interval, then retry the idempotent request | `—` |
+| error class | `CHALLENGE_REQUIRED` | operator confirmation has not completed | required step-up task is pending | complete the required operator confirmation before retrying | `oracle_set_session_level` |
+| error class | `CONNECTION_FAILED` | Oracle connection could not be established or was lost | network, credentials, or unavailable database | connect a configured profile, then retry the read once | `oracle_connect` |
+| error class | `FLASHBACK_CAPABILITY_UNAVAILABLE` | database lacks required DBMS_FLASHBACK capability | selected database/version lacks DBMS_FLASHBACK | use a profile/database with DBMS_FLASHBACK support; do not substitute a current read | `—` |
+| error class | `FLASHBACK_DEFINITION_CHANGED` | flashback crossed a definition change | object definition changed after requested point | use a snapshot before the definition change or query the current definition | `—` |
+| error class | `FLASHBACK_NOT_FLASHBACKABLE` | object or route cannot serve flashback query | remote or unsupported flashback object | query a local flashback-capable object without a database link | `—` |
+| error class | `FLASHBACK_RETENTION_EXCEEDED` | requested flashback point is outside retention | requested history is older than retained undo | choose a newer SCN or timestamp, or narrow the requested history | `—` |
+| error class | `FORBIDDEN_STATEMENT` | fail-closed guard refused the statement | unprovable side effect or disallowed SQL construct | submit a provably read-only static statement or use a reviewed guarded tool | `—` |
+| error class | `INSUFFICIENT_PRIVILEGE` | connected account lacks a required privilege | missing least-privilege Oracle grant | ask the database administrator for the least-privilege grant named by the refusal | `—` |
+| error class | `INTERNAL` | unexpected sanitized server failure | sanitized unexpected server condition | stop and report the sanitized error to the operator; do not retry a write automatically | `—` |
+| error class | `INVALID_ARGUMENTS` | tool arguments failed validation | request does not match the documented schema | correct the request arguments to the documented tool schema | `—` |
+| error class | `LEASE_REQUIRED` | operation needs an active stateful session lease | stateful tool invoked outside a leased session | start or resume a stateful session before using this operation | `—` |
+| error class | `OBJECT_NOT_FOUND` | referenced object is absent or invisible | misspelled, dropped, or privilege-hidden object | inspect the visible schema, then use an exact visible object name | `oracle_schema_inspect` |
+| error class | `OPERATING_LEVEL_TOO_LOW` | session operating level is too low | read-only or lower-level session cap | request the required operating level with oracle_set_session_level; operator confirmation is required | `oracle_set_session_level` |
+| error class | `POLICY_DENIED` | active profile policy denied the request | protected profile or schema policy restriction | use an object and statement allowed by the active profile policy | `—` |
+| error class | `REPREVIEW_REQUIRED` | requested action differs from its approved preview | SQL, binds, or execution modes changed after preview | preview the exact SQL, binds, and modes again before confirmation | `—` |
+| error class | `REQUEST_CANCELLED` | client cancelled an in-flight request | caller cancelled before terminal completion | inspect the reported statement outcome before deciding whether a new request is safe | `—` |
+| error class | `RUNTIME_STATE_REQUIRED` | operation needs unavailable live runtime state | offline invocation or disconnected profile | connect a configured profile, then retry the read once | `oracle_connect` |
+| error class | `SESSION_BUSY` | the pinned session could not serve this request before its deadline | pinned-session queue wait exhausted the request's start budget | wait for the advertised retry interval, then retry the idempotent request | `—` |
+| error class | `SNAPSHOT_TOO_OLD` | Oracle undo snapshot aged out | requested history is older than retained undo | choose a newer SCN or timestamp, or narrow the requested history | `—` |
+| error class | `TRANSIENT` | driver classified an Oracle condition as transient | recoverable connection or package-state condition | retry this idempotent request once on a fresh connection | `—` |
+| error class | `SYNTAX_ERROR` | statement is not valid SQL or PL/SQL | invalid grammar or unsupported statement form | submit one syntactically valid static SQL statement | `—` |
+| error class | `TIMEOUT` | call exceeded its allowed deadline | query or operation exceeded configured time budget | narrow the request or increase an authorized timeout, then retry only if idempotent | `—` |
+| reason category | `BLOCK_LISTED` | statement matches an operator block-list rule | operator-curated forbidden pattern matched | choose a statement that does not use the operator-blocked construct | `—` |
+| reason category | `COST_BUDGET_EXCEEDED` | estimated read cost exceeds configured budget | optimizer estimate exceeds profile cost ceiling | add a selective predicate or lower the requested row/page limit | `—` |
+| reason category | `DYNAMIC_SQL` | dynamic SQL or side-effecting API was detected | EXECUTE IMMEDIATE, DBMS_SQL, UTL, scheduler, or string-built SQL | submit static SQL; put required logic in an operator-reviewed package tool | `—` |
+| reason category | `EDITIONS_NOT_ENABLED` | edition support is not proven for object/schema | schema/object EBR capability was not established | ask the database administrator to enable editions for the exact schema and object type | `—` |
+| reason category | `MULTI_STATEMENT_BATCH` | more than one top-level statement was supplied | semicolon-separated or trailing top-level SQL | submit each statement separately through the guarded tool | `—` |
+| reason category | `NOT_EDITIONABLE` | edition workflow targets shared table or data state | table or data change was proposed for an edition | stage only editionable views or PL/SQL units; plan table and data changes separately | `—` |
+| reason category | `ONE_CHILD_EDITION` | edition parent already has a child | existing or in-flight child would cause ORA-38807 | retire or merge the existing child before proposing the next linear edition | `—` |
+| reason category | `OPERATOR_ONLY_STATEMENT` | operation belongs to authenticated operator workflow | database-wide default-edition action | use the authenticated operator workflow; never submit this as agent SQL | `—` |
+| reason category | `OTHER` | structured cause has no narrower category | no more specific structured cause was supplied | inspect the structured refusal reason and choose a documented guarded tool | `—` |
+| reason category | `PL_SQL_BLOCK` | inline PL/SQL cannot be safely analysed | benign-looking inline procedural block remains unprovable | use pure static SQL or an operator-reviewed package tool instead of an inline PL/SQL block | `—` |
+| reason category | `POLICY_DENIED` | active SQL policy denied the statement | Arc N profile SQL restriction | use an object and statement allowed by the active profile policy | `—` |
+| reason category | `PROTECTED_BY_OLS` | Oracle Label Security policy protects the relation | protected-relation access lacks an approved policy path | use a profile authorized for the protected relation or ask the policy owner for a safe access path | `—` |
+| reason category | `PROTECTED_BY_RAS` | Real Application Security policy protects the relation | protected-relation access lacks an approved policy path | use a profile authorized for the protected relation or ask the policy owner for a safe access path | `—` |
+| reason category | `PROTECTED_BY_REDACTION` | Data Redaction policy protects the relation | protected-relation access lacks an approved policy path | use a profile authorized for the protected relation or ask the policy owner for a safe access path | `—` |
+| reason category | `REQUIRES_HIGHER_LEVEL` | statement needs a higher operating level | write, DDL, or DCL exceeds current session cap | request the required operating level with oracle_set_session_level | `—` |
+| reason category | `SECURITY_FEATURE_VISIBILITY_UNKNOWN` | required security catalog evidence is unavailable | least-privilege catalog read could not prove policy status | ask the administrator to grant the minimum security-catalog visibility needed for proof | `—` |
+| reason category | `TRANSACTION_CONTROL` | caller attempted server-owned transaction control | COMMIT, ROLLBACK, SAVEPOINT, or SET TRANSACTION | let the server own transaction control; remove COMMIT, ROLLBACK, SAVEPOINT, and SET TRANSACTION | `—` |
+| reason category | `UNBALANCED_BLOCK` | block delimiters or literals do not lex cleanly | unterminated literal or BEGIN/END desynchronization | correct the block delimiters and literals, then submit one static statement | `—` |
+| reason category | `UNPROVEN_SIDE_EFFECT` | read-only closure could not be proven | function, view, or base object proof is incomplete | use only relations and functions whose read-only closure can be proven | `—` |
+<!-- /generated:refusals -->
+
 ---
 
 ## 1. The pinned nightly toolchain is build-time-only

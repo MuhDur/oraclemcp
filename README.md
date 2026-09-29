@@ -107,6 +107,9 @@ Oracle ships an official MCP built into SQLcl; ours is independent. On the axis 
 
 ## Safety model
 
+When a guarded request is refused, use the generated [refusal catalogue](docs/operations.md#refusal-catalogue)
+for its typed safe next action; it never recommends bypassing the guard.
+
 The core invariant is a **fail-closed SQL guard** — not "read-only forever." Operating levels form a ladder, `READ_ONLY < READ_WRITE < DDL < ADMIN`, surfaced through `oracle_execute`, `oracle_compile_object`, `oracle_create_or_replace`, `oracle_patch_source`, and `oracle_set_session_level`. Read-only is the **default** and the cap for unconfigured or `protected` profiles; a profile's `max_level` may permit escalation up to `ADMIN`. Every escalation is guarded:
 
 - a **preview → confirmation-token** step-up before any non-read statement runs,

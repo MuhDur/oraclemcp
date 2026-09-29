@@ -76,7 +76,7 @@
         "result": {
           "content": [
             {
-              "text": "{\"error_class\":\"OBJECT_NOT_FOUND\",\"isError\":true,\"message\":\"ORA-00942: table or view does not exist\",\"ora_code\":942,\"suggested_tool\":\"oracle_schema_inspect\"}",
+              "text": "{\"error_class\":\"OBJECT_NOT_FOUND\",\"isError\":true,\"message\":\"ORA-00942: table or view does not exist\",\"next_steps\":[\"inspect the visible schema, then use an exact visible object name\"],\"ora_code\":942,\"suggested_tool\":\"oracle_schema_inspect\"}",
               "type": "text"
             }
           ],
@@ -85,6 +85,9 @@
             "error_class": "OBJECT_NOT_FOUND",
             "isError": true,
             "message": "ORA-00942: table or view does not exist",
+            "next_steps": [
+              "inspect the visible schema, then use an exact visible object name"
+            ],
             "ora_code": 942,
             "suggested_tool": "oracle_schema_inspect"
           }

@@ -12,6 +12,7 @@
 
 use oraclemcp::registry;
 use oraclemcp_core::min_visible_level_for_tool;
+use oraclemcp_error::{ErrorClass, ReasonCategory};
 
 pub(crate) fn setup_profiles_template(profile: &str, credential_env: &str) -> String {
     format!(
@@ -242,6 +243,65 @@ pub(crate) fn config_text() -> String {
         ));
     }
     out
+}
+
+fn refusal_catalogue_table() -> String {
+    let mut out = String::from(
+        "| Kind | Wire name | Meaning | Typical cause | Safe next action | Suggested tool |\n| --- | --- | --- | --- | --- | --- |\n",
+    );
+    for class in ErrorClass::ALL {
+        let wire_value = serde_json::to_value(class).expect("error class serializes");
+        let wire = wire_value.as_str().expect("error class wire string");
+        let tool = class.default_suggested_tool().unwrap_or("—");
+        out.push_str(&format!(
+            "| error class | `{wire}` | {} | {} | {} | `{tool}` |\n",
+            markdown_cell(class.meaning()),
+            markdown_cell(class.typical_cause()),
+            markdown_cell(class.next_action())
+        ));
+    }
+    for category in ReasonCategory::ALL {
+        let wire_value = serde_json::to_value(category).expect("reason category serializes");
+        let wire = wire_value.as_str().expect("reason category wire string");
+        out.push_str(&format!(
+            "| reason category | `{wire}` | {} | {} | {} | `—` |\n",
+            markdown_cell(category.meaning()),
+            markdown_cell(category.typical_cause()),
+            markdown_cell(category.next_action())
+        ));
+    }
+    out
+}
+
+/// The closed refusal vocabulary rendered for operators and docs generation.
+pub(crate) fn refusals_markdown() -> String {
+    format!(
+        "<!-- generated:refusals -->\n{}<!-- /generated:refusals -->\n",
+        refusal_catalogue_table()
+    )
+}
+
+pub(crate) fn refusals_text() -> String {
+    format!("Refusal catalogue\n\n{}", refusal_catalogue_table())
+}
+
+pub(crate) fn refusals_json() -> serde_json::Value {
+    serde_json::json!({
+        "ok": true,
+        "error_classes": ErrorClass::ALL.into_iter().map(|class| serde_json::json!({
+            "name": serde_json::to_value(class).expect("error class serializes"),
+            "meaning": class.meaning(),
+            "typical_cause": class.typical_cause(),
+            "next_action": class.next_action(),
+            "suggested_tool": class.default_suggested_tool(),
+        })).collect::<Vec<_>>(),
+        "reason_categories": ReasonCategory::ALL.into_iter().map(|category| serde_json::json!({
+            "name": serde_json::to_value(category).expect("reason category serializes"),
+            "meaning": category.meaning(),
+            "typical_cause": category.typical_cause(),
+            "next_action": category.next_action(),
+        })).collect::<Vec<_>>(),
+    })
 }
 
 /// The agent-facing tool listing embedded in `robot-docs guide`, so the guide
@@ -909,6 +969,14 @@ mod tests {
             "config reference drifted; run scripts/docs_generate.sh --write"
         );
 
+        let operations = std::fs::read_to_string(root.join("docs/operations.md"))
+            .expect("docs/operations.md readable");
+        assert_eq!(
+            extract_block(&operations, "refusals"),
+            extract_block(&refusals_markdown(), "refusals"),
+            "refusal catalogue drifted; run scripts/docs_generate.sh --write"
+        );
+
         #[cfg(feature = "plsql-intelligence")]
         {
             let readme =
@@ -925,6 +993,34 @@ mod tests {
                 "README alias table drifted; run scripts/docs_generate.sh --write"
             );
         }
+    }
+
+    #[test]
+    fn refusal_catalogue_lists_every_class_and_category() {
+        let markdown = refusals_markdown();
+        for class in ErrorClass::ALL {
+            let wire = serde_json::to_value(class).expect("class wire value");
+            assert!(markdown.contains(wire.as_str().expect("class string")));
+            assert!(markdown.contains(class.next_action()));
+            assert!(markdown.contains(class.meaning()));
+            assert!(markdown.contains(class.typical_cause()));
+        }
+        for category in ReasonCategory::ALL {
+            let wire = serde_json::to_value(category).expect("category wire value");
+            assert!(markdown.contains(wire.as_str().expect("category string")));
+            assert!(markdown.contains(category.next_action()));
+            assert!(markdown.contains(category.meaning()));
+            assert!(markdown.contains(category.typical_cause()));
+        }
+    }
+
+    #[test]
+    fn refusal_catalogue_golden() {
+        assert_eq!(
+            refusals_markdown(),
+            include_str!("../../../tests/golden/robot_docs/refusals.md"),
+            "refusal catalogue golden drifted; render it with robot-docs refusals --markdown"
+        );
     }
 
     /// The agent guide must name every registered tool (it previously listed

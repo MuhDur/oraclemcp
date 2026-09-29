@@ -494,6 +494,13 @@ pub(crate) enum RobotDocsCommand {
         #[arg(long)]
         markdown: bool,
     },
+    /// Render the closed refusal catalogue from the error types (Markdown with
+    /// --markdown).
+    Refusals {
+        /// Emit the marked Markdown block for scripts/docs_generate.sh.
+        #[arg(long)]
+        markdown: bool,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -503,4 +510,22 @@ pub(crate) enum CompletionShell {
     Fish,
     #[value(name = "powershell", alias = "pwsh", alias = "power-shell")]
     Powershell,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, Command, RobotDocsCommand};
+    use clap::Parser;
+
+    #[test]
+    fn robot_docs_refusals_command_parses() {
+        let cli = Cli::try_parse_from(["oraclemcp", "robot-docs", "refusals", "--markdown"])
+            .expect("parse robot-docs refusals");
+        assert!(matches!(
+            cli.command,
+            Some(Command::RobotDocs {
+                command: Some(RobotDocsCommand::Refusals { markdown: true })
+            })
+        ));
+    }
 }

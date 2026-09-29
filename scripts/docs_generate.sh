@@ -111,6 +111,7 @@ mkdir -p "$BLOCK_DIR"
 render_all() {
   "$BIN" robot-docs tools --markdown
   "$BIN" robot-docs config --markdown
+  "$BIN" robot-docs refusals --markdown
 }
 
 split_render() {
@@ -184,8 +185,8 @@ compare_file() {
 }
 
 # target file -> generated-line prefix ("" or "# " for the commented TOML copy).
-TARGET_FILES=(README.md docs/configuration.md oraclemcp.example.toml)
-TARGET_PREFIXES=("" "" "# ")
+TARGET_FILES=(README.md docs/configuration.md docs/operations.md oraclemcp.example.toml)
+TARGET_PREFIXES=("" "" "" "# ")
 
 for file in "${TARGET_FILES[@]}"; do
   [ -f "$file" ] || { echo "docs-generate: missing target file $file" >&2; exit 2; }
@@ -195,6 +196,7 @@ done
 # Prove the comparison actually detects drift before trusting a pass.
 selftest() {
   local clean="README.md" tampered="$TMP_DIR/README.tampered.md"
+  local operations="docs/operations.md" tampered_refusals="$TMP_DIR/operations.tampered.md"
   local default_renderer="$TMP_DIR/default-renderer"
   local no_engine_renderer="$TMP_DIR/no-engine-renderer" no_engine_output
   local explicit_target="$TMP_DIR/explicit-target" explicit_renderer
@@ -252,7 +254,15 @@ selftest() {
     echo "docs-generate: selftest failed: a tampered generated block was accepted" >&2
     return 1
   fi
-  echo "docs-generate: selftest OK (default renderer required, drift detected, clean render accepted)"
+  # The refusal catalogue has its own generated target. Plant a stale header
+  # there so this test proves adding it did not merely make `render_all` wider.
+  sed 's/^| Kind | Wire name | Meaning | Typical cause | Safe next action | Suggested tool |$/& TAMPERED/' \
+    "$operations" > "$tampered_refusals"
+  if compare_file "$tampered_refusals" "" >/dev/null; then
+    echo "docs-generate: selftest failed: a stale refusal catalogue was accepted" >&2
+    return 1
+  fi
+  echo "docs-generate: selftest OK (default renderer required, tools/refusals drift detected, clean render accepted)"
 }
 
 case "$mode" in
@@ -279,7 +289,7 @@ case "$mode" in
       echo "docs-generate: DRIFT — run 'bash scripts/docs_generate.sh --write' and commit the result" >&2
       exit 1
     fi
-    echo "docs-generate: OK (README.md, docs/configuration.md, oraclemcp.example.toml match the registry/config types)"
+    echo "docs-generate: OK (README.md, docs/configuration.md, docs/operations.md, oraclemcp.example.toml match the registry/config types)"
     ;;
   --selftest)
     selftest
