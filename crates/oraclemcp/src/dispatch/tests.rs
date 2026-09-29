@@ -8808,7 +8808,7 @@ fn two_independent_services_reconcile_same_parent_create_against_oracle() {
 }
 
 #[test]
-fn edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionary_oracle_io() {
+fn edition_service_owned_reservation_refuses_a_second_session_before_dictionary_oracle_io() {
     let create = "CREATE EDITION competing_child AS CHILD OF inflight_parent";
     let parent = match parse_edition_lifecycle_sql(create) {
         EditionLifecycleParse::Parsed(EditionLifecycleSql::CreateChild { parent, .. }) => parent,
@@ -8821,17 +8821,24 @@ fn edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionar
         },
     };
     let state = Arc::new(EditionLifecycleState::default());
-    let dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
+    // Stateful HTTP creates a dispatcher for each session. Both sessions must
+    // receive the one board owned by their serving process; otherwise each
+    // session could pass the advisory preflight and race only at Oracle.
+    let service_reservations = Arc::new(SyncMutex::new(HashSet::new()));
+    let first_session = edition_lifecycle_dispatcher(Arc::clone(&state))
+        .with_edition_creation_reservations(Arc::clone(&service_reservations));
+    let second_session = edition_lifecycle_dispatcher(Arc::clone(&state))
+        .with_edition_creation_reservations(Arc::clone(&service_reservations));
     let _first_proposal = reserve_edition_child_slot(
         &parent,
         &pdb_scope,
         Some("d2-edition-test"),
-        &dispatcher.edition_creation_reservations,
+        &first_session.edition_creation_reservations,
     )
     .expect("first proposal reserves the parent's only child slot");
 
-    let error = execute_confirmed_edition_sql(&dispatcher, create)
-        .expect_err("an in-flight first proposal owns the only child slot");
+    let error = execute_confirmed_edition_sql(&second_session, create)
+        .expect_err("an in-flight proposal in another served session owns the only child slot");
     assert_eq!(
         error
             .structured_reason
