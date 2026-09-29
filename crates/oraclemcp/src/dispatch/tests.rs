@@ -3109,13 +3109,13 @@ impl OracleConnection for EditionLifecycleMock {
             // barrier. This models two independent services that both observe
             // the same empty parent at preflight, then race at CREATE.
             let child_already_exists = self.state.child_already_exists.load(Ordering::SeqCst);
-            if let Some(barrier) = self
+            let barrier = self
                 .state
                 .create_preflight_barrier
                 .lock()
                 .expect("edition race barrier mutex")
-                .as_ref()
-            {
+                .clone();
+            if let Some(barrier) = barrier {
                 barrier.wait();
             }
             if child_already_exists {
@@ -8757,26 +8757,53 @@ fn edition_second_child_is_refused_before_oracle_with_a_typed_one_child_envelope
 #[test]
 fn two_independent_services_reconcile_same_parent_create_against_oracle() {
     let state = Arc::new(EditionLifecycleState::default());
+    *state
+        .create_preflight_barrier
+        .lock()
+        .expect("edition race barrier mutex") = Some(Arc::new(Barrier::new(2)));
     let first_dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
     let second_dispatcher = edition_lifecycle_dispatcher(Arc::clone(&state));
-    execute_confirmed_edition_sql(
-        &first_dispatcher,
-        "CREATE EDITION first_child AS CHILD OF shared_parent",
-    )
-    .expect("the first service creates the sole child");
-    let loser = execute_confirmed_edition_sql(
-        &second_dispatcher,
-        "CREATE EDITION second_child AS CHILD OF shared_parent",
-    )
-    .expect_err("the second independent service must reconcile against Oracle");
+    let start = Arc::new(Barrier::new(3));
+    let first_start = Arc::clone(&start);
+    let first = std::thread::spawn(move || {
+        first_start.wait();
+        execute_confirmed_edition_sql(
+            &first_dispatcher,
+            "CREATE EDITION first_child AS CHILD OF shared_parent",
+        )
+    });
+    let second_start = Arc::clone(&start);
+    let second = std::thread::spawn(move || {
+        second_start.wait();
+        execute_confirmed_edition_sql(
+            &second_dispatcher,
+            "CREATE EDITION second_child AS CHILD OF shared_parent",
+        )
+    });
+    start.wait();
+    let first = first.join().expect("first service thread");
+    let second = second.join().expect("second service thread");
     assert!(
-        loser.ora_code == Some(38_807),
-        "the database's one-child rule is authoritative: {loser:?}"
+        first.is_ok() ^ second.is_ok(),
+        "one service wins: {first:?} / {second:?}"
+    );
+    let loser = first
+        .err()
+        .or(second.err())
+        .expect("one service loses at Oracle");
+    assert_eq!(
+        loser.error_class,
+        ErrorClass::ConnectionFailed,
+        "DDL's uncertain terminal boundary quarantines the losing session: {loser:?}"
+    );
+    assert!(
+        loser.message.contains("ORA-38807"),
+        "the authoritative Oracle rejection is preserved in the terminal diagnostic: {loser:?}"
     );
     assert_eq!(
         state.executed.lock().expect("edition execute mutex").len(),
-        1,
-        "the second service reads the shared Oracle dictionary and never creates a fork"
+        2,
+        "both independent services reach CREATE; Oracle, not a mocked preflight, resolves the race"
     );
 }
 
