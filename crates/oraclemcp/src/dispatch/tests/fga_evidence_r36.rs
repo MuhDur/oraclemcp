@@ -938,3 +938,55 @@ fn startup_security_feature_evidence_policy_is_installed_only_on_explicit_strict
         }
     }
 }
+
+#[test]
+fn protected_profile_records_unknown_security_evidence_without_strict_opt_in() {
+    let config = OracleMcpConfig::from_toml_str(
+        r#"
+        [[profiles]]
+        name = "protected"
+        connect_string = "protected:1521/svc"
+        protected = true
+        max_level = "READ_ONLY"
+        require_security_feature_evidence = false
+        "#,
+    )
+    .expect("protected profile config");
+    let state = Arc::new(SemanticGuardState::default());
+    *state
+        .security_catalog_unreadable
+        .lock()
+        .expect("security catalog fixture lock") = true;
+    let sink = Arc::new(MemoryAuditSink::new());
+    let signing_key = SigningKey::new(
+        "r36-protected-test-key",
+        b"r36-protected-security-evidence-audit-key".to_vec(),
+    )
+    .expect("valid test key");
+    let auditor = Arc::new(oraclemcp_audit::Auditor::new(
+        Box::new(SharedSink(Arc::clone(&sink))),
+        signing_key.clone(),
+    ));
+    let dispatcher = OracleDispatcher::new_switchable(
+        Box::new(SemanticGuardMock {
+            state: Arc::clone(&state),
+        }),
+        Some("protected".to_owned()),
+        default_read_only_level(),
+        Arc::new(|_cx, _generation| Box::pin(async move { Ok(session_bundle(OneRowMock)) })),
+    )
+    .with_profile_drain_state(ProfileDrainState::from_config(config))
+    .with_auditor(auditor);
+
+    let result = dispatcher
+        .dispatch("oracle_query", json!({"sql": READ}))
+        .expect("protected READ_ONLY profile admits unknown evidence under R36");
+    assert_eq!(result["security_feature_evidence"], json!("unavailable"));
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
+    let records = sink.records();
+    let marker = records
+        .iter()
+        .find(|record| record.tool == "security_feature_evidence_unavailable")
+        .expect("protected profile records the signed unknown-evidence observation");
+    assert!(marker.signature_is_valid(&signing_key));
+}
