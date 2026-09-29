@@ -1888,7 +1888,14 @@ impl OracleMcpServer {
                 )
         }) && context.notification_session_owner().is_some()
             && context.notification_request_owner().is_some();
-        if observe_catalog {
+        // A per-tool deadline has to begin at transport admission.  The
+        // before-call catalog snapshot normally queries the stateful lane, so
+        // taking it for a timeout-bound tool call would queue that snapshot
+        // behind an active statement before the call itself reaches the lane.
+        // Keep the post-call observation: the already-established session
+        // snapshot still detects any served-surface change caused by this call.
+        let observe_before_catalog = observe_catalog && !Self::timeout_bound_tool_call(&request);
+        if observe_before_catalog {
             self.observe_tool_catalog(context);
         }
         let outcome =
@@ -1897,6 +1904,19 @@ impl OracleMcpServer {
             self.observe_tool_catalog(context);
         }
         outcome
+    }
+
+    fn timeout_bound_tool_call(request: &Value) -> bool {
+        request
+            .get("method")
+            .and_then(Value::as_str)
+            .is_some_and(|method| method == "tools/call")
+            && request
+                .get("params")
+                .and_then(|params| params.get("arguments"))
+                .and_then(|arguments| arguments.get("timeout_seconds"))
+                .and_then(Value::as_u64)
+                .is_some_and(|seconds| seconds > 0)
     }
 
     pub(crate) fn observe_tool_catalog(&self, context: DispatchContext<'_>) {

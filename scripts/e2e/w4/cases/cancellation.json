@@ -94,5 +94,28 @@
     "audit_expect": [],
     "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
     "cleanup": []
+  },
+  {
+    "case_id": "w4_runtime_issue50_session_busy",
+    "tool": "oracle_execute",
+    "level": "ADMIN",
+    "profile_variant": "masked",
+    "transports": ["http"],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {"sql": "UPDATE /* W4MARK_I50_${run_id} */ ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 1", "timeout_seconds": 20},
+      "session_busy": {
+        "marker": "W4MARK_I50_${run_id}",
+        "lock_sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 1",
+        "queued_arguments": {"sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = LABEL WHERE ID = 2", "timeout_seconds": 2},
+        "retry_arguments": {"sql": "SELECT 1 AS C FROM dual"}
+      }
+    },
+    "expect": {"json_subset": {"error_class": "SESSION_BUSY"}},
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
+    "cleanup": []
   }
 ]

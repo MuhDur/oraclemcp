@@ -48,7 +48,7 @@ OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "au
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
-                    "trusted_views"}
+                    "trusted_views", "short_admin"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
@@ -348,6 +348,9 @@ def validate_case(case, filename):
     if case.get("profile_variant") == "capped_rw":
         require(case["level"] in {"READ_ONLY", "READ_WRITE"},
                 "the capped_rw profile's ceiling is READ_WRITE")
+    if case.get("profile_variant") == "short_admin":
+        require(case["level"] == "ADMIN",
+                "short_admin is reserved for deadline-accounted lane cases")
     if "runtime_retention_probe" in case:
         require(case["runtime_retention_probe"] is True
                 and case["case_id"] == "w4_diff_retention_exceeded_typed"
@@ -388,8 +391,20 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "cancel_mutation_audit", "cancel_after_completion", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "cancel_mutation_audit", "cancel_after_completion", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect", "session_busy"},
             "unknown call field")
+    if "session_busy" in case["call"]:
+        busy = case["call"]["session_busy"]
+        require(case["case_id"] == "w4_runtime_issue50_session_busy"
+                and case["transports"] == ["http"]
+                and case.get("profile_variant", "masked") == "masked"
+                and isinstance(busy, dict)
+                and set(busy) == {"marker", "lock_sql", "queued_arguments", "retry_arguments"}
+                and all(isinstance(busy[key], str) and busy[key]
+                        for key in ("marker", "lock_sql"))
+                and all(isinstance(busy[key], dict)
+                        for key in ("queued_arguments", "retry_arguments")),
+                "issue50 session-busy case needs exact same-session pipe barrier fields")
     if "contract_baseline" in case["call"]:
         require(isinstance(case["call"]["contract_baseline"], dict)
                 and case["level"] == "READ_ONLY" and not case["call"].get("mutation")
@@ -868,7 +883,9 @@ class HttpClient:
             frame = (f'{{"jsonrpc":"2.0","id":{self.next_id},"method":"tools/call",'
                      f'"params":{{"name":{json.dumps(params["name"])},"arguments":{raw_arguments}}}}}')
         status, headers, body = self._request("POST", "/mcp", frame.encode())
-        require(status == 200, f"HTTP {method} returned {status}")
+        # `SESSION_BUSY` is a JSON-RPC tool error carried with HTTP 429 so
+        # clients can honor Retry-After without losing the typed envelope.
+        require(status in {200, 429}, f"HTTP {method} returned {status}")
         if method == "initialize":
             self.session_id = headers.get("mcp-session-id")
             require(self.session_id, "stateful HTTP initialize lacked session id")
@@ -1085,6 +1102,17 @@ credential_ref = "env:W4_DB_PASSWORD"
 max_level = "ADMIN"
 default_level = "READ_ONLY"
 diagnostics_pack_licensed = true
+'''
+    content += f'''
+[[profiles]]
+name = "{lane}_short_admin"
+description = "synthetic W4 two-second pinned-session queue deadline"
+connect_string = "{dsn}"
+username = "system"
+credential_ref = "env:W4_DB_PASSWORD"
+max_level = "ADMIN"
+default_level = "READ_ONLY"
+call_timeout_seconds = 2
 '''
     if owner is not None:
         require(re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", owner) is not None,
@@ -1497,6 +1525,111 @@ def wait_cancel_barrier(connection, pipe_name, worker):
     raise DriverError(f"DBMS_PIPE cancellation barrier {pipe_name} was not signalled before its deadline")
 
 
+def session_busy_call(client, case, connection):
+    """Exercise one HTTP MCP session with a DBMS_PIPE-held admin call.
+
+    The holder and both reads use the *same* MCP session id. The independent
+    SYSTEM connection holds/release a fixture-row lock, while V$SQL observes
+    the holder's marked static SQL without a timing guess.
+    """
+    busy = case["call"]["session_busy"]
+    holder = {}
+    preview = tool_payload(client.rpc("tools/call", {
+        "name": "oracle_preview_sql",
+        "arguments": {"sql": case["call"]["arguments"]["sql"]},
+    }))
+    confirm = ((preview.get("structuredContent") or {}).get("execute_confirmation") or {}).get("confirm")
+    require(preview.get("isError") is not True and isinstance(confirm, str) and confirm,
+            "issue50 holder preview did not issue an execute confirmation: "
+            + compact(scrub(preview))[:3_000])
+    holder_arguments = {**case["call"]["arguments"], "confirm": confirm}
+    queued_preview = tool_payload(client.rpc("tools/call", {
+        "name": "oracle_preview_sql",
+        "arguments": {"sql": busy["queued_arguments"]["sql"],
+                      "timeout_seconds": busy["queued_arguments"]["timeout_seconds"]},
+    }))
+    queued_confirm = ((queued_preview.get("structuredContent") or {})
+                      .get("execute_confirmation") or {}).get("confirm")
+    require(queued_preview.get("isError") is not True
+            and isinstance(queued_confirm, str) and queued_confirm,
+            "issue50 queued write preview did not issue an execute confirmation")
+    queued_arguments = {**busy["queued_arguments"], "confirm": queued_confirm}
+
+    def invoke_holder():
+        try:
+            holder["reply"] = client.rpc("tools/call", {
+                "name": case["tool"], "arguments": holder_arguments})
+        except Exception as exc:
+            holder["error"] = exc
+
+    connection.cursor().execute(busy["lock_sql"])
+    worker = threading.Thread(target=invoke_holder, daemon=True)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and worker.is_alive():
+            if vsql_marker_count(connection, busy["marker"]) > 0:
+                break
+            time.sleep(0.05)
+        else:
+            raise DriverError("issue50 marked static holder did not reach Oracle before deadline")
+        require(worker.is_alive(), "issue50 holder completed before queue contention")
+
+        queued_result = {}
+
+        def invoke_queued():
+            try:
+                queued_result["reply"] = client.rpc("tools/call", {
+                    "name": "oracle_execute", "arguments": queued_arguments})
+            except Exception as exc:
+                queued_result["error"] = exc
+
+        queued_worker = threading.Thread(target=invoke_queued, daemon=True)
+        queued_worker.start()
+        # A bounded database-side wait keeps A holding the fixture lock beyond
+        # B's two-second budget without a wall-clock sleep in the test driver.
+        status = connection.cursor().var(int)
+        connection.cursor().execute(
+            "BEGIN :status := DBMS_PIPE.RECEIVE_MESSAGE(:pipe_name, 3); END;",
+            {"status": status, "pipe_name": f"W4I50_DELAY_{secrets.token_hex(8)}"},
+        )
+        require(status.getvalue() == 1, "issue50 DBMS_PIPE delay was unexpectedly signalled")
+        connection.rollback()
+        queued_worker.join(timeout=10)
+        require(not queued_worker.is_alive(), "issue50 queued request did not settle after lock release")
+        if "error" in queued_result:
+            raise queued_result["error"]
+        queued = queued_result["reply"]
+        payload = tool_payload(queued)
+        structured = payload.get("structuredContent", {})
+        if not (payload.get("isError") is True and structured.get("error_class") == "SESSION_BUSY"):
+            print("issue50-queued=" + compact(payload), file=sys.stderr)
+        require(payload.get("isError") is True and structured.get("error_class") == "SESSION_BUSY",
+                "same-session queued request did not return typed SESSION_BUSY: "
+                + compact(scrub(payload))[:400])
+        require(isinstance(structured.get("retry_after_ms"), int)
+                and structured["retry_after_ms"] > 0,
+                "SESSION_BUSY retry_after_ms must be positive")
+        require(isinstance(structured.get("queued_ms"), int) and structured["queued_ms"] > 0,
+                "SESSION_BUSY queued_ms must record real mailbox wait")
+    finally:
+        connection.rollback()
+        worker.join(timeout=10)
+    require(not worker.is_alive(), "issue50 holder did not settle after DBMS_PIPE release")
+    if "error" in holder:
+        raise holder["error"]
+    verify_envelope(holder["reply"])
+    require(tool_payload(holder["reply"]).get("isError") is not True,
+            "issue50 holder failed after DBMS_PIPE release")
+    retried = client.rpc("tools/call", {
+        "name": "oracle_query", "arguments": busy["retry_arguments"]})
+    verify_envelope(retried)
+    require(tool_payload(retried).get("isError") is not True,
+            "issue50 retry after holder release did not succeed")
+    return queued, {"queued": scrub(payload), "holder": scrub(tool_payload(holder["reply"])),
+                    "retry": scrub(tool_payload(retried))}
+
+
 def cancelled_call(client, case, connection, marker_probe=vsql_marker_count):
     marker = case["call"]["cancel_marker"]
     require(marker_probe(connection, marker) == 0,
@@ -1831,6 +1964,10 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         elif case["call"].get("cancel_after_completion") and supported:
             reply = completed_before_cancel_call(client, case, captures)
             row["cancel_observation"] = client.last_cancel_observation
+        elif "session_busy" in case["call"] and supported:
+            require(transport == "http", "issue50 same-session contention requires HTTP")
+            reply, busy_actual = session_busy_call(client, case, connection)
+            row["session_busy"] = busy_actual
         elif "parallel" in case["call"] and supported:
             require(transport == "http", "parallel case requires HTTP transport")
             reply = parallel_http_call(client, case, barriers)
@@ -1926,6 +2063,14 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                     "cancelled mutation needs one pending audit and one terminal no-retry audit")
             row["cancel_mutation_audit"] = {"terminal_outcome": terminal,
                                              "write_attempts": len(writes)}
+        if "session_busy" in case["call"] and supported:
+            busy_audits = [record for record in audit_records(audit_path)[before:]
+                           if record.get("tool") == "session_busy"]
+            require(len(busy_audits) == 1
+                    and busy_audits[0].get("decision") == "BLOCKED"
+                    and busy_audits[0].get("outcome") == "FAILED",
+                    "SESSION_BUSY must append exactly one blocked audit record")
+            row["session_busy_audit"] = {"count": len(busy_audits)}
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env))
@@ -2359,6 +2504,7 @@ def run_lane(args):
                                        else args.lane + "_trusted_views" if variant == "trusted_views"
                                        else args.lane + "_protected" if variant == "protected"
                                        else args.lane + "_capped" if variant == "capped_rw"
+                                       else args.lane + "_short_admin" if variant == "short_admin"
                                        else args.lane)
                     if desired_profile != current_profile:
                         if current_level != "READ_ONLY":

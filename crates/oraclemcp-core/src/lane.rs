@@ -293,6 +293,14 @@ impl LaneCallerBudget {
             priority: self.priority,
         }
     }
+
+    fn tighten_timeout(mut self, timeout: Duration) -> Self {
+        self.deadline_after_admission = Some(
+            self.deadline_after_admission
+                .map_or(timeout, |current| current.min(timeout)),
+        );
+        self
+    }
 }
 
 fn tool_request_timeout_ceiling(profile_ceiling: Duration, args: &Value) -> Duration {
@@ -323,6 +331,16 @@ impl LaneCallerSignal {
             lane_waker: Mutex::new(None),
             budget: LaneCallerBudget::capture(cx),
         }
+    }
+
+    fn with_request_cancellation_and_timeout(
+        cx: &Cx,
+        request_cancellation: Option<Arc<RequestCancellation>>,
+        timeout: Duration,
+    ) -> Self {
+        let mut signal = Self::with_request_cancellation(cx, request_cancellation);
+        signal.budget = signal.budget.tighten_timeout(timeout);
+        signal
     }
 
     fn budget_for_lane(&self, lane_now: Time, queue_wait: std::time::Duration) -> Budget {
@@ -810,13 +828,21 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, mut reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
-            let caller = Arc::new(LaneCallerSignal::with_request_cancellation(
+            let caller = Arc::new(LaneCallerSignal::with_request_cancellation_and_timeout(
                 cx,
                 context.request_cancellation().cloned(),
+                tool_request_timeout_ceiling(
+                    cx.budget()
+                        .deadline
+                        .map(|deadline| Duration::from_nanos(deadline.duration_since(cx.now())))
+                        .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
+                    &args,
+                ),
             ));
+            let enqueued_at = Instant::now();
             let command = LaneCommand::Dispatch {
                 caller: Arc::clone(&caller),
-                enqueued_at: Instant::now(),
+                enqueued_at,
                 context: context.to_owned_context(),
                 name: name.to_owned(),
                 args,
@@ -830,7 +856,44 @@ impl ToolDispatch for LaneRuntime {
                 return lane_send_error_outcome(self.name(), error, cx);
             }
             let caller_guard = LaneCallerGuard::new(caller);
-            match recv_lane_reply(cx, &mut reply_rx).await {
+            // A lane has one owning thread.  Waiting only for the worker to
+            // dequeue this command would let a short per-tool timeout expire
+            // behind a long command, then run the expired command after that
+            // holder completes.  Race the reply at the caller boundary so the
+            // queued command is cancelled before it can enter the dispatcher.
+            let receive = recv_lane_reply(cx, &mut reply_rx);
+            let received = match caller_guard.signal.budget.deadline_after_admission {
+                // The caller bridge owns a distinct runtime.  Its `Cx::now`
+                // may belong to a different timer domain than the reply wait,
+                // so this timer explicitly uses one process wall-clock domain.
+                // `LaneCallerBudget` already captured a duration, not a raw
+                // clock-domain deadline.
+                Some(timeout) => match asupersync::time::TimeoutFuture::with_time_getter(
+                    receive,
+                    asupersync::time::wall_now() + timeout,
+                    asupersync::time::wall_now,
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => {
+                        caller_guard.signal_cancel(CancelReason::timeout());
+                        caller_guard.complete();
+                        return session_busy_outcome(
+                            self.name(),
+                            enqueued_at,
+                            timeout,
+                            // The lane writes the one durable `session_busy`
+                            // audit entry when it drains this cancelled
+                            // command.  Do not duplicate it from the caller
+                            // runtime.
+                            None,
+                        );
+                    }
+                },
+                None => receive.await,
+            };
+            match received {
                 Ok(outcome) => {
                     caller_guard.complete();
                     outcome
@@ -908,9 +971,16 @@ impl ToolDispatch for LaneRuntime {
             let (reply_tx, reply_rx) = oneshot::channel();
             let lane_generation = self.generation();
             let context = context.with_lane_identity(self.name(), lane_generation);
-            let caller = Arc::new(LaneCallerSignal::with_request_cancellation(
+            let caller = Arc::new(LaneCallerSignal::with_request_cancellation_and_timeout(
                 cx,
                 context.request_cancellation().cloned(),
+                tool_request_timeout_ceiling(
+                    cx.budget()
+                        .deadline
+                        .map(|deadline| Duration::from_nanos(deadline.duration_since(cx.now())))
+                        .unwrap_or(DEFAULT_REQUEST_TIMEOUT),
+                    &args,
+                ),
             ));
             let command = LaneCommand::DispatchStream {
                 caller: Arc::clone(&caller),
@@ -2181,9 +2251,12 @@ fn session_busy_before_start(
     profile_timeout: Duration,
     auditor: Option<&Auditor>,
 ) -> Option<DispatchOutcome> {
-    budget
-        .is_exhausted_at(cx.now())
-        .then(|| session_busy_outcome(name, enqueued_at, profile_timeout, auditor))
+    let remaining = budget
+        .deadline()
+        .map(|deadline| Duration::from_nanos(deadline.duration_since(cx.now())));
+    (budget.is_exhausted_at(cx.now())
+        || remaining.is_some_and(|duration| duration < MIN_STATEMENT_START_BUDGET))
+    .then(|| session_busy_outcome(name, enqueued_at, profile_timeout, auditor))
 }
 
 fn audit_timestamp() -> String {
@@ -4652,7 +4725,7 @@ mod tests {
             .expect("first command blocks the lane");
 
         let queued_lane = lane.clone();
-        let queued_cx = testing_cx_with_timeout(Duration::from_millis(250));
+        let queued_cx = testing_cx_with_timeout(Duration::from_secs(1));
         let queued = thread::spawn(move || {
             block_on_lane_bridge(async move {
                 queued_lane
@@ -4685,7 +4758,7 @@ mod tests {
             "mailbox wait must consume the request window; observed only {queue_wait_nanos}ns"
         );
         assert!(
-            deadline_remaining_nanos <= 175_000_000,
+            deadline_remaining_nanos <= 925_000_000,
             "rebased caller deadline must lose mailbox time; {deadline_remaining_nanos}ns remained"
         );
     }
@@ -4715,32 +4788,39 @@ mod tests {
             .expect("first command blocks the lane");
 
         let queued_lane = lane.clone();
-        let queued_cx = testing_cx_with_timeout(Duration::from_millis(100));
+        // The outer caller has plenty of time; the per-tool timeout is the
+        // budget that must govern its place in this pinned-session queue.
+        let queued_cx = testing_cx_with_timeout(Duration::from_secs(30));
+        let (queued_result_tx, queued_result_rx) = std_mpsc::channel();
         let queued = thread::spawn(move || {
-            block_on_lane_bridge(async move {
+            let outcome = block_on_lane_bridge(async move {
                 queued_lane
                     .dispatch(
                         &queued_cx,
                         DispatchContext::default(),
                         "queued",
-                        Value::Null,
+                        json!({ "timeout_seconds": 1 }),
                     )
                     .await
-            })
+            });
+            let _ = queued_result_tx.send(outcome);
         });
         wait_for_queued_lane_command(&lane);
-        thread::sleep(Duration::from_millis(150));
+        let Outcome::Err(error) = queued_result_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("queued caller must receive SESSION_BUSY before the holder is released")
+        else {
+            panic!("expired queued request must return SESSION_BUSY");
+        };
+        assert_eq!(error.error_class, ErrorClass::SessionBusy);
+        assert!(error.retry_after_ms.is_some_and(|ms| ms > 0));
+        assert!(error.queued_ms.is_some_and(|ms| ms >= 900));
         release_tx.send(()).expect("release first command");
         assert!(matches!(
             first.join().expect("first joined"),
             Outcome::Ok(_)
         ));
-        let Outcome::Err(error) = queued.join().expect("queued joined") else {
-            panic!("expired queued request must return SESSION_BUSY");
-        };
-        assert_eq!(error.error_class, ErrorClass::SessionBusy);
-        assert!(error.retry_after_ms.is_some_and(|ms| ms > 0));
-        assert!(error.queued_ms.is_some_and(|ms| ms >= 100));
+        queued.join().expect("queued caller joined");
         assert!(
             entered_rx.recv_timeout(Duration::from_millis(250)).is_err(),
             "SESSION_BUSY request must never enter the dispatcher"

@@ -13289,6 +13289,18 @@ impl OracleDispatcher {
         })?;
         // Mutex wait is part of the same total request budget. Re-check before
         // any arm can mint/consume authority or mutate lane-local state.
+        if request_budget.is_exhausted_at(cx.now())
+            || request_budget.deadline().is_some_and(|deadline| {
+                Duration::from_nanos(deadline.duration_since(cx.now())) < Duration::from_millis(250)
+            })
+        {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::SessionBusy,
+                "pinned session could not start this request before its deadline",
+            )
+            .with_retry_after_ms(250)
+            .with_queued_ms(0));
+        }
         request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         let request_subject = audit_subject(context, &self.default_audit_subject);
         let scoped_level = scoped_session_level(&state.level, context);
