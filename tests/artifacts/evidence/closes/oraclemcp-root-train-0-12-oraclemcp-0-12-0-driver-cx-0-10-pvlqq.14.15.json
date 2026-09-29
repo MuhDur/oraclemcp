@@ -1,0 +1,69 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-29T02:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.14.15",
+  "scope": {
+    "summary": "One-open-edition-request-per-PDB is scoped to the service state store: the production HTTP draft route derives DBID/CON scope server-side and persists coordination_scope service_state_store; the in-process CREATE EDITION reservation is one board per service shared by every stateful HTTP session dispatcher; independent services do not claim exclusivity and Oracle's one-child rule (ORA-38807) decides a real race.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/change_proposal.rs",
+      "crates/oraclemcp-core/src/http/operator.rs",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp-db/src/catalog_facts.rs",
+      "crates/oraclemcp-db/src/catalog_query.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/tests/edition_lifecycle_live_xe.rs",
+      "crates/oraclemcp-db/tests/editions_probe_live.rs"
+    ],
+    "out_of_scope": [
+      "Cross-deployment shared coordination backend; the rest of W12 (T12.2)."
+    ]
+  },
+  "source": {
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "operator HTTP edition draft route (live FREE23, E2E_ORACLE)",
+        "kind": "route",
+        "trace": "live_e2e_oracle_draft_persists_server_derived_pdb_scope 1 passed: persisted service_state_store with non-empty server-derived identity."
+      },
+      {
+        "name": "oracle_preview_sql + oracle_execute CREATE EDITION from two independent dispatcher services (live FREE23)",
+        "kind": "tool",
+        "trace": "live_two_independent_services_race_and_oracle_rejects_the_loser 1 passed: one CREATE wins, the loser carries ORA-38807; disposable editions cleaned (0 E2E_R% left)."
+      },
+      {
+        "name": "dispatch/core unit tests (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Clean export of d3c68ae7, CARGO_TARGET_DIR=target/verify-d3c68ae7/target: cargo test -p oraclemcp --lib 563 passed; -p oraclemcp --lib --no-default-features 546 passed; -p oraclemcp-core --lib 840 passed; -p oraclemcp-db --lib 671 passed; -p oraclemcp-config --lib 154 passed; -p oraclemcp-error --lib 30 passed; -p oraclemcp --bin oraclemcp 182 passed. Includes two_independent_services_reconcile_same_parent_create_against_oracle, edition_inflight_child_reservation_refuses_a_second_proposal_before_dictionary_oracle_io; the cross-session proof edition_service_owned_reservation_refuses_a_second_session_before_dictionary_oracle_io from the later test-only commit b2470901 (two dispatcher/session instances given one service board) was applied temporarily to the d3c68ae7 export and passed, then reversed, edition_proposals_conflict_only_for_the_same_identified_pdb (profile_one/profile_two), edition_pdb_scope_conflict_survives_store_restart, edition_draft_rejects_client_supplied_pdb_coordination_scope; live pdb_identity_free23_live_e2e_oracle passed with LocalOnly still a panic."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "edition-pdb-scope-and-independent-service-race",
+        "path": "tests/artifacts/evidence/live/verify-d3c68ae7-pvlqq.14.15-20260929T0250Z.json",
+        "sha": "d3c68ae7358de7e55124491b700e57040acacc6c"
+      }
+    ]
+  },
+  "limitations": [
+    "The identity field named con_uid is populated from SYS_CONTEXT CON_ID (USERENV CON_UID raised ORA-02003); CON_ID is stable within one CDB but is not the unplug/plug-stable CON_UID the finding names.",
+    "The in-process two-independent-services unit test still models ORA-38807 with a mock; the Oracle behaviour is proven by the separate live race test.",
+    "At d3c68ae7 itself no committed test covers cross-session sharing; that test lands in b2470901 (local, not yet on origin/main at verification time). Production sharing is additionally shown by code reading: stateful HTTP clones DispatcherWiring per session, cloning the one Arc board. No live multi-session HTTP race was run."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

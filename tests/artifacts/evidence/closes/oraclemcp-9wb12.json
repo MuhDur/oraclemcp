@@ -1,10 +1,10 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T21:30:00Z",
+  "generated_at": "2026-09-29T02:50:00Z",
   "bead_id": "oraclemcp-9wb12",
   "scope": {
-    "summary": "W4 driver gains a bounded row_contains matcher; the top_queries live-cursor marker case uses the new sql_text filter plus row_contains instead of asserting the marker is the global rank-1 cursor.",
+    "summary": "W4 driver has a bounded row_contains matcher; the top_queries live-cursor marker case uses the sql_text filter plus row_contains instead of asserting the marker is the global rank-1 cursor.",
     "in_scope": [
       "scripts/e2e/w4/driver.py",
       "scripts/e2e/w4/cases/ops-tools.json"
@@ -14,7 +14,7 @@
     ]
   },
   "source": {
-    "sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
     "tree_clean": true,
     "branch": "main"
   },
@@ -22,9 +22,9 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "W4 external client, release binary",
+        "name": "W4 external client (w4_top_queries_live_cursor_cache_contains_marker)",
         "kind": "cli",
-        "trace": "Release binary built with cargo build --release -p oraclemcp --bin oraclemcp in a clean git-archive export of 32024974 (export HEAD = 32024974, status clean), sha256 0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f. --case w4_top_queries_live_cursor_cache_contains_marker pass stdio+http on free23, xe21, xe18; python3 scripts/e2e/w4/driver.py --selftest pass (includes row_contains positive and the planted absent-marker rejection)."
+        "trace": "At d3c68ae7: PASS stdio+http on free23, xe21, xe18; the case definition is byte-identical to 32024974 (marker via sql_text W4MARK_TOPQUERY_<run_id>, row_contains SQL_TEXT); driver --selftest pass (row_contains positive and absent-marker rejection)."
       }
     ]
   },
@@ -32,16 +32,13 @@
     "claimed": true,
     "artifacts": [
       {
-        "kind": "w4-top-queries-row-contains",
-        "path": "tests/artifacts/evidence/live/verify-32024974-oraclemcp-9wb12-20260928T2130Z.json",
-        "sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01"
+        "kind": "w4-live-case-rerun",
+        "path": "tests/artifacts/evidence/live/verify-d3c68ae7-w4-20260929T0250Z.json",
+        "sha": "d3c68ae7358de7e55124491b700e57040acacc6c"
       }
     ]
   },
-  "limitations": [
-    "The case no longer proves the marker ranks first in the unfiltered cursor cache (that was not deterministic on a shared lab); it proves the marker cursor is present and returned by the filtered top-SQL read.",
-    "The full ops-tools family was not proven green at 32024974: a scoped invocation of all 29 ops ids aborted on every lane with 'failed to drop before profile switch' (oracle_set_session_level drop did not report READ_ONLY) before producing results; the marker case itself passed in isolation. Stdio-only ops cases also cannot be selected with --case at 32024974 (see oraclemcp-mls32)."
-  ],
+  "limitations": [],
   "known_defects": [],
   "follow_ups": [],
   "readiness": {

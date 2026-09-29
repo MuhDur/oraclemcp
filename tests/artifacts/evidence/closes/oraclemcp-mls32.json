@@ -1,10 +1,10 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T21:50:00Z",
+  "generated_at": "2026-09-29T02:50:00Z",
   "bead_id": "oraclemcp-mls32",
   "scope": {
-    "summary": "W4 driver --case resolves after tools/list discovery (generated contract cases selectable) and keeps a requested stdio-only file case selected across the HTTP pass, so one scoped run can select both kinds; unknown ids are still rejected.",
+    "summary": "W4 driver --case resolves after tools/list discovery so generated contract cases are selectable, keeps a requested stdio-only file case selected across the HTTP pass, and still rejects unknown ids.",
     "in_scope": [
       "scripts/e2e/w4/driver.py"
     ],
@@ -13,7 +13,7 @@
     ]
   },
   "source": {
-    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
     "tree_clean": true,
     "branch": "main"
   },
@@ -21,14 +21,9 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "python3 scripts/e2e/w4/driver.py --lane <lane> --case ... (external client, release binary)",
+        "name": "python3 scripts/e2e/w4/driver.py --lane <lane> --case ... (external client)",
         "kind": "cli",
-        "trace": "One scoped invocation per lane at ef2885a5 with 12 --case ids mixing the generated contract case w4_contract_oracle_plsql_lineage_direction_wrong_enum and stdio-only file cases (w4_runtime_issue46_scn_probe_cached, w4_runtime_issue47_killed_session_recovers, w4_runtime_issue47_killed_session_dml_not_replayed): on free23, xe21 and xe18 every requested id was selected and executed (21 rows: 12 stdio + 9 http; the generated case ran on both transports), and no 'unknown scoped W4 case(s)' abort occurred. A deliberately malformed invocation (all ids passed as one argument) was rejected with 'unknown scoped W4 case(s)', so unknown ids still fail closed."
-      },
-      {
-        "name": "driver selftest",
-        "kind": "cli",
-        "trace": "python3 scripts/e2e/w4/driver.py --selftest -> selftest: pass (includes the generated-enum selection check and the stdio-only-across-HTTP selection check from 48f1fa55)."
+        "trace": "At d3c68ae7, one scoped invocation per lane mixing the generated contract case w4_contract_oracle_plsql_lineage_direction_wrong_enum with stdio-only file cases (issue46, issue47 x2) selected and executed every id on free23, xe21, xe18 (generated case on both transports, stdio-only cases on stdio) with no 'unknown scoped W4 case(s)' abort; --case w4_no_such_case_verifier was rejected with 'unknown scoped W4 case(s)'; --selftest pass."
       }
     ]
   },
@@ -36,15 +31,14 @@
     "claimed": true,
     "artifacts": [
       {
-        "kind": "w4-scoped-rerun",
-        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-scoped-20260928T2145Z.json",
-        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+        "kind": "w4-live-case-rerun",
+        "path": "tests/artifacts/evidence/live/verify-d3c68ae7-w4-20260929T0250Z.json",
+        "sha": "d3c68ae7358de7e55124491b700e57040acacc6c"
       }
     ]
   },
   "limitations": [
-    "The 48f1fa55 selftest models the run_lane selection loop inline rather than invoking run_lane; the live scoped runs are the proof of the real loop.",
-    "The scoped runs themselves exited 1 because w4_runtime_issue46_scn_probe_cached is red (belongs to pvlqq.7.1, not to selection)."
+    "Verdicts of the selected cases themselves are out of scope (the issue47 DML case is red for an unrelated audit-count reason)."
   ],
   "known_defects": [],
   "follow_ups": [],

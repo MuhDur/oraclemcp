@@ -1,0 +1,9 @@
+{
+  "run_id": "36510885962",
+  "lane": "github-actions ci.yml (push, main)",
+  "source_sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+  "kind": "hosted-ci-run",
+  "runner": "GitHub Actions CI workflow run 36510885962, read with gh run view by the verifier",
+  "command": "gh run view 36510885962 --json status,conclusion,jobs",
+  "result": "completed/success on head d3c68ae7: build on pinned nightly, cargo test, clippy (-D warnings), rustfmt, cargo deny, public-API lock, PL/SQL intelligence feature matrix, Rust workspace (Windows), Oracle FREE 23ai matrix + VECTOR smoke all success; advisory 'Oracle FREE 23ai W4' failure; feature powerset and release acceptance skipped by workflow policy."
+}

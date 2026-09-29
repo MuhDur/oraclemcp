@@ -1,0 +1,9 @@
+{
+  "run_id": "verifier-d3c68ae7-w4-full-free23-20260929T0250Z",
+  "lane": "free23",
+  "source_sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+  "kind": "w4-full-unscoped-lane",
+  "runner": "independent verifier (Claude agent); debug binary built with `cargo build -p oraclemcp --bin oraclemcp` (default features) in a clean git-archive export of d3c68ae7 made a git repo with HEAD = d3c68ae7 (git status --porcelain empty), sha256 a6f8ad830b39b59e4b3214f607dcb7c0760f3b5fb84282c3eacea7bd8a675c57",
+  "command": "ORACLEMCP_LIVE_XE=1 bash scripts/e2e/w4.sh --log --lane free23 --binary target/debug/oraclemcp --binary-source-sha d3c68ae7358de7e55124491b700e57040acacc6c (no --case: full unscoped lane)",
+  "result": "No 'failed to drop before profile switch' abort: the lane executed 725 case rows (stdio 336 pass / 24 fail, http 342 pass / 23 fail), including the intentional killed-session cases followed by later profile switches, and reached the release-manifest coverage gate, which failed with 19 missing/red rel012_* scenarios on stdio (oraclemcp-bb5qm). Red rows: w4_runtime_issue46_scn_probe_cached (owner holds the positive-diff flashback grant for the whole stdio pass) and 23 cases per transport that re-read T_PARENT and saw row ID=2 labelled 'w4-commit-race', left behind by w4_runtime_issue49_commit_race_not_reported_cancelled which commits without restoring the shared row. Wall time 02:19:14Z-02:23:43Z."
+}

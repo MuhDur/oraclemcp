@@ -1,0 +1,44 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-29T02:50:00Z",
+  "bead_id": "oraclemcp-7j74q",
+  "scope": {
+    "summary": "cargo_patch_warning_guard.sh runs cargo metadata with CARGO_TERM_COLOR=never so the anchored '^warning: patch .+ was not used in the crate graph$' check sees Cargo's plain diagnostic even when CI exports CARGO_TERM_COLOR=always; the release contract test first proves Cargo emits ANSI under forced color, then proves the guard still refuses.",
+    "in_scope": [
+      "scripts/cargo_patch_warning_guard.sh",
+      "tests/release_contract_test.sh"
+    ],
+    "out_of_scope": [
+      "Other release-rehearsal jobs that were skipped after the failing step."
+    ]
+  },
+  "source": {
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "scripts/release_preflight.sh -> scripts/cargo_patch_warning_guard.sh (release gate 'Validate release metadata')",
+        "kind": "cli",
+        "trace": "CARGO_TERM_COLOR=always bash tests/release_contract_test.sh -> 'release-contract-test: OK'. Out-of-tree differential on an unused-patch fixture: pre-fix guard (3ada7e35^) with CARGO_TERM_COLOR=always exits 0 and does not refuse (fail-open), with =never exits 1 and refuses; fixed guard exits 1 and refuses under both. The anchored regex is byte-identical to the pre-fix guard."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "The hosted release rehearsal named in the bead (workflow_dispatch of release.yml) was not re-run; it is an operator-gated action. The failing step was reproduced locally with release.yml's CARGO_TERM_COLOR=always."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}

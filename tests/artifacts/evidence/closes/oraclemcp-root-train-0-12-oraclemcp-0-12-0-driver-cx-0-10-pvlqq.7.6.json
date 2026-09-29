@@ -1,0 +1,62 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-29T02:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.6",
+  "scope": {
+    "summary": "Pinned-session queueing is deadline-accounted: a request that cannot start within its own budget returns typed SESSION_BUSY with queued_ms and a positive retry_after_ms, is audited once as a BLOCKED session_busy record and never reaches the dispatcher; a queued request with budget left runs.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/lane.rs",
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-error/src/lib.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "scripts/e2e/w4/driver.py",
+      "scripts/e2e/w4/cases/ops-tools.json"
+    ],
+    "out_of_scope": [
+      "Fairness and throughput under contention; holder cancellation (T2.4)."
+    ]
+  },
+  "source": {
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_execute over one Streamable HTTP MCP session (W4 w4_runtime_issue50_session_busy, FREE23)",
+        "kind": "route",
+        "trace": "PASS: holder UPDATE observed in V$SQL blocked on a fixture lock; same-session queued write with timeout_seconds=2 returned SESSION_BUSY (HTTP 429 path) queued_ms=2000 retry_after_ms=250, one BLOCKED/FAILED session_busy audit, holder then rolled back normally and the post-release retry succeeded."
+      },
+      {
+        "name": "lane unit tests (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Clean export of d3c68ae7, CARGO_TARGET_DIR=target/verify-d3c68ae7/target: cargo test -p oraclemcp --lib 563 passed; -p oraclemcp --lib --no-default-features 546 passed; -p oraclemcp-core --lib 840 passed; -p oraclemcp-db --lib 671 passed; -p oraclemcp-config --lib 154 passed; -p oraclemcp-error --lib 30 passed; -p oraclemcp --bin oraclemcp 182 passed. Includes issue50_second_request_gets_session_busy_not_zero_ms, issue50_queued_request_runs_when_budget_remains, issue50_retry_after_is_positive_and_bounded, issue50_session_busy_executes_nothing."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-live-case-rerun",
+        "path": "tests/artifacts/evidence/live/verify-d3c68ae7-w4-20260929T0250Z.json",
+        "sha": "d3c68ae7358de7e55124491b700e57040acacc6c"
+      }
+    ]
+  },
+  "limitations": [
+    "retry_after_ms is min(250 ms, profile call timeout), not the holder's remaining budget suggested by implementation note 3; the frozen acceptance only requires > 0.",
+    "issue50_second_request_gets_session_busy_not_zero_ms and issue50_session_busy_executes_nothing share one body; the pre-fix 'call timeout of 0 ms' failure was not re-run by the verifier.",
+    "Live proof is FREE23 over HTTP only (the acceptance's proof class); stdio and XE lanes were not exercised live."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

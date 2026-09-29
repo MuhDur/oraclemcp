@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-29T02:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.1.6",
+  "scope": {
+    "summary": "All 13 plsql-* [patch.crates-io] entries pin the pushed engine rev 1b79c2d5744072fee35904e56262a62aeea0b613 (engine origin/main), which contains T7.2 (27806fb, 11 commits behind tip) and T7.3 (fad41dd, 3 behind); Cargo.lock resolves all 17 engine packages from that rev.",
+    "in_scope": [
+      "Cargo.toml",
+      "Cargo.lock"
+    ],
+    "out_of_scope": [
+      "Engine correctness (T7.2/T7.3 consumers)."
+    ]
+  },
+  "source": {
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "cargo metadata --locked / manifest pin check",
+        "kind": "config-gate",
+        "trace": "rg-equivalent count of rev = \"1b79c2d5...\" in Cargo.toml = 13, no other plsql-intelligence rev; Cargo.lock: 17 entries all at ?rev=1b79c2d5; cargo metadata --locked exit 0; git ls-remote engine refs/heads/main = 1b79c2d5; GitHub compare shows 27806fb and fad41dd are ancestors (behind_by 0). Pins unchanged between consumer commit 2329134f and d3c68ae7."
+      },
+      {
+        "name": "oraclemcp default and --no-default-features builds",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp --lib 563 passed (default, engine on) and --no-default-features 546 passed on the clean export; hosted CI run 36510885962 on d3c68ae7 green including the PL/SQL intelligence feature matrix."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "hosted-ci-run",
+        "path": "tests/artifacts/evidence/live/verify-d3c68ae7-ci-20260929T0250Z.json",
+        "sha": "d3c68ae7358de7e55124491b700e57040acacc6c"
+      }
+    ]
+  },
+  "limitations": [
+    "The consumer commit 2329134f itself has no CI run (it was pushed in a batch); CI is green on d3c68ae7 and on ef2885a5, both carrying byte-identical engine pins."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-09-29T02:50:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.1",
+  "scope": {
+    "summary": "SCN capability is cached per session generation: a NotGranted session probes DBMS_FLASHBACK once, appends one scn_capability_probe degraded audit, and records observed_scn null on each audited read without leaking an SCN error; a Granted session records an exact SCN per read; an empty SCN result is desync and not cached; V$DATABASE is never substituted.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "crates/oraclemcp/src/dispatch/tests/audit_wiring.rs",
+      "crates/oraclemcp-db/src/query.rs",
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "scripts/e2e/w4/driver.py",
+      "scripts/e2e/w4/cases/ops-tools.json",
+      "tests/golden/w4/issue46-scn-cache.free23.json",
+      "tests/golden/w4/issue46-scn-cache.xe21.json",
+      "tests/golden/w4/issue46-scn-cache.xe18.json"
+    ],
+    "out_of_scope": [
+      "Desync classification (T2.2b / .7.3), ADB and dead-session recovery."
+    ]
+  },
+  "source": {
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "oracle_query over an external MCP stdio client (W4 w4_runtime_issue46_scn_probe_cached)",
+        "kind": "tool",
+        "trace": "No-grant disposable owner, 20 sequential reads: PASS on free23, xe21, xe18; exactly one scn_capability_probe FAILED (ORA-00904) audit and 20 SUCCEEDED oracle_query records with verdict_certificate.observed_scn = null; all replies isError=false. Assertion location checked: the same case run against a flashback-granted owner produced integer verdict_certificate.observed_scn 6147036..6147055 on its 20 reads, so the driver's null check is not vacuous and the granted principal gets an exact SCN per read."
+      },
+      {
+        "name": "dispatch unit tests (verifier re-execution)",
+        "kind": "cli",
+        "trace": "Clean export of d3c68ae7, CARGO_TARGET_DIR=target/verify-d3c68ae7/target: cargo test -p oraclemcp --lib 563 passed; -p oraclemcp --lib --no-default-features 546 passed; -p oraclemcp-core --lib 840 passed; -p oraclemcp-db --lib 671 passed; -p oraclemcp-config --lib 154 passed; -p oraclemcp-error --lib 30 passed; -p oraclemcp --bin oraclemcp 182 passed. Includes issue46_not_granted_probe_runs_once_per_generation, issue46_not_granted_audited_once_per_generation, issue46_reconnect_reprobes_once, issue46_granted_session_reads_scn_per_audited_read, issue46_empty_scn_result_is_desync_not_cached, issue46_revoked_capability_downgrades_and_audits_once, scn_never_substitutes_v_database."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-live-case-rerun",
+        "path": "tests/artifacts/evidence/live/verify-d3c68ae7-w4-20260929T0250Z.json",
+        "sha": "d3c68ae7358de7e55124491b700e57040acacc6c"
+      }
+    ]
+  },
+  "limitations": [
+    "In a full unscoped W4 lane the no-grant case is red: 148df67c grants DBMS_FLASHBACK to the shared W4O_ owner for the whole transport pass whenever the positive diff case is selected, so the issue46 case then runs as a granted principal. This is the unresolved ww2n3 harness defect, not a product defect; the case passes only in scoped runs.",
+    "The granted-principal exact-SCN proof comes from the verifier's combined run, not from a committed W4 assertion; no committed case asserts box 1."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,10 +1,10 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T21:55:00Z",
+  "generated_at": "2026-09-29T02:50:00Z",
   "bead_id": "oraclemcp-4g1m1",
   "scope": {
-    "summary": "After the intentional killed-session DML case, the W4 driver starts a fresh MCP client at the lane's READ_ONLY baseline instead of sending a level drop to the dead session, so a full unscoped lane no longer aborts with 'failed to drop before profile switch'.",
+    "summary": "After an intentional killed-session case the W4 driver restarts the MCP client at the lane's READ_ONLY baseline instead of sending a level drop to the dead session, so the full unscoped FREE23 lane no longer aborts with 'failed to drop before profile switch'.",
     "in_scope": [
       "scripts/e2e/w4/driver.py"
     ],
@@ -13,7 +13,7 @@
     ]
   },
   "source": {
-    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+    "sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
     "tree_clean": true,
     "branch": "main"
   },
@@ -21,9 +21,9 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "python3 scripts/e2e/w4/driver.py --lane <lane> (full unscoped lane, release binary)",
+        "name": "bash scripts/e2e/w4.sh --lane free23 (full unscoped external-client lane)",
         "kind": "cli",
-        "trace": "Full unscoped lanes at ef2885a5 on free23, xe21 and xe18: each ran all 716 rows over stdio and HTTP (w4_runtime_issue47_killed_session_dml_not_replayed passed and later profile-variant cases continued), reaching the final manifest gate. No lane printed 'failed to drop before profile switch'. Fix commit: 04008004 (close and reinitialize the client after kill_served_session_dml_user; reset tracked profile and level)."
+        "trace": "725 case rows executed over stdio and HTTP through and after both killed-session cases; zero occurrences of 'failed to drop before profile switch'; the run reached the final release-manifest gate."
       }
     ]
   },
@@ -32,13 +32,14 @@
     "artifacts": [
       {
         "kind": "w4-full-unscoped-lane",
-        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-full-20260928T2145Z.json",
-        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+        "path": "tests/artifacts/evidence/live/verify-d3c68ae7-w4-full-free23-20260929T0250Z.json",
+        "sha": "d3c68ae7358de7e55124491b700e57040acacc6c"
       }
     ]
   },
   "limitations": [
-    "The full lanes are still red overall: 18 rel012 manifest scenarios are missing (oraclemcp-bb5qm), and w4_runtime_issue46_scn_probe_cached, w4_query_cte_read and w4_query_issue35_trusted_view_function_refused fail on all lanes (plus two lane-specific rows). This bead claims only removing the profile-switch abort, so the advisory FREE23 W4 CI lane is not green yet."
+    "The full FREE23 lane is still red: 19 rel012 manifest scenarios missing/red (oraclemcp-bb5qm); w4_runtime_issue46_scn_probe_cached red because the positive-diff flashback grant covers the whole stdio pass (ww2n3); 23 re-read cases per transport red because w4_runtime_issue49_commit_race_not_reported_cancelled leaves T_PARENT ID=2 labelled 'w4-commit-race' (.7.5). This bead claims only removal of the profile-switch abort.",
+    "Only the free23 full lane was re-run at d3c68ae7 (xe21/xe18 full lanes not re-run)."
   ],
   "known_defects": [],
   "follow_ups": [],

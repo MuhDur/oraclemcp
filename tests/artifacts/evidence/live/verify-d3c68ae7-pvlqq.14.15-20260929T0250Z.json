@@ -1,0 +1,9 @@
+{
+  "run_id": "verifier-d3c68ae7-pvlqq.14.15-20260929T0250Z",
+  "lane": "free23",
+  "source_sha": "d3c68ae7358de7e55124491b700e57040acacc6c",
+  "kind": "edition-pdb-scope-and-independent-service-race",
+  "runner": "independent verifier (Claude agent); clean git-archive export of d3c68ae7 (HEAD = d3c68ae7, status clean)",
+  "command": "(1) ORACLEMCP_LIVE_EDITION_RACE=1 ORACLEMCP_LIVE_XE=1 ORACLEMCP_TEST_DSN=localhost:1523/FREEPDB1 ORACLEMCP_TEST_USER=system ORACLEMCP_TEST_PASSWORD=<lab container ORACLE_PASSWORD, read at runtime> cargo test -p oraclemcp --features live-xe --test edition_lifecycle_live_xe live_two_independent_services_race_and_oracle_rejects_the_loser -- --exact --nocapture; (2) ORACLEMCP_PDB_IDENTITY_LIVE=1 ORACLEMCP_LIVE_XE=1 ORACLEMCP_TEST_USER=E2E_ORACLE ... --test edition_lifecycle_live_xe live_e2e_oracle_draft_persists_server_derived_pdb_scope -- --exact --nocapture; (3) ORACLEMCP_PDB_IDENTITY_LIVE=1 ORACLE_MATRIX_FREE23_USER=E2E_ORACLE cargo test -p oraclemcp-db --features live-xe --test editions_probe_live pdb_identity_free23_live_e2e_oracle -- --exact --nocapture; (4) SELECT COUNT(*) FROM dba_editions WHERE edition_name LIKE 'E2E_R%'",
+  "result": "(1) 1 passed in 0.62s, no SKIP line: two independent dispatcher services (separate connections, separate reservation boards) both previewed before a barrier, exactly one CREATE EDITION succeeded and the loser returned CONNECTION_FAILED whose message contains Oracle's ORA-38807. (2) 1 passed in 0.16s, no SKIP: the served HTTP draft route persisted coordination_scope service_state_store with non-empty server-derived dbid/con_uid. (3) 1 passed, printed coordination_scope service_state_store; the LocalOnly arm still panics (9f22f2c4 weakening absent). (4) 0 synthetic E2E_R% editions remain; only ORA$BASE exists."
+}
