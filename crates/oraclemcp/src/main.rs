@@ -252,9 +252,6 @@ fn main() -> ExitCode {
             Some(RobotDocsCommand::Config { markdown }) => {
                 run_robot_docs_config(robot_json, markdown)
             }
-            Some(RobotDocsCommand::Refusals { markdown }) => {
-                run_robot_docs_refusals(robot_json, markdown)
-            }
         },
         Command::Setup {
             write,
@@ -6957,22 +6954,6 @@ fn run_robot_docs_config(robot_json: bool, markdown: bool) -> ExitCode {
         robot_docs::config_markdown()
     } else {
         robot_docs::config_text()
-    };
-    stdout_exit(write_stdout_text(&text), ExitCode::SUCCESS)
-}
-
-/// `robot-docs refusals`: render every closed refusal vocabulary entry from
-/// the error types. `--markdown` emits the marked block
-/// `scripts/docs_generate.sh` writes into docs/operations.md.
-fn run_robot_docs_refusals(robot_json: bool, markdown: bool) -> ExitCode {
-    if robot_json {
-        let output = serde_json::to_string(&robot_docs::refusals_json()).unwrap();
-        return stdout_exit(write_stdout_line(&output), ExitCode::SUCCESS);
-    }
-    let text = if markdown {
-        robot_docs::refusals_markdown()
-    } else {
-        robot_docs::refusals_text()
     };
     stdout_exit(write_stdout_text(&text), ExitCode::SUCCESS)
 }
