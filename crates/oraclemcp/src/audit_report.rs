@@ -537,11 +537,14 @@ mod tests {
         AuditEntryDraft, AuditSubject, GENESIS_HASH, SigningKey, sha256_hex, verify_reader_with,
     };
 
-    const TEST_KEY: &str = "audit-report-test-key-material-0123456789";
+    // This key and the golden JSONL prefix come from the isolated local
+    // FREE23 ladder proof recorded for this bead. It is a disposable lab key,
+    // not an operator credential.
+    const TEST_KEY: &str = "8f84e96ef50b2533f7d9d5f5b2b562593f00d4b0f05eac13d1a53c356b6769ab";
     const CANARY_SQL: &str = "select audit_report_unredacted_canary from dual";
 
     fn key() -> SigningKey {
-        SigningKey::new("audit-report-fixture", TEST_KEY.as_bytes()).expect("valid fixture key")
+        SigningKey::new("default", TEST_KEY.as_bytes()).expect("valid fixture key")
     }
 
     fn records(subject: AuditSubject) -> Vec<AuditRecord> {
@@ -623,6 +626,42 @@ mod tests {
             format,
         )
         .expect("fixture verifies")
+    }
+
+    fn real_free23_golden_input() -> &'static str {
+        include_str!("../../../tests/golden/audit_report/free23_session.jsonl")
+    }
+
+    #[test]
+    fn markdown_golden_session() {
+        let input = real_free23_golden_input();
+        let report = verify_and_render(
+            Cursor::new(input.as_bytes()),
+            &[key()],
+            &sha256_hex(input.as_bytes()),
+            AuditReportFormat::Markdown,
+        )
+        .expect("real FREE23 golden chain verifies");
+        assert_eq!(
+            report.content,
+            include_str!("../../../tests/golden/audit_report/free23_session.md")
+        );
+    }
+
+    #[test]
+    fn html_golden_session() {
+        let input = real_free23_golden_input();
+        let report = verify_and_render(
+            Cursor::new(input.as_bytes()),
+            &[key()],
+            &sha256_hex(input.as_bytes()),
+            AuditReportFormat::Html,
+        )
+        .expect("real FREE23 golden chain verifies");
+        assert_eq!(
+            report.content,
+            include_str!("../../../tests/golden/audit_report/free23_session.html")
+        );
     }
 
     #[test]
