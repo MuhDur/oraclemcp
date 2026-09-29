@@ -4573,7 +4573,7 @@
         "result": {
           "content": [
             {
-              "text": "{\"error_class\":\"INVALID_ARGUMENTS\",\"isError\":true,\"message\":\"unknown tool: \\\"does_not_exist\\\" (call oracle_capabilities for the tool surface)\"}",
+              "text": "{\"error_class\":\"INVALID_ARGUMENTS\",\"isError\":true,\"message\":\"unknown tool: \\\"does_not_exist\\\" (call oracle_capabilities for the tool surface)\",\"next_steps\":[\"correct the request arguments to the documented tool schema\"]}",
               "type": "text"
             }
           ],
@@ -4581,7 +4581,10 @@
           "structuredContent": {
             "error_class": "INVALID_ARGUMENTS",
             "isError": true,
-            "message": "unknown tool: \"does_not_exist\" (call oracle_capabilities for the tool surface)"
+            "message": "unknown tool: \"does_not_exist\" (call oracle_capabilities for the tool surface)",
+            "next_steps": [
+              "correct the request arguments to the documented tool schema"
+            ]
           }
         }
       }
