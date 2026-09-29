@@ -91,6 +91,24 @@
       "require_signed_tools": false
     },
     {
+      "call_timeout_seconds": 2,
+      "connect_timeout_seconds": null,
+      "cumulative_query_cost_budget": null,
+      "dashboard_ddl_workbench": false,
+      "default_level": "READ_ONLY",
+      "description": "synthetic W4 two-second pinned-session queue deadline",
+      "inactivity_timeout_seconds": null,
+      "is_default": false,
+      "keepalive_minutes": null,
+      "max_level": "ADMIN",
+      "max_query_cost": null,
+      "mcp_exposed": true,
+      "name": "free23_short_admin",
+      "protected": false,
+      "read_only_standby": false,
+      "require_signed_tools": false
+    },
+    {
       "call_timeout_seconds": null,
       "connect_timeout_seconds": null,
       "cumulative_query_cost_budget": null,
