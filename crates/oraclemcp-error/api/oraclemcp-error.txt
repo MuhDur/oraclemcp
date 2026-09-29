@@ -77,8 +77,12 @@ pub oraclemcp_error::ErrorClass::SyntaxError
 pub oraclemcp_error::ErrorClass::Timeout
 pub oraclemcp_error::ErrorClass::Transient
 impl oraclemcp_error::ErrorClass
+pub const oraclemcp_error::ErrorClass::ALL: [Self; 23]
 pub fn oraclemcp_error::ErrorClass::default_suggested_tool(self) -> core::option::Option<&'static str>
 pub fn oraclemcp_error::ErrorClass::is_retryable(self) -> bool
+pub const fn oraclemcp_error::ErrorClass::meaning(self) -> &'static str
+pub const fn oraclemcp_error::ErrorClass::next_action(self) -> &'static str
+pub const fn oraclemcp_error::ErrorClass::typical_cause(self) -> &'static str
 impl core::clone::Clone for oraclemcp_error::ErrorClass
 pub fn oraclemcp_error::ErrorClass::clone(&self) -> oraclemcp_error::ErrorClass
 impl core::cmp::Eq for oraclemcp_error::ErrorClass
@@ -233,6 +237,11 @@ pub oraclemcp_error::ReasonCategory::SecurityFeatureVisibilityUnknown
 pub oraclemcp_error::ReasonCategory::TransactionControl
 pub oraclemcp_error::ReasonCategory::UnbalancedBlock
 pub oraclemcp_error::ReasonCategory::UnprovenSideEffect
+impl oraclemcp_error::ReasonCategory
+pub const oraclemcp_error::ReasonCategory::ALL: [Self; 19]
+pub const fn oraclemcp_error::ReasonCategory::meaning(self) -> &'static str
+pub const fn oraclemcp_error::ReasonCategory::next_action(self) -> &'static str
+pub const fn oraclemcp_error::ReasonCategory::typical_cause(self) -> &'static str
 impl core::clone::Clone for oraclemcp_error::ReasonCategory
 pub fn oraclemcp_error::ReasonCategory::clone(&self) -> oraclemcp_error::ReasonCategory
 impl core::cmp::Eq for oraclemcp_error::ReasonCategory

@@ -154,6 +154,64 @@ impl ErrorClass {
         Self::SyntaxError, Self::Timeout,
     ];
 
+    /// Short operator-facing meaning for this stable refusal family.
+    #[must_use]
+    pub const fn meaning(self) -> &'static str {
+        match self {
+            Self::ObjectNotFound => "referenced object is absent or invisible",
+            Self::InsufficientPrivilege => "connected account lacks a required privilege",
+            Self::SyntaxError => "statement is not valid SQL or PL/SQL",
+            Self::ConnectionFailed => "Oracle connection could not be established or was lost",
+            Self::RuntimeStateRequired => "operation needs unavailable live runtime state",
+            Self::ChallengeRequired => "operator confirmation has not completed",
+            Self::RepreviewRequired => "requested action differs from its approved preview",
+            Self::LeaseRequired => "operation needs an active stateful session lease",
+            Self::ForbiddenStatement => "fail-closed guard refused the statement",
+            Self::OperatingLevelTooLow => "session operating level is too low",
+            Self::Busy => "admission control is temporarily busy",
+            Self::AtCapacity => "service lane or connection capacity is exhausted",
+            Self::InvalidArguments => "tool arguments failed validation",
+            Self::PolicyDenied => "active profile policy denied the request",
+            Self::Timeout => "call exceeded its allowed deadline",
+            Self::RequestCancelled => "client cancelled an in-flight request",
+            Self::Transient => "driver classified an Oracle condition as transient",
+            Self::FlashbackRetentionExceeded => "requested flashback point is outside retention",
+            Self::FlashbackDefinitionChanged => "flashback crossed a definition change",
+            Self::FlashbackNotFlashbackable => "object or route cannot serve flashback query",
+            Self::FlashbackCapabilityUnavailable => "database lacks required DBMS_FLASHBACK capability",
+            Self::SnapshotTooOld => "Oracle undo snapshot aged out",
+            Self::Internal => "unexpected sanitized server failure",
+        }
+    }
+
+    /// Typical safe diagnostic cause for this refusal family.
+    #[must_use]
+    pub const fn typical_cause(self) -> &'static str {
+        match self {
+            Self::ObjectNotFound => "misspelled, dropped, or privilege-hidden object",
+            Self::InsufficientPrivilege => "missing least-privilege Oracle grant",
+            Self::SyntaxError => "invalid grammar or unsupported statement form",
+            Self::ConnectionFailed => "network, credentials, or unavailable database",
+            Self::RuntimeStateRequired => "offline invocation or disconnected profile",
+            Self::ChallengeRequired => "required step-up task is pending",
+            Self::RepreviewRequired => "SQL, binds, or execution modes changed after preview",
+            Self::LeaseRequired => "stateful tool invoked outside a leased session",
+            Self::ForbiddenStatement => "unprovable side effect or disallowed SQL construct",
+            Self::OperatingLevelTooLow => "read-only or lower-level session cap",
+            Self::Busy | Self::AtCapacity => "bounded service admission limit",
+            Self::InvalidArguments => "request does not match the documented schema",
+            Self::PolicyDenied => "protected profile or schema policy restriction",
+            Self::Timeout => "query or operation exceeded configured time budget",
+            Self::RequestCancelled => "caller cancelled before terminal completion",
+            Self::Transient => "recoverable connection or package-state condition",
+            Self::FlashbackRetentionExceeded | Self::SnapshotTooOld => "requested history is older than retained undo",
+            Self::FlashbackDefinitionChanged => "object definition changed after requested point",
+            Self::FlashbackNotFlashbackable => "remote or unsupported flashback object",
+            Self::FlashbackCapabilityUnavailable => "selected database/version lacks DBMS_FLASHBACK",
+            Self::Internal => "sanitized unexpected server condition",
+        }
+    }
+
     /// The canonical safe action for this refusal family.
     #[must_use]
     pub const fn next_action(self) -> &'static str {
@@ -292,6 +350,56 @@ impl ReasonCategory {
         Self::RequiresHigherLevel, Self::SecurityFeatureVisibilityUnknown,
         Self::TransactionControl, Self::UnbalancedBlock, Self::UnprovenSideEffect,
     ];
+
+    /// Short operator-facing meaning for this structured refusal cause.
+    #[must_use]
+    pub const fn meaning(self) -> &'static str {
+        match self {
+            Self::MultiStatementBatch => "more than one top-level statement was supplied",
+            Self::DynamicSql => "dynamic SQL or side-effecting API was detected",
+            Self::TransactionControl => "caller attempted server-owned transaction control",
+            Self::UnbalancedBlock => "block delimiters or literals do not lex cleanly",
+            Self::PlSqlBlock => "inline PL/SQL cannot be safely analysed",
+            Self::RequiresHigherLevel => "statement needs a higher operating level",
+            Self::CostBudgetExceeded => "estimated read cost exceeds configured budget",
+            Self::BlockListed => "statement matches an operator block-list rule",
+            Self::UnprovenSideEffect => "read-only closure could not be proven",
+            Self::OperatorOnlyStatement => "operation belongs to authenticated operator workflow",
+            Self::PolicyDenied => "active SQL policy denied the statement",
+            Self::OneChildEdition => "edition parent already has a child",
+            Self::NotEditionable => "edition workflow targets shared table or data state",
+            Self::EditionsNotEnabled => "edition support is not proven for object/schema",
+            Self::ProtectedByOls => "Oracle Label Security policy protects the relation",
+            Self::ProtectedByRas => "Real Application Security policy protects the relation",
+            Self::ProtectedByRedaction => "Data Redaction policy protects the relation",
+            Self::SecurityFeatureVisibilityUnknown => "required security catalog evidence is unavailable",
+            Self::Other => "structured cause has no narrower category",
+        }
+    }
+
+    /// Typical safe diagnostic cause for this structured refusal.
+    #[must_use]
+    pub const fn typical_cause(self) -> &'static str {
+        match self {
+            Self::MultiStatementBatch => "semicolon-separated or trailing top-level SQL",
+            Self::DynamicSql => "EXECUTE IMMEDIATE, DBMS_SQL, UTL, scheduler, or string-built SQL",
+            Self::TransactionControl => "COMMIT, ROLLBACK, SAVEPOINT, or SET TRANSACTION",
+            Self::UnbalancedBlock => "unterminated literal or BEGIN/END desynchronization",
+            Self::PlSqlBlock => "benign-looking inline procedural block remains unprovable",
+            Self::RequiresHigherLevel => "write, DDL, or DCL exceeds current session cap",
+            Self::CostBudgetExceeded => "optimizer estimate exceeds profile cost ceiling",
+            Self::BlockListed => "operator-curated forbidden pattern matched",
+            Self::UnprovenSideEffect => "function, view, or base object proof is incomplete",
+            Self::OperatorOnlyStatement => "database-wide default-edition action",
+            Self::PolicyDenied => "Arc N profile SQL restriction",
+            Self::OneChildEdition => "existing or in-flight child would cause ORA-38807",
+            Self::NotEditionable => "table or data change was proposed for an edition",
+            Self::EditionsNotEnabled => "schema/object EBR capability was not established",
+            Self::ProtectedByOls | Self::ProtectedByRas | Self::ProtectedByRedaction => "protected-relation access lacks an approved policy path",
+            Self::SecurityFeatureVisibilityUnknown => "least-privilege catalog read could not prove policy status",
+            Self::Other => "no more specific structured cause was supplied",
+        }
+    }
 
     /// The canonical safe action for this exact refusal cause.
     #[must_use]
@@ -1337,6 +1445,8 @@ mod tests {
     fn every_error_class_has_next_action() {
         for class in ErrorClass::ALL {
             assert!(!class.next_action().trim().is_empty(), "{class:?}");
+            assert!(!class.meaning().trim().is_empty(), "{class:?}");
+            assert!(!class.typical_cause().trim().is_empty(), "{class:?}");
         }
     }
 
@@ -1344,6 +1454,8 @@ mod tests {
     fn every_reason_category_has_next_action() {
         for category in ReasonCategory::ALL {
             assert!(!category.next_action().trim().is_empty(), "{category:?}");
+            assert!(!category.meaning().trim().is_empty(), "{category:?}");
+            assert!(!category.typical_cause().trim().is_empty(), "{category:?}");
         }
     }
 
