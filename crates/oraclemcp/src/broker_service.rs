@@ -135,10 +135,13 @@ pub(super) fn run_http_proxy(
             strict_custom_tools,
         )?;
         let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        install_shutdown_signal_bridge(
-            &ShutdownCoordinator::new(HealthState::new(env!("CARGO_PKG_VERSION"))),
-            &shutdown,
-        );
+        // Keep the frontend alive until the broker acknowledges listener
+        // closure. Default signal termination would race a replacement launcher.
+        #[cfg(unix)]
+        for signal in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
+            signal_hook::flag::register(signal, shutdown.clone())
+                .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
+        }
         let stopped = shutdown.clone();
         std::thread::spawn(move || {
             while !stopped.load(Ordering::Acquire) {
@@ -208,6 +211,7 @@ fn serve_http(
     writer: interprocess::local_socket::Stream,
     start: serde_json::Value,
     shared: SharedService,
+    permit: HttpListenerPermit,
 ) -> Result<(), ErrorEnvelope> {
     let start: HttpStart = serde_json::from_value(start)
         .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;
@@ -240,6 +244,9 @@ fn serve_http(
     let code = (0..=u8::MAX)
         .find(|code| ExitCode::from(*code) == result)
         .unwrap_or(1);
+    // A successful frontend exit must also acknowledge that another launcher
+    // may acquire this root's listener, rather than just that the socket closed.
+    drop(permit);
     let mut writer = status.lock().expect("HTTP broker status lock");
     serde_json::to_writer(&mut *writer, &serde_json::json!({"exit":code}))
         .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
@@ -589,8 +596,8 @@ pub(super) fn run_broker(_allow_no_auth: bool, strict_custom_tools: bool) -> Exi
                     }
                     *running = true;
                     drop(running);
-                    let _permit = HttpListenerPermit(http_listener.clone());
-                    return serve_http(reader, writer, start, shared.clone());
+                    let permit = HttpListenerPermit(http_listener.clone());
+                    return serve_http(reader, writer, start, shared.clone(), permit);
                 }
                 let selected = select_runtime_profile_from_config(&config, peer.profile.as_deref())
                     .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;

@@ -199,8 +199,15 @@ class HttpMcpSession:
             bufsize=1,
         )
         threading.Thread(target=self._drain, args=(self.proc.stdout,), daemon=True).start()
-        threading.Thread(target=self._drain, args=(self.proc.stderr,), daemon=True).start()
+        threading.Thread(target=self._drain_stderr, daemon=True).start()
         self._wait_ready()
+
+    def _drain_stderr(self):
+        # Preserve served-process diagnostics in the wrapper's captured stderr.
+        # Discarding them hides the actual cause of a readiness failure.
+        for line in self.proc.stderr:
+            sys.stderr.write(line)
+            sys.stderr.flush()
 
     @staticmethod
     def _drain(stream):

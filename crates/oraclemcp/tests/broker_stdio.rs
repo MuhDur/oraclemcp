@@ -994,6 +994,11 @@ fn http_stdio_coexistence(stdio_first: bool) {
             )
             .stderr(Stdio::inherit());
     }
+    if !stdio_first {
+        // The spawning HTTP client's diagnostic pipe disappears with that
+        // client. Its detached broker must still serve replacement clients.
+        command.stderr(Stdio::piped());
+    }
     let process = command.spawn().unwrap();
     struct HttpProcess(Child);
     impl Drop for HttpProcess {
@@ -1221,6 +1226,69 @@ fn http_stdio_coexistence(stdio_first: bool) {
             json!({"jsonrpc":"2.0","id":99,"method":"tools/list"}),
         );
         assert_eq!(status, 404, "deleted session must be unusable: {response}");
+    }
+    #[cfg(unix)]
+    {
+        assert!(
+            Command::new("kill")
+                .args(["-TERM", &process.0.id().to_string()])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let status = loop {
+            if let Some(status) = process.0.try_wait().unwrap() {
+                break status;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "HTTP frontend must acknowledge bounded graceful shutdown"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert!(status.success(), "graceful HTTP shutdown: {status}");
+        drop(process.0.stderr.take());
+        assert!(
+            TcpStream::connect(address).is_err(),
+            "frontend exit must acknowledge listener closure"
+        );
+        // No idle wait or retry of the failed launcher: immediately replace it
+        // on the same root and address while both stdio clients remain alive.
+        process = HttpProcess(command.stderr(Stdio::inherit()).spawn().unwrap());
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while TcpStream::connect(address).is_err() {
+            assert!(
+                process.0.try_wait().unwrap().is_none(),
+                "replacement HTTP startup refused"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "replacement HTTP startup timed out"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let (status, headers, reply) = request(
+            &tokens[0],
+            None,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"http-replacement","version":"1"}}}),
+        );
+        assert_eq!(status, 200, "{reply}");
+        let session = &headers
+            .iter()
+            .find(|(name, _)| name == "mcp-session-id")
+            .unwrap()
+            .1;
+        let (status, _, reply) = request(
+            &tokens[0],
+            Some(session),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 79 AS REPLACEMENT_VALUE FROM dual"}}}),
+        );
+        assert_eq!(status, 200, "{reply}");
+        assert_eq!(reply["result"]["isError"], false, "{reply}");
+        assert!(reply.to_string().contains("79"), "{reply}");
+        let (status, _, reply) = request(&tokens[0], Some(session), Value::Null);
+        assert_eq!(status, 202, "{reply}");
     }
     drop(process);
     let deadline = std::time::Instant::now() + Duration::from_secs(10);

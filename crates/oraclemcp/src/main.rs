@@ -3270,8 +3270,10 @@ fn dispatcher_wiring(
     // poisoned lifecycle state fails closed; serving paths never re-read disk.
     let exposure = match options.profile_drain.accepted_config() {
         Some(cfg) => {
-            // Operator-visibility notice (stderr; never the stdio MCP channel).
-            eprintln!("[oraclemcp] {}", exposed_profiles_summary(&cfg));
+            // The detached broker outlives its spawning client's stderr pipe.
+            // Tracing tolerates a closed sink; eprintln! would panic and abort
+            // a new session after that first client disconnects.
+            tracing::info!(profiles = %exposed_profiles_summary(&cfg), "MCP exposure policy configured");
             oraclemcp::dispatch::McpExposurePolicy::from_config(&cfg)
         }
         None => oraclemcp::dispatch::McpExposurePolicy::AllowList(HashSet::new()),
@@ -3961,7 +3963,7 @@ fn run_serve(
                 return ExitCode::from(2);
             }
             if tls_enabled {
-                eprintln!(
+                tracing::info!(
                     "oraclemcp serve: HTTPS transport on {addr} has native TLS{} enabled.",
                     if resolved_http.mtls_required {
                         " with mTLS client-certificate verification"
@@ -3974,37 +3976,37 @@ fn run_serve(
                     }
                 );
                 if !oauth_enabled && !resolved_http.mtls_required && !client_credentials_enabled {
-                    eprintln!(
+                    tracing::warn!(
                         "oraclemcp serve: WARNING — HTTPS transport on {addr} has TLS \
                          encryption but no per-client credential, OAuth, or mTLS client authentication."
                     );
                 }
             } else if effective_https {
-                eprintln!(
+                tracing::info!(
                     "oraclemcp serve: plaintext HTTP backend on {addr} is configured behind \
                      trusted external HTTPS termination. Forwarded scheme headers are ignored."
                 );
                 if !oauth_enabled && !client_credentials_enabled {
-                    eprintln!(
+                    tracing::warn!(
                         "oraclemcp serve: WARNING — trusted HTTPS termination does not provide \
                          per-client authentication; configure OAuth or client credentials unless \
                          this is intentional local development."
                     );
                 }
             } else if oauth_enabled {
-                eprintln!(
+                tracing::info!(
                     "oraclemcp serve: HTTP transport on {addr} has OAuth bearer enforcement \
                      enabled. The native listener is still plaintext; bind loopback or front it \
                      with a TLS-terminating proxy for off-box clients."
                 );
             } else if client_credentials_enabled {
-                eprintln!(
+                tracing::info!(
                     "oraclemcp serve: HTTP transport on {addr} has per-client bearer credential \
                      enforcement enabled. The native listener is still plaintext; bind loopback \
                      or front it with a TLS-terminating proxy for off-box clients."
                 );
             } else {
-                eprintln!(
+                tracing::warn!(
                     "oraclemcp serve: WARNING — HTTP transport on {addr} is UNAUTHENTICATED and \
                      UNENCRYPTED. Do not expose it to untrusted networks; front it with a \
                      TLS-terminating authenticated proxy, or use stdio."
@@ -4194,7 +4196,7 @@ fn run_serve(
                     };
                 transport.source_history = Some(Arc::new(source_history));
             } else {
-                eprintln!(
+                tracing::warn!(
                     "oraclemcp serve: the config workflow, change proposal and source \
                      history stores stay off in this instance (the service state was owned by \
                      another instance at startup); restart it to enable them."
@@ -4258,7 +4260,7 @@ fn run_serve(
             let listener = match TcpListener::bind(&addr) {
                 Ok(listener) => listener,
                 Err(e) => {
-                    eprintln!(
+                    tracing::error!(
                         "oraclemcp serve: {} bind error on {addr}: {e}",
                         if tls_enabled { "https" } else { "http" }
                     );
@@ -4353,7 +4355,7 @@ fn run_serve(
                     control.preauth_workers,
                     control.preauth_workers,
                 ));
-                eprintln!(
+                tracing::info!(
                     "oraclemcp serve: dedicated mandatory-mTLS control transport on {} enabled (preauth={}, operator={}, doctor={}).",
                     control.listen,
                     control.preauth_workers,
@@ -4396,7 +4398,7 @@ fn run_serve(
             ) {
                 Ok(app) => app,
                 Err(e) => {
-                    eprintln!("oraclemcp serve: service AppSpec failed to start: {e}");
+                    tracing::error!("oraclemcp serve: service AppSpec failed to start: {e}");
                     pinger.shutdown();
                     drop(telemetry);
                     return ExitCode::from(1);
@@ -4418,18 +4420,18 @@ fn run_serve(
             match (result, app_stop_result) {
                 (Ok(()), Ok(())) => ExitCode::SUCCESS,
                 (Ok(()), Err(e)) => {
-                    eprintln!(
+                    tracing::error!(
                         "oraclemcp serve: service AppSpec shutdown did not resolve cleanly: {e}"
                     );
                     ExitCode::from(1)
                 }
                 (Err(e), app_stop_result) => {
-                    eprintln!(
+                    tracing::error!(
                         "oraclemcp serve: {} transport error on {addr}: {e}",
                         if tls_enabled { "https" } else { "http" }
                     );
                     if let Err(app_err) = app_stop_result {
-                        eprintln!(
+                        tracing::error!(
                             "oraclemcp serve: service AppSpec shutdown after transport error \
                              also failed: {app_err}"
                         );
@@ -4468,37 +4470,6 @@ fn install_stdio_signal_close(server: OracleMcpServer) {
 
 #[cfg(not(unix))]
 fn install_stdio_signal_close(_server: OracleMcpServer) {}
-
-/// Install a best-effort SIGTERM/SIGINT bridge: on the first delivery, begin the
-/// graceful drain (flip `/readyz`) and set the accept-loop shutdown flag so
-/// `serve_*_until` stops accepting and joins in-flight workers.
-///
-/// Uses a self-pipe-free approach: a background thread polls a process-global
-/// signal latch set by a minimal `libc`-free handler. Since the workspace forbids
-/// `unsafe` and avoids extra deps, we register via the std-only `ctrlc`-style
-/// path is unavailable; instead we rely on the runtime's own SIGTERM handling
-/// where present and expose the coordinator for an external supervisor. The flag
-/// is also flipped if the coordinator is signalled programmatically.
-fn install_shutdown_signal_bridge(
-    coordinator: &ShutdownCoordinator,
-    flag: &Arc<std::sync::atomic::AtomicBool>,
-) {
-    let coordinator = coordinator.clone();
-    let flag = Arc::clone(flag);
-    // A lightweight watcher thread: when the coordinator begins shutdown (via
-    // any path — a future SIGTERM handler, an admin request, or a test), mirror
-    // it into the accept-loop flag. This keeps the bridge dependency-free and
-    // unsafe-free while still wiring the coordinator to the serve loop.
-    std::thread::Builder::new()
-        .name("oraclemcp-shutdown-bridge".to_owned())
-        .spawn(move || {
-            while !coordinator.is_shutting_down() {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-            }
-            flag.store(true, std::sync::atomic::Ordering::SeqCst);
-        })
-        .ok();
-}
 
 /// Emit a serve startup status line on stderr (stdout stays JSON-RPC data).
 fn emit_serve_status(robot_json: bool, transport: &str, addr: Option<&str>, tools: &[String]) {
@@ -4586,13 +4557,17 @@ fn http_listen_guard(
 
 /// Emit a structured error on stderr (used before the serve loop starts).
 fn emit_status_error(robot_json: bool, code: &str, message: &str) {
+    // A detached broker may no longer have its launcher's diagnostic reader.
+    // A failed notice must not turn a typed startup refusal into a panic.
+    let mut stderr = io::stderr().lock();
     if robot_json {
-        eprintln!(
+        let _ = writeln!(
+            stderr,
             "{}",
             serde_json::json!({ "kind": "error", "code": code, "message": message })
         );
     } else {
-        eprintln!("oraclemcp serve: {message}");
+        let _ = writeln!(stderr, "oraclemcp serve: {message}");
     }
 }
 
