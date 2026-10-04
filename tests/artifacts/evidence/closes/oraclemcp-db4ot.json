@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-04T12:55:00Z",
+  "bead_id": "oraclemcp-db4ot",
+  "scope": {
+    "summary": "grant_scope_match libFuzzer timeouts fixed by upgrading sqlparser 0.62 -> 0.63 (upstream fix for exponential compound-field backtracking, apache/datafusion-sqlparser-rs #2344); both CI reproducers committed byte-for-byte as release-timed regression tests; all fuzz workspaces' lockfiles moved to 0.63.",
+    "in_scope": [
+      "crates/oraclemcp-guard/Cargo.toml",
+      "crates/oraclemcp-guard/fuzz/Cargo.toml",
+      "crates/oraclemcp-guard/fuzz/Cargo.lock",
+      "crates/oraclemcp-auth/fuzz/Cargo.lock",
+      "crates/oraclemcp-config/fuzz/Cargo.lock",
+      "crates/oraclemcp-guard/tests/scoped_grant_matcher.rs",
+      "tests/conformance/PROVENANCE.md"
+    ],
+    "out_of_scope": [
+      "The workspace Cargo.lock and crates/oraclemcp/Cargo.toml also carry the 0.63 bump (15fb0577) but are excluded from the clean-tree scope because another agent has unrelated uncommitted edits in them.",
+      "No algorithmic change in oraclemcp's own guard code: the super-linear path was inside sqlparser's parse_compound_expr."
+    ]
+  },
+  "source": {
+    "sha": "1bb680f2304e6d25b3c8b3254d28a224bdbc6684",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "regression tests, release build (independent verifier, clean export of 66a91448)",
+        "kind": "cli",
+        "trace": "cargo test --locked -p oraclemcp-guard --release --test scoped_grant_matcher -- --nocapture -> 27 passed; 268 B reproducer 191.755 us, 609 B reproducer 434.03 us, both UnsupportedStatement (same verdict as on 0.62, where they took 83.0 s and 9.0 s). Fixture sha256 match the CI artifacts of runs 37112989138 / 36993196303."
+      },
+      {
+        "name": "grant_scope_match fuzz target (independent verifier)",
+        "kind": "cli",
+        "trace": "cargo +nightly-2026-05-11 fuzz run --fuzz-dir crates/oraclemcp-guard/fuzz grant_scope_match -- -max_total_time=300 -timeout=10 -> Done 638864 runs in 301 s, exit 0, no artifacts. Fuzz Campaign workflow_dispatch run 37197018590 on 66a91448: success, both grant_scope_match shards green."
+      },
+      {
+        "name": "tighten-only verdict differential 0.62 vs 0.63 (independent verifier)",
+        "kind": "cli",
+        "trace": "3,566 unique inputs (all guard src/tests/fuzz_targets literals incl. adversarial corpus, classify_fuzz + grant_predicate corpora, both fixtures, 60 synthetic compound chains) through classify, semantic_read_plan_checked and match_sql: 0 refused->admitted in classifier (Safe 9->9) and grant matcher (UPDATE 7->7, DELETE 0->0); 6 classifier verdicts got stricter; 12 synthetic >=64-field SELECT read plans moved ERR->OK but remain classifier-Guarded and read_executor.rs:640 gates plans behind ensure_read_only_decision. cargo test --locked -p oraclemcp-guard -> 577 passed, 0 failed."
+      },
+      {
+        "name": "fuzz workspaces locked build (orchestrator)",
+        "kind": "cli",
+        "trace": "cargo +nightly-2026-05-11 check --locked --manifest-path crates/oraclemcp-{auth,config}/fuzz/Cargo.toml -> Finished (after 32f1c1c7). CI on 32f1c1c7: success."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [
+    "Gate prepush on 66a91448 passed 15/15 but did not cover the separate auth/config fuzz workspaces; CI caught the stale lockfiles and 32f1c1c7 fixed them. The swarm gate now has a fuzz-locks step.",
+    "The scoped_grant_matcher check() helper moved from match_statement(parse(sql)) to match_sql(sql); a proptest's bare is_err() could pass vacuously if a fixed statement stopped parsing. The verifier's differential shows identical verdicts for those statements on both parser versions."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
