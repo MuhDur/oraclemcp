@@ -1337,5 +1337,422 @@
     "error_class": "INVALID_ARGUMENTS"
   },
   "test_id": "w4_query_idle_recycle"
-}
+},
+  {
+    "case_id": "w4_positive_capabilities",
+    "tool": "oracle_capabilities",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "detail_level": "compact"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "server_name": "oraclemcp",
+        "protocol_version": "2025-11-25",
+        "detail_level": "compact",
+        "features": {
+          "built_with_live_db": true,
+          "engine": true,
+          "http_transport": "${http_transport}"
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_parse",
+    "tool": "oracle_plsql_parse",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source": "CREATE OR REPLACE PACKAGE W4_ENGINE AS PROCEDURE q; END;"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "declaration_count": 1,
+        "declaration_kinds": [
+          "Package"
+        ],
+        "declarations": [
+          {
+            "name": "W4_ENGINE",
+            "kind": "Package"
+          }
+        ],
+        "recovered": false,
+        "error_count": 0
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_analyze",
+    "tool": "oracle_plsql_analyze",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${project_root}"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "file_count": 3
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_lineage",
+    "tool": "oracle_plsql_lineage",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${project_root}",
+        "target": "W4_ENGINE",
+        "direction": "downstream"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "target": "W4_ENGINE",
+        "found": true,
+        "direction": "downstream"
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_doc",
+    "tool": "oracle_plsql_doc",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source": "/** W4 documentation marker */\nCREATE OR REPLACE PACKAGE W4_ENGINE AS PROCEDURE q; END;",
+        "query": "documentation"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "matches": [
+          {
+            "tag": null,
+            "text": "W4 documentation marker"
+          }
+        ]
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_sast",
+    "tool": "oracle_plsql_sast",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${project_root}",
+        "format": "json"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "unit_count": 4,
+        "completeness": {
+          "files_total": 3,
+          "files_recovered": 0
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_what_breaks",
+    "tool": "oracle_plsql_what_breaks",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "changeset": {
+          "objects": [
+            {
+              "owner": 1,
+              "name": 2,
+              "kind": "Unclassified",
+              "new_hash": null,
+              "previous_hash": null,
+              "file_paths": [
+                "W4_UNCLASSIFIED.sql"
+              ],
+              "uncertainties": []
+            }
+          ],
+          "unclassified_files": []
+        },
+        "mode": "source_only"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "payload": {
+          "summary": {
+            "invalidation_count": 0,
+            "uncertainty_count": 1
+          },
+          "uncertainties": [
+            {
+              "affected_owner_symbol": 1,
+              "affected_name_symbol": 2
+            }
+          ]
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_live_column_lineage",
+    "tool": "oracle_lineage",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${project_root}",
+        "owner": "${owner}",
+        "object": "V_TYPES_${run_id}",
+        "column": "ID"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "found": true,
+        "column": "ID",
+        "catalog_marker": {
+          "status": "verified",
+          "catalog_data_type": "NUMBER"
+        },
+        "source_files_scanned": 3
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_positive_engine_live_snapshot",
+    "tool": "oracle_plsql_live_snapshot",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "schemas": [
+          "${owner}"
+        ],
+        "include_plscope": false
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "schemas": [
+          "${owner}"
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "catalog_rows_positive": true
+  },
+  {
+    "case_id": "w4_positive_engine_blast_radius",
+    "tool": "oracle_plsql_blast_radius",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "schemas": [
+          "${owner}"
+        ],
+        "include_plscope": false,
+        "changeset": {
+          "objects": [
+            {
+              "owner": 1,
+              "name": 2,
+              "kind": "Unclassified",
+              "new_hash": null,
+              "previous_hash": null,
+              "file_paths": [
+                "W4_UNCLASSIFIED.sql"
+              ],
+              "uncertainties": []
+            }
+          ],
+          "unclassified_files": []
+        }
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "snapshot": {
+          "schemas": [
+            "${owner}"
+          ]
+        },
+        "prediction": {
+          "payload": {
+            "summary": {
+              "invalidation_count": 0,
+              "uncertainty_count": 1
+            },
+            "uncertainties": [
+              {
+                "affected_owner_symbol": 1,
+                "affected_name_symbol": 2
+              }
+            ]
+          }
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "catalog_rows_positive": true
+  }
 ]

@@ -46,7 +46,7 @@ OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "au
                         "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
                         "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner",
                         "environment_skips", "runtime_awr_probe", "audit_optional_prefix", "test_id",
-                        "name_alias_matrix", "mask_certificate_audit"}
+                        "name_alias_matrix", "mask_certificate_audit", "catalog_rows_positive"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -95,7 +95,10 @@ def expand_case(value, run_id, transport, lane=None):
     if lane is not None:
         # Version-specific output (DBMS_METADATA DDL text) has one golden per lane.
         replacements["${lane}"] = lane
+        replacements["${project_root}"] = str(plsql_project_path(run_id, transport, lane))
     if isinstance(value, str):
+        if value == "${http_transport}":
+            return transport == "http"
         for key, replacement in replacements.items():
             value = value.replace(key, replacement)
         # ${cap:name} is filled at run time from an earlier step's capture.
@@ -346,10 +349,14 @@ def coverage_status(tools, cases):
         if lane["adb"]:
             facts.add("adb")
         declared.append(facts)
-    positives = {case["tool"] for case in cases
-                 if "error_class" not in case["expect"]
-                 and case["case_id"].startswith(("w4_", "rel012_"))
-                 and any(set(case["requires"]) <= facts for facts in declared)}
+    positives = set()
+    for case in cases:
+        if (not case["case_id"].startswith(("w4_", "rel012_"))
+                or not any(set(case["requires"]) <= facts for facts in declared)):
+            continue
+        for call in [case, *case.get("steps", [])]:
+            if "tool" in call and not ({"error_class", "error_classes"} & call["expect"].keys()):
+                positives.add(call["tool"])
     canonical = {name for name in tools if name.startswith("oracle_")}
     missing = sorted(canonical - positives)
     return {"registered": len(tools), "canonical": len(canonical),
@@ -479,6 +486,10 @@ def validate_case(case, filename):
                 and case["test_id"] == "w4_sample_rows_sample_mask"
                 and case["tool"] == "oracle_sample_rows",
                 "mask certificate check belongs to the declared sampler scenario")
+    if "catalog_rows_positive" in case:
+        require(case["catalog_rows_positive"] is True
+                and case["tool"] in {"oracle_plsql_live_snapshot", "oracle_plsql_blast_radius"},
+                "positive catalog row proof belongs to the live engine tools")
     if "generated_sampler_absent" in case["call"]:
         require(case["call"]["generated_sampler_absent"] is True
                 and case["case_id"] in {"rel012_i53_sample_policy", "rel012_i53_sample_view"}
@@ -2381,6 +2392,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if supported and not case["call"].get("retry"):
             verify_case_rereads(connection, case, row)
         verify_expect(expected, reply, ROOT / "tests/golden/w4")
+        if case.get("catalog_rows_positive") and supported:
+            verify_positive_catalog_rows(reply)
         if "row_contains" in case:
             verify_row_contains(reply, case["row_contains"])
         if "finding_row_contains" in case:
@@ -3009,6 +3022,43 @@ def probe_expired_retention_scn(connection):
     raise DriverError("lab retained every SCN tested beyond its reported undo retention")
 
 
+def plsql_project_path(run_id, transport, lane):
+    require(re.fullmatch(r"W4[0-9A-F]{10}", run_id) is not None
+            and transport in {"stdio", "http"} and lane in {"free23", "xe21", "xe18"},
+            "PL/SQL project needs an exact disposable fixture identity")
+    return ROOT / "target/e2e/w4" / lane / f"plsql-{run_id}-{transport}"
+
+
+def prepare_plsql_project(run_id, transport, lane):
+    project = plsql_project_path(run_id, transport, lane)
+    project.mkdir(parents=True, exist_ok=True)
+    owner = "W4O_" + run_id
+    # Source-derived column lineage is cross-checked against these real
+    # fixture columns. The local package exercises the offline engine only.
+    (project / "table.sql").write_text(
+        f"CREATE TABLE {owner}.T_TYPES_{run_id} (ID NUMBER, N_VAL NUMBER, V_TEXT VARCHAR2(40));\n")
+    (project / "view.sql").write_text(
+        f"CREATE VIEW {owner}.V_TYPES_{run_id} AS SELECT ID, N_VAL, V_TEXT FROM {owner}.T_TYPES_{run_id};\n")
+    (project / "package.sql").write_text(
+        "CREATE OR REPLACE PACKAGE W4_ENGINE AS PROCEDURE q; END;\n")
+
+
+def verify_positive_catalog_rows(reply):
+    payload = tool_payload(reply)
+    require(payload.get("isError") is not True, "catalog extraction did not succeed")
+    value = payload["structuredContent"]
+    if "snapshot" in value:
+        value = value["snapshot"]
+    rows = value.get("row_counts")
+    require(isinstance(rows, list)
+            and all(isinstance(row, dict) and isinstance(row.get("row_set"), str)
+                    and type(row.get("row_count")) is int and row["row_count"] >= 0 for row in rows),
+            "catalog extraction did not return real row counts")
+    for kind in ("object", "column"):
+        require(any(kind in row["row_set"].lower() and row["row_count"] > 0 for row in rows),
+                f"catalog extraction contains no positive {kind} rowset")
+
+
 def lock_fixture_statistics(connection, fixture_id):
     """Prevent automatic maintenance from evaluating fixture index functions.
 
@@ -3212,6 +3262,7 @@ def _run_lane(args, output):
                         if "setup_ready_sql" in case:
                             wait_for_setup_ready(settings, password, case["setup_ready_sql"])
                 if fixture_id is not None:
+                    prepare_plsql_project(fixture_id, transport, args.lane)
                     output["statistics_locks"][transport] = lock_fixture_statistics(connection, fixture_id)
                 needs_streaming = any(
                     "progress_token" in case.get("call", {})
@@ -3810,6 +3861,38 @@ def flashback_grant_selftest():
 
 
 def release_schedule_selftest():
+    require(expand_case("${http_transport}", "W41234ABCDEF", "stdio", "free23") is False
+            and expand_case("${http_transport}", "W41234ABCDEF", "http", "free23") is True,
+            "capability expectation must preserve the exact transport boolean")
+    try:
+        plsql_project_path("SYSTEM", "stdio", "free23")
+    except DriverError:
+        pass
+    else:
+        raise DriverError("PL/SQL source preparation accepted a foreign identity")
+    cases = load_cases()
+    checkpoint_cases = [case for case in cases if any(
+        step.get("tool") == "oracle_checkpoint" for step in case.get("steps", []))]
+    require(checkpoint_cases and not coverage_status({"oracle_checkpoint": {}}, checkpoint_cases)["missing_positive"],
+            "asserted checkpoint steps must count as actual positive scenarios")
+    for expectation in ({"error_class": "INVALID_ARGUMENTS"}, {"error_classes": ["INVALID_ARGUMENTS"]}):
+        planted = {"case_id": "w4_planted_refusal", "tool": "oracle_query", "requires": [],
+                   "expect": expectation, "steps": [{"tool": "oracle_checkpoint", "expect": expectation}]}
+        require(coverage_status({"oracle_checkpoint": {}}, [planted])["missing_positive"] == ["oracle_checkpoint"],
+                "refusal-only steps must never become positive coverage")
+    good_catalog = {"result": {"structuredContent": {"row_counts": [
+        {"row_set": "ALL_OBJECTS", "row_count": 1},
+        {"row_set": "ALL_TAB_COLUMNS", "row_count": 1}]}}}
+    verify_positive_catalog_rows(good_catalog)
+    for rows in ([], [{"row_set": "ALL_OBJECTS", "row_count": 1}],
+                 [{"row_set": "ALL_OBJECTS", "row_count": 0},
+                  {"row_set": "ALL_TAB_COLUMNS", "row_count": 1}]):
+        try:
+            verify_positive_catalog_rows({"result": {"structuredContent": {"row_counts": rows}}})
+        except DriverError:
+            pass
+        else:
+            raise DriverError("empty catalog extraction accepted as positive coverage")
     try:
         lock_fixture_statistics(None, "SYSTEM")
     except DriverError:
