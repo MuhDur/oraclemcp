@@ -1455,3 +1455,110 @@ fn live_bad_first_credentials_do_not_pin_the_root_broker() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+#[cfg(feature = "live-xe")]
+#[test]
+fn guard_refusal_is_visible_in_signed_audit_report_live_free23() {
+    let root = tempfile::tempdir().unwrap();
+    let path = config(root.path(), true);
+    let mut client = Client::spawn(root.path(), &path, 37);
+    assert!(client.response(1).get("result").is_some());
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 731 AS REFUSAL_LIVE_PROBE FROM dual"}}}));
+    let probe = client.response(2);
+    assert_ne!(
+        probe["result"]["isError"], true,
+        "actual FREE23 read: {probe}"
+    );
+    assert!(
+        probe.to_string().contains("731"),
+        "actual database result: {probe}"
+    );
+    let sql = "DELETE FROM synthetic_refusal_target WHERE password = 'synthetic-raw-secret'";
+    client.send(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":sql,"binds":["synthetic-bind-secret"]}}}));
+    let refused = client.response(3);
+    assert_eq!(refused["result"]["isError"], true, "{refused}");
+    assert!(
+        refused.to_string().contains("OPERATING_LEVEL_TOO_LOW"),
+        "{refused}"
+    );
+    let audit_path = root.path().join("audit.jsonl");
+    let audit = std::fs::read_to_string(&audit_path).unwrap();
+    let records: Vec<Value> = audit
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let blocked: Vec<_> = records
+        .iter()
+        .filter(|record| record["decision"] == "BLOCKED")
+        .collect();
+    assert_eq!(blocked.len(), 1, "exactly one refused DELETE record");
+    assert_eq!(blocked[0]["tool"], "oracle_query");
+    assert_eq!(
+        blocked[0]["failure"]["error_class"],
+        "OPERATING_LEVEL_TOO_LOW"
+    );
+    assert!(
+        blocked[0]["subject"]["stable_id"]
+            .as_str()
+            .unwrap()
+            .contains(":session:")
+    );
+    assert!(
+        blocked[0]["subject"]["client_id"]
+            .as_str()
+            .unwrap()
+            .contains("broker-test-37")
+    );
+    assert!(!audit.contains("synthetic-raw-secret"));
+    assert!(!audit.contains("synthetic-bind-secret"));
+    for subcommand in ["report", "verify"] {
+        let mut command = Command::new(test_binary());
+        for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
+            command.env_remove(key);
+        }
+        let output = command
+            .args(["audit", subcommand, audit_path.to_str().unwrap()])
+            .env("ORACLEMCP_CONFIG", &path)
+            .env("BROKER_TEST_KEY", "synthetic-test-key-32-bytes-minimum")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "audit {subcommand}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = String::from_utf8(output.stdout).unwrap();
+        if subcommand == "report" {
+            assert!(text.contains("## Refusals"), "{text}");
+            assert!(
+                text.contains("| OPERATING_LEVEL_TOO_LOW:REQUIRES_HIGHER_LEVEL | 1 |"),
+                "{text}"
+            );
+            assert!(text.contains("**Verification:** VERIFIED"), "{text}");
+        }
+        assert!(!text.contains("synthetic-raw-secret"));
+        assert!(!text.contains("synthetic-bind-secret"));
+    }
+    drop(client);
+    // The broker owns the sink. Wait for its session cleanup before the
+    // temporary fixture disappears, rather than racing the audit writer.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let audit = std::fs::read_to_string(&audit_path).unwrap();
+        if audit.lines().any(|line| {
+            let record: Value = serde_json::from_str(line).unwrap();
+            record["tool"] == "lane_lifecycle"
+                && record["subject"]["client_id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("broker-test-37"))
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stdio cleanup must finish before removing fixture directory"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

@@ -3,6 +3,7 @@ use oraclemcp_audit::{
     AuditError, AuditOutcome, AuditRecord, AuditSink, AuditSubject, MemoryAuditSink, SigningKey,
     VerifyOutcome, verify_records,
 };
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 /// Share one `MemoryAuditSink` between the `Auditor` (which owns a
@@ -1569,4 +1570,292 @@ fn audit_write_failure_refuses_patch_before_db_execute() {
         .expect_err("audit failure refuses patch");
     assert_eq!(err.error_class, ErrorClass::Internal);
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
+}
+
+#[test]
+fn guard_refusals_are_signed_redacted_and_bound_to_transport_identity() {
+    let (auditor, sink) = auditor_with_sink();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dispatcher = dispatcher_with_conn(
+        Box::new(ZeroCallOracleConnection {
+            calls: calls.clone(),
+        }),
+        escalatable_read_only(),
+        auditor.clone(),
+    );
+    let other_tools = dispatcher_with(escalatable_read_only(), auditor);
+    let context = DispatchContext::default()
+        .with_principal_key("oauth:synthetic-principal")
+        .with_http_session_id("synthetic-session");
+    let cases = [
+        (
+            "oracle_query",
+            "sql",
+            "DELETE FROM refusal_target WHERE secret = 'synthetic-literal-secret'",
+            ErrorClass::OperatingLevelTooLow,
+        ),
+        (
+            "oracle_query",
+            "sql",
+            "BEGIN EXECUTE IMMEDIATE 'DELETE FROM refusal_target'; END;",
+            ErrorClass::ForbiddenStatement,
+        ),
+        (
+            "oracle_query",
+            "sql",
+            "SELECT 'unterminated-synthetic-secret",
+            ErrorClass::ForbiddenStatement,
+        ),
+        (
+            "oracle_explain_plan",
+            "sql",
+            "DELETE FROM refusal_target",
+            ErrorClass::OperatingLevelTooLow,
+        ),
+        (
+            "oracle_execute",
+            "sql",
+            "BEGIN EXECUTE IMMEDIATE 'DELETE FROM refusal_target'; END;",
+            ErrorClass::ForbiddenStatement,
+        ),
+        (
+            "deploy_ddl",
+            "ddl",
+            "SELECT 'unterminated-synthetic-secret",
+            ErrorClass::ForbiddenStatement,
+        ),
+        (
+            "deploy_ddl",
+            "source_code",
+            "SELECT 'unterminated-synthetic-secret",
+            ErrorClass::ForbiddenStatement,
+        ),
+    ];
+    for (tool, sql_arg, sql, expected_class) in cases {
+        let mut args = json!({sql_arg:sql});
+        if tool == "oracle_query" {
+            args["binds"] = json!(["synthetic-bind-secret"]);
+        }
+        let case_dispatcher = if tool == "oracle_query" {
+            &dispatcher
+        } else {
+            &other_tools
+        };
+        let error = case_dispatcher
+            .dispatch_with_context(tool, args, context)
+            .expect_err("guard refuses before database I/O");
+        assert_eq!(error.error_class, expected_class);
+        if tool == "oracle_query" {
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                0,
+                "query refusals do not reach Oracle"
+            );
+        }
+        let records = sink.records();
+        let record = records.last().expect("guard refusal reaches signed audit");
+        assert_eq!(record.tool, tool);
+        assert_eq!(record.decision, AuditDecision::Blocked);
+        assert_eq!(record.outcome, AuditOutcome::Failed);
+        assert_eq!(
+            record.sql_sha256,
+            "sha256:".to_owned()
+                + &Sha256::digest(sql.as_bytes())
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+        );
+        assert_eq!(record.subject.kind, "oauth");
+        assert_eq!(
+            record.subject.stable_id,
+            "synthetic-principal:session:synthetic-session"
+        );
+        let cause = record.failure.as_ref().expect("typed refusal cause");
+        assert_eq!(
+            serde_json::to_value(expected_class).unwrap(),
+            cause.error_class()
+        );
+        assert_eq!(
+            cause.reason_category(),
+            error
+                .structured_reason
+                .as_ref()
+                .map(|r| serde_json::to_value(r.category).unwrap())
+                .as_ref()
+                .and_then(Value::as_str)
+        );
+        assert!(
+            record.db_evidence.is_none(),
+            "guard refusal never probes Oracle for evidence"
+        );
+        let encoded = serde_json::to_string(record).unwrap();
+        assert!(!encoded.contains("synthetic-literal-secret"));
+        assert!(!encoded.contains("synthetic-bind-secret"));
+        assert!(!encoded.contains("unterminated-synthetic-secret"));
+        assert_eq!(record.sql_preview, oraclemcp_audit::REDACTED_SQL_PREVIEW);
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let records = sink.records();
+    assert_eq!(
+        records.len(),
+        cases.len(),
+        "exactly one record per refused statement"
+    );
+    let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec()).unwrap();
+    assert_eq!(
+        verify_records(&records, &[key]),
+        VerifyOutcome::Ok {
+            records: cases.len()
+        }
+    );
+}
+
+#[test]
+fn guard_refusal_sink_failure_never_changes_the_guard_decision() {
+    let dispatcher = dispatcher_with(escalatable_read_only(), failing_auditor());
+    let error = dispatcher
+        .dispatch("oracle_query", json!({"sql":"DELETE FROM refusal_target"}))
+        .expect_err("failed audit append cannot admit SQL");
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+}
+
+#[test]
+fn successful_read_does_not_append_a_refusal_record() {
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = dispatcher_with(escalatable_read_only(), auditor);
+    let response = dispatcher
+        .dispatch("oracle_query", json!({"sql":"SELECT 1 FROM dual"}))
+        .unwrap();
+    let records = sink.records();
+    assert!(records.iter().all(|r| r.decision != AuditDecision::Blocked));
+    // Reads already have their own signed provenance. The refusal observer
+    // must add no further append to that existing path.
+    dispatcher.append_guard_refusal_from_result(
+        DispatchContext::default(),
+        "oracle_query",
+        &json!({"sql":"SELECT 1 FROM dual"}),
+        &Ok(response),
+    );
+    assert_eq!(sink.records().len(), records.len());
+}
+
+#[test]
+fn token_only_guard_refusal_retains_the_previewed_statement_fingerprint() {
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = dispatcher_with(read_write_level(), auditor);
+    let sql = "UPDATE refusal_target SET secret = 'synthetic-token-secret' WHERE id = 1";
+    let preview = dispatcher
+        .dispatch("preview_sql", json!({"sql": sql}))
+        .unwrap();
+    let token = preview["execute_confirmation"]["confirm"].as_str().unwrap();
+    asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let cx = Cx::current().unwrap();
+            let mut state = dispatcher.state.lock(&cx).await.unwrap();
+            state
+                .level
+                .set_current_level(OperatingLevel::ReadOnly)
+                .unwrap();
+        });
+    let error = dispatcher
+        .dispatch("execute_approved", json!({"token": token}))
+        .unwrap_err();
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    let records = sink.records();
+    let blocked: Vec<_> = records
+        .iter()
+        .filter(|r| r.decision == AuditDecision::Blocked)
+        .collect();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].tool, "execute_approved");
+    let fingerprint = Sha256::digest(sql.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert_eq!(blocked[0].sql_sha256, format!("sha256:{fingerprint}"));
+    let encoded = serde_json::to_string(&records).unwrap();
+    assert!(!encoded.contains("synthetic-token-secret"));
+    assert!(!encoded.contains(token));
+}
+
+#[test]
+fn witness_guard_refusal_fingerprints_the_witness_once() {
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = dispatcher_with(read_write_level(), auditor);
+    let dml = "UPDATE refusal_target SET secret = secret WHERE id = 1";
+    let witness = "DELETE FROM refusal_target WHERE secret = 'synthetic-witness-secret'";
+    let error = dispatcher
+        .dispatch(
+            "oracle_preview_dml",
+            json!({
+                "sql": dml, "witness": witness, "witness_binds": ["synthetic-bind-secret"]
+            }),
+        )
+        .unwrap_err();
+    assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    let records = sink.records();
+    let blocked: Vec<_> = records
+        .iter()
+        .filter(|r| r.decision == AuditDecision::Blocked)
+        .collect();
+    assert_eq!(
+        blocked.len(),
+        1,
+        "one refusal, attributed to the actual witness gate"
+    );
+    assert_eq!(blocked[0].tool, "oracle_preview_dml");
+    let fingerprint = Sha256::digest(witness.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert_eq!(blocked[0].sql_sha256, format!("sha256:{fingerprint}"));
+    let encoded = serde_json::to_string(&records).unwrap();
+    assert!(!encoded.contains("synthetic-witness-secret"));
+    assert!(!encoded.contains("synthetic-bind-secret"));
+}
+
+#[test]
+fn async_and_stream_guard_refusals_append_once_per_call() {
+    let (auditor, sink) = auditor_with_sink();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dispatcher = dispatcher_with_conn(
+        Box::new(ZeroCallOracleConnection {
+            calls: calls.clone(),
+        }),
+        escalatable_read_only(),
+        auditor,
+    );
+    let sql = "DELETE FROM refusal_target WHERE secret = 'synthetic-stream-secret'";
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cx = Cx::current().unwrap();
+        let context = DispatchContext::default()
+            .with_principal_key("oauth:synthetic-principal")
+            .with_http_session_id("synthetic-stream-session");
+        let result = ToolDispatch::dispatch(&dispatcher, &cx, context, "oracle_query", json!({"sql": sql})).await;
+        assert!(matches!(result, Outcome::Err(ref error) if error.error_class == ErrorClass::OperatingLevelTooLow));
+        assert_eq!(sink.records().len(), 1);
+        let (frames, _receiver) = mpsc::channel(1);
+        let result = ToolDispatch::dispatch_stream(&dispatcher, &cx, context, "oracle_query", json!({"sql": sql, "streaming": true}), frames).await;
+        assert!(matches!(result, Outcome::Err(ref error) if error.error_class == ErrorClass::OperatingLevelTooLow));
+        assert_eq!(sink.records().len(), 2);
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    let records = sink.records();
+    assert!(records.iter().all(|r| r.decision == AuditDecision::Blocked
+        && r.subject.stable_id == "synthetic-principal:session:synthetic-stream-session"));
+    assert!(
+        !serde_json::to_string(&records)
+            .unwrap()
+            .contains("synthetic-stream-secret")
+    );
+    let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec()).unwrap();
+    assert_eq!(
+        verify_records(&records, &[key]),
+        VerifyOutcome::Ok { records: 2 }
+    );
 }

@@ -615,8 +615,10 @@ impl OracleDispatcher {
     /// Persist a redacted refusal record after the guard has already rejected a
     /// SQL-bearing request. This observer deliberately ignores persistence
     /// errors: failure to record must never weaken or replace the refusal.
-    fn append_refusal_corpus_from_result(
+    fn append_guard_refusal_from_result(
         &self,
+        context: DispatchContext<'_>,
+        tool: &str,
         args: &Value,
         result: &Result<Value, ErrorEnvelope>,
     ) {
@@ -630,9 +632,57 @@ impl OracleDispatcher {
             return;
         }
         emit_lease_event("guard.refused", "classifier_or_level_refusal");
-        let Some(sql) = args.get("sql").and_then(Value::as_str) else {
+        let Some(sql) = ["sql", "source_code", "ddl"]
+            .iter()
+            .find_map(|key| args.get(*key).and_then(Value::as_str))
+        else {
             return;
         };
+        // Accepted calls return above: no hashing, audit I/O, or database
+        // evidence probe is added to the read path. Persist only typed causes;
+        // parser messages and bind values must never enter the signed chain.
+        if let Some(auditor) = &self.auditor {
+            let mut subject = audit_subject(context, &self.default_audit_subject);
+            if let Some(session_id) = context.http_session_id() {
+                // The transport supplies this identity, never tool arguments.
+                // Retain the principal namespace/id and append its session tag,
+                // just as the stdio broker's subject already does.
+                subject.stable_id = format!("{}:session:{session_id}", subject.stable_id);
+            }
+            let mut draft = audit_draft(
+                AuditEntryCtx {
+                    auditor: Some(auditor),
+                    subject: &subject,
+                    db_evidence: None,
+                },
+                tool,
+                sql,
+                "REFUSED",
+                None,
+                AuditOutcome::Failed,
+            );
+            draft.decision = AuditDecision::Blocked;
+            let appended = audit_failure_cause(envelope).and_then(|cause| {
+                auditor
+                    .append_correlated_with_observed_scn_and_verdict_certificate_and_failure(
+                        &draft,
+                        audit_timestamp(),
+                        true,
+                        None,
+                        None,
+                        None,
+                        cause,
+                    )
+                    .map_err(audit_error_to_envelope)
+            });
+            if appended.is_err() {
+                // A failed sink cannot change the guard's verdict or cause the
+                // statement to execute. The Auditor poisons further appends.
+                tracing::error!(
+                    "failed to append signed guard refusal; original SQL remains refused"
+                );
+            }
+        }
         let refusal_class = envelope
             .structured_reason
             .as_ref()
@@ -9196,7 +9246,11 @@ fn preview_witness_max_rows(requested: Option<usize>) -> usize {
 /// - **The witness is a real read.** It is proven read-only by the same
 ///   classifier as `oracle_query`, so "before/after" is never a hole through
 ///   which unproven SQL runs.
-async fn preview_dml(ctx: DbToolCtx<'_>, args: PreviewDmlArgs) -> Result<Value, ErrorEnvelope> {
+async fn preview_dml(
+    ctx: DbToolCtx<'_>,
+    args: PreviewDmlArgs,
+    witness_refusal: impl Fn(&str, &ErrorEnvelope),
+) -> Result<Value, ErrorEnvelope> {
     let timeout_seconds = args.timeout_seconds;
     with_call_timeout(
         ctx.cx,
@@ -9205,7 +9259,7 @@ async fn preview_dml(ctx: DbToolCtx<'_>, args: PreviewDmlArgs) -> Result<Value, 
         ctx.request_budget.clone(),
         timeout_seconds,
         CompletionPolicy::EnforceDeadlineAfterBody,
-        || preview_dml_inner(ctx, args),
+        || preview_dml_inner(ctx, args, witness_refusal),
     )
     .await
 }
@@ -9213,6 +9267,7 @@ async fn preview_dml(ctx: DbToolCtx<'_>, args: PreviewDmlArgs) -> Result<Value, 
 async fn preview_dml_inner(
     ctx: DbToolCtx<'_>,
     args: PreviewDmlArgs,
+    witness_refusal: impl Fn(&str, &ErrorEnvelope),
 ) -> Result<Value, ErrorEnvelope> {
     let cx = ctx.cx;
     let conn = ctx.conn;
@@ -9291,7 +9346,8 @@ async fn preview_dml_inner(
                     marked,
                     binds,
                 )
-                .await?,
+                .await
+                .inspect_err(|error| witness_refusal(witness, error))?,
             )
         }
         None => None,
@@ -12437,8 +12493,13 @@ impl ToolDispatch for OracleDispatcher {
                 );
             }
             let refusal_args = args.clone();
-            let result = self.dispatch_with_cx_inner(cx, context, name, args).await;
-            self.append_refusal_corpus_from_result(&refusal_args, &result);
+            let refusal_recorded = std::cell::Cell::new(false);
+            let result = self
+                .dispatch_with_cx_inner(cx, context, name, args, &refusal_recorded)
+                .await;
+            if !refusal_recorded.get() {
+                self.append_guard_refusal_from_result(context, name, &refusal_args, &result);
+            }
             let terminal_result = match &result {
                 Ok(value) => response_reports_terminal_effect(name, value),
                 Err(_) => self.connection_quarantine().ok().flatten().is_some(),
@@ -12466,14 +12527,18 @@ impl ToolDispatch for OracleDispatcher {
                 );
             }
             let refusal_args = args.clone();
+            let refusal_recorded = std::cell::Cell::new(false);
             let result = if canonical_tool_name(name) == "oracle_query" {
                 GuardedReadExecutor::new(self)
                     .dispatch_query_stream_with_cx(cx, context, name, args, frames)
                     .await
             } else {
-                self.dispatch_with_cx_inner(cx, context, name, args).await
+                self.dispatch_with_cx_inner(cx, context, name, args, &refusal_recorded)
+                    .await
             };
-            self.append_refusal_corpus_from_result(&refusal_args, &result);
+            if !refusal_recorded.get() {
+                self.append_guard_refusal_from_result(context, name, &refusal_args, &result);
+            }
             let terminal_result = match &result {
                 Ok(value) => response_reports_terminal_effect(name, value),
                 Err(_) => self.connection_quarantine().ok().flatten().is_some(),
@@ -12610,10 +12675,24 @@ impl OracleDispatcher {
             .expect("current-thread runtime")
             // block-on-boundary: one-shot dispatch ENTRY runtime (release-gre.16).
             .block_on(async move {
+                let refusal_recorded = std::cell::Cell::new(false);
                 let result = self
-                    .dispatch_with_cx_inner(&caller_cx, DispatchContext::default(), name, args)
+                    .dispatch_with_cx_inner(
+                        &caller_cx,
+                        DispatchContext::default(),
+                        name,
+                        args,
+                        &refusal_recorded,
+                    )
                     .await;
-                self.append_refusal_corpus_from_result(&refusal_args, &result);
+                if !refusal_recorded.get() {
+                    self.append_guard_refusal_from_result(
+                        DispatchContext::default(),
+                        name,
+                        &refusal_args,
+                        &result,
+                    );
+                }
                 result
             })
     }
@@ -12650,8 +12729,13 @@ impl OracleDispatcher {
             // block-on-boundary: one-shot dispatch ENTRY runtime (release-gre.16).
             .block_on(async move {
                 let cx = Cx::current().expect("block_on installs a request Cx");
-                let result = self.dispatch_with_cx_inner(&cx, context, name, args).await;
-                self.append_refusal_corpus_from_result(&refusal_args, &result);
+                let refusal_recorded = std::cell::Cell::new(false);
+                let result = self
+                    .dispatch_with_cx_inner(&cx, context, name, args, &refusal_recorded)
+                    .await;
+                if !refusal_recorded.get() {
+                    self.append_guard_refusal_from_result(context, name, &refusal_args, &result);
+                }
                 result
             })
     }
@@ -12837,6 +12921,7 @@ impl OracleDispatcher {
         context: DispatchContext<'_>,
         name: &str,
         args: Value,
+        refusal_recorded: &std::cell::Cell<bool>,
     ) -> Result<Value, ErrorEnvelope> {
         let canonical_name = canonical_tool_name(name);
         let preview_sql = args
@@ -12871,7 +12956,7 @@ impl OracleDispatcher {
         };
         let retry_args = args.clone();
         let mut response = match self
-            .dispatch_with_cx_inner_core(cx, context, name, args)
+            .dispatch_with_cx_inner_core(cx, context, name, args, refusal_recorded)
             .await
         {
             Ok(response) => response,
@@ -12887,7 +12972,13 @@ impl OracleDispatcher {
                     // reaches Oracle; writes and unproven reads never enter
                     // this branch.
                     match self
-                        .dispatch_with_cx_inner_core(cx, context, name, retry_args)
+                        .dispatch_with_cx_inner_core(
+                            cx,
+                            context,
+                            name,
+                            retry_args,
+                            refusal_recorded,
+                        )
                         .await
                     {
                         Ok(response) => response,
@@ -12994,6 +13085,7 @@ impl OracleDispatcher {
         context: DispatchContext<'_>,
         name: &str,
         args: Value,
+        refusal_recorded: &std::cell::Cell<bool>,
     ) -> Result<Value, ErrorEnvelope> {
         // Reject schema-forbidden keys before connection metadata, audit, or
         // any generated SQL can observe an ambiguously shaped request.
@@ -13476,8 +13568,35 @@ impl OracleDispatcher {
         }
         if tool == "execute_approved" {
             let a: ExecuteApprovedArgs = parse_args(name, args).map_err(write_not_started)?;
+            // A token-only request still submits the previously previewed SQL.
+            // Keep its fingerprint available if the level gate refuses it;
+            // tokens and bind values never enter the audit record.
+            let refusal_sql = if a.sql.as_ref().is_none_or(|sql| sql.trim().is_empty()) {
+                a.token
+                    .as_ref()
+                    .and_then(|token| state.execute_approved_tokens.get(token))
+                    .map(|grant| grant.sql.clone())
+            } else {
+                None
+            };
             let execute_args =
-                execute_approved_args(&mut state, &scoped_level, a).map_err(write_not_started)?;
+                execute_approved_args(&mut state, &scoped_level, a).map_err(|error| {
+                    if let Some(sql) = &refusal_sql
+                        && matches!(
+                            error.error_class,
+                            ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+                        )
+                    {
+                        refusal_recorded.set(true);
+                        self.append_guard_refusal_from_result(
+                            context,
+                            name,
+                            &json!({"sql": sql}),
+                            &Err(error.clone()),
+                        );
+                    }
+                    write_not_started(error)
+                })?;
             let changes_session_context = is_allowed_alter_session(&execute_args.sql);
             let active_profile = state.active_profile.clone();
             let subject = request_subject.clone();
@@ -14037,7 +14156,17 @@ impl OracleDispatcher {
                     quarantine: &self.quarantine,
                     edition_creation_reservations: &self.edition_creation_reservations,
                 };
-                return preview_dml(tool_ctx, a).await;
+                return preview_dml(tool_ctx, a, |sql, error| {
+                    if matches!(error.error_class, ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow) {
+                        // Positive evidence at the witness gate: record the
+                        // statement it actually refused, not the main DML.
+                        // The outer observer must not append a second record.
+                        refusal_recorded.set(true);
+                        self.append_guard_refusal_from_result(
+                            context, name, &json!({"sql": sql}), &Err(error.clone()),
+                        );
+                    }
+                }).await;
             }
             "oracle_undo_to" => {
                 let a: UndoToArgs = parse_args(name, args)?;
