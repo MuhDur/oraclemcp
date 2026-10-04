@@ -244,6 +244,7 @@ struct ResolverCacheState {
     exhausted: bool,
     entries: HashMap<ResolverCacheKey, Resolution>,
     policy_catalog_probe: Option<OraclePolicyCatalogProbe>,
+    policy_catalog_probe_recorded_at: Option<std::time::Instant>,
     scn_capability: ScnCapability,
 }
 
@@ -279,6 +280,7 @@ impl OracleCatalogResolverCache {
                 exhausted: false,
                 entries: HashMap::new(),
                 policy_catalog_probe: None,
+                policy_catalog_probe_recorded_at: None,
                 scn_capability: ScnCapability::Unprobed,
             }),
         }
@@ -323,6 +325,7 @@ impl OracleCatalogResolverCache {
         };
         state.entries.clear();
         state.policy_catalog_probe = None;
+        state.policy_catalog_probe_recorded_at = None;
         // An SCN capability belongs to the physical session/security context,
         // not to catalog object proof. Ordinary served reads deliberately
         // refresh semantic catalog proof, and DDL refreshes object metadata,
@@ -353,10 +356,15 @@ impl OracleCatalogResolverCache {
     /// generation, if it has already been collected.
     #[must_use]
     pub fn policy_catalog_probe(&self) -> Option<OraclePolicyCatalogProbe> {
-        self.state
-            .read()
-            .ok()
-            .and_then(|state| state.policy_catalog_probe.clone())
+        self.state.read().ok().and_then(|state| {
+            let probe = state.policy_catalog_probe.as_ref()?;
+            if probe.visibility == OraclePolicyCatalogVisibility::Unavailable
+                && state.policy_catalog_probe_recorded_at?.elapsed() >= Duration::from_secs(1)
+            {
+                return None;
+            }
+            Some(probe.clone())
+        })
     }
 
     /// Cache one non-authorizing visibility observation for the current
@@ -367,6 +375,7 @@ impl OracleCatalogResolverCache {
             && !state.exhausted
         {
             state.policy_catalog_probe = Some(probe);
+            state.policy_catalog_probe_recorded_at = Some(std::time::Instant::now());
         }
     }
 
@@ -2351,7 +2360,118 @@ fn unavailable_policy_probe(detail: String) -> OraclePolicyCatalogProbe {
     }
 }
 
-/// Acquisition and catalog work share one short deadline. Retain the physical
+/// Read observer-only context and roles together. The primary's independent
+/// authorization/name-resolution context keeps its existing query contract.
+async fn read_policy_observation_session_context(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+) -> Result<OracleSessionSecurityContext, DbError> {
+    let rows = run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::PolicyObservationSessionContext,
+        &[OracleBind::from((MAX_SESSION_ROLES + 1) as i64)],
+    )
+    .await?;
+    policy_observation_context_from_rows(&rows)
+}
+
+fn policy_observation_context_from_rows(
+    rows: &[OracleRow],
+) -> Result<OracleSessionSecurityContext, DbError> {
+    if rows.is_empty() || rows.len() > MAX_SESSION_ROLES {
+        return Err(DbError::Query(
+            "observation context returned no snapshot or exceeded the role cap".to_owned(),
+        ));
+    }
+    let first = &rows[0];
+    let context = |key| {
+        required_text(first, key)
+            .ok_or_else(|| DbError::Query(format!("observation context missing {key}")))
+    };
+    let session_user = context("SESSION_USER")?;
+    let current_schema = context("CURRENT_SCHEMA")?;
+    let edition_name = context("EDITION_NAME")?;
+    let mut enabled_roles = Vec::new();
+    for row in rows {
+        if required_text(row, "SESSION_USER").as_ref() != Some(&session_user)
+            || required_text(row, "CURRENT_SCHEMA").as_ref() != Some(&current_schema)
+            || required_text(row, "EDITION_NAME").as_ref() != Some(&edition_name)
+        {
+            return Err(DbError::Query(
+                "observation context changed within its snapshot".to_owned(),
+            ));
+        }
+        if let Some(role) = required_text(row, "ROLE") {
+            enabled_roles.push(role);
+        } else if rows.len() != 1 || !matches!(row.cell("ROLE"), Some(cell) if cell.value.is_none())
+        {
+            return Err(DbError::Query(
+                "observation enabled-role row was incomplete".to_owned(),
+            ));
+        }
+    }
+    enabled_roles.sort();
+    enabled_roles.dedup();
+    Ok(OracleSessionSecurityContext {
+        session_user,
+        current_schema,
+        edition_name: Some(edition_name),
+        enabled_roles,
+    })
+}
+
+async fn query_policy_observation_snapshot(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    id: CatalogQueryId,
+    binds: &[OracleBind],
+) -> VpdRlsRelationInputs {
+    let mut context_rows = Vec::new();
+    let mut policies = Vec::new();
+    let result = run_catalog_query(cx, conn, id, binds)
+        .await
+        .and_then(|rows| {
+            if rows.len() > MAX_SESSION_ROLES + 1 + MAX_VPD_RLS_POLICY_ROWS + 1 {
+                return Err(DbError::Query(
+                    "policy observation snapshot exceeded its row cap".to_owned(),
+                ));
+            }
+            for row in rows {
+                match required_text(&row, "ROW_KIND").as_deref() {
+                    Some("CONTEXT") => context_rows.push(row),
+                    Some("POLICY") => {
+                        let policy = vpd_rls_policy_from_row(&row).ok_or_else(|| {
+                            DbError::Query("incomplete policy observation row".to_owned())
+                        })?;
+                        if policies.len() < MAX_VPD_RLS_POLICY_ROWS {
+                            policies.push(policy);
+                        }
+                    }
+                    _ => {
+                        return Err(DbError::Query(
+                            "unknown policy observation row kind".to_owned(),
+                        ));
+                    }
+                }
+            }
+            policy_observation_context_from_rows(&context_rows)
+        });
+    match result {
+        Ok(session) => VpdRlsRelationInputs {
+            session: Some(session),
+            policies,
+            policy_error: None,
+        },
+        Err(error) => VpdRlsRelationInputs {
+            session: None,
+            policies,
+            policy_error: Some(error.to_string()),
+        },
+    }
+}
+
+/// Acquisition has its own bounded source deadline. Retain the physical
 /// session outside that future: dropping a socket does not stop Oracle's call.
 /// A timeout must interrupt the abandoned call and permanently close its transport.
 async fn isolated_policy_observation(
@@ -2365,34 +2485,48 @@ async fn isolated_policy_observation(
         PolicyObservationTarget::Relations(_) => "relations",
         PolicyObservationTarget::Probe => "catalog",
     };
-    let mut isolated = None;
+    let acquired = primary.open_policy_observation_session(cx).await;
+    let isolated = match acquired {
+        Ok(conn) => Some(conn),
+        Err(error) => {
+            let detail = format!(
+                "isolated policy observation unavailable: {error}; policy absence is not proven"
+            );
+            return build_vpd_rls_observation(
+                fallback_scope.to_owned(),
+                None,
+                unavailable_policy_probe(detail.clone()),
+                Vec::new(),
+                Some(detail),
+            );
+        }
+    };
     let work = async {
-        isolated = Some(primary.open_policy_observation_session(cx).await?);
         let conn = isolated.as_deref().expect("acquired observation session");
         let (scope, session, policies, policy_error) = match target {
             PolicyObservationTarget::Schema(schema) => {
-                let session = read_session_security_context(cx, conn).await.ok();
+                let inputs = query_policy_observation_snapshot(
+                    cx,
+                    conn,
+                    CatalogQueryId::PolicyObservationBySchema,
+                    &[
+                        OracleBind::from(schema.to_ascii_uppercase()),
+                        OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
+                        OracleBind::from((MAX_SESSION_ROLES + 1) as i64),
+                    ],
+                )
+                .await;
                 let schema = if schema.trim().is_empty() {
-                    session
+                    inputs
+                        .session
                         .as_ref()
-                        .map(|s| s.current_schema.as_str())
+                        .map(|session| session.current_schema.as_str())
                         .unwrap_or("")
                 } else {
                     schema
                 };
-                let schema = schema.to_ascii_uppercase();
-                let scope = format!("schema:{schema}");
-                let (policies, error) = query_vpd_rls_policies(
-                    cx,
-                    conn,
-                    CatalogQueryId::VpdRlsPoliciesBySchema,
-                    &[
-                        OracleBind::from(schema),
-                        OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
-                    ],
-                )
-                .await;
-                (scope, session, policies, error)
+                let scope = format!("schema:{}", schema.to_ascii_uppercase());
+                (scope, inputs.session, inputs.policies, inputs.policy_error)
             }
             PolicyObservationTarget::Relations(relations) => {
                 let inputs = collect_vpd_rls_relation_inputs_inner(cx, conn, relations).await;
@@ -2493,8 +2627,8 @@ pub async fn observe_vpd_rls_for_relations_with_probe(
     .await
 }
 
-/// Cache visibility per generation. Relation observations still use a fresh
-/// owned session, including when a previous catalog probe was unavailable.
+/// Cache visibility per generation, with a one-second retry TTL for failures.
+/// Relation observations lease a separate session from the bounded source.
 pub async fn observe_vpd_rls_for_relations_with_cached_bounded_probe(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -2523,7 +2657,7 @@ async fn collect_vpd_rls_relation_inputs_inner(
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
 ) -> VpdRlsRelationInputs {
-    let session = read_session_security_context(cx, conn).await.ok();
+    let mut session = None;
     let mut policies = Vec::new();
     let mut policy_error = None;
     let mut seen = BTreeSet::new();
@@ -2533,17 +2667,34 @@ async fn collect_vpd_rls_relation_inputs_inner(
         {
             continue;
         }
-        let (mut rows, error) = query_vpd_rls_policies(
-            cx,
-            conn,
-            CatalogQueryId::VpdRlsPoliciesByObject,
-            &[
-                OracleBind::from(relation.owner.as_str()),
-                OracleBind::from(relation.name.as_str()),
-                OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
-            ],
-        )
-        .await;
+        let (mut rows, error) = if session.is_none() {
+            let inputs = query_policy_observation_snapshot(
+                cx,
+                conn,
+                CatalogQueryId::PolicyObservationByObject,
+                &[
+                    OracleBind::from(relation.owner.as_str()),
+                    OracleBind::from(relation.name.as_str()),
+                    OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
+                    OracleBind::from((MAX_SESSION_ROLES + 1) as i64),
+                ],
+            )
+            .await;
+            session = inputs.session;
+            (inputs.policies, inputs.policy_error)
+        } else {
+            query_vpd_rls_policies(
+                cx,
+                conn,
+                CatalogQueryId::VpdRlsPoliciesByObject,
+                &[
+                    OracleBind::from(relation.owner.as_str()),
+                    OracleBind::from(relation.name.as_str()),
+                    OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
+                ],
+            )
+            .await
+        };
         policies.append(&mut rows);
         if error.is_some() {
             policy_error = error;
@@ -2553,6 +2704,9 @@ async fn collect_vpd_rls_relation_inputs_inner(
             policies.truncate(MAX_VPD_RLS_POLICY_ROWS);
             break;
         }
+    }
+    if session.is_none() && policy_error.is_none() {
+        session = read_policy_observation_session_context(cx, conn).await.ok();
     }
     VpdRlsRelationInputs {
         session,
@@ -4254,6 +4408,7 @@ mod tests {
     struct ScriptedRows {
         responses: Arc<Mutex<ScriptedResponses>>,
         queries: Arc<Mutex<RecordedQueries>>,
+        acquisition_delay: Duration,
     }
 
     impl ScriptedRows {
@@ -4265,6 +4420,7 @@ mod tests {
             Self {
                 responses: Arc::new(Mutex::new(responses.into_iter().collect())),
                 queries: Arc::new(Mutex::new(Vec::new())),
+                acquisition_delay: Duration::ZERO,
             }
         }
     }
@@ -4277,8 +4433,11 @@ mod tests {
 
         async fn open_policy_observation_session(
             &self,
-            _cx: &Cx,
+            cx: &Cx,
         ) -> Result<Box<dyn OracleConnection>, DbError> {
+            if !self.acquisition_delay.is_zero() {
+                asupersync::time::sleep(cx.now(), self.acquisition_delay).await;
+            }
             Ok(Box::new(self.clone()))
         }
 
@@ -5392,7 +5551,7 @@ mod tests {
     #[test]
     fn catalog_query_sql_is_const_for_every_variant() {
         let specs = CatalogQueryId::ALL.map(CatalogQueryId::spec);
-        assert_eq!(specs.len(), 177);
+        assert_eq!(specs.len(), 180);
         let mut cases = Vec::new();
         for (id, spec) in CatalogQueryId::ALL.into_iter().zip(specs) {
             let _: &'static str = spec.sql;
@@ -5518,28 +5677,98 @@ mod tests {
     }
 
     #[test]
+    fn policy_observation_context_snapshot_is_bounded_and_complete() {
+        run_with_cx(|cx| async move {
+            let context_row = |role| {
+                row(&[
+                    ("SESSION_USER", Some("APP")),
+                    ("CURRENT_SCHEMA", Some("APP")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                    ("ROLE", role),
+                ])
+            };
+            let conn = ScriptedRows::new([vec![
+                context_row(Some("Z")),
+                context_row(Some("A")),
+                context_row(Some("Z")),
+            ]]);
+            let snapshot = read_policy_observation_session_context(&cx, &conn)
+                .await
+                .unwrap();
+            assert_eq!(snapshot.enabled_roles, ["A", "Z"]);
+            {
+                let queries = conn.queries.lock().unwrap();
+                assert_eq!(queries.len(), 1);
+                assert_eq!(
+                    queries[0].0,
+                    CatalogQueryId::PolicyObservationSessionContext.spec().sql
+                );
+                assert_eq!(queries[0].1, [OracleBind::from(257_i64)]);
+            }
+            let conn = ScriptedRows::new([vec![context_row(None)]]);
+            assert!(
+                read_policy_observation_session_context(&cx, &conn)
+                    .await
+                    .unwrap()
+                    .enabled_roles
+                    .is_empty()
+            );
+            for invalid in [
+                Vec::new(),
+                vec![context_row(Some("A")); MAX_SESSION_ROLES + 1],
+                vec![context_row(None), context_row(Some("A"))],
+                vec![row(&[
+                    ("SESSION_USER", Some("APP")),
+                    ("CURRENT_SCHEMA", Some("APP")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])],
+                vec![
+                    context_row(Some("A")),
+                    row(&[
+                        ("SESSION_USER", Some("OTHER")),
+                        ("CURRENT_SCHEMA", Some("APP")),
+                        ("EDITION_NAME", Some("ORA$BASE")),
+                        ("ROLE", Some("B")),
+                    ]),
+                ],
+            ] {
+                let conn = ScriptedRows::new([invalid]);
+                assert!(
+                    read_policy_observation_session_context(&cx, &conn)
+                        .await
+                        .is_err()
+                );
+            }
+        });
+    }
+
+    #[test]
     fn vpd_rls_schema_observation_names_visible_policy() {
         run_with_cx(|cx| async move {
             let conn = ScriptedRows::new([
-                vec![row(&[
-                    ("SESSION_USER", Some("ORACLEMCP_D3_SIGHTED")),
-                    ("CURRENT_SCHEMA", Some("ORACLEMCP_D3_OWNER")),
-                    ("EDITION_NAME", Some("ORA$BASE")),
-                ])],
-                vec![row(&[("ROLE", Some("SELECT_CATALOG_ROLE"))])],
-                vec![row(&[
-                    ("OBJECT_OWNER", Some("ORACLEMCP_D3_OWNER")),
-                    ("OBJECT_NAME", Some("ORACLEMCP_D3_PROTECTED")),
-                    ("POLICY_NAME", Some("ORACLEMCP_D3_VPD")),
-                    ("PF_OWNER", Some("ORACLEMCP_D3_OWNER")),
-                    ("PACKAGE", None),
-                    ("FUNCTION", Some("ORACLEMCP_D3_VPD")),
-                    ("SEL", Some("YES")),
-                    ("INS", Some("NO")),
-                    ("UPD", Some("NO")),
-                    ("DEL", Some("NO")),
-                    ("ENABLE", Some("YES")),
-                ])],
+                vec![
+                    row(&[
+                        ("ROW_KIND", Some("CONTEXT")),
+                        ("SESSION_USER", Some("ORACLEMCP_D3_SIGHTED")),
+                        ("CURRENT_SCHEMA", Some("ORACLEMCP_D3_OWNER")),
+                        ("EDITION_NAME", Some("ORA$BASE")),
+                        ("ROLE", Some("SELECT_CATALOG_ROLE")),
+                    ]),
+                    row(&[
+                        ("ROW_KIND", Some("POLICY")),
+                        ("OBJECT_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                        ("OBJECT_NAME", Some("ORACLEMCP_D3_PROTECTED")),
+                        ("POLICY_NAME", Some("ORACLEMCP_D3_VPD")),
+                        ("PF_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                        ("PACKAGE", None),
+                        ("FUNCTION", Some("ORACLEMCP_D3_VPD")),
+                        ("SEL", Some("YES")),
+                        ("INS", Some("NO")),
+                        ("UPD", Some("NO")),
+                        ("DEL", Some("NO")),
+                        ("ENABLE", Some("YES")),
+                    ]),
+                ],
                 vec![row(&[("VISIBLE_POLICY_ROWS", Some("1"))])],
             ]);
             let observation = observe_vpd_rls_for_schema(&cx, &conn, "").await;
@@ -5555,6 +5784,10 @@ mod tests {
                     .map(|session| session.session_user.as_str()),
                 Some("ORACLEMCP_D3_SIGHTED")
             );
+            assert_eq!(
+                observation.session.as_ref().unwrap().enabled_roles,
+                ["SELECT_CATALOG_ROLE"]
+            );
             assert_eq!(observation.policies.len(), 1);
             assert_eq!(observation.policies[0].policy_name, "ORACLEMCP_D3_VPD");
             assert_eq!(
@@ -5563,11 +5796,12 @@ mod tests {
             );
             let queries = conn.queries.lock().expect("queries lock");
             assert_eq!(
-                queries[2].0,
-                CatalogQueryId::VpdRlsPoliciesBySchema.spec().sql
+                queries[0].0,
+                CatalogQueryId::PolicyObservationBySchema.spec().sql
             );
-            assert_eq!(queries[2].1[0], OracleBind::from("ORACLEMCP_D3_OWNER"));
-            assert_eq!(queries[2].1[1], OracleBind::from(65_i64));
+            assert_eq!(queries[0].1[0], OracleBind::from(""));
+            assert_eq!(queries[0].1[1], OracleBind::from(65_i64));
+            assert_eq!(queries[0].1[2], OracleBind::from(257_i64));
         });
     }
 
@@ -5576,12 +5810,12 @@ mod tests {
         run_with_cx(|cx| async move {
             let conn = ScriptedRows::new([
                 vec![row(&[
+                    ("ROW_KIND", Some("CONTEXT")),
                     ("SESSION_USER", Some("APP")),
                     ("CURRENT_SCHEMA", Some("APP")),
                     ("EDITION_NAME", Some("ORA$BASE")),
+                    ("ROLE", None),
                 ])],
-                Vec::new(),
-                Vec::new(),
                 vec![row(&[("VISIBLE_POLICY_ROWS", Some("0"))])],
             ]);
             let observation = observe_vpd_rls_for_relations(&cx, &conn, &[table_object()]).await;
@@ -5590,17 +5824,18 @@ mod tests {
                 OracleVpdRlsObservationStatus::NoVisiblePolicyCatalogRows
             );
             let queries = conn.queries.lock().expect("queries lock");
-            assert_eq!(queries.len(), 4);
+            assert_eq!(queries.len(), 2);
             assert_eq!(
-                queries[2].0,
-                CatalogQueryId::VpdRlsPoliciesByObject.spec().sql
+                queries[0].0,
+                CatalogQueryId::PolicyObservationByObject.spec().sql
             );
             assert_eq!(
-                queries[2].1,
+                queries[0].1,
                 vec![
                     OracleBind::from("APP"),
                     OracleBind::from("ORDERS"),
                     OracleBind::from(65_i64),
+                    OracleBind::from(257_i64),
                 ]
             );
         });
@@ -5611,12 +5846,12 @@ mod tests {
         run_with_cx(|cx| async move {
             let conn = ScriptedRows::new([
                 vec![row(&[
+                    ("ROW_KIND", Some("CONTEXT")),
                     ("SESSION_USER", Some("ORACLEMCP_D3_BLIND")),
                     ("CURRENT_SCHEMA", Some("ORACLEMCP_D3_OWNER")),
                     ("EDITION_NAME", Some("ORA$BASE")),
+                    ("ROLE", None),
                 ])],
-                Vec::new(),
-                Vec::new(),
                 vec![row(&[("VISIBLE_POLICY_ROWS", Some("0"))])],
             ]);
             let observation = observe_vpd_rls_for_schema(&cx, &conn, "").await;
@@ -7271,6 +7506,56 @@ mod tests {
 
         cache.invalidate(CatalogInvalidation::Reconnect);
         assert_eq!(cache.policy_catalog_probe(), None);
+    }
+
+    #[test]
+    fn unavailable_policy_catalog_probe_expires_without_reconnecting() {
+        let cache = OracleCatalogResolverCache::new();
+        cache.cache_policy_catalog_probe(unavailable_policy_probe(
+            "transient connect failure".to_owned(),
+        ));
+        assert!(
+            cache.policy_catalog_probe().is_some(),
+            "failure has a bounded retry cooldown"
+        );
+        cache
+            .state
+            .write()
+            .unwrap()
+            .policy_catalog_probe_recorded_at =
+            Some(std::time::Instant::now() - Duration::from_secs(2));
+        assert_eq!(
+            cache.policy_catalog_probe(),
+            None,
+            "retry after TTL, without invalidating the generation"
+        );
+        let recovered = OraclePolicyCatalogProbe {
+            visibility: OraclePolicyCatalogVisibility::NoPolicyRowsVisible,
+            visible_policy_rows_probe: Some(false),
+            detail: "visibility recovered".to_owned(),
+        };
+        cache.cache_policy_catalog_probe(recovered.clone());
+        assert_eq!(cache.policy_catalog_probe(), Some(recovered));
+    }
+
+    #[test]
+    fn observation_catalog_deadline_starts_after_bounded_acquisition() {
+        run_with_cx(|cx| async move {
+            let mut conn = ScriptedRows::new([vec![OracleRow {
+                columns: vec![(
+                    "VISIBLE_POLICY_ROWS".to_owned(),
+                    OracleCell::new("NUMBER", Some("1".to_owned())),
+                )],
+            }]]);
+            conn.acquisition_delay = Duration::from_millis(1100);
+            let probe = bounded_policy_catalog_probe(&cx, &conn).await;
+            assert_eq!(
+                probe.visibility,
+                OraclePolicyCatalogVisibility::PolicyRowsVisible,
+                "a successful logon longer than the catalog budget must still permit catalog observation"
+            );
+            assert_eq!(conn.queries.lock().unwrap().len(), 1);
+        });
     }
 
     #[test]

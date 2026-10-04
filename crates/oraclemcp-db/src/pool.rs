@@ -40,7 +40,76 @@ use crate::types::{
     OracleBackend, OracleBind, OracleConnectOptions, OracleConnectionInfo, OracleRow,
 };
 
-/// Opens thin [`RustOracleConnection`]s from one profile.
+type PooledConnection = Box<dyn OracleConnection>;
+
+/// Shared lifecycle/configuration seam for either primary backend. An absent
+/// configuration lazily owns one spare slot; an explicit None disables it.
+#[derive(Default)]
+pub(crate) struct PolicyObservationSource {
+    pool: Mutex<Option<Option<OraclePool>>>,
+}
+
+impl PolicyObservationSource {
+    pub(crate) fn get(&self) -> Option<OraclePool> {
+        self.pool
+            .lock()
+            .ok()
+            .and_then(|source| source.clone().flatten())
+    }
+
+    pub(crate) fn configure(
+        &self,
+        opts: &OracleConnectOptions,
+        pool: Option<OraclePool>,
+    ) -> Result<(), DbError> {
+        if pool
+            .as_ref()
+            .is_some_and(|pool| !pool.matches_profile(opts))
+        {
+            return Err(DbError::Internal(
+                "policy observation source belongs to a different profile".to_owned(),
+            ));
+        }
+        *self.pool.lock().map_err(|_| {
+            DbError::Internal("policy observation source lock poisoned".to_owned())
+        })? = Some(pool);
+        Ok(())
+    }
+
+    pub(crate) async fn acquire(
+        &self,
+        cx: &Cx,
+        opts: &OracleConnectOptions,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        let pool = self
+            .pool
+            .lock()
+            .map_err(|_| DbError::Internal("policy observation source lock poisoned".to_owned()))?
+            .get_or_insert_with(|| Some(OraclePool::observation_source(opts.clone())))
+            .clone();
+        match pool {
+            Some(pool) => pool.open_policy_observation_session(cx).await,
+            None => Err(DbError::Pool(
+                "profile connection budget has no observation slot".to_owned(),
+            )),
+        }
+    }
+
+    pub(crate) async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        let source = self
+            .pool
+            .lock()
+            .map_err(|_| DbError::Internal("policy observation source lock poisoned".to_owned()))?
+            .clone()
+            .flatten();
+        match source {
+            Some(pool) => pool.close(cx).await,
+            None => Ok(()),
+        }
+    }
+}
+
+/// Opens profile sessions for the bounded shared source.
 #[derive(Clone, Debug)]
 pub struct OracleConnectionManager {
     opts: OracleConnectOptions,
@@ -55,18 +124,22 @@ impl OracleConnectionManager {
 }
 
 impl OracleConnectionManager {
-    async fn connect(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
+    async fn connect(&self, cx: &Cx, observation: bool) -> Result<PooledConnection, DbError> {
         db_checkpoint(cx, "oracle_pool.connect.before")?;
-        let conn = RustOracleConnection::connect(cx, self.opts.clone()).await?;
+        let conn: PooledConnection = if observation {
+            crate::connection::connect_oracle(cx, self.opts.clone()).await?
+        } else {
+            Box::new(RustOracleConnection::connect(cx, self.opts.clone()).await?)
+        };
         db_checkpoint(cx, "oracle_pool.connect.after")?;
         Ok(conn)
     }
 
-    async fn is_valid(&self, cx: &Cx, conn: &RustOracleConnection) -> Result<(), DbError> {
+    async fn is_valid(&self, cx: &Cx, conn: &PooledConnection) -> Result<(), DbError> {
         conn.ping(cx).await
     }
 
-    async fn has_broken(&self, cx: &Cx, conn: &RustOracleConnection) -> bool {
+    async fn has_broken(&self, cx: &Cx, conn: &PooledConnection) -> bool {
         conn.ping(cx).await.is_err()
     }
 }
@@ -192,7 +265,7 @@ impl PoolMetrics {
 }
 
 struct PoolState {
-    idle: Vec<RustOracleConnection>,
+    idle: Vec<PooledConnection>,
     open_count: u32,
     /// Once shutdown begins, no checkout may create or reuse a session and a
     /// late check-in is discarded instead of returning to the idle set.
@@ -655,9 +728,36 @@ pub struct OraclePool {
     /// stored as one mutable pool-wide value. Concurrent callers therefore
     /// cannot overwrite or restore each other's absolute deadlines/quotas.
     request_limits: Arc<Mutex<HashMap<PoolRequestKey, PoolRequestLimits>>>,
+    observation_acquire_failure: Arc<Mutex<Option<std::time::Instant>>>,
 }
 
 impl OraclePool {
+    pub(crate) fn matches_profile(&self, opts: &OracleConnectOptions) -> bool {
+        &self.manager.opts == opts
+    }
+    pub(crate) fn observation_source(opts: OracleConnectOptions) -> Self {
+        let settings = PoolSettings {
+            max_size: 1,
+            min_idle: 0,
+            ..PoolSettings::default()
+        };
+        Self {
+            manager: OracleConnectionManager::new(opts),
+            settings,
+            state: Arc::new(Mutex::new(PoolState {
+                idle: Vec::new(),
+                open_count: 0,
+                closing: false,
+                in_use: 0,
+                acquired: 0,
+                released: 0,
+                discarded: 0,
+            })),
+            capacity: PoolCapacity::new(1),
+            request_limits: Arc::new(Mutex::new(HashMap::new())),
+            observation_acquire_failure: Arc::new(Mutex::new(None)),
+        }
+    }
     fn request_key(cx: &Cx) -> PoolRequestKey {
         (cx.region_id(), cx.task_id())
     }
@@ -706,9 +806,27 @@ impl OraclePool {
         // cpu*2+1)`. This is the single place the config's documented
         // "cpu-derived sizing is applied at pool construction" actually happens.
         let settings = settings.resolved();
-        let mut idle = Vec::new();
+        let mut idle: Vec<PooledConnection> = Vec::new();
+        let deadline =
+            checkout_deadline(asupersync::time::wall_now(), settings.acquire_timeout_secs)?;
         for _ in 0..settings.min_idle {
-            idle.push(manager.connect(cx).await?);
+            let acquisition = asupersync::time::timeout_at(deadline, manager.connect(cx, false))
+                .await
+                .map_err(|_| pool_acquire_timeout())
+                .and_then(|result| result);
+            match acquisition {
+                Ok(connection) => idle.push(connection),
+                Err(error) => {
+                    // Failed eager bootstrap must release sessions already
+                    // established before the failing logon, even if cancelled.
+                    for connection in idle {
+                        if let Err(error) = connection.close(cx).await {
+                            tracing::warn!(error = %error, "pool bootstrap session cleanup failed");
+                        }
+                    }
+                    return Err(error);
+                }
+            }
         }
         Ok(OraclePool {
             manager,
@@ -724,6 +842,7 @@ impl OraclePool {
             })),
             capacity: PoolCapacity::new(settings.max_size as usize),
             request_limits: Arc::new(Mutex::new(HashMap::new())),
+            observation_acquire_failure: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -872,7 +991,7 @@ impl OraclePool {
     where
         F: for<'a> Fn(
             &'a Cx,
-            &'a RustOracleConnection,
+            &'a dyn OracleConnection,
         ) -> std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<T, DbError>> + 'a>,
         >,
@@ -912,7 +1031,7 @@ impl OraclePool {
                 return Err(error);
             }
 
-            let first_result = f(cx, checkout.connection()).await;
+            let first_result = f(cx, checkout.connection().as_ref()).await;
             let result = match &first_result {
                 Err(error)
                     if retry_now(
@@ -927,7 +1046,7 @@ impl OraclePool {
                     // this runtime deliberately has no timer dependency.
                     attempt += 1;
                     asupersync::runtime::yield_now().await;
-                    f(cx, checkout.connection()).await
+                    f(cx, checkout.connection().as_ref()).await
                 }
                 _ => first_result,
             };
@@ -988,18 +1107,50 @@ impl OraclePool {
         }
     }
 
-    async fn checkout(
+    async fn checkout(&self, cx: &Cx) -> Result<(PooledConnection, PoolCapacityPermit), DbError> {
+        self.checkout_with_validation(cx, true).await
+    }
+
+    async fn checkout_with_validation(
         &self,
         cx: &Cx,
-    ) -> Result<(RustOracleConnection, PoolCapacityPermit), DbError> {
+        validate_idle: bool,
+    ) -> Result<(PooledConnection, PoolCapacityPermit), DbError> {
+        if !validate_idle {
+            self.check_observation_retry()?;
+        }
         let deadline = checkout_deadline(
             asupersync::time::wall_now(),
             self.settings.acquire_timeout_secs,
         )?;
         let permit = self.acquire_checkout_permit(cx, deadline).await?;
         db_checkpoint(cx, "oracle_pool.checkout.admitted")?;
-        let connection = self.open_connection_for_permit(cx).await?;
+        // Recheck after admission: concurrent waiters must not all replay the
+        // same failed logon as each predecessor releases its permit.
+        if !validate_idle {
+            self.check_observation_retry()?;
+        }
+        let connection = asupersync::time::timeout_at(
+            deadline,
+            self.open_connection_for_permit(cx, validate_idle),
+        )
+        .await
+        .map_err(|_| pool_acquire_timeout())??;
         Ok((connection, permit))
+    }
+
+    fn check_observation_retry(&self) -> Result<(), DbError> {
+        let failed = self
+            .observation_acquire_failure
+            .lock()
+            .map_err(|err| DbError::Internal(format!("observation retry lock poisoned: {err}")))?;
+        if failed.is_some_and(|at| at.elapsed() < Duration::from_secs(1)) {
+            Err(DbError::Pool(
+                "policy observation acquisition retry cooldown (1000 ms)".to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
     }
 
     async fn acquire_checkout_permit(
@@ -1049,7 +1200,11 @@ impl OraclePool {
         }
     }
 
-    async fn open_connection_for_permit(&self, cx: &Cx) -> Result<RustOracleConnection, DbError> {
+    async fn open_connection_for_permit(
+        &self,
+        cx: &Cx,
+        validate_idle: bool,
+    ) -> Result<PooledConnection, DbError> {
         if self.is_closing()? {
             return Err(DbError::Pool(
                 "thin Oracle connection pool is closing".to_owned(),
@@ -1058,7 +1213,7 @@ impl OraclePool {
         loop {
             if let Some(conn) = self.take_idle_connection()? {
                 let pending_slot = PendingOpenSlot::new(Arc::clone(&self.state));
-                if self.manager.is_valid(cx, &conn).await.is_ok() {
+                if !validate_idle || self.manager.is_valid(cx, &conn).await.is_ok() {
                     pending_slot.complete();
                     return Ok(conn);
                 }
@@ -1067,7 +1222,7 @@ impl OraclePool {
             }
             if self.reserve_new_connection()? {
                 let pending_slot = PendingOpenSlot::new(Arc::clone(&self.state));
-                match self.manager.connect(cx).await {
+                match self.manager.connect(cx, !validate_idle).await {
                     Ok(conn) => {
                         pending_slot.complete();
                         return Ok(conn);
@@ -1084,7 +1239,7 @@ impl OraclePool {
         }
     }
 
-    fn take_idle_connection(&self) -> Result<Option<RustOracleConnection>, DbError> {
+    fn take_idle_connection(&self) -> Result<Option<PooledConnection>, DbError> {
         let mut state = self
             .state
             .lock()
@@ -1144,6 +1299,7 @@ impl OraclePool {
             })),
             capacity: PoolCapacity::new(settings.max_size.saturating_sub(open_count) as usize),
             request_limits: Arc::new(Mutex::new(HashMap::new())),
+            observation_acquire_failure: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -1264,7 +1420,7 @@ impl<T> CheckedOutConnection<T> {
     }
 }
 
-impl CheckedOutConnection<RustOracleConnection> {
+impl CheckedOutConnection<PooledConnection> {
     fn finish(mut self, broken: bool) -> Result<(), DbError> {
         let mut state = self
             .state
@@ -1327,19 +1483,187 @@ fn record_checkin(state: &mut PoolState, broken: bool) -> bool {
     }
 }
 
+/// Owns a pool permit for the entire observation. Ordinary close returns a
+/// successful read-only checkout; timeout cleanup consumes the physical wire.
+/// Dropping this owner without close remains a dirty discard.
+struct PolicyObservationCheckout {
+    backend: OracleBackend,
+    checkout: asupersync::sync::Mutex<Option<CheckedOutConnection<PooledConnection>>>,
+    failed: std::sync::atomic::AtomicBool,
+}
+
+impl PolicyObservationCheckout {
+    async fn finish(&self, cx: &Cx, dirty: bool) -> Result<(), DbError> {
+        asupersync::combinator::try_commit_section(cx, 100, async {
+            let mut guard = self.checkout.lock(cx).await.map_err(|err| {
+                DbError::Internal(format!("observation checkout lock failed: {err}"))
+            })?;
+            let Some(checkout) = guard.take() else {
+                return Ok(());
+            };
+            let cleanup = if dirty {
+                checkout.connection().cancel_and_close(cx).await
+            } else {
+                checkout
+                    .connection()
+                    .run_session_release_statements(cx)
+                    .await
+            };
+            if !dirty && cleanup.is_err() {
+                // A failed release hook cannot put mutable/uncertain state in
+                // the idle set, and still needs terminal server-side cleanup.
+                let _ = checkout.connection().cancel_and_close(cx).await;
+            }
+            checkout.finish(dirty || cleanup.is_err())?;
+            cleanup
+        })
+        .await
+    }
+}
+
+#[async_trait(?Send)]
+impl OracleConnection for PolicyObservationCheckout {
+    fn backend(&self) -> OracleBackend {
+        self.backend
+    }
+
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let guard =
+            self.checkout.lock(cx).await.map_err(|err| {
+                DbError::Internal(format!("observation checkout lock failed: {err}"))
+            })?;
+        let checkout = guard
+            .as_ref()
+            .ok_or_else(|| DbError::Pool("observation checkout already closed".to_owned()))?;
+        let result = checkout.connection().query_rows(cx, sql, binds).await;
+        if result.is_err() {
+            self.failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    async fn query_rows_with_provenance(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+        provenance: crate::ReadQueryProvenance,
+        options: Option<&crate::SerializeOptions>,
+    ) -> Result<Vec<OracleRow>, DbError> {
+        let guard =
+            self.checkout.lock(cx).await.map_err(|err| {
+                DbError::Internal(format!("observation checkout lock failed: {err}"))
+            })?;
+        let checkout = guard
+            .as_ref()
+            .ok_or_else(|| DbError::Pool("observation checkout already closed".to_owned()))?;
+        let result = checkout
+            .connection()
+            .query_rows_with_provenance(cx, sql, binds, provenance, options)
+            .await;
+        if result.is_err() {
+            self.failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
+    async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
+        let guard =
+            self.checkout.lock(cx).await.map_err(|err| {
+                DbError::Internal(format!("observation checkout lock failed: {err}"))
+            })?;
+        guard
+            .as_ref()
+            .ok_or_else(|| DbError::Pool("observation checkout already closed".to_owned()))?
+            .connection()
+            .ping(cx)
+            .await
+    }
+
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        let guard =
+            self.checkout.lock(cx).await.map_err(|err| {
+                DbError::Internal(format!("observation checkout lock failed: {err}"))
+            })?;
+        guard
+            .as_ref()
+            .ok_or_else(|| DbError::Pool("observation checkout already closed".to_owned()))?
+            .connection()
+            .describe(cx)
+            .await
+    }
+
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        Err(DbError::Execute(
+            "policy observation checkout does not execute statements".to_owned(),
+        ))
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        Err(DbError::Execute(
+            "policy observation checkout does not own transactions".to_owned(),
+        ))
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Err(DbError::Execute(
+            "policy observation checkout does not own transactions".to_owned(),
+        ))
+    }
+    async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+        self.finish(cx, self.failed.load(std::sync::atomic::Ordering::Acquire))
+            .await
+    }
+    async fn cancel_and_close(&self, cx: &Cx) -> Result<(), DbError> {
+        self.finish(cx, true).await
+    }
+}
+
 #[async_trait(?Send)]
 impl OracleConnection for OraclePool {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
 
+    fn policy_observation_pool(&self) -> Option<OraclePool> {
+        Some(self.clone())
+    }
+
     async fn open_policy_observation_session(
         &self,
         cx: &Cx,
     ) -> Result<Box<dyn OracleConnection>, DbError> {
-        // A disposable connection is not a pool checkout: cancelled diagnostic
-        // work must never re-enter the pool's idle queue.
-        Ok(Box::new(self.manager.connect(cx).await?))
+        // The first catalog round trip validates the lease. A failed query is
+        // non-authorizing, and its owner terminally discards the wire. Avoid
+        // an extra ping on every warm observation; ordinary pool calls retain
+        // their preflight liveness check and retry contract.
+        let (connection, permit) = match self.checkout_with_validation(cx, false).await {
+            Ok(checkout) => checkout,
+            Err(error) => {
+                // Do not extend an already active cooldown on every read.
+                if let Ok(mut failure) = self.observation_acquire_failure.lock()
+                    && failure.is_none_or(|at| at.elapsed() >= Duration::from_secs(1))
+                {
+                    *failure = Some(std::time::Instant::now());
+                }
+                return Err(error);
+            }
+        };
+        self.on_checked_out()?;
+        Ok(Box::new(PolicyObservationCheckout {
+            backend: connection.backend(),
+            checkout: asupersync::sync::Mutex::new(Some(CheckedOutConnection::new(
+                connection,
+                Arc::clone(&self.state),
+                permit,
+            ))),
+            failed: std::sync::atomic::AtomicBool::new(false),
+        }))
     }
 
     fn request_deadline(&self, cx: &Cx) -> Result<Option<Time>, DbError> {
@@ -2309,5 +2633,81 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "the checkout exceeded its one-second absolute deadline by too much: {elapsed:?}"
         );
+    }
+
+    #[test]
+    fn observation_acquire_deadline_bounds_a_silent_logon_and_releases_capacity() {
+        // Real loopback TCP, deliberately no Oracle greeting: this exercises
+        // connection establishment rather than only a full admission queue.
+        use std::io::Read;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let peer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "bounded TCP accept");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("TCP accept: {error}"),
+                }
+            };
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut received = Vec::new();
+            socket
+                .read_to_end(&mut received)
+                .expect("abandoned logon closes its TCP transport");
+            assert!(
+                !received.is_empty(),
+                "driver must really send its connect packet"
+            );
+        });
+        let reactor = asupersync::runtime::reactor::create_reactor().unwrap();
+        let runtime = RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let pool = OraclePool::connect(
+                &cx,
+                OracleConnectOptions {
+                    connect_string: format!("{address}/SYNTHETIC_SERVICE"),
+                    username: Some("SYNTHETIC_USER".to_owned()),
+                    password: Some(String::new()),
+                    connect_timeout: Some(Duration::from_secs(30)),
+                    ..OracleConnectOptions::default()
+                },
+                PoolSettings {
+                    max_size: 1,
+                    min_idle: 0,
+                    acquire_timeout_secs: 1,
+                    statement_cache_size: 0,
+                },
+            )
+            .await
+            .unwrap();
+            let started = Instant::now();
+            let result = pool.open_policy_observation_session(&cx).await;
+            assert!(matches!(result, Err(DbError::Pool(_))));
+            assert!(started.elapsed() >= Duration::from_secs(1));
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "acquire budget includes the logon"
+            );
+            assert_eq!(
+                pool.metrics().open,
+                0,
+                "abandoned open reservation is released"
+            );
+            assert_eq!(pool.metrics().in_use, 0);
+            assert!(pool.metrics().is_balanced());
+        });
+        peer.join().unwrap();
     }
 }

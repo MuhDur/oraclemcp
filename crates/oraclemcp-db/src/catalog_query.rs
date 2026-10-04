@@ -210,6 +210,12 @@ pub enum CatalogQueryId {
     SessionContext,
     /// Enabled session roles.
     SessionRoles,
+    /// Isolated observer context and enabled roles in one bounded snapshot.
+    PolicyObservationSessionContext,
+    /// Observer context, roles, and visible relation policies in one bounded snapshot.
+    PolicyObservationByObject,
+    /// Observer context, roles, and visible schema policies in one bounded snapshot.
+    PolicyObservationBySchema,
     /// Exact local object candidates.
     Objects,
     /// Synonym target and identity.
@@ -578,9 +584,12 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 177] = [
+    pub const ALL: [Self; 180] = [
         Self::SessionContext,
         Self::SessionRoles,
+        Self::PolicyObservationSessionContext,
+        Self::PolicyObservationByObject,
+        Self::PolicyObservationBySchema,
         Self::Objects,
         Self::Synonyms,
         Self::StandaloneArguments,
@@ -853,6 +862,27 @@ impl CatalogQueryId {
                 "bind resolver to enabled roles",
                 SessionContext,
                 NameResolution,
+            ),
+            Self::PolicyObservationSessionContext => (
+                POLICY_OBSERVATION_SESSION_CONTEXT_SQL,
+                I,
+                "snapshot isolated observation context and roles",
+                SessionContext,
+                Diagnostic,
+            ),
+            Self::PolicyObservationByObject => (
+                POLICY_OBSERVATION_BY_OBJECT_SQL,
+                BindSchema(&[Text, Text, Integer, Integer]),
+                "observe bounded relation policies and observer context together",
+                VisibilityObservation,
+                Diagnostic,
+            ),
+            Self::PolicyObservationBySchema => (
+                POLICY_OBSERVATION_BY_SCHEMA_SQL,
+                BindSchema(&[Text, Integer, Integer]),
+                "observe bounded schema policies and observer context together",
+                VisibilityObservation,
+                Diagnostic,
             ),
             Self::Objects => (
                 OBJECTS_SQL,
@@ -2627,6 +2657,38 @@ pub(crate) const SESSION_CONTEXT_SQL: &str = "SELECT SYS_CONTEXT('USERENV', 'SES
     SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME') AS edition_name FROM dual";
 pub(crate) const SESSION_ROLES_SQL: &str = "SELECT role FROM (SELECT role FROM session_roles ORDER BY role) \
     WHERE ROWNUM <= :1";
+pub(crate) const POLICY_OBSERVATION_SESSION_CONTEXT_SQL: &str = "SELECT \
+    SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user, \
+    SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema, \
+    SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME') AS edition_name, r.role \
+    FROM dual d LEFT JOIN \
+    (SELECT role FROM (SELECT role FROM session_roles ORDER BY role) WHERE ROWNUM <= :1) r \
+    ON 1 = 1";
+macro_rules! policy_observation_snapshot_sql {
+    ($predicate:literal, $policy_limit:literal, $role_limit:literal) => {
+        concat!(
+            "SELECT * FROM (SELECT 'POLICY' AS row_kind, ",
+            "CAST(NULL AS VARCHAR2(128)) AS session_user, CAST(NULL AS VARCHAR2(128)) AS current_schema, ",
+            "CAST(NULL AS VARCHAR2(128)) AS edition_name, CAST(NULL AS VARCHAR2(128)) AS role, ",
+            "object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, upd, del, enable ",
+            "FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, upd, del, enable ",
+            "FROM all_policies WHERE ", $predicate,
+            " ORDER BY object_owner, object_name, policy_name) WHERE ROWNUM <= ", $policy_limit,
+            " UNION ALL SELECT 'CONTEXT', SYS_CONTEXT('USERENV', 'SESSION_USER'), ",
+            "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'), r.role, ",
+            "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL ",
+            "FROM dual d LEFT JOIN (SELECT role FROM (SELECT role FROM session_roles ORDER BY role) WHERE ROWNUM <= ",
+            $role_limit, ") r ON 1 = 1)"
+        )
+    };
+}
+pub(crate) const POLICY_OBSERVATION_BY_OBJECT_SQL: &str =
+    policy_observation_snapshot_sql!("object_owner = :1 AND object_name = :2", ":3", ":4");
+pub(crate) const POLICY_OBSERVATION_BY_SCHEMA_SQL: &str = policy_observation_snapshot_sql!(
+    "object_owner = NVL(:1, SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'))",
+    ":2",
+    ":3"
+);
 pub(crate) const OBJECTS_SQL: &str = "SELECT owner, object_name, object_type, object_id, status, edition_name \
     FROM (SELECT owner, object_name, object_type, object_id, status, edition_name \
           FROM all_objects WHERE owner = :1 AND object_name = :2 ORDER BY object_id) \

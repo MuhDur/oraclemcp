@@ -625,12 +625,24 @@ async fn try_open_stateless_connection(
     opts: OracleConnectOptions,
     pool_settings: Option<PoolSettings>,
 ) -> Result<Option<Box<dyn OracleConnection>>, DbError> {
-    match pool_settings {
+    match pool_settings.and_then(stateless_pool_settings) {
         Some(settings) => OraclePool::connect(cx, opts, settings)
             .await
             .map(|pool| Some(Box::new(pool) as Box<dyn OracleConnection>)),
         None => Ok(None),
     }
+}
+
+fn stateless_pool_settings(settings: PoolSettings) -> Option<PoolSettings> {
+    // Resolve the profile's total ceiling first, then reserve the authoritative
+    // pinned slot. The remainder serves both reads and isolated observations.
+    let mut settings = settings.resolved();
+    if settings.max_size <= 1 {
+        return None;
+    }
+    settings.max_size -= 1;
+    settings.min_idle = settings.min_idle.min(settings.max_size);
+    Some(settings)
 }
 
 struct RuntimeConnections {
@@ -659,11 +671,33 @@ async fn try_open_runtime_connections(
     resolved: ResolvedProfile,
 ) -> Result<RuntimeConnections, DbError> {
     let (session_options, stateless_options, pool_settings) = runtime_connection_options(resolved);
-    try_open_runtime_connections_with(
+    let observation_options = stateless_options.clone();
+    let connections = try_open_runtime_connections_with(
         || try_open_connection(cx, session_options),
         || try_open_stateless_connection(cx, stateless_options, pool_settings),
     )
-    .await
+    .await?;
+    if pool_settings.is_some() {
+        let source = match connections
+            .stateless
+            .as_ref()
+            .and_then(|pool| pool.policy_observation_pool())
+        {
+            Some(pool) => Some(pool),
+            None => match pool_settings.and_then(stateless_pool_settings) {
+                Some(mut settings) => {
+                    // Failed optional bootstrap must not pin diagnostics as
+                    // unavailable forever. Keep the same bounded budget, with
+                    // lazy acquisition so later observations can recover.
+                    settings.min_idle = 0;
+                    Some(OraclePool::connect(cx, observation_options, settings).await?)
+                }
+                None => None,
+            },
+        };
+        connections.session.set_policy_observation_pool(source)?;
+    }
+    Ok(connections)
 }
 
 /// Open the authoritative pinned session before attempting the optional pool.

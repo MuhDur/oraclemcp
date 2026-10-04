@@ -1127,6 +1127,15 @@ impl QueryRowStream {
 pub trait OracleConnection: Send + Sync {
     /// The backend in use.
     fn backend(&self) -> OracleBackend;
+    /// Share the bounded stateless source with the pinned session. `None`
+    /// disables observations when the configured budget has no spare slot.
+    fn set_policy_observation_pool(&self, _pool: Option<crate::OraclePool>) -> Result<(), DbError> {
+        Ok(())
+    }
+    /// The profile's bounded stateless source, when this adapter owns one.
+    fn policy_observation_pool(&self) -> Option<crate::OraclePool> {
+        None
+    }
     /// Open an owned, physically separate profile session for non-authorizing
     /// policy observations. It must never borrow or return the pinned wire.
     /// Dropping the returned session must retire its in-flight work rather
@@ -1442,7 +1451,15 @@ pub trait OracleConnection: Send + Sync {
     /// Roll back the current transaction on this session.
     async fn rollback(&self, cx: &Cx) -> Result<(), DbError>;
 
+    /// Run operator-configured release hooks before a clean pool check-in.
+    async fn run_session_release_statements(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+
     /// Log off and close this physical Oracle session.
+    /// An isolated observation lease instead returns a completed clean session
+    /// to its bounded source; [`OracleConnection::cancel_and_close`] always
+    /// disposes an abandoned observation's physical wire.
     ///
     /// Lifecycle owners call this after their rollback/finalization work rather
     /// than relying on Rust drop. The thin implementation delegates to the
@@ -1859,6 +1876,48 @@ async fn connect_with_backend_registry(
     }
 }
 
+#[cfg(feature = "oracledb")]
+pub(crate) fn validate_official_connect_options(
+    options: &OracleConnectOptions,
+) -> Result<(), DbError> {
+    if options.use_iam_token || options.iam_token.is_some() || options.iam_token_source.is_some() {
+        return Err(DbError::UnsupportedAuth(
+            "official Oracle backend does not support IAM or OAuth database tokens".to_owned(),
+        ));
+    }
+    if options.external_auth || !matches!(options.auth_adapter, crate::AuthAdapter::Password) {
+        return Err(DbError::UnsupportedAuth(
+            "official Oracle backend supports only password authentication; route this auth mode to driver-cx"
+                .to_owned(),
+        ));
+    }
+    if options.ssl_server_dn_match.is_some()
+        || options.ssl_server_cert_dn.is_some()
+        || options.use_sni.is_some()
+    {
+        return Err(DbError::UnsupportedAuth(
+            "official Oracle backend cannot apply the requested TLS override safely".to_owned(),
+        ));
+    }
+    if options.sdu.is_some()
+        || options.connect_timeout.is_some()
+        || options.inactivity_timeout.is_some()
+        // The safe default is implemented by driver-cx's EZConnect handling.
+        // The official backend has no EXPIRE_TIME setter, so it may ignore the
+        // default rather than reject otherwise supported password profiles.
+        // An explicit keepalive request remains a typed unsupported feature.
+        || (options.keepalive_minutes.is_some() && !options.keepalive_defaulted)
+        || !options.app_context.is_empty()
+        || options.session_identity.is_some()
+    {
+        return Err(DbError::UnsupportedFeature(
+            "official Oracle backend cannot apply one or more requested connection settings safely"
+                .to_owned(),
+        ));
+    }
+    Ok(())
+}
+
 /// Open one Oracle connection through the feature-aware backend registry.
 ///
 /// With the `oracledb` feature disabled this is byte-for-byte the retained
@@ -1891,6 +1950,33 @@ pub async fn connect_oracle(
     }
 }
 
+/// Backend-neutral bounded release hooks for a pooled alternate session.
+/// Native sessions retain their existing driver-specific cleanup implementation.
+#[cfg(feature = "oracledb")]
+pub(crate) async fn run_connection_release_statements(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    statements: &[String],
+    timeout: Option<Duration>,
+) -> Result<(), DbError> {
+    asupersync::combinator::try_commit_section(cx, CLEANUP_MASKED_POLLS, async {
+        let work = async {
+            for (index, statement) in statements.iter().enumerate() {
+                conn.execute(cx, statement, &[]).await.map_err(|_| {
+                    DbError::Execute(format!("session release statement {} failed", index + 1))
+                })?;
+            }
+            Ok(())
+        };
+        asupersync::time::timeout(cx.now(), timeout.unwrap_or(Duration::from_secs(5)), work)
+            .await
+            .map_err(|_| {
+                DbError::Execute("session release hooks exceeded cleanup deadline".to_owned())
+            })?
+    })
+    .await
+}
+
 /// The idempotent teardown for a `DBMS_FLASHBACK` session read-snapshot window
 /// (K9). A no-op when flashback is not enabled, so it is safe to call
 /// unconditionally as cleanup.
@@ -1921,6 +2007,9 @@ pub struct RustOracleConnection {
     /// Driver callback identities, keyed by registration id, kept private so
     /// only adapter cleanup can use them. No CQN payload crosses this boundary.
     cqn_client_ids: Mutex<HashMap<u64, Vec<u8>>>,
+    // Outer None: lazily create one spare slot for an unpooled profile.
+    // Some(None): explicitly disabled by the profile's configured ceiling.
+    policy_observation_pool: crate::pool::PolicyObservationSource,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2573,6 +2662,7 @@ mod driver {
                 request_quota: None,
             }),
             cqn_client_ids: SyncMutex::new(HashMap::new()),
+            policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         })
     }
 
@@ -6855,9 +6945,18 @@ mod driver {
             &self,
             cx: &Cx,
         ) -> Result<Box<dyn super::OracleConnection>, DbError> {
-            Ok(Box::new(
-                RustOracleConnection::connect(cx, self.opts.clone()).await?,
-            ))
+            self.policy_observation_pool.acquire(cx, &self.opts).await
+        }
+
+        fn policy_observation_pool(&self) -> Option<crate::OraclePool> {
+            self.policy_observation_pool.get()
+        }
+
+        fn set_policy_observation_pool(
+            &self,
+            pool: Option<crate::OraclePool>,
+        ) -> Result<(), DbError> {
+            self.policy_observation_pool.configure(&self.opts, pool)
         }
 
         async fn cancel(&self, cx: &Cx) -> Result<(), DbError> {
@@ -6891,11 +6990,16 @@ mod driver {
             .await
         }
 
+        async fn run_session_release_statements(&self, cx: &Cx) -> Result<(), DbError> {
+            run_session_release_statements(cx, self).await
+        }
+
         async fn close(&self, cx: &Cx) -> Result<(), DbError> {
+            let source_result = self.policy_observation_pool.close(cx).await;
             // Logical logoff is terminal cleanup. Mask a cancelled request so
             // the driver's consuming close path still gets its bounded chance
             // to roll back, send LOGOFF, and emit TLS close_notify.
-            try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+            let primary_result = try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
                 // Keep the slot lock across the consuming driver close. Queries
                 // already do this for their whole driver round trip, and it
                 // makes concurrent close calls serialize: the second caller
@@ -6957,7 +7061,8 @@ mod driver {
                     }
                 }
             })
-            .await
+            .await;
+            source_result.and(primary_result)
         }
 
         async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
@@ -8780,6 +8885,7 @@ mod tests {
             })),
             wire_limits: Mutex::new(WireLimits::default()),
             cqn_client_ids: Mutex::new(HashMap::new()),
+            policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         };
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -8804,6 +8910,43 @@ mod tests {
     }
 
     #[test]
+    fn policy_observation_source_cannot_cross_profile_credentials() {
+        let conn = RustOracleConnection {
+            opts: OracleConnectOptions::default(),
+            inner: Arc::new(AsyncMutex::new(RustOracleConnectionSlot {
+                connection: None,
+                quarantine_reason: None,
+            })),
+            wire_limits: Mutex::new(WireLimits::default()),
+            cqn_client_ids: Mutex::new(HashMap::new()),
+            policy_observation_pool: crate::pool::PolicyObservationSource::default(),
+        };
+        let options = OracleConnectOptions {
+            username: Some("OTHER_SYNTHETIC_PROFILE".to_owned()),
+            ..OracleConnectOptions::default()
+        };
+        let error = conn
+            .set_policy_observation_pool(Some(crate::OraclePool::observation_source(options)))
+            .expect_err("different profile source");
+        assert!(matches!(error, DbError::Internal(_)));
+        assert!(conn.policy_observation_pool().is_none());
+        conn.set_policy_observation_pool(None).unwrap();
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let error = conn
+                .open_policy_observation_session(&cx)
+                .await
+                .err()
+                .expect("disabled observation source");
+            assert!(matches!(error, DbError::Pool(_)));
+            assert!(error.to_string().contains("no observation slot"));
+        });
+    }
+
+    #[test]
     fn explicit_logoff_is_idempotent_after_the_driver_session_is_consumed() {
         use asupersync::runtime::RuntimeBuilder;
 
@@ -8815,6 +8958,7 @@ mod tests {
             })),
             wire_limits: Mutex::new(WireLimits::default()),
             cqn_client_ids: Mutex::new(HashMap::new()),
+            policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         };
         let runtime = RuntimeBuilder::current_thread()
             .build()
@@ -8854,6 +8998,7 @@ mod tests {
                 inner: Arc::clone(&inner),
                 wire_limits: Mutex::new(WireLimits::default()),
                 cqn_client_ids: Mutex::new(HashMap::new()),
+                policy_observation_pool: crate::pool::PolicyObservationSource::default(),
             };
             let repeated = match conn.lock_inner(&cx).await {
                 Ok(_) => panic!("a recovery failure must not restore the connection slot"),

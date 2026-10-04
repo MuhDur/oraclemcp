@@ -141,7 +141,7 @@ static DOCS: &[ConfigFieldDoc] = &[
     doc!("profiles.session_identity.client_info", "string", "none", false, true, "1", "DBMS_APPLICATION_INFO client info."),
     doc!("profiles.session_identity.driver_name", "string", "none", false, true, "1", "Driver name shown by Oracle connection-info views where supported."),
     // ---- [profiles.pool] -------------------------------------------------
-    doc!("profiles.pool.max_size", "integer", "16", false, false, "1", "Maximum pooled connections (runtime clamps to cpu*2+1)."),
+    doc!("profiles.pool.max_size", "integer", "16", false, false, "1", "Total pinned and pooled connections (runtime clamps to cpu*2+1; observations share pool capacity)."),
     doc!("profiles.pool.min_idle", "integer", "2", false, false, "1", "Minimum idle connections kept warm; must be <= max_size."),
     doc!("profiles.pool.acquire_timeout_secs", "integer", "5", false, false, "1", "Seconds to wait for a checkout before returning BUSY (1..=3600)."),
     doc!("profiles.pool.statement_cache_size", "integer", "50", false, false, "1", "Per-connection statement-cache size passed to the thin driver."),

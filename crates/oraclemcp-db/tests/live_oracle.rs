@@ -1888,207 +1888,230 @@ fn live_slow_policy_probe_isolated_from_pinned_session() {
         eprintln!("[live-xe] SKIP slow policy fixture: set ORACLEMCP_TEST_SLOW_POLICY_PROBE=1");
         return;
     }
-    run_with_cx(|cx| async move {
-        let conn = RustOracleConnection::connect(&cx, test_opts())
+    let fixture = policy_fixture(true);
+    let fixture_ref = &fixture;
+    let result = std::panic::catch_unwind(|| {
+        run_with_cx(|cx| async move {
+            let fixture = fixture_ref;
+            let mut opts = test_opts();
+            opts.username = Some(fixture.user.clone());
+            opts.password = Some(fixture.password.clone());
+            opts.auth_adapter = AuthAdapter::Password;
+            let conn = RustOracleConnection::connect(&cx, opts)
+                .await
+                .expect("slow-probe fixture connection");
+            let raw_started = Instant::now();
+            oraclemcp_db::run_catalog_query(
+                &cx,
+                &conn,
+                oraclemcp_db::CatalogQueryId::AllPoliciesVisibility,
+                &[],
+            )
             .await
-            .expect("slow-probe fixture connection");
-        let raw_started = Instant::now();
-        oraclemcp_db::run_catalog_query(
-            &cx,
-            &conn,
-            oraclemcp_db::CatalogQueryId::AllPoliciesVisibility,
-            &[],
-        )
-        .await
-        .expect("real slow ALL_POLICIES query");
-        let raw_elapsed = raw_started.elapsed();
-        assert!(
-            raw_elapsed >= Duration::from_secs(12),
-            "fixture must really stall the catalog query for 12s"
-        );
-        // The same private synonym must not shadow authorization evidence.
-        let proof_started = Instant::now();
-        let policy_rows = oraclemcp_db::run_catalog_query(
-            &cx,
-            &conn,
-            oraclemcp_db::CatalogQueryId::SelectPolicy,
-            &[
-                OracleBind::from(test_opts().username.expect("fixture username")),
-                OracleBind::from("XR_64"),
-            ],
-        )
-        .await
-        .expect("authoritative SYS policy lookup through a shadowing synonym");
-        assert!(!policy_rows.is_empty(), "positive policy evidence survives");
-        assert!(proof_started.elapsed() < Duration::from_secs(1));
-        let previous = cx.now() + Duration::from_secs(30);
-        conn.set_request_deadline(&cx, Some(previous)).unwrap();
-        let started = Instant::now();
-        let mut probe_future =
-            std::pin::pin!(oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn));
-        let mut read_future = std::pin::pin!(async {
-            asupersync::time::sleep(cx.now(), Duration::from_millis(200)).await;
+            .expect("real slow ALL_POLICIES query");
+            let raw_elapsed = raw_started.elapsed();
+            assert!(
+                raw_elapsed >= Duration::from_secs(12),
+                "fixture must really stall the catalog query for 12s"
+            );
+            // The same private synonym must not shadow authorization evidence.
+            let proof_started = Instant::now();
+            let policy_rows = oraclemcp_db::run_catalog_query(
+                &cx,
+                &conn,
+                oraclemcp_db::CatalogQueryId::SelectPolicy,
+                &[
+                    OracleBind::from(fixture.user.clone()),
+                    OracleBind::from("XR_64"),
+                ],
+            )
+            .await
+            .expect("authoritative SYS policy lookup through a shadowing synonym");
+            assert!(!policy_rows.is_empty(), "positive policy evidence survives");
+            assert!(proof_started.elapsed() < Duration::from_secs(1));
+            let previous = cx.now() + Duration::from_secs(30);
+            conn.set_request_deadline(&cx, Some(previous)).unwrap();
+            let started = Instant::now();
+            let mut probe_future =
+                std::pin::pin!(oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn));
+            let mut read_future = std::pin::pin!(async {
+                asupersync::time::sleep(cx.now(), Duration::from_millis(200)).await;
+                let read_started = Instant::now();
+                let rows = conn
+                    .query_rows(&cx, "SELECT 6 AS n FROM dual", &[])
+                    .await
+                    .expect("pinned read while slow diagnostic is in flight");
+                assert_eq!(rows[0].parse_i64("N"), Some(6));
+                assert!(read_started.elapsed() < Duration::from_secs(1));
+            });
+            let mut probe_result = None;
+            let mut read_complete = false;
+            let probe = std::future::poll_fn(|poll_cx| {
+                if probe_result.is_none()
+                    && let std::task::Poll::Ready(probe) =
+                        std::future::Future::poll(probe_future.as_mut(), poll_cx)
+                {
+                    probe_result = Some(probe);
+                }
+                if !read_complete
+                    && std::future::Future::poll(read_future.as_mut(), poll_cx).is_ready()
+                {
+                    assert!(
+                        probe_result.is_none(),
+                        "primary read must complete while the slow diagnostic is pending"
+                    );
+                    read_complete = true;
+                }
+                if read_complete && probe_result.is_some() {
+                    std::task::Poll::Ready(probe_result.take().unwrap())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            assert_eq!(
+                probe.visibility,
+                oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+            );
+            assert_eq!(probe.visible_policy_rows_probe, None);
+            let probe_elapsed = started.elapsed();
+            assert!(
+                probe_elapsed < Duration::from_secs(5),
+                "owned diagnostic session must be retired promptly: {probe:?}"
+            );
+            assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
             let read_started = Instant::now();
             let rows = conn
-                .query_rows(&cx, "SELECT 6 AS n FROM dual", &[])
+                .query_rows(&cx, "SELECT 7 AS n FROM dual", &[])
                 .await
-                .expect("pinned read while slow diagnostic is in flight");
-            assert_eq!(rows[0].parse_i64("N"), Some(6));
+                .expect("same pinned session immediately usable");
             assert!(read_started.elapsed() < Duration::from_secs(1));
-        });
-        let mut probe_result = None;
-        let mut read_complete = false;
-        let probe = std::future::poll_fn(|poll_cx| {
-            if probe_result.is_none()
-                && let std::task::Poll::Ready(probe) =
-                    std::future::Future::poll(probe_future.as_mut(), poll_cx)
-            {
-                probe_result = Some(probe);
-            }
-            if !read_complete && std::future::Future::poll(read_future.as_mut(), poll_cx).is_ready()
-            {
-                assert!(
-                    probe_result.is_none(),
-                    "primary read must complete while the slow diagnostic is pending"
-                );
-                read_complete = true;
-            }
-            if read_complete && probe_result.is_some() {
-                std::task::Poll::Ready(probe_result.take().unwrap())
-            } else {
-                std::task::Poll::Pending
-            }
+            assert_eq!(rows[0].parse_i64("N"), Some(7));
+            let observation = oraclemcp_db::observe_vpd_rls_for_schema(&cx, &conn, "").await;
+            assert_eq!(
+                observation.status,
+                oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
+            );
+            assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
+            let rows = conn
+                .query_rows(&cx, "SELECT 8 AS n FROM dual", &[])
+                .await
+                .expect("same pinned session usable after isolated doctor observation");
+            assert_eq!(rows[0].parse_i64("N"), Some(8));
+            eprintln!(
+                "[live-xe] slow-probe raw_ms={} probe_ms={} same-session reads and schema observation PASS",
+                raw_elapsed.as_millis(),
+                probe_elapsed.as_millis()
+            );
+            conn.close(&cx).await.unwrap();
         })
-        .await;
-        assert_eq!(
-            probe.visibility,
-            oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
-        );
-        assert_eq!(probe.visible_policy_rows_probe, None);
-        let probe_elapsed = started.elapsed();
-        assert!(
-            probe_elapsed < Duration::from_secs(5),
-            "owned diagnostic session must be retired promptly: {probe:?}"
-        );
-        assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
-        let read_started = Instant::now();
-        let rows = conn
-            .query_rows(&cx, "SELECT 7 AS n FROM dual", &[])
-            .await
-            .expect("same pinned session immediately usable");
-        assert!(read_started.elapsed() < Duration::from_secs(1));
-        assert_eq!(rows[0].parse_i64("N"), Some(7));
-        let observation = oraclemcp_db::observe_vpd_rls_for_schema(&cx, &conn, "").await;
-        assert_eq!(
-            observation.status,
-            oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
-        );
-        assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
-        let rows = conn
-            .query_rows(&cx, "SELECT 8 AS n FROM dual", &[])
-            .await
-            .expect("same pinned session usable after isolated doctor observation");
-        assert_eq!(rows[0].parse_i64("N"), Some(8));
-        eprintln!(
-            "[live-xe] slow-probe raw_ms={} probe_ms={} same-session reads and schema observation PASS",
-            raw_elapsed.as_millis(),
-            probe_elapsed.as_millis()
-        );
-        conn.close(&cx).await.unwrap();
     });
+    fixture.cleanup();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
 }
 
-/// jxn8p: count the physical sessions, not just successful pinned reads.
-/// The opt-in local Docker lab supplies SYS only for fixture setup/census.
-/// Each invocation owns a random user and cleans it up even on assertion failure.
-/// The declared census bound is 30 seconds. Labs disabling OOB can defer the
-/// interrupt until the slow catalog call reaches a server cancellation point.
-#[test]
-fn live_timed_out_policy_observations_return_sessions_to_baseline() {
-    if env_bool("ORACLEMCP_TEST_SLOW_POLICY_CLEANUP") != Some(true) {
-        eprintln!(
-            "[live-xe] SKIP session cleanup fixture: set ORACLEMCP_TEST_SLOW_POLICY_CLEANUP=1"
+use std::io::Write;
+use std::process::{Command, Stdio};
+
+struct PolicyFixture {
+    container: String,
+    pdb: String,
+    user: String,
+    password: String,
+}
+impl PolicyFixture {
+    fn sql(&self, sql: &str) -> String {
+        let mut child = Command::new("timeout")
+            .args([
+                "45",
+                "docker",
+                "exec",
+                "-i",
+                &self.container,
+                "sqlplus",
+                "-S",
+                "/ as sysdba",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("local lab SQLPlus");
+        write!(child.stdin.take().unwrap(),
+            "whenever sqlerror exit failure\nset heading off feedback off pagesize 0\nalter session set container={};\n{sql}\nexit\n", self.pdb)
+            .expect("fixture SQL input");
+        let output = child.wait_with_output().expect("bounded fixture SQL");
+        let stdout = String::from_utf8_lossy(&output.stdout).replace(&self.password, "<redacted>");
+        assert!(
+            output.status.success(),
+            "lab SQL failed: {stdout} {}",
+            String::from_utf8_lossy(&output.stderr).replace(&self.password, "<redacted>")
         );
-        return;
+        stdout
     }
-    use std::io::Write;
-    use std::process::{Command, Stdio};
-    struct Fixture {
-        container: String,
-        pdb: String,
-        user: String,
-        password: String,
+    fn count(&self) -> usize {
+        let output = self.sql(&format!(
+            "select 'COUNT:'||count(*) from v$session where username='{}';",
+            self.user
+        ));
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("COUNT:")?.parse().ok())
+            .expect("v$session census")
     }
-    impl Fixture {
-        fn sql(&self, sql: &str) -> String {
-            let mut child = Command::new("timeout")
-                .args([
-                    "45",
-                    "docker",
-                    "exec",
-                    "-i",
-                    &self.container,
-                    "sqlplus",
-                    "-S",
-                    "/ as sysdba",
-                ])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .expect("local lab SQLPlus");
-            write!(child.stdin.take().unwrap(),
-                "whenever sqlerror exit failure\nset heading off feedback off pagesize 0\nalter session set container={};\n{sql}\nexit\n", self.pdb)
-                .expect("fixture SQL input");
-            let output = child.wait_with_output().expect("bounded fixture SQL");
-            let stdout =
-                String::from_utf8_lossy(&output.stdout).replace(&self.password, "<redacted>");
+    async fn baseline(&self, cx: &Cx, expected: usize) {
+        let started = Instant::now();
+        loop {
+            let count = self.count();
             assert!(
-                output.status.success(),
-                "lab SQL failed: {stdout} {}",
-                String::from_utf8_lossy(&output.stderr).replace(&self.password, "<redacted>")
+                started.elapsed() < Duration::from_secs(30),
+                "{} census exceeded 30 s: baseline={expected} actual={count}",
+                self.container
             );
-            stdout
-        }
-        fn count(&self) -> usize {
-            let output = self.sql(&format!(
-                "select 'COUNT:'||count(*) from v$session where username='{}';",
-                self.user
-            ));
-            output
-                .lines()
-                .find_map(|line| line.trim().strip_prefix("COUNT:")?.parse().ok())
-                .expect("v$session census")
-        }
-        async fn baseline(&self, cx: &Cx, expected: usize) {
-            let started = Instant::now();
-            loop {
-                let count = self.count();
-                assert!(
-                    started.elapsed() < Duration::from_secs(30),
-                    "{} census exceeded 30 s: baseline={expected} actual={count}",
-                    self.container
+            if count == expected {
+                eprintln!(
+                    "[live-xe] {} v$session baseline={} restored_ms={}",
+                    self.container,
+                    expected,
+                    started.elapsed().as_millis()
                 );
-                if count == expected {
-                    eprintln!(
-                        "[live-xe] {} v$session baseline={} restored_ms={}",
-                        self.container,
-                        expected,
-                        started.elapsed().as_millis()
-                    );
-                    return;
-                }
-                asupersync::time::sleep(cx.now(), Duration::from_millis(100)).await;
+                return;
             }
+            asupersync::time::sleep(cx.now(), Duration::from_millis(100)).await;
         }
     }
+}
+impl PolicyFixture {
+    fn cleanup(&self) {
+        self.sql(&format!(r#"begin
+for s in (select sid, serial# from v$session where username='{user}') loop
+begin execute immediate 'alter system disconnect session '||chr(39)||s.sid||','||s.serial#||chr(39)||' immediate'; exception when others then if sqlcode != -31 then raise; end if; end;
+end loop;
+end;
+/
+begin
+for attempt in 1..50 loop
+begin execute immediate 'drop user {user} cascade'; return;
+exception when others then if sqlcode != -1940 then raise; end if;
+if attempt = 50 then raise; end if;
+sys.dbms_lock.sleep(0.1);
+end;
+end loop;
+end;
+/"#, user=self.user));
+    }
+}
+
+fn policy_fixture(slow: bool) -> PolicyFixture {
     let mut random = [0u8; 12];
     getrandom::getrandom(&mut random).expect("fixture entropy");
     let suffix = random
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
-    let fixture = Fixture {
+    let fixture = PolicyFixture {
         container: std::env::var("ORACLEMCP_TEST_LAB_CONTAINER").expect("local lab container"),
         pdb: std::env::var("ORACLEMCP_TEST_LAB_PDB").expect("local lab PDB"),
         user: format!("JXN_{}", &suffix[..16]).to_ascii_uppercase(),
@@ -2106,10 +2129,10 @@ grant create session to {user};
 grant execute on sys.dbms_lock to {user};
 create table {user}.xr_64 (id number);
 insert into {user}.xr_64 values (1);
+create table {user}.xr_plain (id number);
+insert into {user}.xr_plain values (1);
 commit;
 create function {user}.xr_fast_policy(s varchar2, t varchar2) return varchar2 as begin return '1=1'; end;
-/
-create function {user}.xr_slow_policy(s varchar2, t varchar2) return varchar2 as begin sys.dbms_lock.sleep(12); return '1=1'; end;
 /
 begin
 for i in 1..64 loop
@@ -2117,13 +2140,513 @@ sys.dbms_rls.add_policy(object_schema=>'{user}',object_name=>'XR_64',policy_name
 end loop;
 end;
 /
+"#, user=fixture.user, password=fixture.password));
+    if slow {
+        fixture.sql(&format!(r#"
+create function {user}.xr_slow_policy(s varchar2, t varchar2) return varchar2 as begin sys.dbms_lock.sleep(12); return '1=1'; end;
+/
 create view {user}.xr_policy_view as select p.* from sys.all_policies p;
 begin
 sys.dbms_rls.add_policy(object_schema=>'{user}',object_name=>'XR_POLICY_VIEW',policy_name=>'XR_SLOW_P',function_schema=>'{user}',policy_function=>'XR_SLOW_POLICY',statement_types=>'SELECT');
 end;
 /
 create synonym {user}.all_policies for {user}.xr_policy_view;
-"#, user=fixture.user, password=fixture.password));
+"#, user=fixture.user));
+    }
+    fixture
+}
+
+impl PolicyFixture {
+    fn options(&self) -> OracleConnectOptions {
+        let mut opts = test_opts();
+        opts.username = Some(self.user.clone());
+        opts.password = Some(self.password.clone());
+        opts.auth_adapter = AuthAdapter::Password;
+        opts
+    }
+}
+
+#[test]
+fn live_policy_observations_share_bounded_capacity_and_reuse_sessions() {
+    if env_bool("ORACLEMCP_TEST_POLICY_POOL") != Some(true) {
+        eprintln!("[live-xe] SKIP policy pool fixture: set ORACLEMCP_TEST_POLICY_POOL=1");
+        return;
+    }
+    let fixture = policy_fixture(false);
+    let fixture_ref = &fixture;
+    let result = std::panic::catch_unwind(|| {
+        run_with_cx(|cx| async move {
+            let fixture = fixture_ref;
+            let mut options = fixture.options();
+            if env_bool("ORACLEMCP_TEST_POLICY_OFFICIAL") == Some(true) {
+                // The optional official adapter does not support session labels;
+                // keep identical supported credentials/options for the shared source.
+                options.session_identity = None;
+            }
+            let conn: Box<dyn OracleConnection> =
+                if env_bool("ORACLEMCP_TEST_POLICY_OFFICIAL") == Some(true) {
+                    #[cfg(feature = "oracledb")]
+                    {
+                        Box::new(
+                            OfficialOracleConnection::connect(&cx, options.clone())
+                                .await
+                                .unwrap(),
+                        )
+                    }
+                    #[cfg(not(feature = "oracledb"))]
+                    {
+                        panic!("official-primary policy pool proof requires the oracledb feature")
+                    }
+                } else {
+                    Box::new(
+                        RustOracleConnection::connect(&cx, options.clone())
+                            .await
+                            .unwrap(),
+                    )
+                };
+            let pool = OraclePool::connect(
+                &cx,
+                options,
+                PoolSettings {
+                    max_size: 2,
+                    min_idle: 0,
+                    acquire_timeout_secs: 5,
+                    statement_cache_size: 50,
+                },
+            )
+            .await
+            .unwrap();
+            conn.set_policy_observation_pool(None).unwrap();
+            let no_spare = oraclemcp_db::bounded_policy_catalog_probe(&cx, conn.as_ref()).await;
+            assert_eq!(
+                no_spare.visibility,
+                oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+            );
+            assert!(no_spare.detail.contains("no observation slot"));
+            assert_eq!(
+                fixture.count(),
+                1,
+                "budget of one must not create a diagnostic logon"
+            );
+            conn.set_policy_observation_pool(Some(pool.clone()))
+                .unwrap();
+            let snapshot = oraclemcp_db::observe_vpd_rls_for_schema(&cx, conn.as_ref(), "").await;
+            assert_eq!(
+                snapshot.status,
+                oraclemcp_db::OracleVpdRlsObservationStatus::PoliciesObserved
+            );
+            assert_eq!(snapshot.policies.len(), 64);
+            assert!(
+                snapshot
+                    .policies
+                    .iter()
+                    .all(|policy| policy.object_owner == fixture.user
+                        && policy.object_name == "XR_64")
+            );
+            let context = snapshot
+                .session
+                .expect("complete observer context snapshot");
+            assert_eq!(context.session_user, fixture.user);
+            assert_eq!(context.current_schema, fixture.user);
+            assert!(context.enabled_roles.is_empty());
+            let mut sessions = Vec::new();
+            // Serial observations must reuse one physical observer, including its
+            // server SID. Census and accounting prevent a fresh-logon shortcut.
+            for _ in 0..8 {
+                let observer = conn.open_policy_observation_session(&cx).await.unwrap();
+                let row = observer
+                    .query_rows(
+                        &cx,
+                        "SELECT SYS_CONTEXT('USERENV','SID') AS sid FROM dual",
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                sessions.push(row[0].text("SID").map(str::to_owned));
+                observer.close(&cx).await.unwrap();
+                assert_eq!(fixture.count(), 2);
+            }
+            assert!(sessions.iter().all(|sid| sid == &sessions[0]));
+            assert!(sessions[0].is_some());
+            let mut pending: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>> =
+                Vec::new();
+            for index in 0..12 {
+                let conn = &conn;
+                let pool = &pool;
+                let cx = &cx;
+                pending.push(Box::pin(async move {
+                    if index % 2 == 0 {
+                        let observer = conn.open_policy_observation_session(cx).await.unwrap();
+                        let rows = oraclemcp_db::run_catalog_query(
+                            cx,
+                            observer.as_ref(),
+                            oraclemcp_db::CatalogQueryId::AllPoliciesVisibility,
+                            &[],
+                        )
+                        .await
+                        .unwrap();
+                        assert!(!rows.is_empty());
+                        asupersync::time::sleep(cx.now(), Duration::from_millis(200)).await;
+                        observer.close(cx).await.unwrap();
+                    } else {
+                        let rows = pool
+                            .query_rows(cx, "SELECT 1 AS n FROM dual".to_owned(), Vec::new())
+                            .await
+                            .unwrap();
+                        assert_eq!(rows[0].parse_i64("N"), Some(1));
+                    }
+                }));
+            }
+            let mut completed = [false; 12];
+            let mut peak = 0;
+            let started = Instant::now();
+            std::future::poll_fn(|poll_cx| {
+                for (index, future) in pending.iter_mut().enumerate() {
+                    if !completed[index] && future.as_mut().poll(poll_cx).is_ready() {
+                        completed[index] = true;
+                    }
+                }
+                let count = fixture.count();
+                peak = peak.max(count);
+                assert!(
+                    count <= 3,
+                    "configured total=3 (one pinned + two shared slots), actual={count}"
+                );
+                assert!(pool.metrics().is_bounded());
+                assert!(
+                    started.elapsed() < Duration::from_secs(10),
+                    "bounded concurrent checkout"
+                );
+                if completed.iter().all(|done| *done) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            drop(pending);
+            assert_eq!(peak, 3, "exercise the ceiling with real Oracle sessions");
+            assert!(pool.metrics().is_balanced());
+            assert_eq!(pool.metrics().acquired, 21);
+            assert_eq!(pool.metrics().released, 21);
+            assert_eq!(pool.metrics().discarded, 0);
+            conn.close(&cx).await.unwrap();
+            pool.close(&cx).await.unwrap();
+            fixture.baseline(&cx, 0).await;
+            eprintln!(
+                "[live-xe] bounded policy pool PASS concurrency=12 physical_peak={peak} limit=3 serial_reuse=8"
+            );
+        })
+    });
+    fixture.cleanup();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+#[test]
+fn live_transient_policy_logon_failure_recovers_without_pinned_reconnect() {
+    if env_bool("ORACLEMCP_TEST_POLICY_POOL") != Some(true) {
+        eprintln!("[live-xe] SKIP policy pool fixture: set ORACLEMCP_TEST_POLICY_POOL=1");
+        return;
+    }
+    let fixture = policy_fixture(false);
+    let fixture_ref = &fixture;
+    let result = std::panic::catch_unwind(|| {
+        run_with_cx(|cx| async move {
+            let fixture = fixture_ref;
+            let conn = RustOracleConnection::connect(&cx, fixture.options())
+                .await
+                .unwrap();
+            let cache = oraclemcp_db::OracleCatalogResolverCache::new();
+            fixture.sql(&format!("alter user {} account lock;", fixture.user));
+            let failed = oraclemcp_db::observe_vpd_rls_for_relations_with_cached_bounded_probe(
+                &cx,
+                &conn,
+                &[],
+                &cache,
+            )
+            .await;
+            assert_eq!(
+                failed.status,
+                oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
+            );
+            assert!(cache.policy_catalog_probe().is_some());
+            fixture.sql(&format!("alter user {} account unlock;", fixture.user));
+            let cooldown = oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn).await;
+            assert_eq!(
+                cooldown.visibility,
+                oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+            );
+            assert!(cooldown.detail.contains("retry cooldown"), "{cooldown:?}");
+            assert_eq!(
+                fixture.count(),
+                1,
+                "cooldown must not retry the failed logon immediately"
+            );
+            asupersync::time::sleep(cx.now(), Duration::from_millis(1100)).await;
+            assert!(
+                cache.policy_catalog_probe().is_none(),
+                "TTL permits a fresh visibility query"
+            );
+            let recovered = oraclemcp_db::observe_vpd_rls_for_relations_with_cached_bounded_probe(
+                &cx,
+                &conn,
+                &[],
+                &cache,
+            )
+            .await;
+            assert_eq!(
+                recovered.all_policies_probe.visibility,
+                oraclemcp_db::OraclePolicyCatalogVisibility::PolicyRowsVisible
+            );
+            assert_ne!(
+                recovered.status,
+                oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
+            );
+            assert_eq!(
+                conn.query_rows(&cx, "SELECT 1 AS n FROM dual", &[])
+                    .await
+                    .unwrap()[0]
+                    .parse_i64("N"),
+                Some(1)
+            );
+            assert_eq!(fixture.count(), 2);
+            conn.close(&cx).await.unwrap();
+            fixture.baseline(&cx, 0).await;
+            eprintln!(
+                "[live-xe] transient policy logon failure recovered after 1s TTL without pinned reconnect PASS"
+            );
+        })
+    });
+    fixture.cleanup();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// End-to-end wall-clock oracle_query timings, using the same disposable
+/// 64-policy schema for historical and candidate binaries. Both binaries must
+/// return real rows; an unavailable observation or refusal cannot win on speed.
+#[test]
+fn live_policy_observation_read_latency_matches_pre_isolation_baseline() {
+    let Ok(baseline_binary) = std::env::var("ORACLEMCP_POLICY_BENCH_BASELINE") else {
+        eprintln!("[live-xe] SKIP policy latency benchmark: set ORACLEMCP_POLICY_BENCH_BASELINE");
+        return;
+    };
+    let candidate_binary =
+        std::env::var("ORACLEMCP_POLICY_BENCH_CANDIDATE").expect("candidate binary");
+    use std::io::{BufRead, BufReader};
+    struct BenchClient {
+        child: std::process::Child,
+        input: Option<std::process::ChildStdin>,
+        rx: std::sync::mpsc::Receiver<serde_json::Value>,
+        reader: std::thread::JoinHandle<()>,
+        errors: std::thread::JoinHandle<String>,
+        password: String,
+        label: String,
+    }
+    impl BenchClient {
+        fn start(binary: &str, fixture: &PolicyFixture, label: &str) -> Self {
+            let root = std::path::PathBuf::from(
+                std::env::var("CARGO_TARGET_DIR").expect("dedicated target"),
+            )
+            .join(format!("5ic5e-bench-{}-{label}", fixture.user));
+            std::fs::create_dir_all(&root).unwrap();
+            let config = root.join("profiles.toml");
+            // This artifact contains references only; the ephemeral password is
+            // passed directly to the child environment and never written to disk.
+            std::fs::write(&config, format!("schema_version = 2\ndefault_profile = \"policy_bench\"\n[[profiles]]\nname = \"policy_bench\"\nconnect_string = \"{}\"\nusername = \"{}\"\ncredential_ref = \"env:POLICY_BENCH_PASSWORD\"\n", std::env::var("ORACLEMCP_TEST_DSN").unwrap(), fixture.user)).unwrap();
+            let mut child = Command::new("timeout")
+                .arg("180")
+                .arg(binary)
+                .args(["serve", "--profile", "policy_bench", "--allow-no-auth"])
+                .env_clear()
+                .env("PATH", std::env::var("PATH").unwrap())
+                .env("HOME", std::env::var("HOME").unwrap())
+                .env("ORACLEMCP_CONFIG", &config)
+                .env("XDG_STATE_HOME", root.join("state"))
+                .env("POLICY_BENCH_PASSWORD", &fixture.password)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let input = child.stdin.take().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let reader = std::thread::spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let line = line.unwrap();
+                    if let Ok(reply) = serde_json::from_str::<serde_json::Value>(&line)
+                        && tx.send(reply).is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            let errors = std::thread::spawn(move || {
+                BufReader::new(stderr)
+                    .lines()
+                    .map(|line| line.unwrap())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            });
+            let mut client = Self {
+                child,
+                input: Some(input),
+                rx,
+                reader,
+                errors,
+                password: fixture.password.clone(),
+                label: label.to_owned(),
+            };
+            let init = client.rpc(1, "initialize", serde_json::json!({"protocolVersion":"2025-03-26", "capabilities":{}, "clientInfo":{"name":"policy-latency-test", "version":"1"}}));
+            assert!(init.get("result").is_some(), "{init}");
+            client
+        }
+        fn rpc(&mut self, id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
+            let input = self.input.as_mut().expect("open benchmark input");
+            writeln!(
+                input,
+                "{}",
+                serde_json::json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params})
+            )
+            .unwrap();
+            input.flush().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(30);
+            loop {
+                let reply = self
+                    .rx
+                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                    .expect("bounded MCP reply");
+                if reply["id"] == id {
+                    return reply;
+                }
+            }
+        }
+        fn read(&mut self, index: u64) -> f64 {
+            let started = Instant::now();
+            let reply = self.rpc(
+                index + 2,
+                "tools/call",
+                serde_json::json!({"name":"oracle_query", "arguments":{"sql":"SELECT id FROM xr_plain"}}),
+            );
+            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+            let result = &reply["result"];
+            assert_ne!(result["isError"], true, "{reply}");
+            let value = if result["structuredContent"].is_object() {
+                result["structuredContent"].clone()
+            } else {
+                serde_json::from_str::<serde_json::Value>(
+                    result["content"][0]["text"]
+                        .as_str()
+                        .expect("query response"),
+                )
+                .unwrap()
+            };
+            assert_eq!(
+                value["rows"].as_array().expect("real query rows").len(),
+                1,
+                "{value}"
+            );
+            assert!(
+                !value.to_string().contains("visibility_unavailable"),
+                "healthy observation required: {value}"
+            );
+            assert_eq!(
+                value["rls_vpd"]["all_policies_probe"]["visibility"], "policy_rows_visible",
+                "the benchmark must execute the real visibility observation: {value}"
+            );
+            elapsed
+        }
+        fn finish(mut self) {
+            drop(self.input.take());
+            assert!(self.child.wait().unwrap().success());
+            self.reader.join().unwrap();
+            let stderr = self
+                .errors
+                .join()
+                .unwrap()
+                .replace(&self.password, "<redacted>");
+            if !stderr.is_empty() {
+                eprintln!("[policy-bench {}] {stderr}", self.label);
+            }
+        }
+    }
+    fn median(samples: &[f64]) -> f64 {
+        let mut ordered = samples.to_vec();
+        ordered.sort_by(f64::total_cmp);
+        (ordered[19] + ordered[20]) / 2.0
+    }
+    let fixture = policy_fixture(false);
+    let result = std::panic::catch_unwind(|| {
+        // Oracle flashback SCNs can initially straddle this fixture's DDL.
+        // Settle the newly created schema before either binary's warmups;
+        // every warmup and all measured reads must still succeed.
+        std::thread::sleep(Duration::from_secs(3));
+        let mut baseline_client =
+            BenchClient::start(&baseline_binary, &fixture, "baseline-1bb680f2");
+        let mut candidate_client = BenchClient::start(&candidate_binary, &fixture, "candidate");
+        // Alternate order to expose both binaries to the same changing lab load.
+        // Three declared warmups per binary precede all forty measured samples.
+        for index in 0..3 {
+            baseline_client.read(index);
+            candidate_client.read(index);
+        }
+        let mut baseline = Vec::new();
+        let mut candidate = Vec::new();
+        for index in 3..43 {
+            if index % 2 == 0 {
+                baseline.push(baseline_client.read(index));
+                candidate.push(candidate_client.read(index));
+            } else {
+                candidate.push(candidate_client.read(index));
+                baseline.push(baseline_client.read(index));
+            }
+        }
+        baseline_client.finish();
+        candidate_client.finish();
+        eprintln!(
+            "[policy-bench baseline-1bb680f2] n={} samples_ms={baseline:?}",
+            baseline.len()
+        );
+        eprintln!(
+            "[policy-bench candidate] n={} samples_ms={candidate:?}",
+            candidate.len()
+        );
+        let ratio = median(&candidate) / median(&baseline);
+        eprintln!(
+            "[policy-bench] baseline_p50_ms={:.3} candidate_p50_ms={:.3} ratio={ratio:.4} limit=1.20 samples_per_binary=40 warmups=3",
+            median(&baseline),
+            median(&candidate)
+        );
+        assert!(
+            ratio <= 1.20,
+            "candidate p50 must be within 20% of the measured historical baseline"
+        );
+    });
+    fixture.cleanup();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+/// jxn8p: count the physical sessions, not just successful pinned reads.
+/// The opt-in local Docker lab supplies SYS only for fixture setup/census.
+/// Each invocation owns a random user and cleans it up even on assertion failure.
+/// The declared census bound is 30 seconds. Labs disabling OOB can defer the
+/// interrupt until the slow catalog call reaches a server cancellation point.
+#[test]
+fn live_timed_out_policy_observations_return_sessions_to_baseline() {
+    if env_bool("ORACLEMCP_TEST_SLOW_POLICY_CLEANUP") != Some(true) {
+        eprintln!(
+            "[live-xe] SKIP session cleanup fixture: set ORACLEMCP_TEST_SLOW_POLICY_CLEANUP=1"
+        );
+        return;
+    }
+    let fixture = policy_fixture(true);
     // Catch assertion failure only to remove this invocation's disposable user.
     // The original panic is resumed, so fixture teardown cannot hide a leak.
     let fixture_ref = &fixture;
@@ -2271,22 +2794,7 @@ create synonym {user}.all_policies for {user}.xr_policy_view;
             fixture.baseline(&cx, 0).await;
         })
     });
-    fixture.sql(&format!(r#"begin
-for s in (select sid, serial# from v$session where username='{user}') loop
-begin execute immediate 'alter system disconnect session '||chr(39)||s.sid||','||s.serial#||chr(39)||' immediate'; exception when others then if sqlcode != -31 then raise; end if; end;
-end loop;
-end;
-/
-begin
-for attempt in 1..50 loop
-begin execute immediate 'drop user {user} cascade'; return;
-exception when others then if sqlcode != -1940 then raise; end if;
-if attempt = 50 then raise; end if;
-sys.dbms_lock.sleep(0.1);
-end;
-end loop;
-end;
-/"#, user=fixture.user));
+    fixture.cleanup();
     if let Err(panic) = result {
         std::panic::resume_unwind(panic);
     }

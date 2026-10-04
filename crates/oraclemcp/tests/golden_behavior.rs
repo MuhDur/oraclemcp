@@ -71,13 +71,24 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
         }]);
     }
     if sql.contains("SYS_CONTEXT('USERENV', 'SESSION_USER')") {
-        return Some(vec![OracleRow {
+        let mut context = OracleRow {
             columns: vec![
                 ("SESSION_USER".to_owned(), resolver_text("APP")),
                 ("CURRENT_SCHEMA".to_owned(), resolver_text("APP")),
                 ("EDITION_NAME".to_owned(), resolver_text("ORA$BASE")),
             ],
-        }]);
+        };
+        if sql.contains("session_roles") {
+            context
+                .columns
+                .push(("ROLE".to_owned(), OracleCell::new("VARCHAR2", None)));
+        }
+        if sql.contains("row_kind") {
+            context
+                .columns
+                .push(("ROW_KIND".to_owned(), resolver_text("CONTEXT")));
+        }
+        return Some(vec![context]);
     }
     if sql.contains("session_roles") {
         return Some(Vec::new());

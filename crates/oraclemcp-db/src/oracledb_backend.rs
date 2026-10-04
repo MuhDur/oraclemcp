@@ -15,7 +15,6 @@ use asupersync::types::Time;
 use chrono::{Datelike, Timelike};
 use serde_json::{Number, Value, json};
 
-use crate::auth_adapter::AuthAdapter;
 use crate::connection::{
     DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart, WalletFileChoice,
     db_checkpoint, project_tsltz_rows, timestamp_tz_wall_clock,
@@ -61,6 +60,7 @@ pub struct OfficialOracleConnection {
     actor: Arc<BlockingConnectionActor<OfficialCommand, OfficialReply>>,
     wire_limits: Arc<Mutex<OfficialWireLimits>>,
     closed: AtomicBool,
+    policy_observation_pool: crate::pool::PolicyObservationSource,
 }
 
 /// Classifies an official-driver establishment failure by whether a physical
@@ -110,7 +110,8 @@ impl OfficialOracleConnection {
     ) -> Result<Self, ConnectFailure> {
         db_checkpoint(cx, "official Oracle connect before actor startup")
             .map_err(ConnectFailure::RawAcquisition)?;
-        validate_supported_connect_options(&options).map_err(ConnectFailure::RawAcquisition)?;
+        crate::connection::validate_official_connect_options(&options)
+            .map_err(ConnectFailure::RawAcquisition)?;
 
         let connect_slot = OfficialConnectGuard::shared()
             .acquire(cx)
@@ -132,6 +133,7 @@ impl OfficialOracleConnection {
             options,
             actor,
             closed: AtomicBool::new(false),
+            policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         };
         let budget = match adapter.effective_budget(cx, "official Oracle connect") {
             Ok(budget) => budget,
@@ -833,7 +835,7 @@ fn set_driver_timeout(
 }
 
 fn config_from_options(options: &OracleConnectOptions) -> Result<oracledb::Config, DbError> {
-    validate_supported_connect_options(options)?;
+    crate::connection::validate_official_connect_options(options)?;
     reject_auto_login_wallet_at_consumption(options)?;
     let username = options.username.as_deref().ok_or_else(|| {
         DbError::UnsupportedAuth(
@@ -886,45 +888,6 @@ fn reject_auto_login_wallet_at_consumption(options: &OracleConnectOptions) -> Re
     if wallet.join(WalletFileChoice::Sso.file_name()).is_file() {
         return Err(DbError::UnsupportedAuth(
             "official Oracle backend does not support cwallet.sso auto-login wallets".to_owned(),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_supported_connect_options(options: &OracleConnectOptions) -> Result<(), DbError> {
-    if options.use_iam_token || options.iam_token.is_some() || options.iam_token_source.is_some() {
-        return Err(DbError::UnsupportedAuth(
-            "official Oracle backend does not support IAM or OAuth database tokens".to_owned(),
-        ));
-    }
-    if options.external_auth || !matches!(options.auth_adapter, AuthAdapter::Password) {
-        return Err(DbError::UnsupportedAuth(
-            "official Oracle backend supports only password authentication; route this auth mode to driver-cx"
-                .to_owned(),
-        ));
-    }
-    if options.ssl_server_dn_match.is_some()
-        || options.ssl_server_cert_dn.is_some()
-        || options.use_sni.is_some()
-    {
-        return Err(DbError::UnsupportedAuth(
-            "official Oracle backend cannot apply the requested TLS override safely".to_owned(),
-        ));
-    }
-    if options.sdu.is_some()
-        || options.connect_timeout.is_some()
-        || options.inactivity_timeout.is_some()
-        // The safe default is implemented by driver-cx's EZConnect handling.
-        // The official backend has no EXPIRE_TIME setter, so it may ignore the
-        // default rather than reject otherwise supported password profiles.
-        // An explicit keepalive request remains a typed unsupported feature.
-        || (options.keepalive_minutes.is_some() && !options.keepalive_defaulted)
-        || !options.app_context.is_empty()
-        || options.session_identity.is_some()
-    {
-        return Err(DbError::UnsupportedFeature(
-            "official Oracle backend cannot apply one or more requested connection settings safely"
-                .to_owned(),
         ));
     }
     Ok(())
@@ -1451,7 +1414,17 @@ impl OracleConnection for OfficialOracleConnection {
         &self,
         cx: &Cx,
     ) -> Result<Box<dyn OracleConnection>, DbError> {
-        Ok(Box::new(Self::connect(cx, self.options.clone()).await?))
+        self.policy_observation_pool
+            .acquire(cx, &self.options)
+            .await
+    }
+
+    fn policy_observation_pool(&self) -> Option<crate::OraclePool> {
+        self.policy_observation_pool.get()
+    }
+
+    fn set_policy_observation_pool(&self, pool: Option<crate::OraclePool>) -> Result<(), DbError> {
+        self.policy_observation_pool.configure(&self.options, pool)
     }
 
     async fn ping(&self, cx: &Cx) -> Result<(), DbError> {
@@ -1605,12 +1578,23 @@ impl OracleConnection for OfficialOracleConnection {
         .await
     }
 
+    async fn run_session_release_statements(&self, cx: &Cx) -> Result<(), DbError> {
+        crate::connection::run_connection_release_statements(
+            cx,
+            self,
+            &self.options.session_release_statements,
+            self.cleanup_timeout(),
+        )
+        .await
+    }
+
     async fn close(&self, cx: &Cx) -> Result<(), DbError> {
         if self.closed.swap(true, Ordering::AcqRel) {
             return Ok(());
         }
+        let source_result = self.policy_observation_pool.close(cx).await;
         let timeout = self.cleanup_timeout();
-        try_commit_section(cx, CLEANUP_MASKED_POLLS, async {
+        let primary_result = try_commit_section(cx, CLEANUP_MASKED_POLLS, async {
             expect_unit(
                 self.actor
                     .call_disposing_with_deadline(cx, None, OfficialCommand::Close { timeout })
@@ -1618,7 +1602,8 @@ impl OracleConnection for OfficialOracleConnection {
                 "close",
             )
         })
-        .await
+        .await;
+        source_result.and(primary_result)
     }
 
     fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
@@ -2257,6 +2242,7 @@ mod tests {
             actor: Arc::clone(&actor),
             wire_limits: Arc::new(Mutex::new(OfficialWireLimits::default())),
             closed: AtomicBool::new(false),
+            policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         };
 
         let first = block_on_backend(async {
@@ -2581,7 +2567,7 @@ mod tests {
             ..OracleConnectOptions::default()
         };
         assert!(matches!(
-            validate_supported_connect_options(&options),
+            crate::connection::validate_official_connect_options(&options),
             Err(DbError::UnsupportedAuth(_))
         ));
 
@@ -2590,7 +2576,7 @@ mod tests {
             ..OracleConnectOptions::default()
         };
         assert!(matches!(
-            validate_supported_connect_options(&options),
+            crate::connection::validate_official_connect_options(&options),
             Err(DbError::UnsupportedAuth(_))
         ));
     }

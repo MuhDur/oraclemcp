@@ -94,11 +94,23 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
     }
     let normalized = sql.to_ascii_lowercase();
     if normalized.contains("sys_context('userenv', 'session_user')") {
-        return Some(vec![catalog_row(&[
+        let mut context = catalog_row(&[
             ("SESSION_USER", Some("APP")),
             ("CURRENT_SCHEMA", Some("APP")),
             ("EDITION_NAME", Some("ORA$BASE")),
-        ])]);
+        ]);
+        if normalized.contains("session_roles") {
+            context
+                .columns
+                .push(("ROLE".to_owned(), OracleCell::new("VARCHAR2", None)));
+        }
+        if normalized.contains("row_kind") {
+            context.columns.push((
+                "ROW_KIND".to_owned(),
+                OracleCell::new("VARCHAR2", Some("CONTEXT".to_owned())),
+            ));
+        }
+        return Some(vec![context]);
     }
     if normalized.contains("from session_roles") {
         return Some(Vec::new());

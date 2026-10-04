@@ -39,7 +39,7 @@ pub const MAX_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 60 * 60;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PoolConfig {
-    /// Maximum pooled connections.
+    /// Total pinned-session and shared-pool connection ceiling.
     pub max_size: u32,
     /// Minimum idle connections kept warm.
     pub min_idle: u32,
@@ -1311,7 +1311,7 @@ impl ConnectionProfile {
 pub struct PoolMetadata {
     /// Active runtime strategy when this profile is selected.
     pub strategy: &'static str,
-    /// Maximum stateless read connections in the local client-side pool.
+    /// Configured total ceiling for the pinned session and shared read/observation pool.
     pub max_size: u32,
     /// Minimum idle stateless read connections kept warm.
     pub min_idle: u32,

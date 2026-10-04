@@ -118,7 +118,7 @@ in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
 | `profiles.session_identity.client_identifier` | string | none | no | yes | 1 | DBMS_SESSION client identifier. |
 | `profiles.session_identity.client_info` | string | none | no | yes | 1 | DBMS_APPLICATION_INFO client info. |
 | `profiles.session_identity.driver_name` | string | none | no | yes | 1 | Driver name shown by Oracle connection-info views where supported. |
-| `profiles.pool.max_size` | integer | 16 | no | no | 1 | Maximum pooled connections (runtime clamps to cpu*2+1). |
+| `profiles.pool.max_size` | integer | 16 | no | no | 1 | Total pinned and pooled connections (runtime clamps to cpu*2+1; observations share pool capacity). |
 | `profiles.pool.min_idle` | integer | 2 | no | no | 1 | Minimum idle connections kept warm; must be <= max_size. |
 | `profiles.pool.acquire_timeout_secs` | integer | 5 | no | no | 1 | Seconds to wait for a checkout before returning BUSY (1..=3600). |
 | `profiles.pool.statement_cache_size` | integer | 50 | no | no | 1 | Per-connection statement-cache size passed to the thin driver. |
@@ -391,13 +391,23 @@ sharing one pool across lane runtimes. This is **separate** from DRCP server
 routing. When the stateless surface is live, expect the pinned main session plus
 stateless pool session(s): `oracle_connection_info` reports
 `connection_strategy = "pinned_plus_stateless"` and the separate stateless
-connection details. `max_size` caps the additional stateless connections.
+connection details. `max_size` caps the pinned session plus the shared stateless
+read and isolated policy-observation connections. One slot is reserved for the
+pinned session; the remaining slots are reused by reads and observations. A
+ceiling of one keeps reads on the pinned session and records policy visibility
+as unavailable because no isolated slot exists. Profiles without an enabled
+pool reuse one bounded observation connection alongside the pinned session.
+Observation acquisition uses the source's bounded checkout/logon deadline; the
+1000 ms catalog deadline starts after acquisition. A timed-out catalog call is
+cancelled and disposed instead of returned to the pool. Transient observation
+acquisition failures and unavailable visibility probes retry after a one-second
+cooldown/TTL.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|
-| `max_size` | integer | `16` | Maximum pooled connections. Must be ≥ 1. This static default is the documented ceiling; the runtime clamps to `min(configured, cpu*2+1)`. |
-| `min_idle` | integer | `2` | Minimum idle connections kept warm. Must be ≤ `max_size`. |
-| `acquire_timeout_secs` | integer | `5` | Seconds to wait for a checkout before returning `BUSY`. Range: 1–3600. |
+| `max_size` | integer | `16` | Total pinned and shared-pool connections. Must be ≥ 1. The runtime clamps to `min(configured, cpu*2+1)` and reserves one slot for the pinned session. |
+| `min_idle` | integer | `2` | Minimum idle pooled connections kept warm. Must be ≤ `max_size`; runtime clamps to the remaining shared capacity. |
+| `acquire_timeout_secs` | integer | `5` | Seconds to wait for admission and logon before returning `BUSY`. Range: 1–3600. |
 | `statement_cache_size` | integer | `50` | Per-connection statement-cache size passed to the thin driver. |
 
 #### `[profiles.masking]`

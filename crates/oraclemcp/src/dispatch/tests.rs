@@ -444,11 +444,23 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
     }
     let normalized = sql.to_ascii_lowercase();
     if normalized.contains("sys_context('userenv', 'session_user')") {
-        return Some(vec![semantic_row(&[
+        let mut context = semantic_row(&[
             ("SESSION_USER", Some("APP")),
             ("CURRENT_SCHEMA", Some("APP")),
             ("EDITION_NAME", Some("ORA$BASE")),
-        ])]);
+        ]);
+        if normalized.contains("session_roles") {
+            context
+                .columns
+                .push(("ROLE".to_owned(), OracleCell::new("VARCHAR2", None)));
+        }
+        if normalized.contains("row_kind") {
+            context.columns.push((
+                "ROW_KIND".to_owned(),
+                OracleCell::new("VARCHAR2", Some("CONTEXT".to_owned())),
+            ));
+        }
+        return Some(vec![context]);
     }
     if normalized.contains("from session_roles") {
         return Some(Vec::new());
@@ -650,11 +662,23 @@ impl OracleConnection for SemanticGuardMock {
             return Ok(vec![semantic_row(&[("OBSERVED_SCN", Some("424242"))])]);
         }
         if normalized.contains("sys_context('userenv', 'session_user')") {
-            return Ok(vec![semantic_row(&[
+            let mut context = semantic_row(&[
                 ("SESSION_USER", Some("APP")),
                 ("CURRENT_SCHEMA", Some("APP")),
                 ("EDITION_NAME", Some("ORA$BASE")),
-            ])]);
+            ]);
+            if normalized.contains("session_roles") {
+                context
+                    .columns
+                    .push(("ROLE".to_owned(), OracleCell::new("VARCHAR2", None)));
+            }
+            if normalized.contains("row_kind") {
+                context.columns.push((
+                    "ROW_KIND".to_owned(),
+                    OracleCell::new("VARCHAR2", Some("CONTEXT".to_owned())),
+                ));
+            }
+            return Ok(vec![context]);
         }
         if normalized.contains("from session_roles") {
             return Ok(Vec::new());
@@ -1012,7 +1036,7 @@ fn executor_orders_parse_resolve_prove_mask_audit_execute() {
         C::PolicyCatalogProof,
         C::TargetColumnCatalogProof,
     ];
-    assert_eq!(events.len(), 23, "the exact proof and observation sequence");
+    assert_eq!(events.len(), 21, "the exact proof and observation sequence");
     for (actual, id) in events.iter().zip(expected_proof) {
         assert_eq!(actual, &format!("query:{}", id.spec().sql));
     }
@@ -1020,19 +1044,17 @@ fn executor_orders_parse_resolve_prove_mask_audit_execute() {
     assert!(events[18].contains("tool=oracle_query */ SELECT o.id FROM app.orders o"));
     assert_eq!(
         events[19],
-        format!("query:{}", C::SessionContext.spec().sql)
+        format!("query:{}", C::PolicyObservationByObject.spec().sql)
     );
-    assert_eq!(events[20], format!("query:{}", C::SessionRoles.spec().sql));
-    assert!(events[21].contains("FROM all_policies WHERE object_owner = :1 AND object_name = :2"));
     assert_eq!(
-        events[22],
+        events[20],
         format!("query:{}", C::AllPoliciesVisibility.spec().sql)
     );
     assert_eq!(state.caller_queries.load(Ordering::SeqCst), 1);
     write_executor_test_artifact(
         "pipeline_order",
         &[
-            json!({"case_id": "executor_pipeline_order", "expected": {"events": 19, "caller_queries": 1}, "actual": {"events": events.len(), "caller_queries": state.caller_queries.load(Ordering::SeqCst)}}),
+            json!({"case_id": "executor_pipeline_order", "expected": {"events": 21, "caller_queries": 1}, "actual": {"events": events.len(), "caller_queries": state.caller_queries.load(Ordering::SeqCst)}}),
         ],
     );
 }

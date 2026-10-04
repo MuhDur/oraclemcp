@@ -92,12 +92,24 @@ impl OracleConnection for VisibleCatalogQueryMock {
         {
             return Ok(Vec::new());
         }
+        if sql == CatalogQueryId::PolicyObservationByObject.spec().sql
+            || sql == CatalogQueryId::PolicyObservationBySchema.spec().sql
+        {
+            return Ok(vec![row(&[
+                ("ROW_KIND", Some("CONTEXT")),
+                ("SESSION_USER", Some("APP")),
+                ("CURRENT_SCHEMA", Some("APP")),
+                ("EDITION_NAME", Some("ORA$BASE")),
+                ("ROLE", None),
+            ])]);
+        }
         let normalized = sql.to_ascii_lowercase();
         if normalized.contains("sys_context('userenv', 'session_user')") {
             return Ok(vec![row(&[
                 ("SESSION_USER", Some("APP")),
                 ("CURRENT_SCHEMA", Some("APP")),
                 ("EDITION_NAME", Some("ORA$BASE")),
+                ("ROLE", None),
             ])]);
         }
         if normalized.contains("from session_roles") {

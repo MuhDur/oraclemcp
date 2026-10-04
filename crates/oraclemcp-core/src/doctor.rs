@@ -4036,6 +4036,36 @@ mod tests {
                 std::future::pending().await
             }
             let normalized = sql.to_ascii_lowercase();
+            if sql
+                == oraclemcp_db::CatalogQueryId::PolicyObservationBySchema
+                    .spec()
+                    .sql
+            {
+                let mut rows = vec![doctor_row(&[
+                    ("ROW_KIND", Some("CONTEXT")),
+                    ("SESSION_USER", Some("ORACLEMCP_D3_SIGHTED")),
+                    ("CURRENT_SCHEMA", Some("ORACLEMCP_D3_OWNER")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                    ("ROLE", self.policy_visible.then_some("SELECT_CATALOG_ROLE")),
+                ])];
+                if self.policy_visible {
+                    rows.push(doctor_row(&[
+                        ("ROW_KIND", Some("POLICY")),
+                        ("OBJECT_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                        ("OBJECT_NAME", Some("ORACLEMCP_D3_PROTECTED")),
+                        ("POLICY_NAME", Some("ORACLEMCP_D3_VPD")),
+                        ("PF_OWNER", Some("ORACLEMCP_D3_OWNER")),
+                        ("PACKAGE", None),
+                        ("FUNCTION", Some("ORACLEMCP_D3_VPD")),
+                        ("SEL", Some("YES")),
+                        ("INS", Some("NO")),
+                        ("UPD", Some("NO")),
+                        ("DEL", Some("NO")),
+                        ("ENABLE", Some("YES")),
+                    ]));
+                }
+                return Ok(rows);
+            }
             if normalized.contains("sys_context('userenv', 'session_user')") {
                 return Ok(vec![doctor_row(&[
                     ("SESSION_USER", Some("ORACLEMCP_D3_SIGHTED")),

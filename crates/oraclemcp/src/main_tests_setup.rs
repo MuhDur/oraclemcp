@@ -47,3 +47,23 @@ fn setup_payload_resolves_new_snippets_to_the_binary() {
         binary
     );
 }
+
+#[test]
+fn configured_connection_ceiling_includes_pinned_and_observation_sessions() {
+    for max_size in [1, 2, 3, 7, 16] {
+        let configured = PoolSettings {
+            max_size,
+            min_idle: max_size,
+            ..PoolSettings::default()
+        };
+        let effective = configured.resolved().max_size;
+        match stateless_pool_settings(configured) {
+            Some(shared) => {
+                assert_eq!(shared.max_size + 1, effective);
+                assert!(shared.min_idle <= shared.max_size);
+                assert_eq!(shared.acquire_timeout_secs, configured.acquire_timeout_secs);
+            }
+            None => assert_eq!(effective, 1, "no spare slot means no isolated logon"),
+        }
+    }
+}
