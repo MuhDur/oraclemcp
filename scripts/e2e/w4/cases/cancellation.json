@@ -71,7 +71,13 @@
       {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "PENDING"},
       {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "SUCCEEDED", "rows_affected": 1}
     ],
-    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"}
+    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
+    "cleanup": [
+      {"sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'parent-2' WHERE ID = 2"}
+    ],
+    "cleanup_reread": [
+      {"sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID = 2", "rows": [[2, "parent-2"]]}
+    ]
   },
   {
     "case_id": "w4_runtime_issue49_progress_with_token",

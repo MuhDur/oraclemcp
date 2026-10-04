@@ -13317,6 +13317,49 @@ mod qa85_terminal_boundaries {
     }
 
     #[test]
+    fn issue49_cancel_successful_rollback_preserves_transaction_proof() {
+        for failure in [
+            DbError::Execute("ORA-01013: user requested cancel of current operation".to_owned()),
+            DbError::Cancelled("driver break acknowledged".to_owned()),
+        ] {
+            let state = Arc::new(ExecState::default());
+            *state.execute_error.lock().expect("execute error mutex") = Some(failure);
+            let (auditor, sink) = auditor_with_sink();
+            let dispatcher = OracleDispatcher::new_with_profile_level(
+                Box::new(ExecRecordingMock::new(Arc::clone(&state))),
+                Some("dev".to_owned()),
+                read_write_level(),
+            )
+            .with_auditor(auditor);
+            let args = json!({ "sql": "UPDATE employees SET name = name WHERE employee_id = 100", "commit": false });
+            let error = dispatcher
+                .dispatch("oracle_execute", args.clone())
+                .expect_err("cancelled update does not return success");
+            assert_eq!(error.statement_outcome, Some(StatementOutcome::RolledBack));
+            assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+            assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+            assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+            let records = sink.records();
+            assert_eq!(records.len(), 2);
+            assert_eq!(records[0].outcome, AuditOutcome::Pending);
+            assert_eq!(records[1].outcome, AuditOutcome::RolledBack);
+            assert_eq!(
+                dispatcher
+                    .connection_quarantine()
+                    .expect("quarantine lock")
+                    .expect("uncertain wire stays quarantined")
+                    .outcome,
+                AuditOutcome::RolledBack
+            );
+            let retry = dispatcher
+                .dispatch("oracle_execute", args)
+                .expect_err("quarantine prevents replay despite known rollback");
+            assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
+            assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
+        }
+    }
+
+    #[test]
     fn issue49_cancel_rollback_failure_quarantines_connection() {
         let state = Arc::new(ExecState::default());
         *state.execute_error.lock().expect("execute error mutex") = Some(DbError::Cancelled(
@@ -13337,6 +13380,11 @@ mod qa85_terminal_boundaries {
             .expect_err("unconfirmed cancellation cleanup must refuse a result");
         assert_eq!(error.error_class, ErrorClass::ConnectionFailed);
         assert_eq!(state.rollbacks.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            error.statement_outcome,
+            Some(StatementOutcome::ProtocolUnsynchronized)
+        );
+        assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
         let quarantine = dispatcher
             .connection_quarantine()
             .expect("quarantine lock")
