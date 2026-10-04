@@ -1,0 +1,23 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.5",
+  "lane": "free23",
+  "run_id": "local-verifier-75-20261004T1640Z (summary of independent verifier run, not a CI run)",
+  "source_sha": "8be7169dea2fe3c3b45a10b56d68d5099d3704cd",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its live run logs",
+  "commands": [
+    "python3 scripts/e2e/w4/driver.py --lane free23 --binary <export build> --binary-source-sha 8be7169dea2fe3c3b45a10b56d68d5099d3704cd --case <id> (one case per run)"
+  ],
+  "results": [
+    "free23 w4_runtime_issue49_cancel_long_read_confirmed stdio PASS",
+    "free23 w4_runtime_issue49_cancel_long_read_confirmed http PASS",
+    "free23 w4_runtime_issue49_cancel_blocked_update_rolled_back stdio PASS",
+    "free23 w4_runtime_issue49_cancel_blocked_update_rolled_back http PASS",
+    "free23 w4_runtime_issue49_commit_race_not_reported_cancelled stdio PASS",
+    "free23 w4_runtime_issue49_commit_race_not_reported_cancelled http PASS",
+    "free23 w4_runtime_issue49_progress_with_token stdio PASS",
+    "free23 w4_runtime_issue49_progress_with_token http PASS",
+    "driver final line (each of 4 runs): {\"cases\":2,\"lane\":\"free23\",\"registry_count\":69,\"verdict\":\"pass\"}"
+  ],
+  "leftover_check": "no new W4 schemas after each run; prior fixtures unchanged"
+}

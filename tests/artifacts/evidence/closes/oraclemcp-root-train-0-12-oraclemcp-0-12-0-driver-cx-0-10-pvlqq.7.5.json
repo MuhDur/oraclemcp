@@ -1,0 +1,64 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-04T17:30:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.5",
+  "scope": {
+    "summary": "Cancelled mutations report rolled_back/cancel_confirmed only when rollback is proven (outcome_unknown otherwise); the 0718a4b6-era regenerated golden is restored byte-for-byte; the commit-race W4 case cleans up its row; stdio response-order fix kept.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp/src/dispatch/tests.rs",
+      "scripts/e2e/w4/cases/cancellation.json",
+      "tests/golden/w4/issue49-cancel-blocked-update.rolled-back.json"
+    ],
+    "out_of_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs and scripts/e2e/w4/driver.py were also changed by 8be7169d but have since been modified by later landings (qsx1t, fgxfc), so they are excluded from the clean-scope binding; the verifier exercised them at 8be7169d.",
+      "XE21/XE18 live runs (bead requires FREE 23ai)."
+    ]
+  },
+  "source": {
+    "sha": "8be7169dea2fe3c3b45a10b56d68d5099d3704cd",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "planted-fault check (independent verifier, export of 8be7169d)",
+        "kind": "cli",
+        "trace": "Four mutants (proof flag forced false at dispatch/mod.rs:9973; rolled-back tag disabled at 10047; tag applied to every error; server ignores proof at server.rs:3303) each killed by issue49_cancel_successful_rollback_preserves_transaction_proof / issue47_desync_dml_returns_typed_outcome_without_replay / issue49_cancelled_update_on_quarantined_wire_remains_outcome_unknown; reverted afterwards."
+      },
+      {
+        "name": "golden restoration",
+        "kind": "cli",
+        "trace": "git diff 0718a4b6^ 8be7169d -- tests/golden/w4/issue49-cancel-blocked-update.rolled-back.json is empty (blob e9c11304, original from fb9d981c)."
+      },
+      {
+        "name": "suites",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-core --lib 842/0; cargo test -p oraclemcp --lib 564/0; golden_behavior 7/7; issue49_cancel_preserves_stdio_response_order 1/1 (10 iterations). Gate prepush on 8be7169d 16/16; CI on 8be7169d success."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "w4-cancellation-scoped-live",
+        "path": "tests/artifacts/evidence/live/verify-8be7169d-pvlqq.7.5-20261004T1640Z.json",
+        "sha": "8be7169dea2fe3c3b45a10b56d68d5099d3704cd"
+      }
+    ]
+  },
+  "limitations": [
+    "On FREE23 the blocked UPDATE always resolved as outcome_unknown (CONNECTION_FAILED) with audit UNKNOWN_DISCARDED, consistent reply/audit; the rolled_back variant was only seen live by the implementer (XE18 HTTP), and is covered in-process by the tests above.",
+    "The live artifact is a summary of the verifier's run logs, not raw output."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}
