@@ -12,6 +12,7 @@
 //! Exposing these here (rather than as `bin`-private modules) lets the
 //! integration suite drive the real server surface.
 
+pub mod broker;
 pub mod cost_budget;
 pub mod deferred_startup;
 pub mod dispatch;

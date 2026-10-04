@@ -94,6 +94,32 @@
       "path_filtered": false
     },
     {
+      "check_name": "broker IPC (macos-latest)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "broker-ipc",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "broker IPC (ubuntu-latest)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "broker-ipc",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "build on pinned nightly",
       "tier": "required",
       "workflow": "CI",
@@ -856,6 +882,8 @@
         "Rust workspace (Windows)",
         "Windows installer PSSA and dry-run",
         "agent ergonomics drift guard",
+        "broker IPC (macos-latest)",
+        "broker IPC (ubuntu-latest)",
         "build on pinned nightly",
         "cargo deny (advisories, licenses, bans, sources)",
         "cargo doc (builds)",
@@ -1034,6 +1062,8 @@
       "PL/SQL intelligence feature matrix",
       "Windows installer PSSA and dry-run",
       "agent ergonomics drift guard",
+      "broker IPC (macos-latest)",
+      "broker IPC (ubuntu-latest)",
       "build on pinned nightly",
       "cargo deny (advisories, licenses, bans, sources)",
       "cargo doc (builds)",

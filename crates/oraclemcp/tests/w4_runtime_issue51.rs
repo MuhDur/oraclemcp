@@ -1,14 +1,14 @@
 //! #51 process-level proof (bead .7.7): a second `oraclemcp serve` sharing the
-//! first one's state directory completes the MCP handshake and refuses every
-//! tool call with a typed lock error naming the first instance's pid, then
-//! recovers without a restart once the first instance exits.
+//! first one's state directory auto-attaches to the local broker. HTTP still
+//! refuses a separate conflicting service owner before opening Oracle; a
+//! mismatched broker configuration is also refused before connecting.
 //!
 //! Both instances are the built executable, driven over its real stdio or
 //! HTTP boundary by a raw JSON-RPC client. No in-process dispatcher stands in
 //! for either process. Each case appends one JSONL row to
 //! `target/e2e/w4/<lane>/rel012_i51_second_instance.jsonl`. The offline cases
-//! need no database. The live recovery case (feature `live-xe`) also proves,
-//! through `V$SESSION`, that the locked instance opened no Oracle session.
+//! need no database. The live mismatch case (feature `live-xe`) also proves,
+//! through `V$SESSION`, that the refused client opened no Oracle session.
 //!
 //! `ORACLEMCP_W4_BINARY` points the test at a release-profile binary, and each
 //! row records which binary ran.
@@ -179,6 +179,7 @@ impl Drop for StdioInstance {
 struct HttpInstance {
     child: Child,
     addr: SocketAddr,
+    session_id: std::sync::Mutex<Option<String>>,
 }
 
 impl HttpInstance {
@@ -211,15 +212,26 @@ impl HttpInstance {
             assert!(Instant::now() < deadline, "HTTP serve never listened");
             std::thread::sleep(Duration::from_millis(25));
         }
-        Self { child, addr }
+        Self {
+            child,
+            addr,
+            session_id: std::sync::Mutex::new(None),
+        }
     }
 
     /// POST one frame; returns the HTTP status and the JSON body.
     fn request(&self, frame: &Value) -> (u16, Value) {
         let body = frame.to_string();
+        let session_header = self
+            .session_id
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|id| format!("mcp-session-id: {id}\r\n"))
+            .unwrap_or_default();
         let request = format!(
             "POST /mcp HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\n\
-             accept: application/json, text/event-stream\r\nmcp-protocol-version: \
+             accept: application/json, text/event-stream\r\n{session_header}mcp-protocol-version: \
              {PROTOCOL_VERSION}\r\ncontent-length: {len}\r\nconnection: close\r\n\r\n{body}",
             addr = self.addr,
             len = body.len()
@@ -242,7 +254,20 @@ impl HttpInstance {
             .nth(1)
             .and_then(|code| code.parse().ok())
             .unwrap_or_else(|| panic!("HTTP status line: {head}"));
-        let body = serde_json::from_str(body).unwrap_or_else(|e| panic!("JSON body ({e}): {body}"));
+        if frame["method"] == "initialize" && status == 200 {
+            *self.session_id.lock().unwrap() = head.lines().find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("mcp-session-id")
+                    .then(|| value.trim().to_owned())
+            });
+        }
+        let payload = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .next_back()
+            .unwrap_or(body);
+        let body =
+            serde_json::from_str(payload).unwrap_or_else(|e| panic!("JSON body ({e}): {body}"));
         (status, body)
     }
 }
@@ -323,67 +348,98 @@ fn emit_row(lane: &str, row: &Value) {
 }
 
 /// stdio: instance 2 shares instance 1's default audit log. It completes the
-/// handshake, refuses tool calls with ORACLEMCP_AUDIT_LOG_LOCKED naming
-/// instance 1's pid, `doctor` reports `audit_log_locked`, and once instance 1
-/// exits the next call is no longer refused by the lock.
+/// A second stdio client now auto-attaches to the same audit-owning broker.
+/// The original lock regression remains in the HTTP contention case below.
 #[test]
-fn w4_runtime_issue51_second_instance_typed_locked() {
+fn w4_runtime_issue51_second_stdio_instance_auto_attaches() {
     let started = Instant::now();
     let home = SharedHome::new("stdio");
     let config = home.config("serve.toml", "");
-
     let mut first = StdioInstance::spawn(&home, &config, &[]);
-    let (first_init, _) = first.handshake("i51-first");
-    assert!(
-        first_init.get("result").is_some(),
-        "instance 1 starts: {first_init}"
+    let (first_init, first_tools) = first.handshake("i51-first");
+    assert!(handshake_ok(&first_init, &first_tools));
+    let holder = broker_pid(&home);
+    assert_ne!(
+        holder,
+        first.pid(),
+        "audit writer belongs to detached broker"
     );
-    let holder = first.pid();
-
     let mut second = StdioInstance::spawn(&home, &config, &[]);
     let (initialize, tools) = second.handshake("i51-second");
-    let locked = [
+    let responses = [
         second.request(&query_call(3)),
         second.request(&query_call(4)),
     ];
+    assert_eq!(
+        broker_pid(&home),
+        holder,
+        "contender must attach rather than replace owner"
+    );
     let doctor = doctor_json(&home, &config);
     first.kill();
     let recovered = second.request(&query_call(5));
-
     let handshake = handshake_ok(&initialize, &tools);
-    let typed = locked
-        .iter()
-        .all(|reply| typed_lock(reply, "ORACLEMCP_AUDIT_LOG_LOCKED", holder));
+    let shared = responses.iter().all(|reply| !any_lock(reply));
     let doctor_reports = doctor.contains("audit_log_locked") && names_holder(&doctor, holder);
-    let unlocked = !any_lock(&recovered);
+    let surviving = !any_lock(&recovered);
     emit_row(
         "offline",
-        &json!({
-            "case_id": CASE_ID,
-            "manifest_case": "rel012_i51_second_instance",
-            "variant": "stdio_audit_log_locked",
-            "transport": "stdio",
-            "binary": binary().display().to_string(),
-            "holder_pid": holder,
-            "handshake_completed": handshake,
-            "typed_lock_refusals": typed,
-            "doctor_audit_log_locked": doctor_reports,
-            "recovered_without_restart": unlocked,
-            "verdict": if handshake && typed && doctor_reports && unlocked { "pass" } else { "fail" },
-            "duration_ms": started.elapsed().as_millis() as u64,
-        }),
+        &json!({"case_id":CASE_ID,"manifest_case":"rel012_i51_second_instance", "variant":"stdio_auto_attach", "transport":"stdio", "binary":binary().display().to_string(), "holder_pid":holder,"handshake_completed":handshake,"shared_broker":shared,"doctor_audit_log_locked":doctor_reports,"survives_first_proxy_exit":surviving,"verdict":if handshake && shared && doctor_reports && surviving {"pass"} else {"fail"}, "duration_ms":started.elapsed().as_millis() as u64}),
     );
-    assert!(handshake, "handshake while locked: {initialize} / {tools}");
-    assert!(typed, "typed lock refusal naming pid {holder}: {locked:?}");
-    assert!(doctor_reports, "doctor reports audit_log_locked: {doctor}");
+    assert!(handshake, "{initialize} / {tools}");
     assert!(
-        unlocked,
-        "no lock refusal after the holder exits: {recovered}"
+        shared,
+        "second client must not be refused by the shared audit owner: {responses:?}"
     );
+    assert!(doctor_reports, "doctor names actual broker pid: {doctor}");
+    assert!(
+        surviving,
+        "remaining session survives another proxy exit: {recovered}"
+    );
+    second.kill();
+    stop_broker(&home);
+}
+
+fn broker_pid(home: &SharedHome) -> u32 {
+    let locator: Value =
+        serde_json::from_slice(&fs::read(home.state.join("oraclemcp/broker.json")).unwrap())
+            .unwrap();
+    locator["pid"].as_u64().unwrap().try_into().unwrap()
+}
+fn stop_broker(home: &SharedHome) {
+    let pid = broker_pid(home).to_string();
+    #[cfg(unix)]
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    #[cfg(windows)]
+    assert!(
+        Command::new("taskkill")
+            .args(["/PID", &pid, "/F"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let store = oraclemcp_core::FileStore::open(home.state.join("oraclemcp")).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if store.acquire_service_owner("test-owner-release").is_ok() {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "broker did not release service lock"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// HTTP service-owner variant: instance 1 (stdio, write-reachable profile)
-/// owns the service state. An HTTP instance sharing the state directory, with
+/// starts a broker that owns the service state. An HTTP instance sharing the state directory, with
 /// its own audit log, still listens, completes the handshake and refuses tool
 /// calls with ORACLEMCP_SERVICE_OWNER_LOCKED naming instance 1's pid. Once
 /// instance 1 exits, the next call is no longer refused by the lock.
@@ -419,7 +475,7 @@ fn w4_runtime_issue51_http_service_owner_typed_locked() {
         first_init.get("result").is_some(),
         "instance 1 starts: {first_init}"
     );
-    let holder = first.pid();
+    let holder = broker_pid(&home);
 
     let second = HttpInstance::spawn(&home, &second_config);
     let (init_status, initialize) = second.request(&initialize_request(1, "i51-http"));
@@ -430,6 +486,7 @@ fn w4_runtime_issue51_http_service_owner_typed_locked() {
         second.request(&query_call(4)),
     ];
     first.kill();
+    stop_broker(&home);
     let (recovered_status, recovered) = second.request(&query_call(5));
 
     let handshake = init_status == 200 && list_status == 200 && handshake_ok(&initialize, &tools);
@@ -470,12 +527,12 @@ fn w4_runtime_issue51_http_service_owner_typed_locked() {
 
 /// Live recovery: instance 2 targets a real Oracle lane and tags its sessions
 /// with a run-id MODULE. While instance 1 holds the audit log, `V$SESSION`
-/// shows no session with that MODULE. After instance 1 exits, the next
-/// `oracle_query` succeeds without a restart, and the MODULE session appears
-/// (the positive control for the probe).
+/// shows no session with that MODULE. After the original broker exits, a fresh
+/// handshake admits the changed configuration and `oracle_query` succeeds;
+/// the MODULE session appears as the positive control for the probe.
 #[cfg(feature = "live-xe")]
 #[test]
-fn w4_runtime_issue51_recovers_against_live_oracle() {
+fn w4_runtime_issue51_mismatched_broker_config_opens_no_oracle_session() {
     use asupersync::Cx;
     use asupersync::runtime::RuntimeBuilder;
     use oraclemcp_db::{OracleBind, OracleConnectOptions, OracleConnection, RustOracleConnection};
@@ -492,6 +549,12 @@ fn w4_runtime_issue51_recovers_against_live_oracle() {
         return;
     };
     let lane = std::env::var("ORACLEMCP_W4_LANE").unwrap_or_else(|_| "live".to_owned());
+    // The served profile can remain least privilege; only the independent
+    // observer requires V$SESSION visibility for the no-connect proof.
+    let observer_user =
+        std::env::var("ORACLEMCP_TEST_OBSERVER_USER").unwrap_or_else(|_| user.clone());
+    let observer_password =
+        std::env::var("ORACLEMCP_TEST_OBSERVER_PASSWORD").unwrap_or_else(|_| password.clone());
     let module = format!(
         "I51{:X}",
         SystemTime::now()
@@ -512,8 +575,8 @@ fn w4_runtime_issue51_recovers_against_live_oracle() {
                 &cx,
                 OracleConnectOptions {
                     connect_string: dsn.clone(),
-                    username: Some(user.clone()),
-                    password: Some(password.clone()),
+                    username: Some(observer_user.clone()),
+                    password: Some(observer_password.clone()),
                     call_timeout: Some(Duration::from_secs(20)),
                     ..Default::default()
                 },
@@ -560,20 +623,32 @@ fn w4_runtime_issue51_recovers_against_live_oracle() {
 
     let mut first = StdioInstance::spawn(&home, &first_config, &password_env);
     first.handshake("i51-first");
-    let holder = first.pid();
+    let holder = broker_pid(&home);
     let baseline = module_sessions(&module);
 
     let mut second = StdioInstance::spawn(&home, &config, &password_env);
-    let (initialize, tools) = second.handshake("i51-second");
+    let initialize = second.request(&initialize_request(1, "i51-second"));
     let locked = second.request(&query_call(3));
     let while_locked = module_sessions(&module);
     first.kill();
+    stop_broker(&home);
     let after_holder_exit = module_sessions(&module);
-    let recovered = second.request(&query_call(4));
+    let new_initialize = second.request(&initialize_request(4, "i51-second"));
+    assert!(
+        new_initialize.get("result").is_some(),
+        "new broker accepts matching configuration: {new_initialize}"
+    );
+    second.request(&json!({"jsonrpc":"2.0", "method":"notifications/initialized"}));
+    let recovered = second.request(&query_call(5));
     let after_recovery = module_sessions(&module);
 
-    let handshake = handshake_ok(&initialize, &tools);
-    let typed = typed_lock(&locked, "ORACLEMCP_AUDIT_LOG_LOCKED", holder);
+    let handshake = initialize["error"]["data"]["error_class"] == "RUNTIME_STATE_REQUIRED";
+    let typed = locked["result"]["structuredContent"]["error_class"] == "RUNTIME_STATE_REQUIRED"
+        && locked
+            .to_string()
+            .contains("ORACLEMCP_BROKER_VERSION_MISMATCH")
+        && locked.to_string().contains("proxy version=")
+        && locked.to_string().contains("broker version=");
     let no_session_while_locked = baseline == 0 && while_locked == 0;
     let recovered_ok = recovered["result"]["isError"] != json!(true)
         && recovered.to_string().contains("\"1\"")
@@ -584,7 +659,7 @@ fn w4_runtime_issue51_recovers_against_live_oracle() {
         &json!({
             "case_id": CASE_ID,
             "manifest_case": "rel012_i51_second_instance",
-            "variant": "live_recovery",
+            "variant": "live_config_mismatch",
             "transport": "stdio",
             "lane": lane,
             "binary": binary().display().to_string(),
@@ -603,8 +678,14 @@ fn w4_runtime_issue51_recovers_against_live_oracle() {
             "duration_ms": started.elapsed().as_millis() as u64,
         }),
     );
-    assert!(handshake, "handshake while locked: {initialize} / {tools}");
-    assert!(typed, "typed lock refusal naming pid {holder}: {locked}");
+    assert!(
+        handshake,
+        "initialize must give a typed config mismatch: {initialize}"
+    );
+    assert!(
+        typed,
+        "typed configuration refusal names both peers: {locked}"
+    );
     assert!(
         no_session_while_locked,
         "the locked instance opened no session: {baseline} / {while_locked}"
@@ -618,4 +699,6 @@ fn w4_runtime_issue51_recovers_against_live_oracle() {
         "the recovered instance's MODULE session is visible (probe positive control): \
          {after_holder_exit} -> {after_recovery}"
     );
+    second.kill();
+    stop_broker(&home);
 }
