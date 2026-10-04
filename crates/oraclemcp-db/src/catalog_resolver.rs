@@ -2351,10 +2351,9 @@ fn unavailable_policy_probe(detail: String) -> OraclePolicyCatalogProbe {
     }
 }
 
-/// Acquisition, catalog work, and normal logoff share one short deadline.
-/// The future owns its separate physical session. A timeout can drop that
-/// session even when Oracle cannot interrupt the predicate; it never abandons
-/// a statement on the user's pinned connection.
+/// Acquisition and catalog work share one short deadline. Retain the physical
+/// session outside that future: dropping a socket does not stop Oracle's call.
+/// A timeout must interrupt the abandoned call and permanently close its transport.
 async fn isolated_policy_observation(
     cx: &Cx,
     primary: &dyn OracleConnection,
@@ -2366,9 +2365,10 @@ async fn isolated_policy_observation(
         PolicyObservationTarget::Relations(_) => "relations",
         PolicyObservationTarget::Probe => "catalog",
     };
+    let mut isolated = None;
     let work = async {
-        let isolated = primary.open_policy_observation_session(cx).await?;
-        let conn = isolated.as_ref();
+        isolated = Some(primary.open_policy_observation_session(cx).await?);
+        let conn = isolated.as_deref().expect("acquired observation session");
         let (scope, session, policies, policy_error) = match target {
             PolicyObservationTarget::Schema(schema) => {
                 let session = read_session_security_context(cx, conn).await.ok();
@@ -2409,19 +2409,31 @@ async fn isolated_policy_observation(
             Some(probe) => probe,
             None => query_policy_catalog_probe(cx, conn).await,
         };
-        let mut observation =
-            build_vpd_rls_observation(scope, session, probe, policies, policy_error);
-        if let Err(error) = isolated.close(cx).await {
-            observation
-                .detail
-                .push_str(&format!("; diagnostic session logoff failed: {error}"));
-        }
-        Ok::<_, DbError>(observation)
+        Ok::<_, DbError>(build_vpd_rls_observation(
+            scope,
+            session,
+            probe,
+            policies,
+            policy_error,
+        ))
     };
-    let detail = match asupersync::time::timeout(cx.now(), RLS_VPD_VISIBILITY_PROBE_TIMEOUT, work)
-        .await
-    {
-        Ok(Ok(observation)) => return observation,
+    let result = asupersync::time::timeout(cx.now(), RLS_VPD_VISIBILITY_PROBE_TIMEOUT, work).await;
+    let mut cleanup_detail = String::new();
+    if let Some(conn) = isolated.as_deref() {
+        let cleanup = if result.is_err() {
+            conn.cancel_and_close(cx).await
+        } else {
+            conn.close(cx).await
+        };
+        if let Err(error) = cleanup {
+            cleanup_detail.push_str(&format!("; diagnostic session cleanup failed: {error}"));
+        }
+    }
+    let mut detail = match result {
+        Ok(Ok(mut observation)) => {
+            observation.detail.push_str(&cleanup_detail);
+            return observation;
+        }
         Ok(Err(error)) => format!(
             "isolated policy observation unavailable: {error}; policy absence is not proven"
         ),
@@ -2430,6 +2442,7 @@ async fn isolated_policy_observation(
             RLS_VPD_VISIBILITY_PROBE_TIMEOUT.as_millis()
         ),
     };
+    detail.push_str(&cleanup_detail);
     build_vpd_rls_observation(
         fallback_scope.to_owned(),
         None,
@@ -4320,6 +4333,8 @@ mod tests {
     struct StalledPolicyProbe {
         isolated: bool,
         retired: Arc<std::sync::atomic::AtomicUsize>,
+        cleanup: Arc<Mutex<Vec<&'static str>>>,
+        cancel_fails: bool,
     }
 
     impl Drop for StalledPolicyProbe {
@@ -4343,9 +4358,22 @@ mod tests {
             Ok(Box::new(Self {
                 isolated: true,
                 retired: Arc::clone(&self.retired),
+                cleanup: Arc::clone(&self.cleanup),
+                cancel_fails: self.cancel_fails,
             }))
         }
+        async fn cancel(&self, _cx: &Cx) -> Result<(), DbError> {
+            assert!(self.isolated, "never cancel the pinned session");
+            self.cleanup.lock().unwrap().push("cancel");
+            if self.cancel_fails {
+                Err(DbError::Query("cancel failed".to_owned()))
+            } else {
+                Ok(())
+            }
+        }
         async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            assert!(self.isolated, "never close the pinned session");
+            self.cleanup.lock().unwrap().push("close");
             Ok(())
         }
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -7251,12 +7279,26 @@ mod tests {
             let conn = StalledPolicyProbe::default();
             let probe = bounded_policy_catalog_probe(&cx, &conn).await;
             assert_eq!(conn.retired.load(std::sync::atomic::Ordering::SeqCst), 1);
+            assert_eq!(*conn.cleanup.lock().unwrap(), ["cancel", "close"]);
             assert_eq!(probe.visibility, OraclePolicyCatalogVisibility::Unavailable);
             assert_eq!(probe.visible_policy_rows_probe, None);
             assert!(
                 probe.detail.contains("1000 ms deadline"),
                 "timeout must be visible to the caller: {probe:?}"
             );
+        });
+    }
+
+    #[test]
+    fn timed_out_observation_closes_even_when_cancel_fails() {
+        run_with_cx(|cx| async move {
+            let mut conn = StalledPolicyProbe::default();
+            conn.cancel_fails = true;
+            let probe = bounded_policy_catalog_probe(&cx, &conn).await;
+            assert_eq!(probe.visibility, OraclePolicyCatalogVisibility::Unavailable);
+            assert_eq!(*conn.cleanup.lock().unwrap(), ["cancel", "close"]);
+            assert!(probe.detail.contains("cancel failed"));
+            assert_eq!(conn.retired.load(std::sync::atomic::Ordering::SeqCst), 1);
         });
     }
 

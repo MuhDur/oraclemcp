@@ -1452,6 +1452,23 @@ pub trait OracleConnection: Send + Sync {
     /// no-op default.
     async fn close(&self, cx: &Cx) -> Result<(), DbError>;
 
+    /// Break and drain an abandoned in-flight call before terminal logoff.
+    /// The owner must drop the call future first and must close the session
+    /// afterwards, even when cancellation fails. This is cleanup, so it must
+    /// not inherit the deadline or cancellation that abandoned the call.
+    async fn cancel(&self, _cx: &Cx) -> Result<(), DbError> {
+        Err(DbError::Query(
+            "driver cancellation is unavailable".to_owned(),
+        ))
+    }
+
+    /// Cancel and close an abandoned observation session, even if cancel fails.
+    async fn cancel_and_close(&self, cx: &Cx) -> Result<(), DbError> {
+        let cancel = self.cancel(cx).await;
+        let close = self.close(cx).await;
+        cancel.and(close)
+    }
+
     /// Tear down any `DBMS_FLASHBACK` session read-snapshot window (K9).
     ///
     /// This is **cleanup**: like [`OracleConnection::rollback`], the primary
@@ -1961,6 +1978,8 @@ struct RustOracleConnectionSlot {
 }
 
 const EXPLICIT_LOGOFF_CLOSED_REASON: &str = "thin connection was closed by explicit logical logoff";
+const TERMINAL_CANCEL_CLOSED_REASON: &str =
+    "thin connection was closed after terminal cancellation";
 
 impl RustOracleConnectionSlot {
     /// A completed logical logoff is terminal but successful. Repeated close
@@ -1968,7 +1987,10 @@ impl RustOracleConnectionSlot {
     /// connection as an internal error.
     fn is_explicitly_closed(&self) -> bool {
         self.connection.is_none()
-            && self.quarantine_reason.as_deref() == Some(EXPLICIT_LOGOFF_CLOSED_REASON)
+            && matches!(
+                self.quarantine_reason.as_deref(),
+                Some(EXPLICIT_LOGOFF_CLOSED_REASON | TERMINAL_CANCEL_CLOSED_REASON)
+            )
     }
 }
 
@@ -6836,6 +6858,37 @@ mod driver {
             Ok(Box::new(
                 RustOracleConnection::connect(cx, self.opts.clone()).await?,
             ))
+        }
+
+        async fn cancel(&self, cx: &Cx) -> Result<(), DbError> {
+            try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+                let mut inner = self.lock_inner(cx).await?;
+                inner
+                    .cancel(cx)
+                    .await
+                    .map_err(|err| driver_query_error(err, &self.opts, None))
+            })
+            .await
+        }
+
+        async fn cancel_and_close(&self, cx: &Cx) -> Result<(), DbError> {
+            try_commit_section(cx, super::CLEANUP_MASKED_POLLS, async {
+                let mut slot = self.inner.lock(cx).await.map_err(|err| {
+                    DbError::Internal(format!("thin connection lock failed: {err}"))
+                })?;
+                if slot.is_explicitly_closed() {
+                    return Ok(());
+                }
+                let connection = slot.connection.take().ok_or_else(|| {
+                    DbError::Internal(
+                        "thin connection is unavailable for terminal close".to_owned(),
+                    )
+                })?;
+                let result = connection.cancel_and_close(cx).await;
+                slot.quarantine_reason = Some(super::TERMINAL_CANCEL_CLOSED_REASON.to_owned());
+                result.map_err(|err| driver_query_error(err, &self.opts, None))
+            })
+            .await
         }
 
         async fn close(&self, cx: &Cx) -> Result<(), DbError> {

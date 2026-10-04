@@ -2733,7 +2733,7 @@ dependencies = [
 [[package]]
 name = "oraclemcp-driver-cx"
 version = "0.9.3"
-source = "git+https://github.com/MuhDur/rust-oracledb?rev=d6ae7c062ee25c25bf9930ca683bbd3ab78861b3#d6ae7c062ee25c25bf9930ca683bbd3ab78861b3"
+source = "git+https://github.com/MuhDur/rust-oracledb?rev=9802f542abe59ccaef11e58f8ee7f052ea3fe2df#9802f542abe59ccaef11e58f8ee7f052ea3fe2df"
 dependencies = [
  "asupersync",
  "base64",
@@ -2754,7 +2754,7 @@ dependencies = [
 [[package]]
 name = "oraclemcp-driver-cx-protocol"
 version = "0.9.2"
-source = "git+https://github.com/MuhDur/rust-oracledb?rev=d6ae7c062ee25c25bf9930ca683bbd3ab78861b3#d6ae7c062ee25c25bf9930ca683bbd3ab78861b3"
+source = "git+https://github.com/MuhDur/rust-oracledb?rev=9802f542abe59ccaef11e58f8ee7f052ea3fe2df#9802f542abe59ccaef11e58f8ee7f052ea3fe2df"
 dependencies = [
  "aes 0.8.4",
  "cbc 0.1.2",

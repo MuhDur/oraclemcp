@@ -1998,6 +1998,300 @@ fn live_slow_policy_probe_isolated_from_pinned_session() {
     });
 }
 
+/// jxn8p: count the physical sessions, not just successful pinned reads.
+/// The opt-in local Docker lab supplies SYS only for fixture setup/census.
+/// Each invocation owns a random user and cleans it up even on assertion failure.
+/// The declared census bound is 30 seconds. Labs disabling OOB can defer the
+/// interrupt until the slow catalog call reaches a server cancellation point.
+#[test]
+fn live_timed_out_policy_observations_return_sessions_to_baseline() {
+    if env_bool("ORACLEMCP_TEST_SLOW_POLICY_CLEANUP") != Some(true) {
+        eprintln!(
+            "[live-xe] SKIP session cleanup fixture: set ORACLEMCP_TEST_SLOW_POLICY_CLEANUP=1"
+        );
+        return;
+    }
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    struct Fixture {
+        container: String,
+        pdb: String,
+        user: String,
+        password: String,
+    }
+    impl Fixture {
+        fn sql(&self, sql: &str) -> String {
+            let mut child = Command::new("timeout")
+                .args([
+                    "45",
+                    "docker",
+                    "exec",
+                    "-i",
+                    &self.container,
+                    "sqlplus",
+                    "-S",
+                    "/ as sysdba",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("local lab SQLPlus");
+            write!(child.stdin.take().unwrap(),
+                "whenever sqlerror exit failure\nset heading off feedback off pagesize 0\nalter session set container={};\n{sql}\nexit\n", self.pdb)
+                .expect("fixture SQL input");
+            let output = child.wait_with_output().expect("bounded fixture SQL");
+            let stdout =
+                String::from_utf8_lossy(&output.stdout).replace(&self.password, "<redacted>");
+            assert!(
+                output.status.success(),
+                "lab SQL failed: {stdout} {}",
+                String::from_utf8_lossy(&output.stderr).replace(&self.password, "<redacted>")
+            );
+            stdout
+        }
+        fn count(&self) -> usize {
+            let output = self.sql(&format!(
+                "select 'COUNT:'||count(*) from v$session where username='{}';",
+                self.user
+            ));
+            output
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("COUNT:")?.parse().ok())
+                .expect("v$session census")
+        }
+        async fn baseline(&self, cx: &Cx, expected: usize) {
+            let started = Instant::now();
+            loop {
+                let count = self.count();
+                assert!(
+                    started.elapsed() < Duration::from_secs(30),
+                    "{} census exceeded 30 s: baseline={expected} actual={count}",
+                    self.container
+                );
+                if count == expected {
+                    eprintln!(
+                        "[live-xe] {} v$session baseline={} restored_ms={}",
+                        self.container,
+                        expected,
+                        started.elapsed().as_millis()
+                    );
+                    return;
+                }
+                asupersync::time::sleep(cx.now(), Duration::from_millis(100)).await;
+            }
+        }
+    }
+    let mut random = [0u8; 12];
+    getrandom::getrandom(&mut random).expect("fixture entropy");
+    let suffix = random
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let fixture = Fixture {
+        container: std::env::var("ORACLEMCP_TEST_LAB_CONTAINER").expect("local lab container"),
+        pdb: std::env::var("ORACLEMCP_TEST_LAB_PDB").expect("local lab PDB"),
+        user: format!("JXN_{}", &suffix[..16]).to_ascii_uppercase(),
+        password: format!("Jx{suffix}"),
+    };
+    assert!(
+        fixture
+            .pdb
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    );
+    fixture.sql(&format!(r#"
+create user {user} identified by "{password}" quota 10m on users;
+grant create session to {user};
+grant execute on sys.dbms_lock to {user};
+create table {user}.xr_64 (id number);
+insert into {user}.xr_64 values (1);
+commit;
+create function {user}.xr_fast_policy(s varchar2, t varchar2) return varchar2 as begin return '1=1'; end;
+/
+create function {user}.xr_slow_policy(s varchar2, t varchar2) return varchar2 as begin sys.dbms_lock.sleep(12); return '1=1'; end;
+/
+begin
+for i in 1..64 loop
+sys.dbms_rls.add_policy(object_schema=>'{user}',object_name=>'XR_64',policy_name=>'XR_P_'||i,function_schema=>'{user}',policy_function=>'XR_FAST_POLICY',statement_types=>'SELECT');
+end loop;
+end;
+/
+create view {user}.xr_policy_view as select p.* from sys.all_policies p;
+begin
+sys.dbms_rls.add_policy(object_schema=>'{user}',object_name=>'XR_POLICY_VIEW',policy_name=>'XR_SLOW_P',function_schema=>'{user}',policy_function=>'XR_SLOW_POLICY',statement_types=>'SELECT');
+end;
+/
+create synonym {user}.all_policies for {user}.xr_policy_view;
+"#, user=fixture.user, password=fixture.password));
+    // Catch assertion failure only to remove this invocation's disposable user.
+    // The original panic is resumed, so fixture teardown cannot hide a leak.
+    let fixture_ref = &fixture;
+    let result = std::panic::catch_unwind(|| {
+        run_with_cx(|cx| async move {
+            let fixture = fixture_ref;
+            assert_eq!(fixture.count(), 0);
+            let mut opts = test_opts();
+            opts.username = Some(fixture.user.clone());
+            opts.password = Some(fixture.password.clone());
+            opts.auth_adapter = AuthAdapter::Password;
+            let conn = RustOracleConnection::connect(&cx, opts)
+                .await
+                .expect("ephemeral fixture connect");
+            let baseline = fixture.count();
+            assert_eq!(baseline, 1, "only the pinned fixture session exists");
+            let raw_started = Instant::now();
+            oraclemcp_db::run_catalog_query(
+                &cx,
+                &conn,
+                oraclemcp_db::CatalogQueryId::AllPoliciesVisibility,
+                &[],
+            )
+            .await
+            .expect("real slow catalog predicate");
+            assert!(
+                raw_started.elapsed() >= Duration::from_secs(12),
+                "fixture must stall the real product query"
+            );
+            let policies = oraclemcp_db::run_catalog_query(
+                &cx,
+                &conn,
+                oraclemcp_db::CatalogQueryId::SelectPolicy,
+                &[
+                    OracleBind::from(fixture.user.clone()),
+                    OracleBind::from("XR_64"),
+                ],
+            )
+            .await
+            .expect("authoritative policy lookup");
+            assert!(
+                !policies.is_empty(),
+                "positive evidence survives the shadowing synonym"
+            );
+            assert!(fixture.sql(&format!("select 'POLICIES:'||count(*) from dba_policies where object_owner='{}' and object_name='XR_64';", fixture.user)).contains("POLICIES:64"));
+            let previous = cx.now() + Duration::from_secs(240);
+            conn.set_request_deadline(&cx, Some(previous)).unwrap();
+            for attempt in 0..6 {
+                let started = Instant::now();
+                if attempt % 2 == 0 {
+                    let mut pending =
+                        std::pin::pin!(oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn));
+                    let mut census = std::pin::pin!(async {
+                        asupersync::time::sleep(cx.now(), Duration::from_millis(200)).await;
+                        assert_eq!(
+                            fixture.count(),
+                            baseline + 1,
+                            "a real isolated Oracle session must be in flight"
+                        );
+                        let read_started = Instant::now();
+                        let rows = conn
+                            .query_rows(&cx, "SELECT 6 AS n FROM dual", &[])
+                            .await
+                            .expect("pinned read during observation");
+                        assert_eq!(rows[0].parse_i64("N"), Some(6));
+                        assert!(read_started.elapsed() < Duration::from_secs(1));
+                    });
+                    let mut result = None;
+                    let mut checked = false;
+                    let probe = std::future::poll_fn(|poll_cx| {
+                        if result.is_none()
+                            && let std::task::Poll::Ready(probe) =
+                                std::future::Future::poll(pending.as_mut(), poll_cx)
+                        {
+                            result = Some(probe);
+                        }
+                        if !checked
+                            && std::future::Future::poll(census.as_mut(), poll_cx).is_ready()
+                        {
+                            assert!(
+                                result.is_none(),
+                                "census and pinned read must finish before timeout"
+                            );
+                            checked = true;
+                        }
+                        if checked && result.is_some() {
+                            std::task::Poll::Ready(result.take().unwrap())
+                        } else {
+                            std::task::Poll::Pending
+                        }
+                    })
+                    .await;
+                    assert_eq!(
+                        probe.visibility,
+                        oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+                    );
+                    assert!(probe.detail.contains("1000 ms deadline"), "{probe:?}");
+                    assert!(!probe.detail.contains("cancel failed"), "{probe:?}");
+                    assert!(!probe.detail.contains("logoff failed"), "{probe:?}");
+                    assert!(!probe.detail.contains("cleanup failed"), "{probe:?}");
+                } else {
+                    let observation =
+                        oraclemcp_db::observe_vpd_rls_for_schema(&cx, &conn, "").await;
+                    assert_eq!(
+                        observation.status,
+                        oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
+                    );
+                    assert!(
+                        observation.detail.contains("1000 ms deadline"),
+                        "{observation:?}"
+                    );
+                    assert!(
+                        !observation.detail.contains("cancel failed"),
+                        "{observation:?}"
+                    );
+                    assert!(
+                        !observation.detail.contains("logoff failed"),
+                        "{observation:?}"
+                    );
+                    assert!(
+                        !observation.detail.contains("cleanup failed"),
+                        "{observation:?}"
+                    );
+                }
+                assert!(
+                    started.elapsed() < Duration::from_secs(5),
+                    "cleanup must be prompt"
+                );
+                let rows = conn
+                    .query_rows(&cx, "SELECT 7 AS n FROM dual", &[])
+                    .await
+                    .expect("pinned read after timeout");
+                assert_eq!(rows[0].parse_i64("N"), Some(7));
+                assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
+                let cleanup_elapsed = started.elapsed();
+                fixture.baseline(&cx, baseline).await;
+                eprintln!(
+                    "[live-xe] {} attempt={} timeout+cancel+close_ms={} PASS",
+                    fixture.container,
+                    attempt + 1,
+                    cleanup_elapsed.as_millis()
+                );
+            }
+            conn.close(&cx).await.expect("pinned logoff");
+            fixture.baseline(&cx, 0).await;
+        })
+    });
+    fixture.sql(&format!(r#"begin
+for s in (select sid, serial# from v$session where username='{user}') loop
+begin execute immediate 'alter system disconnect session '||chr(39)||s.sid||','||s.serial#||chr(39)||' immediate'; exception when others then if sqlcode != -31 then raise; end if; end;
+end loop;
+end;
+/
+begin
+for attempt in 1..50 loop
+begin execute immediate 'drop user {user} cascade'; return;
+exception when others then if sqlcode != -1940 then raise; end if;
+if attempt = 50 then raise; end if;
+sys.dbms_lock.sleep(0.1);
+end;
+end loop;
+end;
+/"#, user=fixture.user));
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// WP-C live verification: the read-only DBA health suite runs against a real
 /// 23ai, returns a finding per requested subcheck, and — critically — every
 /// subcheck either succeeds against a readable view or degrades to a structured
