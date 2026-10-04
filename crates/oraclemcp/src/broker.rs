@@ -68,6 +68,9 @@ impl BrokerIdentity {
         resolver: &dyn SecretResolver,
     ) -> Result<Self, ErrorEnvelope> {
         let mut hash = Sha256::new();
+        // Wire generation changes are compatibility changes even when two
+        // development binaries share the same package version.
+        hash.update(b"oraclemcp:broker-credential-challenge:v1");
         hash.update(serde_json::to_vec(config).map_err(internal)?);
         hash.update(auth_policy.as_bytes());
         let mut credentials = Sha256::new();
@@ -148,14 +151,8 @@ impl BrokerIdentity {
         Ok(bound)
     }
 
-    pub fn require_match(&self, proxy: &Self) -> Result<(), ErrorEnvelope> {
+    fn require_generation_match(&self, proxy: &Self) -> Result<(), ErrorEnvelope> {
         if self.version == proxy.version && self.generation == proxy.generation {
-            if !oraclemcp_audit::ct_eq(self.credentials.as_bytes(), proxy.credentials.as_bytes()) {
-                return Err(ErrorEnvelope::new(
-                    ErrorClass::PolicyDenied,
-                    "ORACLEMCP_BROKER_CREDENTIAL_MISMATCH: this client's resolved database credentials differ from the broker's; supply the correct credentials in this client's environment",
-                ));
-            }
             return Ok(());
         }
         Err(ErrorEnvelope::new(
@@ -165,6 +162,17 @@ impl BrokerIdentity {
                 proxy.version, proxy.generation, self.version, self.generation,
             ),
         ))
+    }
+
+    pub fn require_match(&self, proxy: &Self) -> Result<(), ErrorEnvelope> {
+        self.require_generation_match(proxy)?;
+        if !oraclemcp_audit::ct_eq(self.credentials.as_bytes(), proxy.credentials.as_bytes()) {
+            return Err(ErrorEnvelope::new(
+                ErrorClass::PolicyDenied,
+                "ORACLEMCP_BROKER_CREDENTIAL_MISMATCH: this client's resolved database credentials differ from the broker's; supply the correct credentials in this client's environment",
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -657,6 +665,18 @@ fn accept_session(
     let mut writer = stream.try_clone().map_err(internal)?;
     writer.set_nonblocking(true).map_err(internal)?;
     let mut reader = BufReader::new(stream);
+    let hello: AttachRequest = read_json_line(&mut DeadlineIo::new(&mut reader))?;
+    if let Err(error) = identity.require_generation_match(&hello.identity) {
+        write_json_line(
+            &mut DeadlineIo::new(&mut writer),
+            &AttachReply {
+                session_id: String::new(),
+                broker_pid: std::process::id(),
+                error: Some(error.clone()),
+            },
+        )?;
+        return Err(error);
+    }
     write_json_line(
         &mut DeadlineIo::new(&mut writer),
         &CredentialChallenge {
@@ -740,7 +760,19 @@ pub fn attach(store: &FileStore, request: &AttachRequest) -> Result<AttachedStre
     let mut writer = stream.try_clone().map_err(transient)?;
     writer.set_nonblocking(true).map_err(transient)?;
     let mut reader = BufReader::new(stream);
-    let challenge: CredentialChallenge = read_json_line(&mut DeadlineIo::new(&mut reader))?;
+    // Public compatibility preflight carries no password digest, HTTP
+    // environment, or init token. Older brokers can refuse its new generation
+    // using the same typed error frame instead of deadlocking on the challenge.
+    let mut hello = request.clone();
+    hello.identity.credentials.clear();
+    hello.http = None;
+    hello.auth = oraclemcp_core::StdioAuthPolicy::Disabled;
+    write_json_line(&mut DeadlineIo::new(&mut writer), &hello)?;
+    let response: serde_json::Value = read_json_line(&mut DeadlineIo::new(&mut reader))?;
+    if let Some(error) = response.get("error").filter(|error| !error.is_null()) {
+        return Err(serde_json::from_value(error.clone()).map_err(internal)?);
+    }
+    let challenge: CredentialChallenge = serde_json::from_value(response).map_err(internal)?;
     let mut challenged_request = request.clone();
     challenged_request.identity = request.identity.challenged(&challenge.nonce)?;
     write_json_line(&mut DeadlineIo::new(&mut writer), &challenged_request)?;
@@ -865,6 +897,38 @@ mod tests {
             auth: oraclemcp_core::StdioAuthPolicy::Disabled,
             http: None,
         }
+    }
+
+    #[test]
+    fn older_ipc_client_gets_typed_version_refusal_before_credential_challenge() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FileStore::open(root.path()).unwrap();
+        let broker = BrokerListener::bind(&store, identity()).unwrap();
+        let locator: Locator =
+            serde_json::from_slice(&std::fs::read(locator_path(&store).unwrap()).unwrap()).unwrap();
+        let serving = std::thread::spawn(move || {
+            broker
+                .serve(Duration::from_millis(150), |_reader, _writer, _peer| {
+                    panic!("mismatched older client must never reach dispatch")
+                })
+                .unwrap()
+        });
+        let mut writer = connect_endpoint(&locator.endpoint).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        let mut reader = BufReader::new(writer.try_clone().unwrap());
+        let mut old = request();
+        old.identity.version = "older-build".into();
+        write_json_line(&mut DeadlineIo::new(&mut writer), &old).unwrap();
+        let reply: serde_json::Value = read_json_line(&mut DeadlineIo::new(&mut reader)).unwrap();
+        assert_eq!(
+            reply["error"]["error_class"], "RUNTIME_STATE_REQUIRED",
+            "first frame must be a typed version refusal: {reply}"
+        );
+        let message = reply["error"]["message"].as_str().unwrap();
+        assert!(message.contains("older-build") && message.contains("test-build"));
+        drop(reader);
+        drop(writer);
+        serving.join().unwrap();
     }
 
     #[test]
