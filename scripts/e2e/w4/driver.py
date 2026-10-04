@@ -2362,7 +2362,7 @@ def probe_expired_retention_scn(connection):
                 (seconds,)).fetchone()[0]
         except Exception as exc:
             message = str(exc)
-            require("ORA-08186" in message,
+            require(any(code in message for code in ("ORA-08180", "ORA-08186")),
                     f"retention SCN timestamp probe failed unexpectedly: {message[:180]}")
             continue
         require(type(scn) is int and scn > 0, "retention timestamp probe returned no SCN")
@@ -2628,6 +2628,56 @@ def run_lane(args):
         connection.close()
 
 
+    class RetentionProbeConnection:
+        """Unit-only cursor covering timestamp history errors, not live proof."""
+        def __init__(self, timestamp_error):
+            self.timestamp_error = timestamp_error
+            self.timestamp_seconds = []
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql, binds=()):
+            if "MAX(TUNED_UNDORETENTION)" in sql:
+                self.row = (100,)
+            elif "CURRENT_SCN FROM V$DATABASE" in sql:
+                self.row = (10000,)
+            elif "TIMESTAMP_TO_SCN" in sql:
+                self.timestamp_seconds.append(binds[0])
+                if len(self.timestamp_seconds) == 1:
+                    raise RuntimeError(self.timestamp_error)
+                self.row = (9000,)
+            elif "SELECT COUNT(*) FROM W4_RIG.W4_RUNS" in sql:
+                raise RuntimeError("ORA-01555: snapshot too old")
+            else:
+                require(sql.startswith("BEGIN DBMS_FLASHBACK."),
+                        f"unexpected retention selftest SQL: {sql}")
+            return self
+
+        def fetchone(self):
+            return self.row
+
+    for code in ("ORA-08180", "ORA-08186"):
+        connection = RetentionProbeConnection(code)
+        result = probe_expired_retention_scn(connection)
+        require(connection.timestamp_seconds == [200, 400],
+                f"{code} did not continue to the next retention multiplier")
+        require(result["multiplier"] == 4 and result["seconds_past"] == 400
+                and result["scn_a"] == 9000 and result["scn_b"] == 10000
+                and result["external_error"].startswith("ORA-01555"),
+                f"{code} produced incorrect retention evidence: {result}")
+        print(compact({"selftest": f"retention_timestamp_{code}_continues",
+                       "verdict": "pass"}))
+    connection = RetentionProbeConnection("ORA-00942: table or view does not exist")
+    try:
+        probe_expired_retention_scn(connection)
+    except DriverError as exc:
+        require("ORA-00942" in str(exc) and connection.timestamp_seconds == [200],
+                "unexpected timestamp error was not rejected at its first multiplier")
+    else:
+        raise DriverError("retention timestamp probe accepted an unexpected error")
+    print(compact({"selftest": "retention_timestamp_unexpected_error_refused",
+                   "verdict": "pass"}))
 def selftest():
     load_cases()
     expected_live_ids = {
