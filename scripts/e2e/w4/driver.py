@@ -2725,13 +2725,20 @@ def map_live_manifest_case_ids(results, release_cases, required_ids):
     }
     bindings = {(case["case_id"], case["test_id"]) for case in load_cases()
                 if "test_id" in case}
+    # An explicit release case owns its canonical identity. Keep supplementary
+    # legacy scenarios distinct rather than manufacturing duplicate proof rows.
+    existing = {(row["case_id"], row.get("lane"), row.get("transport"))
+                for row in results["cases"]}
     changed = False
     for row in results["cases"]:
         manifest_case_id = case_id_by_test_id.get(row.get("test_id"))
-        if (manifest_case_id in required_ids and row.get("case_id") != manifest_case_id
+        identity = (manifest_case_id, row.get("lane"), row.get("transport"))
+        if (manifest_case_id in required_ids and identity not in existing
+                and row.get("case_id") != manifest_case_id
                 and (row.get("case_id") == row.get("test_id")
                      or (row.get("case_id"), row.get("test_id")) in bindings)):
             row["case_id"] = manifest_case_id
+            existing.add(identity)
             changed = True
     return changed
 
@@ -3836,6 +3843,24 @@ def release_schedule_selftest():
             and mapped["cases"][0]["verdict"] == "fail"
             and mapped["cases"][1]["case_id"] == "unrelated",
             "manifest normalization must preserve failures and reject undeclared identities")
+    duplicate = {"cases": [
+        {"case_id": "w4_connection_info_effective_access_readonly_pinned",
+         "test_id": "w4_connection_info_effective_access_readonly_pinned",
+         "lane": "free23", "transport": "stdio", "verdict": "pass"},
+        {"case_id": "rel012_i44_effective_access",
+         "test_id": "w4_connection_info_effective_access_readonly_pinned",
+         "lane": "free23", "transport": "stdio", "verdict": "fail"},
+        {"case_id": "w4_connection_info_effective_access_readonly_pinned",
+         "test_id": "w4_connection_info_effective_access_readonly_pinned",
+         "lane": "free23", "transport": "http", "verdict": "pass"}]}
+    map_live_manifest_case_ids(duplicate, release, {"rel012_i44_effective_access"})
+    require(duplicate["cases"][0]["case_id"]
+            == "w4_connection_info_effective_access_readonly_pinned"
+            and duplicate["cases"][1]["verdict"] == "fail"
+            and duplicate["cases"][2]["case_id"] == "rel012_i44_effective_access",
+            "canonical identity must preserve its red case and remain transport specific")
+    require(not map_live_manifest_case_ids(duplicate, release, {"rel012_i44_effective_access"}),
+            "manifest normalization must be idempotent")
     phases = [{"expected_phase": phase, "actual_phase": phase, "canary_leak": False}
               for phase in ("AuthTtc", "Tcp", "Wallet")]
     require(doctor_phase_observations_valid(0, phases), "valid doctor observations rejected")
