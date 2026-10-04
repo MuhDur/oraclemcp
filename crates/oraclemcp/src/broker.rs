@@ -3,8 +3,9 @@
 
 use std::io::{self, BufReader, Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
+#[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use interprocess::TryClone;
@@ -116,9 +117,39 @@ pub struct BrokerListener {
     listener: Listener,
     owner: ServiceOwner,
     identity: BrokerIdentity,
-    active: Arc<AtomicUsize>,
+    activity: Arc<Mutex<BrokerActivity>>,
     #[cfg(target_os = "linux")]
     _endpoint_directory: Option<std::fs::File>,
+}
+
+struct BrokerActivity {
+    active: usize,
+    idle_since: Instant,
+}
+
+impl BrokerActivity {
+    fn is_idle_for(&self, now: Instant, timeout: Duration) -> bool {
+        self.active == 0 && now.saturating_duration_since(self.idle_since) >= timeout
+    }
+}
+
+struct ActiveSession(Arc<Mutex<BrokerActivity>>);
+
+impl ActiveSession {
+    fn new(activity: Arc<Mutex<BrokerActivity>>) -> Self {
+        activity.lock().expect("broker activity lock").active += 1;
+        Self(activity)
+    }
+}
+
+impl Drop for ActiveSession {
+    fn drop(&mut self) {
+        let mut activity = self.0.lock().expect("broker activity lock");
+        activity.active -= 1;
+        if activity.active == 0 {
+            activity.idle_since = Instant::now();
+        }
+    }
 }
 
 fn internal(error: impl std::fmt::Display) -> ErrorEnvelope {
@@ -186,7 +217,8 @@ fn connect_endpoint(endpoint: &str) -> io::Result<Stream> {
         let handle: std::os::windows::io::OwnedHandle = pipe
             .try_into()
             .map_err(|_| io::Error::other("unexpected shared broker pipe handle"))?;
-        let socket = PipeSocket::try_from(handle).map_err(io::Error::other)?;
+        let socket = PipeSocket::try_from(handle)
+            .map_err(|_| io::Error::other("broker named-pipe handle conversion failed"))?;
         Ok(Stream::from(socket))
     }
 }
@@ -412,7 +444,10 @@ impl BrokerListener {
             listener,
             owner,
             identity,
-            active: Arc::new(AtomicUsize::new(0)),
+            activity: Arc::new(Mutex::new(BrokerActivity {
+                active: 0,
+                idle_since: Instant::now(),
+            })),
             #[cfg(target_os = "linux")]
             _endpoint_directory: endpoint_directory,
         })
@@ -432,23 +467,18 @@ impl BrokerListener {
             + 'static,
     {
         let serve_session = Arc::new(serve_session);
-        let mut idle_since = Instant::now();
+        self.activity
+            .lock()
+            .expect("broker activity lock")
+            .idle_since = Instant::now();
         loop {
             match self.listener.accept() {
                 Ok(stream) => {
-                    idle_since = Instant::now();
-                    let active = Arc::clone(&self.active);
+                    let active = ActiveSession::new(Arc::clone(&self.activity));
                     let callback = Arc::clone(&serve_session);
                     let identity = self.identity.clone();
-                    active.fetch_add(1, Ordering::AcqRel);
                     std::thread::spawn(move || {
-                        struct ActiveSession(Arc<AtomicUsize>);
-                        impl Drop for ActiveSession {
-                            fn drop(&mut self) {
-                                self.0.fetch_sub(1, Ordering::AcqRel);
-                            }
-                        }
-                        let _active = ActiveSession(active);
+                        let _active = active;
                         let result = accept_session(stream, &identity)
                             .and_then(|(reader, writer, peer)| callback(reader, writer, peer));
                         if let Err(error) = result {
@@ -457,9 +487,12 @@ impl BrokerListener {
                     });
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if self.active.load(Ordering::Acquire) != 0 {
-                        idle_since = Instant::now();
-                    } else if idle_since.elapsed() >= idle_timeout {
+                    if self
+                        .activity
+                        .lock()
+                        .expect("broker activity lock")
+                        .is_idle_for(Instant::now(), idle_timeout)
+                    {
                         return Ok(());
                     }
                     std::thread::sleep(Duration::from_millis(20));
@@ -887,7 +920,7 @@ mod tests {
                 })
                 .unwrap();
             drop(broker);
-            finished_tx.send(()).unwrap();
+            finished_tx.send(Instant::now()).unwrap();
         });
         let client = attach(&store, &request()).unwrap();
         accepted_rx.recv_timeout(Duration::from_secs(2)).unwrap();
@@ -898,14 +931,42 @@ mod tests {
             "an active client must keep the broker alive beyond its idle timeout"
         );
         assert!(store.acquire_service_owner("competing-broker").is_err());
+        let disconnect_started = Instant::now();
         drop(client);
+        let exited_at = finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         assert!(
-            finished_rx.recv_timeout(Duration::from_millis(50)).is_err(),
-            "disconnect must start a fresh idle timeout"
+            exited_at.saturating_duration_since(disconnect_started) >= Duration::from_millis(150),
+            "disconnect must start the full idle timeout, regardless of caller scheduling"
         );
-        finished_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         worker.join().unwrap();
         assert!(store.acquire_service_owner("replacement-broker").is_ok());
+    }
+
+    #[test]
+    fn last_session_close_resets_stale_idle_clock_without_a_listener_poll() {
+        let timeout = Duration::from_millis(150);
+        let activity = Arc::new(Mutex::new(BrokerActivity {
+            active: 0,
+            idle_since: Instant::now() - Duration::from_secs(5),
+        }));
+        let first = ActiveSession::new(Arc::clone(&activity));
+        let last = ActiveSession::new(Arc::clone(&activity));
+        drop(first);
+        assert!(
+            !activity
+                .lock()
+                .expect("broker activity lock")
+                .is_idle_for(Instant::now(), timeout)
+        );
+        let close_started = Instant::now();
+        drop(last);
+        let state = activity.lock().expect("broker activity lock");
+        assert!(
+            state.idle_since >= close_started,
+            "record actual final close time"
+        );
+        assert!(!state.is_idle_for(state.idle_since + timeout / 2, timeout));
+        assert!(state.is_idle_for(state.idle_since + timeout, timeout));
     }
 
     #[test]
