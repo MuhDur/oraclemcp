@@ -1888,6 +1888,7 @@ impl OracleMcpServer {
                 )
         }) && context.notification_session_owner().is_some()
             && context.notification_request_owner().is_some();
+        let is_ping = request.get("method").and_then(Value::as_str) == Some("ping");
         // A per-tool deadline has to begin at transport admission.  The
         // before-call catalog snapshot normally queries the stateful lane, so
         // taking it for a timeout-bound tool call would queue that snapshot
@@ -1895,15 +1896,26 @@ impl OracleMcpServer {
         // Keep the post-call observation: the already-established session
         // snapshot still detects any served-surface change caused by this call.
         let observe_before_catalog = observe_catalog && !Self::timeout_bound_tool_call(&request);
-        if observe_before_catalog {
+        // Idle pings still observe TTL-driven catalog changes. During a tool
+        // call the reader must keep accepting cancellation, rather than queue
+        // a catalog snapshot behind the call that cancellation should stop.
+        if observe_before_catalog && !(is_ping && self.has_inflight_tool_call(context)) {
             self.observe_tool_catalog(context);
         }
         let outcome =
             self.handle_jsonrpc_request_with_context_outcome_inner(request, auth, context);
-        if observe_catalog {
+        if observe_catalog && !(is_ping && self.has_inflight_tool_call(context)) {
             self.observe_tool_catalog(context);
         }
         outcome
+    }
+
+    fn has_inflight_tool_call(&self, context: DispatchContext<'_>) -> bool {
+        let session_prefix = format!("{}:", context.http_session_id().unwrap_or("stdio"));
+        self.inflight_cancellations
+            .lock()
+            .keys()
+            .any(|key| key.starts_with(&session_prefix))
     }
 
     fn timeout_bound_tool_call(request: &Value) -> bool {
@@ -3280,21 +3292,33 @@ fn cancelled_dispatch_envelope(reason: &CancelReason) -> ErrorEnvelope {
 
 /// Preserve the terminal certainty established below the transport bridge.
 /// A driver break normally surfaces as a timeout only after drain/rollback has
-/// confirmed cancellation. A quarantined mutation instead remains uncertain.
+/// confirmed cancellation. Transaction rollback proof is distinct from wire
+/// quarantine; an unproved mutation remains uncertain.
 fn transport_cancel_error(
     tool_name: &str,
     envelope: &ErrorEnvelope,
     cancellation: &RequestCancellation,
 ) -> Option<ErrorEnvelope> {
+    if tool_name == "oracle_execute"
+        && envelope.statement_outcome == Some(StatementOutcome::RolledBack)
+        && (envelope.error_class == ErrorClass::Timeout
+            || (envelope.error_class == ErrorClass::Internal && envelope.ora_code == Some(1013)))
+    {
+        return Some(
+            cancelled_dispatch_envelope(
+                &cancellation.reason().unwrap_or_else(CancelReason::timeout),
+            )
+            .with_statement_outcome(StatementOutcome::RolledBack),
+        );
+    }
     if envelope.statement_outcome == Some(StatementOutcome::ProtocolUnsynchronized)
         && (envelope.error_class == ErrorClass::ConnectionFailed
             || (tool_name == "oracle_execute"
                 && envelope.error_class == ErrorClass::Internal
                 && envelope.ora_code == Some(1013)))
     {
-        // Dispatch quarantines these uncertain wires even if Oracle's
-        // rollback established the mutation was absent.  A confirmed cancel
-        // promises a reusable post-break connection, so do not claim it here.
+        // Neither an interrupted statement nor an uncertain wire proves
+        // rollback. Preserve uncertainty unless dispatch supplies that proof.
         return Some(
             envelope
                 .clone()
@@ -4155,6 +4179,23 @@ mod tests {
     }
 
     #[test]
+    fn issue49_cancelled_update_with_rollback_reports_confirmed_rollback() {
+        let cancellation = RequestCancellation::default();
+        cancellation.cancel(CancelReason::user("test cancellation"));
+        for error in [
+            ErrorEnvelope::new(ErrorClass::Internal, "execute: ORA-01013").with_ora_code(1013),
+            ErrorEnvelope::new(ErrorClass::Timeout, "driver break acknowledged"),
+        ] {
+            let error = error.with_statement_outcome(StatementOutcome::RolledBack);
+            let mapped = transport_cancel_error("oracle_execute", &error, &cancellation)
+                .expect("proved rollback must survive transport cancellation mapping");
+            assert_eq!(mapped.error_class, ErrorClass::RequestCancelled);
+            assert_eq!(mapped.cancel_outcome, Some(CancelOutcome::CancelConfirmed));
+            assert_eq!(mapped.statement_outcome, Some(StatementOutcome::RolledBack));
+        }
+    }
+
+    #[test]
     fn issue49_cancelled_update_on_quarantined_wire_remains_outcome_unknown() {
         let cancellation = RequestCancellation::default();
         cancellation.cancel(CancelReason::user("test cancellation"));
@@ -4163,7 +4204,7 @@ mod tests {
             .with_statement_outcome(StatementOutcome::ProtocolUnsynchronized);
 
         let mapped = transport_cancel_error("oracle_execute", &error, &cancellation)
-            .expect("rolled-back cancellation has a typed terminal envelope");
+            .expect("unproved rollback remains uncertain");
         assert_eq!(mapped.error_class, ErrorClass::Internal);
         assert_eq!(mapped.cancel_outcome, Some(CancelOutcome::OutcomeUnknown));
         assert_eq!(
@@ -4210,6 +4251,44 @@ mod tests {
             cancelled.load(Ordering::SeqCst),
             "lane Cx observed the transport cancellation"
         );
+    }
+
+    #[test]
+    fn issue49_cancel_preserves_stdio_response_order() {
+        for _ in 0..10 {
+            let entered = Arc::new((Mutex::new(false), Condvar::new()));
+            let dispatcher: Arc<dyn ToolDispatch> =
+                Arc::new(crate::lane::LaneRuntime::spawn_default(
+                    "issue49-stdio-order",
+                    Arc::new(PendingUntilCancelledDispatcher {
+                        entered: Arc::clone(&entered),
+                        cancelled: Arc::new(AtomicBool::new(false)),
+                    }),
+                ));
+            let server = server_with_dispatcher(dispatcher);
+            let (sender, worker) = start_interactive_stdio(&server);
+            let frames = cancellation_frames(49, false);
+            sender
+                .send(frames[0].clone())
+                .expect("send blocked tool call");
+            wait_for_test_gate(&entered);
+            sender
+                .send(stdio_frame(&json!({
+                    "jsonrpc": "2.0", "id": 50, "method": "ping"
+                })))
+                .expect("send later ping");
+            sender
+                .send(frames[1].clone())
+                .expect("cancel earlier tool call");
+            drop(sender);
+            let replies = worker.join().expect("stdio worker joins");
+            let ids: Vec<_> = replies.iter().filter_map(|reply| reply.get("id")).collect();
+            assert_eq!(ids, vec![&json!(49), &json!(50)]);
+            assert_eq!(
+                replies[0]["result"]["structuredContent"]["cancel_outcome"],
+                json!("cancel_confirmed")
+            );
+        }
     }
 
     #[test]

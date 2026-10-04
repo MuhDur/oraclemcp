@@ -10044,7 +10044,12 @@ async fn execute_sql_inner(
                 return Err(envelope);
             }
             let mut envelope = DbError::into_envelope(e.clone());
-            if e.is_uncertain_session_state() {
+            if envelope.ora_code == Some(1013) || matches!(e, DbError::Cancelled(_)) {
+                // This branch is reached only after bounded cleanup rollback
+                // succeeded and no effect can survive rollback. Transaction
+                // certainty is independent of conservative wire quarantine.
+                envelope = envelope.with_statement_outcome(StatementOutcome::RolledBack);
+            } else if e.is_uncertain_session_state() {
                 // The request crossed an uncertain wire boundary. A cleanup
                 // rollback may have succeeded, but it cannot establish the
                 // statement's wire outcome for a caller; preserve the

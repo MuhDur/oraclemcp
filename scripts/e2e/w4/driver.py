@@ -43,7 +43,7 @@ RELEASE_MANIFEST = ROOT / "scripts/e2e/cases/release_0_12.json"
 CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
-                        "steps", "expect_by_version", "cleanup", "plan_contains", "row_contains",
+                        "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
                         "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
@@ -539,7 +539,9 @@ def validate_case(case, filename):
         require("json_subset" in case["expect"], "parallel aggregate expects json_subset")
     require(isinstance(case["db_reread"], list) and isinstance(case["audit_expect"], list),
             "db_reread/audit_expect must be arrays")
-    for reread in case["db_reread"]:
+    require(isinstance(case.get("cleanup_reread", []), list),
+            "cleanup_reread must be an array")
+    for reread in case["db_reread"] + case.get("cleanup_reread", []):
         require(isinstance(reread, dict) and set(reread) == {"sql", "rows"}
                 and isinstance(reread["sql"], str) and isinstance(reread["rows"], list),
                 "db_reread needs SQL and exact rows")
@@ -1296,6 +1298,18 @@ def vsql_marker_count(connection, marker):
         {"marker": marker}).fetchone()[0]
 
 
+def active_cancel_marker_count(connection, marker, blocked_on_row=False):
+    # Parsing/caching SQL is not an admission barrier. Observe the marked
+    # statement on an active Oracle session; a locked mutation must also be
+    # waiting on the harness's row lock before cancellation is sent.
+    sql = ("SELECT COUNT(*) FROM V$SESSION S JOIN V$SQL Q "
+           "ON Q.SQL_ID = S.SQL_ID AND Q.CHILD_NUMBER = S.SQL_CHILD_NUMBER "
+           "WHERE S.STATUS = 'ACTIVE' AND INSTR(Q.SQL_TEXT, :marker) > 0")
+    if blocked_on_row:
+        sql += " AND S.EVENT = 'enq: TX - row lock contention'"
+    return connection.cursor().execute(sql, {"marker": marker}).fetchone()[0]
+
+
 def canonical_db_value(value):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -1984,11 +1998,15 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             if lock_sql:
                 connection.cursor().execute(lock_sql)
             try:
-                reply = cancelled_call(client, case, connection)
+                reply = cancelled_call(client, case, connection,
+                                       marker_probe=lambda conn, marker: active_cancel_marker_count(
+                                           conn, marker, blocked_on_row=bool(lock_sql)))
             finally:
                 if lock_sql:
                     connection.rollback()
             row["cancel_observation"] = client.last_cancel_observation
+            row["cancel_observation"]["db_admission_barrier"] = (
+                "active_row_lock" if lock_sql else "active_statement")
         elif case["call"].get("cancel_after_completion") and supported:
             reply = completed_before_cancel_call(client, case, captures)
             row["cancel_observation"] = client.last_cancel_observation
@@ -2078,9 +2096,9 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                     and writes[0].get("outcome") == "PENDING",
                     "cancelled mutation needs exactly one pending audit before its terminal audit")
             terminal = writes[1].get("outcome")
-            expected_response = ({"error_class": "INTERNAL", "ora_code": 1013,
-                                  "cancel_outcome": "outcome_unknown",
-                                  "statement_outcome": "protocol_unsynchronized"}
+            expected_response = ({"error_class": "REQUEST_CANCELLED",
+                                  "cancel_outcome": "cancel_confirmed",
+                                  "statement_outcome": "rolled_back"}
                                  if terminal == "ROLLED_BACK" else
                                  {"error_class": "CONNECTION_FAILED",
                                   "cancel_outcome": "outcome_unknown",
@@ -2114,8 +2132,18 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
     except Exception as exc:
         row["verification_failure"] = {"class": type(exc).__name__, "detail": str(exc)[:240]}
     finally:
-        if case.get("cleanup"):
-            apply_setup(connection, case["cleanup"])
+        try:
+            if case.get("cleanup"):
+                apply_setup(connection, case["cleanup"])
+            if case.get("cleanup_reread"):
+                cleanup_row = {}
+                verify_case_rereads(connection,
+                                    {"case_id": case["case_id"], "db_reread": case["cleanup_reread"]},
+                                    cleanup_row)
+                row["cleanup_reread_actual"] = cleanup_row["db_reread_actual"]
+        except Exception as exc:
+            row["verdict"] = "fail"
+            row["cleanup_failure"] = {"class": type(exc).__name__, "detail": str(exc)[:240]}
     row["duration_ms"] = round((time.monotonic() - start) * 1000)
     return row
 
@@ -2909,6 +2937,44 @@ def selftest():
     require(stub.calls == 1 and unsupported_row["verdict"] == "pass",
             "unsupported case silently skipped instead of asserting typed refusal")
     print(compact({"selftest": "unsupported_not_skipped", "verdict": "pass"}))
+    class CleanupConnection:
+        def __init__(self, restore=True):
+            self.label = "w4-commit-race"
+            self.commits = 0
+            self.restore = restore
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql):
+            if sql.startswith("UPDATE") and self.restore:
+                self.label = "parent-2"
+            return self
+
+        def fetchall(self):
+            return [(2, self.label)]
+
+        def commit(self):
+            self.commits += 1
+
+    cleanup_case = {**unsupported, "requires": [],
+                    "cleanup": [{"sql": "UPDATE W4O_W41234ABCDEF.T_PARENT_W41234ABCDEF SET LABEL = 'parent-2' WHERE ID = 2"}],
+                    "cleanup_reread": [{"sql": "SELECT ID, LABEL FROM W4O_W41234ABCDEF.T_PARENT_W41234ABCDEF WHERE ID = 2",
+                                        "rows": [[2, "parent-2"]]}]}
+    for expected, verdict in (({"error_class": "INVALID_ARGUMENTS"}, "pass"),
+                              ({"rows": [[1]]}, "fail")):
+        cleanup_connection = CleanupConnection()
+        cleanup_row = run_case(StubClient(), {**cleanup_case, "expect": expected}, "stdio", "free23",
+                               set(), cleanup_connection, BarrierPool(), Path("unused"), Path("unused"), {})
+        require(cleanup_row["verdict"] == verdict and cleanup_connection.commits == 1
+                and cleanup_row.get("cleanup_reread_actual") == [[[2, "parent-2"]]],
+                "case cleanup must restore and independently reread state even after verification fails")
+    cleanup_row = run_case(StubClient(), {**cleanup_case, "expect": {"error_class": "INVALID_ARGUMENTS"}},
+                           "stdio", "free23", set(), CleanupConnection(restore=False), BarrierPool(),
+                           Path("unused"), Path("unused"), {})
+    require(cleanup_row["verdict"] == "fail" and "cleanup_failure" in cleanup_row,
+            "cleanup reread must fail a case that leaves its committed row behind")
+    print(compact({"selftest": "commit_race_cleanup_on_success_and_failure", "verdict": "pass"}))
     retry_case = {**unsupported, "requires": [],
                   "expect": {"error_class": "INVALID_ARGUMENTS"},
                   "call": {"arguments": {}, "retry": True}}
