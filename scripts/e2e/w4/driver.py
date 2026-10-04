@@ -3002,6 +3002,26 @@ def probe_expired_retention_scn(connection):
     raise DriverError("lab retained every SCN tested beyond its reported undo retention")
 
 
+def lock_fixture_statistics(connection, fixture_id):
+    """Prevent automatic maintenance from evaluating fixture index functions.
+
+    Only this disposable run's current objects are locked. Tables created later
+    by the explicit dictionary statistics case remain available for its gather.
+    """
+    require(re.fullmatch(r"W4[0-9A-F]{10}", fixture_id) is not None,
+            "statistics lock needs an exact disposable fixture id")
+    owners = ["W4O_" + fixture_id, "W4X_" + fixture_id]
+    for owner in owners:
+        connection.cursor().execute("BEGIN DBMS_STATS.LOCK_SCHEMA_STATS(:owner); END;", {"owner": owner})
+    rows = connection.cursor().execute(
+        "SELECT OWNER,TABLE_NAME,STATTYPE_LOCKED FROM DBA_TAB_STATISTICS "
+        "WHERE OWNER IN (:owner,:cross) AND PARTITION_NAME IS NULL ORDER BY OWNER,TABLE_NAME",
+        {"owner": owners[0], "cross": owners[1]}).fetchall()
+    require(rows and all(row[2] == "ALL" for row in rows),
+            "automatic statistics fixture isolation was not established")
+    return [{"owner": owner, "table": table, "lock": locked} for owner, table, locked in rows]
+
+
 def persist_run_results(base, output):
     base.mkdir(parents=True, exist_ok=True)
     (base / "results.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
@@ -3093,6 +3113,7 @@ def _run_lane(args, output):
                                           owner_password_sink=lambda value: env.__setitem__("W4_OWNER_PASSWORD", value),
                                           cross_password_sink=lambda value: env.__setitem__("W4_CROSS_PASSWORD", value))
                     fixture_runs[transport] = fixture_id
+                    output.setdefault("statistics_locks", {})[transport] = lock_fixture_statistics(connection, fixture_id)
                     owner = "W4O_" + fixture_id
                     wait_for_setup_ready(
                         settings, password,
@@ -3142,6 +3163,8 @@ def _run_lane(args, output):
                         apply_setup(connection, case["setup"])
                         if "setup_ready_sql" in case:
                             wait_for_setup_ready(settings, password, case["setup_ready_sql"])
+                if fixture_id is not None:
+                    output["statistics_locks"][transport] = lock_fixture_statistics(connection, fixture_id)
                 needs_streaming = any(
                     "progress_token" in case.get("call", {})
                     and (not args.case or case["case_id"] in args.case)
@@ -3739,6 +3762,12 @@ def flashback_grant_selftest():
 
 
 def release_schedule_selftest():
+    try:
+        lock_fixture_statistics(None, "SYSTEM")
+    except DriverError:
+        pass
+    else:
+        raise DriverError("statistics isolation accepted a foreign schema")
     cases = load_cases()
     release = json.loads(RELEASE_MANIFEST.read_text())
     for transport in ("stdio", "http"):
