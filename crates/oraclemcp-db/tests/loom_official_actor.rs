@@ -22,6 +22,8 @@
 //!   send, completion-ack wait, and loop to the next command (~lines 579-680).
 //!   The second-command model exercises that loop's re-check after the first
 //!   command's Continue acknowledgement.
+//!   An uncertain operation quarantines before publishing its reply; the
+//!   uncertainty model below observes state before acknowledging that reply.
 //! - ActorState::quarantine and close: ACTIVE -> QUARANTINED -> CLOSED
 //!   transitions (~lines 480-525).
 //! - OfficialConnectGuard::acquire and OfficialConnectSlot::drop: the
@@ -168,6 +170,37 @@ impl ActorModel {
         }
         self.resource_drops.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// Mirrors the uncertain execute result -> quarantine -> reply -> retire branch.
+/// The caller checks quarantine without publishing a completion acknowledgement.
+#[test]
+fn loom_actor_uncertain_result_quarantines_before_reply() {
+    loom::model(|| {
+        let actor = Arc::new(ActorModel::new());
+        let actor_thread = {
+            let actor = Arc::clone(&actor);
+            thread::spawn(move || {
+                actor.operations.fetch_add(1, Ordering::Relaxed);
+                actor.quarantine();
+                let mut handshake = actor.handshake.lock().unwrap();
+                handshake.reply_ready[0] = true;
+                actor.changed.notify_all();
+                drop(handshake);
+                actor.retire();
+            })
+        };
+        let mut handshake = actor.handshake.lock().unwrap();
+        while !handshake.reply_ready[0] {
+            handshake = actor.changed.wait(handshake).unwrap();
+        }
+        assert_eq!(actor.state.load(Ordering::Acquire), QUARANTINED);
+        drop(handshake);
+        actor_thread.join().expect("uncertain actor retires");
+        assert_eq!(actor.state.load(Ordering::Acquire), QUARANTINED);
+        assert_eq!(actor.operations.load(Ordering::Acquire), 1);
+        assert_eq!(actor.resource_drops.load(Ordering::Acquire), 1);
+    });
 }
 
 /// Caller cancellation races reply completion. Exactly one valid outcome

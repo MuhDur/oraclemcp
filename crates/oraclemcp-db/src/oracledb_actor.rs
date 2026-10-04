@@ -642,6 +642,14 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
             let _ = reply.send_blocking(ActorReply::DeadlineExceeded);
             break;
         }
+        if result_left_session_uncertain {
+            // Quarantine before waking the caller; no further admission needs an ack.
+            state.quarantine(
+                "official Oracle actor operation left the physical session state uncertain",
+            );
+            let _ = reply.send_blocking(ActorReply::Completed(result));
+            break;
+        }
         if reply.send_blocking(ActorReply::Completed(result)).is_err() {
             if !dispose_after_reply {
                 state.quarantine(
@@ -659,14 +667,6 @@ async fn run_actor_loop<Resource, Request, Reply, Factory, Execute>(
         }
         if dispose_after_reply {
             state.close();
-        }
-        if result_left_session_uncertain {
-            state.quarantine(
-                "official Oracle actor operation left the physical session state uncertain",
-            );
-            break;
-        }
-        if dispose_after_reply {
             break;
         }
     }
@@ -1388,6 +1388,98 @@ mod tests {
             guard.available_for_test(),
             2,
             "retiring stalled actors returns the guard to its exact baseline"
+        );
+    }
+
+    #[test]
+    fn uncertain_operation_error_quarantines_before_reply_under_load() {
+        const WORKERS: usize = 4;
+        const ITERATIONS_PER_WORKER: usize = 125;
+
+        struct CountedResource(Arc<AtomicUsize>);
+
+        impl Drop for CountedResource {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let executions = Arc::new(AtomicUsize::new(0));
+        let disposals = Arc::new(AtomicUsize::new(0));
+        let start = Arc::new(std::sync::Barrier::new(WORKERS));
+        let workers: Vec<_> = (0..WORKERS)
+            .map(|_| {
+                let executions = Arc::clone(&executions);
+                let disposals = Arc::clone(&disposals);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    block_on_actor(async {
+                        let cx = Cx::current().expect("test runtime installs a current Cx");
+                        for iteration in 0..ITERATIONS_PER_WORKER {
+                            let executions = Arc::clone(&executions);
+                            let disposals = Arc::clone(&disposals);
+                            let actor = BlockingConnectionActor::spawn(
+                                move || CountedResource(disposals),
+                                move |_, (), _| -> Result<(), DbError> {
+                                    executions.fetch_add(1, Ordering::SeqCst);
+                                    Err(DbError::Cancelled(
+                                        "driver timeout leaves the session state uncertain"
+                                            .to_owned(),
+                                    ))
+                                },
+                            )
+                            .expect("stress actor starts");
+                            let (reply_tx, mut reply_rx) = oneshot::channel();
+                            let (completion_tx, completion_ack) = oneshot::channel();
+                            assert!(
+                                actor
+                                    .mailbox
+                                    .send(
+                                        &cx,
+                                        ActorCommand::Call {
+                                            request: (),
+                                            deadline: None,
+                                            reply: reply_tx,
+                                            completion_ack,
+                                            dispose_after_reply: iteration % 2 == 0,
+                                        },
+                                    )
+                                    .await
+                                    .is_ok(),
+                                "stress operation admitted"
+                            );
+
+                            assert!(matches!(
+                                reply_rx.recv(&cx).await,
+                                Ok(ActorReply::Completed(Err(DbError::Cancelled(_))))
+                            ));
+                            // Withhold the completion acknowledgement so the old
+                            // reply -> ack -> quarantine order fails deterministically.
+                            // Both ordinary and terminal operations must publish
+                            // uncertainty before the caller can observe the error.
+                            assert!(actor.is_quarantined_for_test());
+                            assert!(matches!(
+                                actor.call(&cx, ()).await,
+                                Err(DbError::Quarantined { .. })
+                            ));
+                            let _ = completion_tx.send_blocking(ActorCompletionAck::Continue);
+                            actor.join_for_test();
+                        }
+                    });
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("quarantine stress worker succeeds");
+        }
+        assert_eq!(
+            executions.load(Ordering::SeqCst),
+            WORKERS * ITERATIONS_PER_WORKER
+        );
+        assert_eq!(
+            disposals.load(Ordering::SeqCst),
+            WORKERS * ITERATIONS_PER_WORKER
         );
     }
 
