@@ -3057,11 +3057,16 @@ def run_manifest_units(work, env, output):
     release = json.loads(RELEASE_MANIFEST.read_text())
     for index, (name, command) in enumerate(manifest_unit_commands(release)):
         log = work / f"manifest-unit-{index}.log"
-        output["cargo_test_logs"].append(str(log))
         with log.open("w") as stream:
             result = subprocess.run(command, cwd=ROOT, env=env, stdout=stream,
                                     stderr=subprocess.STDOUT, timeout=600)
-        verify_manifest_unit_result(name, result.returncode, log.read_text())
+        raw = log.read_text()
+        # The CI artifact includes results.json, so preserve the unchanged
+        # output there rather than referring only to runner-local log paths.
+        output["cargo_test_output"] = output.get("cargo_test_output", "") + raw
+        if result.returncode != 0:
+            print(raw, file=sys.stderr, end="")
+        verify_manifest_unit_result(name, result.returncode, raw)
 
 
 def persist_run_results(base, output):
