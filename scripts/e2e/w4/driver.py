@@ -44,7 +44,8 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
                "call", "expect", "db_reread", "audit_expect", "on_unsupported"}
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
-                        "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner"}
+                        "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner",
+                        "environment_skips"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -59,6 +60,15 @@ CURRENT_SESSION = object()
 
 class DriverError(RuntimeError):
     pass
+
+
+RETENTION_SOURCE_SKIP = "RETENTION_SOURCE_NEWER_THAN_EXPIRED_SCN"
+
+
+class EnvironmentSkip(DriverError):
+    def __init__(self, reason):
+        super().__init__(reason["message"])
+        self.reason = reason
 
 
 def require(condition, message):
@@ -384,6 +394,10 @@ def validate_case(case, filename):
                 and case["case_id"] == "w4_diff_retention_exceeded_typed"
                 and case["tool"] == "oracle_diff" and case["level"] == "READ_ONLY",
                 "runtime retention probing is reserved for the oracle_diff retention case")
+    if "environment_skips" in case:
+        require(case.get("runtime_retention_probe") is True
+                and case["environment_skips"] == [RETENTION_SOURCE_SKIP],
+                "environment skip must be declared only for the retention source age limitation")
     if "flashback_grant_owner" in case:
         require(case["flashback_grant_owner"] is True
                 and case["case_id"] == "w4_diff_as_of_scn_detects_change"
@@ -2344,10 +2358,61 @@ def manifest_enforcement_integration():
 
 
 def summary_table(rows):
-    table = collections.defaultdict(lambda: collections.defaultdict(lambda: {"pass": 0, "fail": 0}))
+    table = collections.defaultdict(lambda: collections.defaultdict(lambda: {"pass": 0, "fail": 0, "skip": 0}))
     for row in rows:
         table[row["tool"]][row["transport"]][row["verdict"]] += 1
     return {tool: dict(transports) for tool, transports in sorted(table.items())}
+
+
+def environment_skip_row(case, transport, lane, reason):
+    require(reason["code"] in case.get("environment_skips", []),
+            f"undeclared environment skip for {case['case_id']}")
+    require(reason["code"] == RETENTION_SOURCE_SKIP
+            and reason.get("candidates")
+            and all(item["external_error"].startswith("ORA-01466")
+                    for item in reason["candidates"]),
+            "retention source skip requires actual table-definition evidence")
+    return {"case_id": case["case_id"], "test_id": case.get("test_id", case["case_id"]),
+            "tool": case["tool"], "level": case["level"], "lane": lane,
+            "transport": transport, "expected": case["expect"], "actual": None,
+            "verdict": "skip", "skip_reason": reason, "duration_ms": 0}
+
+
+def run_verdict(rows):
+    failed = [row["case_id"] for row in rows if row["verdict"] not in {"pass", "skip"}]
+    require(not failed, f"red W4 cases: {', '.join(failed[:12])} ({len(failed)} total)")
+    for row in rows:
+        if row["verdict"] == "skip":
+            declaration = next((case for case in load_cases()
+                                if case["case_id"] == row["case_id"]), None)
+            require(declaration is not None, "skip has no file-backed declaration")
+            environment_skip_row(declaration, row["transport"], row["lane"], row["skip_reason"])
+    return "skip" if any(row["verdict"] == "skip" for row in rows) else "pass"
+
+
+def ci_summary(results_path, summary_path, output_path):
+    results = json.loads(results_path.read_text())
+    rows = results["cases"]
+    verdict = run_verdict(rows)
+    require(results.get("verdict") == verdict, "W4 declared verdict disagrees with case results")
+    slots = collections.defaultdict(lambda: {"pass": 0, "skip": 0, "duration_ms": 0})
+    for row in rows:
+        slot = slots[row["transport"]]
+        slot[row["verdict"]] += 1
+        slot["duration_ms"] += row.get("duration_ms", 0)
+    with summary_path.open("a") as out:
+        out.write(f"W4 disposition: {verdict.upper()}\n\n")
+        out.write("| Transport | Passed cases | Skipped cases | Duration ms |\n|---|---:|---:|---:|\n")
+        for transport, slot in sorted(slots.items()):
+            out.write(f"| {transport} | {slot['pass']} | {slot['skip']} | {slot['duration_ms']} |\n")
+        for row in rows:
+            if row["verdict"] == "skip":
+                reason = row["skip_reason"]
+                out.write(f"\nSKIP {row['case_id']} ({row['transport']}): {reason['code']}: {reason['message']}\n")
+    with output_path.open("a") as out:
+        out.write(f"verdict={verdict}\n")
+    print(compact({"ci_verdict": verdict, "passed": sum(slot["pass"] for slot in slots.values()),
+                   "skipped": sum(slot["skip"] for slot in slots.values())}))
 
 
 def select_cases(file_cases, generated_cases, selected):
@@ -2381,6 +2446,8 @@ def probe_expired_retention_scn(connection):
     current_scn = cursor.execute("SELECT CURRENT_SCN FROM V$DATABASE").fetchone()[0]
     require(type(current_scn) is int and current_scn > 0,
             "V$DATABASE did not report a positive current SCN")
+    definition_errors = []
+    readable_candidates = 0
     for multiplier in (2, 4, 8, 16, 32):
         seconds = retention * multiplier
         try:
@@ -2400,8 +2467,12 @@ def probe_expired_retention_scn(connection):
             message = str(exc)
             try:
                 cursor.execute("BEGIN DBMS_FLASHBACK.DISABLE; END;")
-            except Exception:
-                pass
+            except Exception as cleanup:
+                raise DriverError("retention probe could not disable flashback") from cleanup
+            if "ORA-01466" in message:
+                definition_errors.append({"scn": scn, "seconds_past": seconds,
+                                          "external_error": message.split("\n", 1)[0]})
+                continue
             if any(code in message for code in ("ORA-01555", "ORA-08180", "ORA-08186")):
                 return {"tuned_undo_retention_seconds": retention,
                         "seconds_past": seconds, "multiplier": multiplier,
@@ -2410,6 +2481,13 @@ def probe_expired_retention_scn(connection):
             raise DriverError(f"retention candidate {scn} failed unexpectedly: {message[:180]}") from exc
         else:
             cursor.execute("BEGIN DBMS_FLASHBACK.DISABLE; END;")
+            readable_candidates += 1
+    if definition_errors and not readable_candidates:
+        raise EnvironmentSkip({
+            "code": RETENTION_SOURCE_SKIP,
+            "message": "W4_RIG.W4_RUNS is newer than every SCN tested beyond tuned undo retention "
+                       "(ORA-01466); no honest expired-SCN candidate exists on this database",
+            "tuned_undo_retention_seconds": retention, "candidates": definition_errors})
     raise DriverError("lab retained every SCN tested beyond its reported undo retention")
 
 
@@ -2492,8 +2570,13 @@ def run_lane(args):
                     and (not args.case or case["case_id"] in args.case)
                     and transport in case["transports"]
                     for case in family_cases)
-                retention_probe = (probe_expired_retention_scn(connection)
-                                   if needs_retention_probe else None)
+                retention_skip = None
+                try:
+                    retention_probe = (probe_expired_retention_scn(connection)
+                                       if needs_retention_probe else None)
+                except EnvironmentSkip as exc:
+                    retention_probe = None
+                    retention_skip = exc.reason
                 client_env = {**env, "XDG_STATE_HOME": str(state)}
                 expanded_family = ([] if args.contract_only else [
                     freshen_vsql_marker(expand_case(case, fixture_id, transport, args.lane)) for case in family_cases
@@ -2549,6 +2632,9 @@ def run_lane(args):
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
+                    if case.get("runtime_retention_probe") and retention_skip is not None:
+                        rows.append(environment_skip_row(case, transport, args.lane, retention_skip))
+                        continue
                     variant = case.get("profile_variant")
                     desired_profile = (args.lane + "_raw" if variant == "synthetic_raw"
                                        else args.lane + "_licensed" if variant == "synthetic_licensed"
@@ -2629,7 +2715,8 @@ def run_lane(args):
         if args.case:
             missing = set(args.case) - selected_case_ids
             require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
-        output = {"lane": args.lane, "checkout_sha": checkout_sha,
+        verdict = run_verdict(rows)
+        output = {"lane": args.lane, "verdict": verdict, "checkout_sha": checkout_sha,
                   "binary_source_sha": args.binary_source_sha or (checkout_sha if built_here else None),
                   "binary_sha256": binary_sha256,
                   "fixture_runs": fixture_runs,
@@ -2647,14 +2734,13 @@ def run_lane(args):
                 enforce_manifest(results_path, args.lane, transport, capabilities)
         if (not args.contract_only and not args.case) or args.coverage_report:
             verify_coverage(descriptors, family_cases)
-        failed = [row["case_id"] for row in rows if row["verdict"] != "pass"]
-        require(not failed, f"red W4 cases: {', '.join(failed[:12])} ({len(failed)} total)")
         print(compact({"lane": args.lane, "registry_count": len(descriptors),
-                       "cases": len(rows), "verdict": "pass", "results": str(results_path)}))
+                       "cases": len(rows), "verdict": verdict, "results": str(results_path)}))
     finally:
         connection.close()
 
 
+def retention_probe_selftest():
     class RetentionProbeConnection:
         """Unit-only cursor covering timestamp history errors, not live proof."""
         def __init__(self, timestamp_error):
@@ -2705,7 +2791,91 @@ def run_lane(args):
         raise DriverError("retention timestamp probe accepted an unexpected error")
     print(compact({"selftest": "retention_timestamp_unexpected_error_refused",
                    "verdict": "pass"}))
+
+    class FlashbackConnection(RetentionProbeConnection):
+        def __init__(self, errors):
+            super().__init__(None)
+            self.errors = iter(errors)
+            self.disabled = 0
+
+        def execute(self, sql, binds=()):
+            if "TIMESTAMP_TO_SCN" in sql:
+                self.timestamp_seconds.append(binds[0])
+                self.row = (9000 - len(self.timestamp_seconds),)
+                return self
+            if "SELECT COUNT(*) FROM W4_RIG.W4_RUNS" in sql:
+                error = next(self.errors)
+                if error:
+                    raise RuntimeError(error)
+                self.row = (0,)
+                return self
+            if "DBMS_FLASHBACK.DISABLE" in sql:
+                self.disabled += 1
+            return super().execute(sql, binds)
+
+    definition_error = "ORA-01466: unable to read data - table definition has changed"
+    connection = FlashbackConnection([definition_error] * 5)
+    try:
+        probe_expired_retention_scn(connection)
+    except EnvironmentSkip as exc:
+        reason = exc.reason
+        require(reason["code"] == RETENTION_SOURCE_SKIP and len(reason["candidates"]) == 5
+                and connection.disabled == 5 and "scn_a" not in reason,
+                "table definition errors were promoted into retention proof")
+    else:
+        raise DriverError("ORA-01466 incorrectly produced retention proof")
+    case = next(case for case in load_cases() if case.get("runtime_retention_probe"))
+    row = environment_skip_row(case, "stdio", "free23", reason)
+    require(row["actual"] is None and row["verdict"] == "skip"
+            and run_verdict([row]) == "skip"
+            and summary_table([row])["oracle_diff"]["stdio"] == {"pass": 0, "fail": 0, "skip": 1},
+            "declared environment skip was counted as a pass")
+    directory = ROOT / "target/e2e/w4/selftest"
+    directory.mkdir(parents=True, exist_ok=True)
+    results_path = directory / "retention-skip-results.json"
+    summary_path = directory / "retention-skip-summary.md"
+    output_path = directory / "retention-skip-output.txt"
+    results_path.write_text(compact({"verdict": "skip", "cases": [row]}))
+    summary_path.write_text("")
+    output_path.write_text("")
+    ci_summary(results_path, summary_path, output_path)
+    require(output_path.read_text() == "verdict=skip\n"
+            and "SKIP" in summary_path.read_text() and "| stdio | 0 | 1 |" in summary_path.read_text(),
+            "CI did not declare skipped disposition and separate skip count")
+    for label, operation in (
+            ("undeclared_skip", lambda: environment_skip_row(
+                {**case, "environment_skips": []}, "stdio", "free23", reason)),
+            ("wrong_skip_evidence", lambda: environment_skip_row(
+                case, "stdio", "free23", {**reason, "candidates": [{"external_error": "ORA-01555"}]})),
+            ("skip_cannot_mask_failure", lambda: run_verdict([row, {"case_id": "planted", "verdict": "fail"}])),
+            ("skip_cannot_claim_pass", lambda: ci_summary(
+                results_path, summary_path, output_path))):
+        if label == "skip_cannot_claim_pass":
+            results_path.write_text(compact({"verdict": "pass", "cases": [row]}))
+        try:
+            operation()
+        except DriverError:
+            pass
+        else:
+            raise DriverError(f"retention selftest accepted {label}")
+    require(probe_expired_retention_scn(FlashbackConnection(
+        [definition_error, "ORA-01555: snapshot too old"]))["external_error"].startswith("ORA-01555"),
+        "a later genuine retention error did not win over a definition error")
+    for errors in ([None] * 5, [definition_error, None, None, None, None],
+                   ["ORA-00942: table or view does not exist"]):
+        try:
+            probe_expired_retention_scn(FlashbackConnection(errors))
+        except EnvironmentSkip:
+            raise DriverError("readable or unexpectedly failing source was incorrectly skipped")
+        except DriverError:
+            pass
+        else:
+            raise DriverError("non-expired or unexpectedly failing source produced retention proof")
+    print(compact({"selftest": "retention_definition_age_declared_skip_and_negatives", "verdict": "pass"}))
+
+
 def selftest():
+    retention_probe_selftest()
     load_cases()
     expected_live_ids = {
         "w4_get_source_argument_class": "rel012_i38_argument_class",
@@ -3148,6 +3318,7 @@ def selftest():
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selftest", action="store_true")
+    parser.add_argument("--ci-summary", type=Path, help="validate W4 disposition and write CI pass/skip summary")
     parser.add_argument("--manifest-enforcement-integration", action="store_true")
     parser.add_argument("--lane", choices=("free23", "xe18", "xe21"))
     parser.add_argument("--binary", type=Path)
@@ -3163,7 +3334,10 @@ def main():
         require(not (args.case and args.contract_only), "--case and --contract-only cannot be combined")
         require(not args.binary_source_sha or re.fullmatch(r"[0-9a-f]{40}", args.binary_source_sha),
                 "--binary-source-sha needs a full Git SHA")
-        if args.selftest:
+        if args.ci_summary:
+            ci_summary(args.ci_summary, Path(os.environ["GITHUB_STEP_SUMMARY"]),
+                       Path(os.environ["GITHUB_OUTPUT"]))
+        elif args.selftest:
             selftest()
         elif args.manifest_enforcement_integration:
             manifest_enforcement_integration()

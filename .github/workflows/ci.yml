@@ -986,8 +986,9 @@ jobs:
 
   oracle-free23-w4:
     name: Oracle FREE 23ai W4
-    # Advisory until .9.5-.9.9 and oraclemcp-zw03u close; then make this required.
-    continue-on-error: true
+    # Real failures remain red; a declared fixture limitation is reported as SKIP.
+    outputs:
+      w4-verdict: ${{ steps.w4-summary.outputs.verdict }}
     needs: web-build
     runs-on: ubuntu-latest
     timeout-minutes: 25
@@ -1055,6 +1056,7 @@ jobs:
           set -euo pipefail
           bash scripts/e2e/w4.sh --log --lane free23 --binary target/debug/oraclemcp
       - name: Validate FREE 23ai W4 verdict and summarize duration
+        id: w4-summary
         if: always()
         run: |
           set -euo pipefail
@@ -1073,21 +1075,7 @@ jobs:
           done
           python3 scripts/e2e/cases/validate_manifest.py --check-results "$results" --lane free23 --transport stdio "${manifest_args[@]}"
           python3 scripts/e2e/cases/validate_manifest.py --check-results "$results" --lane free23 --transport http "${manifest_args[@]}"
-          python3 - "$results" "$GITHUB_STEP_SUMMARY" <<'PY'
-          import json, sys
-          results, summary = map(__import__('pathlib').Path, sys.argv[1:])
-          rows = json.loads(results.read_text())['cases']
-          by_transport = {}
-          for row in rows:
-              transport = row['transport']
-              slot = by_transport.setdefault(transport, [0, 0])
-              slot[0] += 1
-              slot[1] += row.get('duration_ms', 0)
-          with summary.open('a') as out:
-              out.write('| W4 family | Transport | Passed cases | Duration ms |\\n|---|---|---:|---:|\\n')
-              for transport, (cases, duration) in sorted(by_transport.items()):
-                  out.write(f'| base | {transport} | {cases} | {duration} |\\n')
-          PY
+          python3 scripts/e2e/w4/driver.py --ci-summary "$results"
       - uses: actions/upload-artifact@v7
         if: always()
         with:

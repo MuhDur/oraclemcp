@@ -61,4 +61,20 @@ if [ "${ORACLEMCP_LIVE_XE:-}" != 1 ]; then
   e2e_finish_skip "set ORACLEMCP_LIVE_XE=1 for live W4 lab"
 fi
 e2e_run_command act "$python" "${args[@]}"
+skip_reason="$("$python" - "$ROOT/target/e2e/w4/$lane/results.json" <<'PY'
+import json
+import sys
+
+results = json.load(open(sys.argv[1]))
+if results.get("verdict") == "skip":
+    reasons = {row["skip_reason"]["message"] for row in results["cases"]
+               if row["verdict"] == "skip"}
+    if not reasons:
+        raise RuntimeError("W4 skip has no declared environment reason")
+    print("; ".join(sorted(reasons)))
+elif results.get("verdict") != "pass":
+    raise RuntimeError("W4 returned success without a pass or declared skip verdict")
+PY
+)"
+[ -z "$skip_reason" ] || e2e_finish_skip "$skip_reason"
 e2e_finish_pass
