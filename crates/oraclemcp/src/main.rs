@@ -25,9 +25,13 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod audit_evidence;
 mod audit_report;
+mod broker_service;
 mod cli_audit_report;
 mod discover;
 mod readiness;
+#[cfg(test)]
+use broker_service::broker_exit_code;
+use broker_service::{run_broker, run_stdio_broker_proxy};
 mod robot_docs;
 mod selftest;
 mod service_lifecycle;
@@ -222,7 +226,7 @@ fn main() -> ExitCode {
             profile,
             strict_custom_tools,
             http,
-            robot_json,
+            (robot_json, None),
         ),
         Command::Info => run_info(robot_json),
         Command::Doctor { args } => match args.command {
@@ -3618,448 +3622,6 @@ fn effective_http_allow_remote(config_allow_remote: bool) -> bool {
     config_allow_remote || http_allow_remote_from_env()
 }
 
-fn attach_or_spawn_broker(
-    store: &FileStore,
-    request: &oraclemcp::broker::AttachRequest,
-    auth: &StdioAuthPolicy,
-    strict_custom_tools: bool,
-) -> Result<oraclemcp::broker::AttachedStream, ErrorEnvelope> {
-    match oraclemcp::broker::attach(store, request) {
-        Ok(stream) => return Ok(stream),
-        Err(error) if error.error_class != ErrorClass::Transient => return Err(error),
-        Err(_) => {}
-    }
-    let binary = std::env::current_exe()
-        .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
-    let mut command = std::process::Command::new(binary);
-    command
-        .arg("broker")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null());
-    match auth {
-        StdioAuthPolicy::Disabled => {
-            command.arg("--allow-no-auth");
-        }
-        StdioAuthPolicy::Required { expected } => {
-            command.env(oraclemcp_core::init_token::STDIO_TOKEN_ENV, expected);
-        }
-    }
-    if strict_custom_tools {
-        command.arg("--strict-custom-tools");
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x00000008 | 0x00000200);
-    }
-    let mut child = command.spawn().map_err(|e| {
-        ErrorEnvelope::new(
-            ErrorClass::Transient,
-            format!("cannot spawn local broker: {e}"),
-        )
-    })?;
-    // Attachment may succeed before a losing election child exits. Retain its
-    // handle in a reaper instead of dropping it and leaving a zombie for the
-    // whole lifetime of this proxy. Waiting for the winning detached broker
-    // happens on this thread too, without delaying MCP traffic.
-    std::thread::spawn(move || {
-        if let Err(error) = child.wait() {
-            tracing::warn!(%error, "failed to reap spawned broker process");
-        }
-    });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match oraclemcp::broker::attach(store, request) {
-            Ok(stream) => return Ok(stream),
-            Err(error)
-                if error.error_class != ErrorClass::Transient
-                    || std::time::Instant::now() >= deadline =>
-            {
-                return Err(error);
-            }
-            Err(_) => {}
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
-}
-
-fn run_stdio_broker_proxy(
-    config: &OracleMcpConfig,
-    auth: &StdioAuthPolicy,
-    profile: Option<String>,
-    strict_custom_tools: bool,
-) -> ExitCode {
-    use std::io::{BufRead, Read, Write};
-    use std::sync::mpsc;
-    enum Event {
-        Client(Vec<u8>),
-        ClientClosed,
-        Broker(u64, Vec<u8>),
-        BrokerClosed(u64),
-    }
-    fn write_refusal(
-        writer: &mut impl Write,
-        id: &serde_json::Value,
-        tool: bool,
-        error: &ErrorEnvelope,
-    ) -> Result<(), ErrorEnvelope> {
-        let result = if tool {
-            serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"isError":true,"content":[{"type":"text","text":serde_json::to_string(error).unwrap_or_default()}],"structuredContent":error}})
-        } else {
-            serde_json::json!({"jsonrpc":"2.0","id":id,"error":{"code":-32000,"message":error.message,"data":error}})
-        };
-        serde_json::to_writer(&mut *writer, &result)
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
-        writer
-            .write_all(b"\n")
-            .and_then(|()| writer.flush())
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))
-    }
-    let result = (|| -> Result<(), ErrorEnvelope> {
-        let policy = serde_json::to_string(&(auth, strict_custom_tools))
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
-        let identity = oraclemcp::broker::BrokerIdentity::from_config(config, &policy)?;
-        let store = FileStore::open_default()
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
-        let (events, received) = mpsc::sync_channel(32);
-        let client_events = events.clone();
-        std::thread::spawn(move || {
-            let mut stdin = std::io::stdin().lock();
-            loop {
-                let mut frame = Vec::new();
-                match (&mut stdin)
-                    .take(1024 * 1024 + 1)
-                    .read_until(b'\n', &mut frame)
-                {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) if frame.len() > 1024 * 1024 => break,
-                    Ok(_) => {
-                        if client_events.send(Event::Client(frame)).is_err() {
-                            return;
-                        }
-                    }
-                }
-            }
-            let _ = client_events.send(Event::ClientClosed);
-        });
-        let mut stdout = std::io::stdout().lock();
-        let mut attached = None;
-        let mut generation = 0_u64;
-        let mut recovery_used = false;
-        let mut initialization: Option<Vec<u8>> = None;
-        let mut initialized = false;
-        let mut request = oraclemcp::broker::AttachRequest {
-            identity,
-            profile,
-            client_info: serde_json::Value::Null,
-        };
-        let mut pending: HashMap<String, (serde_json::Value, bool)> = HashMap::new();
-        loop {
-            match received
-                .recv()
-                .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?
-            {
-                Event::Client(frame) => {
-                    let metadata: serde_json::Value =
-                        serde_json::from_slice(&frame).unwrap_or(serde_json::Value::Null);
-                    let id = metadata.get("id").cloned();
-                    let tool = metadata["method"] == "tools/call";
-                    if metadata["method"] == "initialize" && initialization.is_none() {
-                        request.client_info = metadata
-                            .pointer("/params/clientInfo")
-                            .cloned()
-                            .unwrap_or(serde_json::Value::Null);
-                        initialization = Some(frame.clone());
-                    }
-                    if attached.is_none() {
-                        let recovered = generation != 0;
-                        if recovered && recovery_used {
-                            let error = ErrorEnvelope::new(
-                                ErrorClass::Transient,
-                                "broker recovery exhausted; restart this MCP client; no statement was replayed",
-                            );
-                            if let Some(id) = id {
-                                write_refusal(&mut stdout, &id, tool, &error)?;
-                            }
-                            continue;
-                        }
-                        if recovered {
-                            recovery_used = true;
-                        }
-                        let mut connection = match attach_or_spawn_broker(
-                            &store,
-                            &request,
-                            auth,
-                            strict_custom_tools,
-                        ) {
-                            Ok(connection) => connection,
-                            Err(error) => {
-                                if let Some(id) = id {
-                                    write_refusal(&mut stdout, &id, tool, &error)?;
-                                }
-                                continue;
-                            }
-                        };
-                        if recovered
-                            && initialized
-                            && let Some(init) = &initialization
-                            && let Err(error) =
-                                oraclemcp::broker::reinitialize(&mut connection, init)
-                        {
-                            if let Some(id) = id {
-                                write_refusal(&mut stdout, &id, tool, &error)?;
-                            }
-                            continue;
-                        }
-                        generation += 1;
-                        let reader_generation = generation;
-                        let broker_events = events.clone();
-                        let mut reader = connection.reader;
-                        std::thread::spawn(move || {
-                            loop {
-                                let mut response = Vec::new();
-                                match (&mut reader)
-                                    .take(16 * 1024 * 1024 + 1)
-                                    .read_until(b'\n', &mut response)
-                                {
-                                    Ok(0) | Err(_) => break,
-                                    Ok(_) if response.len() > 16 * 1024 * 1024 => break,
-                                    Ok(_) => {
-                                        if broker_events
-                                            .send(Event::Broker(reader_generation, response))
-                                            .is_err()
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                            let _ = broker_events.send(Event::BrokerClosed(reader_generation));
-                        });
-                        attached = Some(connection.writer);
-                    }
-                    if metadata["method"] == "notifications/initialized" {
-                        initialized = true;
-                    }
-                    if let Some(id) = id {
-                        pending.insert(id.to_string(), (id, tool));
-                    }
-                    let write_result = attached
-                        .as_mut()
-                        .expect("attached above")
-                        .write_all(&frame)
-                        .and_then(|()| attached.as_mut().expect("attached above").flush());
-                    if write_result.is_err() {
-                        let _ = events.try_send(Event::BrokerClosed(generation));
-                    }
-                }
-                Event::Broker(current, frame) if current == generation => {
-                    if let Ok(metadata) = serde_json::from_slice::<serde_json::Value>(&frame)
-                        && let Some(id) = metadata.get("id")
-                    {
-                        pending.remove(&id.to_string());
-                    }
-                    stdout
-                        .write_all(&frame)
-                        .and_then(|()| stdout.flush())
-                        .map_err(|e| ErrorEnvelope::new(ErrorClass::Transient, e.to_string()))?;
-                }
-                Event::ClientClosed => return Ok(()),
-                Event::BrokerClosed(current) if current == generation => {
-                    attached = None;
-                    let error = ErrorEnvelope::new(
-                        ErrorClass::Transient,
-                        "local broker connection lost; statement fate may be unknown; no statement was replayed; session elevations and transactions are lost",
-                    );
-                    for (_, (id, tool)) in pending.drain() {
-                        write_refusal(&mut stdout, &id, tool, &error)?;
-                    }
-                }
-                Event::Broker(_, _) | Event::BrokerClosed(_) => {}
-            }
-        }
-    })();
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!(
-                "oraclemcp proxy: {:?}: {}",
-                error.error_class, error.message
-            );
-            ExitCode::from(2)
-        }
-    }
-}
-
-fn run_broker(allow_no_auth: bool, strict_custom_tools: bool) -> ExitCode {
-    let _telemetry = oraclemcp_telemetry::init_telemetry("info", OtlpConfig::from_env());
-    let result = (|| -> Result<(), ErrorEnvelope> {
-        let config = OracleMcpConfig::load(None)
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;
-        let auth = StdioAuthPolicy::resolve(
-            std::env::var(oraclemcp_core::init_token::STDIO_TOKEN_ENV).ok(),
-            allow_no_auth,
-        )
-        .map_err(|e| ErrorEnvelope::new(ErrorClass::PolicyDenied, e.to_string()))?;
-        let policy = serde_json::to_string(&(&auth, strict_custom_tools))
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
-        let identity = oraclemcp::broker::BrokerIdentity::from_config(&config, &policy)?;
-        let store = FileStore::open_default()
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
-        let broker = oraclemcp::broker::BrokerListener::bind(&store, identity)?;
-        let owner = broker.owner();
-        let resolver: Arc<dyn SecretResolver> = Arc::new(SystemSecretResolver);
-        let ceiling = max_reachable_write_ceiling(&config, &default_read_only_level());
-        let auditor = open_auditor(
-            &config.audit,
-            &default_read_only_level(),
-            ceiling,
-            resolver.as_ref(),
-        )
-        .map_err(|e| {
-            let (code, message) = e.into_pair();
-            ErrorEnvelope::new(
-                ErrorClass::RuntimeStateRequired,
-                format!("{code}: {message}"),
-            )
-        })?;
-        let write_intents =
-            build_write_intent_log(ceiling, Some(&owner)).map_err(|(code, message)| {
-                ErrorEnvelope::new(ErrorClass::Internal, format!("{code}: {message}"))
-            })?;
-        let cost_budgets =
-            build_query_cost_budget_store(has_cumulative_query_cost_budget(&config), Some(&owner))
-                .map_err(|(code, message)| {
-                    ErrorEnvelope::new(ErrorClass::Internal, format!("{code}: {message}"))
-                })?;
-        let reservations = Arc::new(Mutex::new(HashSet::new()));
-        broker.serve(
-            oraclemcp::broker::IDLE_TIMEOUT,
-            move |reader, writer, peer| {
-                let selected = select_runtime_profile_from_config(&config, peer.profile.as_deref())
-                    .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;
-                let (plan, profile, level, timeout, max_cost, budget, masking, sql_policy) =
-                    match selected {
-                        Some(selected) => (
-                            RuntimeConnectionPlan::Profile(selected.name.clone()),
-                            Some(selected.name),
-                            selected.level,
-                            selected.request_timeout,
-                            selected.max_query_cost,
-                            selected.cumulative_query_cost_budget,
-                            selected.result_masking,
-                            selected.sql_policy,
-                        ),
-                        None => (
-                            RuntimeConnectionPlan::Default,
-                            None,
-                            default_read_only_level(),
-                            OracleConnectOptions::default().call_timeout,
-                            None,
-                            None,
-                            None,
-                            None,
-                        ),
-                    };
-                // Validate this profile's protected-key policy without opening
-                // a second writer. The broker alone owns the already armed sink.
-                resolve_audit_keyring(&config.audit, level.is_protected(), resolver.as_ref())
-                    .map_err(|(code, message)| {
-                        ErrorEnvelope::new(ErrorClass::PolicyDenied, format!("{code}: {message}"))
-                    })?;
-                let custom = load_custom_catalog_for_snapshot(
-                    &config,
-                    profile.as_deref(),
-                    &level,
-                    strict_custom_tools,
-                )?;
-                let exports = Arc::new(ExportRegistry::new());
-                let max_level = level.max_level();
-                let connections =
-                    open_runtime_connection_plan(plan, &config, true, resolver.as_ref());
-                let mut wiring = dispatcher_wiring(
-                    profile,
-                    level,
-                    ServerBuildOptions {
-                        custom_catalog: custom.catalog,
-                        strict_custom_tools,
-                        auditor: auditor.clone(),
-                        write_intents: write_intents.clone(),
-                        secret_resolver: resolver.clone(),
-                        request_timeout: timeout,
-                        max_query_cost: max_cost,
-                        cumulative_query_cost_budget: budget,
-                        query_cost_budgets: cost_budgets.clone(),
-                        result_masking: masking,
-                        sql_policy,
-                        profile_drain: ProfileDrainState::from_config(config.clone()),
-                        unsigned_refusal_log: unsigned_refusal_trail_enabled(
-                            auditor.is_some(),
-                            config.audit.unsigned_refusal_log,
-                        ),
-                    },
-                    &exports,
-                );
-                wiring.edition_creation_reservations = reservations.clone();
-                let subject = AuditSubject::new(
-                    "stdio-broker",
-                    format!("{}:session:{}", peer.peer_identity, peer.session_id),
-                )
-                .with_authn_method("local-ipc")
-                .with_client_id(peer.client_info.to_string());
-                let dispatcher =
-                    build_oracle_dispatcher(connections.session, connections.stateless, &wiring)
-                        .with_default_audit_subject(subject);
-                let dispatch: Arc<dyn ToolDispatch> =
-                    Arc::new(LaneRuntime::spawn_default_with_panic_auditor(
-                        "served-broker-stdio",
-                        Arc::new(dispatcher),
-                        auditor.clone(),
-                    ));
-                let server = server_shell(
-                    max_level,
-                    ServerTransportMode::Stdio,
-                    custom.skipped,
-                    dispatch,
-                    exports,
-                );
-                let served = server.serve_stdio_with_io(reader, writer, &auth);
-                let closed = server.close_blocking(DispatchCloseReason::ServerShutdown);
-                served.map_err(|e| ErrorEnvelope::new(ErrorClass::Transient, e.to_string()))?;
-                closed
-            },
-        )
-    })();
-    broker_exit_code(result)
-}
-
-fn broker_exit_code(result: Result<(), ErrorEnvelope>) -> ExitCode {
-    match result {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error)
-            if error.error_class == ErrorClass::Transient
-                && error.message.starts_with("ORACLEMCP_BROKER_OWNER_LOCKED:") =>
-        {
-            // A racing candidate is done once another broker owns the root.
-            // Its proxy attaches to that winner; this is normal startup.
-            tracing::debug!("another broker won the local service election");
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            eprintln!(
-                "oraclemcp broker: {:?}: {}",
-                error.error_class, error.message
-            );
-            ExitCode::from(2)
-        }
-    }
-}
-
 fn run_serve(
     listen: Option<String>,
     allow_no_auth: bool,
@@ -4067,9 +3629,25 @@ fn run_serve(
     profile: Option<String>,
     strict_custom_tools: bool,
     http: HttpServeArgs,
-    robot_json: bool,
+    runtime: (bool, Option<broker_service::HttpService>),
 ) -> ExitCode {
-    let secret_resolver: Arc<dyn SecretResolver> = Arc::new(SystemSecretResolver);
+    let (robot_json, broker_http) = runtime;
+    if let Some(address) = listen.as_deref()
+        && broker_http.is_none()
+    {
+        return broker_service::run_http_proxy(
+            address,
+            allow_no_auth,
+            profile,
+            strict_custom_tools,
+            http,
+            robot_json,
+        );
+    }
+    let secret_resolver: Arc<dyn SecretResolver> = broker_http.as_ref().map_or_else(
+        || Arc::new(SystemSecretResolver) as Arc<dyn SecretResolver>,
+        |http| http.resolver.clone(),
+    );
     // D1 observability: install the JSON stderr logger plus — when an OTLP
     // endpoint is configured via OTEL_EXPORTER_OTLP_* (off by default) — the OTLP
     // logs + traces export layers. The guard owns the background export pump; it
@@ -4083,7 +3661,10 @@ fn run_serve(
     // Load one validated startup snapshot. Every profile connection, level,
     // exposure decision, custom-tool policy, and audit prerequisite below is
     // derived from this exact value; runtime paths never re-read the file.
-    let full_config = match OracleMcpConfig::load(None) {
+    let full_config = match broker_http.as_ref().map_or_else(
+        || OracleMcpConfig::load(None),
+        |http| Ok(http.shared.config.clone()),
+    ) {
         Ok(cfg) => cfg,
         Err(e) => {
             emit_status_error(
@@ -4163,12 +3744,27 @@ fn run_serve(
         Ok(catalog) => catalog,
         Err(e) => {
             if let Some((tool, reason)) = custom_tool_signature_failure(&e)
-                && let Err(record_error) = record_startup_custom_tool_signature_rejection(
-                    &full_config,
-                    &level,
-                    secret_resolver.as_ref(),
-                    &tool,
-                    reason,
+                && let Err(record_error) = broker_http.as_ref().map_or_else(
+                    || {
+                        record_startup_custom_tool_signature_rejection(
+                            &full_config,
+                            &level,
+                            secret_resolver.as_ref(),
+                            &tool,
+                            reason,
+                        )
+                    },
+                    |service| {
+                        record_custom_tool_signature_rejection(
+                            service.shared.auditor.as_ref(),
+                            unsigned_refusal_trail_enabled(
+                                service.shared.auditor.is_some(),
+                                full_config.audit.unsigned_refusal_log,
+                            ),
+                            &tool,
+                            reason,
+                        )
+                    },
                 )
             {
                 emit_status_error(
@@ -4296,57 +3892,10 @@ fn run_serve(
         }
         // ── Streamable HTTP transport (--listen) ───────────────────────────
         Some(addr) => {
-            // #51, HTTP: the listener comes up and answers `initialize` and
-            // `tools/list` even while another instance holds the audit log or
-            // the service-state owner. The locks are tried here in the stdio
-            // opener's order (audit, then owner) so two instances can never
-            // each hold the lock the other waits for. What they gate waits in
-            // the deferred opener below; a genuinely fatal refusal still
-            // exits 2 before the transport.
-            let mut startup_lock: Option<StartupLock> = None;
-            let startup_auditor = match open_auditor(
-                &full_config.audit,
-                &level,
-                reachable_ceiling,
-                secret_resolver.as_ref(),
-            ) {
-                Ok(auditor) => Some(auditor),
-                Err(StartupError::Locked(lock)) => {
-                    startup_lock = Some(lock);
-                    None
-                }
-                Err(error) => {
-                    let (code, message) = error.into_pair();
-                    emit_status_error(robot_json, code, &message);
-                    return ExitCode::from(2);
-                }
-            };
-            // HTTP always needs the service-state owner (write intents,
-            // budgets and the operator stores).
-            let startup_owner = if startup_lock.is_none() {
-                match build_service_owner(true) {
-                    Ok(Some(owner)) => Some(owner),
-                    Ok(None) => {
-                        emit_status_error(
-                            robot_json,
-                            "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
-                            "HTTP service state owner was not initialized",
-                        );
-                        return ExitCode::from(2);
-                    }
-                    Err(StartupError::Locked(lock)) => {
-                        startup_lock = Some(lock);
-                        None
-                    }
-                    Err(error) => {
-                        let (code, message) = error.into_pair();
-                        emit_status_error(robot_json, code, &message);
-                        return ExitCode::from(2);
-                    }
-                }
-            } else {
-                None
-            };
+            let shared_http = broker_http.as_ref().expect("HTTP runs in its root broker");
+            let startup_lock: Option<StartupLock> = None;
+            let startup_auditor = Some(shared_http.shared.auditor.clone());
+            let startup_owner = Some(shared_http.shared.owner.clone());
             let mut resolved_http = match resolve_http_transport_config(
                 &full_config,
                 &http,
@@ -4400,7 +3949,7 @@ fn run_serve(
             let client_credentials_enabled = resolved_http.transport.client_credentials.is_some();
             let auth_enabled =
                 oauth_enabled || resolved_http.mtls_required || client_credentials_enabled;
-            let allow_remote = effective_http_allow_remote(resolved_http.allow_remote);
+            let allow_remote = resolved_http.allow_remote || shared_http.allow_remote_from_env;
             if let Err((code, message)) = http_listen_guard(
                 allow_no_auth,
                 auth_enabled,
@@ -4496,38 +4045,15 @@ fn run_serve(
             let opener_drain = profile_drain.clone();
             let opener_lifecycle = Arc::clone(&session_lifecycle);
             let opener_opened = Arc::clone(&dispatch_opened);
-            let mut held_auditor = startup_auditor.clone();
-            let mut held_owner = startup_owner.clone();
+            let shared_intents = shared_http.shared.write_intents.clone();
+            let shared_budgets = shared_http.shared.cost_budgets.clone();
+            let shared_reservations = shared_http.shared.reservations.clone();
+            let opener_auditor = shared_http.shared.auditor.clone();
             let mut single_use = Some((connection_plan, custom_catalog, active_profile.clone()));
             let opener: Opener = Box::new(move || {
-                let auditor = match held_auditor.clone() {
-                    Some(auditor) => auditor,
-                    None => open_auditor(
-                        &opener_config.audit,
-                        &opener_level,
-                        reachable_ceiling,
-                        opener_resolver.as_ref(),
-                    )
-                    .map_err(StartupError::into_refusal)?,
-                };
-                held_auditor = Some(auditor.clone());
-                let owner = match held_owner.clone() {
-                    Some(owner) => owner,
-                    None => build_service_owner(true)
-                        .map_err(StartupError::into_refusal)?
-                        .ok_or_else(|| {
-                            fatal_refusal((
-                                "ORACLEMCP_SERVICE_STATE_UNAVAILABLE",
-                                "HTTP service state owner was not initialized".to_owned(),
-                            ))
-                        })?,
-                };
-                held_owner = Some(owner.clone());
-                let write_intents = build_write_intent_log(reachable_ceiling, Some(&owner))
-                    .map_err(fatal_refusal)?;
-                let query_cost_budgets =
-                    build_query_cost_budget_store(query_cost_budget_enabled, Some(&owner))
-                        .map_err(fatal_refusal)?;
+                let auditor = opener_auditor.clone();
+                let write_intents = shared_intents.clone();
+                let query_cost_budgets = shared_budgets.clone();
                 let (plan, catalog, profile) = single_use.take().ok_or_else(|| {
                     fatal_refusal((
                         "ORACLEMCP_SERVE_STATE_INVALID",
@@ -4550,7 +4076,7 @@ fn run_serve(
                         opener_resolver.as_ref(),
                     )
                 };
-                let wiring = dispatcher_wiring(
+                let mut wiring = dispatcher_wiring(
                     profile,
                     opener_level.clone(),
                     ServerBuildOptions {
@@ -4570,6 +4096,7 @@ fn run_serve(
                     },
                     &opener_exports,
                 );
+                wiring.edition_creation_reservations = shared_reservations.clone();
                 let (dispatcher, lifecycle) = transport_dispatcher(
                     connections.session,
                     connections.stateless,
@@ -4723,10 +4250,10 @@ fn run_serve(
                     .set_metrics_provider(std::sync::Arc::new(move || metrics_for_otlp.snapshot()));
             }
 
-            // Bridge SIGTERM/SIGINT → graceful drain: flips /readyz to draining
-            // and stops the accept loop. The flag is what serve_*_until watches.
-            let shutdown_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            install_shutdown_signal_bridge(&shutdown_coordinator, &shutdown_flag);
+            // The HTTP launcher owns a control stream. Its disconnect stops
+            // this listener while sibling stdio sessions keep the broker alive.
+            let shutdown_flag = shared_http.shutdown.clone();
+            let _shutdown_coordinator = shutdown_coordinator;
 
             let listener = match TcpListener::bind(&addr) {
                 Ok(listener) => listener,
@@ -4876,10 +4403,9 @@ fn run_serve(
                 }
             };
             readiness::notify_systemd_ready();
-            emit_serve_status(
-                robot_json,
+            shared_http.ready(
                 if tls_enabled { "https" } else { "http" },
-                Some(&recorded_listener),
+                &recorded_listener,
                 &advertised_tools,
             );
             let result = service_app.wait_for_transport();

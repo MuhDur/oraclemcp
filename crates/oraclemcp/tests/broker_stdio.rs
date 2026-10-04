@@ -13,7 +13,46 @@ struct Client {
 }
 impl Client {
     fn spawn(root: &Path, config: &Path, index: usize) -> Self {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+        let password =
+            std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap_or_else(|_| "offline".into());
+        Self::spawn_with_password(root, config, index, Some(&password))
+    }
+    fn spawn_with_password(
+        root: &Path,
+        config: &Path,
+        index: usize,
+        password: Option<&str>,
+    ) -> Self {
+        Self::spawn_with_auth(root, config, index, password, None, None)
+    }
+    fn spawn_with_auth(
+        root: &Path,
+        config: &Path,
+        index: usize,
+        password: Option<&str>,
+        expected_token: Option<&str>,
+        presented_token: Option<&str>,
+    ) -> Self {
+        Self::spawn_with_settings(
+            root,
+            config,
+            index,
+            password,
+            expected_token,
+            presented_token,
+            |_| {},
+        )
+    }
+    fn spawn_with_settings(
+        root: &Path,
+        config: &Path,
+        index: usize,
+        password: Option<&str>,
+        expected_token: Option<&str>,
+        presented_token: Option<&str>,
+        configure: impl FnOnce(&mut Command),
+    ) -> Self {
+        let mut command = Command::new(test_binary());
         for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
             command.env_remove(key);
         }
@@ -22,13 +61,18 @@ impl Client {
             .env("ORACLEMCP_CONFIG", config)
             .env("XDG_STATE_HOME", root.join("state"))
             .env("BROKER_TEST_KEY", "synthetic-test-key-32-bytes-minimum")
-            .env(
-                "BROKER_TEST_PASSWORD",
-                std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap_or_else(|_| "offline".into()),
-            )
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
+        if let Some(password) = password {
+            command.env("BROKER_TEST_PASSWORD", password);
+        } else {
+            command.env_remove("BROKER_TEST_PASSWORD");
+        }
+        if let Some(token) = expected_token {
+            command.env("ORACLEMCP_STDIO_TOKEN", token);
+        }
+        configure(&mut command);
         let mut process = command.spawn().unwrap();
         let input = process.stdin.take().unwrap();
         let output = process.stdout.take().unwrap();
@@ -47,7 +91,11 @@ impl Client {
             input,
             responses,
         };
-        client.send(json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":format!("broker-test-{index}"),"version":"1"}}}));
+        let mut initialize = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":format!("broker-test-{index}"),"version":"1"}}});
+        if let Some(token) = presented_token {
+            initialize["params"]["_meta"] = json!({"oraclemcp/initToken":token});
+        }
+        client.send(initialize);
         client
     }
     fn send(&mut self, frame: Value) {
@@ -67,6 +115,10 @@ impl Client {
             }
         }
     }
+}
+fn test_binary() -> std::ffi::OsString {
+    std::env::var_os("ORACLEMCP_BROKER_TEST_BINARY")
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_oraclemcp").into())
 }
 impl Drop for Client {
     fn drop(&mut self) {
@@ -326,6 +378,85 @@ fn five_clients(live: bool) {
 #[test]
 fn five_stdio_processes_auto_attach_without_a_live_database() {
     five_clients(false);
+}
+
+#[test]
+fn http_listener_does_not_inherit_stdio_remote_bind_authorization() {
+    let root = tempfile::tempdir().unwrap();
+    let path = config(root.path(), false);
+    let mut client = Client::spawn_with_settings(
+        root.path(),
+        &path,
+        0,
+        Some("offline"),
+        None,
+        None,
+        |command| {
+            command.env("ORACLEMCP_HTTP_ALLOW_REMOTE", "1");
+        },
+    );
+    assert!(client.response(1).get("result").is_some());
+    client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 1 FROM dual"}}}));
+    let response = client.response(2);
+    assert_eq!(response["result"]["isError"], true, "{response}");
+    assert_eq!(
+        response["result"]["structuredContent"]["error_class"], "CONNECTION_FAILED",
+        "{response}"
+    );
+    let mut command = Command::new(test_binary());
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
+        command.env_remove(key);
+    }
+    let mut http = command
+        .args([
+            "--json",
+            "serve",
+            "--listen",
+            "0.0.0.0:0",
+            "--allow-no-auth",
+            "--profile",
+            "shared",
+        ])
+        .env("ORACLEMCP_CONFIG", &path)
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .env("BROKER_TEST_KEY", "synthetic-test-key-32-bytes-minimum")
+        .env("BROKER_TEST_PASSWORD", "offline")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = http.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() >= deadline {
+            http.kill().unwrap();
+            http.wait().unwrap();
+            panic!("HTTP launcher must not inherit a stdio client's remote-bind authorization");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(2));
+    drop(client);
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let audit = std::fs::read_to_string(root.path().join("audit.jsonl")).unwrap();
+        if audit
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .any(|record| record["tool"] == "lane_lifecycle")
+        {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stdio close must finish auditing before fixture removal"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 #[cfg(feature = "live-xe")]
 #[test]
@@ -754,6 +885,17 @@ fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
 #[cfg(feature = "live-xe")]
 #[test]
 fn live_http_default_sessions_share_profile_capacity_across_principals() {
+    http_stdio_coexistence(false);
+}
+
+#[cfg(feature = "live-xe")]
+#[test]
+fn live_http_attaches_while_two_stdio_clients_remain_active() {
+    http_stdio_coexistence(true);
+}
+
+#[cfg(feature = "live-xe")]
+fn http_stdio_coexistence(stdio_first: bool) {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
@@ -768,12 +910,22 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
     let mut source = std::fs::read_to_string(&path).unwrap();
     source.push_str(&format!("\n[http]\njson_response = true\n[http.oauth]\nresource = {}\nallowed_issuers = [\"https://broker-test.invalid\"]\nauthorization_servers = [\"https://broker-test.invalid\"]\nhs256_secret_ref = \"env:BROKER_OAUTH_KEY\"\n", json!(resource)));
     std::fs::write(&path, source).unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    let mut stdio = Vec::new();
+    if stdio_first {
+        for index in 0..2 {
+            let mut client = Client::spawn(root.path(), &path, index);
+            assert!(client.response(1).get("result").is_some());
+            client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+            stdio.push(client);
+        }
+    }
+    let mut command = Command::new(test_binary());
     for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
         command.env_remove(key);
     }
-    let process = command
+    command
         .args([
+            "--json",
             "serve",
             "--listen",
             &address.to_string(),
@@ -790,9 +942,59 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
         .env("BROKER_OAUTH_KEY", OAUTH_KEY)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::inherit())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::inherit());
+    if stdio_first {
+        let mut wrong = command
+            .env("BROKER_TEST_PASSWORD", "synthetic-wrong-http-password")
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let status = loop {
+            if let Some(status) = wrong.try_wait().unwrap() {
+                break status;
+            }
+            if std::time::Instant::now() >= deadline {
+                wrong.kill().unwrap();
+                wrong.wait().unwrap();
+                panic!("wrong-password HTTP launcher must refuse before listening");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(status.code(), Some(2));
+        let mut errors = String::new();
+        wrong
+            .stderr
+            .take()
+            .unwrap()
+            .read_to_string(&mut errors)
+            .unwrap();
+        let error: Value = errors
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .find(|frame| frame["kind"] == "error")
+            .expect("typed HTTP credential refusal");
+        assert_eq!(error["error"]["error_class"], "POLICY_DENIED", "{error}");
+        assert!(
+            error["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ORACLEMCP_BROKER_CREDENTIAL_MISMATCH"),
+            "{error}"
+        );
+        assert!(!errors.contains("synthetic-wrong-http-password"));
+        assert!(
+            TcpStream::connect(address).is_err(),
+            "refused HTTP launcher must not bind"
+        );
+        command
+            .env(
+                "BROKER_TEST_PASSWORD",
+                std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap(),
+            )
+            .stderr(Stdio::inherit());
+    }
+    let process = command.spawn().unwrap();
     struct HttpProcess(Child);
     impl Drop for HttpProcess {
         fn drop(&mut self) {
@@ -813,6 +1015,21 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(25));
     }
+    if !stdio_first {
+        for index in 0..2 {
+            let mut client = Client::spawn(root.path(), &path, index);
+            let initialized = client.response(1);
+            assert!(
+                initialized.get("result").is_some(),
+                "HTTP owner must accept stdio: {initialized}"
+            );
+            client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+            stdio.push(client);
+        }
+    }
+    for (index, client) in stdio.iter_mut().enumerate() {
+        client.send(json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":format!("SELECT {} AS STDIO_VALUE FROM dual", 74+index)}}}));
+    }
     let request = |token: &str,
                    session: Option<&str>,
                    frame: Value|
@@ -821,8 +1038,9 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
         let session = session
             .map(|id| format!("mcp-session-id: {id}\r\n"))
             .unwrap_or_default();
+        let method = if frame.is_null() { "DELETE" } else { "POST" };
         let raw = format!(
-            "POST /mcp HTTP/1.1\r\nhost: {address}\r\nauthorization: Bearer {token}\r\n{session}mcp-protocol-version: 2025-11-25\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            "{method} /mcp HTTP/1.1\r\nhost: {address}\r\nauthorization: Bearer {token}\r\n{session}mcp-protocol-version: 2025-11-25\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
             body.len()
         );
         let mut stream = TcpStream::connect(address).unwrap();
@@ -857,7 +1075,13 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
         (
             status,
             headers,
-            serde_json::from_str(data).expect("JSON or SSE payload"),
+            if data.trim().is_empty() {
+                Value::Null
+            } else if status == 404 {
+                Value::String(data.to_owned())
+            } else {
+                serde_json::from_str(data).expect("JSON or SSE payload")
+            },
         )
     };
     let now = std::time::SystemTime::now()
@@ -865,6 +1089,7 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
         .unwrap()
         .as_secs();
     let mut sessions = Vec::new();
+    let mut tokens = Vec::new();
     for index in 0..9 {
         let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"at+jwt"}"#);
         let claims = json!({"iss":"https://broker-test.invalid","aud":resource,"exp":now+600,"iat":now,"sub":format!("principal-{index}"),"client_id":format!("http-client-{index}"),"jti":format!("test-{index}"),"scope":"oracle:admin"});
@@ -890,6 +1115,7 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
             .clone();
         assert!(sessions.iter().all(|existing| existing != &session));
         sessions.push(session.clone());
+        tokens.push(token.clone());
         let (status, headers, response) = request(
             &token,
             Some(&session),
@@ -911,4 +1137,157 @@ fn live_http_default_sessions_share_profile_capacity_across_principals() {
             assert!(headers.iter().any(|(name, _)| name == "retry-after"));
         }
     }
+    for (index, client) in stdio.iter().enumerate() {
+        let response = client.response(20);
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert!(
+            response.to_string().contains(&(74 + index).to_string()),
+            "{response}"
+        );
+        assert!(!response.to_string().contains("LOCKED"));
+    }
+    for password in [Some("synthetic-deliberately-wrong-password"), None] {
+        let client = Client::spawn_with_password(root.path(), &path, 3, password);
+        let response = client.response(1);
+        assert_eq!(
+            response["error"]["data"]["error_class"], "POLICY_DENIED",
+            "{response}"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("ORACLEMCP_BROKER_CREDENTIAL_MISMATCH"),
+            "{response}"
+        );
+        assert!(
+            !response
+                .to_string()
+                .contains("synthetic-deliberately-wrong-password")
+        );
+    }
+    for client in &mut stdio {
+        client.send(json!({"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 76 AS SURVIVING_VALUE FROM dual"}}}));
+        let response = client.response(21);
+        assert_eq!(response["result"]["isError"], false, "{response}");
+    }
+    let password = std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap();
+    for presented in [None, Some("synthetic-wrong-init-token")] {
+        let client = Client::spawn_with_auth(
+            root.path(),
+            &path,
+            4,
+            Some(&password),
+            Some("synthetic-client-token"),
+            presented,
+        );
+        let response = client.response(1);
+        assert!(
+            response.get("error").is_some(),
+            "client-local init-token gate: {response}"
+        );
+        assert!(
+            response["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("init token"),
+            "{response}"
+        );
+    }
+    let mut authenticated = Client::spawn_with_auth(
+        root.path(),
+        &path,
+        2,
+        Some(&password),
+        Some("synthetic-client-token"),
+        Some("synthetic-client-token"),
+    );
+    assert!(authenticated.response(1).get("result").is_some());
+    authenticated.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    let response = call(
+        &mut authenticated,
+        22,
+        "oracle_query",
+        json!({"sql":"SELECT 77 AS AUTHENTICATED_VALUE FROM dual"}),
+    );
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    drop(authenticated);
+    for (token, session) in tokens.iter().zip(&sessions) {
+        let (status, _, response) = request(token, Some(session), Value::Null);
+        assert_eq!(status, 202, "session close: {response}");
+        let (status, _, response) = request(
+            token,
+            Some(session),
+            json!({"jsonrpc":"2.0","id":99,"method":"tools/list"}),
+        );
+        assert_eq!(status, 404, "deleted session must be unusable: {response}");
+    }
+    drop(process);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while TcpStream::connect(address).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "HTTP launcher disconnect must stop its listener"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    for client in &mut stdio {
+        let response = call(
+            client,
+            23,
+            "oracle_query",
+            json!({"sql":"SELECT 78 AS SURVIVING_STDIO_VALUE FROM dual"}),
+        );
+        assert_eq!(
+            response["result"]["isError"], false,
+            "closing HTTP must preserve stdio: {response}"
+        );
+    }
+    drop(stdio);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let audit = std::fs::read_to_string(root.path().join("audit.jsonl")).unwrap();
+        let closed: Vec<Value> = audit
+            .lines()
+            .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+            .filter(|record| {
+                record["tool"] == "lane_lifecycle"
+                    && record["subject"]["authn_method"] == "local-ipc"
+            })
+            .collect();
+        if [0, 1, 2].into_iter().all(|index| {
+            closed.iter().any(|record| {
+                record["subject"]["client_id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains(&format!("broker-test-{index}")))
+            })
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "stdio cleanup must be audited before removing fixture directory"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let mut verify = Command::new(test_binary());
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
+        verify.env_remove(key);
+    }
+    let verified = verify
+        .args([
+            "--json",
+            "audit",
+            "verify",
+            root.path().join("audit.jsonl").to_str().unwrap(),
+        ])
+        .env("ORACLEMCP_CONFIG", &path)
+        .env("BROKER_TEST_KEY", "synthetic-test-key-32-bytes-minimum")
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "mixed audit chain verify: {}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
 }

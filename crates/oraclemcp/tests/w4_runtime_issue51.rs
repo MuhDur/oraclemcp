@@ -1,7 +1,6 @@
 //! #51 process-level proof (bead .7.7): a second `oraclemcp serve` sharing the
-//! first one's state directory auto-attaches to the local broker. HTTP still
-//! refuses a separate conflicting service owner before opening Oracle; a
-//! mismatched broker configuration is also refused before connecting.
+//! first one's state directory auto-attaches to the local broker. Both stdio
+//! and HTTP refuse a mismatched broker configuration before connecting.
 //!
 //! Both instances are the built executable, driven over its real stdio or
 //! HTTP boundary by a raw JSON-RPC client. No in-process dispatcher stands in
@@ -183,12 +182,15 @@ struct HttpInstance {
 }
 
 impl HttpInstance {
-    fn spawn(home: &SharedHome, config: &Path) -> Self {
+    fn spawn(home: &SharedHome, config: &Path, extra_env: &[(&str, &str)]) -> Self {
         let addr = TcpListener::bind("127.0.0.1:0")
             .and_then(|listener| listener.local_addr())
             .expect("reserve loopback port");
-        let mut child = home
-            .command(config)
+        let mut command = home.command(config);
+        for (key, value) in extra_env {
+            command.env(key, value);
+        }
+        let mut child = command
             .args([
                 "--json",
                 "serve",
@@ -306,12 +308,6 @@ fn handshake_ok(initialize: &Value, tools: &Value) -> bool {
         && tools["result"]["tools"]
             .as_array()
             .is_some_and(|tools| tools.iter().any(|tool| tool["name"] == "oracle_query"))
-}
-
-/// The typed refusal: names `code` and the holder pid, and says nothing ran.
-fn typed_lock(reply: &Value, code: &str, holder_pid: u32) -> bool {
-    let text = reply.to_string();
-    text.contains(code) && names_holder(&text, holder_pid) && text.contains("executed nothing")
 }
 
 /// The holder pid is a Unix-only hint: on Windows the holder's mandatory
@@ -438,23 +434,23 @@ fn stop_broker(home: &SharedHome) {
     }
 }
 
-/// HTTP service-owner variant: instance 1 (stdio, write-reachable profile)
-/// starts a broker that owns the service state. An HTTP instance sharing the state directory, with
-/// its own audit log, still listens, completes the handshake and refuses tool
-/// calls with ORACLEMCP_SERVICE_OWNER_LOCKED naming instance 1's pid. Once
-/// instance 1 exits, the next call is no longer refused by the lock.
+/// An HTTP launcher refuses a different configuration on an occupied root.
+/// After the old broker exits, the new generation can listen and serve MCP.
 #[test]
-fn w4_runtime_issue51_http_service_owner_typed_locked() {
+fn w4_runtime_issue51_http_mismatched_broker_config_is_typed() {
     let started = Instant::now();
     let home = SharedHome::new("http");
-    // Top-level keys precede every table.
-    let profile = "[[profiles]]\nname = \"w\"\n\
-                   connect_string = \"//127.0.0.1:9/I51NOSUCH\"\nusername = \"i51\"\n\
-                   credential_ref = \"env:I51_DB_PASSWORD\"\nmax_level = \"READ_WRITE\"\n\
-                   mcp_exposed = true\n";
-    let config_with = |audit_dir: &str, http: &str| {
+    let profile = r#"[[profiles]]
+name = "w"
+connect_string = "//127.0.0.1:9/I51NOSUCH"
+username = "i51"
+credential_ref = "env:I51_DB_PASSWORD"
+max_level = "READ_WRITE"
+mcp_exposed = true
+"#;
+    let config_with = |audit_dir: &str| {
         format!(
-            "default_profile = \"w\"\n\n[audit]\npath = {:?}\n\n{http}{profile}",
+            "default_profile = \"w\"\n[audit]\npath = {:?}\n{profile}",
             home.root
                 .join(audit_dir)
                 .join("audit.jsonl")
@@ -462,66 +458,72 @@ fn w4_runtime_issue51_http_service_owner_typed_locked() {
                 .to_string()
         )
     };
-    let first_config = home.config("first.toml", &config_with("a1", ""));
-    let second_config = home.config(
-        "second.toml",
-        &config_with("a2", "[http]\njson_response = true\n\n"),
-    );
+    let first_config = home.config("first.toml", &config_with("a1"));
+    let second_config = home.config("second.toml", &config_with("a2"));
     let password = [("I51_DB_PASSWORD", "i51-synthetic")];
-
     let mut first = StdioInstance::spawn(&home, &first_config, &password);
-    let (first_init, _) = first.handshake("i51-first");
-    assert!(
-        first_init.get("result").is_some(),
-        "instance 1 starts: {first_init}"
+    assert!(first.handshake("i51-first").0.get("result").is_some());
+    let stderr = second_config.with_extension("refusal.stderr");
+    let mut second = home
+        .command(&second_config)
+        .args([
+            "--json",
+            "serve",
+            "--listen",
+            "127.0.0.1:0",
+            "--allow-no-auth",
+        ])
+        .stderr(fs::File::create(&stderr).unwrap())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + REPLY_TIMEOUT;
+    let status = loop {
+        if let Some(status) = second.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            second.kill().unwrap();
+            second.wait().unwrap();
+            panic!("mismatched HTTP launcher must refuse before listening");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(2));
+    let text = fs::read_to_string(stderr).unwrap();
+    let error: Value = text
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|frame| frame["kind"] == "error")
+        .expect("typed HTTP refusal");
+    assert_eq!(
+        error["error"]["error_class"], "RUNTIME_STATE_REQUIRED",
+        "{error}"
     );
-    let holder = broker_pid(&home);
-
-    let second = HttpInstance::spawn(&home, &second_config);
-    let (init_status, initialize) = second.request(&initialize_request(1, "i51-http"));
-    let (list_status, tools) =
-        second.request(&json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}));
-    let locked = [
-        second.request(&query_call(3)),
-        second.request(&query_call(4)),
-    ];
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("ORACLEMCP_BROKER_VERSION_MISMATCH"),
+        "{error}"
+    );
+    assert!(
+        first
+            .request(&json!({"jsonrpc":"2.0","id":9,"method":"tools/list"}))
+            .get("result")
+            .is_some()
+    );
     first.kill();
     stop_broker(&home);
-    let (recovered_status, recovered) = second.request(&query_call(5));
-
-    let handshake = init_status == 200 && list_status == 200 && handshake_ok(&initialize, &tools);
-    // The typed Busy refusal maps to HTTP 429 with Retry-After on this
-    // transport; the body carries the typed code and holder pid.
-    let typed = locked.iter().all(|(status, reply)| {
-        *status == 429 && typed_lock(reply, "ORACLEMCP_SERVICE_OWNER_LOCKED", holder)
-    });
-    let unlocked = recovered_status != 429 && !any_lock(&recovered);
+    let recovered = HttpInstance::spawn(&home, &second_config, &password);
+    let (init_status, initialize) = recovered.request(&initialize_request(1, "i51-http"));
+    let (list_status, tools) =
+        recovered.request(&json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+    assert_eq!(init_status, 200);
+    assert_eq!(list_status, 200);
+    assert!(handshake_ok(&initialize, &tools), "{initialize} / {tools}");
     emit_row(
         "offline",
-        &json!({
-            "case_id": CASE_ID,
-            "manifest_case": "rel012_i51_second_instance",
-            "variant": "http_service_owner_locked",
-            "transport": "http",
-            "binary": binary().display().to_string(),
-            "holder_pid": holder,
-            "handshake_completed": handshake,
-            "typed_lock_refusals": typed,
-            "locked_http_status": locked.iter().map(|(status, _)| *status).collect::<Vec<_>>(),
-            "recovered_http_status": recovered_status,
-            "recovered_without_restart": unlocked,
-            "verdict": if handshake && typed && unlocked { "pass" } else { "fail" },
-            "duration_ms": started.elapsed().as_millis() as u64,
-        }),
-    );
-    assert!(
-        handshake,
-        "HTTP handshake while locked: {initialize} / {tools}"
-    );
-    assert!(typed, "typed owner refusal naming pid {holder}: {locked:?}");
-    assert!(
-        unlocked,
-        "no lock refusal after the holder exits: {recovered}"
+        &json!({"case_id":CASE_ID,"manifest_case":"rel012_i51_second_instance","variant":"http_broker_config_mismatch","transport":"http","typed_config_refusal":true,"new_generation_handshake":true,"verdict":"pass","duration_ms":started.elapsed().as_millis() as u64}),
     );
 }
 

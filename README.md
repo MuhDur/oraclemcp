@@ -79,6 +79,9 @@ automatically attach to one local broker that owns the audit writer and
 database pools. Each client retains its own session level, confirmation tokens,
 transaction and cancellation. The broker exits after 60 seconds without clients.
 HTTP also gives each client an isolated stateful session by default.
+HTTP and stdio clients share that same broker and state root. Each local client
+must resolve its own configured database credentials. Credentials that differ
+from the broker's receive `ORACLEMCP_BROKER_CREDENTIAL_MISMATCH` before opening a session.
 
 Or run authenticated HTTP with a shown-once bearer, and open the local dashboard through a secret-free one-time pairing URL:
 

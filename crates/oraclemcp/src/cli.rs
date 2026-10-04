@@ -426,7 +426,8 @@ pub(crate) struct ServiceRestoreCliArgs {
     pub(crate) dry_run: bool,
 }
 
-#[derive(Args, Debug, Default)]
+#[derive(Args, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HttpServeArgs {
     /// Allow this Host authority in addition to loopback authorities.
     #[arg(long = "http-allowed-host")]

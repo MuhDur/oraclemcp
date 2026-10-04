@@ -16,6 +16,7 @@ use interprocess::local_socket::GenericNamespaced;
 use interprocess::local_socket::{
     Listener, ListenerNonblockingMode, ListenerOptions, Name, Stream, prelude::*,
 };
+use oraclemcp_auth::{SecretResolver, SystemSecretResolver, resolve_secret_with};
 use oraclemcp_config::{OracleMcpConfig, read_sensitive_file};
 use oraclemcp_core::file_store::{FileStoreError, StoreId};
 use oraclemcp_core::{FileStore, ServiceOwner};
@@ -37,28 +38,110 @@ pub struct BrokerArgs {
 }
 
 /// Compatibility identity checked before any MCP frame reaches a dispatcher.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrokerIdentity {
     pub version: String,
     pub generation: String,
+    credentials: String,
+}
+
+impl std::fmt::Debug for BrokerIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BrokerIdentity")
+            .field("version", &self.version)
+            .field("generation", &self.generation)
+            .finish_non_exhaustive()
+    }
 }
 
 impl BrokerIdentity {
-    /// Profile selection is session-local; service configuration and authentication
-    /// policy must be identical for all clients of one broker.
+    /// Profile selection and init-token policy are session-local. Configuration,
+    /// custom-tool policy and resolved database credentials bind the service.
     pub fn from_config(config: &OracleMcpConfig, auth_policy: &str) -> Result<Self, ErrorEnvelope> {
+        Self::from_config_with(config, auth_policy, &SystemSecretResolver)
+    }
+
+    fn from_config_with(
+        config: &OracleMcpConfig,
+        auth_policy: &str,
+        resolver: &dyn SecretResolver,
+    ) -> Result<Self, ErrorEnvelope> {
         let mut hash = Sha256::new();
         hash.update(serde_json::to_vec(config).map_err(internal)?);
         hash.update(auth_policy.as_bytes());
+        let mut credentials = Sha256::new();
+        for profile in &config.profiles {
+            let iam_references: Vec<String> = profile
+                .oci
+                .as_ref()
+                .filter(|oci| oci.use_iam_token)
+                .map_or_else(Vec::new, |oci| {
+                    let mut references = Vec::new();
+                    if oci
+                        .token_file
+                        .as_deref()
+                        .map(str::trim)
+                        .is_none_or(str::is_empty)
+                        && oci.token_exec.as_ref().is_none_or(Vec::is_empty)
+                    {
+                        references.push(format!(
+                            "env:{}",
+                            oci.token_env
+                                .as_deref()
+                                .map(str::trim)
+                                .filter(|name| !name.is_empty())
+                                .unwrap_or(oraclemcp_core::IAM_TOKEN_ENV)
+                        ));
+                    }
+                    if let Some(name) = oci
+                        .token_key_env
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                    {
+                        references.push(format!("env:{name}"));
+                    }
+                    references
+                });
+            for reference in [
+                profile.credential_ref.as_deref(),
+                profile
+                    .oci
+                    .as_ref()
+                    .and_then(|oci| oci.wallet_password_ref.as_deref()),
+            ]
+            .into_iter()
+            .flatten()
+            .chain(iam_references.iter().map(String::as_str))
+            {
+                credentials.update((reference.len() as u64).to_be_bytes());
+                credentials.update(reference.as_bytes());
+                match resolve_secret_with(reference, profile.protected(), resolver) {
+                    Ok(secret) => {
+                        credentials.update([1]);
+                        credentials.update((secret.expose().len() as u64).to_be_bytes());
+                        credentials.update(secret.expose().as_bytes());
+                    }
+                    Err(_) => credentials.update([0]),
+                }
+            }
+        }
         Ok(Self {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             generation: hex_digest(&hash.finalize()),
+            credentials: hex_digest(&credentials.finalize()),
         })
     }
 
     pub fn require_match(&self, proxy: &Self) -> Result<(), ErrorEnvelope> {
-        if self == proxy {
+        if self.version == proxy.version && self.generation == proxy.generation {
+            if self.credentials != proxy.credentials {
+                return Err(ErrorEnvelope::new(
+                    ErrorClass::PolicyDenied,
+                    "ORACLEMCP_BROKER_CREDENTIAL_MISMATCH: this client's resolved database credentials differ from the broker's; supply the correct credentials in this client's environment",
+                ));
+            }
             return Ok(());
         }
         Err(ErrorEnvelope::new(
@@ -78,14 +161,26 @@ struct Locator {
     pid: u32,
 }
 
-/// Proxy-selected metadata. This confers no Oracle privileges: the broker resolves
-/// the profile and authenticates MCP initialize using its own configuration.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Proxy-selected metadata on the owner-only IPC channel. Session authentication
+/// remains local to this client; credential compatibility is checked before MCP.
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachRequest {
     pub identity: BrokerIdentity,
     pub profile: Option<String>,
     pub client_info: serde_json::Value,
+    pub auth: oraclemcp_core::StdioAuthPolicy,
+    pub http: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for AttachRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AttachRequest")
+            .field("identity", &self.identity)
+            .field("profile", &self.profile)
+            .field("http", &self.http.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -97,12 +192,25 @@ struct AttachReply {
 }
 
 /// Identity recorded from OS peer credentials, never a client assertion.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct PeerSession {
     pub session_id: String,
     pub peer_identity: String,
     pub client_info: serde_json::Value,
     pub profile: Option<String>,
+    pub auth: oraclemcp_core::StdioAuthPolicy,
+    pub http: Option<serde_json::Value>,
+}
+
+impl std::fmt::Debug for PeerSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PeerSession")
+            .field("session_id", &self.session_id)
+            .field("peer_identity", &self.peer_identity)
+            .field("profile", &self.profile)
+            .field("http", &self.http.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 pub struct AttachedStream {
@@ -557,6 +665,8 @@ fn accept_session(
             peer_identity,
             client_info: request.client_info,
             profile: request.profile,
+            auth: request.auth,
+            http: request.http,
         },
     ))
 }
@@ -709,6 +819,7 @@ mod tests {
         BrokerIdentity {
             version: "test-build".into(),
             generation: "test-config".into(),
+            credentials: "test-credentials".into(),
         }
     }
     fn request() -> AttachRequest {
@@ -716,6 +827,8 @@ mod tests {
             identity: identity(),
             profile: Some("synthetic".into()),
             client_info: serde_json::json!({"name":"test","version":"1"}),
+            auth: oraclemcp_core::StdioAuthPolicy::Disabled,
+            http: None,
         }
     }
 
@@ -786,6 +899,105 @@ mod tests {
         let _compatible = attach(&store, &request()).unwrap();
         worker.join().unwrap();
         assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn broker_credentials_bind_values_instead_of_environment_reference_names() {
+        let mut config = OracleMcpConfig::default();
+        config.profiles.push(
+            serde_json::from_value(serde_json::json!({
+                "name":"synthetic", "credential_ref":"env:SYNTHETIC_PASSWORD"
+            }))
+            .unwrap(),
+        );
+        let resolved = |value: Option<&'static str>| {
+            let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(move |_name: &str| {
+                value.map(str::to_owned)
+            });
+            BrokerIdentity::from_config_with(&config, "same-policy", &resolver).unwrap()
+        };
+        let broker = resolved(Some("synthetic-correct-password"));
+        assert!(
+            broker
+                .require_match(&resolved(Some("synthetic-correct-password")))
+                .is_ok()
+        );
+        for proxy in [resolved(Some("synthetic-wrong-password")), resolved(None)] {
+            assert_eq!(proxy.generation, broker.generation);
+            let error = broker.require_match(&proxy).unwrap_err();
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+            assert!(
+                error
+                    .message
+                    .contains("ORACLEMCP_BROKER_CREDENTIAL_MISMATCH")
+            );
+            assert!(!error.message.contains("synthetic-wrong-password"));
+        }
+        let debug = format!("{broker:?}");
+        assert!(!debug.contains(&broker.credentials));
+    }
+
+    #[test]
+    fn broker_ipc_credential_mismatch_refuses_before_dispatch() {
+        let root = tempfile::tempdir().unwrap();
+        let store = FileStore::open(root.path()).unwrap();
+        let broker = BrokerListener::bind(&store, identity()).unwrap();
+        let dispatched = Arc::new(AtomicUsize::new(0));
+        let observed = dispatched.clone();
+        let worker = std::thread::spawn(move || {
+            broker
+                .serve(
+                    Duration::from_millis(150),
+                    move |_reader, _writer, _peer| {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .unwrap()
+        });
+        let mut wrong = request();
+        wrong.identity.credentials = "different-credential-values".into();
+        let error = match attach(&store, &wrong) {
+            Err(error) => error,
+            Ok(_) => panic!("wrong credentials attached"),
+        };
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+        assert_eq!(dispatched.load(Ordering::SeqCst), 0);
+        let _correct = attach(&store, &request()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(dispatched.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn broker_credentials_bind_wallet_and_iam_environment_values() {
+        for profile in [
+            serde_json::json!({"name":"synthetic","oci":{"wallet_password_ref":"env:WALLET_PASSWORD"}}),
+            serde_json::json!({"name":"synthetic","oci":{"use_iam_token":true,"token_env":"IAM_TOKEN"}}),
+            serde_json::json!({"name":"synthetic","oci":{"use_iam_token":true,"token_file":"synthetic-token-file","token_key_env":"IAM_PRIVATE_KEY"}}),
+        ] {
+            let mut config = OracleMcpConfig::default();
+            config
+                .profiles
+                .push(serde_json::from_value(profile).unwrap());
+            let identity = |value: Option<&'static str>| {
+                let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(move |_name: &str| {
+                    value.map(str::to_owned)
+                });
+                BrokerIdentity::from_config_with(&config, "same-policy", &resolver).unwrap()
+            };
+            let broker = identity(Some("synthetic-correct-secret"));
+            assert!(
+                broker
+                    .require_match(&identity(Some("synthetic-correct-secret")))
+                    .is_ok()
+            );
+            for client in [identity(None), identity(Some("synthetic-wrong-secret"))] {
+                assert_eq!(
+                    broker.require_match(&client).unwrap_err().error_class,
+                    ErrorClass::PolicyDenied
+                );
+            }
+        }
     }
 
     #[test]
