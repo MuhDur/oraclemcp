@@ -6326,7 +6326,10 @@ fn consume_confirmation_grant(
             request.binding,
             request.required_level,
         )
-        .map(|_| raw_id)
+        // Separate dispatcher stores share a broker PID and restart their
+        // counters. The verified reference also binds the session/generation;
+        // its stripped raw ID alone would alias in the shared durable ledger.
+        .map(|_| confirm)
         .map_err(|e| confirmation_grant_error(e, request.suggested_tool, request.next_step))
 }
 
@@ -10468,7 +10471,7 @@ async fn compile_object_inner(
         ctx.checkpoints,
         "this compile (Oracle commits DDL implicitly)",
     )?;
-    let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
+    let confirmation_key = consume_confirmation_grant(ConfirmationGrantRequest {
         material: &action_material,
         required_level: OperatingLevel::Ddl,
         active_profile,
@@ -10488,7 +10491,7 @@ async fn compile_object_inner(
         tool_name,
         &audited_sql,
         OperatingLevel::Ddl,
-        &raw_confirm,
+        &confirmation_key,
     )?;
     let db_evidence = match collect_effect_audit_db_evidence(&ctx).await {
         Ok(evidence) => evidence,
@@ -11559,7 +11562,7 @@ async fn patch_source_inner(
         ctx.checkpoints,
         "this source patch (Oracle commits DDL implicitly)",
     )?;
-    let raw_confirm = consume_confirmation_grant(ConfirmationGrantRequest {
+    let confirmation_key = consume_confirmation_grant(ConfirmationGrantRequest {
         material: &action_material,
         required_level,
         active_profile,
@@ -11575,7 +11578,7 @@ async fn patch_source_inner(
 
     let danger_str = audit_danger_string(decision.danger);
     let write_intent_id =
-        append_write_intent(&ctx, tool_name, &patched_ddl, required_level, &raw_confirm)?;
+        append_write_intent(&ctx, tool_name, &patched_ddl, required_level, &confirmation_key)?;
     let db_evidence = match collect_effect_audit_db_evidence(&ctx).await {
         Ok(evidence) => evidence,
         Err(primary) => {
