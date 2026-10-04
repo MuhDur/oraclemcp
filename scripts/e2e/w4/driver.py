@@ -45,7 +45,7 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
                         "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner",
-                        "environment_skips"}
+                        "environment_skips", "runtime_awr_probe"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -63,6 +63,8 @@ class DriverError(RuntimeError):
 
 
 RETENTION_SOURCE_SKIP = "RETENTION_SOURCE_NEWER_THAN_EXPIRED_SCN"
+AWR_SKIP_CODES = ["AWR_PACK_NOT_ENABLED", "AWR_CATALOG_UNAVAILABLE", "AWR_NO_SNAPSHOTS",
+                  "AWR_NO_SQL_HISTORY", "AWR_TOP_SQL_HAS_NO_PLAN_HISTORY"]
 
 
 class EnvironmentSkip(DriverError):
@@ -394,10 +396,19 @@ def validate_case(case, filename):
                 and case["case_id"] == "w4_diff_retention_exceeded_typed"
                 and case["tool"] == "oracle_diff" and case["level"] == "READ_ONLY",
                 "runtime retention probing is reserved for the oracle_diff retention case")
+    if "runtime_awr_probe" in case:
+        require(case["runtime_awr_probe"] is True
+                and case["case_id"] == "w4_diagnostics_licensed_profile_serves_awr"
+                and case["tool"] == "oracle_plan_timeline"
+                and case.get("profile_variant") == "synthetic_licensed"
+                and case["level"] == "READ_ONLY",
+                "runtime AWR probing is reserved for the positive licensed AWR case")
     if "environment_skips" in case:
-        require(case.get("runtime_retention_probe") is True
-                and case["environment_skips"] == [RETENTION_SOURCE_SKIP],
-                "environment skip must be declared only for the retention source age limitation")
+        require((case.get("runtime_retention_probe") is True
+                 and case["environment_skips"] == [RETENTION_SOURCE_SKIP])
+                or (case.get("runtime_awr_probe") is True
+                    and case["environment_skips"] == AWR_SKIP_CODES),
+                "environment skip must name the exact declared retention or AWR limitation")
     if "flashback_grant_owner" in case:
         require(case["flashback_grant_owner"] is True
                 and case["case_id"] == "w4_diff_as_of_scn_detects_change"
@@ -2013,6 +2024,15 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if marker and supported:
             require(vsql_marker_count(connection, marker) == 0,
                     "V$SQL marker already present before refusal test")
+        if "kill_served_session_dml_user" in case["call"] and supported:
+            # Establish the connection's one-time capability observation before
+            # opening the killed-session audit window. The case still requires
+            # its exact baseline PENDING/SUCCEEDED pair, then no mutation audit.
+            ready = client.rpc("tools/call", {"name": "oracle_query",
+                                              "arguments": {"sql": "SELECT 1 AS C FROM dual"}})
+            verify_envelope(ready, descriptor)
+            verify_expect({"rows": [{"C": "1"}]}, ready, ROOT / "tests/golden/w4")
+            row["killed_session_setup"] = scrub(tool_payload(ready))
         before = len(audit_records(audit_path))
         captures = (run_steps(client, case, row, binary, audit_path, env, connection)
                     if "steps" in case else {})
@@ -2380,14 +2400,104 @@ def summary_table(rows):
     return {tool: dict(transports) for tool, transports in sorted(table.items())}
 
 
+def verify_awr_skip_evidence(reason):
+    code = reason["code"]
+    if code == "AWR_PACK_NOT_ENABLED":
+        require(reason.get("pack_setting") == "NONE",
+                "AWR pack skip needs the actual disabled server setting")
+    elif code == "AWR_CATALOG_UNAVAILABLE":
+        require(reason.get("catalog") in {"V$PARAMETER", "DBA_HIST_SNAPSHOT", "DBA_HIST_SQLSTAT"}
+                and reason.get("external_error", "").startswith(("ORA-00942", "ORA-01031")),
+                "AWR catalog skip needs an actual absence/privilege error")
+    else:
+        require(reason.get("pack_setting") in {"DIAGNOSTIC", "DIAGNOSTIC+TUNING"},
+                "AWR history skip needs an enabled server pack setting")
+        snapshots = reason.get("snapshot_count")
+        history = reason.get("sql_history_count")
+        require(type(snapshots) is int and snapshots >= 0,
+                "AWR history skip needs an actual snapshot count")
+        if code == "AWR_NO_SNAPSHOTS":
+            require(snapshots == 0, "AWR no-snapshot skip requires zero real snapshots")
+        elif code == "AWR_NO_SQL_HISTORY":
+            require(snapshots > 0 and type(history) is int and history == 0,
+                    "AWR empty SQL history skip requires snapshots and zero SQL rows")
+        elif code == "AWR_TOP_SQL_HAS_NO_PLAN_HISTORY":
+            require(snapshots > 0 and type(history) is int and history > 0
+                    and re.fullmatch(r"[a-z0-9]{13}", reason.get("sql_id", ""))
+                    and type(reason.get("plan_point_count")) is int
+                    and reason["plan_point_count"] == 0,
+                    "AWR plan-history skip needs an actual top SQL ID and zero matching points")
+        else:
+            raise DriverError("unknown AWR environment skip")
+
+
+def probe_awr_environment(connection):
+    """Observe prerequisites without enabling packs or creating licensed snapshots."""
+    cursor = connection.cursor()
+    evidence = {}
+    catalog = "V$PARAMETER"
+    def absent(code, message):
+        reason = {"code": code, "message": message, **evidence}
+        verify_awr_skip_evidence(reason)
+        raise EnvironmentSkip(reason)
+    try:
+        row = cursor.execute(
+            "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'").fetchone()
+        require(row and row[0] in {"NONE", "DIAGNOSTIC", "DIAGNOSTIC+TUNING"},
+                "AWR pack probe did not report a recognized server setting")
+        evidence["pack_setting"] = row[0]
+        if row[0] == "NONE":
+            absent("AWR_PACK_NOT_ENABLED", "server control_management_pack_access=NONE; AWR is not enabled")
+        catalog = "DBA_HIST_SNAPSHOT"
+        snapshots = cursor.execute("SELECT COUNT(*) FROM DBA_HIST_SNAPSHOT").fetchone()[0]
+        require(type(snapshots) is int and snapshots >= 0, "invalid AWR snapshot count")
+        evidence["snapshot_count"] = snapshots
+        if snapshots == 0:
+            absent("AWR_NO_SNAPSHOTS", "DBA_HIST_SNAPSHOT contains 0 rows; the positive AWR case has no captured snapshot interval")
+        catalog = "DBA_HIST_SQLSTAT"
+        history = cursor.execute("SELECT COUNT(*) FROM DBA_HIST_SQLSTAT").fetchone()[0]
+        require(type(history) is int and history >= 0, "invalid AWR SQL history count")
+        evidence["sql_history_count"] = history
+        if history == 0:
+            absent("AWR_NO_SQL_HISTORY", "AWR snapshots exist but DBA_HIST_SQLSTAT contains 0 rows; no historical SQL ID can be captured")
+        # Match the positive case's elapsed-time top_sql selection, then its
+        # timeline's snapshot join. AWR need not capture every cursor in a plan interval.
+        row = cursor.execute(
+            "SELECT sql_id FROM (SELECT sql_id, SUM(elapsed_time_delta) AS elapsed_time "
+            "FROM DBA_HIST_SQLSTAT GROUP BY sql_id ORDER BY elapsed_time DESC NULLS LAST) "
+            "WHERE ROWNUM <= 1").fetchone()
+        require(row and isinstance(row[0], str) and re.fullmatch(r"[a-z0-9]{13}", row[0]),
+                "AWR top SQL probe did not report a valid SQL ID")
+        evidence["sql_id"] = row[0]
+        points = cursor.execute(
+            "SELECT COUNT(*) FROM DBA_HIST_SQLSTAT s JOIN DBA_HIST_SNAPSHOT sn "
+            "ON sn.snap_id = s.snap_id AND sn.dbid = s.dbid "
+            "AND sn.instance_number = s.instance_number WHERE s.sql_id = :1", (row[0],)).fetchone()[0]
+        require(type(points) is int and points >= 0, "invalid AWR plan-point count")
+        evidence["plan_point_count"] = points
+        if points == 0:
+            absent("AWR_TOP_SQL_HAS_NO_PLAN_HISTORY", "the elapsed-time top AWR SQL ID has 0 matching snapshot intervals; its plan timeline cannot contain a point")
+        return evidence
+    except EnvironmentSkip:
+        raise
+    except Exception as exc:
+        first = str(exc).splitlines()[0]
+        if first.startswith(("ORA-00942", "ORA-01031")):
+            evidence.update({"catalog": catalog, "external_error": first})
+            absent("AWR_CATALOG_UNAVAILABLE", f"AWR prerequisite catalog {catalog} is unavailable: {first}")
+        raise
+
+
 def environment_skip_row(case, transport, lane, reason):
     require(reason["code"] in case.get("environment_skips", []),
             f"undeclared environment skip for {case['case_id']}")
-    require(reason["code"] == RETENTION_SOURCE_SKIP
-            and reason.get("candidates")
-            and all(item["external_error"].startswith("ORA-01466")
-                    for item in reason["candidates"]),
-            "retention source skip requires actual table-definition evidence")
+    if reason["code"] == RETENTION_SOURCE_SKIP:
+        require(reason.get("candidates")
+                and all(item["external_error"].startswith("ORA-01466")
+                        for item in reason["candidates"]),
+                "retention source skip requires actual table-definition evidence")
+    else:
+        verify_awr_skip_evidence(reason)
     return {"case_id": case["case_id"], "test_id": case.get("test_id", case["case_id"]),
             "tool": case["tool"], "level": case["level"], "lane": lane,
             "transport": transport, "expected": case["expect"], "actual": None,
@@ -2396,39 +2506,44 @@ def environment_skip_row(case, transport, lane, reason):
 
 def run_verdict(rows):
     failed = [row["case_id"] for row in rows if row["verdict"] not in {"pass", "skip"}]
-    require(not failed, f"red W4 cases: {', '.join(failed[:12])} ({len(failed)} total)")
     for row in rows:
         if row["verdict"] == "skip":
             declaration = next((case for case in load_cases()
                                 if case["case_id"] == row["case_id"]), None)
             require(declaration is not None, "skip has no file-backed declaration")
             environment_skip_row(declaration, row["transport"], row["lane"], row["skip_reason"])
-    return "skip" if any(row["verdict"] == "skip" for row in rows) else "pass"
+    return "fail" if failed else "skip" if any(row["verdict"] == "skip" for row in rows) else "pass"
 
 
 def ci_summary(results_path, summary_path, output_path):
     results = json.loads(results_path.read_text())
     rows = results["cases"]
     verdict = run_verdict(rows)
+    if results.get("run_failure"):
+        verdict = "fail"
     require(results.get("verdict") == verdict, "W4 declared verdict disagrees with case results")
-    slots = collections.defaultdict(lambda: {"pass": 0, "skip": 0, "duration_ms": 0})
+    slots = collections.defaultdict(lambda: {"pass": 0, "fail": 0, "skip": 0, "duration_ms": 0})
     for row in rows:
         slot = slots[row["transport"]]
         slot[row["verdict"]] += 1
         slot["duration_ms"] += row.get("duration_ms", 0)
     with summary_path.open("a") as out:
         out.write(f"W4 disposition: {verdict.upper()}\n\n")
-        out.write("| Transport | Passed cases | Skipped cases | Duration ms |\n|---|---:|---:|---:|\n")
+        out.write("| Transport | Passed cases | Failed cases | Skipped cases | Duration ms |\n|---|---:|---:|---:|---:|\n")
         for transport, slot in sorted(slots.items()):
-            out.write(f"| {transport} | {slot['pass']} | {slot['skip']} | {slot['duration_ms']} |\n")
+            out.write(f"| {transport} | {slot['pass']} | {slot['fail']} | {slot['skip']} | {slot['duration_ms']} |\n")
         for row in rows:
             if row["verdict"] == "skip":
                 reason = row["skip_reason"]
                 out.write(f"\nSKIP {row['case_id']} ({row['transport']}): {reason['code']}: {reason['message']}\n")
+        if results.get("run_failure"):
+            out.write(f"\nRun failure: {results['run_failure']['class']}: {results['run_failure']['detail']}\n")
     with output_path.open("a") as out:
         out.write(f"verdict={verdict}\n")
     print(compact({"ci_verdict": verdict, "passed": sum(slot["pass"] for slot in slots.values()),
+                   "failed": sum(slot["fail"] for slot in slots.values()),
                    "skipped": sum(slot["skip"] for slot in slots.values())}))
+    require(verdict != "fail", "W4 results contain failures")
 
 
 def select_cases(file_cases, generated_cases, selected):
@@ -2507,7 +2622,32 @@ def probe_expired_retention_scn(connection):
     raise DriverError("lab retained every SCN tested beyond its reported undo retention")
 
 
+def persist_run_results(base, output):
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "results.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
+    (base / "cases.jsonl").write_text("".join(compact(row) + "\n" for row in output["cases"]))
+
+
 def run_lane(args):
+    base = ROOT / "target/e2e/w4" / args.lane
+    output = {"lane": args.lane, "verdict": "fail", "checkout_sha": subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+        "binary_source_sha": args.binary_source_sha, "binary_sha256": None,
+        "fixture_runs": {}, "capabilities": [], "registry": [], "cases": [], "summary": {},
+        "cargo_test_logs": [str(path) for path in args.cargo_test_log],
+        "run_failure": {"class": "DriverError", "detail": "W4 run did not complete"}}
+    persist_run_results(base, output)
+    try:
+        _run_lane(args, output)
+    except BaseException as exc:
+        output["verdict"] = "fail"
+        output["summary"] = summary_table(output["cases"])
+        output["run_failure"] = {"class": type(exc).__name__, "detail": str(exc)[:240]}
+        persist_run_results(base, output)
+        raise
+
+
+def _run_lane(args, output):
     settings = load_lane(HERE / "rig.toml", args.lane)
     config = json.loads(CAPABILITIES.read_text())
     require(config.get("schema_version") == 1 and args.lane in config.get("lanes", {}),
@@ -2547,6 +2687,10 @@ def run_lane(args):
         if case["case_id"] in release_ids:
             case["test_id"] = release_ids[case["case_id"]]
     rows, descriptors, fixture_runs, selected_case_ids = [], None, {}, set()
+    output.update({"checkout_sha": checkout_sha,
+                   "binary_source_sha": args.binary_source_sha or (checkout_sha if built_here else None),
+                   "binary_sha256": binary_sha256, "fixture_runs": fixture_runs,
+                   "capabilities": sorted(capabilities), "cases": rows})
     barriers = BarrierPool()
     try:
         for transport in ("stdio", "http"):
@@ -2587,6 +2731,14 @@ def run_lane(args):
                 except EnvironmentSkip as exc:
                     retention_probe = None
                     retention_skip = exc.reason
+                awr_skip = None
+                if any(case.get("runtime_awr_probe")
+                       and (not args.case or case["case_id"] in args.case)
+                       and transport in case["transports"] for case in family_cases):
+                    try:
+                        probe_awr_environment(connection)
+                    except EnvironmentSkip as exc:
+                        awr_skip = exc.reason
                 client_env = {**env, "XDG_STATE_HOME": str(state)}
                 expanded_family = ([] if args.contract_only else [
                     freshen_vsql_marker(expand_case(case, fixture_id, transport, args.lane)) for case in family_cases
@@ -2642,6 +2794,9 @@ def run_lane(args):
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
+                    if case.get("runtime_awr_probe") and awr_skip is not None:
+                        rows.append(environment_skip_row(case, transport, args.lane, awr_skip))
+                        continue
                     if case.get("runtime_retention_probe") and retention_skip is not None:
                         rows.append(environment_skip_row(case, transport, args.lane, retention_skip))
                         continue
@@ -2728,16 +2883,13 @@ def run_lane(args):
             missing = set(args.case) - selected_case_ids
             require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
         verdict = run_verdict(rows)
-        output = {"lane": args.lane, "verdict": verdict, "checkout_sha": checkout_sha,
-                  "binary_source_sha": args.binary_source_sha or (checkout_sha if built_here else None),
-                  "binary_sha256": binary_sha256,
-                  "fixture_runs": fixture_runs,
-                  "capabilities": sorted(capabilities), "registry": sorted(descriptors),
-                  "cases": rows, "summary": summary_table(rows),
-                  "cargo_test_logs": [str(path) for path in args.cargo_test_log]}
+        output.update({"verdict": verdict, "registry": sorted(descriptors),
+                       "summary": summary_table(rows)})
+        output.pop("run_failure", None)
         results_path = base / "results.json"
-        results_path.write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
-        (base / "cases.jsonl").write_text("".join(compact(row) + "\n" for row in rows))
+        persist_run_results(base, output)
+        failed = [row["case_id"] for row in rows if row["verdict"] not in {"pass", "skip"}]
+        require(verdict != "fail", f"red W4 cases: {', '.join(failed[:12])} ({len(failed)} total)")
         if args.coverage_report:
             (base / "coverage.json").write_text(json.dumps(
                 coverage_status(descriptors, family_cases), indent=2, sort_keys=True) + "\n")
@@ -2842,6 +2994,8 @@ def retention_probe_selftest():
             and run_verdict([row]) == "skip"
             and summary_table([row])["oracle_diff"]["stdio"] == {"pass": 0, "fail": 0, "skip": 1},
             "declared environment skip was counted as a pass")
+    require(run_verdict([row, {"case_id": "planted", "verdict": "fail"}]) == "fail",
+            "a declared skip must never hide a failed case")
     directory = ROOT / "target/e2e/w4/selftest"
     directory.mkdir(parents=True, exist_ok=True)
     results_path = directory / "retention-skip-results.json"
@@ -2852,14 +3006,13 @@ def retention_probe_selftest():
     output_path.write_text("")
     ci_summary(results_path, summary_path, output_path)
     require(output_path.read_text() == "verdict=skip\n"
-            and "SKIP" in summary_path.read_text() and "| stdio | 0 | 1 |" in summary_path.read_text(),
+            and "SKIP" in summary_path.read_text() and "| stdio | 0 | 0 | 1 |" in summary_path.read_text(),
             "CI did not declare skipped disposition and separate skip count")
     for label, operation in (
             ("undeclared_skip", lambda: environment_skip_row(
                 {**case, "environment_skips": []}, "stdio", "free23", reason)),
             ("wrong_skip_evidence", lambda: environment_skip_row(
                 case, "stdio", "free23", {**reason, "candidates": [{"external_error": "ORA-01555"}]})),
-            ("skip_cannot_mask_failure", lambda: run_verdict([row, {"case_id": "planted", "verdict": "fail"}])),
             ("skip_cannot_claim_pass", lambda: ci_summary(
                 results_path, summary_path, output_path))):
         if label == "skip_cannot_claim_pass":
@@ -2884,6 +3037,136 @@ def retention_probe_selftest():
         else:
             raise DriverError("non-expired or unexpectedly failing source produced retention proof")
     print(compact({"selftest": "retention_definition_age_declared_skip_and_negatives", "verdict": "pass"}))
+
+
+def awr_environment_selftest():
+    class AwrConnection:
+        """Unit-only catalog responses; real Oracle is proved separately."""
+        def __init__(self, setting="DIAGNOSTIC+TUNING", snapshots=2, history=3, points=1, error=None):
+            self.setting, self.snapshots, self.history, self.points = setting, snapshots, history, points
+            self.error = error
+            self.queries = []
+        def cursor(self):
+            return self
+        def execute(self, sql, binds=()):
+            self.queries.append(sql)
+            if self.error:
+                raise DriverError(self.error)
+            if "v$parameter" in sql:
+                self.row = (self.setting,)
+            elif sql == "SELECT COUNT(*) FROM DBA_HIST_SNAPSHOT":
+                self.row = (self.snapshots,)
+            elif sql == "SELECT COUNT(*) FROM DBA_HIST_SQLSTAT":
+                self.row = (self.history,)
+            elif sql.startswith("SELECT sql_id FROM"):
+                self.row = ("123456789abcd",)
+            else:
+                self.row = (self.points,)
+            return self
+        def fetchone(self):
+            return self.row
+    case = next(case for case in load_cases() if case.get("runtime_awr_probe"))
+    for code, connection in (
+            ("AWR_PACK_NOT_ENABLED", AwrConnection(setting="NONE")),
+            ("AWR_NO_SNAPSHOTS", AwrConnection(snapshots=0)),
+            ("AWR_NO_SQL_HISTORY", AwrConnection(history=0)),
+            ("AWR_TOP_SQL_HAS_NO_PLAN_HISTORY", AwrConnection(points=0)),
+            ("AWR_CATALOG_UNAVAILABLE", AwrConnection(error="ORA-00942: table or view does not exist"))):
+        try:
+            probe_awr_environment(connection)
+        except EnvironmentSkip as exc:
+            require(exc.reason["code"] == code, "wrong typed AWR environment reason")
+            row = environment_skip_row(case, "stdio", "free23", exc.reason)
+            require(row["verdict"] == "skip" and row["actual"] is None
+                    and run_verdict([row]) == "skip", "AWR absence was counted as a positive pass")
+            require(run_verdict([row, {"case_id": "planted", "verdict": "fail"}]) == "fail",
+                    "AWR skip masked a failed case")
+            try:
+                environment_skip_row({**case, "environment_skips": []}, "stdio", "free23", exc.reason)
+            except DriverError:
+                pass
+            else:
+                raise DriverError("undeclared AWR skip accepted")
+        else:
+            raise DriverError("AWR absence was reported as available")
+        if code == "AWR_PACK_NOT_ENABLED":
+            require(len(connection.queries) == 1, "disabled pack caused an AWR history read")
+        require(not any("DBMS_WORKLOAD_REPOSITORY" in q for q in connection.queries),
+                "AWR probe created an unapproved snapshot")
+    available = probe_awr_environment(AwrConnection())
+    require(available["snapshot_count"] == 2 and available["plan_point_count"] == 1,
+            "real available history must retain the positive case")
+    for error in ("ORA-03113: end-of-file on communication channel", "ORA-00600: internal error"):
+        try:
+            probe_awr_environment(AwrConnection(error=error))
+        except EnvironmentSkip:
+            raise DriverError("unexpected AWR failure was hidden as an environment skip")
+        except DriverError:
+            pass
+        else:
+            raise DriverError("unexpected AWR failure accepted")
+    for reason in (
+            {"code": "AWR_NO_SNAPSHOTS", "pack_setting": "DIAGNOSTIC", "snapshot_count": 1},
+            {"code": "AWR_PACK_NOT_ENABLED", "pack_setting": "DIAGNOSTIC"},
+            {"code": "AWR_CATALOG_UNAVAILABLE", "catalog": "DBA_HIST_SNAPSHOT", "external_error": "ORA-03113"}):
+        try:
+            verify_awr_skip_evidence(reason)
+        except DriverError:
+            pass
+        else:
+            raise DriverError("AWR skip accepted contradictory evidence")
+    print(compact({"selftest": "awr_declared_environment_skips_preserve_positive_and_failures", "verdict": "pass"}))
+
+
+def failed_results_selftest():
+    global ROOT, _run_lane
+    original_root, original_runner = ROOT, _run_lane
+    ROOT = ROOT / "target/e2e/w4/selftest/red-results-source"
+    ROOT.mkdir(parents=True, exist_ok=True)
+    base = ROOT / "target/e2e/w4/free23"
+    args = argparse.Namespace(lane="free23", binary_source_sha=None, cargo_test_log=[])
+    try:
+        for stage in ("startup", "case", "cleanup", "interrupt"):
+            persist_run_results(base, {"verdict": "pass", "cases": [{"case_id": "old", "verdict": "pass"}]})
+            def fail_runner(args, output):
+                primed = json.loads((base / "results.json").read_text())
+                require(primed["verdict"] == "fail" and primed["cases"] == []
+                        and primed["checkout_sha"], "run did not invalidate stale pass before startup")
+                if stage != "startup":
+                    output["capabilities"] = ["version:23"]
+                    output["cases"].append({"case_id": "current", "tool": "oracle_query", "lane": "free23",
+                                            "transport": "stdio", "verdict": "fail"})
+                if stage == "interrupt":
+                    raise KeyboardInterrupt()
+                raise DriverError("planted " + stage + " failure")
+            _run_lane = fail_runner
+            try:
+                run_lane(args)
+            except (DriverError, KeyboardInterrupt):
+                pass
+            else:
+                raise DriverError("failed run returned success")
+            current = json.loads((base / "results.json").read_text())
+            require(current["verdict"] == "fail" and current["checkout_sha"]
+                    and "run_failure" in current and not any(r["case_id"] == "old" for r in current["cases"]),
+                    "current failure did not replace stale passing results")
+            require((stage == "startup" and current["cases"] == [])
+                    or (stage != "startup" and current["cases"][0]["case_id"] == "current"),
+                    "failed results lost completed case evidence")
+        summary, output_file = base / "summary.md", base / "output.txt"
+        summary.write_text(""); output_file.write_text("")
+        try:
+            ci_summary(base / "results.json", summary, output_file)
+        except DriverError:
+            pass
+        else:
+            raise DriverError("CI accepted failed results")
+        require(output_file.read_text() == "verdict=fail\n" and "FAIL" in summary.read_text()
+                and "| stdio | 0 | 1 | 0 |" in summary.read_text(),
+                "CI did not record an honest failed disposition and failed count")
+    finally:
+        ROOT, _run_lane = original_root, original_runner
+    print(compact({"selftest": "current_failed_results_persist_before_nonzero_exit", "verdict": "pass"}))
 
 
 def flashback_grant_selftest():
@@ -2939,6 +3222,8 @@ def flashback_grant_selftest():
 def selftest():
     retention_probe_selftest()
     flashback_grant_selftest()
+    awr_environment_selftest()
+    failed_results_selftest()
     load_cases()
     expected_live_ids = {
         "w4_get_source_argument_class": "rel012_i38_argument_class",

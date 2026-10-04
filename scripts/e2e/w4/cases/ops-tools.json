@@ -869,6 +869,8 @@
   },
   {
     "case_id": "w4_diagnostics_licensed_profile_serves_awr",
+    "runtime_awr_probe": true,
+    "environment_skips": ["AWR_PACK_NOT_ENABLED", "AWR_CATALOG_UNAVAILABLE", "AWR_NO_SNAPSHOTS", "AWR_NO_SQL_HISTORY", "AWR_TOP_SQL_HAS_NO_PLAN_HISTORY"],
     "tool": "oracle_plan_timeline",
     "level": "READ_ONLY",
     "transports": [
