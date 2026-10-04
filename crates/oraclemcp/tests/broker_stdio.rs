@@ -1026,6 +1026,12 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(25));
     }
+    if !stdio_first && !kill_frontend {
+        // Exercise loss of the spawning client's diagnostic pipe while its
+        // broker is still serving. Holding an unread pipe open instead can
+        // fill it with real connection diagnostics and block the fixture.
+        drop(process.0.stderr.take());
+    }
     if !stdio_first {
         for index in 0..2 {
             let mut client = Client::spawn(root.path(), &path, index);
