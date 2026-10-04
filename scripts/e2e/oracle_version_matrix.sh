@@ -433,6 +433,36 @@ BADTOOL
   fi
   e2e_log_event "ladder_session" "assert" "pass" 0 "lane $lane: full ladder green (evidence: $evidence)"
 
+  # Stdio proxies close before the detached broker's idle lifetime ends. The
+  # next transport must acquire the same owner and continue the same audit
+  # chain, so observe actual lock release rather than racing HTTP startup.
+  e2e_log_event "broker_idle_exit" "act" "running" 0 "lane $lane: waiting for the stdio service owner to exit"
+  if ! timeout -k 5 90 python3 - "$state_dir" <<'PY'
+import fcntl
+from pathlib import Path
+import time
+import sys
+
+path = Path(sys.argv[1]) / "oraclemcp" / ".service.lock"
+started = time.monotonic()
+with path.open("rb") as lock:
+    while True:
+        try:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            break
+        except BlockingIOError:
+            if time.monotonic() - started >= 85:
+                raise RuntimeError("stdio service owner did not release after its idle deadline")
+            time.sleep(0.05)
+print(f"stdio owner released after {time.monotonic() - started:.2f}s")
+PY
+  then
+    e2e_log_event "broker_idle_exit" "assert" "fail" 0 "lane $lane: stdio owner did not release within the bounded idle-exit wait"
+    return 1
+  fi
+  e2e_log_event "broker_idle_exit" "assert" "pass" 0 "lane $lane: stdio owner released; HTTP may resume the same state/audit chain"
+
   # Cross the real stateful Streamable-HTTP MCP boundary over the same live
   # profile. The session driver replays the ladder's elevation/confirmation,
   # DML rollback, real-clock TTL, protected-ceiling, and OAuth scope-lowering
