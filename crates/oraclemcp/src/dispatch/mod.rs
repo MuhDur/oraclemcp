@@ -483,6 +483,9 @@ struct DispatcherState {
     execute_grants: ExecGrantStore,
     scoped_grants: ScopedGrantStore,
     grant_generation: u64,
+    /// Server-owned local session identity. Broker sessions have no HTTP
+    /// context, but their signed grants must still bind to one client.
+    default_session_id: Option<String>,
     execute_approved_tokens: HashMap<String, ExecuteApprovedGrant>,
     patch_previews: HashMap<String, PatchPreviewEntry>,
     /// Generation-scoped dictionary evidence for this lane/profile sequence.
@@ -683,6 +686,7 @@ impl OracleDispatcher {
                 execute_grants: ExecGrantStore::new(),
                 scoped_grants: ScopedGrantStore::new(),
                 grant_generation: 1,
+                default_session_id: None,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
                 catalog_cache: OracleCatalogResolverCache::new(),
@@ -779,6 +783,7 @@ impl OracleDispatcher {
                 execute_grants: ExecGrantStore::new(),
                 scoped_grants: ScopedGrantStore::new(),
                 grant_generation: 1,
+                default_session_id: None,
                 execute_approved_tokens: HashMap::new(),
                 patch_previews: HashMap::new(),
                 catalog_cache: OracleCatalogResolverCache::new(),
@@ -903,6 +908,9 @@ impl OracleDispatcher {
     /// request contexts without an explicit transport principal.
     #[must_use]
     pub fn with_default_audit_subject(mut self, subject: AuditSubject) -> Self {
+        if let Ok(state) = self.state.get_mut() {
+            state.default_session_id = Some(subject.stable_id.clone());
+        }
         self.default_audit_subject = subject;
         self
     }
@@ -7626,9 +7634,15 @@ fn grant_binding_for_context(
     state: &DispatcherState,
     context: DispatchContext<'_>,
 ) -> ExecGrantBinding {
-    let session_id = context.http_session_id().unwrap_or("process");
+    let session_id = context
+        .http_session_id()
+        .or(state.default_session_id.as_deref())
+        .unwrap_or("process");
     let lane_id = context.lane_id().unwrap_or(session_id);
-    let subject_id = context.principal_key().unwrap_or("process");
+    let subject_id = context
+        .principal_key()
+        .or(state.default_session_id.as_deref())
+        .unwrap_or("process");
     ExecGrantBinding::new(session_id, lane_id, subject_id, state.grant_generation)
 }
 

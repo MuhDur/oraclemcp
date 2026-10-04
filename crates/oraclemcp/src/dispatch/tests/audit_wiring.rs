@@ -1201,6 +1201,39 @@ fn masked_diff_carries_before_after_audit_bound_certificates() {
 }
 
 #[test]
+fn broker_session_subject_binds_elevation_grants_without_http_context() {
+    let (auditor, sink) = auditor_with_sink();
+    let a = dispatcher_with(escalatable_read_only(), auditor.clone())
+        .with_default_audit_subject(AuditSubject::new("stdio-broker", "uid:1000:session:a"));
+    let b = dispatcher_with(escalatable_read_only(), auditor)
+        .with_default_audit_subject(AuditSubject::new("stdio-broker", "uid:1000:session:b"));
+    let preview = a
+        .dispatch(
+            "oracle_set_session_level",
+            json!({"level":"READ_WRITE", "ttl_seconds":60}),
+        )
+        .unwrap();
+    let token = preview["confirmation"]["confirm"].as_str().unwrap();
+    let args = json!({"level":"READ_WRITE", "ttl_seconds":60, "execute":true, "confirm":token});
+    let theft = b
+        .dispatch("oracle_set_session_level", args.clone())
+        .unwrap_err();
+    assert_eq!(theft.error_class, ErrorClass::ChallengeRequired);
+    let status = b
+        .dispatch("oracle_set_session_level", json!({"action":"status"}))
+        .unwrap();
+    assert_eq!(status["session"]["current_level"], "READ_ONLY");
+    let applied = a.dispatch("oracle_set_session_level", args).unwrap();
+    assert_eq!(applied["session"]["current_level"], "READ_WRITE");
+    assert!(
+        sink.records()
+            .iter()
+            .any(|record| record.subject.stable_id == "uid:1000:session:a"
+                && record.outcome == AuditOutcome::Succeeded)
+    );
+}
+
+#[test]
 fn session_level_escalation_is_audited() {
     let (auditor, sink) = auditor_with_sink();
     let dispatcher = dispatcher_with(escalatable_read_only(), auditor);

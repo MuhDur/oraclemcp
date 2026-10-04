@@ -73,6 +73,12 @@ Wire it into an MCP client (e.g. Claude Desktop) over stdio:
 }
 ```
 
+Several local MCP clients can use this same stdio configuration concurrently,
+including write-capable profiles. When service state is needed, clients
+automatically attach to one local broker that owns the audit writer and
+database pools. Each client retains its own session level, confirmation tokens,
+transaction and cancellation. The broker exits after 60 seconds without clients.
+
 Or run authenticated HTTP with a shown-once bearer, and open the local dashboard through a secret-free one-time pairing URL:
 
 ```sh

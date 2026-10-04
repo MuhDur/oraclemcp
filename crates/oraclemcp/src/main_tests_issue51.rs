@@ -5,6 +5,34 @@
 use super::*;
 
 #[test]
+fn broker_election_loss_is_normal_but_other_startup_errors_stay_errors() {
+    assert_eq!(broker_exit_code(Ok(())), ExitCode::SUCCESS);
+    assert_eq!(
+        broker_exit_code(Err(ErrorEnvelope::new(
+            ErrorClass::Transient,
+            "ORACLEMCP_BROKER_OWNER_LOCKED: file-store service lock is already held",
+        ))),
+        ExitCode::SUCCESS
+    );
+    for (class, message) in [
+        (ErrorClass::Transient, "cannot publish broker endpoint"),
+        (
+            ErrorClass::Internal,
+            "ORACLEMCP_BROKER_OWNER_LOCKED: unexpected corruption",
+        ),
+        (
+            ErrorClass::RuntimeStateRequired,
+            "ORACLEMCP_BROKER_VERSION_MISMATCH: proxy version=1 broker version=2",
+        ),
+    ] {
+        assert_eq!(
+            broker_exit_code(Err(ErrorEnvelope::new(class, message))),
+            ExitCode::from(2)
+        );
+    }
+}
+
+#[test]
 fn defaulted_keepalive_is_reported_as_descriptor_owned() {
     let config: OracleMcpConfig = toml::from_str(
         r#"

@@ -81,6 +81,7 @@ serde.workspace = true
 serde_json.workspace = true
 signal-hook = "0.4"
 getrandom = "0.2"
+interprocess = "2.4.4"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
 rustix = { version = "1", features = ["fs"] }
@@ -126,6 +127,9 @@ sqlparser = "0.63"
 # Windows audit startup tests read back the owner and exact DACL that startup
 # installs on audit and WORM parents (bead .12.2). Already in the graph through
 # oraclemcp-audit's Windows hardening.
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+
 [target.'cfg(windows)'.dev-dependencies]
 windows-permissions = "0.2.4"
 

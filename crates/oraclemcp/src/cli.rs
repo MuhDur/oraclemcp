@@ -52,6 +52,9 @@ pub(crate) struct Cli {
 #[allow(clippy::large_enum_variant)]
 #[derive(Subcommand, Debug)]
 pub(crate) enum Command {
+    /// Internal process hosting the automatically attached local broker.
+    #[command(hide = true)]
+    Broker(oraclemcp::broker::BrokerArgs),
     /// Start the MCP server (stdio by default; --listen <ADDR> for HTTP).
     Serve {
         /// Bind a Streamable HTTP listener at <ADDR> (e.g. 127.0.0.1:7070)

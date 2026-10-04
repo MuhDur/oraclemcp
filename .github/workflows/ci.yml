@@ -423,6 +423,7 @@ jobs:
           cargo test -p oraclemcp --lib --bins -- worm_parent_
           cargo test -p oraclemcp --lib --bins -- startup_audit_parent_
           cargo test -p oraclemcp --lib --bins -- build_auditor_
+          cargo test -p oraclemcp --lib -- broker::tests
       - name: cargo test workspace on Windows
         env:
           # windows-msvc link time is dominated by debuginfo; drop it to cut the
@@ -433,6 +434,37 @@ jobs:
         # unit tests; the integration-test binaries add little Windows signal,
         # are covered on Linux, and roughly double the windows-msvc compile.
         run: cargo test --workspace --lib --bins
+
+  broker-ipc:
+    name: broker IPC (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_TARGET_DIR: target/broker-ipc
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: . -> target/broker-ipc
+      - name: Linux local sockets
+        if: runner.os == 'Linux'
+        run: cargo test -p oraclemcp --no-default-features --lib -- broker::tests
+      - name: macOS local sockets
+        if: runner.os == 'macOS'
+        env:
+          # The POSIX flock interceptor is Linux-hosted; this CI runner is isolated.
+          RUSTC_WRAPPER: ""
+        run: cargo test -p oraclemcp --no-default-features --lib -- broker::tests
 
   release-acceptance:
     name: release acceptance suite (B.12)
@@ -865,6 +897,27 @@ jobs:
           mkdir -p target/test-attestation-evidence
           bash scripts/e2e/oracle_version_matrix.sh --log --lane free23 2>&1 \
             | tee target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+      - name: Live shared broker sessions, isolation and recovery
+        env:
+          ORACLEMCP_TEST_DSN: localhost:1522/FREEPDB1
+          ORACLEMCP_TEST_USER: E2E_ORACLE
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+
+          # Read the existing disposable CI service credential at runtime.
+          # The broker config contains only an environment credential reference.
+          env = os.environ.copy()
+          source = Path('.github/workflows/ci.yml').read_text()
+          env['ORACLEMCP_TEST_PASSWORD'] = re.search(r'APP_USER_PASSWORD:\s*(\S+)', source).group(1)
+          subprocess.run([
+              'cargo', 'test', '-p', 'oraclemcp', '--features', 'live-xe,dashboard-bundle',
+              '--test', 'broker_stdio', '--', '--test-threads=1', '--nocapture',
+          ], env=env, check=True, timeout=300)
+          PY
       - name: Derive e2e attestation outcome
         if: always()
         id: e2e-attestation
