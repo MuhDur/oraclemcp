@@ -1,0 +1,50 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-xrna0",
+  "verified_sha": "22f1b97c59f0d4eddd138447689ab271118e2c87",
+  "verifier": "independent orchestrator subagent, clean git-archive export",
+  "generated_at": "2026-10-04T15:05:00Z",
+  "databases": {
+    "free23": "local docker FREE 23ai",
+    "xe21": "local docker XE 21c",
+    "xe18": "local docker XE 18c"
+  },
+  "commands": [
+    "cargo test -p oraclemcp-db --features live-xe --test live_oracle live_slow_policy_probe_isolated_from_pinned_session --exact",
+    "external MCP stdio client against oraclemcp serve (protected profile, 12 s slow private ALL_POLICIES synonym, ephemeral fixture user)"
+  ],
+  "lane_results": {
+    "free23": [
+      "free23 slow-catalog concurrent MCP reads PASS ms 2153.2",
+      "free23 VERIFIER 4-call burst ms 4234.3 session_busy 0",
+      "free23 VERIFIER v$session count right after slow phase: SESS:12",
+      "free23 positive 64-policy authority refusal despite slow private synonym ms 40.8",
+      "free23 slow-catalog external MCP reads within 30s and no SESSION_BUSY PASS",
+      "free23 VERIFIER v$session count 30s after server exit: SESS:0",
+      "free23 external MCP sequential and concurrent reads PASS",
+      "free23 fixture cleaned"
+    ],
+    "xe21": [
+      "xe21 slow-catalog concurrent MCP reads PASS ms 2397.5",
+      "xe21 VERIFIER 4-call burst ms 4739.2 session_busy 0",
+      "xe21 VERIFIER v$session count right after slow phase: SESS:12",
+      "xe21 positive 64-policy authority refusal despite slow private synonym ms 81.2",
+      "xe21 slow-catalog external MCP reads within 30s and no SESSION_BUSY PASS",
+      "xe21 VERIFIER v$session count 30s after server exit: SESS:0",
+      "xe21 external MCP sequential and concurrent reads PASS",
+      "xe21 fixture cleaned"
+    ],
+    "xe18": [
+      "xe18 slow-catalog concurrent MCP reads PASS ms 2385.8",
+      "xe18 VERIFIER 4-call burst ms 4758.4 session_busy 0",
+      "xe18 VERIFIER v$session count right after slow phase: SESS:11",
+      "xe18 positive 64-policy authority refusal despite slow private synonym ms 102.7",
+      "xe18 slow-catalog external MCP reads within 30s and no SESSION_BUSY PASS",
+      "xe18 VERIFIER v$session count 30s after server exit: SESS:6",
+      "xe18 external MCP sequential and concurrent reads PASS",
+      "xe18 fixture cleaned"
+    ]
+  },
+  "lane": "free23+xe21+xe18",
+  "source_sha": "22f1b97c59f0d4eddd138447689ab271118e2c87"
+}

@@ -1,0 +1,71 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-04T15:05:00Z",
+  "bead_id": "oraclemcp-xrna0",
+  "scope": {
+    "summary": "The per-call RLS/VPD policy observation runs on a separate bounded (1000 ms) observation session instead of the pinned session, so oracle_query on policy-heavy or slow-dictionary schemas returns promptly and concurrent calls no longer get SESSION_BUSY; authorizing policy lookups name SYS.ALL_POLICIES directly.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/catalog_resolver.rs",
+      "crates/oraclemcp-db/src/connection.rs",
+      "crates/oraclemcp-db/src/pool.rs",
+      "crates/oraclemcp-db/src/oracledb_backend.rs",
+      "crates/oraclemcp-db/src/catalog_query.rs",
+      "crates/oraclemcp-db/tests/live_oracle.rs",
+      "crates/oraclemcp-core/src/doctor.rs",
+      "crates/oraclemcp/src/dispatch/read_executor.rs",
+      "crates/oraclemcp/tests/rls_vpd_visibility.rs"
+    ],
+    "out_of_scope": [
+      "Server-side cancellation of a timed-out observation session (it is dropped client-side and lingers on the server for a while) - follow-up bead.",
+      "Per-read logon cost and pool max_size bypass of the observation connection - follow-up bead.",
+      "Live run of the official oracledb fallback backend's observation session (compiled and clippy-clean only) - follow-up bead."
+    ]
+  },
+  "source": {
+    "sha": "22f1b97c59f0d4eddd138447689ab271118e2c87",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "live isolation test on FREE23/XE21/XE18 (independent verifier, clean export of 22f1b97c)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-db --features live-xe --test live_oracle live_slow_policy_probe_isolated_from_pinned_session --exact with an ephemeral fixture user: PASS on all three lanes; raw slow catalog query 24212/24231/24265 ms, probe bounded at 1000 ms, pinned reads usable during and after."
+      },
+      {
+        "name": "external MCP stdio client, protected profile, 12 s slow catalog (independent verifier)",
+        "kind": "tool",
+        "trace": "oracle_query SELECT 1 -> rows in 1.09-1.31 s with rls_vpd.status=visibility_unavailable; 2 concurrent calls 2153/2397/2386 ms and a 4-call burst 4234/4739/4758 ms; SESSION_BUSY = 0 on FREE23, XE21, XE18. Positive-evidence refusal (FORBIDDEN_STATEMENT) unchanged; R36 admit+observation test 1/1."
+      },
+      {
+        "name": "unit and regression suites (independent verifier)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-db --lib catalog_resolver::tests:: 98/98; cargo test -p oraclemcp --lib 563 passed; rls_vpd_visibility 9, sec1_reclassification_e2e 7, e2e_stdio 1, golden_behavior 8 passed; doctor_rls_vpd_visibility 3/3; clippy -p oraclemcp-db --all-targets --features live-xe,oracledb clean. Gate prepush on 22f1b97c 16/16; CI on 22f1b97c success."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "live-isolation-and-external-mcp-concurrency",
+        "path": "tests/artifacts/evidence/live/verify-22f1b97c-oraclemcp-xrna0-20261004T1450Z.json",
+        "sha": "22f1b97c59f0d4eddd138447689ab271118e2c87"
+      }
+    ]
+  },
+  "limitations": [
+    "The external-client proof script lived outside the repo (/tmp); the in-repo live test live_slow_policy_probe_isolated_from_pinned_session carries the reproducible proof.",
+    "The lab slows a private ALL_POLICIES synonym rather than SYS.ALL_POLICIES itself; per-relation authorizing lookups still run on the pinned session under the 30 s budget.",
+    "XE21/XE18 E2E_ORACLE baseline test skipped: the CI-public password gives ORA-01017 on those local lab instances."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}
