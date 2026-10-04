@@ -11577,8 +11577,13 @@ async fn patch_source_inner(
     clear_read_only_transaction_before_write(&ctx).await?;
 
     let danger_str = audit_danger_string(decision.danger);
-    let write_intent_id =
-        append_write_intent(&ctx, tool_name, &patched_ddl, required_level, &confirmation_key)?;
+    let write_intent_id = append_write_intent(
+        &ctx,
+        tool_name,
+        &patched_ddl,
+        required_level,
+        &confirmation_key,
+    )?;
     let db_evidence = match collect_effect_audit_db_evidence(&ctx).await {
         Ok(evidence) => evidence,
         Err(primary) => {
