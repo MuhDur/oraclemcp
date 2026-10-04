@@ -26,7 +26,7 @@ const ATTACH_LIMIT: usize = 16 * 1024;
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// Arguments used only by the internally spawned broker process.
+/// Internal process hosting the automatically attached local broker.
 #[derive(clap::Args, Debug)]
 pub struct BrokerArgs {
     #[arg(long)]
