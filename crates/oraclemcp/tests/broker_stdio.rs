@@ -611,38 +611,36 @@ fn two_live_stdio_clients_commit_independent_write_intents() {
 fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
     let root = tempfile::tempdir().unwrap();
     let path = config_with_ceiling(root.path(), true, "DDL");
+    let mut nonce = [0; 8];
+    getrandom::getrandom(&mut nonce).unwrap();
+    let table = format!("SG_BROKER_I_{:016X}", u64::from_le_bytes(nonce));
+    // Always create a fresh fixture, so local reruns exercise the same DDL path
+    // as a clean CI database instead of hiding it behind an existing table.
+    let mut setup = Client::spawn(root.path(), &path, 2);
+    assert!(setup.response(1).get("result").is_some());
+    setup.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    elevate(&mut setup, 2, "DDL");
+    execute(
+        &mut setup,
+        5,
+        &format!("CREATE TABLE {table} (RUN_ID VARCHAR2(64) PRIMARY KEY)"),
+        json!([]),
+        true,
+        false,
+    );
+    drop(setup);
+    // Let the freshly committed table definition settle before either client
+    // can pin its read-only snapshot. This is fixture setup, not a read retry.
+    std::thread::sleep(Duration::from_secs(2));
+    // Both isolation sessions must start after fixture DDL commits. Reusing
+    // the setup session would retain a snapshot older than the new definition.
     let mut a = Client::spawn(root.path(), &path, 0);
     assert!(a.response(1).get("result").is_some());
     a.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
     elevate(&mut a, 2, "DDL");
-    let existing = count(
-        &mut a,
-        4,
-        "SELECT COUNT(*) AS N FROM all_tables WHERE owner = USER AND table_name = 'SG_BROKER_ISOLATION'",
-        json!([]),
-    );
-    assert!(existing <= 1);
-    if existing == 0 {
-        // One reusable synthetic fixture; all run-owned rows remain uncommitted.
-        execute(
-            &mut a,
-            5,
-            "CREATE TABLE SG_BROKER_ISOLATION (RUN_ID VARCHAR2(64) PRIMARY KEY)",
-            json!([]),
-            true,
-            false,
-        );
-    }
-    let described = call(
-        &mut a,
-        7,
-        "oracle_describe",
-        json!({"table":"SG_BROKER_ISOLATION"}),
-    );
+    let described = call(&mut a, 7, "oracle_describe", json!({"table":table}));
     assert_eq!(described["result"]["isError"], false, "{described}");
     assert!(described.to_string().contains("RUN_ID"));
-    // Open B after fixture DDL commits, so its first read-only snapshot cannot
-    // predate the table definition (Oracle otherwise correctly raises ORA-01466).
     let mut b = Client::spawn(root.path(), &path, 1);
     assert!(b.response(1).get("result").is_some());
     b.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
@@ -674,7 +672,7 @@ fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
     let held = execute(
         &mut a,
         10,
-        "INSERT INTO SG_BROKER_ISOLATION (RUN_ID) VALUES (:1)",
+        &format!("INSERT INTO {table} (RUN_ID) VALUES (:1)"),
         json!([run_id]),
         false,
         true,
@@ -683,14 +681,14 @@ fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
         held["result"]["structuredContent"]["committed"], false,
         "{held}"
     );
-    let select = "SELECT COUNT(*) AS N FROM SG_BROKER_ISOLATION WHERE RUN_ID = :1";
+    let select = format!("SELECT COUNT(*) AS N FROM {table} WHERE RUN_ID = :1");
     assert_eq!(
-        count(&mut a, 12, select, json!([run_id])),
+        count(&mut a, 12, &select, json!([run_id])),
         1,
         "own pending DML visible to A"
     );
     assert_eq!(
-        count(&mut b, 12, select, json!([run_id])),
+        count(&mut b, 12, &select, json!([run_id])),
         0,
         "pending DML must be invisible to B"
     );
@@ -716,8 +714,17 @@ fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
     );
     let undo = call(&mut a, 15, "oracle_undo_to", json!({}));
     assert_eq!(undo["result"]["isError"], false, "{undo}");
-    assert_eq!(count(&mut a, 16, select, json!([run_id])), 0);
-    assert_eq!(count(&mut b, 16, select, json!([run_id])), 0);
+    assert_eq!(count(&mut a, 16, &select, json!([run_id])), 0);
+    assert_eq!(count(&mut b, 16, &select, json!([run_id])), 0);
+    elevate(&mut a, 18, "DDL");
+    execute(
+        &mut a,
+        20,
+        &format!("DROP TABLE {table} PURGE"),
+        json!([]),
+        true,
+        false,
+    );
     let locator: Value = serde_json::from_slice(
         &std::fs::read(root.path().join("state/oraclemcp/broker.json")).unwrap(),
     )
