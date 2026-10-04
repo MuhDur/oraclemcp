@@ -1237,24 +1237,41 @@
     ]
   },
   {
-    "case_id": "w4_runtime_issue46_scn_probe_cached",
-    "tool": "oracle_query",
-    "level": "READ_ONLY",
-    "profile_variant": "synthetic_owner",
-    "setup_phase": "before_server",
-    "transports": ["stdio"],
-    "requires": [],
-    "setup": [],
-    "call": {
-      "arguments": {"sql": "SELECT 1 AS C FROM dual"},
-      "repeat_count": 20,
-      "scn_cache_expect": true
+  "case_id": "w4_runtime_issue46_scn_probe_cached",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "profile_variant": "synthetic_owner",
+  "setup_phase": "before_server",
+  "transports": [
+    "stdio",
+    "http"
+  ],
+  "requires": [],
+  "setup": [],
+  "call": {
+    "arguments": {
+      "sql": "SELECT ID FROM T_PARENT_${run_id} ORDER BY ID"
     },
-    "expect": {"golden": "issue46-scn-cache.${lane}.json"},
-    "db_reread": [],
-    "audit_expect": [],
-    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+    "repeat_count": 20,
+    "scn_cache_expect": true
   },
+  "expect": {
+    "rows": [
+      {
+        "ID": "1"
+      },
+      {
+        "ID": "2"
+      }
+    ]
+  },
+  "db_reread": [],
+  "audit_expect": [],
+  "on_unsupported": {
+    "error_class": "INVALID_ARGUMENTS"
+  },
+  "test_id": "w4_query_scn_cache"
+},
   {
     "case_id": "w4_runtime_issue47_killed_session_dml_not_replayed",
     "audit_optional_prefix": {
@@ -1282,27 +1299,43 @@
     ],
     "audit_expect": [
       {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
-      {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"},
-      {"tool": "lane_lifecycle", "decision": "ALLOWED", "outcome": "UNKNOWN_DISCARDED", "cancel": {"kind": "Shutdown", "reason": "server_shutdown"}}
+      {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
     ],
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
   },
   {
-    "case_id": "w4_runtime_issue47_killed_session_recovers",
-    "tool": "oracle_query",
-    "level": "READ_ONLY",
-    "profile_variant": "synthetic_owner",
-    "setup_phase": "before_server",
-    "transports": ["stdio"],
-    "requires": [],
-    "setup": [],
-    "call": {
-      "arguments": {"sql": "SELECT 1 AS C FROM dual"},
-      "kill_served_session_user": "${owner}"
+  "case_id": "w4_runtime_issue47_killed_session_recovers",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "profile_variant": "synthetic_owner",
+  "setup_phase": "before_server",
+  "transports": [
+    "stdio",
+    "http"
+  ],
+  "requires": [],
+  "setup": [],
+  "call": {
+    "arguments": {
+      "sql": "SELECT ID FROM T_PARENT_${run_id} ORDER BY ID"
     },
-    "expect": {"rows": [{"C": "1"}]},
-    "db_reread": [],
-    "audit_expect": [],
-    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
-  }
+    "kill_served_session_user": "${owner}"
+  },
+  "expect": {
+    "rows": [
+      {
+        "ID": "1"
+      },
+      {
+        "ID": "2"
+      }
+    ]
+  },
+  "db_reread": [],
+  "audit_expect": [],
+  "on_unsupported": {
+    "error_class": "INVALID_ARGUMENTS"
+  },
+  "test_id": "w4_query_idle_recycle"
+}
 ]

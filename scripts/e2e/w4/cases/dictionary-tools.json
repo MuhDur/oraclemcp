@@ -1006,52 +1006,53 @@
   "tool": "oracle_sample_rows",
   "level": "READ_ONLY",
   "transports": [
-   "stdio",
-   "http"
+    "stdio",
+    "http"
   ],
   "requires": [],
   "setup": [],
   "call": {
-   "arguments": {
-    "owner": "${owner}",
-    "table": "T_PARENT_${run_id}",
-    "max_rows": 1
-   }
+    "arguments": {
+      "owner": "${owner}",
+      "max_rows": 1,
+      "name": "T_PARENT_${run_id}"
+    }
   },
   "expect": {
-   "json_subset": {
-    "columns": [
-     "ID",
-     "LABEL"
-    ],
-    "row_count": 1,
-    "rows": [
-     {
-      "ID": "1",
-      "LABEL": "parent-1"
-     }
-    ],
-    "truncated": true
-   }
+    "json_subset": {
+      "columns": [
+        "ID",
+        "LABEL"
+      ],
+      "row_count": 1,
+      "rows": [
+        {
+          "ID": "1",
+          "LABEL": "parent-1"
+        }
+      ],
+      "truncated": true
+    }
   },
   "db_reread": [
-   {
-    "sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id}",
-    "rows": [
-     [
-      2
-     ]
-    ]
-   }
+    {
+      "sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id}",
+      "rows": [
+        [
+          2
+        ]
+      ]
+    }
   ],
   "audit_expect": [],
   "on_unsupported": {
-   "error_class": "INVALID_ARGUMENTS"
+    "error_class": "INVALID_ARGUMENTS"
   },
   "profile_variant": "synthetic_raw",
   "setup_phase": "before_server",
-  "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ROWNUM <= 1"
- },
+  "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ROWNUM <= 1",
+  "test_id": "w4_sample_rows_common_name"
+},
  {
   "case_id": "w4_sample_rows_vpd_rows_only",
   "tool": "oracle_sample_rows",
@@ -1084,6 +1085,8 @@
  },
  {
   "case_id": "w4_sample_rows_masked_column_masked",
+    "test_id": "w4_sample_rows_sample_mask",
+    "mask_certificate_audit": true,
   "tool": "oracle_sample_rows",
   "level": "READ_ONLY",
   "transports": [

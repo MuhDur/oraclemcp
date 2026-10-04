@@ -1904,7 +1904,10 @@ impl OracleMcpServer {
         }
         let outcome =
             self.handle_jsonrpc_request_with_context_outcome_inner(request, auth, context);
-        if observe_catalog && !(is_ping && self.has_inflight_tool_call(context)) {
+        // A completed queued-budget refusal must reach the wire while its
+        // sibling still owns the pinned lane. That sibling observes the catalog
+        // when it completes; do not enqueue this snapshot behind it.
+        if observe_catalog && !self.has_inflight_tool_call(context) {
             self.observe_tool_catalog(context);
         }
         outcome
@@ -4116,6 +4119,70 @@ mod tests {
             })),
         );
         assert!(replies.is_empty(), "notifications produce no response");
+    }
+
+    #[test]
+    fn queued_budget_reply_defers_catalog_observation_until_holder_finishes() {
+        struct QueueDispatcher(Arc<AtomicUsize>);
+        impl ToolDispatch for QueueDispatcher {
+            fn dispatch<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: DispatchContext<'a>,
+                _name: &'a str,
+                _args: Value,
+            ) -> DispatchFuture<'a> {
+                Box::pin(async {
+                    Outcome::Err(ErrorEnvelope::new(
+                        ErrorClass::SessionBusy,
+                        "queued budget expired",
+                    ))
+                })
+            }
+            fn mcp_surface_state<'a>(
+                &'a self,
+                _cx: &'a Cx,
+                _context: DispatchContext<'a>,
+                _detail: McpSurfaceDetail,
+            ) -> McpSurfaceFuture<'a> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Outcome::Ok(None) })
+            }
+        }
+        let observations = Arc::new(AtomicUsize::new(0));
+        let mut s = server();
+        s.dispatcher = Arc::new(QueueDispatcher(Arc::clone(&observations)));
+        let context = DispatchContext::default();
+        let holder_key = s.inflight_cancellation_key(context, &json!(41));
+        s.inflight_cancellations
+            .lock()
+            .insert(holder_key.clone(), Arc::new(RequestCancellation::default()));
+        let reply = s.handle_jsonrpc_request_with_context(
+            json!({"jsonrpc":"2.0", "id":42, "method":"tools/call", "params": {
+                "name":"oracle_query", "arguments":{"sql":"SELECT 1 FROM dual", "timeout_seconds":1}}}),
+            Some(&StdioAuthPolicy::Disabled), context,
+        ).expect("queued request has an outward reply");
+        assert_eq!(
+            reply["result"]["structuredContent"]["error_class"],
+            json!("SESSION_BUSY")
+        );
+        assert_eq!(
+            observations.load(Ordering::SeqCst),
+            0,
+            "a queued-budget reply must not wait for a catalog snapshot behind its holder"
+        );
+        s.inflight_cancellations.lock().remove(&holder_key);
+        s.handle_jsonrpc_request_with_context(
+            json!({"jsonrpc":"2.0", "id":43, "method":"ping"}),
+            Some(&StdioAuthPolicy::Disabled),
+            context,
+        )
+        .expect("idle request replies");
+        assert_eq!(
+            observations.load(Ordering::SeqCst),
+            2,
+            "catalog observation resumes once the sibling finishes"
+        );
     }
 
     #[test]

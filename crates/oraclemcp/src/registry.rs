@@ -1263,6 +1263,7 @@ pub fn tool_registry() -> ToolRegistry {
                 "owner": { "type": "string", "description": "Optional schema owner (case-insensitive). Defaults to current schema when available." },
                 "table": { "type": "string", "description": "Required table or view name. May be OWNER.TABLE." },
                 "table_name": { "type": "string", "description": "Runtime compatibility alias for table; schema clients should supply table." },
+                "name": { "type": "string", "description": "Runtime compatibility alias for table; schema clients should supply table." },
                 "max_rows": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Maximum rows to return (default 50, hard cap 1000)." },
                 "limit": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "Alias for max_rows for compatibility with older clients. Prefer max_rows." }
             }),

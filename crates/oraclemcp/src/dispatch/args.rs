@@ -680,7 +680,7 @@ pub(super) struct GetSourceArgs {
 pub(super) struct SampleRowsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "table_name")]
+    #[serde(alias = "table_name", alias = "name")]
     pub(super) table: String,
     #[serde(default, alias = "limit")]
     pub(super) max_rows: Option<usize>,
@@ -1010,7 +1010,7 @@ mod strict_contract_tests {
             ("get_ddl", "name") => Some("object_name"),
             ("oracle_get_source", "object_name") => Some("name"),
             ("get_object_source", "name") => Some("object_name"),
-            ("oracle_sample_rows", "table_name") => Some("table"),
+            ("oracle_sample_rows", "table_name" | "name") => Some("table"),
             ("oracle_read_clob", "table_name") => Some("table"),
             ("oracle_read_clob", "clob_col") => Some("clob_column"),
             ("oracle_read_clob", "pk_col") => Some("pk_column"),
@@ -1074,6 +1074,7 @@ mod strict_contract_tests {
             ),
             ("oracle_get_source", json!({"object_name": "P"})),
             ("oracle_sample_rows", json!({"table_name": "T", "limit": 1})),
+            ("oracle_sample_rows", json!({"name": "T", "limit": 1})),
             (
                 "oracle_read_clob",
                 json!({"table_name": "T", "clob_col": "C", "pk_col": "ID", "pk_val": "1"}),
@@ -1083,6 +1084,21 @@ mod strict_contract_tests {
         ] {
             let result = decode(tool, args);
             assert!(result.is_ok(), "{tool} old alias must decode: {result:?}");
+        }
+    }
+
+    #[test]
+    fn sample_rows_common_name_is_single_use() {
+        for args in [
+            json!({"name": "T", "table": "T"}),
+            json!({"name": "T", "table_name": "T"}),
+        ] {
+            let error = decode("oracle_sample_rows", args)
+                .expect_err("duplicate names must not reach the sampler");
+            assert_eq!(
+                error.error_class,
+                oraclemcp_error::ErrorClass::InvalidArguments
+            );
         }
     }
 

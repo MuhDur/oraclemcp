@@ -10,8 +10,11 @@
     "properties": {
       "case_id": {"type": "string", "pattern": "^(w4|rel012)_([a-z0-9_]+)$"},
       "tool": {"type": "string", "minLength": 1},
+      "test_id": {"type": "string", "pattern": "^w4_[a-z0-9_]+$"},
       "level": {"enum": ["READ_ONLY", "READ_WRITE", "DDL", "ADMIN"]},
       "profile_variant": {"enum": ["masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw", "synthetic_cross_rw_strict", "protected", "capped_rw"]},
+      "name_alias_matrix": {"const": true},
+      "mask_certificate_audit": {"const": true},
       "plan_contains": {"type": "string", "minLength": 1},
       "transports": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"enum": ["stdio", "http"]}},
       "requires": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
@@ -27,6 +30,14 @@
           "max_count": {"const": 1}, "reason": {"type": "string", "minLength": 1}
         }},
       "call": {"type": "object", "required": ["arguments"], "additionalProperties": false, "properties": {
+        "generated_sampler_absent": {"const": true},
+        "queued_read": {"type": "object", "additionalProperties": false,
+          "required": ["hold_marker", "arguments", "expired_marker"], "properties": {
+            "hold_marker": {"type": "string", "pattern": "^W4MARK_[A-Z0-9]{12,32}$"},
+            "expired_marker": {"type": "string", "pattern": "^W4MARK_[A-Z0-9]{12,32}$"},
+            "arguments": {"type": "object", "required": ["sql", "timeout_seconds"],
+              "properties": {"sql": {"type": "string", "minLength": 1}, "timeout_seconds": {"const": 1}}}
+          }},
         "arguments": {"type": "object"}, "raw_arguments": {"type": "string"},
         "baseline_arguments": {"type": "object"},
         "contract_baseline": {"type": "object"},

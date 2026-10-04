@@ -47,7 +47,8 @@
       "error_class": "INVALID_ARGUMENTS"
     },
     "profile_variant": "synthetic_raw",
-    "setup_phase": "before_server"
+    "setup_phase": "before_server",
+    "test_id": "w4_query_cte"
   },
   {
     "case_id": "w4_query_cte_read_unqualified_columns",

@@ -45,7 +45,8 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
                         "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner",
-                        "environment_skips", "runtime_awr_probe", "audit_optional_prefix"}
+                        "environment_skips", "runtime_awr_probe", "audit_optional_prefix", "test_id",
+                        "name_alias_matrix", "mask_certificate_audit"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -144,23 +145,23 @@ def json_pointer(document, pointer):
 
 
 def freshen_vsql_marker(case):
-    marker = case["call"].get("vsql_absent_marker") or case["call"].get("cancel_marker")
-    if marker is None:
-        return case
-    require(marker in compact(case["call"]["arguments"]),
-            "V$SQL absence marker must occur in the SQL sent by the case")
-    fresh = "W4MARK_" + secrets.token_hex(12).upper()
-
-    def replace(value):
-        if isinstance(value, str):
-            return value.replace(marker, fresh)
-        if isinstance(value, list):
-            return [replace(item) for item in value]
-        if isinstance(value, dict):
-            return {key: replace(item) for key, item in value.items()}
-        return value
-
-    return replace(case)
+    markers = [case["call"].get("vsql_absent_marker"), case["call"].get("cancel_marker")]
+    queued = case["call"].get("queued_read")
+    if queued:
+        markers.extend([queued["hold_marker"], queued["expired_marker"]])
+    for marker in filter(None, markers):
+        require(marker in compact(case["call"]), "V$SQL marker must occur in this case's call")
+        fresh = "W4MARK_" + secrets.token_hex(12).upper()
+        def replace(value):
+            if isinstance(value, str):
+                return value.replace(marker, fresh)
+            if isinstance(value, list):
+                return [replace(item) for item in value]
+            if isinstance(value, dict):
+                return {key: replace(item) for key, item in value.items()}
+            return value
+        case = replace(case)
+    return case
 
 
 def deep_subset(expected, actual):
@@ -362,6 +363,12 @@ def validate_case(case, filename):
             f"{filename}: case fields mismatch: {sorted(case.keys() ^ CASE_FIELDS)}")
     require(re.fullmatch(r"(?:w4|rel012)_[a-z0-9_]+", case["case_id"]), "invalid case_id")
     require(isinstance(case["tool"], str) and case["tool"], "missing tool name")
+    if "test_id" in case:
+        manifest = json.loads(RELEASE_MANIFEST.read_text())
+        declared = next((item for item in manifest if item["test_id"] == case["test_id"]), None)
+        require(declared is not None and declared["reproducible"] == "live"
+                and declared["tool_or_path"] == case["tool"],
+                "test_id must declare a live release scenario for this exact tool")
     require(case["level"] in {"READ_ONLY", "READ_WRITE", "DDL", "ADMIN"}, "invalid level")
     require(case.get("profile_variant", "masked") in PROFILE_VARIANTS,
             f"profile_variant must be one of {sorted(PROFILE_VARIANTS)}")
@@ -461,8 +468,33 @@ def validate_case(case, filename):
                 "setup action needs exact nonempty sql field")
     require(isinstance(case["call"], dict) and isinstance(case["call"].get("arguments"), dict),
             "call.arguments must be an object")
-    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "cancel_mutation_audit", "cancel_after_completion", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect", "session_busy"},
+    require(set(case["call"]) <= {"arguments", "raw_arguments", "retry", "retry_expect", "repeat_count", "repeat_expect", "parallel", "mutation", "baseline_arguments", "contract_baseline", "vsql_absent_marker", "cancel_marker", "cancel_barrier", "progress_token", "reuse_after_cancel", "cancel_audit", "lock_sql", "cancel_mutation_audit", "cancel_after_completion", "kill_served_session_user", "kill_served_session_dml_user", "scn_cache_expect", "session_busy", "queued_read", "generated_sampler_absent"},
             "unknown call field")
+    if "name_alias_matrix" in case:
+        require(case["name_alias_matrix"] is True
+                and case["case_id"] == "rel012_i40_common_name_matrix",
+                "name alias matrix belongs to its declared release case")
+    if "mask_certificate_audit" in case:
+        require(case["mask_certificate_audit"] is True
+                and case["test_id"] == "w4_sample_rows_sample_mask"
+                and case["tool"] == "oracle_sample_rows",
+                "mask certificate check belongs to the declared sampler scenario")
+    if "generated_sampler_absent" in case["call"]:
+        require(case["call"]["generated_sampler_absent"] is True
+                and case["case_id"] in {"rel012_i53_sample_policy", "rel012_i53_sample_view"}
+                and case["tool"] == "oracle_sample_rows"
+                and "priv:SELECT_V_SQL" in case["requires"],
+                "generated sampler absence requires a declared refusal and V$SQL")
+    if "queued_read" in case["call"]:
+        queued = case["call"]["queued_read"]
+        require(case["case_id"] == "rel012_i50_queued_budget"
+                and case["tool"] == "oracle_query" and case["level"] == "READ_WRITE"
+                and set(queued) == {"hold_marker", "arguments", "expired_marker"}
+                and queued["arguments"].get("timeout_seconds") == 1
+                and queued["hold_marker"] in case["call"]["arguments"]["sql"]
+                and queued["expired_marker"] in queued["arguments"]["sql"]
+                and "priv:SELECT_V_SQL" in case["requires"],
+                "queued-read proof requires its two marked real reads and one-second budget")
     if "session_busy" in case["call"]:
         busy = case["call"]["session_busy"]
         require(case["case_id"] == "w4_runtime_issue50_session_busy"
@@ -530,9 +562,9 @@ def validate_case(case, filename):
         user = case["call"]["kill_served_session_user"]
         require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
                 "kill_served_session_user must be the exact run-owned owner")
-        require(case["tool"] == "oracle_query" and case["transports"] == ["stdio"]
+        require(case["tool"] == "oracle_query" and case["transports"] == ["stdio", "http"]
                 and case["level"] == "READ_ONLY" and not case["call"].get("mutation"),
-                "killed-session recovery is a read-only stdio oracle_query case")
+                "killed-session recovery covers both read-only oracle_query transports")
     if "kill_served_session_dml_user" in case["call"]:
         user = case["call"]["kill_served_session_dml_user"]
         require(isinstance(user, str) and (user == "${owner}" or re.fullmatch(r"W4O_W4[0-9]{4}[A-F0-9]{6}", user)),
@@ -625,7 +657,10 @@ def validate_steps(case):
     require(not ({"parallel", "cancel_marker", "retry", "raw_arguments", "baseline_arguments"}
                  & case["call"].keys()),
             "steps cannot be combined with parallel, cancel, retry or raw calls")
-    require(case.get("profile_variant", "masked") not in {"synthetic_raw", "synthetic_owner"},
+    require(case.get("profile_variant", "masked") not in {"synthetic_raw", "synthetic_owner"}
+            or (case["case_id"] in {"rel012_i35_dictionary_view", "rel012_i40_common_name_matrix"}
+                and case["level"] == "READ_ONLY"
+                and all(step.get("tool") in {"oracle_query", "oracle_describe", "oracle_describe_view", "oracle_describe_index", "oracle_describe_trigger", "oracle_get_ddl", "oracle_get_source", "oracle_sample_rows"} for step in steps)),
             "steps need a writable lab profile")
     require(not case["requires"],
             "steps cases run on every lane; an unsupported lane would skip the steps unasserted")
@@ -2020,9 +2055,8 @@ def killed_session_dml_call(client, case, connection, descriptor):
     require(payload.get("isError") is True and outcome == "protocol_unsynchronized"
             and "no statement was executed" in payload.get("structuredContent", {}).get("message", ""),
             "killed DML did not report its unexecuted protocol-unsynchronized preflight")
-    # Flush the quarantined lease's terminal audit before checking this case.
-    # The lane already restarts this client after killed DML; close is idempotent.
-    client.close()
+    # Check statement audits before transport teardown: a stdio launcher may
+    # detach from a shared broker whose shutdown audit arrives later.
     return lost, {"baseline": scrub(tool_payload(baseline)), "killed_sessions": len(sessions),
                   "loss": scrub(payload)}
 
@@ -2041,6 +2075,184 @@ def case_flashback_grant(case, lane, settings, owner, change_grant=set_flashback
         yield
     finally:
         change_grant(lane, settings, owner, False)
+
+
+def generated_sampler_sql_ids(connection, table):
+    return {row[0] for row in connection.cursor().execute(
+        "SELECT SQL_ID FROM V$SQL WHERE COMMAND_TYPE=3 AND INSTR(UPPER(SQL_TEXT), :1)>0",
+        (table.upper(),)).fetchall()}
+
+
+def verify_mask_audit_binding(reply, records, chain_verified):
+    certificate = tool_payload(reply).get("structuredContent", {}).get("mask_certificate")
+    require(chain_verified and isinstance(certificate, dict), "masked sampler needs a verified audit certificate")
+    core = {key: value for key, value in certificate.items() if key != "audit_entry_hash"}
+    matches = [record for record in records
+               if record.get("tool") == "oracle_sample_rows" and record.get("outcome") == "SUCCEEDED"
+               and record.get("entry_hash") == certificate.get("audit_entry_hash")
+               and record.get("result_masking") == core]
+    require(len(matches) == 1 and "W4_MASK_CANARY_" not in compact(reply),
+            "masked response certificate is not bound to exactly one signed terminal audit")
+    return {"audit_entry_hash": matches[0]["entry_hash"], "certificate_verified": True}
+
+
+def verify_name_alias_matrix(client, case):
+    descriptors = list_tools(client)
+    legacy = {"oracle_describe": "table", "oracle_describe_view": "view_name",
+              "oracle_describe_index": "index_name", "oracle_describe_trigger": "trigger_name",
+              "oracle_get_ddl": "object_name", "oracle_get_source": "object_name",
+              "oracle_sample_rows": "table"}
+    calls = [step for step in case["steps"] if "tool" in step]
+    require({step["tool"] for step in calls} == set(legacy) and len(calls) == 7,
+            "common-name matrix must execute all seven distinct tools")
+    observations = []
+    for step in calls:
+        tool, alias = step["tool"], legacy[step["tool"]]
+        properties = descriptors[tool]["inputSchema"]["properties"]
+        require("name" in properties and alias in properties
+                and properties["name"].get("description") and properties[alias].get("description"),
+                f"{tool}: name or its documented legacy alias is missing from the real registry")
+        duplicate = {**step["arguments"], alias: step["arguments"]["name"]}
+        actual = client.rpc("tools/call", {"name": tool, "arguments": duplicate})
+        verify_expect({"error_class": "INVALID_ARGUMENTS"}, actual)
+        observations.append({"tool": tool, "name_advertised": True, "alias": alias,
+                             "duplicate_alias": scrub(tool_payload(actual))})
+    return observations
+
+
+def active_exact_read_count(connection, sql):
+    # The native adapter annotates and paginates the sent SQL. Match the entire
+    # caller SELECT inside that execution envelope, rather than a preparation
+    # statement which happens to carry the same marker.
+    return connection.cursor().execute(
+        "SELECT COUNT(*) FROM V$SESSION S JOIN V$SQL Q ON Q.SQL_ID=S.SQL_ID "
+        "AND Q.CHILD_NUMBER=S.SQL_CHILD_NUMBER WHERE S.STATUS='ACTIVE' "
+        "AND Q.COMMAND_TYPE=3 AND INSTR(Q.SQL_TEXT,:sql)>0 "
+        "AND REGEXP_LIKE(Q.SQL_TEXT,' OFFSET 0 ROWS FETCH NEXT [0-9]+ ROWS ONLY$')",
+        {"sql": sql.strip().rstrip(";")}).fetchone()[0]
+
+
+def queued_read_call(client, case, connection):
+    """Two raw-wire reads share one session; the second must expire before execution."""
+    queued = case["call"]["queued_read"]
+    checkpoint = client.rpc("tools/call", {"name": "oracle_checkpoint", "arguments": {"name": "W4_QUEUE_PROOF"}})
+    require(tool_payload(checkpoint).get("isError") is not True, "could not pin queued-read workspace")
+    require(vsql_marker_count(connection, queued["expired_marker"]) == 0,
+            "queued statement marker already exists")
+    client.next_id += 1
+    hold_id = client.next_id
+    hold = {"jsonrpc": "2.0", "id": hold_id, "method": "tools/call",
+            "params": {"name": "oracle_query", "arguments": case["call"]["arguments"]}}
+    client.next_id += 1
+    queue_id = client.next_id
+    request = {"jsonrpc": "2.0", "id": queue_id, "method": "tools/call",
+               "params": {"name": "oracle_query", "arguments": queued["arguments"]}}
+    replies, worker = {}, None
+    def http_hold():
+        try:
+            status, _, body = client._request("POST", "/mcp", compact(hold).encode())
+            require(status == 200, "held HTTP read did not return an MCP response")
+            replies[hold_id] = client.decode_body(body)
+        except Exception as exc:
+            replies["error"] = exc
+    def receive_stdio(wanted, seconds):
+        deadline = time.monotonic() + seconds
+        while wanted not in replies:
+            remaining = deadline - time.monotonic()
+            require(remaining > 0, "queued-read stdio response deadline expired")
+            try:
+                line = client.lines.get(timeout=remaining)
+            except queue.Empty as exc:
+                raise DriverError("queued-read stdio response deadline expired") from exc
+            require(line is not None, "stdio closed during queued-read proof")
+            frame = json.loads(line)
+            if "id" in frame:
+                require(frame["id"] in {hold_id, queue_id} and frame["id"] not in replies,
+                        "queued-read received an unexpected or duplicate response")
+                replies[frame["id"]] = frame
+            elif "method" in frame:
+                with client.notifications_lock:
+                    client.notifications.append(frame)
+    if isinstance(client, StdioClient):
+        client.process.stdin.write(compact(hold) + "\n")
+        client.process.stdin.flush()
+    else:
+        worker = threading.Thread(target=http_hold, daemon=True)
+        worker.start()
+    queued_response, queued_ms = None, None
+    try:
+        deadline = time.monotonic() + 15
+        while active_exact_read_count(connection, case["call"]["arguments"]["sql"]) == 0:
+            require(time.monotonic() < deadline and hold_id not in replies and "error" not in replies,
+                    "holder did not reach an active Oracle statement")
+            time.sleep(0.05)
+        started = time.monotonic()
+        if isinstance(client, StdioClient):
+            client.process.stdin.write(compact(request) + "\n")
+            client.process.stdin.flush()
+            receive_stdio(queue_id, 5)
+            queued_response = replies[queue_id]
+        else:
+            status, _, body = client._request("POST", "/mcp", compact(request).encode())
+            require(status == 429, "queued HTTP read did not return Retry-After disposition")
+            queued_response = client.decode_body(body)
+        queued_ms = round((time.monotonic() - started) * 1000)
+        client.last_queued_read = {"queued_ms": queued_ms, "response": scrub(tool_payload(queued_response))}
+        require(tool_payload(queued_response).get("isError") is True,
+                "queued read unexpectedly executed: " + compact(scrub(tool_payload(queued_response)))[:500])
+        verify_expect({"error_class": "SESSION_BUSY"}, queued_response)
+        message = tool_payload(queued_response)["structuredContent"].get("message", "").lower()
+        require("busy" in message and "budget" in message and queued_ms < 5000 and hold_id not in replies,
+                "queued read did not expire within its budget while the holder remained active")
+        require(active_exact_read_count(connection, case["call"]["arguments"]["sql"]) > 0,
+                "held SELECT was no longer active when the queued budget expired")
+        structured = tool_payload(queued_response)["structuredContent"]
+        require(isinstance(structured.get("queued_ms"), int) and structured["queued_ms"] > 0
+                and isinstance(structured.get("retry_after_ms"), int) and structured["retry_after_ms"] > 0,
+                "SESSION_BUSY must report the actual mailbox wait and retry budget")
+        require(vsql_marker_count(connection, queued["expired_marker"]) == 0,
+                "expired queued read reached Oracle")
+    finally:
+        try:
+            client.notify("notifications/cancelled", {"requestId": hold_id, "reason": "synthetic W4 holder cleanup"})
+            if isinstance(client, StdioClient):
+                receive_stdio(hold_id, 30)
+            else:
+                worker.join(timeout=30)
+                require(not worker.is_alive(), "queued-read holder did not settle after cancellation")
+                if "error" in replies:
+                    raise replies["error"]
+            client.last_queued_read = {"queued_ms": queued_ms, "response": scrub(tool_payload(queued_response)) if queued_response else None, "holder": scrub(tool_payload(replies[hold_id]))}
+            verify_expect({"error_class": "REQUEST_CANCELLED"}, replies[hold_id])
+        finally:
+            # Cancellation can quarantine the wire. Closing the served session releases
+            # its workspace; the lane restarts it before the next case.
+            client.close()
+    return queued_response, {"queued_ms": queued_ms, "holder": scrub(tool_payload(replies[hold_id])),
+                             "expired_statement_sql_ids": 0, "holder_active_at_queue_expiry": True}
+
+
+def run_doctor_manifest_case(binary, lane, transport):
+    """Run the existing real CLI scenario; this is separate from MCP discovery."""
+    started = time.monotonic()
+    command = [sys.executable, str(ROOT / "scripts/e2e/doctor_online_connect_phase.py"),
+               "--binary", str(binary), "--lane", lane]
+    process = subprocess.run(command, cwd=ROOT, text=True, capture_output=True, timeout=300)
+    observations = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
+    valid = doctor_phase_observations_valid(process.returncode, observations)
+    return {"case_id": "rel012_i56_connect_phase", "test_id": "w4_doctor_online_connect_phase",
+            "tool": "doctor --online --verbose", "level": "READ_ONLY", "lane": lane,
+            "transport": transport, "expected": {"connect_phases": ["AuthTtc", "Tcp", "Wallet"]},
+            "actual": observations, "verdict": "pass" if valid else "fail",
+            "runner_exit": process.returncode, "runner_stderr": scrub(process.stderr[-500:]),
+            "duration_ms": round((time.monotonic() - started) * 1000)}
+
+
+def doctor_phase_observations_valid(exit_code, observations):
+    return (exit_code == 0 and len(observations) == 3
+             and {item.get("expected_phase") for item in observations} == {"AuthTtc", "Tcp", "Wallet"}
+             and all(item.get("actual_phase") == item.get("expected_phase")
+                     and item.get("canary_leak") is False for item in observations))
 
 
 def run_case(client, case, transport, lane, capabilities, connection, barriers,
@@ -2098,6 +2310,10 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if marker and supported:
             require(vsql_marker_count(connection, marker) == 0,
                     "V$SQL marker already present before refusal test")
+        sampler_before = (generated_sampler_sql_ids(connection, case["call"]["arguments"]["table"])
+                          if case["call"].get("generated_sampler_absent") and supported else None)
+        if case.get("name_alias_matrix") and supported:
+            row["name_alias_matrix"] = verify_name_alias_matrix(client, case)
         before = len(audit_records(audit_path))
         captures = (run_steps(client, case, row, binary, audit_path, env, connection)
                     if "steps" in case else {})
@@ -2124,6 +2340,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         elif case["call"].get("cancel_after_completion") and supported:
             reply = completed_before_cancel_call(client, case, captures)
             row["cancel_observation"] = client.last_cancel_observation
+        elif "queued_read" in case["call"] and supported:
+            reply, row["queued_read"] = queued_read_call(client, case, connection)
         elif "session_busy" in case["call"] and supported:
             require(transport == "http", "issue50 same-session contention requires HTTP")
             reply, busy_actual = session_busy_call(client, case, connection)
@@ -2192,6 +2410,18 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                         "no-grant SCN cache needs null observed_scn on every audited read")
                 row["scn_cache"] = {"observed_scn_null_reads": len(reads),
                                     "degraded_probe_audits": len(probes)}
+        if "kill_served_session_user" in case["call"] and supported:
+            records = audit_records(audit_path)[before:]
+            reads = [record for record in records if record.get("tool") == "oracle_query"]
+            recycled = [record for record in records if record.get("tool") == "lane_lifecycle"
+                        and record.get("cancel", {}).get("reason") == "session_recycle"]
+            require([(record.get("decision"), record.get("outcome")) for record in reads]
+                    == [("ALLOWED", "PENDING"), ("ALLOWED", "SUCCEEDED")] * 2
+                    and len(recycled) == 1 and recycled[0].get("outcome") == "UNKNOWN_DISCARDED"
+                    and not any(record.get("tool") == "oracle_execute" for record in records)
+                    and audit_verify(binary, audit_path, env),
+                    "idle recycle needs two exact read audit pairs, one recycle, and no mutation")
+            row["killed_session_recovery"]["recycle_audit_records"] = len(recycled)
         if case["call"].get("cancel_audit"):
             records = audit_records(audit_path)[before:]
             cancelled = [record for record in records
@@ -2233,6 +2463,22 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                     and busy_audits[0].get("outcome") == "FAILED",
                     "SESSION_BUSY must append exactly one blocked audit record")
             row["session_busy_audit"] = {"count": len(busy_audits)}
+        if sampler_before is not None:
+            sampler_after = generated_sampler_sql_ids(connection, case["call"]["arguments"]["table"])
+            require(sampler_after == sampler_before, "refused sampler introduced a generated SQL_ID")
+            row["generated_sampler_sql_ids"] = {"before": sorted(sampler_before), "after": sorted(sampler_after)}
+        if case.get("mask_certificate_audit") and supported:
+            row["mask_certificate_audit"] = verify_mask_audit_binding(
+                reply, audit_records(audit_path)[before:], audit_verify(binary, audit_path, env))
+        if "queued_read" in case["call"] and supported:
+            records = audit_records(audit_path)[before:]
+            expired_hash = "sha256:" + hashlib.sha256(case["call"]["queued_read"]["arguments"]["sql"].encode()).hexdigest()
+            require(not any(record.get("sql_sha256") == expired_hash for record in records),
+                    "expired read appended a statement execution audit")
+            busy = [record for record in records if record.get("tool") == "session_busy"]
+            require(len(busy) == 1 and busy[0].get("decision") == "BLOCKED"
+                    and busy[0].get("outcome") == "FAILED", "queued read needs one exact blocked audit")
+            row["queued_read"]["blocked_audits"] = len(busy)
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
                          audit_verify(binary, audit_path, env), case.get("audit_optional_prefix"))
@@ -2254,6 +2500,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             row["audit_zero_executions"] = True
         row["verdict"] = "pass"
     except Exception as exc:
+        if "queued_read" in case["call"] and hasattr(client, "last_queued_read"):
+            row["queued_read"] = client.last_queued_read
         row["verification_failure"] = {"class": type(exc).__name__, "detail": str(exc)[:240]}
     finally:
         try:
@@ -2420,13 +2668,28 @@ def map_live_manifest_case_ids(results, release_cases, required_ids):
         for case in release_cases
         if case.get("reproducible") == "live"
     }
+    bindings = {(case["case_id"], case["test_id"]) for case in load_cases()
+                if "test_id" in case}
     changed = False
     for row in results["cases"]:
         manifest_case_id = case_id_by_test_id.get(row.get("test_id"))
-        if manifest_case_id in required_ids and row.get("case_id") == row.get("test_id"):
+        if (manifest_case_id in required_ids and row.get("case_id") != manifest_case_id
+                and (row.get("case_id") == row.get("test_id")
+                     or (row.get("case_id"), row.get("test_id")) in bindings)):
             row["case_id"] = manifest_case_id
             changed = True
     return changed
+
+
+def verify_manifest_schedule(family_cases, release_cases, required, transport):
+    """Check scheduling before Oracle work; passing rows are still checked afterwards."""
+    by_test = {case["test_id"]: case["case_id"] for case in release_cases
+               if case.get("reproducible") == "live"}
+    scheduled = {by_test.get(case.get("test_id", case["case_id"]), case["case_id"])
+                 for case in family_cases if transport in case["transports"]}
+    scheduled.add("rel012_i56_connect_phase")  # Executed by the real doctor CLI runner.
+    missing = sorted(required - scheduled)
+    require(not missing, f"unscheduled release manifest case on {transport}: {', '.join(missing)}")
 
 
 def enforce_manifest(results_path, lane, transport, capabilities):
@@ -2797,6 +3060,11 @@ def _run_lane(args, output):
                    "capabilities": sorted(capabilities), "cases": rows})
     barriers = BarrierPool()
     try:
+        if not args.case and not args.contract_only:
+            release_cases = json.loads(RELEASE_MANIFEST.read_text())
+            for transport in ("stdio", "http"):
+                verify_manifest_schedule(family_cases, release_cases,
+                                         manifest_required(args.lane, transport, capabilities), transport)
         for transport in ("stdio", "http"):
             state = work / transport / "state"
             state.mkdir(parents=True, exist_ok=True)
@@ -2947,7 +3215,8 @@ def _run_lane(args, output):
                         row["flashback_grant"] = {"scope": "case", "revoked": True}
                     rows.append(row)
                     cancelled_mutation = case["call"].get("cancel_mutation_audit") is True
-                    if "kill_served_session_dml_user" in case["call"] or cancelled_mutation:
+                    if ("kill_served_session_dml_user" in case["call"] or cancelled_mutation
+                            or "queued_read" in case["call"]):
                         # A killed session, and every cancelled mutation whose wire outcome
                         # dispatch quarantined, cannot service the normal level drop. Restart
                         # at the lane's READ_ONLY baseline before another selected W4 case.
@@ -2966,6 +3235,8 @@ def _run_lane(args, output):
                         require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
                                 "failed to drop after a multi-step case")
                         current_level = "READ_ONLY"
+                if not args.case and not args.contract_only:
+                    rows.append(run_doctor_manifest_case(binary, args.lane, transport))
                 if not args.case:
                     restart_row, replacement = run_restart_recovery(
                         client, binary, args.lane, client_env, transport, port,
@@ -2986,6 +3257,10 @@ def _run_lane(args, output):
         if args.case:
             missing = set(args.case) - selected_case_ids
             require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
+        if not args.case and not args.contract_only:
+            required = set().union(*(manifest_required(args.lane, transport, capabilities)
+                                     for transport in ("stdio", "http")))
+            map_live_manifest_case_ids(output, json.loads(RELEASE_MANIFEST.read_text()), required)
         verdict = run_verdict(rows)
         output.update({"verdict": verdict, "registry": sorted(descriptors),
                        "summary": summary_table(rows)})
@@ -3369,10 +3644,9 @@ def killed_dml_audit_selftest():
         "wrong_probe_outcome": [{**probe, "outcome": "SUCCEEDED"}, *expected],
         "late_probe": [expected[0], probe, *expected[1:]],
         "missing_query_pending": [probe, *expected[1:]],
-        "missing_query_success": [probe, expected[0], expected[2]],
-        "missing_quarantine_terminal": cold[:-1],
-        "wrong_quarantine_terminal": [probe, *expected[:2], {**expected[2], "outcome": "ROLLED_BACK"}],
-        "duplicate_baseline_execution": [probe, expected[0], expected[1], expected[1], expected[2]],
+        "missing_query_success": [probe, expected[0]],
+        "shutdown_outside_statement_window": [*cold, {"tool": "lane_lifecycle", "decision": "ALLOWED", "outcome": "UNKNOWN_DISCARDED"}],
+        "duplicate_baseline_execution": [probe, expected[0], expected[1], expected[1]],
         "unexpected_mutation_pending": [*cold, {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "PENDING"}],
         "unexpected_mutation_success": [*cold, {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "SUCCEEDED"}],
         "unknown_extra_audit": [*cold, {"tool": "unexpected", "decision": "ALLOWED", "outcome": "FAILED"}],
@@ -3451,8 +3725,60 @@ def flashback_grant_selftest():
     print(compact({"selftest": "flashback_grant_case_scope_all_exit_paths", "verdict": "pass"}))
 
 
+def release_schedule_selftest():
+    cases = load_cases()
+    release = json.loads(RELEASE_MANIFEST.read_text())
+    for transport in ("stdio", "http"):
+        required = manifest_required("free23", transport, {"version:23", "priv:SELECT_V_SQL"})
+        verify_manifest_schedule(cases, release, required, transport)
+        try:
+            verify_manifest_schedule([case for case in cases if case["case_id"] != "rel012_i34_derived"],
+                                     release, required, transport)
+        except DriverError as exc:
+            require("rel012_i34_derived" in str(exc), "missing scheduled case must be named")
+        else:
+            raise DriverError("missing release scenario was accepted")
+    mapped = {"cases": [{"case_id": "w4_query_cte_read", "test_id": "w4_query_cte",
+                         "verdict": "fail"},
+                        {"case_id": "unrelated", "test_id": "w4_query_cte", "verdict": "pass"}]}
+    map_live_manifest_case_ids(mapped, release, {"rel012_i34_cte"})
+    require(mapped["cases"][0]["case_id"] == "rel012_i34_cte"
+            and mapped["cases"][0]["verdict"] == "fail"
+            and mapped["cases"][1]["case_id"] == "unrelated",
+            "manifest normalization must preserve failures and reject undeclared identities")
+    phases = [{"expected_phase": phase, "actual_phase": phase, "canary_leak": False}
+              for phase in ("AuthTtc", "Tcp", "Wallet")]
+    require(doctor_phase_observations_valid(0, phases), "valid doctor observations rejected")
+    for exit_code, observations in ((1, phases), (0, phases[:2]), (0, phases + phases[:1]),
+                                   (0, [{**phases[0], "canary_leak": True}] + phases[1:]),
+                                   (0, [{**phases[0], "actual_phase": "Tcp"}] + phases[1:])):
+        require(not doctor_phase_observations_valid(exit_code, observations),
+                "incomplete or incorrect doctor phase proof accepted")
+    certificate = {"audit_entry_hash": "hash", "masked_columns": ["LABEL"]}
+    reply = {"result": {"structuredContent": {"mask_certificate": certificate}}}
+    record = {"tool": "oracle_sample_rows", "outcome": "SUCCEEDED", "entry_hash": "hash",
+              "result_masking": {"masked_columns": ["LABEL"]}}
+    verify_mask_audit_binding(reply, [record], True)
+    for records, verified in (([record], False), ([record, record], True),
+                              ([{**record, "entry_hash": "other"}], True),
+                              ([{**record, "result_masking": {}}], True)):
+        try:
+            verify_mask_audit_binding(reply, records, verified)
+        except DriverError:
+            pass
+        else:
+            raise DriverError("invalid mask audit binding accepted")
+    queue_case = next(case for case in cases if case["case_id"] == "rel012_i50_queued_budget")
+    first, second = freshen_vsql_marker(queue_case), freshen_vsql_marker(queue_case)
+    for key in ("hold_marker", "expired_marker"):
+        require(first["call"]["queued_read"][key] != second["call"]["queued_read"][key],
+                "queued read reused a SQL marker across runs")
+    print(compact({"selftest": "release_schedule_and_proof_negatives", "verdict": "pass"}))
+
+
 def selftest():
     audit_report_timeline_selftest()
+    release_schedule_selftest()
     retention_probe_selftest()
     flashback_grant_selftest()
     awr_environment_selftest()

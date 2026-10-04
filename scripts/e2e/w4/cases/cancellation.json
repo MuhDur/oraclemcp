@@ -80,27 +80,39 @@
     ]
   },
   {
-    "case_id": "w4_runtime_issue49_progress_with_token",
-    "tool": "oracle_query",
-    "level": "READ_ONLY",
-    "profile_variant": "synthetic_raw",
-    "setup_phase": "before_server",
-    "transports": ["stdio", "http"],
-    "requires": ["priv:SELECT_V_SQL"],
-    "setup": [],
-    "call": {
-      "arguments": {"sql": "SELECT /* W4MARK_123456789ABD */ COUNT(*) AS C FROM ${owner}.T_PARENT_${run_id} CONNECT BY LEVEL <= 100000000"},
-      "cancel_marker": "W4MARK_123456789ABD",
-      "progress_token": "w4-cancel-progress",
-      "reuse_after_cancel": true,
-      "cancel_audit": true
+  "case_id": "w4_runtime_issue49_progress_with_token",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "profile_variant": "synthetic_raw",
+  "setup_phase": "before_server",
+  "transports": [
+    "stdio",
+    "http"
+  ],
+  "requires": [
+    "priv:SELECT_V_SQL"
+  ],
+  "setup": [],
+  "call": {
+    "arguments": {
+      "sql": "SELECT /* W4MARK_123456789ABD */ COUNT(*) AS C FROM ${owner}.T_PARENT_${run_id} CONNECT BY LEVEL <= 100000000"
     },
-    "expect": {"golden": "issue49-progress.${lane}.json"},
-    "db_reread": [],
-    "audit_expect": [],
-    "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
-    "cleanup": []
+    "cancel_marker": "W4MARK_123456789ABD",
+    "progress_token": "w4-cancel-progress",
+    "reuse_after_cancel": true,
+    "cancel_audit": true
   },
+  "expect": {
+    "golden": "issue49-progress.${lane}.json"
+  },
+  "db_reread": [],
+  "audit_expect": [],
+  "on_unsupported": {
+    "error_class": "RUNTIME_STATE_REQUIRED"
+  },
+  "cleanup": [],
+  "test_id": "w4_query_cancel_progress"
+},
   {
     "case_id": "w4_runtime_issue50_session_busy",
     "tool": "oracle_execute",

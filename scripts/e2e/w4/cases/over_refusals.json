@@ -653,5 +653,553 @@
     "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_OBJ_METHOD_${run_id}", "rows": [[1]]}],
     "audit_expect": [], "audit_zero_executions": true,
     "on_unsupported": {"error_class": "OPERATING_LEVEL_TOO_LOW"}
+  },
+  {
+    "case_id": "rel012_i34_derived",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT x.ID FROM (SELECT ID FROM ${owner}.T_PARENT_${run_id}) x ORDER BY x.ID"
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        },
+        {
+          "ID": "2"
+        }
+      ]
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i34_union_all",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT u.ID FROM (SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p UNION ALL SELECT c.ID FROM ${owner}.T_CHILD_${run_id} c) u ORDER BY u.ID"
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1"
+        },
+        {
+          "ID": "1"
+        },
+        {
+          "ID": "2"
+        }
+      ]
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i35_dictionary_view",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.F_I35_${run_id}(P_ID NUMBER) RETURN NUMBER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (P_ID); COMMIT; RETURN P_ID; END;"
+      },
+      {
+        "sql": "CREATE OR REPLACE VIEW ${owner}.V_I35_${run_id} AS SELECT ID, ${owner}.F_I35_${run_id}(ID) AS SIDE_ID FROM ${owner}.T_PARENT_${run_id}"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "SELECT SIDE_ID FROM V_I35_${run_id}"
+      }
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_query",
+        "arguments": {
+          "sql": "SELECT OBJECT_NAME FROM USER_OBJECTS WHERE OBJECT_NAME = :1",
+          "binds": [
+            "T_PARENT_${run_id}"
+          ]
+        },
+        "expect": {
+          "rows": [
+            {
+              "OBJECT_NAME": "T_PARENT_${run_id}"
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+  "case_id": "rel012_i40_common_name_matrix",
+  "tool": "oracle_sample_rows",
+  "level": "READ_ONLY",
+  "profile_variant": "synthetic_owner",
+  "setup_phase": "before_server",
+  "transports": [
+    "stdio",
+    "http"
+  ],
+  "requires": [],
+  "setup": [
+    {
+      "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_NAME_${run_id} AS BEGIN NULL; END;"
+    }
+  ],
+  "call": {
+    "arguments": {
+      "owner": "${owner}",
+      "name": "T_PARENT_${run_id}",
+      "max_rows": 1
+    }
+  },
+  "expect": {
+    "json_subset": {
+      "row_count": 1,
+      "rows": [
+        {
+          "ID": "1",
+          "LABEL": "parent-1"
+        }
+      ]
+    }
+  },
+  "db_reread": [],
+  "audit_expect": [],
+  "on_unsupported": {
+    "error_class": "INVALID_ARGUMENTS"
+  },
+  "name_alias_matrix": true,
+  "steps": [
+    {
+      "tool": "oracle_describe",
+      "arguments": {
+        "owner": "${owner}",
+        "name": "T_PARENT_${run_id}"
+      },
+      "expect": {
+        "json_subset": {
+          "owner": "${owner}",
+          "table": "T_PARENT_${run_id}",
+          "columns": [
+            {
+              "COLUMN_NAME": "ID"
+            },
+            {
+              "COLUMN_NAME": "LABEL"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "tool": "oracle_describe_view",
+      "arguments": {
+        "owner": "${owner}",
+        "name": "V_TYPES_${run_id}"
+      },
+      "expect": {
+        "json_subset": {
+          "owner": "${owner}",
+          "name": "V_TYPES_${run_id}"
+        }
+      }
+    },
+    {
+      "tool": "oracle_describe_index",
+      "arguments": {
+        "owner": "${owner}",
+        "name": "IX_TYPES_${run_id}"
+      },
+      "expect": {
+        "json_subset": {
+          "index": {
+            "OWNER": "${owner}",
+            "INDEX_NAME": "IX_TYPES_${run_id}"
+          }
+        }
+      }
+    },
+    {
+      "tool": "oracle_describe_trigger",
+      "arguments": {
+        "owner": "${owner}",
+        "name": "TRG_CHILD_AUDIT_${run_id}"
+      },
+      "expect": {
+        "json_subset": {
+          "trigger": {
+            "TRIGGER_NAME": "TRG_CHILD_AUDIT_${run_id}",
+            "TABLE_OWNER": "${owner}"
+          }
+        }
+      }
+    },
+    {
+      "tool": "oracle_get_ddl",
+      "arguments": {
+        "owner": "${owner}",
+        "name": "V_TYPES_${run_id}",
+        "object_type": "VIEW"
+      },
+      "expect": {
+        "golden": "source-tools.get_ddl_view.${lane}.json"
+      }
+    },
+    {
+      "tool": "oracle_get_source",
+      "arguments": {
+        "owner": "${owner}",
+        "name": "P_NAME_${run_id}",
+        "object_type": "PROCEDURE"
+      },
+      "expect": {
+        "json_subset": {
+          "source": {
+            "owner": "${owner}",
+            "name": "P_NAME_${run_id}",
+            "object_type": "PROCEDURE",
+            "line_count": 1,
+            "truncated": false
+          }
+        }
+      }
+    },
+    {
+      "tool": "oracle_sample_rows",
+      "arguments": {
+        "owner": "${owner}",
+        "name": "T_PARENT_${run_id}",
+        "max_rows": 1
+      },
+      "expect": {
+        "json_subset": {
+          "row_count": 1,
+          "rows": [
+            {
+              "ID": "1",
+              "LABEL": "parent-1"
+            }
+          ]
+        }
+      }
+    }
+  ]
+},
+  {
+    "case_id": "rel012_i41_array_string",
+    "tool": "oracle_orient",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "include": "[\"schema\"]"
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "rel012_i52_exists_view",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p WHERE EXISTS (SELECT 1 FROM ${owner}.V_I35_${run_id}) /* W4MARK_I52EXISTSVIEW000000000000 */"
+      },
+      "vsql_absent_marker": "W4MARK_I52EXISTSVIEW000000000000"
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "rel012_i52_in_policy",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p WHERE p.ID IN (SELECT s.ID FROM ${owner}.T_SECURE_${run_id} s) /* W4MARK_I52INPOLICY000000000000 */"
+      },
+      "vsql_absent_marker": "W4MARK_I52INPOLICY000000000000"
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "rel012_i52_scalar_view",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT (SELECT MAX(SIDE_ID) FROM ${owner}.V_I35_${run_id}) AS M FROM ${owner}.T_PARENT_${run_id} /* W4MARK_I52SCALARVIEW000000000000 */"
+      },
+      "vsql_absent_marker": "W4MARK_I52SCALARVIEW000000000000"
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "rel012_i53_sample_policy",
+    "tool": "oracle_sample_rows",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "table": "T_SECURE_${run_id}",
+        "max_rows": 5
+      },
+      "generated_sampler_absent": true
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "audit_zero_executions": true
+  },
+  {
+    "case_id": "rel012_i53_sample_view",
+    "tool": "oracle_sample_rows",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "table": "V_I35_${run_id}",
+        "max_rows": 5
+      },
+      "generated_sampler_absent": true
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "audit_zero_executions": true
+  },
+  {
+  "case_id": "rel012_i50_queued_budget",
+  "tool": "oracle_query",
+  "level": "READ_WRITE",
+  "profile_variant": "synthetic_owner_rw",
+  "setup_phase": "before_server",
+  "transports": [
+    "stdio",
+    "http"
+  ],
+  "requires": [
+    "priv:SELECT_V_SQL"
+  ],
+  "setup": [],
+  "call": {
+    "arguments": {
+      "sql": "SELECT /* W4MARK_QUEUEHOLD000000 */ COUNT(*) AS C FROM (SELECT LEVEL AS N FROM dual CONNECT BY LEVEL <= 10000) a CROSS JOIN (SELECT LEVEL AS N FROM dual CONNECT BY LEVEL <= 10000) b CROSS JOIN (SELECT LEVEL AS N FROM dual CONNECT BY LEVEL <= 10000) c CROSS JOIN ${owner}.T_PARENT_${run_id} p WHERE p.ID = 1",
+      "timeout_seconds": 20
+    },
+    "queued_read": {
+      "hold_marker": "W4MARK_QUEUEHOLD000000",
+      "arguments": {
+        "sql": "SELECT /* W4MARK_QUEUEEXPIRE000 */ ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "timeout_seconds": 1
+      },
+      "expired_marker": "W4MARK_QUEUEEXPIRE000"
+    }
+  },
+  "expect": {
+    "error_class": "SESSION_BUSY"
+  },
+  "db_reread": [],
+  "audit_expect": [],
+  "on_unsupported": {
+    "error_class": "INVALID_ARGUMENTS"
   }
+}
 ]
