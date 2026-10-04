@@ -795,6 +795,8 @@
   ],
   "requires": [],
   "setup": [
+    {"sql": "CREATE TABLE ${owner}.T_NAME_${run_id}(ID NUMBER PRIMARY KEY, LABEL VARCHAR2(40))"},
+    {"sql": "INSERT INTO ${owner}.T_NAME_${run_id}(ID,LABEL) VALUES (1,'parent-1')"},
     {
       "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_NAME_${run_id} AS BEGIN NULL; END;"
     }
@@ -802,7 +804,7 @@
   "call": {
     "arguments": {
       "owner": "${owner}",
-      "name": "T_PARENT_${run_id}",
+      "name": "T_NAME_${run_id}",
       "max_rows": 1
     }
   },
@@ -828,12 +830,12 @@
       "tool": "oracle_describe",
       "arguments": {
         "owner": "${owner}",
-        "name": "T_PARENT_${run_id}"
+        "name": "T_NAME_${run_id}"
       },
       "expect": {
         "json_subset": {
           "owner": "${owner}",
-          "table": "T_PARENT_${run_id}",
+          "table": "T_NAME_${run_id}",
           "columns": [
             {
               "COLUMN_NAME": "ID"
@@ -922,7 +924,7 @@
       "tool": "oracle_sample_rows",
       "arguments": {
         "owner": "${owner}",
-        "name": "T_PARENT_${run_id}",
+        "name": "T_NAME_${run_id}",
         "max_rows": 1
       },
       "expect": {
