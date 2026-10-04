@@ -1942,6 +1942,22 @@ def killed_session_dml_call(client, case, connection, descriptor):
                   "loss": scrub(payload)}
 
 
+@contextlib.contextmanager
+def case_flashback_grant(case, lane, settings, owner, change_grant=set_flashback_grant):
+    """Keep the positive diff privilege inside its case, even when setup or execution fails.
+
+    A failed revoke aborts the lane rather than letting another case inherit the grant.
+    """
+    if not case.get("flashback_grant_owner"):
+        yield
+        return
+    try:
+        change_grant(lane, settings, owner, True)
+        yield
+    finally:
+        change_grant(lane, settings, owner, False)
+
+
 def run_case(client, case, transport, lane, capabilities, connection, barriers,
              binary, audit_path, env, descriptor=None):
     start = time.monotonic()
@@ -2539,7 +2555,6 @@ def run_lane(args):
             audit_path = state / "oraclemcp/audit/audit.jsonl"
             fixture_id = None
             client = None
-            flashback_grant_owner = None
             try:
                 if not args.contract_only:
                     fixture_id = new_run_id()
@@ -2558,11 +2573,6 @@ def run_lane(args):
                         # The disposable owner needs the same FGA catalog proof
                         # that every served relation read requires.
                         connection.cursor().execute(f"GRANT SELECT ANY DICTIONARY TO {owner}")
-                    if any(case.get("flashback_grant_owner")
-                           and (not args.case or case["case_id"] in args.case)
-                           and transport in case["transports"] for case in family_cases):
-                        set_flashback_grant(args.lane, settings, owner, True)
-                        flashback_grant_owner = owner
                     write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
                                      owner=owner, cross="W4X_" + fixture_id)
                 needs_retention_probe = any(
@@ -2669,9 +2679,13 @@ def run_lane(args):
                                     "failed to drop between case levels")
                         elevate(client, case["level"])
                         current_level = case["level"]
-                    row = run_case(client, case, transport, args.lane, capabilities, connection,
-                                   barriers, binary, audit_path, client_env,
-                                   discovered.get(case["tool"]))
+                    with case_flashback_grant(case, args.lane, settings,
+                                             "W4O_" + fixture_id if fixture_id else None):
+                        row = run_case(client, case, transport, args.lane, capabilities, connection,
+                                       barriers, binary, audit_path, client_env,
+                                       discovered.get(case["tool"]))
+                    if case.get("flashback_grant_owner"):
+                        row["flashback_grant"] = {"scope": "case", "revoked": True}
                     rows.append(row)
                     cancelled_mutation = case["call"].get("cancel_mutation_audit") is True
                     if "kill_served_session_dml_user" in case["call"] or cancelled_mutation:
@@ -2705,8 +2719,6 @@ def run_lane(args):
             finally:
                 if client is not None:
                     client.close()
-                if flashback_grant_owner is not None:
-                    set_flashback_grant(args.lane, settings, flashback_grant_owner, False)
                 if fixture_id is not None:
                     with (work / "fixture.jsonl").open("a") as fixture_log:
                         with contextlib.redirect_stdout(fixture_log):
@@ -2874,8 +2886,59 @@ def retention_probe_selftest():
     print(compact({"selftest": "retention_definition_age_declared_skip_and_negatives", "verdict": "pass"}))
 
 
+def flashback_grant_selftest():
+    positive = {"flashback_grant_owner": True}
+    owner = "W4O_W41234ABCDEF"
+    for outcome in ("pass", "failed_row", "exception", "interrupt", "grant_failure"):
+        events = []
+        def change_grant(lane, settings, name, granted):
+            require(lane == "free23" and settings == {} and name == owner,
+                    "case grant targeted the wrong principal")
+            events.append("grant" if granted else "revoke")
+            if granted and outcome == "grant_failure":
+                raise DriverError("grant failed after sending DDL")
+        try:
+            with case_flashback_grant(positive, "free23", {}, owner, change_grant):
+                require(events == ["grant"], "case must start after its grant")
+                events.append("case_setup")
+                if outcome == "exception":
+                    raise DriverError("case setup/execution failed")
+                if outcome == "interrupt":
+                    raise KeyboardInterrupt()
+                events.append(outcome)
+        except (DriverError, KeyboardInterrupt):
+            require(outcome in {"exception", "interrupt", "grant_failure"},
+                    "unexpected case-scope failure")
+        else:
+            require(outcome in {"pass", "failed_row"}, "case exception was swallowed")
+        expected = (["grant", "revoke"] if outcome == "grant_failure" else
+                    ["grant", "case_setup", "revoke"] if outcome in {"exception", "interrupt"} else
+                    ["grant", "case_setup", outcome, "revoke"])
+        require(events == expected, "case did not revoke its grant on every exit path")
+    events = []
+    def revoke_fails(lane, settings, name, granted):
+        events.append("grant" if granted else "revoke")
+        if not granted:
+            raise DriverError("revoke failed")
+    try:
+        with case_flashback_grant(positive, "free23", {}, owner, revoke_fails):
+            events.append("case")
+        events.append("next_case")
+    except DriverError:
+        pass
+    require(events == ["grant", "case", "revoke"],
+            "a revoke failure must stop the lane before the next case")
+    events = []
+    with case_flashback_grant({}, "free23", {}, owner,
+                              lambda *args: events.append("unexpected privilege change")):
+        events.append("no_grant_case")
+    require(events == ["no_grant_case"], "negative cases must never change the grant")
+    print(compact({"selftest": "flashback_grant_case_scope_all_exit_paths", "verdict": "pass"}))
+
+
 def selftest():
     retention_probe_selftest()
+    flashback_grant_selftest()
     load_cases()
     expected_live_ids = {
         "w4_get_source_argument_class": "rel012_i38_argument_class",
