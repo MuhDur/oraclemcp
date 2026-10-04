@@ -143,6 +143,13 @@ fn resolver_bind(binds: &[OracleBind], index: usize) -> &str {
 struct OneRowMock;
 #[async_trait::async_trait(?Send)]
 impl OracleConnection for OneRowMock {
+    async fn open_policy_observation_session(
+        &self,
+        _cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        Ok(Box::new(Self))
+    }
+
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }

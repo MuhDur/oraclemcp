@@ -1537,7 +1537,7 @@ mod tests {
                     ("COLUMN_ID", Some("1")),
                 ])]);
             }
-            if sql.contains("FROM all_policies") {
+            if sql.contains("FROM SYS.ALL_POLICIES") {
                 // The object-specific VPD gate (SELECT_POLICY_SQL) binds
                 // object_owner/object_name; the blind-visibility proof
                 // (POLICY_CATALOG_PROOF_SQL) does not. The proof must return rows
