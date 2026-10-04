@@ -113,6 +113,82 @@ fn run_binary(args: &[&str]) -> Output {
 }
 
 #[test]
+fn audit_report_cli_goldens_and_broken_chain_exit_2() {
+    let dir = temp_dir("audit-report-goldens");
+    let config = dir.join("profiles.toml");
+    fs::write(
+        &config,
+        "[audit]\nkey_id = \"default\"\nkey_ref = \"env:AUDIT_REPORT_FIXTURE_KEY\"\n",
+    )
+    .expect("write isolated fixture config");
+    let input = include_str!("../../../tests/golden/audit_report/session.jsonl");
+    let ledger = dir.join("session.jsonl");
+    fs::write(&ledger, input).expect("write signed fixture");
+    let key = "8f84e96ef50b2533f7d9d5f5b2b562593f00d4b0f05eac13d1a53c356b6769ab";
+    let cases = [
+        (
+            "session.md",
+            "markdown",
+            0,
+            include_str!("../../../tests/golden/audit_report/session.md"),
+        ),
+        (
+            "session.html",
+            "html",
+            0,
+            include_str!("../../../tests/golden/audit_report/session.html"),
+        ),
+        (
+            "broken_chain.md",
+            "markdown",
+            2,
+            include_str!("../../../tests/golden/audit_report/broken_chain.md"),
+        ),
+    ];
+    for (case_id, format, exit, golden) in cases {
+        if exit == 2 {
+            fs::write(
+                &ledger,
+                input.replacen("oracle_query", "oracle_query_tampered", 1),
+            )
+            .expect("tamper one signed record");
+        }
+        for write_file in [false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+            command
+                .args(["audit", "report"])
+                .arg(&ledger)
+                .args(["--format", format])
+                .env(CONFIG_PATH_ENV, &config)
+                .env("AUDIT_REPORT_FIXTURE_KEY", key)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let out = dir.join(case_id);
+            if write_file {
+                command.arg("--out").arg(&out);
+            }
+            let output = wait_with_timeout(command, Duration::from_secs(30));
+            assert_eq!(output.status.code(), Some(exit), "{case_id}: {output:?}");
+            let actual = if write_file {
+                fs::read(&out).expect("report written even when chain is broken")
+            } else {
+                output.stdout
+            };
+            eprintln!(
+                "{}",
+                serde_json::json!({
+                    "case_id": case_id, "out": write_file,
+                    "expected_digest": oraclemcp_audit::sha256_hex(golden.as_bytes()),
+                    "actual_digest": oraclemcp_audit::sha256_hex(&actual),
+                    "verdict": if actual == golden.as_bytes() { "pass" } else { "fail" },
+                })
+            );
+            assert_eq!(actual, golden.as_bytes(), "{case_id}");
+        }
+    }
+}
+
+#[test]
 fn audit_verify_cli_uses_active_and_historical_keyring() {
     let dir = temp_dir("qa37-mixed-key-verify");
     let audit_path = dir.join("audit.jsonl");

@@ -1528,6 +1528,49 @@ def audit_records_since(records, starting_count):
     return records[starting_count:]
 
 
+def verify_report_timeline(report, records):
+    """Compare every rendered row to the real ledger, including sequence order."""
+    require("## Timeline\n\n" in report, "audit report has no timeline")
+    table = report.split("## Timeline\n\n", 1)[1].split("\n\n", 1)[0].splitlines()
+    cells = lambda row: [cell.strip() for cell in re.split(r"(?<!\\)\|", row)[1:-1]]
+    require(len(table) >= 2 and len(cells(table[0])) == len(cells(table[1])) == 10,
+            "audit report timeline header/delimiter must have ten columns")
+    rows = [cells(row) for row in table[2:]]
+    require(len(rows) == len(records), "audit report omitted or added timeline records")
+    for row, record in zip(rows, records):
+        require(len(row) == 10, "audit report timeline row has wrong column count")
+        for column, field in ((0, "seq"), (1, "timestamp"), (3, "tool"),
+                              (4, "danger_level"), (5, "decision"), (6, "outcome")):
+            require(row[column] == str(record[field]),
+                    f"audit report seq {record['seq']}: {field} differs from ledger")
+        require(row[7].startswith(record["sql_sha256"] + "; "),
+                "audit report SQL hash differs from ledger")
+        require(row[8] == str(record.get("rows_affected", "-")),
+                "audit report row count differs from ledger")
+
+
+def audit_report_timeline_selftest():
+    # Structural parser proof only. Live rendering uses the real CLI above.
+    record = {"seq": 1, "timestamp": "unix:1", "tool": "oracle_execute",
+              "danger_level": "READ_WRITE", "decision": "ALLOWED",
+              "outcome": "ROLLED_BACK", "sql_sha256": "sha256:test", "rows_affected": 1}
+    header = "| Seq | Time | Subject | Tool | Level | Decision | Outcome | SQL | Rows | Failure |"
+    delimiter = "| " + " | ".join(["---"] * 10) + " |"
+    row = "| 1 | unix:1 | process:stdio | oracle_execute | READ_WRITE | ALLOWED | ROLLED_BACK | sha256:test; redacted | 1 | - |"
+    report = "## Timeline\n\n" + "\n".join([header, delimiter, row]) + "\n\n"
+    verify_report_timeline(report, [record])
+    for invalid in (report.replace(delimiter, delimiter[:-6]),
+                    report.replace("ROLLED_BACK", "SUCCEEDED"),
+                    report.replace("| 1 | unix:1", "| 2 | unix:1"),
+                    report.replace(row, "")):
+        try:
+            verify_report_timeline(invalid, [record])
+        except DriverError:
+            continue
+        raise DriverError("audit report parser accepted a malformed or incorrect timeline")
+    print(compact({"selftest": "audit_report_timeline_structure_and_values", "verdict": "pass"}))
+
+
 def audit_verify(binary, path, env):
     if not path.exists():
         return False
@@ -1867,8 +1910,18 @@ def run_steps(client, case, row, binary, audit_path, env, connection):
             observed.append({"step": index, "wait_level": level})
         elif "audit_report" in step:
             records = audit_records(audit_path)
-            report = "\n".join(compact(record) for record in records)
-            observed.append({"step": index, "audit_record_count": len(records)})
+            process = subprocess.run(
+                [str(binary), "--json", "audit", "report", str(audit_path)],
+                cwd=ROOT, env=env, text=True, capture_output=True, timeout=60)
+            require(process.returncode == 0, f"step {index}: audit report CLI failed")
+            payload = json.loads(process.stdout)
+            require(payload.get("verification") == "verified",
+                    f"step {index}: audit report chain was not verified")
+            report = payload["report"]
+            verify_report_timeline(report, records)
+            observed.append({"step": index, "audit_record_count": len(records),
+                             "report_digest": hashlib.sha256(report.encode()).hexdigest(),
+                             "renderer": "audit report CLI", "timeline_verified": True})
             row["steps"] = observed
             missing = [item for item in step["audit_report"]["contains"] if item not in report]
             require(not missing, f"step {index}: audit report lacks {missing}")
@@ -3399,6 +3452,7 @@ def flashback_grant_selftest():
 
 
 def selftest():
+    audit_report_timeline_selftest()
     retention_probe_selftest()
     flashback_grant_selftest()
     awr_environment_selftest()

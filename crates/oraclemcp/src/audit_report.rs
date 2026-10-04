@@ -151,7 +151,7 @@ fn render_markdown_timeline(out: &mut String, records: &[AuditRecord]) {
     out.push_str(
         "| Seq | Time | Subject | Tool | Level | Decision | Outcome | SQL | Rows | Failure |\n",
     );
-    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
+    out.push_str("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n");
     for record in records {
         out.push('|');
         for value in [
@@ -617,13 +617,13 @@ mod tests {
         .expect("fixture verifies")
     }
 
-    fn real_free23_golden_input() -> &'static str {
-        include_str!("../../../tests/golden/audit_report/free23_session.jsonl")
+    fn golden_input() -> &'static str {
+        include_str!("../../../tests/golden/audit_report/session.jsonl")
     }
 
     #[test]
     fn markdown_golden_session() {
-        let input = real_free23_golden_input();
+        let input = golden_input();
         let report = verify_and_render(
             Cursor::new(input.as_bytes()),
             &[key()],
@@ -633,13 +633,79 @@ mod tests {
         .expect("real FREE23 golden chain verifies");
         assert_eq!(
             report.content,
-            include_str!("../../../tests/golden/audit_report/free23_session.md")
+            include_str!("../../../tests/golden/audit_report/session.md")
         );
+    }
+
+    // Parse pipe-table rows independently of the renderer, honoring escaped
+    // pipes so cell content cannot hide a header/delimiter mismatch.
+    fn markdown_columns(row: &str) -> Vec<&str> {
+        let row = row
+            .trim()
+            .strip_prefix('|')
+            .expect("leading pipe")
+            .strip_suffix('|')
+            .expect("trailing pipe");
+        let mut cells = Vec::new();
+        let mut start = 0;
+        let mut escaped = false;
+        for (index, ch) in row.char_indices() {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '|' {
+                cells.push(row[start..index].trim());
+                start = index + 1;
+            }
+        }
+        cells.push(row[start..].trim());
+        cells
+    }
+
+    #[test]
+    fn markdown_table_header_and_delimiter_columns_match() {
+        let input = golden_input();
+        let golden_report = verify_and_render(
+            Cursor::new(input.as_bytes()),
+            &[key()],
+            &sha256_hex(input.as_bytes()),
+            AuditReportFormat::Markdown,
+        )
+        .expect("golden chain verifies");
+        let escaped_report = report_from_records(
+            &records(AuditSubject::new("fixture", "session|with\\pipes")),
+            AuditReportFormat::Markdown,
+        );
+        for report in [golden_report, escaped_report] {
+            let lines: Vec<_> = report.content.lines().collect();
+            let mut tables = 0;
+            for (index, line) in lines.iter().enumerate() {
+                if !line.starts_with("| ---") {
+                    continue;
+                }
+                let header = markdown_columns(lines[index - 1]);
+                let delimiter = markdown_columns(line);
+                assert_eq!(header.len(), delimiter.len(), "table header: {header:?}");
+                assert!(delimiter.iter().all(|cell| *cell == "---"));
+                if header.first() == Some(&"Seq") && header.get(1) == Some(&"Time") {
+                    assert_eq!(header.len(), 10, "timeline has ten columns");
+                }
+                for row in lines[index + 1..]
+                    .iter()
+                    .take_while(|row| row.starts_with('|'))
+                {
+                    assert_eq!(markdown_columns(row).len(), header.len(), "row: {row}");
+                }
+                tables += 1;
+            }
+            assert_eq!(tables, 6, "all report tables were parsed");
+        }
     }
 
     #[test]
     fn html_golden_session() {
-        let input = real_free23_golden_input();
+        let input = golden_input();
         let report = verify_and_render(
             Cursor::new(input.as_bytes()),
             &[key()],
@@ -649,7 +715,7 @@ mod tests {
         .expect("real FREE23 golden chain verifies");
         assert_eq!(
             report.content,
-            include_str!("../../../tests/golden/audit_report/free23_session.html")
+            include_str!("../../../tests/golden/audit_report/session.html")
         );
     }
 
@@ -725,7 +791,7 @@ mod tests {
 
     #[test]
     fn broken_chain_report_banner_and_exit_2() {
-        let input = jsonl(&records(AuditSubject::new("fixture", "session")));
+        let input = golden_input();
         let tampered = input.replacen("oracle_query", "oracle_query_tampered", 1);
         let report = verify_and_render(
             Cursor::new(tampered.as_bytes()),
@@ -736,10 +802,15 @@ mod tests {
         .expect("tampering is a verifier verdict, not an I/O error");
         assert!(matches!(
             report.verdict,
-            AuditReportVerdict::Broken { seq: 1, .. }
+            AuditReportVerdict::Broken { seq: 2, .. }
         ));
-        assert!(report.content.contains("CHAIN BROKEN at seq 1"));
-        assert!(!report.content.contains("oracle_execute"));
+        assert!(report.content.contains("CHAIN BROKEN at seq 2"));
+        assert_eq!(
+            report.content,
+            include_str!("../../../tests/golden/audit_report/broken_chain.md")
+        );
+        assert!(!report.content.contains("## Timeline"));
+        assert!(!report.content.contains("oracle_query"));
         assert_eq!(
             report.verdict.error_code(),
             Some("ORACLEMCP_AUDIT_CHAIN_BROKEN")
