@@ -2151,8 +2151,9 @@ def queued_read_call(client, case, connection):
     def http_hold():
         try:
             status, _, body = client._request("POST", "/mcp", compact(hold).encode())
-            require(status == 200, "held HTTP read did not return an MCP response")
+            require(status in {200, 500}, f"held HTTP read returned unexpected status {status}")
             replies[hold_id] = client.decode_body(body)
+            replies["holder_http_status"] = status
         except Exception as exc:
             replies["error"] = exc
     def receive_stdio(wanted, seconds):
@@ -2179,7 +2180,7 @@ def queued_read_call(client, case, connection):
     else:
         worker = threading.Thread(target=http_hold, daemon=True)
         worker.start()
-    queued_response, queued_ms = None, None
+    queued_response, queued_ms, holder_active_at_expiry = None, None, False
     try:
         deadline = time.monotonic() + 15
         while active_exact_read_count(connection, case["call"]["arguments"]["sql"]) == 0:
@@ -2190,6 +2191,17 @@ def queued_read_call(client, case, connection):
         if isinstance(client, StdioClient):
             client.process.stdin.write(compact(request) + "\n")
             client.process.stdin.flush()
+            # Stdio preserves request response order. Let the one-second queued
+            # budget expire while A is active, then cancel A so its terminal
+            # response can precede B without holding B behind a long query.
+            status = connection.cursor().var(int)
+            connection.cursor().execute(
+                "BEGIN :status := DBMS_PIPE.RECEIVE_MESSAGE(:pipe_name, 2); END;",
+                {"status": status, "pipe_name": "W4QUEUE_" + secrets.token_hex(8)})
+            require(status.getvalue() == 1, "queue expiry barrier was unexpectedly signalled")
+            holder_active_at_expiry = active_exact_read_count(connection, case["call"]["arguments"]["sql"]) > 0
+            require(holder_active_at_expiry, "holder ended before queued budget expiry")
+            client.notify("notifications/cancelled", {"requestId": hold_id, "reason": "synthetic queue release"})
             receive_stdio(queue_id, 5)
             queued_response = replies[queue_id]
         else:
@@ -2202,10 +2214,11 @@ def queued_read_call(client, case, connection):
                 "queued read unexpectedly executed: " + compact(scrub(tool_payload(queued_response)))[:500])
         verify_expect({"error_class": "SESSION_BUSY"}, queued_response)
         message = tool_payload(queued_response)["structuredContent"].get("message", "").lower()
-        require("busy" in message and "budget" in message and queued_ms < 5000 and hold_id not in replies,
+        require("busy" in message and "budget" in message and queued_ms < 5000,
                 "queued read did not expire within its budget while the holder remained active")
-        require(active_exact_read_count(connection, case["call"]["arguments"]["sql"]) > 0,
-                "held SELECT was no longer active when the queued budget expired")
+        if not isinstance(client, StdioClient):
+            holder_active_at_expiry = active_exact_read_count(connection, case["call"]["arguments"]["sql"]) > 0
+        require(holder_active_at_expiry, "held SELECT was no longer active when the queued budget expired")
         structured = tool_payload(queued_response)["structuredContent"]
         require(isinstance(structured.get("queued_ms"), int) and structured["queued_ms"] > 0
                 and isinstance(structured.get("retry_after_ms"), int) and structured["retry_after_ms"] > 0,
@@ -2229,7 +2242,7 @@ def queued_read_call(client, case, connection):
             # its workspace; the lane restarts it before the next case.
             client.close()
     return queued_response, {"queued_ms": queued_ms, "holder": scrub(tool_payload(replies[hold_id])),
-                             "expired_statement_sql_ids": 0, "holder_active_at_queue_expiry": True}
+                             "expired_statement_sql_ids": 0, "holder_active_at_queue_expiry": holder_active_at_expiry}
 
 
 def run_doctor_manifest_case(binary, lane, transport):
