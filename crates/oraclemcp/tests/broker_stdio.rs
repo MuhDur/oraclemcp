@@ -885,17 +885,23 @@ fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
 #[cfg(feature = "live-xe")]
 #[test]
 fn live_http_default_sessions_share_profile_capacity_across_principals() {
-    http_stdio_coexistence(false);
+    http_stdio_coexistence(false, false);
 }
 
 #[cfg(feature = "live-xe")]
 #[test]
 fn live_http_attaches_while_two_stdio_clients_remain_active() {
-    http_stdio_coexistence(true);
+    http_stdio_coexistence(true, false);
+}
+
+#[cfg(all(feature = "live-xe", unix))]
+#[test]
+fn live_sigkill_http_launcher_allows_immediate_replacement() {
+    http_stdio_coexistence(false, true);
 }
 
 #[cfg(feature = "live-xe")]
-fn http_stdio_coexistence(stdio_first: bool) {
+fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
@@ -994,7 +1000,7 @@ fn http_stdio_coexistence(stdio_first: bool) {
             )
             .stderr(Stdio::inherit());
     }
-    if !stdio_first {
+    if !stdio_first && !kill_frontend {
         // The spawning HTTP client's diagnostic pipe disappears with that
         // client. Its detached broker must still serve replacement clients.
         command.stderr(Stdio::piped());
@@ -1231,7 +1237,10 @@ fn http_stdio_coexistence(stdio_first: bool) {
     {
         assert!(
             Command::new("kill")
-                .args(["-TERM", &process.0.id().to_string()])
+                .args([
+                    if kill_frontend { "-KILL" } else { "-TERM" },
+                    &process.0.id().to_string()
+                ])
                 .status()
                 .unwrap()
                 .success()
@@ -1247,15 +1256,36 @@ fn http_stdio_coexistence(stdio_first: bool) {
             );
             std::thread::sleep(Duration::from_millis(20));
         };
-        assert!(status.success(), "graceful HTTP shutdown: {status}");
+        if !kill_frontend {
+            assert!(status.success(), "graceful HTTP shutdown: {status}");
+        }
         drop(process.0.stderr.take());
-        assert!(
-            TcpStream::connect(address).is_err(),
-            "frontend exit must acknowledge listener closure"
-        );
+        if !kill_frontend {
+            assert!(
+                TcpStream::connect(address).is_err(),
+                "frontend exit must acknowledge listener closure"
+            );
+        }
         // No idle wait or retry of the failed launcher: immediately replace it
         // on the same root and address while both stdio clients remain alive.
-        process = HttpProcess(command.stderr(Stdio::inherit()).spawn().unwrap());
+        process = HttpProcess(command.stderr(Stdio::piped()).spawn().unwrap());
+        let stderr = process.0.stderr.take().unwrap();
+        let (ready_tx, ready_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stderr).lines() {
+                let line = line.unwrap();
+                eprintln!("{line}");
+                if let Ok(value) = serde_json::from_str::<Value>(&line)
+                    && (value["kind"] == "status" || value["kind"] == "error")
+                {
+                    let _ = ready_tx.send(value);
+                }
+            }
+        });
+        let ready = ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("replacement must take over promptly without a launcher retry");
+        assert_eq!(ready["kind"], "status", "replacement launcher: {ready}");
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while TcpStream::connect(address).is_err() {
             assert!(
@@ -1358,4 +1388,64 @@ fn http_stdio_coexistence(stdio_first: bool) {
         "mixed audit chain verify: {}",
         String::from_utf8_lossy(&verified.stderr)
     );
+}
+
+#[cfg(feature = "live-xe")]
+#[test]
+fn live_bad_first_credentials_do_not_pin_the_root_broker() {
+    let root = tempfile::tempdir().unwrap();
+    let path = config(root.path(), true);
+    for password in [Some("synthetic-wrong-first-password"), None] {
+        let wrong = Client::spawn_with_password(root.path(), &path, 91, password);
+        let refusal = wrong.response(1);
+        assert_eq!(
+            refusal["error"]["data"]["error_class"], "POLICY_DENIED",
+            "{refusal}"
+        );
+        assert!(
+            refusal
+                .to_string()
+                .contains("ORACLEMCP_BROKER_CREDENTIAL_INVALID"),
+            "{refusal}"
+        );
+        assert!(
+            !refusal
+                .to_string()
+                .contains("synthetic-wrong-first-password")
+        );
+        assert!(
+            !root.path().join("state/oraclemcp/broker.json").exists(),
+            "invalid first credentials must never elect an owner"
+        );
+        drop(wrong);
+    }
+    let mut valid = Client::spawn(root.path(), &path, 92);
+    assert!(
+        valid.response(1).get("result").is_some(),
+        "correct client must start immediately after a refused first client"
+    );
+    valid.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    valid.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 92 AS CORRECT_FIRST_VALUE FROM dual"}}}));
+    let response = valid.response(2);
+    assert_eq!(response["result"]["isError"], false, "{response}");
+    assert!(response.to_string().contains("92"));
+    drop(valid);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let records = std::fs::read_to_string(root.path().join("audit.jsonl")).unwrap();
+        if records.lines().any(|line| {
+            let record: Value = serde_json::from_str(line).unwrap();
+            record["tool"] == "lane_lifecycle"
+                && record["subject"]["client_id"]
+                    .as_str()
+                    .is_some_and(|id| id.contains("broker-test-92"))
+        }) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "wait for owned session's durable cleanup before fixture removal"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }

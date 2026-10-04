@@ -4412,6 +4412,12 @@ fn run_serve(
             );
             let result = service_app.wait_for_transport();
             let app_stop_result = service_app.stop_and_join();
+            // The TCP transport and its retained listener are now closed. A
+            // dead frontend's replacement need not wait for the probe or
+            // telemetry shutdown tail to release per-root HTTP ownership.
+            drop(service_app);
+            drop(_service_instance_guard);
+            shared_http.listener_closed();
 
             // Drain telemetry + the probe before returning (bounded budgets).
             pinger.shutdown();

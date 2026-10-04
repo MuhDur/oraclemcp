@@ -18,19 +18,66 @@ pub(super) struct HttpService {
     pub shutdown: Arc<std::sync::atomic::AtomicBool>,
     pub status: Arc<Mutex<interprocess::local_socket::Stream>>,
     pub allow_remote_from_env: bool,
+    listener_permit: Arc<Mutex<Option<HttpListenerPermit>>>,
 }
 
-struct HttpListenerPermit(Arc<Mutex<bool>>);
+#[derive(Default)]
+struct HttpListenerState {
+    running: bool,
+    disconnected: bool,
+}
+
+type HttpListenerSlot = Arc<(Mutex<HttpListenerState>, std::sync::Condvar)>;
+
+struct HttpListenerPermit(HttpListenerSlot);
 impl Drop for HttpListenerPermit {
     fn drop(&mut self) {
-        *self
-            .0
+        let (state, changed) = &*self.0;
+        state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = false;
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running = false;
+        changed.notify_all();
     }
 }
 
+fn acquire_http_listener(slot: &HttpListenerSlot) -> Option<HttpListenerPermit> {
+    let (state, changed) = &**slot;
+    let mut state = state.lock().expect("broker HTTP listener lock");
+    if state.running && !state.disconnected {
+        // A replacement can reach this thread just before the control reader
+        // observes the dead launcher's EOF. Give that reader one scheduling
+        // turn; a live launcher still owns its listener and is refused.
+        state = changed
+            .wait_timeout_while(state, std::time::Duration::from_millis(50), |s| {
+                s.running && !s.disconnected
+            })
+            .expect("broker HTTP liveness wait")
+            .0;
+    }
+    if state.running && state.disconnected {
+        // Positive IPC EOF (or explicit shutdown), never a guessed stale PID.
+        // Wait for listener closure, not telemetry/probe/session tail cleanup.
+        state = changed
+            .wait_timeout_while(state, std::time::Duration::from_secs(2), |s| s.running)
+            .expect("broker HTTP closure wait")
+            .0;
+    }
+    if state.running {
+        return None;
+    }
+    state.running = true;
+    state.disconnected = false;
+    Some(HttpListenerPermit(slot.clone()))
+}
+
 impl HttpService {
+    pub fn listener_closed(&self) {
+        self.listener_permit
+            .lock()
+            .expect("HTTP listener permit lock")
+            .take();
+    }
     pub fn ready(&self, transport: &str, address: &str, tools: &[String]) {
         let mut writer = self.status.lock().expect("HTTP broker status lock");
         let _ = serde_json::to_writer(
@@ -217,10 +264,18 @@ fn serve_http(
         .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let disconnected = shutdown.clone();
+    let slot = permit.0.clone();
     std::thread::spawn(move || {
         let _ = reader.read(&mut [0_u8]);
+        let (state, changed) = &*slot;
+        state
+            .lock()
+            .expect("HTTP listener liveness lock")
+            .disconnected = true;
         disconnected.store(true, Ordering::Release);
+        changed.notify_all();
     });
+    let listener_permit = Arc::new(Mutex::new(Some(permit)));
     let resolver = oraclemcp_auth::EnvLookupSecretResolver::new(move |name: &str| {
         start.environment.get(name).cloned()
     });
@@ -231,6 +286,7 @@ fn serve_http(
         shutdown,
         status: status.clone(),
         allow_remote_from_env: start.allow_remote_from_env,
+        listener_permit: listener_permit.clone(),
     };
     let result = run_serve(
         Some(start.listen),
@@ -246,7 +302,10 @@ fn serve_http(
         .unwrap_or(1);
     // A successful frontend exit must also acknowledge that another launcher
     // may acquire this root's listener, rather than just that the socket closed.
-    drop(permit);
+    listener_permit
+        .lock()
+        .expect("HTTP listener permit lock")
+        .take();
     let mut writer = status.lock().expect("HTTP broker status lock");
     serde_json::to_writer(&mut *writer, &serde_json::json!({"exit":code}))
         .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
@@ -254,6 +313,37 @@ fn serve_http(
         .write_all(b"\n")
         .and_then(|()| writer.flush())
         .map_err(|e| ErrorEnvelope::new(ErrorClass::Transient, e.to_string()))
+}
+
+fn validate_spawn_credentials(profile: Option<&str>) -> Result<(), ErrorEnvelope> {
+    let config = OracleMcpConfig::load(None)
+        .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;
+    let resolved = resolve_profile_options_from_config_with(&config, profile, &SystemSecretResolver)
+        .map_err(|_| ErrorEnvelope::new(ErrorClass::PolicyDenied,
+            "ORACLEMCP_BROKER_CREDENTIAL_INVALID: resolve this client's configured credentials before starting a broker"))?;
+    let Some(resolved) = resolved else {
+        return Ok(());
+    };
+    let outcome = block_on_connect(|cx| async move {
+        let connection = try_open_connection(&cx, resolved.opts).await?;
+        // This validates authentication only; no agent statement is executed.
+        let _ = connection.close(&cx).await;
+        Ok::<(), DbError>(())
+    });
+    if let Err(error) = outcome {
+        let error = error.into_envelope();
+        if matches!(
+            error.ora_code,
+            Some(1017 | 1005 | 1045 | 28000 | 28001 | 28009)
+        ) {
+            return Err(ErrorEnvelope::new(ErrorClass::PolicyDenied,
+                "ORACLEMCP_BROKER_CREDENTIAL_INVALID: Oracle refused this client's credentials; a broker was not started")
+                .with_ora_code(error.ora_code.expect("matched Oracle authentication code")));
+        }
+        // Unknown/unreachable database evidence must not block offline tools
+        // (R36). Only a positive authentication refusal prevents ownership.
+    }
+    Ok(())
 }
 
 fn attach_or_spawn_broker(
@@ -267,6 +357,9 @@ fn attach_or_spawn_broker(
         Err(error) if error.error_class != ErrorClass::Transient => return Err(error),
         Err(_) => {}
     }
+    // A bad first client must not fix the broker's credential binding for all
+    // later clients. Authenticate before electing/spawning the root owner.
+    validate_spawn_credentials(request.profile.as_deref())?;
     let binary = std::env::current_exe()
         .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
     let mut command = std::process::Command::new(binary);
@@ -581,22 +674,21 @@ pub(super) fn run_broker(_allow_no_auth: bool, strict_custom_tools: bool) -> Exi
             cost_budgets: cost_budgets.clone(),
             reservations: reservations.clone(),
         };
-        let http_listener = Arc::new(Mutex::new(false));
+        let http_listener = Arc::new((
+            Mutex::new(HttpListenerState::default()),
+            std::sync::Condvar::new(),
+        ));
         broker.serve(
             oraclemcp::broker::IDLE_TIMEOUT,
             move |reader, writer, peer| {
                 if let Some(start) = peer.http {
-                    let mut running = http_listener.lock().expect("broker HTTP listener lock");
-                    if *running {
+                    let Some(permit) = acquire_http_listener(&http_listener) else {
                         let error = ErrorEnvelope::new(ErrorClass::Busy, "ORACLEMCP_HTTP_LISTENER_ALREADY_RUNNING: connect to this root's existing HTTP listener");
                         let mut writer = writer;
                         serde_json::to_writer(&mut writer, &serde_json::json!({"exit":2,"error":error})).map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
                         writer.write_all(b"\n").and_then(|()| writer.flush()).map_err(|e| ErrorEnvelope::new(ErrorClass::Transient, e.to_string()))?;
                         return Ok(());
-                    }
-                    *running = true;
-                    drop(running);
-                    let permit = HttpListenerPermit(http_listener.clone());
+                    };
                     return serve_http(reader, writer, start, shared.clone(), permit);
                 }
                 let selected = select_runtime_profile_from_config(&config, peer.profile.as_deref())
@@ -715,5 +807,49 @@ pub(super) fn broker_exit_code(result: Result<(), ErrorEnvelope>) -> ExitCode {
             );
             ExitCode::from(2)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_launcher_retains_exclusive_http_ownership() {
+        let slot = Arc::new((
+            Mutex::new(HttpListenerState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let permit = acquire_http_listener(&slot).expect("first listener");
+        assert!(
+            acquire_http_listener(&slot).is_none(),
+            "a live launcher is never displaced"
+        );
+        drop(permit);
+        assert!(
+            acquire_http_listener(&slot).is_some(),
+            "closed listener releases ownership"
+        );
+    }
+
+    #[test]
+    fn positive_launcher_disconnect_waits_for_listener_release() {
+        let slot = Arc::new((
+            Mutex::new(HttpListenerState::default()),
+            std::sync::Condvar::new(),
+        ));
+        let permit = acquire_http_listener(&slot).unwrap();
+        slot.0.lock().unwrap().disconnected = true;
+        let next_slot = slot.clone();
+        let next = std::thread::spawn(move || acquire_http_listener(&next_slot));
+        drop(permit);
+        let replacement = next
+            .join()
+            .unwrap()
+            .expect("dead launcher's replacement acquires the released listener");
+        assert!(slot.0.lock().unwrap().running);
+        assert!(!slot.0.lock().unwrap().disconnected);
+        drop(replacement);
+        assert!(!slot.0.lock().unwrap().running);
     }
 }

@@ -134,9 +134,23 @@ impl BrokerIdentity {
         })
     }
 
+    fn challenged(&self, nonce: &str) -> Result<Self, ErrorEnvelope> {
+        if nonce.len() != 32 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(internal("invalid broker credential challenge"));
+        }
+        let mut bound = self.clone();
+        // The credential-derived key remains in each process's memory. Only
+        // this broker's fresh challenge response crosses the owner-only IPC
+        // channel; a plain password hash is never sent or persisted.
+        let message = format!("oraclemcp:broker-credential-binding:v1:{nonce}");
+        bound.credentials =
+            oraclemcp_audit::hmac_sha256_hex(self.credentials.as_bytes(), message.as_bytes());
+        Ok(bound)
+    }
+
     pub fn require_match(&self, proxy: &Self) -> Result<(), ErrorEnvelope> {
         if self.version == proxy.version && self.generation == proxy.generation {
-            if self.credentials != proxy.credentials {
+            if !oraclemcp_audit::ct_eq(self.credentials.as_bytes(), proxy.credentials.as_bytes()) {
                 return Err(ErrorEnvelope::new(
                     ErrorClass::PolicyDenied,
                     "ORACLEMCP_BROKER_CREDENTIAL_MISMATCH: this client's resolved database credentials differ from the broker's; supply the correct credentials in this client's environment",
@@ -185,6 +199,11 @@ impl std::fmt::Debug for AttachRequest {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct CredentialChallenge {
+    nonce: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 struct AttachReply {
     session_id: String,
     broker_pid: u32,
@@ -223,6 +242,7 @@ pub struct AttachedStream {
 /// An exclusive listener and its process-wide service-state capability.
 pub struct BrokerListener {
     listener: Listener,
+    credential_nonce: String,
     owner: ServiceOwner,
     identity: BrokerIdentity,
     activity: Arc<Mutex<BrokerActivity>>,
@@ -550,6 +570,7 @@ impl BrokerListener {
             .map_err(internal)?;
         Ok(Self {
             listener,
+            credential_nonce: random_id()?,
             owner,
             identity,
             activity: Arc::new(Mutex::new(BrokerActivity {
@@ -585,9 +606,10 @@ impl BrokerListener {
                     let active = ActiveSession::new(Arc::clone(&self.activity));
                     let callback = Arc::clone(&serve_session);
                     let identity = self.identity.clone();
+                    let credential_nonce = self.credential_nonce.clone();
                     std::thread::spawn(move || {
                         let _active = active;
-                        let result = accept_session(stream, &identity)
+                        let result = accept_session(stream, &identity, &credential_nonce)
                             .and_then(|(reader, writer, peer)| callback(reader, writer, peer));
                         if let Err(error) = result {
                             tracing::warn!(error = %error.message, "broker session ended with an error");
@@ -614,6 +636,7 @@ impl BrokerListener {
 fn accept_session(
     stream: Stream,
     identity: &BrokerIdentity,
+    credential_nonce: &str,
 ) -> Result<(BufReader<Stream>, Stream, PeerSession), ErrorEnvelope> {
     stream.set_nonblocking(true).map_err(internal)?;
     let creds = stream.peer_creds().map_err(internal)?;
@@ -634,8 +657,17 @@ fn accept_session(
     let mut writer = stream.try_clone().map_err(internal)?;
     writer.set_nonblocking(true).map_err(internal)?;
     let mut reader = BufReader::new(stream);
+    write_json_line(
+        &mut DeadlineIo::new(&mut writer),
+        &CredentialChallenge {
+            nonce: credential_nonce.to_owned(),
+        },
+    )?;
     let request: AttachRequest = read_json_line(&mut DeadlineIo::new(&mut reader))?;
-    if let Err(error) = identity.require_match(&request.identity) {
+    if let Err(error) = identity
+        .challenged(credential_nonce)?
+        .require_match(&request.identity)
+    {
         write_json_line(
             &mut DeadlineIo::new(&mut writer),
             &AttachReply {
@@ -708,7 +740,10 @@ pub fn attach(store: &FileStore, request: &AttachRequest) -> Result<AttachedStre
     let mut writer = stream.try_clone().map_err(transient)?;
     writer.set_nonblocking(true).map_err(transient)?;
     let mut reader = BufReader::new(stream);
-    write_json_line(&mut DeadlineIo::new(&mut writer), request)?;
+    let challenge: CredentialChallenge = read_json_line(&mut DeadlineIo::new(&mut reader))?;
+    let mut challenged_request = request.clone();
+    challenged_request.identity = request.identity.challenged(&challenge.nonce)?;
+    write_json_line(&mut DeadlineIo::new(&mut writer), &challenged_request)?;
     let reply: AttachReply = read_json_line(&mut DeadlineIo::new(&mut reader))?;
     if let Some(error) = reply.error {
         return Err(error);
@@ -830,6 +865,38 @@ mod tests {
             auth: oraclemcp_core::StdioAuthPolicy::Disabled,
             http: None,
         }
+    }
+
+    #[test]
+    fn credential_challenge_is_keyed_broker_specific_and_redacted() {
+        let original = identity();
+        let a = original
+            .challenged("0123456789abcdef0123456789abcdef")
+            .unwrap();
+        let b = original
+            .challenged("fedcba9876543210fedcba9876543210")
+            .unwrap();
+        assert_ne!(a.credentials, original.credentials);
+        assert_ne!(a.credentials, b.credentials);
+        assert!(
+            a.require_match(
+                &original
+                    .challenged("0123456789abcdef0123456789abcdef")
+                    .unwrap()
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            a.require_match(&b).unwrap_err().error_class,
+            ErrorClass::PolicyDenied
+        );
+        assert!(
+            !serde_json::to_string(&a)
+                .unwrap()
+                .contains(&original.credentials)
+        );
+        assert!(!format!("{a:?}").contains(&a.credentials));
+        assert!(original.challenged("malformed").is_err());
     }
 
     #[test]
