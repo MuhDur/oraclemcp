@@ -1257,6 +1257,11 @@
   },
   {
     "case_id": "w4_runtime_issue47_killed_session_dml_not_replayed",
+    "audit_optional_prefix": {
+      "record": {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED", "failure": {"error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"}},
+      "max_count": 1,
+      "reason": "The baseline read on a no-FLASHBACK session emits one degraded SCN capability probe before its query audit pair; a prior probe cached on that same session emits none. This is capability evidence, not execution or replay of the killed UPDATE."
+    },
     "tool": "oracle_execute",
     "level": "READ_WRITE",
     "profile_variant": "synthetic_owner_rw",
@@ -1271,13 +1276,14 @@
       "mutation": true,
       "kill_served_session_dml_user": "${owner}"
     },
-    "expect": {"error_classes": ["CONNECTION_FAILED", "TRANSIENT"]},
+    "expect": {"json_subset": {"isError": true, "error_class": "CONNECTION_FAILED", "statement_outcome": "protocol_unsynchronized"}},
     "db_reread": [
       {"sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID=1", "rows": [[1, "parent-1"]]}
     ],
     "audit_expect": [
       {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
-      {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+      {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"},
+      {"tool": "lane_lifecycle", "decision": "ALLOWED", "outcome": "UNKNOWN_DISCARDED", "cancel": {"kind": "Shutdown", "reason": "server_shutdown"}}
     ],
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
   },

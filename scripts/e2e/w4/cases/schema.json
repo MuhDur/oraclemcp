@@ -20,6 +20,12 @@
       "setup_phase": {"enum": ["before_call", "before_server"]},
       "setup_ready_sql": {"type": "string", "minLength": 1},
       "flashback_grant_owner": {"const": true},
+      "audit_optional_prefix": {"type": "object", "additionalProperties": false,
+        "required": ["record", "max_count", "reason"], "properties": {
+          "record": {"const": {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED",
+            "failure": {"error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"}}},
+          "max_count": {"const": 1}, "reason": {"type": "string", "minLength": 1}
+        }},
       "call": {"type": "object", "required": ["arguments"], "additionalProperties": false, "properties": {
         "arguments": {"type": "object"}, "raw_arguments": {"type": "string"},
         "baseline_arguments": {"type": "object"},

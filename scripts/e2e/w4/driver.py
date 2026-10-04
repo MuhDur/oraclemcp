@@ -45,7 +45,7 @@ CASE_FIELDS = {"case_id", "tool", "level", "transports", "requires", "setup",
 OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "audit_zero_executions",
                         "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
                         "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner",
-                        "environment_skips", "runtime_awr_probe"}
+                        "environment_skips", "runtime_awr_probe", "audit_optional_prefix"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -314,8 +314,12 @@ def verify_finding_row_contains(reply, expected_row):
             "findings did not contain the expected row")
 
 
-def verify_audit(expected, records, verified):
+def verify_audit(expected, records, verified, optional_prefix=None):
     require(verified, "audit chain verification failed")
+    if optional_prefix and records and records[0].get("tool") == optional_prefix["record"]["tool"]:
+        require(deep_subset(optional_prefix["record"], records[0]),
+                "wrong optional audit prefix record")
+        records = records[1:]
     require(len(expected) == len(records),
             f"audit record count differs: expected {len(expected)}, observed {len(records)}")
     for item, record in zip(expected, records):
@@ -416,6 +420,17 @@ def validate_case(case, filename):
                 and case["case_id"] == "w4_diff_as_of_scn_detects_change"
                 and case.get("profile_variant") == "synthetic_owner_rw",
                 "flashback grant is reserved for the positive disposable-owner diff case")
+    if "audit_optional_prefix" in case:
+        prefix = case["audit_optional_prefix"]
+        require(case["case_id"] == "w4_runtime_issue47_killed_session_dml_not_replayed"
+                and "kill_served_session_dml_user" in case["call"]
+                and isinstance(prefix, dict) and set(prefix) == {"record", "max_count", "reason"}
+                and type(prefix["max_count"]) is int and prefix["max_count"] == 1
+                and isinstance(prefix["reason"], str) and prefix["reason"].strip()
+                and prefix["record"] == {"tool": "scn_capability_probe", "decision": "ALLOWED",
+                                         "outcome": "FAILED", "failure": {
+                                             "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"}},
+                "killed-DML audit allows only one explicitly explained degraded SCN prefix")
     if "steps" in case:
         validate_steps(case)
     require(isinstance(case["transports"], list) and case["transports"]
@@ -1949,8 +1964,12 @@ def killed_session_dml_call(client, case, connection, descriptor):
     verify_envelope(lost, descriptor)
     payload = tool_payload(lost)
     outcome = payload.get("structuredContent", {}).get("statement_outcome")
-    require(payload.get("isError") is True and outcome in {"protocol_unsynchronized", "commit_unknown"},
-            "killed DML did not return a typed uncertain statement outcome")
+    require(payload.get("isError") is True and outcome == "protocol_unsynchronized"
+            and "no statement was executed" in payload.get("structuredContent", {}).get("message", ""),
+            "killed DML did not report its unexecuted protocol-unsynchronized preflight")
+    # Flush the quarantined lease's terminal audit before checking this case.
+    # The lane already restarts this client after killed DML; close is idempotent.
+    client.close()
     return lost, {"baseline": scrub(tool_payload(baseline)), "killed_sessions": len(sessions),
                   "loss": scrub(payload)}
 
@@ -2026,15 +2045,6 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if marker and supported:
             require(vsql_marker_count(connection, marker) == 0,
                     "V$SQL marker already present before refusal test")
-        if "kill_served_session_dml_user" in case["call"] and supported:
-            # Establish the connection's one-time capability observation before
-            # opening the killed-session audit window. The case still requires
-            # its exact baseline PENDING/SUCCEEDED pair, then no mutation audit.
-            ready = client.rpc("tools/call", {"name": "oracle_query",
-                                              "arguments": {"sql": "SELECT 1 AS C FROM dual"}})
-            verify_envelope(ready, descriptor)
-            verify_expect({"rows": [{"C": "1"}]}, ready, ROOT / "tests/golden/w4")
-            row["killed_session_setup"] = scrub(tool_payload(ready))
         before = len(audit_records(audit_path))
         captures = (run_steps(client, case, row, binary, audit_path, env, connection)
                     if "steps" in case else {})
@@ -2172,7 +2182,17 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             row["session_busy_audit"] = {"count": len(busy_audits)}
         if case["audit_expect"]:
             verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
-                         audit_verify(binary, audit_path, env))
+                         audit_verify(binary, audit_path, env), case.get("audit_optional_prefix"))
+            if "kill_served_session_dml_user" in case["call"] and supported:
+                records = audit_records(audit_path)[before:]
+                row["killed_dml_audit"] = {
+                    "records": [{key: record[key] for key in
+                                 ("tool", "decision", "outcome", "failure", "cancel") if key in record}
+                                for record in records],
+                    "mutation_execution_records": sum(record.get("tool") == case["tool"]
+                                                      for record in records),
+                    "scn_probe_records": sum(record.get("tool") == "scn_capability_probe"
+                                             for record in records)}
         if case.get("audit_zero_executions"):
             records = audit_records(audit_path)[before:]
             require(not any(record.get("decision") == "ALLOWED" or record.get("outcome") == "SUCCEEDED"
@@ -3281,6 +3301,53 @@ def failed_results_selftest():
     print(compact({"selftest": "current_failed_results_persist_before_nonzero_exit", "verdict": "pass"}))
 
 
+def killed_dml_audit_selftest():
+    """Unit audit transcripts, not a substitute for live killed-session proof."""
+    case = next(case for case in load_cases()
+                if case["case_id"] == "w4_runtime_issue47_killed_session_dml_not_replayed")
+    expected, prefix = case["audit_expect"], case["audit_optional_prefix"]
+    probe = prefix["record"]
+    cold = [probe, *expected]
+    verify_audit(expected, cold, True, prefix)
+    verify_audit(expected, expected, True, prefix)
+    planted = {
+        "duplicate_probe": [probe, probe, *expected],
+        "wrong_probe_reason": [{**probe, "failure": {"error_class": "CONNECTION_FAILED"}}, *expected],
+        "wrong_probe_outcome": [{**probe, "outcome": "SUCCEEDED"}, *expected],
+        "late_probe": [expected[0], probe, *expected[1:]],
+        "missing_query_pending": [probe, *expected[1:]],
+        "missing_query_success": [probe, expected[0], expected[2]],
+        "missing_quarantine_terminal": cold[:-1],
+        "wrong_quarantine_terminal": [probe, *expected[:2], {**expected[2], "outcome": "ROLLED_BACK"}],
+        "duplicate_baseline_execution": [probe, expected[0], expected[1], expected[1], expected[2]],
+        "unexpected_mutation_pending": [*cold, {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "PENDING"}],
+        "unexpected_mutation_success": [*cold, {"tool": "oracle_execute", "decision": "ALLOWED", "outcome": "SUCCEEDED"}],
+        "unknown_extra_audit": [*cold, {"tool": "unexpected", "decision": "ALLOWED", "outcome": "FAILED"}],
+    }
+    for label, records in planted.items():
+        try:
+            verify_audit(expected, records, True, prefix)
+        except DriverError:
+            pass
+        else:
+            raise DriverError(f"killed-DML audit accepted planted {label}")
+    for change in ({"max_count": 2}, {"reason": ""},
+                   {"record": {**probe, "tool": "oracle_execute"}}):
+        try:
+            validate_case({**case, "audit_optional_prefix": {**prefix, **change}}, "selftest")
+        except DriverError:
+            pass
+        else:
+            raise DriverError("killed-DML audit accepted a broadened prefix declaration")
+    try:
+        verify_audit(expected, cold, False, prefix)
+    except DriverError:
+        pass
+    else:
+        raise DriverError("killed-DML audit accepted an unverified chain")
+    print(compact({"selftest": "killed_dml_exact_audits_bounded_scn_probe_and_no_replay", "verdict": "pass"}))
+
+
 def flashback_grant_selftest():
     positive = {"flashback_grant_owner": True}
     owner = "W4O_W41234ABCDEF"
@@ -3336,6 +3403,7 @@ def selftest():
     flashback_grant_selftest()
     awr_environment_selftest()
     failed_results_selftest()
+    killed_dml_audit_selftest()
     load_cases()
     expected_live_ids = {
         "w4_get_source_argument_class": "rel012_i38_argument_class",
