@@ -1999,7 +1999,62 @@ def verify_case_rereads(connection, case, row):
                 f"{case['case_id']}: independent DB re-read differed")
 
 
-def killed_session_recovery_call(client, case, connection, descriptor):
+def confirm_killed_session(connection, user, sid, serial, timeout=10):
+    deadline = time.monotonic() + timeout
+    while True:
+        rows = connection.cursor().execute(
+            "SELECT USERNAME, STATUS FROM V$SESSION WHERE SID=:1 AND SERIAL#=:2",
+            (sid, serial)).fetchall()
+        if not rows:
+            return "gone"
+        require(len(rows) == 1 and rows[0][0] == user,
+                "kill confirmation found a session outside the exact run owner")
+        if rows[0][1] == "KILLED":
+            return "killed"
+        require(time.monotonic() < deadline,
+                "target session is still live after the kill request")
+        time.sleep(0.05)
+
+
+def kill_served_sessions(connection, user, connect_killer):
+    """Keep fault injection off the connection used for independent proof.
+
+    ORA-00031 can close the killer connection. It is accepted only after a
+    separate V$SESSION read proves this exact target killed or gone.
+    """
+    require(re.fullmatch(r"W4O_W4[0-9A-F]{10}", user),
+            "session kill needs an exact synthetic W4 owner")
+    sessions = connection.cursor().execute(
+        "SELECT SID, SERIAL# FROM V$SESSION "
+        "WHERE USERNAME=:1 AND TYPE='USER' AND STATUS <> 'KILLED' ORDER BY SID",
+        (user,)).fetchall()
+    require(sessions, "no exact run-owned served Oracle session found to kill")
+    evidence = []
+    for sid, serial in sessions:
+        error_code = None
+        with connect_killer() as killer:
+            try:
+                killer.cursor().execute(kill_session_sql(int(sid), int(serial)))
+            except Exception as exc:
+                error_code = getattr(exc.args[0], "code", None) if exc.args else None
+                if error_code != 31:
+                    raise
+        evidence.append({"sid": int(sid), "serial": int(serial),
+                         "kill_error_code": error_code,
+                         "confirmed": confirm_killed_session(connection, user, sid, serial)})
+    require(db_rows(connection, "SELECT 1 FROM DUAL") == [[1]],
+            "independent verification connection did not survive session kills")
+    return evidence
+
+
+def lane_killer(lane):
+    import oracledb
+    settings = load_lane(HERE / "rig.toml", lane)
+    return lambda: oracledb.connect(user="system", password=admin_password(lane, settings),
+                                   dsn=settings["dsn"])
+
+
+def killed_session_recovery_call(client, case, connection, descriptor, lane):
     """Kill only this W4 run's served session, then prove next-call re-lease.
 
     This case deliberately uses the disposable ``synthetic_owner`` profile so
@@ -2008,10 +2063,8 @@ def killed_session_recovery_call(client, case, connection, descriptor):
     expected result here; it does not relax the normal masked-profile contract
     (which remains covered by the issue-46 case).
 
-    The first query establishes the pinned session. The second call is expected
-    to observe the dead wire and quarantine it; only the third, separate
-    statement may obtain a replacement. This deliberately proves no in-flight
-    statement is replayed.
+    The first query establishes the pinned session. The next read observes the
+    dead wire and obtains a replacement before executing its statement.
     """
     arguments = case["call"]["arguments"]
     first = client.rpc("tools/call", {"name": case["tool"], "arguments": arguments})
@@ -2019,26 +2072,18 @@ def killed_session_recovery_call(client, case, connection, descriptor):
     require(tool_payload(first).get("isError") is not True,
             "baseline read failed before killed-session exercise")
     user = case["call"]["kill_served_session_user"]
-    sessions = connection.cursor().execute(
-        "SELECT SID, SERIAL# FROM V$SESSION "
-        "WHERE USERNAME=:1 AND TYPE='USER' AND STATUS <> 'KILLED' ORDER BY SID",
-        (user,)).fetchall()
-    require(sessions, "no exact run-owned served Oracle session found to kill")
-    cursor = connection.cursor()
-    for sid, serial in sessions:
-        cursor.execute(kill_session_sql(int(sid), int(serial)))
-    connection.commit()
+    evidence = kill_served_sessions(connection, user, lane_killer(lane))
     recovered = client.rpc("tools/call", {"name": case["tool"], "arguments": arguments})
     verify_envelope(recovered, descriptor)
     require(tool_payload(recovered).get("isError") is not True,
             "the first read after a killed session did not transparently re-lease: "
             + compact(scrub(tool_payload(recovered)))[:400])
     return recovered, {"baseline": scrub(tool_payload(first)),
-                       "killed_sessions": len(sessions),
+                       "killed_sessions": len(evidence), "kill_evidence": evidence,
                        "recovered": scrub(tool_payload(recovered))}
 
 
-def killed_session_dml_call(client, case, connection, descriptor):
+def killed_session_dml_call(client, case, connection, descriptor, lane):
     """Kill the exact disposable-owner wire before one governed DML attempt.
 
     This proves the mutation is not replayed: the attempt must surface a typed
@@ -2050,15 +2095,7 @@ def killed_session_dml_call(client, case, connection, descriptor):
     require(tool_payload(baseline).get("isError") is not True,
             "baseline read failed before killed-session DML exercise")
     user = case["call"]["kill_served_session_dml_user"]
-    sessions = connection.cursor().execute(
-        "SELECT SID, SERIAL# FROM V$SESSION "
-        "WHERE USERNAME=:1 AND TYPE='USER' AND STATUS <> 'KILLED' ORDER BY SID",
-        (user,)).fetchall()
-    require(sessions, "no exact run-owned served Oracle session found to kill")
-    cursor = connection.cursor()
-    for sid, serial in sessions:
-        cursor.execute(kill_session_sql(int(sid), int(serial)))
-    connection.commit()
+    evidence = kill_served_sessions(connection, user, lane_killer(lane))
     lost = client.rpc("tools/call", {"name": case["tool"], "arguments": case["call"]["arguments"]})
     verify_envelope(lost, descriptor)
     payload = tool_payload(lost)
@@ -2068,7 +2105,8 @@ def killed_session_dml_call(client, case, connection, descriptor):
             "killed DML did not report its unexecuted protocol-unsynchronized preflight")
     # Check statement audits before transport teardown: a stdio launcher may
     # detach from a shared broker whose shutdown audit arrives later.
-    return lost, {"baseline": scrub(tool_payload(baseline)), "killed_sessions": len(sessions),
+    return lost, {"baseline": scrub(tool_payload(baseline)), "killed_sessions": len(evidence),
+                  "kill_evidence": evidence,
                   "loss": scrub(payload)}
 
 
@@ -2342,10 +2380,10 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         captures = (run_steps(client, case, row, binary, audit_path, env, connection)
                     if "steps" in case else {})
         if "kill_served_session_user" in case["call"] and supported:
-            reply, recovery_actual = killed_session_recovery_call(client, case, connection, descriptor)
+            reply, recovery_actual = killed_session_recovery_call(client, case, connection, descriptor, lane)
             row["killed_session_recovery"] = recovery_actual
         elif "kill_served_session_dml_user" in case["call"] and supported:
-            reply, recovery_actual = killed_session_dml_call(client, case, connection, descriptor)
+            reply, recovery_actual = killed_session_dml_call(client, case, connection, descriptor, lane)
             row["killed_session_recovery"] = recovery_actual
         elif "cancel_marker" in case["call"] and supported:
             lock_sql = case["call"].get("lock_sql")
@@ -3983,6 +4021,91 @@ def release_schedule_selftest():
     print(compact({"selftest": "release_schedule_and_proof_negatives", "verdict": "pass"}))
 
 
+def killed_session_fixture_selftest():
+    user = "W4O_W4ABCDEF1234"
+
+    class OracleError(Exception):
+        def __init__(self, code):
+            self.code = code
+            super().__init__(self)
+
+    class ProofConnection:
+        def __init__(self, rows):
+            self.rows = rows
+            self.queries = []
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql, binds=()):
+            require(sql.startswith("SELECT "), "verification connection executed a kill")
+            self.queries.append((sql, binds))
+            if "SERIAL# FROM" in sql:
+                self.result = [(17, 42)]
+            elif "USERNAME, STATUS" in sql:
+                require(binds == (17, 42), "kill confirmation lost the exact session identity")
+                self.result = self.rows
+            else:
+                self.result = [(1,)]
+            return self
+
+        def fetchall(self):
+            return self.result
+
+    class Killer:
+        def __init__(self, code):
+            self.code = code
+            self.closed = False
+            self.sql = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.closed = True
+
+        def cursor(self):
+            return self
+
+        def execute(self, sql):
+            self.sql = sql
+            if self.code:
+                raise OracleError(self.code)
+
+    for code in (None, 31):
+        for rows, state in (([], "gone"), ([(user, "KILLED")], "killed")):
+            killer = Killer(code)
+            proof = ProofConnection(rows)
+            evidence = kill_served_sessions(proof, user, lambda: killer)
+            require(killer.closed and killer.sql == kill_session_sql(17, 42)
+                    and evidence == [{"sid": 17, "serial": 42,
+                                      "kill_error_code": code, "confirmed": state}]
+                    and proof.queries[-1][0] == "SELECT 1 FROM DUAL",
+                    "kill fixture lost independent confirmation or verification health")
+    for rows in ([ ("SYSTEM", "KILLED") ], [(user, "ACTIVE")]):
+        try:
+            confirm_killed_session(ProofConnection(rows), user, 17, 42, timeout=0)
+        except DriverError:
+            pass
+        else:
+            raise DriverError("unproven or foreign killed session was accepted")
+    killer = Killer(3113)
+    try:
+        kill_served_sessions(ProofConnection([]), user, lambda: killer)
+    except OracleError as exc:
+        require(exc.code == 3113 and killer.closed, "unexpected kill error or cleanup was lost")
+    else:
+        raise DriverError("unexpected kill error was suppressed")
+    try:
+        kill_served_sessions(ProofConnection([]), "SYSTEM", lambda: Killer(None))
+    except DriverError:
+        pass
+    else:
+        raise DriverError("kill fixture admitted a foreign owner")
+    print(compact({"selftest": "kill_connection_isolated_exact_target_independently_confirmed",
+                   "verdict": "pass"}))
+
+
 def selftest():
     audit_report_timeline_selftest()
     release_schedule_selftest()
@@ -3991,6 +4114,7 @@ def selftest():
     awr_environment_selftest()
     failed_results_selftest()
     killed_dml_audit_selftest()
+    killed_session_fixture_selftest()
     load_cases()
     expected_live_ids = {
         "w4_get_source_argument_class": "rel012_i38_argument_class",
