@@ -63,6 +63,8 @@ class DriverError(RuntimeError):
 
 
 RETENTION_SOURCE_SKIP = "RETENTION_SOURCE_NEWER_THAN_EXPIRED_SCN"
+RETENTION_HISTORY_SKIP = "RETENTION_SCN_HISTORY_UNAVAILABLE"
+RETENTION_SKIP_CODES = [RETENTION_SOURCE_SKIP, RETENTION_HISTORY_SKIP]
 AWR_SKIP_CODES = ["AWR_PACK_NOT_ENABLED", "AWR_CATALOG_UNAVAILABLE", "AWR_NO_SNAPSHOTS",
                   "AWR_NO_SQL_HISTORY", "AWR_TOP_SQL_HAS_NO_PLAN_HISTORY"]
 
@@ -405,7 +407,7 @@ def validate_case(case, filename):
                 "runtime AWR probing is reserved for the positive licensed AWR case")
     if "environment_skips" in case:
         require((case.get("runtime_retention_probe") is True
-                 and case["environment_skips"] == [RETENTION_SOURCE_SKIP])
+                 and case["environment_skips"] == RETENTION_SKIP_CODES)
                 or (case.get("runtime_awr_probe") is True
                     and case["environment_skips"] == AWR_SKIP_CODES),
                 "environment skip must name the exact declared retention or AWR limitation")
@@ -2496,6 +2498,21 @@ def environment_skip_row(case, transport, lane, reason):
                 and all(item["external_error"].startswith("ORA-01466")
                         for item in reason["candidates"]),
                 "retention source skip requires actual table-definition evidence")
+    elif reason["code"] == RETENTION_HISTORY_SKIP:
+        candidates = reason.get("candidates", [])
+        require(len(candidates) == 5
+                and [item.get("multiplier") for item in candidates] == [2, 4, 8, 16, 32]
+                and all(item.get("stage") in {"timestamp_to_scn", "flashback_read"}
+                        and item.get("external_error", "").startswith(
+                            ("ORA-08180", "ORA-08186", "ORA-01466"))
+                        for item in candidates)
+                and any(item["external_error"].startswith(("ORA-08180", "ORA-08186"))
+                        for item in candidates)
+                and all(item["stage"] == "flashback_read"
+                        or not item["external_error"].startswith("ORA-01466")
+                        for item in candidates)
+                and "scn_a" not in reason and "scn_b" not in reason,
+                "retention history skip requires all five unavailable candidates, never expiry proof")
     else:
         verify_awr_skip_evidence(reason)
     return {"case_id": case["case_id"], "test_id": case.get("test_id", case["case_id"]),
@@ -2578,6 +2595,7 @@ def probe_expired_retention_scn(connection):
     require(type(current_scn) is int and current_scn > 0,
             "V$DATABASE did not report a positive current SCN")
     definition_errors = []
+    unavailable_candidates = []
     readable_candidates = 0
     for multiplier in (2, 4, 8, 16, 32):
         seconds = retention * multiplier
@@ -2589,6 +2607,9 @@ def probe_expired_retention_scn(connection):
             message = str(exc)
             require(any(code in message for code in ("ORA-08180", "ORA-08186")),
                     f"retention SCN timestamp probe failed unexpectedly: {message[:180]}")
+            unavailable_candidates.append({"stage": "timestamp_to_scn", "multiplier": multiplier,
+                                           "seconds_past": seconds,
+                                           "external_error": message.split("\n", 1)[0]})
             continue
         require(type(scn) is int and scn > 0, "retention timestamp probe returned no SCN")
         try:
@@ -2600,11 +2621,15 @@ def probe_expired_retention_scn(connection):
                 cursor.execute("BEGIN DBMS_FLASHBACK.DISABLE; END;")
             except Exception as cleanup:
                 raise DriverError("retention probe could not disable flashback") from cleanup
-            if "ORA-01466" in message:
-                definition_errors.append({"scn": scn, "seconds_past": seconds,
-                                          "external_error": message.split("\n", 1)[0]})
+            if any(code in message for code in ("ORA-01466", "ORA-08180", "ORA-08186")):
+                candidate = {"stage": "flashback_read", "multiplier": multiplier,
+                             "scn": scn, "seconds_past": seconds,
+                             "external_error": message.split("\n", 1)[0]}
+                unavailable_candidates.append(candidate)
+                if "ORA-01466" in message:
+                    definition_errors.append(candidate)
                 continue
-            if any(code in message for code in ("ORA-01555", "ORA-08180", "ORA-08186")):
+            if "ORA-01555" in message:
                 return {"tuned_undo_retention_seconds": retention,
                         "seconds_past": seconds, "multiplier": multiplier,
                         "scn_a": scn, "scn_b": current_scn,
@@ -2613,7 +2638,13 @@ def probe_expired_retention_scn(connection):
         else:
             cursor.execute("BEGIN DBMS_FLASHBACK.DISABLE; END;")
             readable_candidates += 1
-    if definition_errors and not readable_candidates:
+    if len(unavailable_candidates) == 5 and len(definition_errors) != 5 and not readable_candidates:
+        raise EnvironmentSkip({
+            "code": RETENTION_HISTORY_SKIP,
+            "message": "No retention-expired candidate is observable: Oracle SCN/snapshot history "
+                       "is unavailable (ORA-08180/ORA-08186); these errors do not prove undo expiry",
+            "tuned_undo_retention_seconds": retention, "candidates": unavailable_candidates})
+    if len(definition_errors) == 5 and not readable_candidates:
         raise EnvironmentSkip({
             "code": RETENTION_SOURCE_SKIP,
             "message": "W4_RIG.W4_RUNS is newer than every SCN tested beyond tuned undo retention "
@@ -3037,6 +3068,87 @@ def retention_probe_selftest():
         else:
             raise DriverError("non-expired or unexpectedly failing source produced retention proof")
     print(compact({"selftest": "retention_definition_age_declared_skip_and_negatives", "verdict": "pass"}))
+
+    class MissingTimestampHistory(RetentionProbeConnection):
+        def execute(self, sql, binds=()):
+            if "TIMESTAMP_TO_SCN" in sql:
+                self.timestamp_seconds.append(binds[0])
+                raise RuntimeError(self.timestamp_error)
+            return super().execute(sql, binds)
+
+    for code in ("ORA-08180", "ORA-08186"):
+        for connection in (MissingTimestampHistory(code), FlashbackConnection([code] * 5)):
+            try:
+                probe_expired_retention_scn(connection)
+            except EnvironmentSkip as exc:
+                history_reason = exc.reason
+            else:
+                raise DriverError(f"{code} missing history became retention proof")
+            require(history_reason["code"] == RETENTION_HISTORY_SKIP
+                    and connection.timestamp_seconds == [200, 400, 800, 1600, 3200],
+                    "missing history did not exhaust all multipliers")
+            history_row = environment_skip_row(case, "stdio", "free23", history_reason)
+            require(history_row["actual"] is None and run_verdict([history_row]) == "skip",
+                    "history skip was promoted to a pass")
+            # The following case remains present; skip does not short-circuit the lane.
+            following = {"case_id": "rel012_i28_order_alias", "verdict": "pass"}
+            require(run_verdict([history_row, following]) == "skip",
+                    "retention skip prevented later lane results")
+            summary_path.write_text("")
+            output_path.write_text("")
+            following["transport"] = "stdio"
+            results_path.write_text(compact({"verdict": "skip", "cases": [history_row, following]}))
+            ci_summary(results_path, summary_path, output_path)
+            require("| stdio | 1 | 0 | 1 |" in summary_path.read_text(),
+                    "CI lost the following case or counted history skip as pass")
+            for invalid in ({**history_reason, "candidates": history_reason["candidates"][:4]},
+                            {**history_reason, "scn_a": 9000},
+                            {**history_reason, "candidates": [
+                                {**item, "external_error": "ORA-01555"}
+                                for item in history_reason["candidates"]]}):
+                try:
+                    environment_skip_row(case, "stdio", "free23", invalid)
+                except DriverError:
+                    pass
+                else:
+                    raise DriverError("invalid history evidence was accepted")
+        require(probe_expired_retention_scn(FlashbackConnection(
+            [code, "ORA-01555: snapshot too old"]))["external_error"].startswith("ORA-01555"),
+            "unavailable snapshot prevented a later genuine retention proof")
+        print(compact({"selftest": f"retention_{code}_history_skip_not_proof", "verdict": "pass"}))
+    mixed = FlashbackConnection([definition_error, "ORA-08180", definition_error,
+                                "ORA-08186", definition_error])
+    try:
+        probe_expired_retention_scn(mixed)
+    except EnvironmentSkip as exc:
+        require(exc.reason["code"] == RETENTION_HISTORY_SKIP and mixed.disabled == 5,
+                "mixed unavailable candidates lost their history evidence or cleanup")
+        environment_skip_row(case, "stdio", "free23", exc.reason)
+    else:
+        raise DriverError("mixed unavailable candidates produced proof")
+    for errors in (["ORA-08180", None, None, None, None], ["ORA-08180", "ORA-00942"]):
+        try:
+            probe_expired_retention_scn(FlashbackConnection(errors))
+        except EnvironmentSkip:
+            raise DriverError("history skip hid a readable or unexpected candidate")
+        except DriverError:
+            pass
+        else:
+            raise DriverError("history errors produced false retention proof")
+    class DisableFails(FlashbackConnection):
+        def execute(self, sql, binds=()):
+            if "DBMS_FLASHBACK.DISABLE" in sql:
+                raise RuntimeError("ORA-03113")
+            return super().execute(sql, binds)
+    try:
+        probe_expired_retention_scn(DisableFails(["ORA-08180"]))
+    except EnvironmentSkip:
+        raise DriverError("history skip hid failed flashback cleanup")
+    except DriverError as exc:
+        require("could not disable flashback" in str(exc), "cleanup failure lost its cause")
+    else:
+        raise DriverError("failed flashback disable was accepted")
+
 
 
 def awr_environment_selftest():

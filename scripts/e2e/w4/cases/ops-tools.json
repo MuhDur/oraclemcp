@@ -489,7 +489,7 @@
     "requires": [],
     "setup": [],
     "runtime_retention_probe": true,
-    "environment_skips": ["RETENTION_SOURCE_NEWER_THAN_EXPIRED_SCN"],
+    "environment_skips": ["RETENTION_SOURCE_NEWER_THAN_EXPIRED_SCN", "RETENTION_SCN_HISTORY_UNAVAILABLE"],
     "call": {
       "arguments": {
         "sql": "SELECT RUN_ID, TOKEN FROM W4_RIG.W4_RUNS ORDER BY RUN_ID",
