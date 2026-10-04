@@ -16,7 +16,9 @@ oraclemcp-audit = { path = "../oraclemcp-audit", version = "0.11.0" }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-sqlparser = { version = "0.62", features = ["visitor"] }
+# 0.63 fixes exponential compound-field backtracking (Apache sqlparser #2344).
+# Keep the fuzz harness and server test dependency on the same parser.
+sqlparser = { version = "0.63", features = ["visitor"] }
 regex = "1"
 thiserror.workspace = true
 zeroize = "1"

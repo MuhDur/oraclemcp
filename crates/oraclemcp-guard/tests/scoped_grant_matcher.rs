@@ -112,7 +112,7 @@ fn check(
     sql: &str,
     resolved: &ResolvedDmlTarget,
 ) -> Result<oraclemcp_guard::scoped_grant::GrantMatch, GrantMismatch> {
-    match_statement(&grant(), &parse(sql), resolved)
+    match_sql(&grant(), sql, resolved)
 }
 
 const VALID: &str = "UPDATE APP.ORDERS SET STATUS = :s WHERE ID = :id";
@@ -544,5 +544,52 @@ proptest! {
             _ => unreachable!(),
         };
         prop_assert!(check(sql, &target).is_err(), "admitted field={field} change={change}");
+    }
+}
+
+// CI timeout artifacts, unchanged bytes. Before the compound-chain fix in
+// sqlparser 0.63, both returned UnsupportedStatement in release mode:
+// 268 bytes in 22.332 s; 609 bytes in 2.559 s. Preserve that verdict.
+#[test]
+fn scope_match_ci_timeout_reproducers() {
+    let grant = grant();
+    let resolved = resolved();
+    let mut timings = Vec::new();
+    for data in [
+        include_bytes!("fixtures/grant_scope_timeout-c58375dfdc952fa0e853e4dd1f85240d76b4069a")
+            .as_slice(),
+        include_bytes!("fixtures/grant_scope_timeout-5e016f1a6c9f3855132ad02278b9320642cc6f04")
+            .as_slice(),
+    ] {
+        let sql = std::str::from_utf8(data).unwrap();
+        let started = std::time::Instant::now();
+        let verdict = match_sql(&grant, sql, &resolved).unwrap_err();
+        let elapsed = started.elapsed();
+        eprintln!("{} bytes: {verdict:?}, {elapsed:?}", data.len());
+        assert_eq!(verdict, GrantMismatch::UnsupportedStatement);
+        timings.push(elapsed);
+    }
+    for elapsed in timings {
+        assert!(elapsed < Duration::from_millis(100), "{elapsed:?}");
+    }
+}
+
+#[test]
+fn scope_match_malformed_compound_chains_are_bounded() {
+    let grant = grant();
+    let resolved = resolved();
+    for fields in [16, 32, 64, 128, 256, 512, 1024] {
+        let chain = vec!["GGG"; fields].join(".");
+        for prefix in ["RETURN :", "UPDATE APP.ORDERS SET STATUS = :s WHERE :"] {
+            let sql = format!("{prefix}{chain}..GG~;GG\0m");
+            let started = std::time::Instant::now();
+            let verdict = match_sql(&grant, &sql, &resolved).unwrap_err();
+            let elapsed = started.elapsed();
+            assert_eq!(verdict, GrantMismatch::UnsupportedStatement);
+            assert!(
+                elapsed < Duration::from_millis(100),
+                "fields={fields}, {elapsed:?}"
+            );
+        }
     }
 }
