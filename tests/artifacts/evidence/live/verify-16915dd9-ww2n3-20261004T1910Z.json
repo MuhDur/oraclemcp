@@ -1,0 +1,17 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-ww2n3",
+  "lane": "free23+xe21+xe18",
+  "run_id": "local-verifier-ww2n3-20261004T1910Z (summary of independent verifier run, not a CI run)",
+  "source_sha": "16915dd9a2bdbf06fdfce9003581758b520e4e90",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "free23 w4_diff_flashback_capability_unavailable_typed stdio pass | http pass",
+    "free23 w4_diff_retention_exceeded_typed stdio pass | http pass",
+    "free23 w4_diff_as_of_scn_detects_change stdio pass | http pass (flashback_grant scope=case revoked=true)",
+    "free23 w4_runtime_issue46_scn_probe_cached stdio pass",
+    "xe21 same 7 rows all pass",
+    "xe18 same 7 rows all pass",
+    "free23 SIGINT during positive case: grant revoked while owner existed; persisted verdict=fail"
+  ]
+}

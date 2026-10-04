@@ -1,0 +1,54 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-04T19:15:00Z",
+  "bead_id": "oraclemcp-ww2n3",
+  "scope": {
+    "summary": "The W4 FLASHBACK grant is scoped to the positive oracle_diff case only (case_flashback_grant wraps run_case; grant and revoke inside try/finally, grantee is the run's disposable owner), so issue46 and the full lane no longer see a leaked grant.",
+    "in_scope": [
+      "scripts/e2e/w4/driver.py"
+    ],
+    "out_of_scope": [
+      "Hosted CI W4 job result at 16915dd9 (tracked on fgxfc / bb5qm)."
+    ]
+  },
+  "source": {
+    "sha": "16915dd9a2bdbf06fdfce9003581758b520e4e90",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "diff + issue46 together, 3 lanes (independent verifier, export 16915dd9)",
+        "kind": "cli",
+        "trace": "driver.py --lane free23|xe21|xe18 --case w4_diff_as_of_scn_detects_change --case w4_diff_flashback_capability_unavailable_typed --case w4_diff_retention_exceeded_typed --case w4_runtime_issue46_scn_probe_cached -> 7/7 pass per lane, exit 0; DBA_TAB_PRIVS poller saw the grant only during the positive case (0.3-1.6 s); no W4% FLASHBACK grants afterwards on any lane."
+      },
+      {
+        "name": "revoke on failure path",
+        "kind": "cli",
+        "trace": "SIGINT during the positive case on free23: grant revoked ~0.1 s later while the owner still existed; results.json persisted verdict=fail. driver.py --selftest exit 0."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "scoped-live-verification",
+        "path": "tests/artifacts/evidence/live/verify-16915dd9-ww2n3-20261004T1910Z.json",
+        "sha": "16915dd9a2bdbf06fdfce9003581758b520e4e90"
+      }
+    ]
+  },
+  "limitations": [
+    "Live artifact is a summary of the verifier's logs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-04T19:15:00Z",
+  "bead_id": "oraclemcp-l47rx",
+  "scope": {
+    "summary": "The blocking connection actor quarantines itself before publishing the reply on the uncertain-outcome path, closing the window where a caller could see the error and reuse a not-yet-quarantined actor; a stress test pins it.",
+    "in_scope": [
+      "crates/oraclemcp-db/src/oracledb_actor.rs"
+    ],
+    "out_of_scope": [
+      "Live Oracle exercise is not required: the race is in the actor state machine."
+    ]
+  },
+  "source": {
+    "sha": "16915dd9a2bdbf06fdfce9003581758b520e4e90",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "stress, 500 runs under parallel load (independent verifier, export 16915dd9)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp-db --lib uncertain_operation -- --test-threads=16 looped 500x with 3 concurrent full db-lib loops -> 500/500 pass; same binary 5 parallel workers -> 500/500."
+      },
+      {
+        "name": "planted old ordering",
+        "kind": "cli",
+        "trace": "Reverting to reply-before-quarantine makes the new stress test fail (assertion failed: actor.is_quarantined_for_test() at oracledb_actor.rs:1461) in all 4 workers; original test unchanged (diff 53e4d7af only moves the product block). Gate prepush 53e4d7af 16/16."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": false,
+    "artifacts": []
+  },
+  "limitations": [],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "scoped-test"
+  }
+}
