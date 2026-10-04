@@ -121,6 +121,7 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
         || normalized.contains("from all_arguments")
         || (normalized.contains("from all_tab_columns") && !normalized.contains("table_name = :2"))
         || normalized.contains("from all_policies")
+        || normalized.contains("from sys.all_policies")
         || normalized.contains("from all_tab_cols")
     {
         return Some(Vec::new());

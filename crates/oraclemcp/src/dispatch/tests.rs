@@ -538,7 +538,9 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
     // here; the bulk catalog-extraction queries (`... WHERE owner IN (...)`, no
     // ROWNUM) must fall through to `catalog_extract_empty_rowset` so they yield an
     // empty rowset with the extraction's own column shape, not this probe shape.
-    if normalized.contains("from all_policies") && normalized.contains("rownum") {
+    if (normalized.contains("from all_policies") || normalized.contains("from sys.all_policies"))
+        && normalized.contains("rownum")
+    {
         if normalized.contains("object_owner = :1")
             || normalized.contains("(object_owner, object_name) in")
         {
@@ -587,6 +589,15 @@ fn semantic_tab_col_rows_for(sql: &str) -> Vec<OracleRow> {
 impl OracleConnection for SemanticGuardMock {
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
+    }
+
+    async fn open_policy_observation_session(
+        &self,
+        _cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        Ok(Box::new(Self {
+            state: Arc::clone(&self.state),
+        }))
     }
 
     async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -786,7 +797,8 @@ impl OracleConnection for SemanticGuardMock {
         if normalized.contains("from all_tab_columns") {
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_policies") {
+        if normalized.contains("from all_policies") || normalized.contains("from sys.all_policies")
+        {
             return Ok(semantic_policy_rows_for(sql, binds));
         }
         if normalized.contains("from all_audit_policies") {
@@ -2447,6 +2459,7 @@ fn catalog_extract_empty_rowset(sql_lower: &str) -> bool {
         "from all_editions",
         "from all_editioning_views",
         "from all_policies",
+        "from sys.all_policies",
         "from all_associations",
         "from all_sa_table_policies",
         "from all_sa_schema_policies",

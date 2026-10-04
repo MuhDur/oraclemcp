@@ -2667,13 +2667,13 @@ pub(crate) const JSON_CONSTRAINT_SQL: &str = "SELECT search_condition_vc FROM al
     AND ROWNUM <= 65";
 pub(crate) const TYPE_ATTRIBUTE_SQL: &str = "SELECT attr_name, attr_type_owner, attr_type_name, attr_type_mod FROM all_type_attrs \
     WHERE owner = :1 AND type_name = :2 AND attr_name = :3 AND ROWNUM <= 2";
-pub(crate) const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM all_policies \
+pub(crate) const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM SYS.ALL_POLICIES \
     WHERE object_owner = :1 AND object_name = :2 \
     AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= 1";
 pub(crate) const ALL_POLICIES_VISIBILITY_SQL: &str =
     "SELECT COUNT(*) AS VISIBLE_POLICY_ROWS FROM (SELECT 1 FROM all_policies WHERE ROWNUM <= 1)";
 pub(crate) const POLICY_CATALOG_PROOF_SQL: &str =
-    "SELECT policy_name FROM all_policies WHERE ROWNUM <= 1";
+    "SELECT policy_name FROM SYS.ALL_POLICIES WHERE ROWNUM <= 1";
 pub(crate) const FGA_CATALOG_PROOF_SQL: &str =
     "SELECT policy_name FROM all_audit_policies WHERE ROWNUM <= 1";
 pub(crate) const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
@@ -2681,7 +2681,7 @@ pub(crate) const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_col
     AND virtual_column = 'YES' AND ROWNUM <= 1";
 pub(crate) const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM all_tab_cols \
     WHERE owner = :1 AND table_name = :2 AND ROWNUM <= 1";
-pub(crate) const POLICY_ROWS_FOR_RELATIONS_32_SQL: &str = "SELECT object_owner, object_name FROM all_policies \
+pub(crate) const POLICY_ROWS_FOR_RELATIONS_32_SQL: &str = "SELECT object_owner, object_name FROM SYS.ALL_POLICIES \
     WHERE enable = 'YES' AND sel = 'YES' \
     AND (object_owner, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";
 pub(crate) const FGA_POLICIES_FOR_RELATIONS_32_SQL: &str = "SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \

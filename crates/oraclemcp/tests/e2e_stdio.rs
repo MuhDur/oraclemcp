@@ -102,7 +102,7 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
     if sql.contains("FROM all_synonyms") {
         return Some(Vec::new());
     }
-    if sql.contains("policy_name FROM all_policies WHERE ROWNUM <= 1") {
+    if sql.contains("policy_name FROM SYS.ALL_POLICIES WHERE ROWNUM <= 1") {
         return Some(vec![OracleRow {
             columns: vec![("POLICY_NAME".to_owned(), resolver_text("VISIBLE_POLICY"))],
         }]);
@@ -124,7 +124,7 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
     if sql.contains("all_tab_columns") && sql.contains("column_name = :1") {
         return Some(Vec::new());
     }
-    if sql.contains("all_policies") {
+    if sql.to_ascii_lowercase().contains("all_policies") {
         return Some(Vec::new());
     }
     if sql.contains("all_tab_cols") && sql.contains("virtual_column") {

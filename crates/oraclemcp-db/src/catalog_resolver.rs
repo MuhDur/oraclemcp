@@ -158,7 +158,8 @@ pub struct OracleVpdRlsObservation {
     pub status: OracleVpdRlsObservationStatus,
     /// Scope of the observation, such as `schema:APP` or `relations`.
     pub scope: String,
-    /// Session-security context, when it could be observed.
+    /// Context of the separate profile session used for this observation.
+    /// This does not describe mutable state on the caller's pinned session.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<OracleSessionSecurityContext>,
     /// Visibility probe for `ALL_POLICIES`.
@@ -2336,114 +2337,172 @@ pub async fn read_session_security_context(
     })
 }
 
-/// Observe VPD/RLS policies visible for a schema. Empty policy rows are reported
-/// as an observation boundary, not as proof that no protected objects exist.
+enum PolicyObservationTarget<'a> {
+    Schema(&'a str),
+    Relations(&'a [ResolvedObject]),
+    Probe,
+}
+
+fn unavailable_policy_probe(detail: String) -> OraclePolicyCatalogProbe {
+    OraclePolicyCatalogProbe {
+        visibility: OraclePolicyCatalogVisibility::Unavailable,
+        visible_policy_rows_probe: None,
+        detail,
+    }
+}
+
+/// Acquisition, catalog work, and normal logoff share one short deadline.
+/// The future owns its separate physical session. A timeout can drop that
+/// session even when Oracle cannot interrupt the predicate; it never abandons
+/// a statement on the user's pinned connection.
+async fn isolated_policy_observation(
+    cx: &Cx,
+    primary: &dyn OracleConnection,
+    target: PolicyObservationTarget<'_>,
+    cached_probe: Option<OraclePolicyCatalogProbe>,
+) -> OracleVpdRlsObservation {
+    let fallback_scope = match target {
+        PolicyObservationTarget::Schema(_) => "schema:unavailable",
+        PolicyObservationTarget::Relations(_) => "relations",
+        PolicyObservationTarget::Probe => "catalog",
+    };
+    let work = async {
+        let isolated = primary.open_policy_observation_session(cx).await?;
+        let conn = isolated.as_ref();
+        let (scope, session, policies, policy_error) = match target {
+            PolicyObservationTarget::Schema(schema) => {
+                let session = read_session_security_context(cx, conn).await.ok();
+                let schema = if schema.trim().is_empty() {
+                    session
+                        .as_ref()
+                        .map(|s| s.current_schema.as_str())
+                        .unwrap_or("")
+                } else {
+                    schema
+                };
+                let schema = schema.to_ascii_uppercase();
+                let scope = format!("schema:{schema}");
+                let (policies, error) = query_vpd_rls_policies(
+                    cx,
+                    conn,
+                    CatalogQueryId::VpdRlsPoliciesBySchema,
+                    &[
+                        OracleBind::from(schema),
+                        OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
+                    ],
+                )
+                .await;
+                (scope, session, policies, error)
+            }
+            PolicyObservationTarget::Relations(relations) => {
+                let inputs = collect_vpd_rls_relation_inputs_inner(cx, conn, relations).await;
+                (
+                    "relations".to_owned(),
+                    inputs.session,
+                    inputs.policies,
+                    inputs.policy_error,
+                )
+            }
+            PolicyObservationTarget::Probe => ("catalog".to_owned(), None, Vec::new(), None),
+        };
+        let probe = match cached_probe {
+            Some(probe) => probe,
+            None => query_policy_catalog_probe(cx, conn).await,
+        };
+        let mut observation =
+            build_vpd_rls_observation(scope, session, probe, policies, policy_error);
+        if let Err(error) = isolated.close(cx).await {
+            observation
+                .detail
+                .push_str(&format!("; diagnostic session logoff failed: {error}"));
+        }
+        Ok::<_, DbError>(observation)
+    };
+    let detail = match asupersync::time::timeout(cx.now(), RLS_VPD_VISIBILITY_PROBE_TIMEOUT, work)
+        .await
+    {
+        Ok(Ok(observation)) => return observation,
+        Ok(Err(error)) => format!(
+            "isolated policy observation unavailable: {error}; policy absence is not proven"
+        ),
+        Err(_) => format!(
+            "isolated policy observation exceeded its {} ms deadline; policy absence is not proven",
+            RLS_VPD_VISIBILITY_PROBE_TIMEOUT.as_millis()
+        ),
+    };
+    build_vpd_rls_observation(
+        fallback_scope.to_owned(),
+        None,
+        unavailable_policy_probe(detail.clone()),
+        Vec::new(),
+        Some(detail),
+    )
+}
+
+/// Observe schema policies on a separate profile session. Its session context
+/// is diagnostic-only and does not describe mutable state on the pinned wire.
 pub async fn observe_vpd_rls_for_schema(
     cx: &Cx,
     conn: &dyn OracleConnection,
     schema: &str,
 ) -> OracleVpdRlsObservation {
-    let session = read_session_security_context(cx, conn).await.ok();
-    let schema = if schema.trim().is_empty() {
-        session
-            .as_ref()
-            .map(|session| session.current_schema.as_str())
-            .unwrap_or("")
-    } else {
-        schema
-    };
-    let schema = schema.to_ascii_uppercase();
-    let scope = format!("schema:{schema}");
-    let (policies, policy_error) = query_vpd_rls_policies(
-        cx,
-        conn,
-        CatalogQueryId::VpdRlsPoliciesBySchema,
-        &[
-            OracleBind::from(schema),
-            OracleBind::from((MAX_VPD_RLS_POLICY_ROWS + 1) as i64),
-        ],
-    )
-    .await;
-    let probe = query_policy_catalog_probe(cx, conn).await;
-    build_vpd_rls_observation(scope, session, probe, policies, policy_error)
+    isolated_policy_observation(cx, conn, PolicyObservationTarget::Schema(schema), None).await
 }
 
-/// Observe VPD/RLS policies visible for resolved query relations. Empty policy
-/// rows are reported as an observation boundary, not as proof of absence.
+/// Observe policies for the exact read relations on a disposable session.
 pub async fn observe_vpd_rls_for_relations(
     cx: &Cx,
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
 ) -> OracleVpdRlsObservation {
-    observe_vpd_rls_for_relations_inner(cx, conn, relations, None).await
+    isolated_policy_observation(
+        cx,
+        conn,
+        PolicyObservationTarget::Relations(relations),
+        None,
+    )
+    .await
 }
 
-/// Observe visible policies using a previously bounded, generation-scoped
-/// `ALL_POLICIES` visibility observation.
+/// Use caller-supplied diagnostic visibility without turning it into authority.
 pub async fn observe_vpd_rls_for_relations_with_probe(
     cx: &Cx,
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
     probe: OraclePolicyCatalogProbe,
 ) -> OracleVpdRlsObservation {
-    observe_vpd_rls_for_relations_inner(cx, conn, relations, Some(probe)).await
+    isolated_policy_observation(
+        cx,
+        conn,
+        PolicyObservationTarget::Relations(relations),
+        Some(probe),
+    )
+    .await
 }
 
-/// Observe relation policies before obtaining the bounded, generation-scoped
-/// visibility observation. The visibility result is diagnostic-only, so it
-/// must not move ahead of the post-read session-context observation.
+/// Cache visibility per generation. Relation observations still use a fresh
+/// owned session, including when a previous catalog probe was unavailable.
 pub async fn observe_vpd_rls_for_relations_with_cached_bounded_probe(
     cx: &Cx,
     conn: &dyn OracleConnection,
     relations: &[ResolvedObject],
     cache: &OracleCatalogResolverCache,
 ) -> OracleVpdRlsObservation {
-    let inputs = collect_vpd_rls_relation_inputs(cx, conn, relations).await;
-    let probe = match cache.policy_catalog_probe() {
-        Some(probe) => probe,
-        None => {
-            let probe = bounded_policy_catalog_probe(cx, conn).await;
-            cache.cache_policy_catalog_probe(probe.clone());
-            probe
-        }
-    };
-    build_vpd_rls_observation(
-        "relations".to_owned(),
-        inputs.session,
-        probe,
-        inputs.policies,
-        inputs.policy_error,
+    let observation = isolated_policy_observation(
+        cx,
+        conn,
+        PolicyObservationTarget::Relations(relations),
+        cache.policy_catalog_probe(),
     )
+    .await;
+    cache.cache_policy_catalog_probe(observation.all_policies_probe.clone());
+    observation
 }
 
 struct VpdRlsRelationInputs {
     session: Option<OracleSessionSecurityContext>,
     policies: Vec<OracleVpdRlsPolicy>,
     policy_error: Option<String>,
-}
-
-async fn collect_vpd_rls_relation_inputs(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    relations: &[ResolvedObject],
-) -> VpdRlsRelationInputs {
-    match asupersync::time::timeout(
-        cx.now(),
-        RLS_VPD_VISIBILITY_PROBE_TIMEOUT,
-        collect_vpd_rls_relation_inputs_inner(cx, conn, relations),
-    )
-    .await
-    {
-        Ok(inputs) => inputs,
-        Err(_) => VpdRlsRelationInputs {
-            session: None,
-            policies: Vec::new(),
-            policy_error: Some(format!(
-                "relation policy/session observation exceeded its {} ms deadline; policy absence is not proven",
-                RLS_VPD_VISIBILITY_PROBE_TIMEOUT.as_millis()
-            )),
-        },
-    }
 }
 
 async fn collect_vpd_rls_relation_inputs_inner(
@@ -2489,52 +2548,14 @@ async fn collect_vpd_rls_relation_inputs_inner(
     }
 }
 
-async fn observe_vpd_rls_for_relations_inner(
-    cx: &Cx,
-    conn: &dyn OracleConnection,
-    relations: &[ResolvedObject],
-    cached_probe: Option<OraclePolicyCatalogProbe>,
-) -> OracleVpdRlsObservation {
-    let inputs = collect_vpd_rls_relation_inputs(cx, conn, relations).await;
-    let probe = match cached_probe {
-        Some(probe) => probe,
-        None => bounded_policy_catalog_probe(cx, conn).await,
-    };
-    build_vpd_rls_observation(
-        "relations".to_owned(),
-        inputs.session,
-        probe,
-        inputs.policies,
-        inputs.policy_error,
-    )
-}
-
-/// Bound the non-authorizing `ALL_POLICIES` visibility observation.
-///
-/// The caller is expected to cache the returned value for its session
-/// generation. A timeout is a truthful R36 observation, never a refusal and
-/// never evidence of policy absence.
+/// Bound the non-authorizing catalog probe on an owned separate session.
 pub async fn bounded_policy_catalog_probe(
     cx: &Cx,
     conn: &dyn OracleConnection,
 ) -> OraclePolicyCatalogProbe {
-    match asupersync::time::timeout(
-        cx.now(),
-        RLS_VPD_VISIBILITY_PROBE_TIMEOUT,
-        query_policy_catalog_probe(cx, conn),
-    )
-    .await
-    {
-        Ok(probe) => probe,
-        Err(_) => OraclePolicyCatalogProbe {
-            visibility: OraclePolicyCatalogVisibility::Unavailable,
-            visible_policy_rows_probe: None,
-            detail: format!(
-                "ALL_POLICIES visibility probe exceeded its {} ms observation deadline; policy absence is not proven",
-                RLS_VPD_VISIBILITY_PROBE_TIMEOUT.as_millis()
-            ),
-        },
-    }
+    isolated_policy_observation(cx, conn, PolicyObservationTarget::Probe, None)
+        .await
+        .all_policies_probe
 }
 
 struct DictionaryLookup<'a> {
@@ -4213,9 +4234,13 @@ mod tests {
         })
     }
 
+    type ScriptedResponses = VecDeque<Result<Vec<OracleRow>, DbError>>;
+    type RecordedQueries = Vec<(String, Vec<OracleBind>)>;
+
+    #[derive(Clone)]
     struct ScriptedRows {
-        responses: Mutex<VecDeque<Result<Vec<OracleRow>, DbError>>>,
-        queries: Mutex<Vec<(String, Vec<OracleBind>)>>,
+        responses: Arc<Mutex<ScriptedResponses>>,
+        queries: Arc<Mutex<RecordedQueries>>,
     }
 
     impl ScriptedRows {
@@ -4225,8 +4250,8 @@ mod tests {
 
         fn results(responses: impl IntoIterator<Item = Result<Vec<OracleRow>, DbError>>) -> Self {
             Self {
-                responses: Mutex::new(responses.into_iter().collect()),
-                queries: Mutex::new(Vec::new()),
+                responses: Arc::new(Mutex::new(responses.into_iter().collect())),
+                queries: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -4235,6 +4260,13 @@ mod tests {
     impl OracleConnection for ScriptedRows {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
+        }
+
+        async fn open_policy_observation_session(
+            &self,
+            _cx: &Cx,
+        ) -> Result<Box<dyn OracleConnection>, DbError> {
+            Ok(Box::new(self.clone()))
         }
 
         async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
@@ -4284,35 +4316,56 @@ mod tests {
         }
     }
 
-    struct StalledPolicyProbe;
+    #[derive(Default)]
+    struct StalledPolicyProbe {
+        isolated: bool,
+        retired: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Drop for StalledPolicyProbe {
+        fn drop(&mut self) {
+            if self.isolated {
+                self.retired
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+    }
 
     #[async_trait::async_trait(?Send)]
     impl OracleConnection for StalledPolicyProbe {
         fn backend(&self) -> OracleBackend {
             OracleBackend::RustOracle
         }
-
+        async fn open_policy_observation_session(
+            &self,
+            _cx: &Cx,
+        ) -> Result<Box<dyn OracleConnection>, DbError> {
+            Ok(Box::new(Self {
+                isolated: true,
+                retired: Arc::clone(&self.retired),
+            }))
+        }
         async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-
         async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
             Ok(())
         }
-
         async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
         }
-
         async fn query_rows(
             &self,
             _cx: &Cx,
             _sql: &str,
             _binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
+            assert!(
+                self.isolated,
+                "diagnostics must never query the pinned session"
+            );
             std::future::pending().await
         }
-
         async fn execute(
             &self,
             _cx: &Cx,
@@ -4321,11 +4374,9 @@ mod tests {
         ) -> Result<u64, DbError> {
             Err(DbError::Execute("unexpected execute".to_owned()))
         }
-
         async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(DbError::Execute("unexpected commit".to_owned()))
         }
-
         async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
             Err(DbError::Execute("unexpected rollback".to_owned()))
         }
@@ -7197,11 +7248,13 @@ mod tests {
     #[test]
     fn stalled_policy_catalog_probe_degrades_to_a_typed_observation() {
         run_with_cx(|cx| async move {
-            let probe = bounded_policy_catalog_probe(&cx, &StalledPolicyProbe).await;
+            let conn = StalledPolicyProbe::default();
+            let probe = bounded_policy_catalog_probe(&cx, &conn).await;
+            assert_eq!(conn.retired.load(std::sync::atomic::Ordering::SeqCst), 1);
             assert_eq!(probe.visibility, OraclePolicyCatalogVisibility::Unavailable);
             assert_eq!(probe.visible_policy_rows_probe, None);
             assert!(
-                probe.detail.contains("1000 ms observation deadline"),
+                probe.detail.contains("1000 ms deadline"),
                 "timeout must be visible to the caller: {probe:?}"
             );
         });
@@ -7210,8 +7263,8 @@ mod tests {
     #[test]
     fn stalled_relation_policy_and_session_observation_degrades_without_refusal() {
         run_with_cx(|cx| async move {
-            let observation =
-                observe_vpd_rls_for_relations(&cx, &StalledPolicyProbe, &[table_object()]).await;
+            let conn = StalledPolicyProbe::default();
+            let observation = observe_vpd_rls_for_relations(&cx, &conn, &[table_object()]).await;
             assert_eq!(
                 observation.status,
                 OracleVpdRlsObservationStatus::VisibilityUnavailable
@@ -7225,6 +7278,7 @@ mod tests {
                 "the bounded relation/session observation must remain explicit: {observation:?}"
             );
             assert!(observation.policies.is_empty());
+            assert_eq!(conn.retired.load(std::sync::atomic::Ordering::SeqCst), 1);
         });
     }
 

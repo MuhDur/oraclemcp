@@ -445,6 +445,7 @@ impl OracleConnection for CostAuditMock {
             ));
         }
         if normalized.contains("from all_policies")
+            || normalized.contains("from sys.all_policies")
             || normalized.contains("from redaction_policies")
         {
             return Ok(Vec::new());

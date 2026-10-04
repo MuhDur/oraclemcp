@@ -37,6 +37,13 @@ impl OracleConnection for VisibleCatalogQueryMock {
         OracleBackend::RustOracle
     }
 
+    async fn open_policy_observation_session(
+        &self,
+        _cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        Ok(Box::new(Self))
+    }
+
     async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
         Ok(())
     }
@@ -121,10 +128,11 @@ impl OracleConnection for VisibleCatalogQueryMock {
         {
             return Ok(Vec::new());
         }
-        if normalized.contains("select policy_name from all_policies where rownum <= 1") {
+        if normalized.contains("select policy_name from sys.all_policies where rownum <= 1") {
             return Ok(vec![row(&[("POLICY_NAME", Some("VISIBLE_ELSEWHERE"))])]);
         }
-        if normalized.contains("from all_policies") {
+        if normalized.contains("from all_policies") || normalized.contains("from sys.all_policies")
+        {
             return Ok(Vec::new());
         }
         if normalized.contains("from all_tab_cols") && normalized.contains("virtual_column = 'yes'")

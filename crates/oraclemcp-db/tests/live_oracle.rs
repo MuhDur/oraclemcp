@@ -1879,6 +1879,125 @@ fn live_midflight_oracle_timeout_keeps_pinned_connection_usable() {
     });
 }
 
+/// xrna0: the real private ALL_POLICIES synonym must point at the lab view
+/// protected by a 12-second VPD predicate. This opt-in fixture deliberately
+/// slows the actual product catalog query, never a substitute connection.
+#[test]
+fn live_slow_policy_probe_isolated_from_pinned_session() {
+    if env_bool("ORACLEMCP_TEST_SLOW_POLICY_PROBE") != Some(true) {
+        eprintln!("[live-xe] SKIP slow policy fixture: set ORACLEMCP_TEST_SLOW_POLICY_PROBE=1");
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let conn = RustOracleConnection::connect(&cx, test_opts())
+            .await
+            .expect("slow-probe fixture connection");
+        let raw_started = Instant::now();
+        oraclemcp_db::run_catalog_query(
+            &cx,
+            &conn,
+            oraclemcp_db::CatalogQueryId::AllPoliciesVisibility,
+            &[],
+        )
+        .await
+        .expect("real slow ALL_POLICIES query");
+        let raw_elapsed = raw_started.elapsed();
+        assert!(
+            raw_elapsed >= Duration::from_secs(12),
+            "fixture must really stall the catalog query for 12s"
+        );
+        // The same private synonym must not shadow authorization evidence.
+        let proof_started = Instant::now();
+        let policy_rows = oraclemcp_db::run_catalog_query(
+            &cx,
+            &conn,
+            oraclemcp_db::CatalogQueryId::SelectPolicy,
+            &[
+                OracleBind::from(test_opts().username.expect("fixture username")),
+                OracleBind::from("XR_64"),
+            ],
+        )
+        .await
+        .expect("authoritative SYS policy lookup through a shadowing synonym");
+        assert!(!policy_rows.is_empty(), "positive policy evidence survives");
+        assert!(proof_started.elapsed() < Duration::from_secs(1));
+        let previous = cx.now() + Duration::from_secs(30);
+        conn.set_request_deadline(&cx, Some(previous)).unwrap();
+        let started = Instant::now();
+        let mut probe_future =
+            std::pin::pin!(oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn));
+        let mut read_future = std::pin::pin!(async {
+            asupersync::time::sleep(cx.now(), Duration::from_millis(200)).await;
+            let read_started = Instant::now();
+            let rows = conn
+                .query_rows(&cx, "SELECT 6 AS n FROM dual", &[])
+                .await
+                .expect("pinned read while slow diagnostic is in flight");
+            assert_eq!(rows[0].parse_i64("N"), Some(6));
+            assert!(read_started.elapsed() < Duration::from_secs(1));
+        });
+        let mut probe_result = None;
+        let mut read_complete = false;
+        let probe = std::future::poll_fn(|poll_cx| {
+            if probe_result.is_none()
+                && let std::task::Poll::Ready(probe) =
+                    std::future::Future::poll(probe_future.as_mut(), poll_cx)
+            {
+                probe_result = Some(probe);
+            }
+            if !read_complete && std::future::Future::poll(read_future.as_mut(), poll_cx).is_ready()
+            {
+                assert!(
+                    probe_result.is_none(),
+                    "primary read must complete while the slow diagnostic is pending"
+                );
+                read_complete = true;
+            }
+            if read_complete && probe_result.is_some() {
+                std::task::Poll::Ready(probe_result.take().unwrap())
+            } else {
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+        assert_eq!(
+            probe.visibility,
+            oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+        );
+        assert_eq!(probe.visible_policy_rows_probe, None);
+        let probe_elapsed = started.elapsed();
+        assert!(
+            probe_elapsed < Duration::from_secs(5),
+            "owned diagnostic session must be retired promptly: {probe:?}"
+        );
+        assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
+        let read_started = Instant::now();
+        let rows = conn
+            .query_rows(&cx, "SELECT 7 AS n FROM dual", &[])
+            .await
+            .expect("same pinned session immediately usable");
+        assert!(read_started.elapsed() < Duration::from_secs(1));
+        assert_eq!(rows[0].parse_i64("N"), Some(7));
+        let observation = oraclemcp_db::observe_vpd_rls_for_schema(&cx, &conn, "").await;
+        assert_eq!(
+            observation.status,
+            oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
+        );
+        assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
+        let rows = conn
+            .query_rows(&cx, "SELECT 8 AS n FROM dual", &[])
+            .await
+            .expect("same pinned session usable after isolated doctor observation");
+        assert_eq!(rows[0].parse_i64("N"), Some(8));
+        eprintln!(
+            "[live-xe] slow-probe raw_ms={} probe_ms={} same-session reads and schema observation PASS",
+            raw_elapsed.as_millis(),
+            probe_elapsed.as_millis()
+        );
+        conn.close(&cx).await.unwrap();
+    });
+}
+
 /// WP-C live verification: the read-only DBA health suite runs against a real
 /// 23ai, returns a finding per requested subcheck, and — critically — every
 /// subcheck either succeeds against a readable view or degrades to a structured

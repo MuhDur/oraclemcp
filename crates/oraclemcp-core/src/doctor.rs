@@ -26,11 +26,10 @@ use cap_std::fs::{Dir as CapDir, DirBuilder as CapDirBuilder, OpenOptions as Cap
 use oraclemcp_audit::AuditLockProbe;
 use oraclemcp_db::{
     CatalogQueryId, DRIVER_VERSION, DbError, DiagnosticsSource, HardParseEffectClosureV1,
-    OracleBind, OracleConnection, OraclePolicyCatalogProbe, OraclePolicyCatalogVisibility,
-    OracleVpdRlsObservation, OracleVpdRlsObservationStatus, canonical_nls_statements,
-    detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema, preflight, probe_privileges,
-    probe_write_posture, prove_hard_parse_effect_closure, resolve_plan_table, run_catalog_query,
-    supported_wallet_modes,
+    OracleBind, OracleConnection, OracleVpdRlsObservation, OracleVpdRlsObservationStatus,
+    canonical_nls_statements, detect_oracle_driver, detect_standby, observe_vpd_rls_for_schema,
+    preflight, probe_privileges, probe_write_posture, prove_hard_parse_effect_closure,
+    resolve_plan_table, run_catalog_query, supported_wallet_modes,
 };
 use oraclemcp_db::{ConnectPhaseReached, connect_hint_for};
 use oraclemcp_error::{ErrorClass, classify_ora_code, parse_ora_code};
@@ -2593,7 +2592,6 @@ async fn check_privilege_tier(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
 async fn check_rls_vpd_visibility(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResult {
     const ID: u8 = 17;
     const NAME: &str = "RLS/VPD visibility";
-    const OBSERVATION_TIMEOUT: Duration = Duration::from_secs(1);
 
     if ctx.connection_error.is_some() {
         return CheckResult::new(
@@ -2612,30 +2610,9 @@ async fn check_rls_vpd_visibility(cx: &Cx, ctx: &DoctorContext<'_>) -> CheckResu
         );
     };
 
-    let observation = match asupersync::time::timeout(
-        cx.now(),
-        OBSERVATION_TIMEOUT,
-        observe_vpd_rls_for_schema(cx, conn, ""),
-    )
-    .await
-    {
-        Ok(observation) => observation,
-        Err(_) => OracleVpdRlsObservation {
-            status: OracleVpdRlsObservationStatus::VisibilityUnavailable,
-            scope: "schema:unavailable".to_owned(),
-            session: None,
-            all_policies_probe: OraclePolicyCatalogProbe {
-                visibility: OraclePolicyCatalogVisibility::Unavailable,
-                visible_policy_rows_probe: None,
-                detail: format!(
-                    "RLS/VPD observation exceeded its {} ms deadline; policy absence is not proven",
-                    OBSERVATION_TIMEOUT.as_millis()
-                ),
-            },
-            policies: Vec::new(),
-            detail: "RLS/VPD observation unavailable within the bounded doctor check".to_owned(),
-        },
-    };
+    // The observer owns a separate disposable session and bounds its entire
+    // lifetime. A stalled catalog statement cannot poison this doctor connection.
+    let observation = observe_vpd_rls_for_schema(cx, conn, "").await;
     rls_vpd_check_from_observation(ctx, observation)
 }
 
@@ -4039,6 +4016,15 @@ mod tests {
         }
         async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
             Ok(OracleConnectionInfo::default())
+        }
+        async fn open_policy_observation_session(
+            &self,
+            _cx: &Cx,
+        ) -> Result<Box<dyn OracleConnection>, DbError> {
+            Ok(Box::new(Self {
+                policy_visible: self.policy_visible,
+                stall_catalog_observation: self.stall_catalog_observation,
+            }))
         }
         async fn query_rows(
             &self,

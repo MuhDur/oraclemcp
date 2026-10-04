@@ -152,6 +152,14 @@ impl OracleConnection for ReadUncertaintyConn<'_> {
         self.inner.backend()
     }
 
+    async fn open_policy_observation_session(
+        &self,
+        cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        // Failures on this owned diagnostic session cannot quarantine the primary.
+        self.inner.open_policy_observation_session(cx).await
+    }
+
     async fn close(&self, cx: &Cx) -> Result<(), DbError> {
         self.inner.close(cx).await
     }
@@ -446,6 +454,14 @@ impl GuardedGeneratedReadConn<'_> {
 impl OracleConnection for GuardedGeneratedReadConn<'_> {
     fn backend(&self) -> OracleBackend {
         self.inner.backend()
+    }
+
+    async fn open_policy_observation_session(
+        &self,
+        cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        // Failures on this owned diagnostic session cannot quarantine the primary.
+        self.inner.open_policy_observation_session(cx).await
     }
 
     async fn close(&self, cx: &Cx) -> Result<(), DbError> {

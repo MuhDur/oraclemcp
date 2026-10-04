@@ -1127,6 +1127,21 @@ impl QueryRowStream {
 pub trait OracleConnection: Send + Sync {
     /// The backend in use.
     fn backend(&self) -> OracleBackend;
+    /// Open an owned, physically separate profile session for non-authorizing
+    /// policy observations. It must never borrow or return the pinned wire.
+    /// Dropping the returned session must retire its in-flight work rather
+    /// than making it available to the primary connection or a pool.
+    /// Session-local changes on the primary are not reproduced by this snapshot.
+    async fn open_policy_observation_session(
+        &self,
+        cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        let _ = cx;
+        Err(DbError::Query(
+            "isolated policy observation is unavailable for this connection".to_owned(),
+        ))
+    }
+
     /// Round-trip the server to confirm liveness (`SELECT 1 FROM dual`).
     async fn ping(&self, cx: &Cx) -> Result<(), DbError>;
     /// Best-effort connection metadata (version, role/open-mode, schema).
@@ -6812,6 +6827,15 @@ mod driver {
     impl super::OracleConnection for RustOracleConnection {
         fn backend(&self) -> crate::types::OracleBackend {
             crate::types::OracleBackend::RustOracle
+        }
+
+        async fn open_policy_observation_session(
+            &self,
+            cx: &Cx,
+        ) -> Result<Box<dyn super::OracleConnection>, DbError> {
+            Ok(Box::new(
+                RustOracleConnection::connect(cx, self.opts.clone()).await?,
+            ))
         }
 
         async fn close(&self, cx: &Cx) -> Result<(), DbError> {

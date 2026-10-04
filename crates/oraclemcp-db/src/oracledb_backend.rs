@@ -36,8 +36,7 @@ const CLEANUP_MASKED_POLLS: u32 = 100;
 // depending on `V$SESSION` visibility. `USERENV` is available to every
 // authenticated Oracle session and this query remains actor-owned.
 const OFFICIAL_SESSION_CONTEXT_SQL: &str = concat!(
-    "SELECT ",
-    "SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, ",
+    "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema, ",
     "SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS current_edition, ",
     "SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, ",
     "SYS_CONTEXT('USERENV','CURRENT_USER') AS current_user, ",
@@ -1259,12 +1258,7 @@ fn structured_official_vector_values(values: &oracledb::VectorData) -> (&'static
         ),
         oracledb::VectorData::Float64(values) => (
             "float64",
-            Value::Array(
-                values
-                    .iter()
-                    .map(|value| json_number_or_string(*value))
-                    .collect(),
-            ),
+            Value::Array(values.iter().copied().map(json_number_or_string).collect()),
         ),
         oracledb::VectorData::Int8(values) => (
             "int8",
@@ -1451,6 +1445,13 @@ impl Drop for OfficialOracleRowStream {
 impl OracleConnection for OfficialOracleConnection {
     fn backend(&self) -> OracleBackend {
         OracleBackend::OfficialOracle
+    }
+
+    async fn open_policy_observation_session(
+        &self,
+        cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        Ok(Box::new(Self::connect(cx, self.options.clone()).await?))
     }
 
     async fn ping(&self, cx: &Cx) -> Result<(), DbError> {

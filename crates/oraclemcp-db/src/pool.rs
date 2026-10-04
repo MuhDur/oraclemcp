@@ -1333,6 +1333,15 @@ impl OracleConnection for OraclePool {
         OracleBackend::RustOracle
     }
 
+    async fn open_policy_observation_session(
+        &self,
+        cx: &Cx,
+    ) -> Result<Box<dyn OracleConnection>, DbError> {
+        // A disposable connection is not a pool checkout: cancelled diagnostic
+        // work must never re-enter the pool's idle queue.
+        Ok(Box::new(self.manager.connect(cx).await?))
+    }
+
     fn request_deadline(&self, cx: &Cx) -> Result<Option<Time>, DbError> {
         Ok(self.request_limits_for(cx)?.deadline)
     }
