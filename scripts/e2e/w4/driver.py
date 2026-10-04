@@ -21,6 +21,9 @@ from pathlib import Path
 import queue
 import re
 import secrets
+import select
+import signal
+import stat
 import socket
 import subprocess
 import sys
@@ -2636,6 +2639,43 @@ def run_malformed_frame(client, lane, transport):
     return row
 
 
+def kill_fixture_server(client, binary, env):
+    """Kill the real broker, pinned by pidfd, only after verifying this run's root."""
+    state = Path(env["XDG_STATE_HOME"]).resolve()
+    require(state.is_relative_to((ROOT / "target/e2e/w4").resolve()),
+            "server fault must stay inside this checkout's disposable W4 state")
+    locator_path = state / "oraclemcp/broker.json"
+    metadata = locator_path.lstat()
+    require(stat.S_ISREG(metadata.st_mode) and metadata.st_uid == os.getuid(),
+            "broker locator must be an owned regular file")
+    locator = json.loads(locator_path.read_text())
+    require(set(locator) == {"endpoint", "pid"} and type(locator["pid"]) is int
+            and locator["pid"] > 1 and locator["pid"] not in {os.getpid(), client.process.pid},
+            "server fault needs the broker PID rather than the launcher")
+    pid = locator["pid"]
+    process = Path(f"/proc/{pid}")
+    descriptor = os.pidfd_open(pid)
+    try:
+        require(not select.select([descriptor], [], [], 0)[0], "broker already exited before fault")
+        require(process.stat().st_uid == os.getuid()
+                and os.path.samefile(process / "exe", binary),
+                "broker process owner or executable does not match this W4 run")
+        command = (process / "cmdline").read_bytes().split(b"\0")
+        require(len(command) > 1 and command[1] == b"broker", "locator PID is not a broker")
+        process_env = dict(item.split(b"=", 1) for item in (process / "environ").read_bytes().split(b"\0")
+                           if b"=" in item)
+        require(process_env.get(b"XDG_STATE_HOME") == os.fsencode(str(state)),
+                "broker belongs to a different state root")
+        # Stop the proxy first so it cannot transparently respawn the broker.
+        client.process.kill()
+        client.process.wait(timeout=10)
+        signal.pidfd_send_signal(descriptor, signal.SIGKILL)
+        require(select.select([descriptor], [], [], 10)[0], "broker did not exit after the injected fault")
+    finally:
+        os.close(descriptor)
+    return pid
+
+
 def run_restart_recovery(client, binary, lane, env, transport, port, secret,
                          audience, descriptors):
     started = time.monotonic()
@@ -2647,16 +2687,18 @@ def run_restart_recovery(client, binary, lane, env, transport, port, secret,
            "verdict": "fail", "duration_ms": 0}
     replacement = None
     try:
-        client.process.kill()
-        client.process.wait(timeout=10)
+        killed_pid = kill_fixture_server(client, binary, env)
         replacement = (StdioClient(binary, lane, env) if transport == "stdio"
                        else HttpClient(binary, lane, env, port, secret, audience))
         initialize(replacement)
         elevate(replacement, "ADMIN")
         current = list_tools(replacement)
         recovered = set(current) == set(descriptors)
+        new_pid = json.loads((Path(env["XDG_STATE_HOME"]) / "oraclemcp/broker.json").read_text())["pid"]
+        require(new_pid != killed_pid, "restart did not replace the faulted broker")
         row["actual"] = {"registry_recovered": recovered,
-                         "registry_count": len(current)}
+                         "registry_count": len(current), "killed_server_pid": killed_pid,
+                         "replacement_server_pid": new_pid}
         require(recovered, "registry changed after server kill and restart")
         row["verdict"] = "pass"
     except Exception as exc:
@@ -3762,6 +3804,12 @@ def flashback_grant_selftest():
 
 
 def release_schedule_selftest():
+    try:
+        kill_fixture_server(None, None, {"XDG_STATE_HOME": "/foreign-state-root"})
+    except DriverError:
+        pass
+    else:
+        raise DriverError("server fault accepted a foreign state root")
     try:
         lock_fixture_statistics(None, "SYSTEM")
     except DriverError:
