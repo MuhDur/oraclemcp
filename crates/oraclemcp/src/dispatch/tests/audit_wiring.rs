@@ -1234,6 +1234,67 @@ fn broker_session_subject_binds_elevation_grants_without_http_context() {
 }
 
 #[test]
+fn broker_confirmation_intents_are_distinct_across_sessions_and_generations() {
+    let log = write_intent_log("broker-confirmation-identities");
+    let cases = [
+        (
+            ExecGrantBinding::new("session-a", "lane-a", "subject-a", 1),
+            "ALTER TABLE A ADD N NUMBER",
+        ),
+        (
+            ExecGrantBinding::new("session-b", "lane-b", "subject-b", 1),
+            "ALTER TABLE B ADD N NUMBER",
+        ),
+        (
+            ExecGrantBinding::new("session-a", "lane-a", "subject-a", 2),
+            "ALTER TABLE A ADD M NUMBER",
+        ),
+    ];
+    let mut raw_ids = Vec::new();
+    let mut intent_ids = Vec::new();
+    for (binding, sql) in cases {
+        let grants = ExecGrantStore::new();
+        let confirm =
+            issue_confirmation_grant(&grants, &binding, Some("shared"), sql, OperatingLevel::Ddl);
+        raw_ids.push(
+            verify_execute_grant_reference(&confirm, &binding, Some("shared"), OperatingLevel::Ddl)
+                .unwrap(),
+        );
+        let key = consume_confirmation_grant(ConfirmationGrantRequest {
+            material: sql,
+            required_level: OperatingLevel::Ddl,
+            active_profile: Some("shared"),
+            grants: &grants,
+            binding: &binding,
+            confirm: Some(&confirm),
+            challenge_message: "test confirmation required",
+            suggested_tool: "oracle_preview_sql",
+            next_step: "preview again",
+        })
+        .unwrap();
+        let intent = WriteIntent::new(WriteIntentDetails {
+            idempotency_key_material: &key,
+            subject: &binding.subject_id,
+            active_profile: Some("shared"),
+            tool: "oracle_execute",
+            sql,
+            required_level: OperatingLevel::Ddl,
+            binding: &binding,
+        });
+        let id = log
+            .append_pending(intent)
+            .expect("different sessions/generations must not alias one durable intent");
+        assert!(!intent_ids.contains(&id));
+        intent_ids.push(id);
+    }
+    assert!(
+        raw_ids.iter().all(|id| id == &raw_ids[0]),
+        "the regression must exercise equal process/counter IDs from separate stores"
+    );
+    assert_eq!(log.unresolved().unwrap().len(), 3);
+}
+
+#[test]
 fn session_level_escalation_is_audited() {
     let (auditor, sink) = auditor_with_sink();
     let dispatcher = dispatcher_with(escalatable_read_only(), auditor);

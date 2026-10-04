@@ -77,6 +77,19 @@ allow = ["LicenseRef-MIT-OpenAI-Anthropic-Rider"]
 name = "webpki-roots"
 allow = ["CDLA-Permissive-2.0"]
 
+# The broker's interprocess dependency uses these two 0BSD-only packages.
+# Their registry LICENSE.txt files were reviewed; keep the exception limited
+# to the exact versions in the lockfile rather than widening the allowlist.
+[[licenses.exceptions]]
+name = "recvmsg"
+version = "=1.0.0"
+allow = ["0BSD"]
+
+[[licenses.exceptions]]
+name = "doctest-file"
+version = "=1.1.1"
+allow = ["0BSD"]
+
 [bans]
 multiple-versions = "allow"
 wildcards = "allow"

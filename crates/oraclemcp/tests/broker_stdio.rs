@@ -533,6 +533,81 @@ fn two_live_stdio_clients_isolate_cancellation_and_keep_sibling_available() {
 
 #[cfg(feature = "live-xe")]
 #[test]
+fn two_live_stdio_clients_commit_independent_write_intents() {
+    let root = tempfile::tempdir().unwrap();
+    let path = config_with_ceiling(root.path(), true, "DDL");
+    let mut a = Client::spawn(root.path(), &path, 0);
+    let mut b = Client::spawn(root.path(), &path, 1);
+    for client in [&mut a, &mut b] {
+        assert!(client.response(1).get("result").is_some());
+        client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        elevate(client, 2, "DDL");
+    }
+    // Both stores have consumed exactly one level grant. Their next raw grant
+    // IDs have the same broker PID/counter; the durable identities must differ.
+    execute(
+        &mut a,
+        4,
+        "CREATE OR REPLACE VIEW SG_BROKER_INTENT_A AS SELECT 31 AS V FROM dual",
+        json!([]),
+        true,
+        false,
+    );
+    execute(
+        &mut b,
+        4,
+        "CREATE OR REPLACE VIEW SG_BROKER_INTENT_B AS SELECT 37 AS V FROM dual",
+        json!([]),
+        true,
+        false,
+    );
+    assert_eq!(
+        count(
+            &mut a,
+            6,
+            "SELECT COUNT(*) AS N FROM all_views v WHERE v.owner = USER AND v.view_name = 'SG_BROKER_INTENT_A' AND v.text_vc LIKE '%31%'",
+            json!([])
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &mut b,
+            6,
+            "SELECT COUNT(*) AS N FROM all_views v WHERE v.owner = USER AND v.view_name = 'SG_BROKER_INTENT_B' AND v.text_vc LIKE '%37%'",
+            json!([])
+        ),
+        1
+    );
+    // Reusable, synthetic views avoid accumulating a new fixture per run.
+    let locator: Value = serde_json::from_slice(
+        &std::fs::read(root.path().join("state/oraclemcp/broker.json")).unwrap(),
+    )
+    .unwrap();
+    let pid = locator["pid"].as_u64().unwrap().to_string();
+    drop(a);
+    drop(b);
+    std::thread::sleep(Duration::from_secs(2));
+    #[cfg(unix)]
+    assert!(
+        Command::new("kill")
+            .args(["-TERM", &pid])
+            .status()
+            .unwrap()
+            .success()
+    );
+    #[cfg(windows)]
+    assert!(
+        Command::new("taskkill")
+            .args(["/PID", &pid, "/F"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[cfg(feature = "live-xe")]
+#[test]
 fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
     let root = tempfile::tempdir().unwrap();
     let path = config_with_ceiling(root.path(), true, "DDL");
