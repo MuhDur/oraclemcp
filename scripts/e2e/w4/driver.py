@@ -3029,6 +3029,41 @@ def lock_fixture_statistics(connection, fixture_id):
     return [{"owner": owner, "table": table, "lock": locked} for owner, table, locked in rows]
 
 
+def manifest_unit_commands(release_cases):
+    commands = []
+    for case in release_cases:
+        if case["reproducible"] != "unit":
+            continue
+        crate, name = case["test_id"].split("::", 1)
+        require(re.fullmatch(r"oraclemcp(?:_[a-z]+)?", crate) is not None
+                and re.fullmatch(r"[a-z0-9_]+(?:::[a-z0-9_]+)+", name) is not None,
+                "manifest unit identity must name a workspace crate and exact Rust test")
+        package = crate.replace("_", "-")
+        target = ["--bin", "oraclemcp"] if crate == "oraclemcp" and name.startswith("tests::") else ["--lib"]
+        commands.append((name, ["cargo", "test", "--color", "never", "-p", package,
+                                *target, name, "--", "--exact"]))
+    return commands
+
+
+def verify_manifest_unit_result(name, exit_code, output):
+    require(exit_code == 0
+            and re.search(r"^test\s+" + re.escape(name) + r"\s+\.\.\.\s+ok\s*$", output, re.M)
+            and "test result: ok. 1 passed; 0 failed; 0 ignored;" in output,
+            f"manifest unit test did not execute and pass exactly once: {name}")
+
+
+def run_manifest_units(work, env, output):
+    """Full W4 carries real, unmodified evidence for every governed Rust case."""
+    release = json.loads(RELEASE_MANIFEST.read_text())
+    for index, (name, command) in enumerate(manifest_unit_commands(release)):
+        log = work / f"manifest-unit-{index}.log"
+        output["cargo_test_logs"].append(str(log))
+        with log.open("w") as stream:
+            result = subprocess.run(command, cwd=ROOT, env=env, stdout=stream,
+                                    stderr=subprocess.STDOUT, timeout=600)
+        verify_manifest_unit_result(name, result.returncode, log.read_text())
+
+
 def persist_run_results(base, output):
     base.mkdir(parents=True, exist_ok=True)
     (base / "results.json").write_text(json.dumps(output, indent=2, sort_keys=True) + "\n")
@@ -3102,6 +3137,7 @@ def _run_lane(args, output):
     try:
         if not args.case and not args.contract_only:
             release_cases = json.loads(RELEASE_MANIFEST.read_text())
+            run_manifest_units(work, {**env, "CARGO_TARGET_DIR": str(target_dir)}, output)
             for transport in ("stdio", "http"):
                 verify_manifest_schedule(family_cases, release_cases,
                                          manifest_required(args.lane, transport, capabilities), transport)
@@ -3813,6 +3849,22 @@ def release_schedule_selftest():
             "canonical identity must preserve its red case and remain transport specific")
     require(not map_live_manifest_case_ids(duplicate, release, {"rel012_i44_effective_access"}),
             "manifest normalization must be idempotent")
+    commands = manifest_unit_commands(release)
+    require(len(commands) == 8 and all("--exact" in command and "-p" in command
+                                      for _, command in commands),
+            "all eight governed unit cases need scoped exact test execution")
+    name = commands[0][0]
+    good = f"test {name} ... ok\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured;"
+    verify_manifest_unit_result(name, 0, good)
+    for exit_code, text in ((1, good), (0, "test result: ok. 0 passed; 0 failed; 0 ignored;"),
+                            (0, good.replace("... ok", "... ignored")),
+                            (0, good.replace(name, "unrelated::test"))):
+        try:
+            verify_manifest_unit_result(name, exit_code, text)
+        except DriverError:
+            pass
+        else:
+            raise DriverError("unexecuted, ignored, wrong or failed unit evidence accepted")
     phases = [{"expected_phase": phase, "actual_phase": phase, "canary_leak": False}
               for phase in ("AuthTtc", "Tcp", "Wallet")]
     require(doctor_phase_observations_valid(0, phases), "valid doctor observations rejected")

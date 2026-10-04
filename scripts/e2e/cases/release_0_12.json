@@ -949,7 +949,7 @@
       "RequestBudget::from_profile",
       "profile_request_timeout"
     ],
-    "test_id": "oraclemcp::config::tests::zero_call_timeout_refused_issue_48",
+    "test_id": "oraclemcp_config::profile::tests::issue48_zero_call_timeout_refused_at_load",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i48_zero_timeout.jsonl"
   },
