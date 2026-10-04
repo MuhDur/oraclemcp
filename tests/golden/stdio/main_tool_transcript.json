@@ -2448,6 +2448,10 @@
                     "minimum": 1,
                     "type": "integer"
                   },
+                  "name": {
+                    "description": "Runtime compatibility alias for table; schema clients should supply table.",
+                    "type": "string"
+                  },
                   "owner": {
                     "description": "Optional schema owner (case-insensitive). Defaults to current schema when available.",
                     "type": "string"
