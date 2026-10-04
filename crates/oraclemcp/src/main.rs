@@ -91,7 +91,6 @@ use oraclemcp_config::{
     HttpControlConfig, OracleMcpConfig,
 };
 use oraclemcp_core::admission::DEFAULT_READ_PER_PROFILE_CAP;
-use oraclemcp_core::http::SinglePrincipalGuard;
 use oraclemcp_core::incident::{
     Cassette, CassetteFrame, IncidentCaptureError, IncidentCaptureRequest, IncidentReplayError,
     capture_bundle, replay_bundle,
@@ -2607,7 +2606,14 @@ fn stateful_lane_factory_builder(
                 Ok(maybe_wrap_metrics_dispatch(dispatcher, metrics.as_ref()))
             })
         });
-        Ok(PreparedLaneDispatch::new(factory, request_timeout))
+        Ok(
+            PreparedLaneDispatch::new(factory, request_timeout).with_capacity_profile(
+                wiring
+                    .active_profile
+                    .clone()
+                    .unwrap_or_else(|| "default".to_owned()),
+            ),
+        )
     })
 }
 
@@ -3051,6 +3057,7 @@ fn transport_dispatcher(
     transport: ServerTransportMode,
     wiring: &DispatcherWiring,
     metrics: Option<Arc<Metrics>>,
+    stateful_caps: (usize, usize),
 ) -> (Arc<dyn ToolDispatch>, Option<Arc<dyn HttpSessionLifecycle>>) {
     if !transport.is_http() {
         return (stdio_lane_dispatcher(conn, stateless_conn, wiring), None);
@@ -3061,7 +3068,10 @@ fn transport_dispatcher(
                 stateful_lane_factory_builder(wiring.clone(), metrics),
                 wiring.auditor.clone(),
             )
-            .with_admission_controller(Arc::new(AdmissionController::n4_stateful_defaults())),
+            .with_admission_controller(Arc::new(AdmissionController::new(
+                stateful_caps.1,
+                stateful_caps.0,
+            ))),
         );
         let lifecycle: Arc<dyn HttpSessionLifecycle> = stateful.clone();
         return (stateful, Some(lifecycle));
@@ -3307,9 +3317,6 @@ fn apply_http_cli_overrides(mut config: HttpConfig, cli: &HttpServeArgs) -> Http
     config
         .allowed_origins
         .extend(cli.allowed_origins.iter().cloned());
-    if cli.stateful {
-        config.stateful = true;
-    }
     if cli.json_response {
         config.json_response = true;
     }
@@ -3563,7 +3570,7 @@ fn http_transport_config_from_merged(
         allowed_hosts: http.allowed_hosts,
         allowed_origins: http.allowed_origins,
         json_response: http.json_response,
-        stateful: http.stateful,
+        stateful: true,
         effective_scheme: if http.trusted_https_termination {
             EffectiveHttpScheme::Https
         } else {
@@ -3573,7 +3580,6 @@ fn http_transport_config_from_merged(
         resource_metadata,
         oauth,
         mtls_clients: MtlsClientRegistry::from_fingerprints(http.mtls.client_fingerprints),
-        single_principal_guard: Some(SinglePrincipalGuard::new()),
         operator_authority: OperatorAuthorityPolicy {
             allow_loopback_owner: http.operator.allow_loopback_owner,
             local_owner_stable_id: local_operator_stable_id(),
@@ -4456,9 +4462,6 @@ fn run_serve(
                 );
             }
             let http_stateful = resolved_http.transport.stateful;
-            if http_stateful {
-                resolved_http.transport.single_principal_guard = None;
-            }
             let metrics = Arc::new(Metrics::new());
             // Bound metric-label cardinality (oraclemcp-met-bounded-tool-label):
             // seed the allowlist with the advertised built-in + custom tools so
@@ -4573,6 +4576,10 @@ fn run_serve(
                     http_transport_mode,
                     &wiring,
                     Some(Arc::clone(&opener_metrics)),
+                    (
+                        opener_config.http.stateful_per_profile_cap,
+                        opener_config.http.stateful_host_cap,
+                    ),
                 );
                 if let Some(lifecycle) = lifecycle {
                     opener_lifecycle.attach(lifecycle);

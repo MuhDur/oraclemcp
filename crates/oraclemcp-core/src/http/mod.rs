@@ -238,34 +238,6 @@ pub struct OAuthEnforcement {
     pub metadata_url: String,
 }
 
-/// Interim single-principal admission guard for the pre-lane HTTP server.
-///
-/// The guard stores only a derived, redacted key. It never stores a bearer token
-/// or raw JWT claim value.
-#[derive(Clone, Debug, Default)]
-pub struct SinglePrincipalGuard {
-    active_principal_key: Arc<Mutex<Option<String>>>,
-}
-
-impl SinglePrincipalGuard {
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    fn admit(&self, candidate_key: &str) -> Result<(), ()> {
-        let mut active = self.active_principal_key.lock();
-        match active.as_deref() {
-            None => {
-                *active = Some(candidate_key.to_owned());
-                Ok(())
-            }
-            Some(current) if current == candidate_key => Ok(()),
-            Some(_) => Err(()),
-        }
-    }
-}
-
 impl std::fmt::Debug for OAuthEnforcement {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The verifier may hold a secret; never print it.
@@ -956,29 +928,6 @@ fn cookie_get_requires_origin(request: &HttpRequest) -> Option<HttpResponse> {
     None
 }
 
-fn enforce_single_principal(
-    config: &HttpTransportConfig,
-    authenticated: Option<&AuthenticatedHttpRequest>,
-) -> Option<HttpResponse> {
-    let guard = config.single_principal_guard.as_ref()?;
-    let key = stateful_principal_key(authenticated.map(|auth| auth.principal_key.as_str()));
-    guard
-        .admit(key)
-        .err()
-        .map(|()| single_principal_conflict_response())
-}
-
-fn single_principal_conflict_response() -> HttpResponse {
-    json_response(
-        409,
-        &json!({
-            "error": "single_principal_active",
-            "message": "this pre-lane HTTP server is already bound to another principal",
-            "next_step": "start a separate oraclemcp process for the second principal, or wait for the per-principal LaneRuntime release",
-        }),
-    )
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum HttpRoute {
     ProtectedResourceMetadata,
@@ -1273,9 +1222,6 @@ fn handle_http_exchange(
         Ok(authenticated) => authenticated,
         Err(response) => return HttpExchange::Buffered(response),
     };
-    if let Some(response) = enforce_single_principal(config, authenticated.as_ref()) {
-        return HttpExchange::Buffered(response);
-    }
     let scope_grant = authenticated
         .as_ref()
         .and_then(|auth| auth.scope_grant.as_ref());

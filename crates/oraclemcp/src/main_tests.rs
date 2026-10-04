@@ -1158,7 +1158,6 @@ fn http_cli_oauth_builds_enforced_transport_config() {
         allowed_hosts: vec!["mcp.example.com".to_owned()],
         allowed_origins: vec!["https://client.example.com".to_owned()],
         json_response: true,
-        stateful: true,
         oauth_resource: Some("https://mcp.example.com/mcp".to_owned()),
         oauth_issuers: vec!["https://idp.example.com".to_owned()],
         oauth_authorization_servers: vec!["https://idp.example.com".to_owned()],
@@ -1182,7 +1181,6 @@ fn http_cli_oauth_builds_enforced_transport_config() {
     );
     assert!(cfg.transport.json_response);
     assert!(cfg.transport.stateful);
-    assert!(cfg.transport.single_principal_guard.is_some());
     assert!(cfg.tls.is_none());
 }
 

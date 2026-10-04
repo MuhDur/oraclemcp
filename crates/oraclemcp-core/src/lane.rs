@@ -85,6 +85,7 @@ pub type LaneDispatchFactory = dyn for<'a> Fn(
 pub struct PreparedLaneDispatch {
     factory: Arc<LaneDispatchFactory>,
     request_timeout: Duration,
+    capacity_profile: Option<String>,
 }
 
 impl PreparedLaneDispatch {
@@ -95,7 +96,16 @@ impl PreparedLaneDispatch {
         Self {
             factory,
             request_timeout,
+            capacity_profile: None,
         }
+    }
+
+    /// Charge a new lane to the server-selected profile, shared across all
+    /// principals. This metadata is prepared before any Oracle connection opens.
+    #[must_use]
+    pub fn with_capacity_profile(mut self, profile: String) -> Self {
+        self.capacity_profile = Some(profile);
+        self
     }
 
     /// Consume the atomic preparation into its factory and matching timeout.
@@ -1526,12 +1536,28 @@ impl StatefulLaneDispatch {
             LaneCreationTurn::Create(guard) => guard,
         };
 
+        let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
+        let lane_id = format!("http-lane-{lane_number}");
+        let lane_context = LaneContext::new(
+            lane_id.clone(),
+            key.mcp_session_id.clone(),
+            key.principal_key.clone(),
+            1,
+        );
+        // Config/profile generation preparation happens before the lane
+        // registry lock. This both preserves the canonical Config -> Registry
+        // order and binds factory + timeout to one atomic generation lease.
+        let prepared = (self.factory_builder)(&lane_context)?;
+        let capacity_profile = prepared
+            .capacity_profile
+            .as_deref()
+            .unwrap_or(principal_key);
         let capacity_permit = if let Some(admission) = self.admission.as_ref() {
-            match admission.try_admit(cx, principal_key) {
+            match admission.try_admit(cx, capacity_profile) {
                 Ok(permit) => Some(permit),
                 Err(_) => match admission.admit_capacity_with_fair_wait(
                     cx,
-                    principal_key,
+                    capacity_profile,
                     "stateful_lane",
                 ) {
                     Ok(permit) => Some(permit),
@@ -1553,18 +1579,6 @@ impl StatefulLaneDispatch {
         } else {
             None
         };
-        let lane_number = self.next_lane_id.fetch_add(1, Ordering::SeqCst);
-        let lane_id = format!("http-lane-{lane_number}");
-        let lane_context = LaneContext::new(
-            lane_id.clone(),
-            key.mcp_session_id.clone(),
-            key.principal_key.clone(),
-            1,
-        );
-        // Config/profile generation preparation happens before the lane
-        // registry lock. This both preserves the canonical Config -> Registry
-        // order and binds factory + timeout to one atomic generation lease.
-        let prepared = (self.factory_builder)(&lane_context)?;
         if cx.checkpoint().is_err() {
             drop(prepared);
             drop(capacity_permit);

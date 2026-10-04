@@ -48,7 +48,7 @@ impl TestHome {
         let config = root.join("profiles.toml");
         fs::write(
             &config,
-            "schema_version = 2\n[http]\njson_response = true\nstateful = false\n",
+            "schema_version = 2\n[http]\njson_response = true\n",
         )
         .expect("write isolated config");
         Self {

@@ -53,8 +53,11 @@ allowed_hosts = ["127.0.0.1:7070"]
 allowed_origins = ["https://client.example.com"]
 # Prefer direct JSON responses for stateless requests. Default: false.
 json_response = true
-# Enable Streamable HTTP stateful session framing. Default: false.
-stateful = false
+# HTTP MCP sessions are stateful by default, with separate levels and transactions.
+# Concurrent pinned lanes for one starting profile, across principals. Default: 8.
+stateful_per_profile_cap = 8
+# Concurrent pinned lanes across the service. Default: 64.
+stateful_host_cap = 64
 # Idle TTL for stateful sessions, in seconds. Default: 900. Set 0 to disable.
 stateful_idle_ttl_seconds = 900
 # Assert that every external client reaches this plaintext listener only through
@@ -399,7 +402,8 @@ default_level = "READ_ONLY"
 # | `http.allowed_hosts` | array of string | [] | no | no | 1 | Host authorities allowed beyond loopback. |
 # | `http.allowed_origins` | array of string | [] | no | no | 1 | Browser Origin values allowed beyond loopback origins. |
 # | `http.json_response` | bool | false | no | no | 1 | Prefer direct JSON responses for stateless requests. |
-# | `http.stateful` | bool | false | no | no | 1 | Enable Streamable HTTP stateful session framing. |
+# | `http.stateful_per_profile_cap` | integer | 8 | no | no | 1 | Maximum simultaneous pinned MCP sessions for one profile. |
+# | `http.stateful_host_cap` | integer | 64 | no | no | 1 | Maximum simultaneous pinned MCP sessions across this process. |
 # | `http.stateful_idle_ttl_seconds` | integer | 900 | no | no | 1 | Seconds before an idle stateful session is reaped; 0 disables reaping. |
 # | `http.dashboard_workbench` | bool | false | no | no | 1 | Release gate for the browser Safe SQL Workbench. |
 # | `http.trusted_https_termination` | bool | false | no | no | 1 | Assert external clients reach this plaintext listener only through a trusted HTTPS terminator. |

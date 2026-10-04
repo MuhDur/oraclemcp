@@ -126,7 +126,6 @@ key_ref = "env:RFAIL_AUDIT_KEY"
 key_id = "rfail-synthetic"
 
 [http]
-stateful = true
 json_response = false
 allowed_hosts = ["127.0.0.1:{port}"]
 stateful_idle_ttl_seconds = 2
@@ -191,7 +190,6 @@ class ServerProcess:
                 "--listen",
                 f"127.0.0.1:{port}",
                 "--client-credentials",
-                "--http-stateful",
                 "--profile",
                 "rfail_synthetic",
                 "--http-allowed-host",

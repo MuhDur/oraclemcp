@@ -212,7 +212,6 @@ class ServedServer:
             "--listen",
             f"127.0.0.1:{self.port}",
             "--allow-no-auth",
-            "--http-stateful",
             "--http-json-response",
             "--profile",
             "verdict_certificate",

@@ -333,10 +333,6 @@ pub struct HttpTransportConfig {
     /// the lane registry so HTTP DELETE can terminate the owning lane instead
     /// of only forgetting the session id.
     pub session_lifecycle: Option<Arc<dyn HttpSessionLifecycle>>,
-    /// N8 interim guard: until per-principal lanes exist, a served HTTP process
-    /// may bind to one authenticated principal only. A second principal is
-    /// refused before it can touch the shared dispatcher/session state.
-    pub single_principal_guard: Option<SinglePrincipalGuard>,
     /// D17 operator-authority policy for `/operator/v1`. Ordinary authenticated
     /// subjects are not operators unless this policy authorizes them.
     pub operator_authority: OperatorAuthorityPolicy,
@@ -417,10 +413,6 @@ impl std::fmt::Debug for HttpTransportConfig {
             .field("session_store", &self.session_store.is_some())
             .field("result_store", &self.result_store.is_some())
             .field("session_lifecycle", &self.session_lifecycle.is_some())
-            .field(
-                "single_principal_guard",
-                &self.single_principal_guard.is_some(),
-            )
             .field("operator_authority", &self.operator_authority)
             .field("dashboard_auth", &self.dashboard_auth.is_some())
             .field("dashboard_workbench", &self.dashboard_workbench)
@@ -466,7 +458,6 @@ impl Default for HttpTransportConfig {
             session_store: None,
             result_store: None,
             session_lifecycle: None,
-            single_principal_guard: None,
             operator_authority: OperatorAuthorityPolicy::default(),
             dashboard_auth: None,
             dashboard_workbench: false,

@@ -743,3 +743,165 @@ fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
             .success()
     );
 }
+
+#[cfg(feature = "live-xe")]
+#[test]
+fn live_http_default_sessions_share_profile_capacity_across_principals() {
+    use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
+    use std::io::Read;
+    use std::net::{TcpListener, TcpStream};
+    const OAUTH_KEY: &str = "synthetic-broker-oauth-signing-key-32bytes";
+    let root = tempfile::tempdir().unwrap();
+    let path = config(root.path(), true);
+    let address = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    let resource = format!("http://{address}/mcp");
+    let mut source = std::fs::read_to_string(&path).unwrap();
+    source.push_str(&format!("\n[http]\njson_response = true\n[http.oauth]\nresource = {}\nallowed_issuers = [\"https://broker-test.invalid\"]\nauthorization_servers = [\"https://broker-test.invalid\"]\nhs256_secret_ref = \"env:BROKER_OAUTH_KEY\"\n", json!(resource)));
+    std::fs::write(&path, source).unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_oraclemcp"));
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
+        command.env_remove(key);
+    }
+    let process = command
+        .args([
+            "serve",
+            "--listen",
+            &address.to_string(),
+            "--profile",
+            "shared",
+        ])
+        .env("ORACLEMCP_CONFIG", &path)
+        .env("XDG_STATE_HOME", root.path().join("state"))
+        .env("BROKER_TEST_KEY", "synthetic-test-key-32-bytes-minimum")
+        .env(
+            "BROKER_TEST_PASSWORD",
+            std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap(),
+        )
+        .env("BROKER_OAUTH_KEY", OAUTH_KEY)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    struct HttpProcess(Child);
+    impl Drop for HttpProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut process = HttpProcess(process);
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        if TcpStream::connect(address).is_ok() {
+            break;
+        }
+        assert!(
+            process.0.try_wait().unwrap().is_none(),
+            "HTTP server exited during startup"
+        );
+        assert!(std::time::Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    let request = |token: &str,
+                   session: Option<&str>,
+                   frame: Value|
+     -> (u16, Vec<(String, String)>, Value) {
+        let body = frame.to_string();
+        let session = session
+            .map(|id| format!("mcp-session-id: {id}\r\n"))
+            .unwrap_or_default();
+        let raw = format!(
+            "POST /mcp HTTP/1.1\r\nhost: {address}\r\nauthorization: Bearer {token}\r\n{session}mcp-protocol-version: 2025-11-25\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let mut stream = TcpStream::connect(address).unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        stream.write_all(raw.as_bytes()).unwrap();
+        stream.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        let (headers, body) = response.split_once("\r\n\r\n").expect("HTTP response");
+        let status = headers
+            .lines()
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let headers = headers
+            .lines()
+            .skip(1)
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_owned()))
+            .collect();
+        let data = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .next_back()
+            .unwrap_or(body);
+        (
+            status,
+            headers,
+            serde_json::from_str(data).expect("JSON or SSE payload"),
+        )
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut sessions = Vec::new();
+    for index in 0..9 {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"at+jwt"}"#);
+        let claims = json!({"iss":"https://broker-test.invalid","aud":resource,"exp":now+600,"iat":now,"sub":format!("principal-{index}"),"client_id":format!("http-client-{index}"),"jti":format!("test-{index}"),"scope":"oracle:admin"});
+        let unsigned = format!("{header}.{}", URL_SAFE_NO_PAD.encode(claims.to_string()));
+        let token = format!(
+            "{unsigned}.{}",
+            URL_SAFE_NO_PAD.encode(oraclemcp_audit::hmac_sha256(
+                OAUTH_KEY.as_bytes(),
+                unsigned.as_bytes()
+            ))
+        );
+        let (status, headers, initialized) = request(
+            &token,
+            None,
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":format!("http-client-{index}"),"version":"1"}}}),
+        );
+        assert_eq!(status, 200, "{initialized}");
+        let session = headers
+            .iter()
+            .find(|(name, _)| name == "mcp-session-id")
+            .expect("HTTP is stateful without opt-in")
+            .1
+            .clone();
+        assert!(sessions.iter().all(|existing| existing != &session));
+        sessions.push(session.clone());
+        let (status, headers, response) = request(
+            &token,
+            Some(&session),
+            json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":"SELECT 47 AS HTTP_BROKER_VALUE FROM dual"}}}),
+        );
+        if index < 8 {
+            assert_eq!(status, 200, "{response}");
+            assert_eq!(response["result"]["isError"], false, "{response}");
+            assert!(
+                response.to_string().contains("47"),
+                "real FREE23 rows: {response}"
+            );
+        } else {
+            assert_eq!(status, 429, "{response}");
+            assert_eq!(
+                response["result"]["structuredContent"]["error_class"], "AT_CAPACITY",
+                "{response}"
+            );
+            assert!(headers.iter().any(|(name, _)| name == "retry-after"));
+        }
+    }
+}

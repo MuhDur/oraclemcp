@@ -897,7 +897,7 @@ jobs:
           mkdir -p target/test-attestation-evidence
           bash scripts/e2e/oracle_version_matrix.sh --log --lane free23 2>&1 \
             | tee target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
-      - name: Live shared broker sessions, isolation and recovery
+      - name: Live shared broker sessions, isolation, recovery and default HTTP
         env:
           ORACLEMCP_TEST_DSN: localhost:1522/FREEPDB1
           ORACLEMCP_TEST_USER: E2E_ORACLE

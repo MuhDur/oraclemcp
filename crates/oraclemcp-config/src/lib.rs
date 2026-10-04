@@ -902,8 +902,10 @@ pub struct HttpConfig {
     pub allowed_origins: Vec<String>,
     /// Prefer direct JSON responses for stateless requests.
     pub json_response: bool,
-    /// Enable Streamable HTTP stateful session framing.
-    pub stateful: bool,
+    /// Maximum simultaneous pinned MCP sessions for one profile.
+    pub stateful_per_profile_cap: usize,
+    /// Maximum simultaneous pinned MCP sessions across this process.
+    pub stateful_host_cap: usize,
     /// Seconds before an idle stateful session is reaped. The watchdog closes
     /// the owning lane by mailbox; it never touches the Oracle connection from
     /// the HTTP/listener thread. `0` disables idle reaping.
@@ -947,7 +949,8 @@ impl Default for HttpConfig {
             allowed_hosts: Vec::new(),
             allowed_origins: Vec::new(),
             json_response: false,
-            stateful: false,
+            stateful_per_profile_cap: 8,
+            stateful_host_cap: 64,
             stateful_idle_ttl_seconds: DEFAULT_HTTP_STATEFUL_IDLE_TTL_SECONDS,
             oauth: None,
             mtls: HttpMtlsConfig::default(),
@@ -987,6 +990,20 @@ impl HttpConfig {
     pub fn validate(&self) -> Result<(), ConfigError> {
         validate_non_empty_list("http.allowed_hosts", &self.allowed_hosts)?;
         validate_non_empty_list("http.allowed_origins", &self.allowed_origins)?;
+        for (field, cap) in [
+            (
+                "http.stateful_per_profile_cap",
+                self.stateful_per_profile_cap,
+            ),
+            ("http.stateful_host_cap", self.stateful_host_cap),
+        ] {
+            if cap == 0 {
+                return Err(ConfigError::InvalidHttp {
+                    field,
+                    reason: "must be greater than zero",
+                });
+            }
+        }
         if let Some(oauth) = &self.oauth {
             oauth.validate()?;
         }
@@ -2360,6 +2377,26 @@ mod tests {
     }
 
     #[test]
+    fn http_lane_capacity_defaults_and_zero_refusals() {
+        let defaults = HttpConfig::default();
+        assert_eq!(defaults.stateful_per_profile_cap, 8);
+        assert_eq!(defaults.stateful_host_cap, 64);
+        for source in [
+            "[http]\nstateful_per_profile_cap = 0",
+            "[http]\nstateful_host_cap = 0",
+        ] {
+            assert!(matches!(
+                OracleMcpConfig::from_toml_str(source),
+                Err(ConfigError::InvalidHttp { .. })
+            ));
+        }
+        assert!(
+            OracleMcpConfig::from_toml_str("[http]\nstateful = false").is_err(),
+            "removed opt-in key must not resurrect single-principal mode"
+        );
+    }
+
+    #[test]
     fn http_oauth_config_loads_and_validates() {
         let cfg = OracleMcpConfig::from_toml_str(
             r#"
@@ -2367,7 +2404,8 @@ mod tests {
             allowed_hosts = ["mcp.example.com"]
             allowed_origins = ["https://app.example.com"]
             json_response = true
-            stateful = true
+            stateful_per_profile_cap = 3
+            stateful_host_cap = 12
             stateful_idle_ttl_seconds = 60
 
             [http.oauth]
@@ -2382,7 +2420,8 @@ mod tests {
         .expect("http oauth config loads");
 
         assert_eq!(cfg.http.allowed_hosts, vec!["mcp.example.com"]);
-        assert!(cfg.http.stateful);
+        assert_eq!(cfg.http.stateful_per_profile_cap, 3);
+        assert_eq!(cfg.http.stateful_host_cap, 12);
         assert_eq!(cfg.http.stateful_idle_ttl_seconds, 60);
         let oauth = cfg.http.oauth.expect("oauth config");
         assert_eq!(
@@ -4306,7 +4345,7 @@ mod tests {
             default_profile = "dev"
 
             [http]
-            stateful = true
+            stateful_per_profile_cap = 4
 
             [[profiles]]
             name = "dev"

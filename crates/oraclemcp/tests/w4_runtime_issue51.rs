@@ -465,7 +465,7 @@ fn w4_runtime_issue51_http_service_owner_typed_locked() {
     let first_config = home.config("first.toml", &config_with("a1", ""));
     let second_config = home.config(
         "second.toml",
-        &config_with("a2", "[http]\njson_response = true\nstateful = false\n\n"),
+        &config_with("a2", "[http]\njson_response = true\n\n"),
     );
     let password = [("I51_DB_PASSWORD", "i51-synthetic")];
 

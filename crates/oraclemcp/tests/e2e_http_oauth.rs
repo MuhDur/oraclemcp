@@ -12,9 +12,7 @@ use asupersync::{Cx, Outcome};
 use oraclemcp::dispatch::{OracleDispatcher, ProfileConnectionBundle};
 use oraclemcp::registry::{capabilities, tool_registry};
 use oraclemcp_auth::{ResourceServerConfig, SignatureVerifier};
-use oraclemcp_core::http::{
-    HEALTHZ_PATH, PROTECTED_RESOURCE_METADATA_PATH, SinglePrincipalGuard, serve_http_until,
-};
+use oraclemcp_core::http::{HEALTHZ_PATH, PROTECTED_RESOURCE_METADATA_PATH, serve_http_until};
 use oraclemcp_core::{
     DispatchContext, DispatchFuture, HttpTransportConfig, LaneDispatchFactory, LaneRuntime,
     MCP_PATH, OAuthEnforcement, ObservabilityState, OracleMcpServer, PreparedLaneDispatch,
@@ -274,6 +272,14 @@ fn per_lane_dispatcher_server_with_profile_level(
     max_level: OperatingLevel,
     protected: bool,
 ) -> OracleMcpServer {
+    per_lane_dispatcher_server_with_caps(max_level, protected, (8, 64))
+}
+
+fn per_lane_dispatcher_server_with_caps(
+    max_level: OperatingLevel,
+    protected: bool,
+    caps: (usize, usize),
+) -> OracleMcpServer {
     let registry = tool_registry();
     let factory: Arc<LaneDispatchFactory> = Arc::new(move |_cx, _lane_context| {
         Box::pin(async move {
@@ -288,15 +294,21 @@ fn per_lane_dispatcher_server_with_profile_level(
         env!("CARGO_PKG_VERSION"),
         registry,
         capabilities(env!("CARGO_PKG_VERSION"), true, false),
-        Arc::new(StatefulLaneDispatch::with_dispatch_factory_builder(
-            Arc::new(move |_lane_context| {
-                Ok(PreparedLaneDispatch::new(
-                    Arc::clone(&factory),
-                    oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
-                ))
-            }),
-            None,
-        )),
+        Arc::new(
+            StatefulLaneDispatch::with_dispatch_factory_builder(
+                Arc::new(move |_lane_context| {
+                    Ok(PreparedLaneDispatch::new(
+                        Arc::clone(&factory),
+                        oraclemcp_core::DEFAULT_REQUEST_TIMEOUT,
+                    )
+                    .with_capacity_profile("http-lane-e2e".to_owned()))
+                }),
+                None,
+            )
+            .with_admission_controller(Arc::new(
+                oraclemcp_core::AdmissionController::new(caps.1, caps.0),
+            )),
+        ),
     )
 }
 
@@ -702,71 +714,37 @@ fn binary_http_oauth_serves_metadata_and_applies_scope_ceilings() {
 }
 
 #[test]
-fn binary_http_single_principal_guard_rejects_second_oauth_subject_pre_lane() {
+fn default_http_accepts_two_principals_with_isolated_sessions() {
     let mut config = oauth_config(Vec::new());
-    config.single_principal_guard = Some(SinglePrincipalGuard::new());
-    let harness = spawn_http(config);
-    let initialize = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": { "name": "n8-pre-lane", "version": "1.0" }
-        }
-    });
-
-    let agent_a_read = jwt_with_scope_and_subject("oracle:read", Some("agent-a"));
-    let (status, _headers, _body) = request_json(
-        harness.addr,
-        "POST",
-        MCP_PATH,
-        Some(&agent_a_read),
-        Some(initialize.to_string().as_bytes()),
+    config.stateful = true;
+    let harness = spawn_http_with_server(
+        config,
+        per_lane_dispatcher_server(OperatingLevel::ReadWrite),
     );
-    assert_eq!(status, 200);
-
-    let agent_a_admin = jwt_with_scope_and_subject("oracle:admin", Some("agent-a"));
-    let (status, _headers, _body) = request_json(
-        harness.addr,
-        "POST",
-        MCP_PATH,
-        Some(&agent_a_admin),
-        Some(initialize.to_string().as_bytes()),
-    );
-    assert_eq!(
-        status, 200,
-        "the same principal may refresh/change scopes without opening a second lane"
-    );
-
-    let agent_b = jwt_with_scope_and_subject("oracle:read", Some("agent-b"));
-    let (status, headers, body) = request_json(
-        harness.addr,
-        "POST",
-        MCP_PATH,
-        Some(&agent_b),
-        Some(initialize.to_string().as_bytes()),
-    );
-    assert_eq!(status, 409);
-    assert_eq!(body["error"], json!("single_principal_active"));
-    assert!(
-        !headers
-            .iter()
-            .any(|(_, value)| value.contains(&agent_b) || value.contains("agent-b")),
-        "rejection headers must not leak the second token or subject"
-    );
-    assert!(
-        !body.to_string().contains("agent-b"),
-        "rejection body must not leak the second subject"
-    );
+    let a = jwt_with_scope_and_subject("oracle:admin", Some("agent-a"));
+    let b = jwt_with_scope_and_subject("oracle:admin", Some("agent-b"));
+    let first = stateful_initialize(harness.addr, &a, "default-a");
+    let second = stateful_initialize(harness.addr, &b, "default-b");
+    assert_ne!(first, second, "each principal owns a separate MCP session");
+    for (token, session) in [(&a, &first), (&b, &second)] {
+        let response = stateful_tool_call(
+            harness.addr,
+            token,
+            session,
+            "oracle_set_session_level",
+            json!({"action":"status"}),
+        );
+        assert_eq!(
+            response["result"]["structuredContent"]["session"]["current_level"],
+            "READ_ONLY"
+        );
+    }
 }
 
 #[test]
 fn stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject() {
     let mut config = oauth_config(Vec::new());
     config.stateful = true;
-    config.single_principal_guard = None;
     let harness = spawn_http_with_server(
         config,
         per_lane_dispatcher_server(OperatingLevel::ReadWrite),
@@ -849,7 +827,6 @@ fn stateful_http_lanes_keep_operating_level_isolated_per_session_and_subject() {
 fn streamable_http_e1_ladder_all_rungs_scope_and_admin_ttl() {
     let mut config = oauth_config(Vec::new());
     config.stateful = true;
-    config.single_principal_guard = None;
     let harness = spawn_http_with_server(config, per_lane_dispatcher_server(OperatingLevel::Admin));
     let admin = jwt_with_scope_and_subject("oracle:admin", Some("ladder-agent"));
     let read = jwt_with_scope_and_subject("oracle:read", Some("ladder-agent"));
@@ -944,7 +921,6 @@ fn streamable_http_e1_ladder_all_rungs_scope_and_admin_ttl() {
 fn streamable_http_e1_ladder_ceiling_drop_and_protected() {
     let mut config = oauth_config(Vec::new());
     config.stateful = true;
-    config.single_principal_guard = None;
     let harness = spawn_http_with_server(config, per_lane_dispatcher_server(OperatingLevel::Admin));
     let admin = jwt_with_scope_and_subject("oracle:admin", Some("e1-ladder"));
     let read = jwt_with_scope_and_subject("oracle:read", Some("e1-ladder"));
@@ -1026,7 +1002,6 @@ fn streamable_http_e1_ladder_ceiling_drop_and_protected() {
 
     let mut protected_config = oauth_config(Vec::new());
     protected_config.stateful = true;
-    protected_config.single_principal_guard = None;
     let protected = spawn_http_with_server(
         protected_config,
         per_lane_dispatcher_server_with_profile_level(OperatingLevel::ReadOnly, true),
@@ -1051,7 +1026,6 @@ fn write_auth_http_execute_visibility_follows_effective_ceiling() {
     let listed = |max_level, protected, scope| {
         let mut config = oauth_config(Vec::new());
         config.stateful = true;
-        config.single_principal_guard = None;
         let harness = spawn_http_with_server(
             config,
             per_lane_dispatcher_server_with_profile_level(max_level, protected),
@@ -1097,7 +1071,6 @@ fn write_auth_http_execute_visibility_follows_effective_ceiling() {
 fn stateful_http_lanes_keep_profile_switches_and_connections_isolated() {
     let mut config = oauth_config(Vec::new());
     config.stateful = true;
-    config.single_principal_guard = None;
     let harness = spawn_http_with_server(config, per_lane_profile_switch_server());
     let agent_a_admin = jwt_with_scope_and_subject("oracle:admin", Some("profile-agent-a"));
     let agent_b_admin = jwt_with_scope_and_subject("oracle:admin", Some("profile-agent-b"));
@@ -1396,4 +1369,67 @@ fn binary_http_rejects_bad_origin_and_forged_stateful_sessions() {
     );
     assert_eq!(status, 404);
     assert_eq!(body, json!("Invalid mcp-session-id"));
+}
+
+#[test]
+fn http_profile_capacity_is_shared_across_principals_and_configurable() {
+    for (profile_cap, host_cap, cap) in [(8_usize, 64_usize, 8_usize), (2, 64, 2), (8, 2, 2)] {
+        let mut config = oauth_config(Vec::new());
+        config.stateful = true;
+        let harness = spawn_http_with_server(
+            config,
+            per_lane_dispatcher_server_with_caps(
+                OperatingLevel::ReadWrite,
+                false,
+                (profile_cap, host_cap),
+            ),
+        );
+        for index in 0..=cap {
+            let subject = format!("capacity-client-{index}");
+            let token = jwt_with_scope_and_subject("oracle:admin", Some(&subject));
+            let session = stateful_initialize(harness.addr, &token, &subject);
+            let (status, headers, body) = request_json_with_extra_headers(
+                harness.addr,
+                "POST",
+                MCP_PATH,
+                Some(&token),
+                &[
+                    ("mcp-session-id", &session),
+                    ("mcp-protocol-version", "2025-11-25"),
+                ],
+                Some(
+                    tool_call("oracle_set_session_level", json!({"action":"status"}))
+                        .to_string()
+                        .as_bytes(),
+                ),
+            );
+            let response = if status == 200 {
+                sse_last_json(&body)
+            } else {
+                body
+            };
+            if index < cap {
+                assert_eq!(status, 200, "{response}");
+                assert_eq!(
+                    response["result"]["structuredContent"]["session"]["current_level"],
+                    "READ_ONLY",
+                    "{response}"
+                );
+            } else {
+                assert_eq!(status, 429, "overflow lane admitted: {response}");
+                assert!(header(&headers, "retry-after").is_some(), "{headers:?}");
+                assert_eq!(response["result"]["isError"], true, "{response}");
+                assert_eq!(
+                    response["result"]["structuredContent"]["error_class"], "AT_CAPACITY",
+                    "{response}"
+                );
+                assert!(
+                    response["result"]["structuredContent"]["retry_after_ms"]
+                        .as_u64()
+                        .is_some_and(|retry| retry > 0),
+                    "{response}"
+                );
+            }
+        }
+    }
 }

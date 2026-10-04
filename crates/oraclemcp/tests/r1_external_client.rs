@@ -40,7 +40,7 @@ impl TestHome {
         let config = root.join("profiles.toml");
         fs::write(
             &config,
-            "schema_version = 2\n[http]\njson_response = true\nstateful = false\n",
+            "schema_version = 2\n[http]\njson_response = true\n",
         )
         .expect("write isolated config");
         Self {
@@ -274,14 +274,19 @@ fn spawn_http_server(home: &TestHome, addr: SocketAddr) -> HttpServer {
     }
 }
 
-fn post_json(addr: SocketAddr, body: &Value) -> (u16, Value) {
+fn post_json(addr: SocketAddr, body: &Value, session: &mut Option<String>) -> (u16, Value) {
     let body = body.to_string();
+    let session_header = session
+        .as_ref()
+        .map(|id| format!("mcp-session-id: {id}\r\n"))
+        .unwrap_or_default();
     let request = format!(
         "POST {MCP_PATH} HTTP/1.1\r\n\
          host: {addr}\r\n\
          content-type: application/json\r\n\
          accept: application/json, text/event-stream\r\n\
          mcp-protocol-version: {PROTOCOL_VERSION}\r\n\
+         {session_header}\
          content-length: {}\r\n\
          connection: close\r\n\
          \r\n\
@@ -309,6 +314,16 @@ fn post_json(addr: SocketAddr, body: &Value) -> (u16, Value) {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|code| code.parse::<u16>().ok())
         .unwrap_or_else(|| panic!("HTTP status line is parseable: {head}"));
+    if let Some(id) = head
+        .lines()
+        .filter_map(|line| line.split_once(':'))
+        .find_map(|(key, value)| {
+            key.eq_ignore_ascii_case("mcp-session-id")
+                .then(|| value.trim().to_owned())
+        })
+    {
+        *session = Some(id);
+    }
     let body = if response_body.trim().is_empty() {
         Value::Null
     } else if response_body.trim_start().starts_with('{') {
@@ -331,18 +346,26 @@ fn installed_artifact_accepts_raw_external_http_client() {
     let home = TestHome::new("http");
     let addr = reserve_loopback_addr();
     let _server = spawn_http_server(&home, addr);
+    let mut session = None;
 
-    let (status, initialize) = post_json(addr, &initialize_request(1, "r1-raw-http"));
+    let (status, initialize) = post_json(addr, &initialize_request(1, "r1-raw-http"), &mut session);
     assert_eq!(status, 200, "HTTP initialize succeeds: {initialize}");
     assert_initialize(&initialize);
+    assert!(
+        session.is_some(),
+        "default HTTP initializes a stateful session"
+    );
+    let (status, _) = post_json(addr, &initialized_notification(), &mut session);
+    assert_eq!(status, 202);
 
-    let (status, tools) = post_json(addr, &tools_list_request(2));
+    let (status, tools) = post_json(addr, &tools_list_request(2), &mut session);
     assert_eq!(status, 200, "HTTP tools/list succeeds: {tools}");
     assert_tools_list(&tools);
 
     let (status, governed_read) = post_json(
         addr,
         &tool_call_request(3, "oracle_query", json!({ "sql": "SELECT 1 FROM dual" })),
+        &mut session,
     );
     assert_eq!(
         status, 200,

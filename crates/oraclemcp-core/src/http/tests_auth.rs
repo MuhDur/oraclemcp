@@ -448,10 +448,11 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
             reason: DispatchCloseReason,
             min_generation: Option<u64>,
         ) -> usize {
-            self.closed
-                .lock()
-                .expect("test lifecycle mutex")
-                .push((principal_key.to_owned(), reason, min_generation));
+            self.closed.lock().expect("test lifecycle mutex").push((
+                principal_key.to_owned(),
+                reason,
+                min_generation,
+            ));
             1
         }
     }
@@ -696,13 +697,9 @@ fn operator_client_credentials_screen_lists_rotates_revokes_without_token_leak()
             .closed
             .lock()
             .expect("test lifecycle mutex")
-        .as_slice(),
+            .as_slice(),
         &[
-            (
-                read_principal,
-                DispatchCloseReason::SessionDelete,
-                Some(2),
-            ),
+            (read_principal, DispatchCloseReason::SessionDelete, Some(2),),
             (
                 execute_principal,
                 DispatchCloseReason::SessionDelete,
@@ -1060,53 +1057,28 @@ fn oauth_scope_is_forwarded_to_operator_action_dispatch() {
 // ===================================================================
 
 // ===================================================================
-// CC1 — a framework panic must not strand the single-principal admission
-// (bead H14, plan §30.4 item 7)
+// Session ownership remains isolated with multiple authenticated principals.
 // ===================================================================
 
-/// A panic taken while the admission guard is held must leave the retry
-/// ADMITTED, not refused 409 — and must not loosen the guard for anyone else.
-///
-/// Both directions matter and they pull against each other. "Never strand"
-/// argued alone invites releasing the binding on unwind, which would let a
-/// caller who can provoke a panic take the slot from the principal holding it.
-/// "Never release" argued alone invites poisoning, which strands the rightful
-/// owner behind a permanent 409. The guard is built on `parking_lot::Mutex`
-/// (no poisoning) over a sticky binding, so recovery re-enforces rather than
-/// re-opens; swapping in a `std::sync::Mutex` with `.lock().unwrap()` would
-/// turn every post-panic request into a 500 and fail this test.
+// The temporary single-principal guard is gone. Session ownership is the
+// authority boundary; the process-level HTTP test exercises two principals.
 #[test]
-fn a_panic_holding_the_admission_guard_admits_the_retry_and_still_refuses_others() {
-    let guard = SinglePrincipalGuard::new();
-    assert!(
-        guard.admit("principal-a").is_ok(),
-        "the first principal must be admitted"
+fn two_principals_keep_distinct_session_owners() {
+    let sessions = HttpSessionStore::default();
+    sessions.insert("first".into(), "principal-a".into(), "2025-11-25".into());
+    sessions.insert("second".into(), "principal-b".into(), "2025-11-25".into());
+    assert_eq!(
+        sessions.principal_for("first").as_deref(),
+        Some("principal-a")
     );
-
-    let held = guard.clone();
-    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-        let _locked = held.active_principal_key.lock();
-        panic!("framework panic while the admission guard is held");
-    }));
-    assert!(panicked.is_err(), "the injected panic must have unwound");
-
-    assert!(
-        guard.admit("principal-a").is_ok(),
-        "the rightful principal's retry must be admitted after a panic, not stranded behind 409"
+    assert_eq!(
+        sessions.principal_for("second").as_deref(),
+        Some("principal-b")
     );
-    assert!(
-        guard.admit("principal-b").is_err(),
-        "a panic must not release the binding to another principal"
+    assert_eq!(sessions.remove_principal("principal-a"), vec!["first"]);
+    assert_eq!(sessions.principal_for("first"), None);
+    assert_eq!(
+        sessions.principal_for("second").as_deref(),
+        Some("principal-b")
     );
-}
-
-/// The refusal an unrelated principal receives is the 409 the retry must not
-/// get. Pinned alongside the recovery test so a change that turns the conflict
-/// into some other status cannot silently redefine what "admitted" means.
-#[test]
-fn a_second_principal_receives_the_single_principal_409_conflict() {
-    let response = single_principal_conflict_response();
-    assert_eq!(response.status, 409);
-    let body = response_json(&response);
-    assert_eq!(body["error"], serde_json::json!("single_principal_active"));
 }

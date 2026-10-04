@@ -188,7 +188,6 @@ class HttpMcpSession:
                 "serve",
                 "--listen",
                 listen,
-                "--http-stateful",
                 "--http-json-response",
                 "--profile",
                 profile,

@@ -211,7 +211,6 @@ key_ref = "env:E5_AUDIT_KEY"
 key_id = "e5-synthetic"
 
 [http]
-stateful = true
 json_response = false
 allowed_hosts = ["127.0.0.1:{port}"]
 
@@ -705,7 +704,6 @@ class ServerProcess:
                 "--listen",
                 f"127.0.0.1:{port}",
                 "--client-credentials",
-                "--http-stateful",
                 "--profile",
                 "e5_synthetic",
                 "--http-allowed-host",
@@ -1213,7 +1211,6 @@ def run_commit_in_doubt_wire(
             "--listen",
             f"127.0.0.1:{port}",
             "--client-credentials",
-            "--http-stateful",
             "--profile",
             "e5_synthetic",
             "--http-allowed-host",

@@ -78,6 +78,7 @@ including write-capable profiles. When service state is needed, clients
 automatically attach to one local broker that owns the audit writer and
 database pools. Each client retains its own session level, confirmation tokens,
 transaction and cancellation. The broker exits after 60 seconds without clients.
+HTTP also gives each client an isolated stateful session by default.
 
 Or run authenticated HTTP with a shown-once bearer, and open the local dashboard through a secret-free one-time pairing URL:
 

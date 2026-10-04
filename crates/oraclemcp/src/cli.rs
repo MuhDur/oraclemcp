@@ -434,9 +434,6 @@ pub(crate) struct HttpServeArgs {
     /// Allow this browser Origin in addition to loopback origins.
     #[arg(long = "http-allowed-origin")]
     pub(crate) allowed_origins: Vec<String>,
-    /// Use Streamable HTTP stateful session framing.
-    #[arg(long = "http-stateful")]
-    pub(crate) stateful: bool,
     /// Prefer direct JSON responses for stateless requests.
     #[arg(long = "http-json-response")]
     pub(crate) json_response: bool,

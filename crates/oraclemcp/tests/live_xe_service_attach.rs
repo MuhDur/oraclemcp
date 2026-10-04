@@ -82,7 +82,6 @@ default_profile = "live_xe"
 
 [http]
 json_response = true
-stateful = true
 dashboard_workbench = true
 
 [audit]
@@ -261,7 +260,6 @@ fn spawn_service(
             "--listen",
             &addr.to_string(),
             "--allow-no-auth",
-            "--http-stateful",
             "--http-json-response",
             "--profile",
             "live_xe",

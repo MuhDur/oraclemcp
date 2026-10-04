@@ -39,7 +39,8 @@ in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
 | `http.allowed_hosts` | array of string | [] | no | no | 1 | Host authorities allowed beyond loopback. |
 | `http.allowed_origins` | array of string | [] | no | no | 1 | Browser Origin values allowed beyond loopback origins. |
 | `http.json_response` | bool | false | no | no | 1 | Prefer direct JSON responses for stateless requests. |
-| `http.stateful` | bool | false | no | no | 1 | Enable Streamable HTTP stateful session framing. |
+| `http.stateful_per_profile_cap` | integer | 8 | no | no | 1 | Maximum simultaneous pinned MCP sessions for one profile. |
+| `http.stateful_host_cap` | integer | 64 | no | no | 1 | Maximum simultaneous pinned MCP sessions across this process. |
 | `http.stateful_idle_ttl_seconds` | integer | 900 | no | no | 1 | Seconds before an idle stateful session is reaped; 0 disables reaping. |
 | `http.dashboard_workbench` | bool | false | no | no | 1 | Release gate for the browser Safe SQL Workbench. |
 | `http.trusted_https_termination` | bool | false | no | no | 1 | Assert external clients reach this plaintext listener only through a trusted HTTPS terminator. |
@@ -684,7 +685,8 @@ proposal verdict. Agent DML proposals store parameterized SQL templates plus
 captured binds rather than inlined literal SQL.
 
 `[http]` fields: `allowed_hosts`, `allowed_origins` (both default `[]`,
-loopback-only), `json_response` (default `false`), `stateful` (default `false`),
+loopback-only), `json_response` (default `false`),
+`stateful_per_profile_cap` (default `8`), `stateful_host_cap` (default `64`),
 `stateful_idle_ttl_seconds` (default `900`, `0` disables idle reaping),
 `dashboard_workbench` (default `false`), the optional `[http.oauth]`
 resource-server table, the `[http.mtls]` client
@@ -695,8 +697,11 @@ second, separately bounded incident-response listener. It requires
 matching `mtls:<fingerprint>` in `http.operator.allowed_subjects`. Its
 `preauth_workers` (default 4), `operator_workers` (default 1), and
 `doctor_workers` (default 1) are independently capped at 64; ordinary MCP and
-dashboard routes are never served there. Idle
-stateful sessions are reaped by sending a close message to the owning lane; the
+dashboard routes are never served there. HTTP MCP sessions are always stateful;
+no flag or configuration opt-in is needed.
+The lane caps must be positive and exhausted capacity returns `AT_CAPACITY`
+with a retry delay. Idle sessions are reaped by sending a close message to the
+owning lane; the
 watchdog never touches the Oracle connection from the HTTP thread. When OAuth or
 per-client credentials are enabled, granted `oracle:*` scopes can only **lower**
 the effective ceiling, never raise it, and protected profiles stay `READ_ONLY`.

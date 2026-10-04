@@ -838,8 +838,7 @@ class HttpClient:
         self.notifications_lock = threading.Lock()
         self.last_response_frames = []
         self.stderr_tail = collections.deque(maxlen=20)
-        command = [str(binary), "--json", "serve", "--listen", f"127.0.0.1:{port}",
-                   "--http-stateful"]
+        command = [str(binary), "--json", "serve", "--listen", f"127.0.0.1:{port}"]
         if not streaming:
             command.append("--http-json-response")
         command.extend(["--profile", profile])

@@ -791,9 +791,11 @@ thread or lane-owned Oracle connection can be opened. The HTTP listener also
 admits accepted connection workers before spawning the per-connection thread,
 and long-lived Streamable HTTP GET/SSE subscribers have their own transport cap
 because they are not Oracle lanes. The current served defaults are upper
-bounds: 8 stateful lanes or SSE subscribers per principal bucket, 64 total host
-slots, with 1 operator slot and 1 doctor/readiness slot held out of regular
-agent admission; accepted connection workers share the same 64-slot host budget
+bounds: 8 stateful lanes per starting profile across principals and 64 lanes
+per host, configured by `http.stateful_per_profile_cap` and
+`http.stateful_host_cap`. Transport admission separately bounds SSE subscribers
+per principal and holds 1 operator slot and 1 doctor/readiness slot out of its
+64-slot budget; accepted connection workers share the same host budget
 with the same reserve. N4b finalized those shipped upper bounds from the CX-I6
 Phase-0 measurement recorded in
 `tests/artifacts/perf/20260630-cx-i6-phase0-capacity/RESULTS.md`, which observed
