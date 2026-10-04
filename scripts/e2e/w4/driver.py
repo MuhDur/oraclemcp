@@ -21,8 +21,6 @@ from pathlib import Path
 import queue
 import re
 import secrets
-import select
-import stat
 import socket
 import subprocess
 import sys
