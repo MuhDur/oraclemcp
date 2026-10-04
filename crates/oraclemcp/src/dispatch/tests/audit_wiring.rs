@@ -1859,3 +1859,68 @@ fn async_and_stream_guard_refusals_append_once_per_call() {
         VerifyOutcome::Ok { records: 2 }
     );
 }
+
+#[test]
+fn structured_compile_refusal_hashes_statement_identity_without_auth_material() {
+    let (auditor, sink) = auditor_with_sink();
+    let state = Arc::new(ExecState::default());
+    let dispatcher = dispatcher_with_conn(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        read_write_level(),
+        auditor,
+    );
+    for (name, confirm) in [
+        ("EMP_API", "synthetic-auth-secret"),
+        ("EMP_API", "synthetic-other-auth-secret"),
+        ("EMP_API_2", "synthetic-auth-secret"),
+    ] {
+        let error = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "object_type":"PACKAGE", "name":name, "execute":true, "confirm":confirm
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(error.error_class, ErrorClass::OperatingLevelTooLow);
+    }
+    assert!(state.executed.lock().unwrap().is_empty());
+    let records = sink.records();
+    let blocked: Vec<_> = records
+        .iter()
+        .filter(|r| r.decision == AuditDecision::Blocked)
+        .collect();
+    assert_eq!(
+        blocked.len(),
+        3,
+        "structured SQL operations must also record their guard refusal"
+    );
+    assert_eq!(blocked[0].tool, "oracle_compile_object");
+    assert!(blocked[0].sql_sha256.starts_with("sha256:"));
+    assert_eq!(
+        blocked[0].sql_sha256, blocked[1].sql_sha256,
+        "authentication material is not fingerprinted"
+    );
+    assert_ne!(
+        blocked[0].sql_sha256, blocked[2].sql_sha256,
+        "statement identity is fingerprinted"
+    );
+    let input = json!(["oraclemcp:statement-input:v1", "oracle_compile_object", {"name":"EMP_API", "object_type":"PACKAGE"}]).to_string();
+    let expected = Sha256::digest(input.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    assert_eq!(blocked[0].sql_sha256, format!("sha256:{expected}"));
+    assert!(
+        !serde_json::to_string(&records)
+            .unwrap()
+            .contains("synthetic-auth-secret")
+    );
+    let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec()).unwrap();
+    assert_eq!(
+        verify_records(&records, &[key]),
+        VerifyOutcome::Ok {
+            records: records.len()
+        }
+    );
+}

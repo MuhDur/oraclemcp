@@ -632,11 +632,38 @@ impl OracleDispatcher {
             return;
         }
         emit_lease_event("guard.refused", "classifier_or_level_refusal");
-        let Some(sql) = ["sql", "source_code", "ddl"]
+        let submitted_sql = ["sql", "source_code", "ddl"]
             .iter()
-            .find_map(|key| args.get(*key).and_then(Value::as_str))
-        else {
-            return;
+            .find_map(|key| args.get(*key).and_then(Value::as_str));
+        // Structured SQL operations (compile, patch, edition/level actions)
+        // have no literal SQL argument. Fingerprint their statement inputs in
+        // a stable, tagged representation. Authentication and bind material
+        // are deliberately excluded, even from the fingerprint.
+        let descriptor;
+        let sql = if let Some(sql) = submitted_sql {
+            sql
+        } else {
+            let fields: std::collections::BTreeMap<_, _> = [
+                "owner",
+                "schema",
+                "name",
+                "object_name",
+                "object_type",
+                "old_text",
+                "search_text",
+                "new_text",
+                "replacement",
+                "edition",
+                "level",
+                "action",
+                "plscope",
+                "warnings",
+            ]
+            .iter()
+            .filter_map(|key| args.get(*key).map(|value| (*key, value)))
+            .collect();
+            descriptor = json!(["oraclemcp:statement-input:v1", tool, fields]).to_string();
+            &descriptor
         };
         // Accepted calls return above: no hashing, audit I/O, or database
         // evidence probe is added to the read path. Persist only typed causes;
@@ -688,6 +715,11 @@ impl OracleDispatcher {
             .as_ref()
             .map_or(ReasonCategory::UnprovenSideEffect, |reason| reason.category);
         let Some(writer) = &self.refusal_corpus else {
+            return;
+        };
+        let Some(sql) = submitted_sql else {
+            // The classifier corpus requires literal SQL, not an operation
+            // descriptor. Its opt-in behavior remains separate from auditing.
             return;
         };
         if writer
