@@ -1,0 +1,61 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-04T20:45:00Z",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.7",
+  "scope": {
+    "summary": "oraclemcp audit report renders valid GFM tables (header and delimiter column counts match, asserted by a parsing test), ships correct goldens regenerated from real output after the renderer fix, a broken_chain.md golden, and acceptance-text golden names; live chain reports and tamper detection verified on FREE23.",
+    "in_scope": [
+      "crates/oraclemcp/src/audit_report.rs",
+      "crates/oraclemcp/tests/cli.rs",
+      "tests/golden/audit_report/broken_chain.md",
+      "tests/golden/audit_report/session.md",
+      "tests/golden/audit_report/session.html",
+      "tests/golden/audit_report/session.jsonl"
+    ],
+    "out_of_scope": [
+      "scripts/e2e/w4/driver.py was also touched by f2891008 but is excluded from the clean-scope binding (shared with other in-flight W4 work).",
+      "Refused statements (OPERATING_LEVEL_TOO_LOW) currently leave no audit record, so the report's Refusals section can be empty - separate bead (bead's no-claim boundary)."
+    ]
+  },
+  "source": {
+    "sha": "f28910087772c4e0111bb98192d9f2f8e6a7b1af",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "unit + CLI goldens (independent verifier, export f2891008)",
+        "kind": "cli",
+        "trace": "cargo test -p oraclemcp --bin oraclemcp audit_report -> 8 passed (incl. markdown_table_header_and_delimiter_columns_match); cargo test -p oraclemcp --test cli audit_report_cli_goldens_and_broken_chain_exit_2 -> 1 passed, 6/6 digests. Old-to-new golden diff is exactly the delimiter row; jsonl/html byte-identical. Gate prepush f2891008 16/16."
+      },
+      {
+        "name": "live report on FREE23",
+        "kind": "tool",
+        "trace": "See live artifact: 10-record chain, verify ok; tamper at seq 4 detected with exit 2."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "audit-report-live",
+        "path": "tests/artifacts/evidence/live/verify-f2891008-pvlqq.8.7-20261004T2040Z.json",
+        "sha": "f28910087772c4e0111bb98192d9f2f8e6a7b1af"
+      }
+    ]
+  },
+  "limitations": [
+    "w4_audit_report_after_ladder passes only after the execute case has run (order-dependent fixture).",
+    "Live artifact is a summary of the verifier's logs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

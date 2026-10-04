@@ -1,0 +1,14 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.8.7",
+  "lane": "free23",
+  "run_id": "local-verifier-87-20261004T2040Z (summary of independent verifier run, not a CI run)",
+  "source_sha": "f28910087772c4e0111bb98192d9f2f8e6a7b1af",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "free23 stdio serve as E2E_ORACLE: 3 SELECT + 1 refused DELETE -> 10 audit records, audit verify ok, anchor match",
+    "audit report markdown/--json/html exit 0; GFM checker 6/6 tables header==delimiter (timeline 10/10)",
+    "tampered copy at seq 4 -> 'CHAIN BROKEN at seq 4', exit 2, ORACLEMCP_AUDIT_CHAIN_BROKEN, matches audit verify broken_at_seq 4",
+    "free23 w4_execute_insert_rollback_default + w4_audit_report_after_ladder stdio+http pass x4"
+  ]
+}
