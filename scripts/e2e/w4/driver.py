@@ -331,6 +331,21 @@ def verify_audit(expected, records, verified, optional_prefix=None):
                 f"wrong ordered audit record for {item.get('tool', 'unknown tool')}")
 
 
+def verify_level_expiry_audit(case, reply, records, verified):
+    verify_audit(case["audit_expect"], records, verified)
+    require(len(records) == 2, "TTL expiry needs exactly one elevation and one refusal audit")
+    refusal = records[1]
+    expected_hash = "sha256:" + hashlib.sha256(case["call"]["arguments"]["sql"].encode()).hexdigest()
+    require(refusal.get("sql_sha256") == expected_hash
+            and isinstance(refusal.get("signature"), str) and refusal["signature"]
+            and isinstance(refusal.get("key_id"), str) and refusal["key_id"],
+            "TTL refusal audit lacks its signed caller-SQL binding")
+    require(tool_payload(reply).get("structuredContent", {}).get("statement_outcome") == "not_started",
+            "TTL refusal must prove its statement was not started")
+    return {"records": len(records), "refusal_sql_sha256": expected_hash,
+            "signed": True, "statement_outcome": "not_started"}
+
+
 def verify_coverage(tools, cases):
     report = coverage_status(tools, cases)
     require(not report["missing_positive"],
@@ -2544,10 +2559,12 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                     and busy[0].get("outcome") == "FAILED", "queued read needs one exact blocked audit")
             row["queued_read"]["blocked_audits"] = len(busy)
         if case["audit_expect"]:
-            verify_audit(case["audit_expect"], audit_records(audit_path)[before:],
-                         audit_verify(binary, audit_path, env), case.get("audit_optional_prefix"))
+            records = audit_records(audit_path)[before:]
+            verified = audit_verify(binary, audit_path, env)
+            verify_audit(case["audit_expect"], records, verified, case.get("audit_optional_prefix"))
+            if case["case_id"] == "w4_set_session_level_ttl_expiry_returns_readonly":
+                row["ttl_refusal_audit"] = verify_level_expiry_audit(case, reply, records, verified)
             if "kill_served_session_dml_user" in case["call"] and supported:
-                records = audit_records(audit_path)[before:]
                 row["killed_dml_audit"] = {
                     "records": [{key: record[key] for key in
                                  ("tool", "decision", "outcome", "failure", "cancel") if key in record}
@@ -3802,6 +3819,39 @@ def failed_results_selftest():
     print(compact({"selftest": "current_failed_results_persist_before_nonzero_exit", "verdict": "pass"}))
 
 
+def level_expiry_audit_selftest():
+    case = next(case for case in load_cases()
+                if case["case_id"] == "w4_set_session_level_ttl_expiry_returns_readonly")
+    expected = case["audit_expect"]
+    sql_hash = "sha256:" + hashlib.sha256(case["call"]["arguments"]["sql"].encode()).hexdigest()
+    records = [dict(expected[0]), {**expected[1], "sql_sha256": sql_hash,
+                                 "signature": "unit-test-signature", "key_id": "unit-test-key"}]
+    reply = {"result": {"structuredContent": {"statement_outcome": "not_started"}}}
+    verify_level_expiry_audit(case, reply, records, True)
+    for wrong in (records[:1], records + [records[1]], list(reversed(records)),
+                  [records[0], {**records[1], "decision": "ALLOWED"}],
+                  [records[0], {**records[1], "failure": {"error_class": "INTERNAL"}}],
+                  [records[0], {**records[1], "sql_sha256": "sha256:wrong"}],
+                  [records[0], {**records[1], "signature": None}],
+                  [records[0], {**records[1], "key_id": None}]):
+        try:
+            verify_level_expiry_audit(case, reply, wrong, True)
+        except DriverError:
+            pass
+        else:
+            raise DriverError("TTL audit accepted missing, duplicate, wrong or unsigned evidence")
+    for verified, wrong_reply in ((False, reply),
+                                   (True, {"result": {"structuredContent": {
+                                       "statement_outcome": "outcome_unknown"}}})):
+        try:
+            verify_level_expiry_audit(case, wrong_reply, records, verified)
+        except DriverError:
+            pass
+        else:
+            raise DriverError("TTL audit accepted an unverified chain or uncertain execution")
+    print(compact({"selftest": "ttl_expiry_exact_signed_refusal_not_started", "verdict": "pass"}))
+
+
 def killed_dml_audit_selftest():
     """Unit audit transcripts, not a substitute for live killed-session proof."""
     case = next(case for case in load_cases()
@@ -4114,6 +4164,7 @@ def selftest():
     awr_environment_selftest()
     failed_results_selftest()
     killed_dml_audit_selftest()
+    level_expiry_audit_selftest()
     killed_session_fixture_selftest()
     load_cases()
     expected_live_ids = {

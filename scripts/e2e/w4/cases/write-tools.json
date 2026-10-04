@@ -1787,6 +1787,12 @@
         "tool": "oracle_set_session_level",
         "decision": "STEP_UP_REQUIRED",
         "outcome": "SUCCEEDED"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "BLOCKED",
+        "outcome": "FAILED",
+        "failure": {"error_class": "OPERATING_LEVEL_TOO_LOW"}
       }
     ],
     "on_unsupported": {
