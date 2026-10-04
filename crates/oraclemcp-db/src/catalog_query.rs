@@ -516,6 +516,8 @@ pub enum CatalogQueryId {
     ExtractObjects,
     /// Snapshot column metadata.
     ExtractColumns,
+    /// Snapshot column metadata without a default expression on older Oracle releases.
+    ExtractColumnsLegacy,
     /// Snapshot constraint metadata.
     ExtractConstraints,
     /// Snapshot index metadata.
@@ -576,7 +578,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 176] = [
+    pub const ALL: [Self; 177] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::Objects,
@@ -720,6 +722,7 @@ impl CatalogQueryId {
         Self::VpdRlsPoliciesByObject,
         Self::ExtractObjects,
         Self::ExtractColumns,
+        Self::ExtractColumnsLegacy,
         Self::ExtractConstraints,
         Self::ExtractIndexes,
         Self::ExtractTriggers,
@@ -2158,6 +2161,21 @@ order by owner, table_name, nvl(column_id, internal_column_id)"#
                 ),
                 OWNER32,
                 "extract columns for selected owners",
+                DictionaryMetadata,
+                Diagnostic,
+            ),
+            Self::ExtractColumnsLegacy => (
+                extract_owner_sql!(
+                    r#"SELECT owner, table_name, column_name, nvl(column_id, internal_column_id) as column_position,
+  data_type_owner, data_type, data_length, data_precision, data_scale, char_used,
+  nullable, cast(null as varchar2(4000)) as data_default_vc, virtual_column, hidden_column
+from all_tab_cols
+where owner in ("#,
+                    r#")
+order by owner, table_name, nvl(column_id, internal_column_id)"#
+                ),
+                OWNER32,
+                "extract columns without long defaults on older Oracle releases",
                 DictionaryMetadata,
                 Diagnostic,
             ),

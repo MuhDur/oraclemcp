@@ -816,3 +816,150 @@ fn live_cache_invalidation_rejects_stale_positive_and_negative_evidence() {
         ));
     });
 }
+
+/// Read-only proof of the extraction boundary against actual release catalogs.
+fn assert_catalog_extraction_defaults(lane: &str, default_dsn: &str, legacy: bool) {
+    if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
+        eprintln!("[live-xe] SKIP catalog extraction matrix: opt in with ORACLEMCP_LIVE_XE=1");
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let user = std::env::var(format!("ORACLE_MATRIX_{lane}_USER")).expect("matrix user");
+        let password =
+            std::env::var(format!("ORACLE_MATRIX_{lane}_PASSWORD")).expect("matrix password");
+        let dsn = std::env::var(format!("ORACLE_MATRIX_{lane}_DSN"))
+            .unwrap_or_else(|_| default_dsn.to_owned());
+        assert!(dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"));
+        let conn = RustOracleConnection::connect(
+            &cx,
+            OracleConnectOptions {
+                connect_string: dsn,
+                username: Some(user.clone()),
+                password: Some(password),
+                auth_adapter: AuthAdapter::Password,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{lane} connect: {e}"));
+        let mut binds = vec![OracleBind::from(user.to_uppercase())];
+        binds.resize(32, OracleBind::Null);
+        let modern = run_catalog_query(&cx, &conn, CatalogQueryId::ExtractColumns, &binds).await;
+        let expected_rows = if legacy {
+            let error = modern.expect_err("legacy release must prove missing DATA_DEFAULT_VC");
+            let envelope = error.into_envelope();
+            assert_eq!(envelope.ora_code, Some(904), "{lane}");
+            assert!(envelope.message.contains("DATA_DEFAULT_VC"), "{lane}");
+            run_catalog_query(&cx, &conn, CatalogQueryId::ExtractColumnsLegacy, &binds)
+                .await
+                .expect("legacy projection")
+        } else {
+            modern.expect("modern projection")
+        };
+        eprintln!("[live-xe] {lane}: direct supported columns projection succeeded");
+        conn.describe(&cx)
+            .await
+            .unwrap_or_else(|e| panic!("{lane} connection metadata: {e}"));
+        eprintln!("[live-xe] {lane}: connection metadata succeeded");
+        for id in CatalogQueryId::ALL {
+            if !format!("{id:?}").starts_with("Extract")
+                || id == CatalogQueryId::ExtractColumns
+                || id == CatalogQueryId::ExtractColumnsLegacy
+            {
+                continue;
+            }
+            let mut query_binds = binds.clone();
+            if id.spec().binds.0.is_empty() {
+                query_binds.clear();
+            } else if id.spec().binds.0.len() == 33 {
+                query_binds.push(OracleBind::I64(1));
+            }
+            run_catalog_query(&cx, &conn, id, &query_binds)
+                .await
+                .unwrap_or_else(|e| panic!("{lane} direct {id:?}: {e}"));
+            eprintln!("[live-xe] {lane}: direct {id:?} succeeded");
+        }
+        let report = oraclemcp_db::extract_catalog_rowsets(
+            &cx,
+            &conn,
+            &oraclemcp_db::CatalogExtractRequest::for_current_schema(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{lane} extraction: {e}"));
+        let columns = report
+            .batches
+            .iter()
+            .find(|b| b.row_set == oraclemcp_db::CatalogRowSetName::Columns)
+            .expect("columns rowset");
+        assert!(
+            !columns.rows.is_empty(),
+            "{lane}: live proof requires visible columns"
+        );
+        assert_eq!(
+            serde_json::to_value(&columns.rows).unwrap(),
+            serde_json::to_value(expected_rows).unwrap(),
+            "{lane}: extraction must preserve the complete supported projection"
+        );
+        for row in &columns.rows {
+            assert!(
+                row.cell("DATA_DEFAULT_VC").is_some(),
+                "{lane}: stable default alias"
+            );
+            assert!(
+                row.cell("VIRTUAL_COLUMN").is_some(),
+                "{lane}: virtual metadata retained"
+            );
+            if legacy {
+                assert_eq!(
+                    row.text("DATA_DEFAULT_VC"),
+                    None,
+                    "{lane}: no LONG source claims"
+                );
+            }
+        }
+        let unavailable = report
+            .warnings
+            .iter()
+            .filter(|w| w.code == "catalog-column-defaults-unavailable")
+            .count();
+        assert_eq!(unavailable, usize::from(legacy), "{lane}");
+        assert_eq!(
+            report.batches.len(),
+            23,
+            "{lane}: core and PL/Scope rowsets"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .all(|w| w.code == "catalog-column-defaults-unavailable"),
+            "{lane}: {:?}",
+            report.warnings
+        );
+        conn.close(&cx).await.expect("close matrix connection");
+        eprintln!(
+            "[live-xe] {lane}: full catalog extracted; {} columns, defaults={}",
+            columns.rows.len(),
+            if legacy {
+                "explicitly unavailable (ORA-00904 fallback)"
+            } else {
+                "bounded text preserved"
+            }
+        );
+    });
+}
+
+#[test]
+fn catalog_extraction_defaults_match_live_release_capability_xe18() {
+    assert_catalog_extraction_defaults("XE18", "localhost:1518/XEPDB1", true);
+}
+
+#[test]
+fn catalog_extraction_defaults_match_live_release_capability_xe21() {
+    assert_catalog_extraction_defaults("XE21", "localhost:1520/XEPDB1", true);
+}
+
+#[test]
+fn catalog_extraction_defaults_match_live_release_capability_free23() {
+    assert_catalog_extraction_defaults("FREE23", "localhost:1523/FREEPDB1", false);
+}

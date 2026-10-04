@@ -23,9 +23,10 @@ username = "${ORACLEMCP_TEST_USER}"
 credential_ref = "env:E2E_SELFTEST_PASSWORD"
 max_level = "ADMIN"
 default_level = "READ_ONLY"
+call_timeout_seconds = 30
 EOF
-binary="${ORACLEMCP_SELFTEST_BINARY:-$ROOT/target/swarm-GreenTiger/debug/oraclemcp}"
-if [ ! -x "$binary" ]; then e2e_run_command setup cargo build -p oraclemcp; binary="$ROOT/target/swarm-GreenTiger/debug/oraclemcp"; fi
+binary="${ORACLEMCP_SELFTEST_BINARY:-${CARGO_TARGET_DIR:-$ROOT/target}/debug/oraclemcp}"
+if [ ! -x "$binary" ]; then e2e_run_command setup cargo build -p oraclemcp; binary="${CARGO_TARGET_DIR:-$ROOT/target}/debug/oraclemcp"; fi
 # This selector belongs to the outer harness.  The child config loader treats
 # every ORACLEMCP_* variable as server configuration and correctly rejects it.
 export ORACLEMCP_CONFIG="$profiles" E2E_SELFTEST_PASSWORD="$ORACLEMCP_TEST_PASSWORD" XDG_STATE_HOME="$run_dir/state"

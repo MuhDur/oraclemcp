@@ -501,6 +501,14 @@ an agent session.
 
 ---
 
+Live PL/SQL catalog extraction tries the bounded `ALL_TAB_COLS.DATA_DEFAULT_VC`
+projection first. If Oracle reports ORA-00904 for that column (as on XE18 and
+XE21), extraction retries a fixed projection with null default text and emits
+`catalog-column-defaults-unavailable`. Column types and virtual/hidden flags
+remain available, but default and virtual-column expressions are unavailable.
+The legacy path never reads LONG `DATA_DEFAULT` as complete source. Other query
+errors propagate without this fallback.
+
 ## 4. Network posture
 
 The stdio transport talks to a single trusted parent process and has no network

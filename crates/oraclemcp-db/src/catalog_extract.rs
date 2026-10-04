@@ -290,8 +290,23 @@ pub async fn extract_catalog_rowsets(
     let mut batches = Vec::with_capacity(query_specs.len());
     let mut warnings = Vec::new();
 
-    for spec in query_specs {
-        match run_extract_query(cx, conn, &spec, &schema_names).await {
+    for mut spec in query_specs {
+        let mut result = run_extract_query(cx, conn, &spec, &schema_names).await;
+        if spec.id == crate::CatalogQueryId::ExtractColumns
+            && result.as_ref().is_err_and(missing_data_default_vc)
+        {
+            // Retry only on positive evidence from the projection itself. An
+            // empty dictionary lookup could mean limited visibility instead.
+            spec.id = crate::CatalogQueryId::ExtractColumnsLegacy;
+            result = run_extract_query(cx, conn, &spec, &schema_names).await;
+            warnings.push(CatalogExtractWarning {
+                row_set: CatalogRowSetName::Columns,
+                code: "catalog-column-defaults-unavailable".to_owned(),
+                message: "ALL_TAB_COLS.DATA_DEFAULT_VC is absent; column default expressions are unavailable, including virtual-column expressions".to_owned(),
+                remediation: Some("Use a release exposing DATA_DEFAULT_VC for bounded default text; LONG DATA_DEFAULT is not treated as complete source".to_owned()),
+            });
+        }
+        match result {
             Ok(rows) => batches.push(CatalogRowBatch {
                 row_set: spec.row_set,
                 rows,
@@ -314,6 +329,18 @@ pub async fn extract_catalog_rowsets(
         batches,
         warnings,
     })
+}
+
+// Match the Oracle error code and the missing identifier, not a release guess
+// or an unrelated invalid identifier in this server-owned projection.
+fn missing_data_default_vc(error: &DbError) -> bool {
+    match error {
+        DbError::Query(detail) | DbError::ServerQuery(detail) => {
+            oraclemcp_error::parse_ora_code(detail) == Some(904)
+                && detail.to_ascii_uppercase().contains("\"DATA_DEFAULT_VC\"")
+        }
+        _ => false,
+    }
 }
 
 /// The fixed query is repeated over deterministic owner chunks. PUBLIC rows
@@ -553,6 +580,7 @@ mod tests {
         calls: Mutex<Vec<(String, Vec<OracleBind>)>>,
         fail_contains: Option<&'static str>,
         synthesize_owners: bool,
+        column_error: Option<DbError>,
     }
 
     #[async_trait(?Send)]
@@ -586,6 +614,11 @@ mod tests {
                 .lock()
                 .expect("call log")
                 .push((sql.to_owned(), binds.to_vec()));
+            if sql == crate::CatalogQueryId::ExtractColumns.spec().sql
+                && let Some(error) = &self.column_error
+            {
+                return Err(error.clone());
+            }
             if self
                 .fail_contains
                 .is_some_and(|needle| sql.contains(needle))
@@ -747,6 +780,140 @@ mod tests {
         assert!(calls[12].1.is_empty());
         assert!(calls[17].0.contains("from all_editions"));
         assert!(calls[17].1.is_empty());
+    }
+
+    #[test]
+    fn legacy_columns_projection_never_reads_default_long() {
+        assert_eq!(
+            crate::CatalogQueryId::ExtractColumnsLegacy.spec().binds,
+            crate::CatalogQueryId::ExtractColumns.spec().binds,
+        );
+        let sql = crate::CatalogQueryId::ExtractColumnsLegacy
+            .spec()
+            .sql
+            .to_ascii_lowercase();
+        assert!(sql.contains("cast(null as varchar2(4000)) as data_default_vc"));
+        assert!(!sql.contains("data_default,"));
+    }
+
+    #[test]
+    fn missing_default_vc_retries_legacy_projection_with_warning() {
+        for code in ["ORA-00904", "ORA-904"] {
+            let conn = RecordingConn {
+                column_error: Some(DbError::Query(format!(
+                    "{code}: \"DATA_DEFAULT_VC\": invalid identifier"
+                ))),
+                synthesize_owners: true,
+                ..RecordingConn::default()
+            };
+            let request =
+                CatalogExtractRequest::for_named_schemas((0..70).map(|n| format!("OWNER_{n:02}")));
+            let conn_ref = &conn;
+            let report = run_with_cx(|cx| async move {
+                extract_catalog_rowsets(&cx, conn_ref, &request)
+                    .await
+                    .unwrap()
+            });
+            let columns = report
+                .batches
+                .iter()
+                .find(|b| b.row_set == CatalogRowSetName::Columns)
+                .unwrap();
+            assert_eq!(columns.rows.len(), 70);
+            assert_eq!(report.warnings.len(), 1);
+            assert_eq!(
+                report.warnings[0].code,
+                "catalog-column-defaults-unavailable"
+            );
+            let calls = conn.calls.lock().unwrap();
+            let modern = crate::CatalogQueryId::ExtractColumns.spec();
+            let legacy = crate::CatalogQueryId::ExtractColumnsLegacy.spec();
+            assert_eq!(calls.iter().filter(|(sql, _)| sql == modern.sql).count(), 1);
+            let retries: Vec<_> = calls.iter().filter(|(sql, _)| sql == legacy.sql).collect();
+            assert_eq!(retries.len(), 3);
+            assert_eq!(
+                retries[0].1,
+                calls.iter().find(|(sql, _)| sql == modern.sql).unwrap().1
+            );
+            assert!(retries.iter().all(|(_, binds)| binds.len() == 32));
+        }
+    }
+
+    #[test]
+    fn other_column_errors_do_not_trigger_legacy_retry() {
+        for detail in [
+            "ORA-00904: \"OTHER_COLUMN\": invalid identifier",
+            "ORA-00942: table or view does not exist",
+            "ORA-01031: insufficient privileges",
+            "ORA-03113: end-of-file on communication channel",
+            "DATA_DEFAULT_VC capability unknown",
+        ] {
+            let conn = RecordingConn {
+                column_error: Some(DbError::Query(detail.to_owned())),
+                ..RecordingConn::default()
+            };
+            let request = CatalogExtractRequest::for_current_schema();
+            let conn_ref = &conn;
+            let result =
+                run_with_cx(
+                    |cx| async move { extract_catalog_rowsets(&cx, conn_ref, &request).await },
+                );
+            assert!(result.is_err(), "{detail}");
+            let calls = conn.calls.lock().unwrap();
+            assert!(
+                !calls
+                    .iter()
+                    .any(|(sql, _)| sql == crate::CatalogQueryId::ExtractColumnsLegacy.spec().sql)
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_column_query_failure_propagates() {
+        let conn = RecordingConn {
+            column_error: Some(DbError::Query(
+                "ORA-00904: \"DATA_DEFAULT_VC\": invalid identifier".to_owned(),
+            )),
+            fail_contains: Some("cast(null as varchar2(4000))"),
+            ..RecordingConn::default()
+        };
+        let request = CatalogExtractRequest::for_current_schema();
+        let result =
+            run_with_cx(|cx| async move { extract_catalog_rowsets(&cx, &conn, &request).await });
+        assert!(
+            matches!(result, Err(DbError::Query(detail)) if detail == "scripted query failure")
+        );
+    }
+
+    #[test]
+    fn modern_columns_success_retains_projection_without_warning() {
+        let conn = RecordingConn::default();
+        let request = CatalogExtractRequest::for_current_schema();
+        let conn_ref = &conn;
+        let report = run_with_cx(|cx| async move {
+            extract_catalog_rowsets(&cx, conn_ref, &request)
+                .await
+                .unwrap()
+        });
+        assert!(report.warnings.is_empty());
+        let calls = conn.calls.lock().unwrap();
+        assert_eq!(
+            calls
+                .iter()
+                .filter(|(sql, _)| sql == crate::CatalogQueryId::ExtractColumns.spec().sql)
+                .count(),
+            1
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(sql, _)| sql == crate::CatalogQueryId::ExtractColumnsLegacy.spec().sql)
+        );
+        assert!(
+            !calls
+                .iter()
+                .any(|(sql, _)| sql == crate::CatalogQueryId::DescribeDefaultVcProbe.spec().sql)
+        );
     }
 
     #[test]
