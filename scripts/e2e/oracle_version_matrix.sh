@@ -593,6 +593,16 @@ PY
       return 1
     fi
     e2e_log_event "policy_timeout_lifecycle" "assert" "pass" 0 "live timeout disposal and retained capacity verified; no general server-stop time claim"
+    if ! env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}" ORACLEMCP_TEST_DSN="$dsn" \
+      ORACLEMCP_TEST_LAB_CONTAINER="${ORACLEMCP_TEST_LAB_CONTAINER:-oraclemcp-free23-rel}" \
+      ORACLEMCP_TEST_LAB_PDB=FREEPDB1 \
+      timeout -k 10 300 cargo test -p oraclemcp-db --features live-xe --test live_oracle \
+      live_abandoned_policy_logons_retain_capacity -- --exact --nocapture \
+      >"$lane_dir/policy_logon_lifecycle.log" 2>&1; then
+      e2e_log_event "policy_logon_lifecycle" "assert" "fail" 0 "live abandoned-logon lifecycle failed (see $lane_dir/policy_logon_lifecycle.log)"
+      return 1
+    fi
+    e2e_log_event "policy_logon_lifecycle" "assert" "pass" 0 "abandoned logon retains capacity under concurrent probes"
   fi
   return 0
 }

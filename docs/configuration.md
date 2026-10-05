@@ -404,7 +404,8 @@ attempts a break and terminal transport disposal. This does **not** prove that
 Oracle stopped the server call: in-band breaks may be processed only after a
 server-side operation finishes, and the official actor cannot break an
 in-flight call. There is no general server-retirement time bound. The abandoned
-slot stays charged and quarantined until the source closes; later reads cannot
+slot stays charged and quarantined until the source closes, including abandoned
+logons that have not yet returned a client handle; later reads cannot
 replace it with new logons, even when the client socket is already closed.
 Exhausted quarantine capacity reports unavailable observation evidence promptly;
 reconnect creates a new source. Transient acquisition failures and unavailable

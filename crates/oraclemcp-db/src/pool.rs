@@ -283,7 +283,9 @@ struct PoolState {
 }
 
 struct QuarantinedObservation {
-    connection: PooledConnection,
+    // A cancelled logon may have created a server session before returning a
+    // client handle. Its transport future is dropped, but capacity stays held.
+    connection: Option<PooledConnection>,
     // Keep admission charged even after sending a best-effort interrupt/EOF.
     // In-band cancellation need not stop a server-side PL/SQL sleep.
     _permit: Option<PoolCapacityPermit>,
@@ -951,7 +953,9 @@ impl OraclePool {
         for retired in quarantined {
             // A dropped observation may still own an undisposed wire. Source
             // shutdown also gives it a bounded terminal-disposal attempt.
-            if let Err(error) = retired.connection.cancel_and_close(cx).await {
+            if let Some(connection) = retired.connection
+                && let Err(error) = connection.cancel_and_close(cx).await
+            {
                 tracing::warn!(error = %error, "quarantined observer transport disposal failed");
                 if first_error.is_none() {
                     first_error = Some(error);
@@ -1213,6 +1217,14 @@ impl OraclePool {
         if !validate_idle {
             self.check_observation_retry()?;
         }
+        if !validate_idle {
+            return asupersync::time::timeout_at(
+                deadline,
+                self.open_observation_for_permit(cx, permit),
+            )
+            .await
+            .map_err(|_| pool_acquire_timeout())?;
+        }
         let connection = asupersync::time::timeout_at(
             deadline,
             self.open_connection_for_permit(cx, validate_idle),
@@ -1220,6 +1232,41 @@ impl OraclePool {
         .await
         .map_err(|_| pool_acquire_timeout())??;
         Ok((connection, permit))
+    }
+
+    async fn open_observation_for_permit(
+        &self,
+        cx: &Cx,
+        permit: PoolCapacityPermit,
+    ) -> Result<(PooledConnection, PoolCapacityPermit), DbError> {
+        if self.is_closing()? {
+            return Err(DbError::Pool(
+                "thin Oracle connection pool is closing".to_owned(),
+            ));
+        }
+        if let Some(connection) = self.take_idle_connection()? {
+            return Ok((connection, permit));
+        }
+        if !self.reserve_new_connection()? {
+            return Err(DbError::Internal(
+                "observation permit had no idle or openable slot".to_owned(),
+            ));
+        }
+        let pending = PendingOpenSlot::observation(Arc::clone(&self.state), permit);
+        match self.manager.connect(cx, true).await {
+            Ok(connection) => Ok((connection, pending.complete_observation())),
+            Err(error @ (DbError::Cancelled(_) | DbError::CallTimeout { .. })) => {
+                // Cancellation can also be reported by the connector after
+                // Oracle has accepted authentication. Drop keeps this charge.
+                Err(error)
+            }
+            Err(error) => {
+                // A reported rejection is distinct from abandoning the logon
+                // future: authentication failures keep the bounded retry path.
+                pending.discard()?;
+                Err(error)
+            }
+        }
     }
 
     fn check_observation_retry(&self) -> Result<(), DbError> {
@@ -1437,11 +1484,12 @@ fn pool_acquire_timeout() -> DbError {
 }
 
 /// Tracks an open pool slot while an idle-session validation or a new connect
-/// is awaiting. Dropping either future must release the slot even though the
-/// connection has not yet reached the acquired/in-use accounting phase.
+/// is awaiting. Ordinary checkout releases an abandoned slot; an observation
+/// logon retains its charge even before a connection handle exists.
 struct PendingOpenSlot {
     state: Arc<Mutex<PoolState>>,
     active: bool,
+    observation_permit: Option<PoolCapacityPermit>,
 }
 
 impl PendingOpenSlot {
@@ -1449,11 +1497,27 @@ impl PendingOpenSlot {
         Self {
             state,
             active: true,
+            observation_permit: None,
         }
     }
 
     fn complete(mut self) {
         self.active = false;
+    }
+
+    fn observation(state: Arc<Mutex<PoolState>>, permit: PoolCapacityPermit) -> Self {
+        Self {
+            state,
+            active: true,
+            observation_permit: Some(permit),
+        }
+    }
+
+    fn complete_observation(mut self) -> PoolCapacityPermit {
+        self.active = false;
+        self.observation_permit
+            .take()
+            .expect("pending observation owns admission")
     }
 
     fn discard(mut self) -> Result<(), DbError> {
@@ -1474,7 +1538,14 @@ impl Drop for PendingOpenSlot {
         }
         match self.state.lock() {
             Ok(mut state) => {
-                state.open_count = state.open_count.saturating_sub(1);
+                if let Some(permit) = self.observation_permit.take() {
+                    state.quarantined.push(QuarantinedObservation {
+                        connection: None,
+                        _permit: Some(permit),
+                    });
+                } else {
+                    state.open_count = state.open_count.saturating_sub(1);
+                }
             }
             Err(error) => {
                 tracing::error!(
@@ -1606,7 +1677,7 @@ fn quarantine_observation(
     // retirement. Retain the connection owner and capacity until source close.
     // Drop alone cannot silently free a slot or forget the abandoned wire.
     state.quarantined.push(QuarantinedObservation {
-        connection,
+        connection: Some(connection),
         _permit: permit,
     });
     Ok(())
@@ -3031,7 +3102,7 @@ mod tests {
     }
 
     #[test]
-    fn observation_acquire_deadline_bounds_a_silent_logon_and_releases_capacity() {
+    fn observation_acquire_deadline_bounds_a_silent_logon_and_retains_capacity() {
         // Real loopback TCP, deliberately no Oracle greeting: this exercises
         // connection establishment rather than only a full admission queue.
         use std::io::Read;
@@ -3097,9 +3168,10 @@ mod tests {
             );
             assert_eq!(
                 pool.metrics().open,
-                0,
-                "abandoned open reservation is released"
+                1,
+                "abandoned observation logon stays charged"
             );
+            assert_eq!(pool.quarantined_connections(), 1);
             assert_eq!(pool.metrics().in_use, 0);
             assert!(pool.metrics().is_balanced());
         });

@@ -2427,6 +2427,91 @@ fn live_transient_policy_logon_failure_recovers_without_pinned_reconnect() {
     }
 }
 
+/// A logon deadline can abandon a server session before a client handle exists.
+/// Selected by the required FREE23 lane; missing lab prerequisites fail.
+#[test]
+fn live_abandoned_policy_logons_retain_capacity() {
+    let fixture = policy_fixture(false);
+    let result = std::panic::catch_unwind(|| {
+        let fixture = &fixture;
+        run_with_cx(|cx| async move {
+            let conn = RustOracleConnection::connect(&cx, fixture.options())
+                .await
+                .unwrap();
+            fixture.sql(&format!(
+                "create or replace trigger {}.xr_slow_logon after logon on {}.schema begin sys.dbms_lock.sleep(12); end;\n/",
+                fixture.user, fixture.user
+            ));
+            let started = Instant::now();
+            let probe = oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn).await;
+            assert_eq!(
+                probe.visibility,
+                oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+            );
+            assert!(started.elapsed() >= Duration::from_secs(5));
+            assert!(started.elapsed() < Duration::from_secs(8));
+            assert_eq!(fixture.count(), 2, "actual in-flight server logon");
+            // Let the transient failure cooldown expire. A cancelled logon
+            // must still retain admission instead of permitting replacements.
+            asupersync::time::sleep(cx.now(), Duration::from_millis(1100)).await;
+            let started = Instant::now();
+            let mut pending = (0..4)
+                .map(|_| Box::pin(oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn)))
+                .collect::<Vec<_>>();
+            let mut probes: [Option<_>; 4] = std::array::from_fn(|_| None);
+            std::future::poll_fn(|poll_cx| {
+                for (future, result) in pending.iter_mut().zip(probes.iter_mut()) {
+                    if result.is_none()
+                        && let std::task::Poll::Ready(probe) = future.as_mut().poll(poll_cx)
+                    {
+                        *result = Some(probe);
+                    }
+                }
+                if probes.iter().all(Option::is_some) {
+                    std::task::Poll::Ready(())
+                } else {
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            let elapsed = started.elapsed();
+            assert!(
+                fixture.count() <= 2,
+                "one pinned + one charged logon, including concurrency"
+            );
+            assert!(
+                elapsed < Duration::from_secs(1),
+                "quarantine must reject replacements promptly"
+            );
+            for probe in probes.into_iter().flatten() {
+                assert_eq!(
+                    probe.visibility,
+                    oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+                );
+                assert!(probe.detail.contains("capacity quarantined"), "{probe:?}");
+            }
+            assert_eq!(
+                conn.query_rows(&cx, "SELECT 1 AS n FROM dual", &[])
+                    .await
+                    .unwrap()[0]
+                    .parse_i64("N"),
+                Some(1)
+            );
+            // This retirement bound is ONLY for the finite 12s logon fixture.
+            fixture.baseline(&cx, 1).await;
+            conn.close(&cx).await.unwrap();
+            fixture.baseline(&cx, 0).await;
+            eprintln!(
+                "[live-xe] abandoned-logon lifecycle PASS physical_limit=2 concurrent_probes=4 unconfirmed_slot_not_replaced; finite fixture retirement only"
+            );
+        });
+    });
+    fixture.cleanup();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 /// End-to-end wall-clock oracle_query timings, using the same disposable
 /// 64-policy schema for historical and candidate binaries. Both binaries must
 /// return real rows; an unavailable observation or refusal cannot win on speed.
