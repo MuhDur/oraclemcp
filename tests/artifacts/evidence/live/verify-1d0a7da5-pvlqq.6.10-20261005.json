@@ -1,0 +1,14 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.6.10",
+  "lane": "free23+xe21+xe18",
+  "run_id": "local-verifier-pvlqq.6.10-20261005 (summary of independent verifier run, not a CI run)",
+  "source_sha": "1d0a7da5aeeac5c269ea9f8035c1aa7941a30e81",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "free23 live_metadata_pool_write_refused_by_db ok; armed tx present, after tx=None inserted=1; counts 0",
+    "xe21 same ok",
+    "xe18 same ok",
+    "w4 {free23,xe21,xe18}x{on,off}: cases 8 verdict pass"
+  ]
+}
