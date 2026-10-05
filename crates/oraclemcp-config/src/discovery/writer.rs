@@ -222,6 +222,7 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
             "sdu" => push_commented_scalar(&mut scalars, fd, "32768"),
             // protected = true is the safe, instructive value: it pins the
             // ceiling immutable and requires max_level = READ_ONLY (which we set).
+            "metadata_read_only_transaction" => push_commented_scalar(&mut scalars, fd, "false"),
             "protected" => push_commented_scalar(&mut scalars, fd, "true"),
             "require_signed_tools" => push_commented_scalar(&mut scalars, fd, "true"),
             "read_only_standby" => push_commented_scalar(&mut scalars, fd, "false"),

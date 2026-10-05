@@ -229,6 +229,7 @@ pub fn synthesize_profiles(
             // default) so the READ_ONLY safety ceiling is legible in the file.
             max_level: Some(OperatingLevel::ReadOnly),
             default_level: Some(OperatingLevel::ReadOnly),
+            metadata_read_only_transaction: None,
             // Everything else is left unset (the writer renders each as a
             // commented, help-annotated menu entry): protected stays unset so an
             // operator can later deliberately opt a target up, mcp_exposed stays

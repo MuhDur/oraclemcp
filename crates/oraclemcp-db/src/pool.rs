@@ -283,9 +283,37 @@ struct PoolState {
 struct PoolRequestLimits {
     deadline: Option<Time>,
     quota: Option<DbRequestQuota>,
+    metadata_read_only: Option<oraclemcp_guard::SessionLevelState>,
 }
 
 type PoolRequestKey = (RegionId, TaskId);
+
+/// Restores the calling task's metadata transaction policy when a request ends.
+/// This owns its pool state, so it also survives profile replacement without
+/// borrowing the dispatcher or leaking a policy into another client task.
+pub struct MetadataReadOnlyScope {
+    limits: Arc<Mutex<HashMap<PoolRequestKey, PoolRequestLimits>>>,
+    key: PoolRequestKey,
+    previous: Option<oraclemcp_guard::SessionLevelState>,
+}
+
+impl Drop for MetadataReadOnlyScope {
+    fn drop(&mut self) {
+        match self.limits.lock() {
+            Ok(mut limits) => {
+                let entry = limits.entry(self.key).or_default();
+                entry.metadata_read_only = self.previous.take();
+                if entry.deadline.is_none()
+                    && entry.quota.is_none()
+                    && entry.metadata_read_only.is_none()
+                {
+                    limits.remove(&self.key);
+                }
+            }
+            Err(error) => tracing::error!(error = %error, "metadata request scope restore failed"),
+        }
+    }
+}
 
 /// Private FIFO checkout admission. Unlike the upstream semaphore, this owns
 /// every state transition around a user-owned `Waker`: the state is committed
@@ -784,10 +812,11 @@ impl OraclePool {
             DbError::Internal(format!("pool request-limits lock poisoned: {err}"))
         })?;
         update(limits.entry(key).or_default());
-        if limits
-            .get(&key)
-            .is_some_and(|limits| limits.deadline.is_none() && limits.quota.is_none())
-        {
+        if limits.get(&key).is_some_and(|limits| {
+            limits.deadline.is_none()
+                && limits.quota.is_none()
+                && limits.metadata_read_only.is_none()
+        }) {
             limits.remove(&key);
         }
         Ok(())
@@ -1031,36 +1060,54 @@ impl OraclePool {
                 return Err(error);
             }
 
-            let first_result = f(cx, checkout.connection().as_ref()).await;
+            let first = crate::metadata_read_only::metadata_read_attempt(
+                cx,
+                checkout.connection().as_ref(),
+                limits.metadata_read_only.as_ref(),
+                || f(cx, checkout.connection().as_ref()),
+            )
+            .await;
+            let mut control_failed = first.control_failed;
+            let first_result = first.result;
             let result = match &first_result {
                 Err(error)
-                    if retry_now(
-                        retry_policy,
-                        1,
-                        error.retry_action(),
-                        oraclemcp_error::OracleRetryAction::RetrySameConnection,
-                    ) =>
+                    if !control_failed
+                        && retry_now(
+                            retry_policy,
+                            1,
+                            error.retry_action(),
+                            oraclemcp_error::OracleRetryAction::RetrySameConnection,
+                        ) =>
                 {
                     // ORA-04068 and driver retry-in-place conditions leave the
                     // session usable. Yield once before the one safe replay;
                     // this runtime deliberately has no timer dependency.
                     attempt += 1;
                     asupersync::runtime::yield_now().await;
-                    f(cx, checkout.connection().as_ref()).await
+                    let retried = crate::metadata_read_only::metadata_read_attempt(
+                        cx,
+                        checkout.connection().as_ref(),
+                        limits.metadata_read_only.as_ref(),
+                        || f(cx, checkout.connection().as_ref()),
+                    )
+                    .await;
+                    control_failed = retried.control_failed;
+                    retried.result
                 }
                 _ => first_result,
             };
 
-            let retry_fresh = matches!(
-                &result,
-                Err(error)
-                    if retry_now(
-                        retry_policy,
-                        attempt,
-                        error.retry_action(),
-                        oraclemcp_error::OracleRetryAction::ReconnectThenRetry,
-                    )
-            );
+            let retry_fresh = !control_failed
+                && matches!(
+                    &result,
+                    Err(error)
+                        if retry_now(
+                            retry_policy,
+                            attempt,
+                            error.retry_action(),
+                            oraclemcp_error::OracleRetryAction::ReconnectThenRetry,
+                        )
+                );
             let quota_restore = checkout.connection().set_request_quota(cx, previous_quota);
             let deadline_restore = checkout
                 .connection()
@@ -1626,6 +1673,27 @@ impl OracleConnection for PolicyObservationCheckout {
 
 #[async_trait(?Send)]
 impl OracleConnection for OraclePool {
+    fn metadata_read_only_scope(
+        &self,
+        cx: &Cx,
+        level: oraclemcp_guard::SessionLevelState,
+    ) -> Result<Option<MetadataReadOnlyScope>, DbError> {
+        let key = Self::request_key(cx);
+        let mut limits = self.request_limits.lock().map_err(|error| {
+            DbError::Internal(format!("pool request-limits lock poisoned: {error}"))
+        })?;
+        let previous = limits
+            .entry(key)
+            .or_default()
+            .metadata_read_only
+            .replace(level);
+        Ok(Some(MetadataReadOnlyScope {
+            limits: Arc::clone(&self.request_limits),
+            key,
+            previous,
+        }))
+    }
+
     fn backend(&self) -> OracleBackend {
         OracleBackend::RustOracle
     }
@@ -1801,6 +1869,197 @@ mod tests {
             Poll::Ready(Ok(permit)) => permit,
             other => panic!("available capacity must acquire immediately: {other:?}"),
         }
+    }
+
+    #[cfg(feature = "live-xe")]
+    #[test]
+    fn live_metadata_pool_write_refused_by_db() {
+        use oraclemcp_guard::{OperatingLevel, SessionLevelState};
+        let Ok(password) = std::env::var("ORACLEMCP_TEST_PASSWORD") else {
+            eprintln!(
+                "[live-xe] SKIP live_metadata_pool_write_refused_by_db: credential not configured"
+            );
+            return;
+        };
+        let opts = OracleConnectOptions {
+            connect_string: std::env::var("ORACLEMCP_TEST_DSN").expect("live DSN"),
+            username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("live user")),
+            password: Some(password),
+            ..Default::default()
+        };
+        let reactor = asupersync::runtime::reactor::create_reactor().expect("live reactor");
+        RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cx = Cx::current().unwrap();
+                let observer = RustOracleConnection::connect(&cx, opts.clone())
+                    .await
+                    .expect("live observer");
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros()
+                    % 1_000_000_000_000;
+                let table = format!("E2E_MRO_{}_{}", std::process::id(), stamp);
+                observer
+                    .execute(&cx, &format!("CREATE TABLE {table} (ID NUMBER)"), &[])
+                    .await
+                    .expect("create run-owned table");
+                // Open after DDL so the snapshot cannot predate the fixture.
+                let pool = OraclePool::connect(
+                    &cx,
+                    opts,
+                    PoolSettings {
+                        max_size: 1,
+                        min_idle: 0,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("live pool");
+                let scope = pool
+                    .metadata_read_only_scope(
+                        &cx,
+                        SessionLevelState::new(OperatingLevel::ReadOnly, false),
+                    )
+                    .unwrap();
+                let sql = format!("INSERT INTO {table} (ID) VALUES (731)");
+                // This raw write-through-pool capability exists only in test code.
+                let error = pool
+                    .with_conn(&cx, |cx, conn| {
+                        let sql = sql.clone();
+                        Box::pin(async move { conn.execute(cx, &sql, &[]).await })
+                    })
+                    .await
+                    .expect_err("Oracle READ ONLY must refuse the real INSERT");
+                let envelope = error.into_envelope();
+                assert_eq!(
+                    envelope.ora_code,
+                    Some(1456),
+                    "only genuine ORA-01456 proves enforcement: {envelope:?}"
+                );
+                assert_eq!(pool.metrics().discarded, 1);
+                drop(scope);
+                let rows = observer
+                    .query_rows(&cx, &format!("SELECT ID FROM {table}"), &[])
+                    .await
+                    .expect("independent reread");
+                assert!(
+                    rows.is_empty(),
+                    "the refused write must leave the table unchanged"
+                );
+                pool.close(&cx).await.expect("pool close");
+                observer
+                    .execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                    .await
+                    .expect("clean run-owned fixture");
+                observer.close(&cx).await.expect("observer close");
+            });
+    }
+
+    fn recorded_metadata_checkout(
+        enabled: bool,
+        elevated: bool,
+        fail_arm: bool,
+        fail_cleanup: bool,
+    ) -> (
+        Result<Vec<OracleRow>, DbError>,
+        Vec<&'static str>,
+        PoolMetrics,
+    ) {
+        use crate::metadata_read_only::RecordingMetadataConnection;
+        use oraclemcp_guard::{OperatingLevel, SessionLevelState};
+        let recording = RecordingMetadataConnection {
+            fail_arm,
+            fail_cleanup,
+            ..Default::default()
+        };
+        let calls = Arc::clone(&recording.calls);
+        let pool = OraclePool::for_test_at_open_count(
+            PoolSettings {
+                max_size: 1,
+                min_idle: 0,
+                ..Default::default()
+            },
+            0,
+        );
+        {
+            let mut state = pool.state.lock().unwrap();
+            state.open_count = 1;
+            state.idle.push(Box::new(recording));
+        }
+        let result = RuntimeBuilder::current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cx = Cx::current().unwrap();
+                let mut level = SessionLevelState::new(OperatingLevel::Admin, false);
+                if elevated {
+                    level
+                        .escalate_window(OperatingLevel::ReadWrite, Duration::from_secs(60))
+                        .unwrap();
+                }
+                let _scope = if enabled {
+                    pool.metadata_read_only_scope(&cx, level).unwrap()
+                } else {
+                    None
+                };
+                pool.query_rows(&cx, "SELECT 1 FROM dual", Vec::new()).await
+            });
+        assert!(
+            pool.request_limits.lock().unwrap().is_empty(),
+            "request policy must restore on drop"
+        );
+        let recorded = calls.lock().unwrap().clone();
+        (result, recorded, pool.metrics())
+    }
+
+    #[test]
+    fn metadata_pool_arms_read_only_when_enabled_at_read_only() {
+        let (result, calls, metrics) = recorded_metadata_checkout(true, false, false, false);
+        assert!(result.is_ok());
+        assert_eq!(calls, ["rollback", "arm", "read", "rollback"]);
+        assert_eq!(
+            (metrics.idle, metrics.released, metrics.discarded),
+            (1, 1, 0)
+        );
+        assert!(metrics.is_balanced());
+    }
+
+    #[test]
+    fn metadata_pool_untouched_when_disabled() {
+        let (result, calls, metrics) = recorded_metadata_checkout(false, false, false, false);
+        assert!(result.is_ok());
+        assert_eq!(calls, ["read"]);
+        assert_eq!((metrics.idle, metrics.discarded), (1, 0));
+    }
+
+    #[test]
+    fn metadata_pool_not_armed_above_read_only() {
+        let (result, calls, metrics) = recorded_metadata_checkout(true, true, false, false);
+        assert!(result.is_ok());
+        assert_eq!(calls, ["read"]);
+        assert_eq!((metrics.idle, metrics.discarded), (1, 0));
+    }
+
+    #[test]
+    fn metadata_pool_arm_failure_refuses_and_discards() {
+        let (result, calls, metrics) = recorded_metadata_checkout(true, false, true, false);
+        assert!(result.is_err());
+        assert_eq!(calls, ["rollback", "arm"]);
+        assert_eq!((metrics.open, metrics.idle, metrics.discarded), (0, 0, 1));
+        assert!(metrics.is_balanced());
+    }
+
+    #[test]
+    fn metadata_pool_rollback_failure_discards_connection() {
+        let (result, calls, metrics) = recorded_metadata_checkout(true, false, false, true);
+        assert!(result.is_err());
+        assert_eq!(calls, ["rollback", "arm", "read", "rollback"]);
+        assert_eq!((metrics.open, metrics.idle, metrics.discarded), (0, 0, 1));
+        assert!(metrics.is_balanced());
     }
 
     #[test]
@@ -2386,6 +2645,15 @@ mod tests {
             let expected_quota = quota_a.clone();
             runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("spawned task installs its own Cx");
+                let _metadata_scope = pool
+                    .metadata_read_only_scope(
+                        &cx,
+                        oraclemcp_guard::SessionLevelState::new(
+                            oraclemcp_guard::OperatingLevel::ReadOnly,
+                            false,
+                        ),
+                    )
+                    .unwrap();
                 pool.set_request_deadline(&cx, Some(deadline_a))
                     .expect("task A deadline");
                 pool.set_request_quota(&cx, Some(expected_quota))
@@ -2398,6 +2666,11 @@ mod tests {
                     OraclePool::request_key(&cx),
                     pool.request_deadline(&cx).expect("task A deadline read"),
                     pool.request_quota(&cx).expect("task A quota read"),
+                    pool.request_limits_for(&cx)
+                        .unwrap()
+                        .metadata_read_only
+                        .unwrap()
+                        .effective_level(),
                 );
                 pool.set_request_deadline(&cx, None)
                     .expect("clear task A deadline");
@@ -2415,6 +2688,17 @@ mod tests {
             let expected_quota = quota_b.clone();
             runtime.handle().spawn(async move {
                 let cx = Cx::current().expect("spawned task installs its own Cx");
+                let mut metadata_level = oraclemcp_guard::SessionLevelState::new(
+                    oraclemcp_guard::OperatingLevel::Admin,
+                    false,
+                );
+                metadata_level
+                    .escalate_window(
+                        oraclemcp_guard::OperatingLevel::Admin,
+                        Duration::from_secs(60),
+                    )
+                    .unwrap();
+                let _metadata_scope = pool.metadata_read_only_scope(&cx, metadata_level).unwrap();
                 pool.set_request_deadline(&cx, Some(deadline_b))
                     .expect("task B deadline");
                 pool.set_request_quota(&cx, Some(expected_quota))
@@ -2427,6 +2711,11 @@ mod tests {
                     OraclePool::request_key(&cx),
                     pool.request_deadline(&cx).expect("task B deadline read"),
                     pool.request_quota(&cx).expect("task B quota read"),
+                    pool.request_limits_for(&cx)
+                        .unwrap()
+                        .metadata_read_only
+                        .unwrap()
+                        .effective_level(),
                 );
                 pool.set_request_deadline(&cx, None)
                     .expect("clear task B deadline");
@@ -2442,6 +2731,8 @@ mod tests {
             observed_a.0, observed_b.0,
             "spawned requests must have distinct pool request-limit keys"
         );
+        assert_eq!(observed_a.3, oraclemcp_guard::OperatingLevel::ReadOnly);
+        assert_eq!(observed_b.3, oraclemcp_guard::OperatingLevel::Admin);
         assert_eq!(observed_a.1, Some(deadline_a));
         assert_eq!(observed_b.1, Some(deadline_b));
         let observed_quota_a = observed_a.2.expect("task A quota remains installed");

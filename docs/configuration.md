@@ -92,6 +92,7 @@ in [`oraclemcp.example.toml`](../oraclemcp.example.toml).
 | `profiles.sdu` | integer | none | yes | no | 1 | Thin Session Data Unit request size (512..=65535). |
 | `profiles.max_level` | enum(READ_ONLY\|READ_WRITE\|DDL\|ADMIN) | READ_ONLY | yes | no | 1 | Per-target operating-level ceiling; session elevation cannot exceed it. |
 | `profiles.default_level` | enum(READ_ONLY\|READ_WRITE\|DDL\|ADMIN) | READ_ONLY | yes | no | 1 | Level a fresh session starts at; must not exceed max_level. |
+| `profiles.metadata_read_only_transaction` | bool | false | yes | no | 1 | Opt metadata-pool checkouts at READ_ONLY into fresh READ ONLY transactions with bounded rollback. Above READ_ONLY no transaction is armed; the pinned-session backstop is unchanged. Does not stop autonomous transactions. |
 | `profiles.protected` | bool | false | yes | no | 1 | Pin the ceiling immutable at READ_ONLY and reject literal: secret refs. |
 | `profiles.require_signed_tools` | bool | false | yes | no | 1 | Require an HMAC signature for every operator-defined custom tool on this profile. |
 | `profiles.read_only_standby` | bool | false | yes | no | 1 | Force READ_ONLY regardless of max_level for an Active Data Guard standby. |

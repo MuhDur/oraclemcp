@@ -1,0 +1,29 @@
+{
+  "lane": "free23",
+  "binary_source_sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+  "binary_sha256": "37aff3270f2273c5de3499282580297b58be4b82d1e9f3c8233f496348f8fefb",
+  "tool": "oracle_describe",
+  "catalog_query_id": "DescribeColumns",
+  "probe": "run-owned ALL_TAB_COLS view calls MRO_USER_CODE returning731",
+  "application_user_code_reached": true,
+  "no_claim": "READ ONLY does not prevent autonomous transactions or user-code execution",
+  "command": "python3 scripts/e2e/w4/driver.py --lane free23 --metadata-reachability-probe --binary <baseline-d30fe11f-oraclemcp> --binary-source-sha d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+  "metadata_connection": {
+    "connected": true,
+    "pool_open_connections": 1,
+    "strategy": "stateless_metadata_pool"
+  },
+  "observed_columns": [
+    {
+      "COLUMN_NAME": "ID",
+      "DATA_DEFAULT": null,
+      "DATA_LENGTH": "731",
+      "DATA_TYPE": "NUMBER",
+      "HIDDEN_COLUMN": "NO",
+      "NULLABLE": "Y",
+      "USER_GENERATED": "YES",
+      "VIRTUAL_COLUMN": "NO"
+    }
+  ],
+  "conclusion": "Closed CatalogQueryId SQL can resolve an unqualified dictionary name to a run-owned application view and execute its PL/SQL function. The config option adds transaction enforcement; it does not prevent user-code execution or autonomous side effects."
+}

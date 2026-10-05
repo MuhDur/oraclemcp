@@ -1053,6 +1053,32 @@ impl<'a> GuardedReadExecutor<'a> {
         Self { dispatcher }
     }
 
+    /// Apply the profile's opt-in only to the separate metadata pool. The
+    /// request's scoped level carries its TTL and OAuth ceiling to checkout.
+    pub(super) fn metadata_scope(
+        &self,
+        cx: &Cx,
+        state: &DispatcherState,
+        level: &SessionLevelState,
+    ) -> Result<Option<oraclemcp_db::MetadataReadOnlyScope>, ErrorEnvelope> {
+        let enabled = state
+            .profile_generation
+            .as_ref()
+            .and_then(|lease| {
+                lease
+                    .config()
+                    .and_then(|config| config.profile(lease.profile()))
+            })
+            .is_some_and(|profile| profile.metadata_read_only_transaction());
+        if !enabled {
+            return Ok(None);
+        }
+        state.stateless_conn.as_ref().map_or(Ok(None), |pool| {
+            pool.metadata_read_only_scope(cx, level.clone())
+                .map_err(DbError::into_envelope)
+        })
+    }
+
     /// Open a fresh profile session for optimizer-cost work. The pinned
     /// request connection may already be inside Oracle's READ ONLY transaction;
     /// using a separately connected session keeps the diagnostic PLAN_TABLE
@@ -1564,6 +1590,7 @@ impl<'a> GuardedReadExecutor<'a> {
             }
             let current_schema = state.current_schema.clone();
             let scoped_level = scoped_session_level(&state.level, context);
+            let _metadata_scope = self.metadata_scope(cx, &state, &scoped_level)?;
             if let Some(active_profile) = state.active_profile.as_deref() {
                 match state.profile_generation.as_ref() {
                     None => return Err(profile_generation_inactive_error(active_profile)),

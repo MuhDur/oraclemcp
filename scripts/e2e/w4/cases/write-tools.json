@@ -1792,7 +1792,9 @@
         "tool": "oracle_execute",
         "decision": "BLOCKED",
         "outcome": "FAILED",
-        "failure": {"error_class": "OPERATING_LEVEL_TOO_LOW"}
+        "failure": {
+          "error_class": "OPERATING_LEVEL_TOO_LOW"
+        }
       }
     ],
     "on_unsupported": {
@@ -2220,5 +2222,157 @@
       "error_class": "INVALID_ARGUMENTS"
     },
     "profile_variant": "protected"
+  },
+  {
+    "case_id": "w4_backstop_elevated_write_succeeds",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "UPDATE ${owner}.T_CHILD_AUD_${run_id} SET CHILD_ID = 903 WHERE CHILD_ID = 902",
+        "commit": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": true,
+        "rolled_back": false,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT CHILD_ID FROM ${owner}.T_CHILD_AUD_${run_id} WHERE CHILD_ID IN (902, 903) ORDER BY CHILD_ID",
+        "rows": [
+          [
+            903
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_preview_sql",
+        "arguments": {
+          "sql": "INSERT INTO ${owner}.T_CHILD_AUD_${run_id} (CHILD_ID) VALUES (902)",
+          "commit": true
+        },
+        "expect": {
+          "json_subset": {
+            "execute_confirmation": {}
+          }
+        },
+        "capture": {
+          "token": "/execute_confirmation/confirm"
+        }
+      },
+      {
+        "tool": "oracle_execute",
+        "arguments": {
+          "sql": "INSERT INTO ${owner}.T_CHILD_AUD_${run_id} (CHILD_ID) VALUES (902)",
+          "commit": true,
+          "confirm": "${cap:token}"
+        },
+        "expect": {
+          "json_subset": {
+            "executed": true,
+            "committed": true,
+            "rolled_back": false,
+            "rows_affected": 1
+          }
+        }
+      },
+      {
+        "tool": "oracle_preview_sql",
+        "arguments": {
+          "sql": "UPDATE ${owner}.T_CHILD_AUD_${run_id} SET CHILD_ID = 903 WHERE CHILD_ID = 902",
+          "commit": true
+        },
+        "expect": {
+          "json_subset": {
+            "execute_confirmation": {}
+          }
+        },
+        "capture": {
+          "token": "/execute_confirmation/confirm"
+        }
+      }
+    ]
+  },
+  {
+    "case_id": "w4_backstop_toggle_off_matches_baseline",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "WITH p AS (SELECT 731 AS PROBE_VALUE FROM dual) SELECT PROBE_VALUE FROM p",
+        "max_rows": 10
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "PROBE_VALUE": "731"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT 731 FROM dual",
+        "rows": [
+          [
+            731
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server"
   }
 ]

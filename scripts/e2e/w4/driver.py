@@ -26,6 +26,8 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
+import tomllib
 
 from fixture import (admin_password, kill_session_sql, load_lane, new_run_id,
                      set_flashback_grant, setup as fixture_setup, teardown as fixture_teardown)
@@ -1165,7 +1167,8 @@ def pick_port():
         return sock.getsockname()[1]
 
 
-def write_lab_config(path, lane, dsn, port, owner=None, cross=None):
+def write_lab_config(path, lane, dsn, port, owner=None, cross=None,
+                     metadata_pool=False, metadata_read_only_transaction=None):
     audience = f"http://127.0.0.1:{port}/mcp"
     content = f'''schema_version = 2
 default_profile = "{lane}"
@@ -1325,6 +1328,17 @@ max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 require_security_feature_evidence = true
 '''
+    if metadata_pool or metadata_read_only_transaction is not None:
+        # Keep the same physical pool in baseline/off/on proofs. The baseline
+        # binary predates the option, so omit its key when no mode was selected.
+        sections = content.split("[[profiles]]\n")
+        for index in range(1, len(sections)):
+            if metadata_read_only_transaction is not None:
+                value = str(metadata_read_only_transaction).lower()
+                sections[index] = f"metadata_read_only_transaction = {value}\n" + sections[index]
+            if metadata_pool:
+                sections[index] += "\n[profiles.pool]\nmax_size = 2\nmin_idle = 0\n"
+        content = "[[profiles]]\n".join(sections)
     path.write_text(content)
     return audience
 
@@ -3211,7 +3225,9 @@ def _run_lane(args, output):
     work = base / run_id
     work.mkdir(parents=True, exist_ok=True)
     port = pick_port()
-    audience = write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port)
+    audience = write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
+                               metadata_pool=args.metadata_pool,
+                               metadata_read_only_transaction=args.metadata_read_only_transaction)
     secret = secrets.token_hex(32)
     key = secrets.token_hex(32)
     env = {name: value for name, value in os.environ.items() if not name.startswith("ORACLEMCP_")}
@@ -3277,7 +3293,9 @@ def _run_lane(args, output):
                         # that every served relation read requires.
                         connection.cursor().execute(f"GRANT SELECT ANY DICTIONARY TO {owner}")
                     write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
-                                     owner=owner, cross="W4X_" + fixture_id)
+                                     owner=owner, cross="W4X_" + fixture_id,
+                                     metadata_pool=args.metadata_pool,
+                                     metadata_read_only_transaction=args.metadata_read_only_transaction)
                 needs_retention_probe = any(
                     case.get("runtime_retention_probe")
                     and (not args.case or case["case_id"] in args.case)
@@ -4156,7 +4174,96 @@ def killed_session_fixture_selftest():
                    "verdict": "pass"}))
 
 
+def metadata_pool_reachability_probe(args):
+    """Measure dictionary name resolution in an isolated, registered lab owner."""
+    import oracledb
+    require(args.lane == "free23" and args.binary, "reachability probe needs FREE23 and a binary")
+    settings = load_lane(HERE / "rig.toml", args.lane)
+    run_id = new_run_id()
+    work = ROOT / "target/e2e/w4/free23" / ("metadata-probe-" + run_id)
+    work.mkdir(parents=True, exist_ok=False)
+    env = {name: value for name, value in os.environ.items() if not name.startswith("ORACLEMCP_")}
+    env.update({"ORACLEMCP_CONFIG": str(work / "profiles.toml"),
+                "ORACLEMCP_AUDIT_KEY": secrets.token_hex(32),
+                "W4_DB_PASSWORD": admin_password(args.lane, settings),
+                "W4_OAUTH_SECRET": secrets.token_hex(32),
+                "XDG_STATE_HOME": str(work / "state")})
+    client = owner_db = None
+    try:
+        with (work / "fixture.log").open("x") as log, contextlib.redirect_stdout(log):
+            fixture_setup(args.lane, settings, run_id,
+                          owner_password_sink=lambda value: env.__setitem__("W4_OWNER_PASSWORD", value))
+        owner = "W4O_" + run_id
+        owner_db = oracledb.connect(user=owner, password=env["W4_OWNER_PASSWORD"], dsn=settings["dsn"])
+        cursor = owner_db.cursor()
+        cursor.execute("CREATE FUNCTION MRO_USER_CODE RETURN NUMBER IS BEGIN RETURN 731; END;")
+        cursor.execute(f"""CREATE VIEW ALL_TAB_COLS AS SELECT '{owner}' AS owner,
+            'T_PARENT_{run_id}' AS table_name, 'ID' AS column_name, 1 AS column_id,
+            'NUMBER' AS data_type, MRO_USER_CODE() AS data_length, 'Y' AS nullable,
+            CAST(NULL AS VARCHAR2(40)) AS data_default_vc,
+            'NO' AS virtual_column, 'NO' AS hidden_column, 'YES' AS user_generated FROM SYS.DUAL""")
+        write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], pick_port(),
+                         owner=owner, metadata_pool=True)
+        client = StdioClient(args.binary, "free23_owner_rw", env)
+        initialize(client)
+        info = tool_payload(client.rpc("tools/call", {"name": "oracle_connection_info", "arguments": {}}))
+        reply = tool_payload(client.rpc("tools/call", {"name": "oracle_describe",
+                             "arguments": {"owner": owner, "table_name": "T_PARENT_" + run_id}}))
+        require(reply.get("isError") is not True, "dictionary probe refused: " + compact(scrub(reply)))
+        require(info.get("structuredContent", {}).get("stateless_read_connection", {}).get("strategy")
+                == "stateless_metadata_pool", "probe must use the metadata pool")
+        columns = reply.get("structuredContent", {}).get("columns", [])
+        reached = any(column.get("DATA_LENGTH") == "731" for column in columns)
+        result = {"lane": args.lane, "binary_source_sha": args.binary_source_sha,
+                  "binary_sha256": hashlib.sha256(args.binary.read_bytes()).hexdigest(),
+                  "tool": "oracle_describe", "catalog_query_id": "DescribeColumns",
+                  "probe": "run-owned ALL_TAB_COLS view calls MRO_USER_CODE returning731",
+                  "application_user_code_reached": reached,
+                  "connection_info": scrub(info), "response": scrub(reply),
+                  "no_claim": "READ ONLY does not prevent autonomous transactions or user-code execution"}
+        (work / "reachability.json").write_text(json.dumps(result, indent=2) + "\n")
+        print(compact({"probe": "metadata_pool_reachability", "application_user_code_reached": reached,
+                       "evidence": str(work / "reachability.json")}))
+    finally:
+        if client is not None:
+            client.close()
+        if owner_db is not None:
+            owner_db.close()
+        with (work / "teardown.log").open("x") as log, contextlib.redirect_stdout(log):
+            fixture_teardown(args.lane, settings, run_id)
+
+
+def metadata_pool_config_selftest():
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "profiles.toml"
+        for mode in (None, False, True):
+            write_lab_config(path, "free23", "localhost:1523/FREEPDB1", 7070,
+                             metadata_pool=True, metadata_read_only_transaction=mode)
+            profiles = tomllib.loads(path.read_text())["profiles"]
+            require(profiles and all(profile["pool"]["max_size"] == 2
+                                    and profile["pool"]["min_idle"] == 0 for profile in profiles),
+                    "baseline/off/on must use the same metadata pool")
+            for profile in profiles:
+                if mode is None:
+                    require("metadata_read_only_transaction" not in profile,
+                            "baseline binary must not receive the new option")
+                else:
+                    require(profile["metadata_read_only_transaction"] is mode,
+                            "profile option must be an actual TOML boolean")
+        write_lab_config(path, "free23", "localhost:1523/FREEPDB1", 7070)
+        require(all("pool" not in profile and "metadata_read_only_transaction" not in profile
+                    for profile in tomllib.loads(path.read_text())["profiles"]),
+                "ordinary W4 configuration must remain unchanged")
+        write_lab_config(path, "free23", "localhost:1523/FREEPDB1", 7070,
+                         metadata_read_only_transaction=False)
+        require(all("pool" not in profile and profile["metadata_read_only_transaction"] is False
+                    for profile in tomllib.loads(path.read_text())["profiles"]),
+                "explicit off must also exercise the existing default configuration")
+    print(compact({"selftest": "metadata_pool_baseline_off_on_config", "verdict": "pass"}))
+
+
 def selftest():
+    metadata_pool_config_selftest()
     audit_report_timeline_selftest()
     release_schedule_selftest()
     retention_probe_selftest()
@@ -4613,6 +4720,11 @@ def main():
     parser.add_argument("--lane", choices=("free23", "xe18", "xe21"))
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--binary-source-sha", help="verified source revision of an external binary")
+    parser.add_argument("--metadata-reachability-probe", action="store_true")
+    parser.add_argument("--metadata-pool", action="store_true",
+                        help="use the same two-slot metadata pool for baseline/off/on proofs")
+    parser.add_argument("--metadata-read-only-transaction", choices=("on", "off"),
+                        help="explicit profile option; on implies --metadata-pool, off preserves pool selection")
     parser.add_argument("--contract-only", action="store_true",
                         help="run generated W3 contracts without the release manifest")
     parser.add_argument("--case", action="append",
@@ -4620,6 +4732,9 @@ def main():
     parser.add_argument("--coverage-report", action="store_true")
     parser.add_argument("--cargo-test-log", type=Path, action="append", default=[])
     args = parser.parse_args()
+    if args.metadata_read_only_transaction is not None:
+        args.metadata_pool = args.metadata_pool or args.metadata_read_only_transaction == "on"
+        args.metadata_read_only_transaction = args.metadata_read_only_transaction == "on"
     try:
         require(not (args.case and args.contract_only), "--case and --contract-only cannot be combined")
         require(not args.binary_source_sha or re.fullmatch(r"[0-9a-f]{40}", args.binary_source_sha),
@@ -4629,6 +4744,8 @@ def main():
                        Path(os.environ["GITHUB_OUTPUT"]))
         elif args.selftest:
             selftest()
+        elif args.metadata_reachability_probe:
+            metadata_pool_reachability_probe(args)
         elif args.manifest_enforcement_integration:
             manifest_enforcement_integration()
         else:

@@ -89,6 +89,7 @@ mod standby;
 mod tns;
 mod types;
 
+mod metadata_read_only;
 mod pool;
 
 pub use auth_adapter::{AuthAdapter, AuthAdapterError};
@@ -240,7 +241,9 @@ pub use types::{
     redacted_oracle_binds,
 };
 
-pub use pool::{OracleConnectionManager, OraclePool, PoolMetrics, PoolSettings};
+pub use pool::{
+    MetadataReadOnlyScope, OracleConnectionManager, OraclePool, PoolMetrics, PoolSettings,
+};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error_envelope;

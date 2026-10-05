@@ -13194,6 +13194,22 @@ impl OracleDispatcher {
                 ),
                 _ => None,
             };
+            let candidate_level = scoped_session_level(
+                &profile_dispatch_policy(&profile_generation)?.level,
+                context,
+            );
+            let _candidate_metadata_scope = if profile_generation
+                .config()
+                .and_then(|config| config.profile(profile_generation.profile()))
+                .is_some_and(|profile| profile.metadata_read_only_transaction())
+            {
+                stateless_conn.as_ref().map_or(Ok(None), |pool| {
+                    pool.metadata_read_only_scope(cx, candidate_level)
+                        .map_err(DbError::into_envelope)
+                })?
+            } else {
+                None
+            };
             // Candidate metadata is normally best-effort, but an uncertain
             // primary describe means this newly opened physical session is not
             // safe to install. Defer the error until both request-limit guards
@@ -13455,6 +13471,8 @@ impl OracleDispatcher {
         request_budget.enforce(cx).map_err(DbError::into_envelope)?;
         let request_subject = audit_subject(context, &self.default_audit_subject);
         let scoped_level = scoped_session_level(&state.level, context);
+        let _metadata_scope =
+            GuardedReadExecutor::new(self).metadata_scope(cx, &state, &scoped_level)?;
         // Arc N: the active profile's tightening-only policy governs every guarded
         // statement below. A policy rule names a schema, so the schema it is
         // matched against is resolved from the CONNECTION, once per session — a

@@ -1125,6 +1125,18 @@ impl QueryRowStream {
 /// (which is `!Send`) across an `.await`.
 #[async_trait(?Send)]
 pub trait OracleConnection: Send + Sync {
+    /// Opt a metadata pool into READ ONLY transactions for this runtime task.
+    /// A cloned level preserves the live elevation deadline; each checkout
+    /// reevaluates it. Physical sessions and non-pool connections need no scope.
+    fn metadata_read_only_scope(
+        &self,
+        cx: &Cx,
+        level: oraclemcp_guard::SessionLevelState,
+    ) -> Result<Option<crate::pool::MetadataReadOnlyScope>, DbError> {
+        let _ = (cx, level);
+        Ok(None)
+    }
+
     /// The backend in use.
     fn backend(&self) -> OracleBackend;
     /// Share the bounded stateless source with the pinned session. `None`

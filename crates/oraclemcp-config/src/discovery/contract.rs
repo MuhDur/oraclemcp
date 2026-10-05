@@ -198,6 +198,11 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Level a fresh session starts at; set explicitly to READ_ONLY. Must not exceed max_level.",
     },
     FieldDisposition {
+        field: "metadata_read_only_transaction",
+        disposition: Disposition::Commented,
+        help: "Opt metadata-pool reads at READ_ONLY into fresh READ ONLY transactions; default false. Does not affect the pinned backstop or autonomous transactions.",
+    },
+    FieldDisposition {
         field: "protected",
         disposition: Disposition::Commented,
         help: "Production profile: pins the ceiling immutable; requires max_level = READ_ONLY and rejects literal: secret refs.",
@@ -383,6 +388,7 @@ mod tests {
             sdu: Some(8192),
             max_level: Some(OperatingLevel::ReadOnly),
             default_level: Some(OperatingLevel::ReadOnly),
+            metadata_read_only_transaction: Some(true),
             protected: Some(false),
             require_signed_tools: Some(false),
             read_only_standby: Some(false),
@@ -446,8 +452,8 @@ mod tests {
         // Diagnostics Pack licensing is a separate explicit opt-in.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            42,
-            "ConnectionProfile has 42 serde fields"
+            43,
+            "ConnectionProfile has 43 serde fields"
         );
     }
 

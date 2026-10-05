@@ -1965,6 +1965,7 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.sdu == after.sdu
         && before.max_level == after.max_level
         && before.default_level == after.default_level
+        && before.metadata_read_only_transaction() == after.metadata_read_only_transaction()
         && before.protected == after.protected
         && before.require_signed_tools == after.require_signed_tools
         && before.read_only_standby == after.read_only_standby
@@ -3983,6 +3984,11 @@ mod tests {
                 |p| p.connect_string = Some("other:1521/svc".into()),
             ),
             ("username", |_| {}, |p| p.username = Some("APP".into())),
+            (
+                "metadata_read_only_transaction",
+                |_| {},
+                |p| p.metadata_read_only_transaction = Some(true),
+            ),
             (
                 "credential_ref",
                 |_| {},

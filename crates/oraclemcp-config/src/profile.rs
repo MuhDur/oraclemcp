@@ -858,6 +858,11 @@ pub struct ConnectionProfile {
     /// The level a fresh session starts at. Defaults to `READ_ONLY`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_level: Option<OperatingLevel>,
+    /// Opt metadata pool reads at READ_ONLY into fresh database READ ONLY
+    /// transactions. Defaults to false; does not change the pinned backstop
+    /// or protect against autonomous transactions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata_read_only_transaction: Option<bool>,
     /// Production profile: the ceiling is pinned and immutable (§6.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected: Option<bool>,
@@ -1011,6 +1016,10 @@ impl std::fmt::Debug for ConnectionProfile {
             .field("sdu", &self.sdu)
             .field("max_level", &self.max_level)
             .field("default_level", &self.default_level)
+            .field(
+                "metadata_read_only_transaction",
+                &self.metadata_read_only_transaction,
+            )
             .field("protected", &self.protected)
             .field("require_signed_tools", &self.require_signed_tools)
             .field("read_only_standby", &self.read_only_standby)
@@ -1084,6 +1093,12 @@ impl ConnectionProfile {
     #[must_use]
     pub fn max_level(&self) -> OperatingLevel {
         self.max_level.unwrap_or(OperatingLevel::ReadOnly)
+    }
+
+    /// Whether this profile enables the metadata-only transaction backstop.
+    #[must_use]
+    pub fn metadata_read_only_transaction(&self) -> bool {
+        self.metadata_read_only_transaction.unwrap_or(false)
     }
 
     /// The effective starting level (defaults to `READ_ONLY`).
@@ -1220,6 +1235,7 @@ impl ConnectionProfile {
             sdu,
             max_level,
             default_level,
+            metadata_read_only_transaction,
             protected,
             require_signed_tools,
             read_only_standby,
@@ -1451,6 +1467,7 @@ mod tests {
             sdu: None,
             max_level: None,
             default_level: None,
+            metadata_read_only_transaction: None,
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,
@@ -2431,6 +2448,53 @@ mod tests {
                 ConfigError::InvalidCumulativeQueryCostBudget { .. }
             ));
         }
+    }
+
+    #[test]
+    fn metadata_read_only_transaction_defaults_off_and_inherits_explicit_false() {
+        let config = crate::OracleMcpConfig::from_toml_str(
+            r#"
+            [[profiles]]
+            name = "unset"
+            connect_string = "synthetic:1521/service"
+            [[profiles]]
+            name = "base"
+            connect_string = "synthetic:1521/service"
+            metadata_read_only_transaction = true
+            [[profiles]]
+            name = "inherited"
+            base = "base"
+            [[profiles]]
+            name = "off"
+            base = "base"
+            metadata_read_only_transaction = false
+        "#,
+        )
+        .unwrap();
+        assert!(
+            !config
+                .profile("unset")
+                .unwrap()
+                .metadata_read_only_transaction()
+        );
+        assert!(
+            config
+                .profile("base")
+                .unwrap()
+                .metadata_read_only_transaction()
+        );
+        assert!(
+            config
+                .profile("inherited")
+                .unwrap()
+                .metadata_read_only_transaction()
+        );
+        assert!(
+            !config
+                .profile("off")
+                .unwrap()
+                .metadata_read_only_transaction()
+        );
     }
 
     #[test]
