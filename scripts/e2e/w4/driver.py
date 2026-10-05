@@ -250,7 +250,7 @@ def golden_path(golden_root, name):
     return path
 
 
-def verify_expect(expect, reply, golden_root=None):
+def verify_expect(expect, reply, golden_root=None, awr_context=None):
     require(isinstance(expect, dict) and len(EXPECT_KINDS & expect.keys()) == 1,
             "expect needs exactly one rows/error_class/json_subset/golden/goldens selector")
     payload = tool_payload(reply)
@@ -272,6 +272,7 @@ def verify_expect(expect, reply, golden_root=None):
         require(structured.get("error_class") in expect["error_classes"],
                 "wrong typed refusal class")
     elif "json_subset" in expect:
+        require(payload.get("isError") is not True, "expected JSON but tool refused")
         require(deep_subset(expect["json_subset"], structured), "JSON subset differs")
     elif "golden" in expect:
         require(golden_root is not None, "golden root missing")
@@ -288,7 +289,33 @@ def verify_expect(expect, reply, golden_root=None):
             goldens.append(json.loads(golden_path(golden_root, name).read_text()))
         require(scrub(structured) in goldens,
                 "scrubbed result differs from both proved terminal-outcome goldens")
+    if "json_keys" in expect:
+        require(set(structured) == set(expect["json_keys"]), "exact JSON key set differs")
+    if expect.get("awr_timeline_exact"):
+        require(awr_context is not None, "AWR expectation needs independent database context")
+        verify_awr_timeline(structured, *awr_context)
     return scrub(structured)
+
+
+def verify_awr_timeline(structured, connection, sql_id, max_points):
+    """Compare every served timeline field with an independent historical read."""
+    require(structured.get("sql_id") == sql_id, "AWR timeline SQL ID differs from requested cursor")
+    rows = connection.cursor().execute('''
+        SELECT * FROM (SELECT s.snap_id, s.instance_number,
+          TO_CHAR(sn.begin_interval_time,'YYYY-MM-DD"T"HH24:MI:SS.FF6'),
+          TO_CHAR(sn.end_interval_time,'YYYY-MM-DD"T"HH24:MI:SS.FF6'),
+          s.plan_hash_value, COALESCE(s.optimizer_cost,p.cost)
+          FROM dba_hist_sqlstat s JOIN dba_hist_snapshot sn
+          ON sn.snap_id=s.snap_id AND sn.dbid=s.dbid AND sn.instance_number=s.instance_number
+          LEFT JOIN dba_hist_sql_plan p ON p.dbid=s.dbid AND p.sql_id=s.sql_id
+          AND p.plan_hash_value=s.plan_hash_value AND p.id=0
+          WHERE s.sql_id=:1 ORDER BY s.snap_id,s.instance_number,s.plan_hash_value)
+          WHERE ROWNUM<=:2''', (sql_id, max_points)).fetchall()
+    require(rows, "independent AWR read returned no timeline points")
+    fields = ("snapshot_id", "instance_number", "snapshot_begin_time", "snapshot_end_time",
+              "plan_hash_value", "optimizer_cost")
+    expected = [dict(zip(fields, record)) for record in rows]
+    require(structured.get("points") == expected, "exact independently read AWR points differ")
 
 
 def verify_row_contains(reply, expected_row):
@@ -761,7 +788,16 @@ def validate_steps(case):
 def verify_expect_shape(expect):
     require(isinstance(expect, dict) and len(EXPECT_KINDS & expect.keys()) == 1,
             "expect must select one verification mode")
-    require(set(expect) <= EXPECT_KINDS | {"ora_code", "reason_code"}, "unknown expect key")
+    require(set(expect) <= EXPECT_KINDS | {"ora_code", "reason_code", "json_keys", "awr_timeline_exact"}, "unknown expect key")
+    if "json_keys" in expect:
+        require("json_subset" in expect and isinstance(expect["json_keys"], list)
+                and expect["json_keys"] and all(isinstance(key, str) and key for key in expect["json_keys"])
+                and len(set(expect["json_keys"])) == len(expect["json_keys"])
+                and set(expect["json_subset"]) <= set(expect["json_keys"]),
+                "json_keys needs distinct exact keys covering the JSON subset")
+    if "awr_timeline_exact" in expect:
+        require("json_subset" in expect and expect["awr_timeline_exact"] is True,
+                "awr_timeline_exact must be true with json_subset")
     require("ora_code" not in expect or "error_class" in expect, "ora_code needs error_class")
     require("reason_code" not in expect or ("error_class" in expect and isinstance(expect["reason_code"], str)),
             "reason_code needs error_class and a string value")
@@ -2455,7 +2491,11 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         row["actual"] = scrub(tool_payload(reply))
         if supported and not case["call"].get("retry"):
             verify_case_rereads(connection, case, row)
-        verify_expect(expected, reply, ROOT / "tests/golden/w4")
+        awr_context = None
+        if expected.get("awr_timeline_exact"):
+            arguments = fill_captures(case["call"]["arguments"], captures)
+            awr_context = (connection, arguments["sql_id"], arguments["max_points"])
+        verify_expect(expected, reply, ROOT / "tests/golden/w4", awr_context)
         if case.get("catalog_rows_positive") and supported:
             verify_positive_catalog_rows(reply)
         if "row_contains" in case:
@@ -4467,6 +4507,18 @@ def selftest():
          "call": {"arguments": {"sql": "UPDATE T SET X = 1"}, "mutation": True,
                   "kill_served_session_dml_user": "SYSTEM"}}, "selftest"))
     rejected("wrong_row_order", lambda: verify_expect({"rows": [[2], [1]]}, correct))
+    exact_keys = {"json_subset": {"rows": [[1], [2]]}, "json_keys": ["rows"]}
+    verify_expect_shape(exact_keys)
+    verify_expect(exact_keys, correct)
+    extra_section = json.loads(json.dumps(correct))
+    extra_section["result"]["structuredContent"]["recent_ddl"] = []
+    rejected("orient_include_ignored_extra_section", lambda: verify_expect(exact_keys, extra_section))
+    rejected("duplicate_exact_json_keys", lambda: verify_expect_shape(
+        {**exact_keys, "json_keys": ["rows", "rows"]}))
+    rejected("incomplete_exact_json_keys", lambda: verify_expect_shape(
+        {**exact_keys, "json_keys": ["recent_ddl"]}))
+    rejected("awr_without_independent_database_read", lambda: verify_expect(
+        {**exact_keys, "awr_timeline_exact": True}, correct))
     rejected("row_contains_marker_absent",
              lambda: verify_row_contains(marker_rows, {"SQL_TEXT": "OTHER_MARKER"}))
     rejected("finding_row_contains_marker_absent",

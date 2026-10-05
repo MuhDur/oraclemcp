@@ -728,7 +728,15 @@
           }
         ],
         "truncated": false
-      }
+      },
+      "json_keys": [
+        "owner",
+        "catalog_revision",
+        "max_rows",
+        "truncation",
+        "truncated",
+        "fks"
+      ]
     },
     "db_reread": [],
     "audit_expect": [],
@@ -750,7 +758,8 @@
       "arguments": {
         "owner": "${owner}",
         "include": [
-          "fks"
+          "fks",
+          "freshness"
         ],
         "max_rows": 10
       }
@@ -775,7 +784,16 @@
           }
         ],
         "truncated": false
-      }
+      },
+      "json_keys": [
+        "owner",
+        "catalog_revision",
+        "max_rows",
+        "truncation",
+        "truncated",
+        "fks",
+        "freshness"
+      ]
     },
     "db_reread": [],
     "audit_expect": [],
@@ -822,7 +840,15 @@
           }
         ],
         "truncated": false
-      }
+      },
+      "json_keys": [
+        "owner",
+        "catalog_revision",
+        "max_rows",
+        "truncation",
+        "truncated",
+        "fks"
+      ]
     },
     "db_reread": [],
     "audit_expect": [],
@@ -902,7 +928,13 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_top_queries",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "audit_zero_executions": true,
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
@@ -928,7 +960,13 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_plan_timeline",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "audit_zero_executions": true,
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
@@ -954,10 +992,14 @@
     },
     "expect": {
       "json_subset": {
-        "points": [
-          {}
-        ]
-      }
+        "note": "AWR observations are bounded by snapshot intervals, not exact historical SCNs. optimizer_cost is the optimizer's relative estimate, not elapsed time or a runtime guarantee; a row exists only when AWR captured that SQL cursor in the interval."
+      },
+      "json_keys": [
+        "sql_id",
+        "points",
+        "note"
+      ],
+      "awr_timeline_exact": true
     },
     "db_reread": [],
     "audit_expect": [],
@@ -1261,7 +1303,13 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_explain_plan",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "audit_zero_executions": true,
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
