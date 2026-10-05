@@ -212,10 +212,24 @@ impl TelemetryGuard {
 /// already installed one) is a no-op for the subscriber but still returns a
 /// guard owning a fresh pump if `otlp` is `Some`.
 pub fn init_telemetry(default_level: &str, otlp: Option<OtlpConfig>) -> TelemetryGuard {
+    init_telemetry_with_writer(default_level, otlp, std::io::stderr)
+}
+
+/// Initialize the same redacted telemetry stack with a caller-owned local sink.
+/// Detached services can supply a bounded non-blocking writer instead of inheriting
+/// a launcher pipe. The OTLP exporter and filtering remain unchanged.
+pub fn init_telemetry_with_writer<W>(
+    default_level: &str,
+    otlp: Option<OtlpConfig>,
+    writer: W,
+) -> TelemetryGuard
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
     let filter =
         EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level));
 
-    let json_layer = json_fmt_layer(std::io::stderr);
+    let json_layer = json_fmt_layer(writer);
 
     match otlp {
         Some(config) => {

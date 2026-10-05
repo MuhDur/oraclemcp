@@ -18,6 +18,29 @@ incapable of writing.
 > the same controls, and the project [`README.md`](../README.md) for the full
 > tool surface and profile schema.
 
+## Shared broker diagnostics
+
+The per-state-root broker detaches all three standard streams from its launcher.
+Its redacted JSON diagnostics go to `broker-diagnostics.0.jsonl`,
+`broker-diagnostics.1.jsonl`, and `broker-diagnostics.2.jsonl` under the service
+state root (`$XDG_STATE_HOME/oraclemcp`, normally `~/.local/state/oraclemcp` on
+Linux). The same XDG_STATE_HOME/HOME resolution applies on other platforms.
+These files are separate from the signed audit log.
+
+Each slot holds at most 512 KiB; rotation overwrites the next slot, retaining
+at most 1.5 MiB. Events carry timestamps; slot numbers are cyclic rather than
+chronological. Files are private (0600 on Unix), and links are refused. `RUST_LOG`
+controls diagnostic verbosity; the normal redaction and optional OTLP exporter
+still apply. Launcher startup status and typed refusals remain on its own stderr.
+
+Request threads enqueue diagnostics without waiting for disk or a client pipe.
+The queue holds at most 64 events of at most 16 KiB each. If it fills, the sink
+fails, or an event exceeds that limit, diagnostics are dropped; when writing
+resumes after queue pressure eases, a warning reports the number dropped. A disk
+write failure disables the diagnostic worker until broker restart. Diagnostic loss
+never substitutes for or changes the authoritative audit record. A stalled MCP host that keeps
+stderr open without reading cannot block the shared broker or sibling clients.
+
 ## Field round after an install
 
 Run the installed binary's read-only field round against a configured profile:

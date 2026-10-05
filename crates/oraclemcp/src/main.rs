@@ -25,6 +25,7 @@ static GLOBAL_ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod audit_evidence;
 mod audit_report;
+mod broker_diagnostics;
 mod broker_service;
 mod cli_audit_report;
 mod discover;

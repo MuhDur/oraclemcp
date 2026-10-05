@@ -366,7 +366,8 @@ fn attach_or_spawn_broker(
     command
         .arg("broker")
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null());
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     match auth {
         StdioAuthPolicy::Disabled => {
             command.arg("--allow-no-auth");
@@ -630,7 +631,6 @@ pub(super) fn run_stdio_broker_proxy(
 }
 
 pub(super) fn run_broker(_allow_no_auth: bool, strict_custom_tools: bool) -> ExitCode {
-    let _telemetry = oraclemcp_telemetry::init_telemetry("info", OtlpConfig::from_env());
     let result = (|| -> Result<(), ErrorEnvelope> {
         let config = OracleMcpConfig::load(None)
             .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;
@@ -640,6 +640,19 @@ pub(super) fn run_broker(_allow_no_auth: bool, strict_custom_tools: bool) -> Exi
         let store = FileStore::open_default()
             .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
         let broker = oraclemcp::broker::BrokerListener::bind(&store, identity)?;
+        // Only the elected owner writes the root's bounded diagnostics ring.
+        // No request thread ever writes to an inherited launcher pipe.
+        let diagnostics = broker_diagnostics::Diagnostics::open(store.root()).map_err(|e| {
+            ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("cannot open broker diagnostics: {e}"),
+            )
+        })?;
+        let _telemetry = oraclemcp_telemetry::init_telemetry_with_writer(
+            "info",
+            OtlpConfig::from_env(),
+            diagnostics,
+        );
         let owner = broker.owner();
         let resolver: Arc<dyn SecretResolver> = Arc::new(SystemSecretResolver);
         let ceiling = max_reachable_write_ceiling(&config, &default_read_only_level());
@@ -801,10 +814,7 @@ pub(super) fn broker_exit_code(result: Result<(), ErrorEnvelope>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            eprintln!(
-                "oraclemcp broker: {:?}: {}",
-                error.error_class, error.message
-            );
+            tracing::error!(error_class = ?error.error_class, message = %error.message, "broker stopped");
             ExitCode::from(2)
         }
     }

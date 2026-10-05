@@ -885,23 +885,126 @@ fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
 #[cfg(feature = "live-xe")]
 #[test]
 fn live_http_default_sessions_share_profile_capacity_across_principals() {
-    http_stdio_coexistence(false, false);
+    http_stdio_coexistence(false, false, false);
 }
 
 #[cfg(feature = "live-xe")]
 #[test]
 fn live_http_attaches_while_two_stdio_clients_remain_active() {
-    http_stdio_coexistence(true, false);
+    http_stdio_coexistence(true, false, false);
 }
 
 #[cfg(all(feature = "live-xe", unix))]
 #[test]
 fn live_sigkill_http_launcher_allows_immediate_replacement() {
-    http_stdio_coexistence(false, true);
+    http_stdio_coexistence(false, true, false);
 }
 
 #[cfg(feature = "live-xe")]
-fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
+#[test]
+fn live_undrained_http_launcher_and_stdio_stderr_do_not_block_shared_broker() {
+    http_stdio_coexistence(false, true, true);
+}
+
+// Produces real server diagnostics through the ordinary MCP handler. Each
+// successful unsubscribe emits its URI into the redacted tracing layer.
+fn drive_diagnostics(client: &mut Client, root: &Path) {
+    let uri = format!("diagnostic:{}", "x".repeat(4096));
+    for id in 1000..1640 {
+        client.send(
+            json!({"jsonrpc":"2.0","id":id,"method":"resources/unsubscribe","params":{"uri":if id == 1639 { format!("{uri}:final") } else { uri.clone() }}}),
+        );
+        let response = client.response(id);
+        assert!(response.get("result").is_some(), "{response}");
+    }
+    let paths: Vec<_> = (0..3)
+        .map(|i| root.join(format!("state/oraclemcp/broker-diagnostics.{i}.jsonl")))
+        .collect();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let sizes: Vec<_> = paths
+            .iter()
+            .map(|p| std::fs::metadata(p).unwrap().len())
+            .collect();
+        assert!(sizes.iter().all(|bytes| *bytes <= 512 * 1024));
+        let complete = paths.iter().any(|path| {
+            std::fs::read_to_string(path)
+                .unwrap()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|event| event["fields"]["uri"] == format!("{uri}:final"))
+        });
+        if sizes.iter().sum::<u64>() > 1024 * 1024 && complete {
+            eprintln!(
+                "recorded diagnostic bytes={} across3 slots;640 real MCP diagnostic requests completed",
+                sizes.iter().sum::<u64>()
+            );
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "more than 1MiB of real diagnostics must reach bounded files: {sizes:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut diagnostic_events = 0;
+    for path in paths {
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let event: Value = serde_json::from_str(line).expect("complete JSON diagnostic event");
+            if event["fields"]["message"] == "resources/unsubscribe" {
+                diagnostic_events += 1;
+            }
+        }
+    }
+    assert!(
+        diagnostic_events > 200,
+        "real stress diagnostics remain discoverable"
+    );
+}
+
+#[test]
+fn undrained_stdio_spawner_stderr_does_not_block_sibling() {
+    let root = tempfile::tempdir().unwrap();
+    let path = config(root.path(), false);
+    let mut first = Client::spawn_with_settings(
+        root.path(),
+        &path,
+        0,
+        Some("offline"),
+        None,
+        None,
+        |command| {
+            command.stderr(Stdio::piped()).env("RUST_LOG", "info");
+        },
+    );
+    assert!(first.response(1).get("result").is_some());
+    first.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    assert!(first.process.stderr.is_some());
+    drive_diagnostics(&mut first, root.path());
+    let mut sibling = Client::spawn_with_settings(
+        root.path(),
+        &path,
+        1,
+        Some("offline"),
+        None,
+        None,
+        |command| {
+            command.stderr(Stdio::piped());
+        },
+    );
+    assert!(sibling.response(1).get("result").is_some());
+    sibling.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+    sibling.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}));
+    let result = sibling.response(2);
+    assert!(result.get("result").is_some(), "{result}");
+    assert!(
+        result["result"]["tools"].as_array().unwrap().len() > 1,
+        "{result}"
+    );
+}
+
+#[cfg(feature = "live-xe")]
+fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool, undrained_diagnostics: bool) {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     use std::io::Read;
     use std::net::{TcpListener, TcpStream};
@@ -1000,7 +1103,11 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
             )
             .stderr(Stdio::inherit());
     }
-    if !stdio_first && !kill_frontend {
+    if undrained_diagnostics {
+        // The stress test controls verbosity even when the test host suppresses logs.
+        command.env("RUST_LOG", "info");
+    }
+    if !stdio_first && (!kill_frontend || undrained_diagnostics) {
         // The spawning HTTP client's diagnostic pipe disappears with that
         // client. Its detached broker must still serve replacement clients.
         command.stderr(Stdio::piped());
@@ -1019,14 +1126,17 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
         if TcpStream::connect(address).is_ok() {
             break;
         }
-        assert!(
-            process.0.try_wait().unwrap().is_none(),
-            "HTTP server exited during startup"
-        );
+        if let Some(status) = process.0.try_wait().unwrap() {
+            let mut diagnostic = String::new();
+            if let Some(mut stderr) = process.0.stderr.take() {
+                stderr.read_to_string(&mut diagnostic).unwrap();
+            }
+            panic!("HTTP server exited during startup: {status}; {diagnostic}");
+        }
         assert!(std::time::Instant::now() < deadline);
         std::thread::sleep(Duration::from_millis(25));
     }
-    if !stdio_first && !kill_frontend {
+    if !stdio_first && !kill_frontend && !undrained_diagnostics {
         // Exercise loss of the spawning client's diagnostic pipe while its
         // broker is still serving. Holding an unread pipe open instead can
         // fill it with real connection diagnostics and block the fixture.
@@ -1034,7 +1144,19 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
     }
     if !stdio_first {
         for index in 0..2 {
-            let mut client = Client::spawn(root.path(), &path, index);
+            let mut client = Client::spawn_with_settings(
+                root.path(),
+                &path,
+                index,
+                Some(&std::env::var("ORACLEMCP_TEST_PASSWORD").unwrap()),
+                None,
+                None,
+                |command| {
+                    if undrained_diagnostics {
+                        command.stderr(Stdio::piped());
+                    }
+                },
+            );
             let initialized = client.response(1);
             assert!(
                 initialized.get("result").is_some(),
@@ -1043,6 +1165,12 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
             client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
             stdio.push(client);
         }
+    }
+    if undrained_diagnostics {
+        // Hold BOTH launcher and first stdio client pipes open, never read them.
+        assert!(process.0.stderr.is_some());
+        assert!(stdio[0].process.stderr.is_some());
+        drive_diagnostics(&mut stdio[0], root.path());
     }
     for (index, client) in stdio.iter_mut().enumerate() {
         client.send(json!({"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"oracle_query","arguments":{"sql":format!("SELECT {} AS STDIO_VALUE FROM dual", 74+index)}}}));
@@ -1265,7 +1393,12 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
         if !kill_frontend {
             assert!(status.success(), "graceful HTTP shutdown: {status}");
         }
-        drop(process.0.stderr.take());
+        let _held_old_stderr = if undrained_diagnostics {
+            process.0.stderr.take()
+        } else {
+            drop(process.0.stderr.take());
+            None
+        };
         if !kill_frontend {
             assert!(
                 TcpStream::connect(address).is_err(),
@@ -1276,22 +1409,27 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool) {
         // on the same root and address while both stdio clients remain alive.
         process = HttpProcess(command.stderr(Stdio::piped()).spawn().unwrap());
         let stderr = process.0.stderr.take().unwrap();
-        let (ready_tx, ready_rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let line = line.unwrap();
-                eprintln!("{line}");
-                if let Ok(value) = serde_json::from_str::<Value>(&line)
-                    && (value["kind"] == "status" || value["kind"] == "error")
-                {
-                    let _ = ready_tx.send(value);
+        let _held_replacement_stderr = if undrained_diagnostics {
+            Some(stderr)
+        } else {
+            let (ready_tx, ready_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                for line in BufReader::new(stderr).lines() {
+                    let line = line.unwrap();
+                    eprintln!("{line}");
+                    if let Ok(value) = serde_json::from_str::<Value>(&line)
+                        && (value["kind"] == "status" || value["kind"] == "error")
+                    {
+                        let _ = ready_tx.send(value);
+                    }
                 }
-            }
-        });
-        let ready = ready_rx
-            .recv_timeout(Duration::from_secs(2))
-            .expect("replacement must take over promptly without a launcher retry");
-        assert_eq!(ready["kind"], "status", "replacement launcher: {ready}");
+            });
+            let ready = ready_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("replacement must take over promptly without a launcher retry");
+            assert_eq!(ready["kind"], "status", "replacement launcher: {ready}");
+            None
+        };
         let deadline = std::time::Instant::now() + Duration::from_secs(15);
         while TcpStream::connect(address).is_err() {
             assert!(

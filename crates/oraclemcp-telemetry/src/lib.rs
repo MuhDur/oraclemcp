@@ -25,7 +25,7 @@ mod metrics;
 pub mod otlp;
 
 pub use health::{HealthReport, HealthState};
-pub use logging::{TelemetryGuard, init_json_logging, init_telemetry};
+pub use logging::{TelemetryGuard, init_json_logging, init_telemetry, init_telemetry_with_writer};
 pub use metrics::{
     ActiveLaneGauge, ErrorCount, HistogramSnapshot, LaneBlockedCount, LaneRequestCount,
     LaneRequestDuration, Metrics, MetricsSnapshot, RequestCount,
