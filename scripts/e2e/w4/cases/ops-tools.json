@@ -941,7 +941,8 @@
       {
         "tool": "oracle_top_queries",
         "decision": "BLOCKED",
-        "outcome": "FAILED"
+        "outcome": "FAILED",
+        "failure": {"error_class": "POLICY_DENIED"}
       }
     ],
     "audit_zero_executions": true,
@@ -973,7 +974,8 @@
       {
         "tool": "oracle_plan_timeline",
         "decision": "BLOCKED",
-        "outcome": "FAILED"
+        "outcome": "FAILED",
+        "failure": {"error_class": "POLICY_DENIED"}
       }
     ],
     "audit_zero_executions": true,
@@ -1316,7 +1318,8 @@
       {
         "tool": "oracle_explain_plan",
         "decision": "BLOCKED",
-        "outcome": "FAILED"
+        "outcome": "FAILED",
+        "failure": {"error_class": "POLICY_DENIED"}
       }
     ],
     "audit_zero_executions": true,
