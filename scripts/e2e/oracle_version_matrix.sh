@@ -20,6 +20,8 @@
 #                    `oraclemcp audit verify` (isolated XDG_STATE_HOME per run)
 #   7. FREE 23ai only: a VECTOR(3, FLOAT32) column accepts a synthetic vector
 #                    and VECTOR_DISTANCE returns the expected zero distance
+#   8. FREE 23ai only: real-server policy timeout lifecycle and charged-capacity
+#                    regression, using a mandatory ephemeral Docker fixture
 #
 # Lab containers ONLY. The lane endpoints must look like local test targets
 # (lib.sh refuses production-looking DSNs/users). Suggested lab compose:
@@ -201,7 +203,7 @@ mkdir -p "$matrix_dir"
 # treats its `ORACLEMCP_` environment prefix as strict configuration, so no
 # E2E-only controls may cross this process boundary.
 export -n ORACLEMCP_E2E_ARTIFACT_DIR ORACLEMCP_E2E_SEED \
-  ORACLEMCP_LIVE_XE ORACLEMCP_ORACLE_MATRIX_BINARY
+  ORACLEMCP_LIVE_XE ORACLEMCP_ORACLE_MATRIX_BINARY ORACLEMCP_TEST_LAB_CONTAINER
 
 audit_key="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
 tools_hmac_key="$(openssl rand -hex 32 2>/dev/null || date +%s%N | sha256sum | cut -d' ' -f1)"
@@ -572,6 +574,22 @@ PY
     return 1
   fi
   e2e_log_event "audit_truncation_detect" "assert" "pass" 0 "lane $lane: tail truncation detected (anchor seq $anchor_seq, exit $truncated_status)"
+  if [ "$lane" = "free23" ]; then
+    # This is part of the required live lane, including the swarm pre-push gate.
+    # Missing Docker/fixture prerequisites fail; this test has no opt-in skip.
+    # CI supplies its service container id; local swarm uses its fixed lab name.
+    e2e_log_event "policy_timeout_lifecycle" "act" "running" 0 "mandatory real-server observation lifecycle proof"
+    if ! env CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}" ORACLEMCP_TEST_DSN="$dsn" \
+      ORACLEMCP_TEST_LAB_CONTAINER="${ORACLEMCP_TEST_LAB_CONTAINER:-oraclemcp-free23-rel}" \
+      ORACLEMCP_TEST_LAB_PDB=FREEPDB1 ORACLEMCP_POLICY_QUERY_BINARY="$BINARY" \
+      timeout -k 10 300 cargo test -p oraclemcp-db --features live-xe --test live_oracle \
+      live_timed_out_policy_observations_return_sessions_to_baseline -- --exact --nocapture \
+      >"$lane_dir/policy_timeout_lifecycle.log" 2>&1; then
+      e2e_log_event "policy_timeout_lifecycle" "assert" "fail" 0 "live policy lifecycle failed (see $lane_dir/policy_timeout_lifecycle.log)"
+      return 1
+    fi
+    e2e_log_event "policy_timeout_lifecycle" "assert" "pass" 0 "live timeout disposal and retained capacity verified; no general server-stop time claim"
+  fi
   return 0
 }
 

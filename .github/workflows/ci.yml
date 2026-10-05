@@ -892,6 +892,8 @@ jobs:
           ORACLE_MATRIX_FREE23_DSN: localhost:1522/FREEPDB1
           ORACLE_MATRIX_FREE23_USER: E2E_ORACLE
           ORACLE_MATRIX_FREE23_PASSWORD: E2EOracle23
+          # Mandatory lifecycle regression runs inside the matrix lane.
+          ORACLEMCP_TEST_LAB_CONTAINER: ${{ job.services.free23.id }}
         run: |
           set -euo pipefail
           mkdir -p target/test-attestation-evidence

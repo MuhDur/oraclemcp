@@ -399,10 +399,17 @@ ceiling of one keeps reads on the pinned session and records policy visibility
 as unavailable because no isolated slot exists. Profiles without an enabled
 pool reuse one bounded observation connection alongside the pinned session.
 Observation acquisition uses the source's bounded checkout/logon deadline; the
-1000 ms catalog deadline starts after acquisition. A timed-out catalog call is
-cancelled and disposed instead of returned to the pool. Transient observation
-acquisition failures and unavailable visibility probes retry after a one-second
-cooldown/TTL.
+1000 ms catalog deadline starts after acquisition. After a timeout the adapter
+attempts a break and terminal transport disposal. This does **not** prove that
+Oracle stopped the server call: in-band breaks may be processed only after a
+server-side operation finishes, and the official actor cannot break an
+in-flight call. There is no general server-retirement time bound. The abandoned
+slot stays charged and quarantined until the source closes; later reads cannot
+replace it with new logons, even when the client socket is already closed.
+Exhausted quarantine capacity reports unavailable observation evidence promptly;
+reconnect creates a new source. Transient acquisition failures and unavailable
+visibility probes retry after a one-second cooldown/TTL while usable capacity
+remains. A balanced checkout count is not evidence of zero server sessions.
 
 | Field | Type | Default | Effect |
 |---|---|---|---|

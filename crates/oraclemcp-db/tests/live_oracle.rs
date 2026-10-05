@@ -2436,145 +2436,6 @@ fn live_policy_observation_read_latency_matches_pre_isolation_baseline() {
     };
     let candidate_binary =
         std::env::var("ORACLEMCP_POLICY_BENCH_CANDIDATE").expect("candidate binary");
-    use std::io::{BufRead, BufReader};
-    struct BenchClient {
-        child: std::process::Child,
-        input: Option<std::process::ChildStdin>,
-        rx: std::sync::mpsc::Receiver<serde_json::Value>,
-        reader: std::thread::JoinHandle<()>,
-        errors: std::thread::JoinHandle<String>,
-        password: String,
-        label: String,
-    }
-    impl BenchClient {
-        fn start(binary: &str, fixture: &PolicyFixture, label: &str) -> Self {
-            let root = std::path::PathBuf::from(
-                std::env::var("CARGO_TARGET_DIR").expect("dedicated target"),
-            )
-            .join(format!("5ic5e-bench-{}-{label}", fixture.user));
-            std::fs::create_dir_all(&root).unwrap();
-            let config = root.join("profiles.toml");
-            // This artifact contains references only; the ephemeral password is
-            // passed directly to the child environment and never written to disk.
-            std::fs::write(&config, format!("schema_version = 2\ndefault_profile = \"policy_bench\"\n[[profiles]]\nname = \"policy_bench\"\nconnect_string = \"{}\"\nusername = \"{}\"\ncredential_ref = \"env:POLICY_BENCH_PASSWORD\"\n", std::env::var("ORACLEMCP_TEST_DSN").unwrap(), fixture.user)).unwrap();
-            let mut child = Command::new("timeout")
-                .arg("180")
-                .arg(binary)
-                .args(["serve", "--profile", "policy_bench", "--allow-no-auth"])
-                .env_clear()
-                .env("PATH", std::env::var("PATH").unwrap())
-                .env("HOME", std::env::var("HOME").unwrap())
-                .env("ORACLEMCP_CONFIG", &config)
-                .env("XDG_STATE_HOME", root.join("state"))
-                .env("POLICY_BENCH_PASSWORD", &fixture.password)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            let input = child.stdin.take().unwrap();
-            let stdout = child.stdout.take().unwrap();
-            let stderr = child.stderr.take().unwrap();
-            let (tx, rx) = std::sync::mpsc::channel();
-            let reader = std::thread::spawn(move || {
-                for line in BufReader::new(stdout).lines() {
-                    let line = line.unwrap();
-                    if let Ok(reply) = serde_json::from_str::<serde_json::Value>(&line)
-                        && tx.send(reply).is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-            let errors = std::thread::spawn(move || {
-                BufReader::new(stderr)
-                    .lines()
-                    .map(|line| line.unwrap())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            });
-            let mut client = Self {
-                child,
-                input: Some(input),
-                rx,
-                reader,
-                errors,
-                password: fixture.password.clone(),
-                label: label.to_owned(),
-            };
-            let init = client.rpc(1, "initialize", serde_json::json!({"protocolVersion":"2025-03-26", "capabilities":{}, "clientInfo":{"name":"policy-latency-test", "version":"1"}}));
-            assert!(init.get("result").is_some(), "{init}");
-            client
-        }
-        fn rpc(&mut self, id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
-            let input = self.input.as_mut().expect("open benchmark input");
-            writeln!(
-                input,
-                "{}",
-                serde_json::json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params})
-            )
-            .unwrap();
-            input.flush().unwrap();
-            let deadline = Instant::now() + Duration::from_secs(30);
-            loop {
-                let reply = self
-                    .rx
-                    .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-                    .expect("bounded MCP reply");
-                if reply["id"] == id {
-                    return reply;
-                }
-            }
-        }
-        fn read(&mut self, index: u64) -> f64 {
-            let started = Instant::now();
-            let reply = self.rpc(
-                index + 2,
-                "tools/call",
-                serde_json::json!({"name":"oracle_query", "arguments":{"sql":"SELECT id FROM xr_plain"}}),
-            );
-            let elapsed = started.elapsed().as_secs_f64() * 1000.0;
-            let result = &reply["result"];
-            assert_ne!(result["isError"], true, "{reply}");
-            let value = if result["structuredContent"].is_object() {
-                result["structuredContent"].clone()
-            } else {
-                serde_json::from_str::<serde_json::Value>(
-                    result["content"][0]["text"]
-                        .as_str()
-                        .expect("query response"),
-                )
-                .unwrap()
-            };
-            assert_eq!(
-                value["rows"].as_array().expect("real query rows").len(),
-                1,
-                "{value}"
-            );
-            assert!(
-                !value.to_string().contains("visibility_unavailable"),
-                "healthy observation required: {value}"
-            );
-            assert_eq!(
-                value["rls_vpd"]["all_policies_probe"]["visibility"], "policy_rows_visible",
-                "the benchmark must execute the real visibility observation: {value}"
-            );
-            elapsed
-        }
-        fn finish(mut self) {
-            drop(self.input.take());
-            assert!(self.child.wait().unwrap().success());
-            self.reader.join().unwrap();
-            let stderr = self
-                .errors
-                .join()
-                .unwrap()
-                .replace(&self.password, "<redacted>");
-            if !stderr.is_empty() {
-                eprintln!("[policy-bench {}] {stderr}", self.label);
-            }
-        }
-    }
     fn median(samples: &[f64]) -> f64 {
         let mut ordered = samples.to_vec();
         ordered.sort_by(f64::total_cmp);
@@ -2587,8 +2448,9 @@ fn live_policy_observation_read_latency_matches_pre_isolation_baseline() {
         // every warmup and all measured reads must still succeed.
         std::thread::sleep(Duration::from_secs(3));
         let mut baseline_client =
-            BenchClient::start(&baseline_binary, &fixture, "baseline-1bb680f2");
-        let mut candidate_client = BenchClient::start(&candidate_binary, &fixture, "candidate");
+            PolicyQueryClient::start(&baseline_binary, &fixture, "baseline-1bb680f2");
+        let mut candidate_client =
+            PolicyQueryClient::start(&candidate_binary, &fixture, "candidate");
         // Alternate order to expose both binaries to the same changing lab load.
         // Three declared warmups per binary precede all forty measured samples.
         for index in 0..3 {
@@ -2633,166 +2495,223 @@ fn live_policy_observation_read_latency_matches_pre_isolation_baseline() {
     }
 }
 
-/// jxn8p: count the physical sessions, not just successful pinned reads.
-/// The opt-in local Docker lab supplies SYS only for fixture setup/census.
-/// Each invocation owns a random user and cleans it up even on assertion failure.
-/// The declared census bound is 30 seconds. Labs disabling OOB can defer the
-/// interrupt until the slow catalog call reaches a server cancellation point.
+use std::io::{BufRead, BufReader};
+struct PolicyQueryClient {
+    child: std::process::Child,
+    input: Option<std::process::ChildStdin>,
+    rx: std::sync::mpsc::Receiver<serde_json::Value>,
+    reader: std::thread::JoinHandle<()>,
+    errors: std::thread::JoinHandle<String>,
+    password: String,
+    label: String,
+}
+impl PolicyQueryClient {
+    fn start(binary: &str, fixture: &PolicyFixture, label: &str) -> Self {
+        let root =
+            std::path::PathBuf::from(std::env::var("CARGO_TARGET_DIR").expect("dedicated target"))
+                .join(format!("5ic5e-bench-{}-{label}", fixture.user));
+        std::fs::create_dir_all(&root).unwrap();
+        let config = root.join("profiles.toml");
+        // This artifact contains references only; the ephemeral password is
+        // passed directly to the child environment and never written to disk.
+        std::fs::write(&config, format!("schema_version = 2\ndefault_profile = \"policy_bench\"\n[[profiles]]\nname = \"policy_bench\"\nconnect_string = \"{}\"\nusername = \"{}\"\ncredential_ref = \"env:POLICY_BENCH_PASSWORD\"\n", std::env::var("ORACLEMCP_TEST_DSN").unwrap(), fixture.user)).unwrap();
+        let mut child = Command::new("timeout")
+            .arg("180")
+            .arg(binary)
+            .args(["serve", "--profile", "policy_bench", "--allow-no-auth"])
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap())
+            .env("HOME", std::env::var("HOME").unwrap())
+            .env("ORACLEMCP_CONFIG", &config)
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("POLICY_BENCH_PASSWORD", &fixture.password)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let input = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let line = line.unwrap();
+                if let Ok(reply) = serde_json::from_str::<serde_json::Value>(&line)
+                    && tx.send(reply).is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let errors = std::thread::spawn(move || {
+            BufReader::new(stderr)
+                .lines()
+                .map(|line| line.unwrap())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        let mut client = Self {
+            child,
+            input: Some(input),
+            rx,
+            reader,
+            errors,
+            password: fixture.password.clone(),
+            label: label.to_owned(),
+        };
+        let init = client.rpc(1, "initialize", serde_json::json!({"protocolVersion":"2025-03-26", "capabilities":{}, "clientInfo":{"name":"policy-latency-test", "version":"1"}}));
+        assert!(init.get("result").is_some(), "{init}");
+        client
+    }
+    fn rpc(&mut self, id: u64, method: &str, params: serde_json::Value) -> serde_json::Value {
+        let input = self.input.as_mut().expect("open benchmark input");
+        writeln!(
+            input,
+            "{}",
+            serde_json::json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params})
+        )
+        .unwrap();
+        input.flush().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let reply = self
+                .rx
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("bounded MCP reply");
+            if reply["id"] == id {
+                return reply;
+            }
+        }
+    }
+    fn read_response(&mut self, index: u64) -> (f64, serde_json::Value) {
+        let started = Instant::now();
+        let reply = self.rpc(
+            index + 2,
+            "tools/call",
+            serde_json::json!({"name":"oracle_query", "arguments":{"sql":"SELECT id FROM xr_plain"}}),
+        );
+        let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+        let result = &reply["result"];
+        assert_ne!(result["isError"], true, "{reply}");
+        let value = if result["structuredContent"].is_object() {
+            result["structuredContent"].clone()
+        } else {
+            serde_json::from_str::<serde_json::Value>(
+                result["content"][0]["text"]
+                    .as_str()
+                    .expect("query response"),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            value["rows"].as_array().expect("real query rows").len(),
+            1,
+            "{value}"
+        );
+        (elapsed, value)
+    }
+    fn read(&mut self, index: u64) -> f64 {
+        let (elapsed, value) = self.read_response(index);
+        assert!(
+            !value.to_string().contains("visibility_unavailable"),
+            "healthy observation required: {value}"
+        );
+        assert_eq!(
+            value["rls_vpd"]["all_policies_probe"]["visibility"], "policy_rows_visible",
+            "the benchmark must execute the real visibility observation: {value}"
+        );
+        elapsed
+    }
+    fn finish(mut self) {
+        drop(self.input.take());
+        assert!(self.child.wait().unwrap().success());
+        self.reader.join().unwrap();
+        let stderr = self
+            .errors
+            .join()
+            .unwrap()
+            .replace(&self.password, "<redacted>");
+        if !stderr.is_empty() {
+            eprintln!("[policy-bench {}] {stderr}", self.label);
+        }
+    }
+}
+
+/// jxn8p/5ic5e: real MCP reads cannot replace unconfirmed server sessions.
+/// This test is mandatory when selected, including missing fixture prerequisites.
+/// The 30s census assertion applies ONLY to this known finite sleep fixture;
+/// transport disposal is not proof of interrupting arbitrary Oracle execution.
 #[test]
 fn live_timed_out_policy_observations_return_sessions_to_baseline() {
-    if env_bool("ORACLEMCP_TEST_SLOW_POLICY_CLEANUP") != Some(true) {
-        eprintln!(
-            "[live-xe] SKIP session cleanup fixture: set ORACLEMCP_TEST_SLOW_POLICY_CLEANUP=1"
-        );
-        return;
-    }
+    let binary = std::env::var("ORACLEMCP_POLICY_QUERY_BINARY")
+        .expect("mandatory policy lifecycle proof requires the real MCP binary");
     let fixture = policy_fixture(true);
-    // Catch assertion failure only to remove this invocation's disposable user.
-    // The original panic is resumed, so fixture teardown cannot hide a leak.
-    let fixture_ref = &fixture;
     let result = std::panic::catch_unwind(|| {
+        // Keep the same predeclared DDL-settle window as the latency fixture.
+        std::thread::sleep(Duration::from_secs(3));
+        let fixture = &fixture;
+        let binary = &binary;
         run_with_cx(|cx| async move {
-            let fixture = fixture_ref;
             assert_eq!(fixture.count(), 0);
-            let mut opts = test_opts();
-            opts.username = Some(fixture.user.clone());
-            opts.password = Some(fixture.password.clone());
-            opts.auth_adapter = AuthAdapter::Password;
-            let conn = RustOracleConnection::connect(&cx, opts)
-                .await
-                .expect("ephemeral fixture connect");
-            let baseline = fixture.count();
-            assert_eq!(baseline, 1, "only the pinned fixture session exists");
-            let raw_started = Instant::now();
-            oraclemcp_db::run_catalog_query(
-                &cx,
-                &conn,
-                oraclemcp_db::CatalogQueryId::AllPoliciesVisibility,
-                &[],
-            )
-            .await
-            .expect("real slow catalog predicate");
-            assert!(
-                raw_started.elapsed() >= Duration::from_secs(12),
-                "fixture must stall the real product query"
-            );
-            let policies = oraclemcp_db::run_catalog_query(
-                &cx,
-                &conn,
-                oraclemcp_db::CatalogQueryId::SelectPolicy,
-                &[
-                    OracleBind::from(fixture.user.clone()),
-                    OracleBind::from("XR_64"),
-                ],
-            )
-            .await
-            .expect("authoritative policy lookup");
-            assert!(
-                !policies.is_empty(),
-                "positive evidence survives the shadowing synonym"
-            );
-            assert!(fixture.sql(&format!("select 'POLICIES:'||count(*) from dba_policies where object_owner='{}' and object_name='XR_64';", fixture.user)).contains("POLICIES:64"));
-            let previous = cx.now() + Duration::from_secs(240);
-            conn.set_request_deadline(&cx, Some(previous)).unwrap();
-            for attempt in 0..6 {
-                let started = Instant::now();
-                if attempt % 2 == 0 {
-                    let mut pending =
-                        std::pin::pin!(oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn));
-                    let mut census = std::pin::pin!(async {
-                        asupersync::time::sleep(cx.now(), Duration::from_millis(200)).await;
-                        assert_eq!(
-                            fixture.count(),
-                            baseline + 1,
-                            "a real isolated Oracle session must be in flight"
-                        );
-                        let read_started = Instant::now();
-                        let rows = conn
-                            .query_rows(&cx, "SELECT 6 AS n FROM dual", &[])
-                            .await
-                            .expect("pinned read during observation");
-                        assert_eq!(rows[0].parse_i64("N"), Some(6));
-                        assert!(read_started.elapsed() < Duration::from_secs(1));
-                    });
-                    let mut result = None;
-                    let mut checked = false;
-                    let probe = std::future::poll_fn(|poll_cx| {
-                        if result.is_none()
-                            && let std::task::Poll::Ready(probe) =
-                                std::future::Future::poll(pending.as_mut(), poll_cx)
-                        {
-                            result = Some(probe);
-                        }
-                        if !checked
-                            && std::future::Future::poll(census.as_mut(), poll_cx).is_ready()
-                        {
-                            assert!(
-                                result.is_none(),
-                                "census and pinned read must finish before timeout"
-                            );
-                            checked = true;
-                        }
-                        if checked && result.is_some() {
-                            std::task::Poll::Ready(result.take().unwrap())
-                        } else {
-                            std::task::Poll::Pending
-                        }
-                    })
-                    .await;
-                    assert_eq!(
-                        probe.visibility,
-                        oraclemcp_db::OraclePolicyCatalogVisibility::Unavailable
+            let mut client = PolicyQueryClient::start(binary, fixture, "timeout-lifecycle");
+            assert_eq!(fixture.count(), 1, "only the pinned server session exists");
+            for index in 0..4 {
+                let (elapsed, value) = client.read_response(index);
+                assert_eq!(
+                    value["rls_vpd"]["status"], "visibility_unavailable",
+                    "{value}"
+                );
+                let detail = value["rls_vpd"]["detail"]
+                    .as_str()
+                    .expect("honest observation detail");
+                if index == 0 {
+                    assert!(elapsed >= 900.0, "actually run the slow catalog: {elapsed}");
+                    assert!(detail.contains("1000 ms deadline"), "{detail}");
+                    assert!(
+                        detail.contains("server cancellation is unconfirmed"),
+                        "{detail}"
                     );
-                    assert!(probe.detail.contains("1000 ms deadline"), "{probe:?}");
-                    assert!(!probe.detail.contains("cancel failed"), "{probe:?}");
-                    assert!(!probe.detail.contains("logoff failed"), "{probe:?}");
-                    assert!(!probe.detail.contains("cleanup failed"), "{probe:?}");
                 } else {
-                    let observation =
-                        oraclemcp_db::observe_vpd_rls_for_schema(&cx, &conn, "").await;
-                    assert_eq!(
-                        observation.status,
-                        oraclemcp_db::OracleVpdRlsObservationStatus::VisibilityUnavailable
-                    );
+                    assert!(detail.contains("capacity quarantined"), "{detail}");
                     assert!(
-                        observation.detail.contains("1000 ms deadline"),
-                        "{observation:?}"
-                    );
-                    assert!(
-                        !observation.detail.contains("cancel failed"),
-                        "{observation:?}"
-                    );
-                    assert!(
-                        !observation.detail.contains("logoff failed"),
-                        "{observation:?}"
-                    );
-                    assert!(
-                        !observation.detail.contains("cleanup failed"),
-                        "{observation:?}"
+                        elapsed < 1000.0,
+                        "quarantine must refuse a replacement promptly"
                     );
                 }
+                assert!(elapsed < 5000.0, "pinned read and cleanup are bounded");
                 assert!(
-                    started.elapsed() < Duration::from_secs(5),
-                    "cleanup must be prompt"
-                );
-                let rows = conn
-                    .query_rows(&cx, "SELECT 7 AS n FROM dual", &[])
-                    .await
-                    .expect("pinned read after timeout");
-                assert_eq!(rows[0].parse_i64("N"), Some(7));
-                assert_eq!(conn.request_deadline(&cx).unwrap(), Some(previous));
-                let cleanup_elapsed = started.elapsed();
-                fixture.baseline(&cx, baseline).await;
-                eprintln!(
-                    "[live-xe] {} attempt={} timeout+cancel+close_ms={} PASS",
-                    fixture.container,
-                    attempt + 1,
-                    cleanup_elapsed.as_millis()
+                    fixture.count() <= 2,
+                    "one pinned + one charged observer, no replacement logons"
                 );
             }
-            conn.close(&cx).await.expect("pinned logoff");
+            // Check retirement WHILE the real server is still running, before
+            // EOF/server shutdown or SYS fixture teardown can hide a lost close.
+            // Removing cancel_and_close leaves the quarantined socket alive and
+            // this must fail even after Oracle's sleep naturally finishes.
+            fixture.baseline(&cx, 1).await;
+            let (elapsed, value) = client.read_response(4);
+            assert_eq!(
+                value["rls_vpd"]["status"], "visibility_unavailable",
+                "{value}"
+            );
+            assert!(
+                value["rls_vpd"]["detail"]
+                    .as_str()
+                    .unwrap()
+                    .contains("capacity quarantined")
+            );
+            assert!(
+                elapsed < 1000.0,
+                "no automatic replacement after presumed retirement"
+            );
+            assert_eq!(fixture.count(), 1);
+            client.finish();
             fixture.baseline(&cx, 0).await;
-        })
+            eprintln!(
+                "[live-xe] real-server lifecycle PASS reads=5 physical_limit=2 unconfirmed_slot_not_replaced; finite fixture retirement only, no general cancellation-time bound"
+            );
+        });
     });
     fixture.cleanup();
     if let Err(panic) = result {

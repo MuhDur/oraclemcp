@@ -2572,7 +2572,7 @@ async fn isolated_policy_observation(
             "isolated policy observation unavailable: {error}; policy absence is not proven"
         ),
         Err(_) => format!(
-            "isolated policy observation exceeded its {} ms deadline; policy absence is not proven",
+            "isolated policy observation exceeded its {} ms deadline; policy absence is not proven; server cancellation is unconfirmed and the abandoned slot stays quarantined until reconnect",
             RLS_VPD_VISIBILITY_PROBE_TIMEOUT.as_millis()
         ),
     };

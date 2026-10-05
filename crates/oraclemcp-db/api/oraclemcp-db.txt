@@ -8646,6 +8646,7 @@ pub async fn oraclemcp_db::OraclePool::connect(&asupersync::cx::cx::Cx, oraclemc
 pub async fn oraclemcp_db::OraclePool::describe(&self, &asupersync::cx::cx::Cx) -> core::result::Result<oraclemcp_db::OracleConnectionInfo, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::metrics(&self) -> oraclemcp_db::PoolMetrics
 pub async fn oraclemcp_db::OraclePool::ping(&self, &asupersync::cx::cx::Cx) -> core::result::Result<(), oraclemcp_db::DbError>
+pub fn oraclemcp_db::OraclePool::quarantined_connections(&self) -> u32
 pub async fn oraclemcp_db::OraclePool::query_rows(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<oraclemcp_db::OracleBind>) -> core::result::Result<alloc::vec::Vec<oraclemcp_db::OracleRow>, oraclemcp_db::DbError>
 pub async fn oraclemcp_db::OraclePool::read_query(&self, &asupersync::cx::cx::Cx, impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<oraclemcp_db::OracleBind>, oraclemcp_db::QueryCaps, usize, oraclemcp_db::SerializeOptions) -> core::result::Result<oraclemcp_db::QueryResponse, oraclemcp_db::DbError>
 pub fn oraclemcp_db::OraclePool::settings(&self) -> oraclemcp_db::PoolSettings

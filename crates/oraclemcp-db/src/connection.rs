@@ -1471,7 +1471,9 @@ pub trait OracleConnection: Send + Sync {
     /// Log off and close this physical Oracle session.
     /// An isolated observation lease instead returns a completed clean session
     /// to its bounded source; [`OracleConnection::cancel_and_close`] always
-    /// disposes an abandoned observation's physical wire.
+    /// attempts terminal disposal of an abandoned observation's physical wire.
+    /// A disposed client transport does not confirm that Oracle stopped the
+    /// server call; the source keeps its slot charged until source shutdown.
     ///
     /// Lifecycle owners call this after their rollback/finalization work rather
     /// than relying on Rust drop. The thin implementation delegates to the
@@ -1491,10 +1493,20 @@ pub trait OracleConnection: Send + Sync {
         ))
     }
 
-    /// Cancel and close an abandoned observation session, even if cancel fails.
+    /// Attempt cancel and terminal transport disposal, even if cancel fails.
+    /// Success does not certify immediate server-side cancellation or retirement.
     async fn cancel_and_close(&self, cx: &Cx) -> Result<(), DbError> {
-        let cancel = self.cancel(cx).await;
-        let close = self.close(cx).await;
+        // The official actor inherits the typed unsupported-cancel result.
+        // Closing a stuck actor must still be bounded; dropping that close
+        // future quarantines its owner rather than certifying server retirement.
+        let cancel = asupersync::time::timeout(cx.now(), Duration::from_secs(1), self.cancel(cx))
+            .await
+            .map_err(|_| DbError::Query("driver cancellation deadline exceeded".to_owned()))
+            .and_then(|result| result);
+        let close = asupersync::time::timeout(cx.now(), Duration::from_secs(1), self.close(cx))
+            .await
+            .map_err(|_| DbError::Query("terminal transport disposal deadline exceeded".to_owned()))
+            .and_then(|result| result);
         cancel.and(close)
     }
 

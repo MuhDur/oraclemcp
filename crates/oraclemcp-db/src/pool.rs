@@ -20,9 +20,10 @@
 //! arrivals, and a dropped head waiter hands the permit to its successor. A
 //! bounded cancellation checkpoint wakes at most the waiting task; it never
 //! removes and re-enqueues an admission waiter. [`PoolMetrics`] exposes the
-//! checkout accounting (`acquired`/`released`/`discarded`/`in_use`/`open`) so
-//! the zero-leaked-session invariant (`is_balanced`) and the bound
-//! (`is_bounded`) are observable.
+//! checkout accounting and retained quarantine capacity. `is_balanced` proves
+//! completed client checkout accounting, not zero Oracle server sessions.
+//! `is_bounded` includes abandoned observation slots whose server retirement is
+//! unconfirmed; these slots cannot be replaced until source shutdown.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future as StdFuture;
@@ -226,12 +227,13 @@ impl PoolSettings {
 
 /// A point-in-time snapshot of pool checkout accounting (B3/B4).
 ///
-/// Used by the load/soak harness to assert ZERO leaked sessions: across a run,
+/// Used by the load/soak harness to assert balanced client checkouts: across a run,
 /// `acquired` must equal `released + discarded` and, once every client has
 /// finished, `in_use` must be `0` while `open` never exceeds `max_size`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PoolMetrics {
-    /// Connections currently open (idle + in-use).
+    /// Charged session slots (idle + in-use + quarantined). A disposed client
+    /// transport does not prove that Oracle retired its server session.
     pub open: u32,
     /// Connections currently idle (available for checkout).
     pub idle: u32,
@@ -250,8 +252,8 @@ pub struct PoolMetrics {
 impl PoolMetrics {
     /// Whether checkout accounting balances: every acquire has either been
     /// returned clean or discarded dirty, and nothing is still checked out.
-    /// This is the zero-leaked-session invariant the B3 soak asserts after a
-    /// run quiesces.
+    /// Quarantined capacity and lingering server sessions require separate
+    /// accounting/census; this predicate does not prove server retirement.
     #[must_use]
     pub fn is_balanced(&self) -> bool {
         self.in_use == 0 && self.acquired == self.released + self.discarded
@@ -266,6 +268,7 @@ impl PoolMetrics {
 
 struct PoolState {
     idle: Vec<PooledConnection>,
+    quarantined: Vec<QuarantinedObservation>,
     open_count: u32,
     /// Once shutdown begins, no checkout may create or reuse a session and a
     /// late check-in is discarded instead of returning to the idle set.
@@ -277,6 +280,13 @@ struct PoolState {
     acquired: u64,
     released: u64,
     discarded: u64,
+}
+
+struct QuarantinedObservation {
+    connection: PooledConnection,
+    // Keep admission charged even after sending a best-effort interrupt/EOF.
+    // In-band cancellation need not stop a server-side PL/SQL sleep.
+    _permit: Option<PoolCapacityPermit>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -774,6 +784,7 @@ impl OraclePool {
             settings,
             state: Arc::new(Mutex::new(PoolState {
                 idle: Vec::new(),
+                quarantined: Vec::new(),
                 open_count: 0,
                 closing: false,
                 in_use: 0,
@@ -863,6 +874,7 @@ impl OraclePool {
             state: Arc::new(Mutex::new(PoolState {
                 open_count: idle.len() as u32,
                 idle,
+                quarantined: Vec::new(),
                 closing: false,
                 in_use: 0,
                 acquired: 0,
@@ -875,7 +887,7 @@ impl OraclePool {
         })
     }
 
-    /// Current number of idle + in-use connections in the pool.
+    /// Current charged slots, including quarantined observation connections.
     ///
     /// A poisoned accounting lock reports the resolved ceiling, which keeps
     /// callers conservative rather than fabricating healthy spare capacity.
@@ -890,6 +902,16 @@ impl OraclePool {
         }
     }
 
+    /// Slots charged for abandoned observations with unconfirmed server
+    /// retirement. They cannot be reused or replaced until source shutdown.
+    #[must_use]
+    pub fn quarantined_connections(&self) -> u32 {
+        self.state
+            .lock()
+            .map(|state| state.quarantined.len() as u32)
+            .unwrap_or(self.settings.max_size)
+    }
+
     /// The settings actually in force after CPU-derived resolution (B4).
     #[must_use]
     pub fn settings(&self) -> PoolSettings {
@@ -902,15 +924,18 @@ impl OraclePool {
     /// pool. If a checkout is still unwinding, its check-in observes `closing`
     /// and discards that session instead of putting it back into the idle set.
     pub async fn close(&self, cx: &Cx) -> Result<(), DbError> {
-        let idle = {
+        let (idle, quarantined) = {
             let mut state = self
                 .state
                 .lock()
                 .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
             state.closing = true;
             let idle = std::mem::take(&mut state.idle);
-            state.open_count = state.open_count.saturating_sub(idle.len() as u32);
-            idle
+            let quarantined = std::mem::take(&mut state.quarantined);
+            state.open_count = state
+                .open_count
+                .saturating_sub((idle.len() + quarantined.len()) as u32);
+            (idle, quarantined)
         };
         self.capacity.close();
 
@@ -918,6 +943,16 @@ impl OraclePool {
         for connection in idle {
             if let Err(error) = connection.close(cx).await {
                 tracing::warn!(error = %error, "pooled Oracle session logical close failed");
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        for retired in quarantined {
+            // A dropped observation may still own an undisposed wire. Source
+            // shutdown also gives it a bounded terminal-disposal attempt.
+            if let Err(error) = retired.connection.cancel_and_close(cx).await {
+                tracing::warn!(error = %error, "quarantined observer transport disposal failed");
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -1163,6 +1198,7 @@ impl OraclePool {
         cx: &Cx,
         validate_idle: bool,
     ) -> Result<(PooledConnection, PoolCapacityPermit), DbError> {
+        self.check_quarantined_capacity()?;
         if !validate_idle {
             self.check_observation_retry()?;
         }
@@ -1200,6 +1236,21 @@ impl OraclePool {
         }
     }
 
+    fn check_quarantined_capacity(&self) -> Result<(), DbError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+        if state.quarantined.len() >= self.settings.max_size as usize {
+            Err(DbError::Pool(
+                "observation capacity quarantined: server cancellation is unconfirmed; reconnect required"
+                    .to_owned(),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
     async fn acquire_checkout_permit(
         &self,
         cx: &Cx,
@@ -1208,6 +1259,7 @@ impl OraclePool {
         db_checkpoint(cx, "oracle_pool.checkout.wait.before")?;
         let mut acquire = Box::pin(self.capacity.acquire());
         loop {
+            self.check_quarantined_capacity()?;
             let now = asupersync::time::wall_now();
             check_checkout_wait_deadline(cx, deadline, now)?;
             let poll_deadline = checkout_poll_deadline(now, deadline);
@@ -1337,6 +1389,7 @@ impl OraclePool {
             settings,
             state: Arc::new(Mutex::new(PoolState {
                 idle: Vec::new(),
+                quarantined: Vec::new(),
                 open_count,
                 closing: false,
                 in_use: 0,
@@ -1440,7 +1493,11 @@ struct CheckedOutConnection<T> {
     connection: Option<T>,
     state: Arc<Mutex<PoolState>>,
     permit: Option<PoolCapacityPermit>,
+    on_abandon: Option<AbandonedCheckout<T>>,
 }
+
+type AbandonedCheckout<T> =
+    fn(T, &Arc<Mutex<PoolState>>, Option<PoolCapacityPermit>) -> Result<(), DbError>;
 
 impl<T> CheckedOutConnection<T> {
     fn new(connection: T, state: Arc<Mutex<PoolState>>, permit: PoolCapacityPermit) -> Self {
@@ -1448,6 +1505,7 @@ impl<T> CheckedOutConnection<T> {
             connection: Some(connection),
             state,
             permit: Some(permit),
+            on_abandon: None,
         }
     }
 
@@ -1457,6 +1515,7 @@ impl<T> CheckedOutConnection<T> {
             connection: Some(connection),
             state,
             permit: None,
+            on_abandon: None,
         }
     }
 
@@ -1468,7 +1527,24 @@ impl<T> CheckedOutConnection<T> {
 }
 
 impl CheckedOutConnection<PooledConnection> {
+    fn new_observation(
+        connection: PooledConnection,
+        state: Arc<Mutex<PoolState>>,
+        permit: PoolCapacityPermit,
+    ) -> Self {
+        let mut checkout = Self::new(connection, state, permit);
+        checkout.on_abandon = Some(quarantine_observation);
+        checkout
+    }
+
     fn finish(mut self, broken: bool) -> Result<(), DbError> {
+        if broken && let Some(quarantine) = self.on_abandon.take() {
+            return quarantine(
+                self.connection.take().expect("observation finishes once"),
+                &self.state,
+                self.permit.take(),
+            );
+        }
         let mut state = self
             .state
             .lock()
@@ -1494,6 +1570,12 @@ impl<T> Drop for CheckedOutConnection<T> {
         let Some(connection) = self.connection.take() else {
             return;
         };
+        if let Some(quarantine) = self.on_abandon.take() {
+            if let Err(error) = quarantine(connection, &self.state, self.permit.take()) {
+                tracing::error!(error = %error, "abandoned observation quarantine failed");
+            }
+            return;
+        }
         match self.state.lock() {
             Ok(mut state) => {
                 let _ = record_checkin(&mut state, true);
@@ -1508,6 +1590,26 @@ impl<T> Drop for CheckedOutConnection<T> {
         drop(connection);
         drop(self.permit.take());
     }
+}
+
+fn quarantine_observation(
+    connection: PooledConnection,
+    state: &Arc<Mutex<PoolState>>,
+    permit: Option<PoolCapacityPermit>,
+) -> Result<(), DbError> {
+    let mut state = state
+        .lock()
+        .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+    state.in_use = state.in_use.saturating_sub(1);
+    state.discarded += 1;
+    // Neither socket shutdown nor a successful interrupt write proves server
+    // retirement. Retain the connection owner and capacity until source close.
+    // Drop alone cannot silently free a slot or forget the abandoned wire.
+    state.quarantined.push(QuarantinedObservation {
+        connection,
+        _permit: permit,
+    });
+    Ok(())
 }
 
 /// Connection-agnostic check-in accounting (B4): decrement the in-use count and
@@ -1725,7 +1827,7 @@ impl OracleConnection for OraclePool {
         self.on_checked_out()?;
         Ok(Box::new(PolicyObservationCheckout {
             backend: connection.backend(),
-            checkout: asupersync::sync::Mutex::new(Some(CheckedOutConnection::new(
+            checkout: asupersync::sync::Mutex::new(Some(CheckedOutConnection::new_observation(
                 connection,
                 Arc::clone(&self.state),
                 permit,
@@ -2536,6 +2638,7 @@ mod tests {
 
     fn seeded_state(open_count: u32) -> PoolState {
         PoolState {
+            quarantined: Vec::new(),
             idle: Vec::new(),
             open_count,
             closing: false,
@@ -2783,6 +2886,7 @@ mod tests {
     fn dropped_pending_open_future_releases_reserved_slot() {
         let state = Arc::new(Mutex::new(PoolState {
             idle: Vec::new(),
+            quarantined: Vec::new(),
             open_count: 1,
             closing: false,
             in_use: 0,
