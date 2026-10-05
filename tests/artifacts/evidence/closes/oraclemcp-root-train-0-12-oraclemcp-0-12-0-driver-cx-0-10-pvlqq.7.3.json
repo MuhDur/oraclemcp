@@ -1,30 +1,19 @@
 {
   "schema": "bead-close-evidence/v1",
   "repo": "oraclemcp",
-  "generated_at": "2026-09-28T22:00:00Z",
+  "generated_at": "2026-10-05T02:00:00Z",
   "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.3",
   "scope": {
-    "summary": "Protocol desync, ORA-03113/03114/03135 and empty-SCN results are classified as connection loss; a lost oracle_query (read-executor ProtocolUnsynchronized or connector-backed admission-probe loss) is retried exactly once on a fresh lease through retry_decision(.., ProvenIdempotentRead); DML loss returns protocol_unsynchronized (never rolled_back) and is not replayed; DDL loss returns ddl_outcome_unknown; checkpoint loss reports rolled_back without re-lease; keepalive_minutes defaults to 10 with a doctor-reported skip for complete descriptors; bounded lease lifecycle events.",
+    "summary": "w4_runtime_issue47_killed_session_dml_not_replayed asserts the exact ordered audit records (no replay, one documented degraded SCN probe) and passes both scoped on free23/xe21/xe18 and in the full free23 lane.",
     "in_scope": [
-      "crates/oraclemcp/src/dispatch/mod.rs",
-      "crates/oraclemcp/src/dispatch/read_executor.rs",
-      "crates/oraclemcp-db/src/connection.rs",
-      "crates/oraclemcp-db/src/error.rs",
-      "crates/oraclemcp-db/src/query.rs",
-      "crates/oraclemcp-config/src/profile.rs",
-      "crates/oraclemcp-config/src/config_docs.rs",
-      "crates/oraclemcp-core/src/connect.rs",
-      "crates/oraclemcp-core/src/doctor.rs",
-      "crates/oraclemcp/src/main.rs",
-      "scripts/e2e/w4/driver.py",
-      "scripts/e2e/w4/cases/ops-tools.json"
+      "scripts/e2e/w4/cases/ops-tools.json",
+      "scripts/e2e/w4/cases/schema.json",
+      "scripts/e2e/w4/driver.py"
     ],
-    "out_of_scope": [
-      "Real firewall idle-drop and ADB recovery (T9.6); cancellation outcomes (T2.4); cursor discard (T2.7)."
-    ]
+    "out_of_scope": []
   },
   "source": {
-    "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313",
+    "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
     "tree_clean": true,
     "branch": "main"
   },
@@ -32,19 +21,14 @@
   "integration_evidence": {
     "entry_points": [
       {
-        "name": "oracle_query / oracle_execute over an external MCP client after a server-side ALTER SYSTEM KILL SESSION (W4, release binary)",
-        "kind": "tool",
-        "trace": "w4_runtime_issue47_killed_session_recovers pass on free23, xe21, xe18 (scoped and full runs): the first oracle_query after the kill returns C=1 without switch_profile. w4_runtime_issue47_killed_session_dml_not_replayed pass on all 3 lanes: CONNECTION_FAILED + statement_outcome=protocol_unsynchronized, driver no longer accepts rolled_back (450501f0), independent reread unchanged."
+        "name": "scoped live + planted faults (independent verifier at f2891008)",
+        "kind": "cli",
+        "trace": "PASS on free23, xe21, xe18; three planted faults (wrong terminal record, probe allowance removed, product replays DML) each caught."
       },
       {
-        "name": "oraclemcp doctor --online (defaulted keepalive)",
+        "name": "full lane (independent verifier at d30fe11f)",
         "kind": "cli",
-        "trace": "Live FREE23 E2E_ORACLE: easy-connect and complete-descriptor profiles without keepalive_minutes both connect; check 12 reports EXPIRE_TIME every 10m and, for the descriptor, that the default was not injected because the descriptor owns EXPIRE_TIME."
-      },
-      {
-        "name": "dispatch/db/config unit tests (verifier re-execution)",
-        "kind": "cli",
-        "trace": "Clean export of ef2885a5: cargo test -p oraclemcp --lib 561 passed; -p oraclemcp-db --lib 670 passed; -p oraclemcp-core --lib 828 passed. retry_decision is called from dispatch_with_cx_inner (10eaadec) and ef2885a5 routes connector-backed admission-probe loss into it; DdlOutcomeUnknown is produced in execute_sql_inner for statement_level >= DDL."
+        "trace": "Full free23 W4 lane 771/771 pass, including the issue47 case; hosted CI W4 green at 07402e78."
       }
     ]
   },
@@ -52,22 +36,14 @@
     "claimed": true,
     "artifacts": [
       {
-        "kind": "killed-session-recovery-and-keepalive-default",
-        "path": "tests/artifacts/evidence/live/verify-ef2885a5-pvlqq.7.3-20260928T2200Z.json",
-        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
-      },
-      {
-        "kind": "w4-full-unscoped-lane",
-        "path": "tests/artifacts/evidence/live/verify-ef2885a5-w4-full-20260928T2145Z.json",
-        "sha": "ef2885a5942ec31dddc8bf213b5ed83487db0313"
+        "kind": "scoped-live-verification",
+        "path": "tests/artifacts/evidence/live/verify-d30fe11f-pvlqq.7.3-20261005.json",
+        "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c"
       }
     ]
   },
   "limitations": [
-    "Live kill happens between statements, so the live DML case fails in the audit-evidence preflight ('no statement was executed') and reports protocol_unsynchronized; an UPDATE dying while on the wire is proven only by the mock test issue47_desync_dml_returns_typed_outcome_without_replay.",
-    "The live transparent retry exercised is the admission-probe path added in ef2885a5; the read-executor ProtocolUnsynchronized retry path is unit-proven only. The failed first attempt leaves a lane_lifecycle UNKNOWN_DISCARDED audit record, not an oracle_query attempt record.",
-    "Two acceptance test names differ from the frozen list: ORA-03113/03114/03135 coverage is in query_and_execute_uncertain_state_markers_are_each_detected, and the defaulted-descriptor skip in defaulted_descriptor_keepalive_skip_is_reported / defaulted_keepalive_is_reported_as_descriptor_owned.",
-    "10eaadec repurposed recoverable_pinned_quarantine_recycles_switchable_session_on_retry into issue47_desync_read_recycles_and_retries_once; the old oracle_sample_rows Cancelled->recycle scenario and its exact query-count and catalog-generation assertions are no longer tested."
+    "Live artifact is a summary of the verifier's logs."
   ],
   "known_defects": [],
   "follow_ups": [],

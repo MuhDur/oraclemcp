@@ -1,0 +1,276 @@
+{
+  "run_id": "verifier-32024974-pvlqq.10.19-20260928T2130Z",
+  "lane": "free23,xe18,xe21",
+  "source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+  "kind": "w4-security-feature-cases+doctor",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 32024974 (export repo HEAD = 32024974, git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 32024974bab0e97a54d3178ea2c2b39bfbefff01 --case <id>... (release binary built in the export with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "redaction table + nested EXISTS refused PROTECTED_BY_REDACTION with audit_zero_executions on 3 lanes; unreadable-catalog read admitted with security_feature_evidence=unavailable on 3 lanes; strict profile refused SECURITY_FEATURE_VISIBILITY_UNKNOWN on 3 lanes; all stdio+http; dictionary family 82/82 per lane; doctor check 20 warn as E2E_ORACLE on free23",
+  "runs": [
+    {
+      "lane": "xe18",
+      "invocation": "redtab",
+      "fixture_runs": {
+        "http": "W41852EF4DD0",
+        "stdio": "W4185286B617"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_redaction_policy_table_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "rednest",
+      "fixture_runs": {
+        "http": "W41853A22409",
+        "stdio": "W41852AE200A"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_redaction_nested_exists_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "redtab",
+      "fixture_runs": {
+        "http": "W418539B0828",
+        "stdio": "W41853BB9F8A"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_redaction_policy_table_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "secadm",
+      "fixture_runs": {
+        "http": "W41853C7B461",
+        "stdio": "W41853D080D1"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_security_catalog_unreadable_admitted"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "redtab",
+      "fixture_runs": {
+        "http": "W418536B12F4",
+        "stdio": "W41853CC58AA"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_redaction_policy_table_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "rednest",
+      "fixture_runs": {
+        "http": "W41854328A48",
+        "stdio": "W4185331F2ED"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_redaction_nested_exists_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "secstrict",
+      "fixture_runs": {
+        "http": "W41854E3D761",
+        "stdio": "W41853B8A58C"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_security_catalog_unreadable_strict_refused"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "rednest",
+      "fixture_runs": {
+        "http": "W41854475058",
+        "stdio": "W41854DDFA89"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_redaction_nested_exists_refused_no_execution"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "secadm",
+      "fixture_runs": {
+        "http": "W41854F30BD1",
+        "stdio": "W4185461E065"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_security_catalog_unreadable_admitted"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "famdict",
+      "fixture_runs": {
+        "http": "W41854B871D4",
+        "stdio": "W418545981D3"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "41 distinct"
+    },
+    {
+      "lane": "xe21",
+      "invocation": "secstrict",
+      "fixture_runs": {
+        "http": "W41855F9B942",
+        "stdio": "W4185478F258"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_security_catalog_unreadable_strict_refused"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "secadm",
+      "fixture_runs": {
+        "http": "W418550C6B3D",
+        "stdio": "W418545C4933"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_security_catalog_unreadable_admitted"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "famdict",
+      "fixture_runs": {
+        "http": "W418551D04D9",
+        "stdio": "W418558C6F02"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "41 distinct"
+    },
+    {
+      "lane": "free23",
+      "invocation": "secstrict",
+      "fixture_runs": {
+        "http": "W4185651DB70",
+        "stdio": "W4185534F513"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_query_security_catalog_unreadable_strict_refused"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "famdict",
+      "fixture_runs": {
+        "http": "W41856CFA67E",
+        "stdio": "W41856151CD7"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "41 distinct"
+    }
+  ],
+  "note": "Doctor: release binary at 32024974, oraclemcp --json doctor --online with a profile for least-privilege E2E_ORACLE on localhost:1523/FREEPDB1 (credential via env at runtime): id 20 'Security feature catalog visibility' status=warn, detail security_feature_catalog_unreadable (ORA-00942), reads proceed with security_feature_evidence: unavailable, keyed observation and audit record; require_security_feature_evidence = true refuses."
+}

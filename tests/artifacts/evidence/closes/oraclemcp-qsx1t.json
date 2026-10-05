@@ -1,0 +1,93 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-05T02:00:00Z",
+  "bead_id": "oraclemcp-qsx1t",
+  "scope": {
+    "summary": "Multiple MCP clients share one oraclemcp by default with no flags: stdio auto-attaches to a per-state-root broker (0600 socket) that owns the service lock, single audit writer and pools; HTTP is stateful by default with caps and coexists with stdio on one root; sessions are isolated; credentials are bound per client with a keyed digest; dead launchers are reclaimed immediately.",
+    "in_scope": [
+      ".github/workflows/ci.yml",
+      "Cargo.lock",
+      "README.md",
+      "crates/oraclemcp-config/src/lib.rs",
+      "crates/oraclemcp-core/ci_taxonomy.json",
+      "crates/oraclemcp-core/src/config_ops.rs",
+      "crates/oraclemcp-core/src/http/config.rs",
+      "crates/oraclemcp-core/src/http/mod.rs",
+      "crates/oraclemcp-core/src/http/tests_auth.rs",
+      "crates/oraclemcp-core/src/lane.rs",
+      "crates/oraclemcp/Cargo.toml",
+      "crates/oraclemcp/src/broker.rs",
+      "crates/oraclemcp/src/broker_service.rs",
+      "crates/oraclemcp/src/cli.rs",
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests/audit_wiring.rs",
+      "crates/oraclemcp/src/lib.rs",
+      "crates/oraclemcp/src/main_tests.rs",
+      "crates/oraclemcp/src/main_tests_issue51.rs",
+      "crates/oraclemcp/tests/broker_stdio.rs",
+      "crates/oraclemcp/tests/dashboard_listener_discovery.rs",
+      "crates/oraclemcp/tests/e2e_http_oauth.rs",
+      "crates/oraclemcp/tests/live_xe_service_attach.rs",
+      "crates/oraclemcp/tests/r1_external_client.rs",
+      "crates/oraclemcp/tests/w4_runtime_issue51.rs",
+      "deny.toml",
+      "docs/ci_taxonomy.json",
+      "docs/operations.md",
+      "scripts/e2e/oracle_ladder_session.py",
+      "scripts/e2e/verdict_certificate_session.py",
+      "scripts/e2e/w4/driver.py",
+      "scripts/rig/failure_injection_lanes.py",
+      "scripts/rig/failure_recovery_e2e.py"
+    ],
+    "out_of_scope": [
+      "Broker inherits the HTTP launcher's stderr and can wedge if that pipe is not drained (new bug filed).",
+      "Changed by these commits but excluded from the clean-scope binding because later landings modified them: crates/oraclemcp-config/src/config_docs.rs, crates/oraclemcp/src/main.rs, docs/configuration.md, oraclemcp.example.toml"
+    ]
+  },
+  "source": {
+    "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "verification #1 (c0fab7e2): 3 concurrent stdio clients, isolation, single audit writer, idle exit, version mismatch, TRANSIENT on kill, socket 0600, HTTP stateful+caps",
+        "kind": "tool",
+        "trace": "All MET live on FREE23."
+      },
+      {
+        "name": "verification #2 (d5338f84): HTTP/stdio coexistence both orders, 1 HTTP + 2 stdio isolation, wrong/missing password refused",
+        "kind": "tool",
+        "trace": "All MET live on FREE23."
+      },
+      {
+        "name": "verification #3 (d30fe11f): D1 replacement after SIGKILL ready 0.04 s, D2 wrong first client does not pin broker, D3 HMAC-SHA256 per-broker nonce, 5 stdio + HTTP coexistence, audit verify ok",
+        "kind": "tool",
+        "trace": "All MET live on FREE23."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "scoped-live-verification",
+        "path": "tests/artifacts/evidence/live/verify-d30fe11f-qsx1t-20261005.json",
+        "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c"
+      }
+    ]
+  },
+  "limitations": [
+    "XE21/XE18 not exercised for the broker (transport-level feature); Windows/macOS covered by CI broker IPC jobs.",
+    "Live artifact is a summary of the verifier's logs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

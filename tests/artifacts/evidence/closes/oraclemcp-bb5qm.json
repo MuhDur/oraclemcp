@@ -1,0 +1,63 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-05T02:00:00Z",
+  "bead_id": "oraclemcp-bb5qm",
+  "scope": {
+    "summary": "The full free23 W4 lane executes every governed release-manifest scenario on both transports (no longer stops after killed-session recovery); manifest validation passes for stdio and http.",
+    "in_scope": [
+      "crates/oraclemcp-core/src/server.rs",
+      "crates/oraclemcp/src/dispatch/args.rs",
+      "crates/oraclemcp/src/registry.rs",
+      "scripts/e2e/cases/release_0_12.json",
+      "scripts/e2e/w4/cases/cancellation.json",
+      "scripts/e2e/w4/cases/dictionary-tools.json",
+      "scripts/e2e/w4/cases/ops-tools.json",
+      "scripts/e2e/w4/cases/over_refusals.json",
+      "scripts/e2e/w4/cases/schema.json",
+      "scripts/e2e/w4/cases/write-tools.json",
+      "scripts/e2e/w4/driver.py"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "full CI W4 lane locally (independent verifier, export d30fe11f)",
+        "kind": "cli",
+        "trace": "ORACLEMCP_LIVE_XE=1 build_lease.sh -- bash scripts/e2e/w4.sh --log --lane free23 --binary target/debug/oraclemcp -> exit 0, 771 rows all pass (stdio 382, http 389); validate_manifest.py --check-results stdio and http exit 0; ci-summary pass 771/0/0."
+      },
+      {
+        "name": "hosted CI",
+        "kind": "cli",
+        "trace": "CI run on 07402e78: all jobs success including Oracle FREE 23ai W4."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "scoped-live-verification",
+        "path": "tests/artifacts/evidence/live/verify-d30fe11f-bb5qm-20261005.json",
+        "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c"
+      }
+    ]
+  },
+  "limitations": [
+    "Local run read the fixture admin password from the container (differs from CI value).",
+    "Live artifact is a summary of the verifier's logs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

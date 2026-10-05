@@ -1,0 +1,12 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-root-train-0-12-oraclemcp-0-12-0-driver-cx-0-10-pvlqq.7.3",
+  "lane": "free23+xe21+xe18",
+  "run_id": "local-verifier-pvlqq.7.3-20261005 (summary of independent verifier run, not a CI run)",
+  "source_sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "free23|xe21|xe18 w4_runtime_issue47_killed_session_dml_not_replayed stdio pass (probe=1, mutation=0)",
+    "full free23 W4 lane d30fe11f 771/771 pass"
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "run_id": "orchestrator-verify-660c0872-tio2e",
+  "lane": "free23,xe21,xe18",
+  "source_sha": "660c087261562200a7ad921145b20fda559c23cd",
+  "kind": "w4-live-case-rerun",
+  "runner": "orchestrator, clean detached gate worktree at 660c0872, debug binary (dashboard-bundle), least-privilege E2E_ORACLE",
+  "command": "python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/debug/oraclemcp --binary-source-sha <sha> --case <case>",
+  "cases": [
+    {
+      "case_id": "w4_describe_view_after_describe_keeps_session_usable",
+      "lane": "free23",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "w4_get_ddl_view",
+      "lane": "free23",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "w4_describe_view_after_describe_keeps_session_usable",
+      "lane": "xe21",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "w4_get_ddl_view",
+      "lane": "xe21",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "w4_describe_view_after_describe_keeps_session_usable",
+      "lane": "xe18",
+      "verdict": "pass"
+    },
+    {
+      "case_id": "w4_get_ddl_view",
+      "lane": "xe18",
+      "verdict": "pass"
+    }
+  ],
+  "result": "6/6 pass (both transports per driver run)"
+}

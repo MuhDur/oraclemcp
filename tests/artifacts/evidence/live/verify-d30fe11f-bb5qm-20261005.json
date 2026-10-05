@@ -1,0 +1,12 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-bb5qm",
+  "lane": "free23",
+  "run_id": "local-verifier-bb5qm-20261005 (summary of independent verifier run, not a CI run)",
+  "source_sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "W4 free23 d30fe11f: results.json sha256 c09de2c9..5ffc36; 771/771 pass; validate stdio=0 http=0",
+    "hosted CI 07402e78: success (all jobs)"
+  ]
+}

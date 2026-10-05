@@ -1,0 +1,13 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-qsx1t",
+  "lane": "free23",
+  "run_id": "local-verifier-qsx1t-20261005 (summary of independent verifier run, not a CI run)",
+  "source_sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "qsx1t live #3: D1 ready 0.04s / SELECT 0.50s; D2 3/3 modes correct client OK; D3 disk hits=[]; coex 5 stdio + HTTP ok, verify ok records=30",
+    "qsx1t live #2: 1a/1b coexistence pass; isolation HTTP+2stdio pass; wrong pw refused CREDENTIAL_MISMATCH",
+    "qsx1t live #1: 3 concurrent stdio, single broker, socket 0600, idle exit 60s, TRANSIENT on kill"
+  ]
+}

@@ -1,0 +1,12 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-fzjya",
+  "lane": "free23",
+  "run_id": "local-verifier-fzjya-20261005 (summary of independent verifier run, not a CI run)",
+  "source_sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "fzjya live: 6 refusals -> 6 BLOCKED; leaks=[]; verify ok records=7",
+    "fault plant (no refusal append): 5 FAILED / 584 passed"
+  ]
+}

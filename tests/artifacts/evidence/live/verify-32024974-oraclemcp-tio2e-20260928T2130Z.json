@@ -1,0 +1,168 @@
+{
+  "run_id": "verifier-32024974-oraclemcp-tio2e-20260928T2130Z",
+  "lane": "free23,xe18,xe21",
+  "source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+  "kind": "w4-isolated-and-family-runs",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 32024974 (export repo HEAD = 32024974, git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 32024974bab0e97a54d3178ea2c2b39bfbefff01 --case <id>... (release binary built in the export with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "describe_view_after_describe alone: pass stdio+http on free23, xe21, xe18; get_ddl_view alone: pass stdio+http on 3 lanes; source-tools family (40 ids) 80/80 on each lane",
+  "runs": [
+    {
+      "lane": "xe18",
+      "invocation": "tio2e",
+      "fixture_runs": {
+        "http": "W41851A4A3B9",
+        "stdio": "W418510CB9E4"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_describe_view_after_describe_keeps_session_usable"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "getddl",
+      "fixture_runs": {
+        "http": "W418510038C0",
+        "stdio": "W418510D3629"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_get_ddl_view"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "tio2e",
+      "fixture_runs": {
+        "http": "W418527EE48F",
+        "stdio": "W418523EFB0E"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_describe_view_after_describe_keeps_session_usable"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "tio2e",
+      "fixture_runs": {
+        "http": "W418521D22BC",
+        "stdio": "W41852FAC3EB"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_describe_view_after_describe_keeps_session_usable"
+      ]
+    },
+    {
+      "lane": "xe21",
+      "invocation": "getddl",
+      "fixture_runs": {
+        "http": "W418535BD2E4",
+        "stdio": "W4185229BD3D"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_get_ddl_view"
+      ]
+    },
+    {
+      "lane": "free23",
+      "invocation": "getddl",
+      "fixture_runs": {
+        "http": "W41853128ED7",
+        "stdio": "W41852063968"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 2,
+      "pass": 2,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": [
+        "w4_get_ddl_view"
+      ]
+    },
+    {
+      "lane": "xe18",
+      "invocation": "famsrc",
+      "fixture_runs": {
+        "http": "W41855FE099F",
+        "stdio": "W418552C06A6"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 80,
+      "pass": 80,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "40 distinct"
+    },
+    {
+      "lane": "xe21",
+      "invocation": "famsrc",
+      "fixture_runs": {
+        "http": "W41856E06B58",
+        "stdio": "W418562E7549"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 80,
+      "pass": 80,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "40 distinct"
+    },
+    {
+      "lane": "free23",
+      "invocation": "famsrc",
+      "fixture_runs": {
+        "http": "W418576336AA",
+        "stdio": "W4185750ADA0"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 80,
+      "pass": 80,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "40 distinct"
+    }
+  ],
+  "note": "dictionary-tools.json and tests/golden/w4 get_ddl goldens unchanged between 12e16ecb and 32024974."
+}

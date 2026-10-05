@@ -1,0 +1,55 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-05T02:00:00Z",
+  "bead_id": "oraclemcp-fzjya",
+  "scope": {
+    "summary": "Every guard refusal (level too low, forbidden construct, unparseable, structured operations) appends one signed, hash-chained BLOCKED audit record with tool, error class, reason category and SQL sha256 (SQL text redacted); audit report lists refusals; guard admission unchanged.",
+    "in_scope": [
+      "crates/oraclemcp/src/dispatch/mod.rs",
+      "crates/oraclemcp/src/dispatch/tests/audit_wiring.rs",
+      "crates/oraclemcp/tests/broker_stdio.rs"
+    ],
+    "out_of_scope": []
+  },
+  "source": {
+    "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "live refusals on FREE23 (independent verifier)",
+        "kind": "tool",
+        "trace": "6 refusals (DELETE, string-concat EXECUTE IMMEDIATE, multi-statement, unparseable, explain_plan) -> 6 BLOCKED records, no secret/bind leaks; audit report Refusals lists them; audit verify ok records=7."
+      },
+      {
+        "name": "tighten-only + planted fault",
+        "kind": "cli",
+        "trace": "git diff 66f2f4f9 d30fe11f -- crates/oraclemcp-guard is empty; guard 577 pass; oraclemcp --lib 589/589; dropping the refusal append makes 5 lib tests fail."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "scoped-live-verification",
+        "path": "tests/artifacts/evidence/live/verify-d30fe11f-fzjya-20261005.json",
+        "sha": "d30fe11fabc54f1b42e77a35f7e0a5bea7b79f2c"
+      }
+    ]
+  },
+  "limitations": [
+    "Unparseable SQL is refused as OPERATING_LEVEL_TOO_LOW rather than FORBIDDEN (pre-existing classification).",
+    "Live artifact is a summary of the verifier's logs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}

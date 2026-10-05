@@ -1,0 +1,60 @@
+{
+  "run_id": "verifier-32024974-pvlqq.9.7-20260928T2130Z",
+  "lane": "free23,xe18,xe21",
+  "source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+  "kind": "w4-dictionary-family",
+  "runner": "independent verifier (Claude agent); local disposable lab lanes on localhost; release binary built from a clean git-archive export of 32024974 (export repo HEAD = 32024974, git status --porcelain empty)",
+  "command": "ORACLEMCP_LIVE_XE=1 python3 scripts/e2e/w4/driver.py --lane <lane> --binary target/release/oraclemcp --binary-source-sha 32024974bab0e97a54d3178ea2c2b39bfbefff01 --case <id>... (release binary built in the export with cargo build --release -p oraclemcp --bin oraclemcp)",
+  "result": "dictionary-tools family (41 ids) 82/82 stdio+http on each of free23, xe21, xe18",
+  "runs": [
+    {
+      "lane": "xe18",
+      "invocation": "famdict",
+      "fixture_runs": {
+        "http": "W41854B871D4",
+        "stdio": "W418545981D3"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "41 distinct"
+    },
+    {
+      "lane": "xe21",
+      "invocation": "famdict",
+      "fixture_runs": {
+        "http": "W418551D04D9",
+        "stdio": "W418558C6F02"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "41 distinct"
+    },
+    {
+      "lane": "free23",
+      "invocation": "famdict",
+      "fixture_runs": {
+        "http": "W41856CFA67E",
+        "stdio": "W41856151CD7"
+      },
+      "binary_sha256": "0431dd14bdd2976211584eb054bb322f3c6c62b433a9271400081c645b45851f",
+      "checkout_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "binary_source_sha": "32024974bab0e97a54d3178ea2c2b39bfbefff01",
+      "rows": 82,
+      "pass": 82,
+      "fail": 0,
+      "failed_rows": [],
+      "cases": "41 distinct"
+    }
+  ],
+  "note": "Scoped family invocation per lane; tier-C runner not used."
+}
