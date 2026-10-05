@@ -328,7 +328,10 @@
         "matches": [
           {
             "TYPE": "PACKAGE",
-            "NAME": "PKG_W4_${run_id}"
+            "NAME": "PKG_W4_${run_id}",
+            "OWNER": "${owner}",
+            "LINE": "3",
+            "TEXT": "    PROCEDURE DML_PROC(P_ID NUMBER);\n"
           }
         ]
       }
@@ -455,23 +458,30 @@
       "stdio",
       "http"
     ],
-    "requires": [],
+    "requires": ["priv:SELECT_V_SQL"],
     "setup": [],
     "call": {
       "arguments": {
-        "sql": "SELECT ID, N_VAL FROM ${owner}.T_TYPES_${run_id} ORDER BY ID",
+        "sql": "SELECT /* W4MARK_DIFFNOGRANT000001 */ ID, N_VAL FROM ${owner}.T_TYPES_${run_id} ORDER BY ID",
         "scn_a": 1,
         "scn_b": 2,
         "key": [
-          "RUN_ID"
+          "ID"
         ]
-      }
+      },
+      "vsql_absent_marker": "W4MARK_DIFFNOGRANT000001"
     },
     "expect": {
       "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
     },
-    "db_reread": [],
-    "audit_expect": [],
+    "db_reread": [{"sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "rows": [[1,"parent-1"],[2,"parent-2"]]}],
+    "audit_expect": [
+      {
+        "tool": "oracle_diff",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "on_unsupported": {
       "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
     },
@@ -537,9 +547,30 @@
           {
             "key": {
               "ID": "1"
+            },
+            "before": {
+              "ID": "1",
+              "LABEL": "parent-1"
+            },
+            "after": {
+              "ID": "1",
+              "LABEL": "parent-5"
             }
           }
-        ]
+        ],
+        "added": [],
+        "removed": [],
+        "columns": [
+          "ID",
+          "LABEL"
+        ],
+        "key_columns": [
+          "ID"
+        ],
+        "keyed": true,
+        "row_count_a": 1,
+        "row_count_b": 1,
+        "truncated": false
       }
     },
     "db_reread": [
@@ -621,6 +652,17 @@
       },
       {
         "external_scn_capture": "scn_b"
+      }
+    ],
+    "cleanup_reread": [
+      {
+        "sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID=1",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ]
+        ]
       }
     ]
   },
@@ -837,7 +879,13 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_top_queries",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
     }
@@ -862,7 +910,13 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_plan_timeline",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
     }
@@ -1051,6 +1105,56 @@
     "plan_contains": "T_RUN_${run_id}"
   },
   {
+    "case_id": "w4_explain_plan_select_readonly_requires_elevation",
+    "tool": "oracle_explain_plan",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner",
+    "setup_phase": "before_server",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT /* W4MARK_EXPLAINRO000001 */ ID FROM T_PARENT_${run_id} ORDER BY ID",
+        "allow_plan_table_write": true
+      },
+      "vsql_absent_marker": "W4MARK_EXPLAINRO000001"
+    },
+    "expect": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_explain_plan",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "OPERATING_LEVEL_TOO_LOW"
+    }
+  },
+  {
     "case_id": "w4_explain_plan_dml_inner_sql_refused_readonly",
     "tool": "oracle_explain_plan",
     "level": "READ_ONLY",
@@ -1058,19 +1162,42 @@
       "stdio",
       "http"
     ],
-    "requires": [],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
     "setup": [],
     "call": {
       "arguments": {
-        "sql": "UPDATE ${owner}.T_RUN_${run_id} SET LABEL='x'",
+        "sql": "UPDATE /* W4MARK_EXPLAINDML000001 */ ${owner}.T_PARENT_${run_id} SET LABEL='x' WHERE ID=1",
         "allow_plan_table_write": true
-      }
+      },
+      "vsql_absent_marker": "W4MARK_EXPLAINDML000001"
     },
     "expect": {
       "error_class": "OPERATING_LEVEL_TOO_LOW"
     },
-    "db_reread": [],
-    "audit_expect": [],
+    "db_reread": [
+      {
+        "sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_explain_plan",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "on_unsupported": {
       "error_class": "OPERATING_LEVEL_TOO_LOW"
     }
@@ -1095,7 +1222,13 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [],
+    "audit_expect": [
+      {
+        "tool": "oracle_explain_plan",
+        "decision": "BLOCKED",
+        "outcome": "FAILED"
+      }
+    ],
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
     },
@@ -1104,7 +1237,7 @@
   {
     "case_id": "w4_switch_profile_to_protected_resets_level",
     "tool": "oracle_switch_profile",
-    "level": "READ_ONLY",
+    "level": "READ_WRITE",
     "transports": [
       "stdio",
       "http"
@@ -1130,7 +1263,9 @@
     "audit_expect": [],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
-    }
+    },
+    "profile_variant": "synthetic_owner_rw",
+    "setup_phase": "before_server"
   },
   {
     "case_id": "w4_list_profiles_exact_names_no_secrets",
