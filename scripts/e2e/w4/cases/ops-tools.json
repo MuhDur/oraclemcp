@@ -474,7 +474,8 @@
       "vsql_absent_marker": "W4MARK_DIFFNOGRANT000001"
     },
     "expect": {
-      "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
+      "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE",
+      "ora_code": 904
     },
     "db_reread": [
       {
@@ -530,7 +531,8 @@
       }
     },
     "expect": {
-      "error_class": "FLASHBACK_RETENTION_EXCEEDED"
+      "error_class": "FLASHBACK_RETENTION_EXCEEDED",
+      "ora_code": 1555
     },
     "db_reread": [],
     "audit_expect": [],
