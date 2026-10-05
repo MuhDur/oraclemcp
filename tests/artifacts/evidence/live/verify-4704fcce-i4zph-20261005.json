@@ -1,0 +1,14 @@
+{
+  "schema": "live-verification/v1",
+  "bead_id": "oraclemcp-i4zph",
+  "lane": "free23",
+  "run_id": "local-verifier-i4zph-20261005 (summary of independent verifier run, not a CI run)",
+  "source_sha": "4704fccee7cb0d1f3418eecaffe8f1485a3ff2a9",
+  "verifier": "independent orchestrator subagent, clean git-archive export; summary lines copied from its run logs",
+  "results": [
+    "live-http-unsub: cum_diag=1262622B wchan no anon_pipe_write PASS",
+    "live-http-trace: cum_diag=1259361B PASS; pw_hits=0",
+    "stdio-spawner: 400 calls broker_fd2=/dev/null PASS",
+    "fault(stderr inherited): tests 0 passed 2 failed (Timeout)"
+  ]
+}

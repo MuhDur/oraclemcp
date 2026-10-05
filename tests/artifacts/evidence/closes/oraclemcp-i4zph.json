@@ -1,0 +1,66 @@
+{
+  "schema": "bead-close-evidence/v1",
+  "repo": "oraclemcp",
+  "generated_at": "2026-10-05T02:00:00Z",
+  "bead_id": "oraclemcp-i4zph",
+  "scope": {
+    "summary": "The shared broker no longer inherits its launcher's stdio (fd 0/1/2 are /dev/null); diagnostics go to bounded, rotated 0600 JSONL files under the state root, so an undrained parent pipe can never block it; documented in docs/operations.md.",
+    "in_scope": [
+      "crates/oraclemcp-telemetry/src/lib.rs",
+      "crates/oraclemcp-telemetry/src/logging.rs",
+      "crates/oraclemcp/src/broker_diagnostics.rs",
+      "crates/oraclemcp/src/broker_service.rs",
+      "crates/oraclemcp/src/main.rs",
+      "crates/oraclemcp/tests/broker_stdio.rs",
+      "docs/operations.md"
+    ],
+    "out_of_scope": [
+      "doctor does not yet surface the diagnostics path; failures before the diagnostics sink opens are no longer visible on the launcher's stderr (follow-up bead)."
+    ]
+  },
+  "source": {
+    "sha": "4704fccee7cb0d1f3418eecaffe8f1485a3ff2a9",
+    "tree_clean": true,
+    "branch": "main"
+  },
+  "proofs": [],
+  "integration_evidence": {
+    "entry_points": [
+      {
+        "name": "undrained HTTP launcher stderr, >1 MB diagnostics (independent verifier, export 4704fcce, live FREE23)",
+        "kind": "tool",
+        "trace": "1.26 MB diagnostics written; broker threads never in anon_pipe_write; HTTP and 2 stdio clients keep serving; fresh sessions work."
+      },
+      {
+        "name": "undrained stdio spawner",
+        "kind": "tool",
+        "trace": "400 calls, broker fd2=/dev/null, sibling tools/list ok."
+      },
+      {
+        "name": "planted fault + suites",
+        "kind": "cli",
+        "trace": "restoring stderr inheritance: both new tests FAIL (timeout), broker in anon_pipe_write; clean: broker_stdio 3/3, live-xe 14/14, broker_diagnostics 3/3, telemetry 56/56."
+      }
+    ]
+  },
+  "live_evidence": {
+    "claimed": true,
+    "artifacts": [
+      {
+        "kind": "scoped-live-verification",
+        "path": "tests/artifacts/evidence/live/verify-4704fcce-i4zph-20261005.json",
+        "sha": "4704fccee7cb0d1f3418eecaffe8f1485a3ff2a9"
+      }
+    ]
+  },
+  "limitations": [
+    "Test suite leaves detached brokers behind after runs (cleanup nit).",
+    "Live artifact is a summary of the verifier's logs."
+  ],
+  "known_defects": [],
+  "follow_ups": [],
+  "readiness": {
+    "claim": "not-ready",
+    "basis": "live-evidence"
+  }
+}
