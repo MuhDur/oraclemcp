@@ -193,6 +193,10 @@ if [ "$E2E_DRY_RUN" = "1" ]; then
   exit 0
 fi
 
+case "$BINARY" in
+  /*) ;;
+  *) BINARY="$ROOT/$BINARY" ;;
+esac
 [ -x "$BINARY" ] || e2e_finish_fail "oraclemcp binary not found at $BINARY"
 
 run_stamp="$(date -u +"%Y%m%dT%H%M%SZ")-$$"

@@ -5,6 +5,8 @@
 //! Oracle is reachable, each test prints a loud SKIP banner and returns rather
 //! than failing — so CI without a database stays
 //! green, matching the repo's `live-xe` / estate-absent convention.
+//! The explicitly selected policy lifecycle regression is mandatory and fails
+//! when its real MCP binary or local fixture prerequisites are missing.
 //!
 //! To run against the repo's containerized Oracle 23ai Free:
 //!   cargo test -p oraclemcp-db --features live-xe -- --nocapture
