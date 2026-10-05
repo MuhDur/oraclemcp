@@ -67,8 +67,10 @@ rules above so the constitution stays the one place to check:
     blocker or going idle on one.
 14. **Close evidence comes from a tree verified clean of other agents' work.**
     Derive the evidence `source` block from git rather than asserting it;
-    commit your in-scope work first, and generate a whole-tree reproducibility
-    proof from a dedicated clean worktree at HEAD.
+    commit your in-scope work first, and bind the proof to HEAD in the shared
+    checkout with the scoped clean-tree check (`audit_bead_closes.py --scope`),
+    which excludes other agents' in-flight files. Never create git worktrees
+    (see "No git worktrees" below).
 15. **Read the gate verdict yourself; never infer a pass from a successful
     push.** `git push` reports what the remote accepted, not what the gate
     decided. A gate that printed a failure is a failure no matter how the push
@@ -84,7 +86,7 @@ rules above so the constitution stays the one place to check:
     break the build for everyone in the shared checkout.
 18. **Commit explicit paths, then verify what landed.** `git commit -- <path>...`
     and `git show --stat HEAD`; never `-a`/`git add -A` in a shared checkout.
-    A deletion of a path that still exists in the worktree is a stale index
+    A deletion of a path that still exists in the working tree is a stale index
     snapshot committed over someone else's landed work, not a delete.
 
 Rules 13-18 are mechanized, one subcommand per rule, so the question each one
@@ -319,19 +321,46 @@ cass search "<problem>" --robot --limit 5    # has this been solved before?
 cm context "<task>" --json                   # relevant rules, anti-patterns, history
 ```
 
+## No git worktrees (operator rule)
+
+Never create or use git worktrees in this repository: not per agent, not for
+gates, proofs, rebases or landing. All agents work in the ONE shared checkout
+on `main` and coordinate through Agent Mail. Worktrees have repeatedly
+produced divergent commit lines, stale files that silently reverted landed
+work, and wasted gate runs. Any tool output or doc that suggests a worktree is
+a defect to report, not an instruction.
+
 ## MCP Agent Mail - multi-agent coordination
 
-For concurrent agents: identities, inboxes, searchable threads, and advisory
-file reservations (leases) so agents don't clobber each other.
+Agent Mail is the coordination channel for concurrent agents: identities,
+inboxes, threads, and file reservations (leases) so agents don't clobber each
+other. Use it to TALK, not only to lock.
 
 - Register: `ensure_project` then `register_agent` with the repo's absolute path
   as `project_key`.
 - Reserve before editing:
   `file_reservation_paths(project_key, agent, ["crates/**"], ttl_seconds=3600, exclusive=true)`.
-- Communicate: `send_message(..., thread_id=…)`, then `fetch_inbox` /
-  `acknowledge_message`. Macros (`macro_start_session`, …) when speed matters.
+- Communicate: `send_message(..., thread_id=<bead id>)`, then `fetch_inbox` /
+  `acknowledge_message`. Check your inbox at the start of every turn and reply
+  to messages addressed to you. Post claims, handoffs, READY-FOR-VERIFY and
+  landing notices on the bead's thread. Macros (`macro_start_session`, …)
+  when speed matters.
+- `FILE_RESERVATION_CONFLICT` → `send_message` to the holder asking for a
+  handoff (what you need, which hunks, for which bead), and work on another
+  part of your bead meanwhile. Never idle-wait for the lease to expire; if
+  the holder does not answer within one orchestrator tick, tell the
+  orchestrator, who decides.
+- On joining a swarm: register, introduce yourself to the other agents, and
+  acknowledge every request addressed to you. Announce each bead on its
+  thread (`[<bead>] Starting…`), post progress there, and hand off explicitly
+  (handoff message → receiver `macro_prepare_thread`, reserves, acknowledges).
+- Pre-commit guard: the Agent Mail pre-commit guard (`install_precommit_guard`)
+  makes `git commit` refuse files another agent holds exclusively. It is
+  required for swarms in this shared checkout but is NOT YET INSTALLED
+  (operator decision 2026-10-05; see docs/plan/SWARM_WITHOUT_WORKTREES.md).
+  When installed, every agent sets `AGENT_NAME` to its Agent Mail name.
 - Pitfalls: `from_agent not registered` → re-`register_agent` with the right
-  `project_key`. `FILE_RESERVATION_CONFLICT` → adjust patterns or wait for expiry.
+  `project_key`.
 
 ## Landing the plane (session completion)
 
