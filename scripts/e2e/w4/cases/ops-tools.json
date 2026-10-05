@@ -550,7 +550,7 @@
     "setup": [],
     "setup_phase": "before_server",
     "flashback_grant_owner": true,
-    "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ID=1",
+    "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} AS OF SCN (DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER) WHERE ID=1",
     "call": {
       "arguments": {
         "sql": "SELECT ID, LABEL FROM T_PARENT_${run_id} WHERE ID=1",
