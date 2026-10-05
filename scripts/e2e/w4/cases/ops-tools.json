@@ -458,7 +458,9 @@
       "stdio",
       "http"
     ],
-    "requires": ["priv:SELECT_V_SQL"],
+    "requires": [
+      "priv:SELECT_V_SQL"
+    ],
     "setup": [],
     "call": {
       "arguments": {
@@ -474,12 +476,31 @@
     "expect": {
       "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"
     },
-    "db_reread": [{"sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "rows": [[1,"parent-1"],[2,"parent-2"]]}],
+    "db_reread": [
+      {
+        "sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
     "audit_expect": [
       {
-        "tool": "oracle_diff",
-        "decision": "BLOCKED",
-        "outcome": "FAILED"
+        "tool": "fga_evidence_unavailable",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED"
+      },
+      {
+        "tool": "security_feature_evidence_unavailable",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED"
       }
     ],
     "on_unsupported": {
@@ -1076,7 +1097,8 @@
       "arguments": {
         "sql": "SELECT /*+ FULL(t) */ t.RUN_ID FROM ${owner}.T_RUN_${run_id} t",
         "allow_plan_table_write": true
-      }
+      },
+      "mutation": true
     },
     "expect": {
       "json_subset": {
@@ -1086,8 +1108,33 @@
         }
       }
     },
-    "db_reread": [],
-    "audit_expect": [],
+    "db_reread": [
+      {
+        "sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_explain_plan",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_explain_plan",
+        "decision": "ALLOWED",
+        "outcome": "ROLLED_BACK"
+      }
+    ],
     "on_unsupported": {
       "error_class": "RUNTIME_STATE_REQUIRED"
     },
