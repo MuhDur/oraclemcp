@@ -879,13 +879,8 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [
-      {
-        "tool": "oracle_top_queries",
-        "decision": "BLOCKED",
-        "outcome": "FAILED"
-      }
-    ],
+    "audit_expect": [],
+    "audit_zero_executions": true,
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
     }
@@ -910,13 +905,8 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [
-      {
-        "tool": "oracle_plan_timeline",
-        "decision": "BLOCKED",
-        "outcome": "FAILED"
-      }
-    ],
+    "audit_expect": [],
+    "audit_zero_executions": true,
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
     }
@@ -1222,13 +1212,8 @@
       "error_class": "POLICY_DENIED"
     },
     "db_reread": [],
-    "audit_expect": [
-      {
-        "tool": "oracle_explain_plan",
-        "decision": "BLOCKED",
-        "outcome": "FAILED"
-      }
-    ],
+    "audit_expect": [],
+    "audit_zero_executions": true,
     "on_unsupported": {
       "error_class": "POLICY_DENIED"
     },
