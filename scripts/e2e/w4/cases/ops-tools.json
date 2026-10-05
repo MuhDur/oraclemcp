@@ -727,12 +727,15 @@
             "parent_table": "T_PARENT_${run_id}"
           }
         ],
-        "truncated": false
+        "truncated": false,
+        "max_rows": 10,
+        "next_cursor": null
       },
       "json_keys": [
         "owner",
         "catalog_revision",
         "max_rows",
+        "next_cursor",
         "truncation",
         "truncated",
         "fks"
@@ -783,12 +786,15 @@
             "parent_table": "T_PARENT_${run_id}"
           }
         ],
-        "truncated": false
+        "truncated": false,
+        "max_rows": 10,
+        "next_cursor": null
       },
       "json_keys": [
         "owner",
         "catalog_revision",
         "max_rows",
+        "next_cursor",
         "truncation",
         "truncated",
         "fks",
@@ -839,12 +845,15 @@
             "parent_table": "T_PARENT_${run_id}"
           }
         ],
-        "truncated": false
+        "truncated": false,
+        "max_rows": 10,
+        "next_cursor": null
       },
       "json_keys": [
         "owner",
         "catalog_revision",
         "max_rows",
+        "next_cursor",
         "truncation",
         "truncated",
         "fks"
