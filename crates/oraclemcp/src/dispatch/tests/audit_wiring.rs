@@ -1710,6 +1710,241 @@ fn guard_refusals_are_signed_redacted_and_bound_to_transport_identity() {
     );
 }
 
+// Unit boundary: schema metadata and generated-read cleanup rollbacks are
+// counted separately. Diagnostic queries, PLAN_TABLE writes and commits are
+// counted and refused. Deadline settings are local configuration.
+struct PolicyRefusalNoSqlConnection {
+    calls: Arc<AtomicUsize>,
+    rollbacks: Arc<AtomicUsize>,
+    describes: Arc<AtomicUsize>,
+}
+
+impl PolicyRefusalNoSqlConnection {
+    #[track_caller]
+    fn unexpected_sql<T>(&self) -> Result<T, DbError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Internal(format!(
+            "policy refusal reached an Oracle command at {}",
+            std::panic::Location::caller()
+        )))
+    }
+}
+
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for PolicyRefusalNoSqlConnection {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.unexpected_sql()
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.unexpected_sql()
+    }
+    async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        self.describes.fetch_add(1, Ordering::SeqCst);
+        Ok(OracleConnectionInfo {
+            current_schema: Some("APP".to_owned()),
+            ..Default::default()
+        })
+    }
+    async fn query_rows(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        self.unexpected_sql()
+    }
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.unexpected_sql()
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.unexpected_sql()
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.rollbacks.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn call_timeout(&self) -> Result<Option<Duration>, DbError> {
+        Ok(None)
+    }
+    fn set_call_timeout(&self, _timeout: Option<Duration>) -> Result<(), DbError> {
+        Ok(())
+    }
+    fn request_deadline(&self, _cx: &Cx) -> Result<Option<asupersync::Time>, DbError> {
+        Ok(None)
+    }
+    fn set_request_deadline(
+        &self,
+        _cx: &Cx,
+        _deadline: Option<asupersync::Time>,
+    ) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[test]
+fn policy_refusals_are_signed_once_redacted_and_never_execute() {
+    let (auditor, sink) = auditor_with_sink();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rollbacks = Arc::new(AtomicUsize::new(0));
+    let describes = Arc::new(AtomicUsize::new(0));
+    let dispatcher = dispatcher_with_conn(
+        Box::new(PolicyRefusalNoSqlConnection {
+            calls: calls.clone(),
+            rollbacks: rollbacks.clone(),
+            describes: describes.clone(),
+        }),
+        read_write_level(),
+        auditor,
+    );
+    // Policy still refuses an elevated session. No read-only backstop needs
+    // to be armed and no diagnostic statement or PLAN_TABLE write can run.
+    let context = DispatchContext::default()
+        .with_principal_key("oauth:synthetic-policy-principal")
+        .with_http_session_id("synthetic-policy-session");
+    let cases = [
+        ("oracle_top_queries", json!({"historical": true})),
+        ("oracle_plan_timeline", json!({"sql_id": "0000000000000"})),
+        (
+            "oracle_explain_plan",
+            json!({
+                "sql": "SELECT 'synthetic-policy-literal-secret' FROM dual",
+                "allow_plan_table_write": false,
+            }),
+        ),
+    ];
+    for (index, (tool, args)) in cases.into_iter().enumerate() {
+        let error = dispatcher
+            .dispatch_with_context(tool, args.clone(), context)
+            .expect_err("explicit policy refuses before Oracle I/O");
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{error:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "policy refusal never queries, executes or commits"
+        );
+        let records = sink.records();
+        assert_eq!(
+            records.len(),
+            index + 1,
+            "exactly one signed record per policy refusal"
+        );
+        let record = records.last().unwrap();
+        assert_eq!(record.tool, tool);
+        assert_eq!(record.decision, AuditDecision::Blocked);
+        assert_eq!(record.outcome, AuditOutcome::Failed);
+        assert_eq!(
+            record.failure.as_ref().unwrap().error_class(),
+            "POLICY_DENIED"
+        );
+        assert_eq!(record.subject.kind, "oauth");
+        assert_eq!(
+            record.subject.stable_id,
+            "synthetic-policy-principal:session:synthetic-policy-session"
+        );
+        let material = args
+            .get("sql")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .unwrap_or_else(|| json!(["oraclemcp:statement-input:v1", tool, args]).to_string());
+        let fingerprint = Sha256::digest(material.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(record.sql_sha256, format!("sha256:{fingerprint}"));
+        assert_eq!(record.sql_preview, oraclemcp_audit::REDACTED_SQL_PREVIEW);
+        assert!(record.db_evidence.is_none());
+        assert!(
+            !serde_json::to_string(record)
+                .unwrap()
+                .contains("synthetic-policy-literal-secret")
+        );
+    }
+    let key = SigningKey::new("test-key", b"0123456789abcdef0123456789abcdef".to_vec()).unwrap();
+    assert_eq!(
+        rollbacks.load(Ordering::SeqCst),
+        0,
+        "the elevated policy-refusal cases do not alter a transaction"
+    );
+    assert_eq!(
+        describes.load(Ordering::SeqCst),
+        2,
+        "only the two pre-existing metadata observations occur"
+    );
+    assert_eq!(
+        verify_records(&sink.records(), &[key]),
+        VerifyOutcome::Ok { records: 3 }
+    );
+}
+
+#[test]
+fn policy_refusal_fingerprint_binds_diagnostics_but_excludes_auth_and_binds() {
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = dispatcher_with(escalatable_read_only(), auditor);
+    let refusal = Err(ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        "synthetic-message-secret",
+    ));
+    for args in [
+        json!({"sql_id":"0000000000000", "auth":"synthetic-auth-one", "binds":["synthetic-bind-one"]}),
+        json!({"sql_id":"0000000000000", "auth":"synthetic-auth-two", "binds":["synthetic-bind-two"]}),
+        json!({"sql_id":"0000000000001", "auth":"synthetic-auth-one", "binds":["synthetic-bind-one"]}),
+    ] {
+        dispatcher.append_guard_refusal_from_result(
+            DispatchContext::default(),
+            "oracle_plan_timeline",
+            &args,
+            &refusal,
+        );
+    }
+    let records = sink.records();
+    assert_eq!(records.len(), 3);
+    assert_eq!(records[0].sql_sha256, records[1].sql_sha256);
+    assert_ne!(records[0].sql_sha256, records[2].sql_sha256);
+    let encoded = serde_json::to_string(&records).unwrap();
+    for secret in [
+        "synthetic-auth-one",
+        "synthetic-auth-two",
+        "synthetic-bind-one",
+        "synthetic-bind-two",
+        "synthetic-message-secret",
+    ] {
+        assert!(!encoded.contains(secret));
+    }
+}
+
+#[test]
+fn policy_refusal_sink_failure_preserves_the_refusal_and_zero_execution() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let rollbacks = Arc::new(AtomicUsize::new(0));
+    let describes = Arc::new(AtomicUsize::new(0));
+    let dispatcher = dispatcher_with_conn(
+        Box::new(PolicyRefusalNoSqlConnection {
+            calls: calls.clone(),
+            rollbacks: rollbacks.clone(),
+            describes: describes.clone(),
+        }),
+        read_write_level(),
+        failing_auditor(),
+    );
+    for (tool, args) in [
+        ("oracle_top_queries", json!({"historical":true})),
+        ("oracle_plan_timeline", json!({"sql_id":"0000000000000"})),
+        (
+            "oracle_explain_plan",
+            json!({"sql":"SELECT 1 FROM dual", "allow_plan_table_write":false}),
+        ),
+    ] {
+        let error = dispatcher.dispatch(tool, args).unwrap_err();
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{error:?}");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    assert_eq!(rollbacks.load(Ordering::SeqCst), 0);
+    assert_eq!(describes.load(Ordering::SeqCst), 2);
+}
+
 #[test]
 fn guard_refusal_sink_failure_never_changes_the_guard_decision() {
     let dispatcher = dispatcher_with(escalatable_read_only(), failing_auditor());

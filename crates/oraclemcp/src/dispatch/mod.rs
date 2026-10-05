@@ -612,8 +612,8 @@ pub struct OracleDispatcher {
 }
 
 impl OracleDispatcher {
-    /// Persist a redacted refusal record after the guard has already rejected a
-    /// SQL-bearing request. This observer deliberately ignores persistence
+    /// Persist a redacted refusal after the guard or an explicit policy has
+    /// rejected a request. This observer deliberately ignores persistence
     /// errors: failure to record must never weaken or replace the refusal.
     fn append_guard_refusal_from_result(
         &self,
@@ -627,11 +627,17 @@ impl OracleDispatcher {
         };
         if !matches!(
             envelope.error_class,
-            ErrorClass::ForbiddenStatement | ErrorClass::OperatingLevelTooLow
+            ErrorClass::ForbiddenStatement
+                | ErrorClass::OperatingLevelTooLow
+                | ErrorClass::PolicyDenied
         ) {
             return;
         }
-        emit_lease_event("guard.refused", "classifier_or_level_refusal");
+        if envelope.error_class == ErrorClass::PolicyDenied {
+            emit_lease_event("policy.refused", "policy_refusal");
+        } else {
+            emit_lease_event("guard.refused", "classifier_or_level_refusal");
+        }
         let submitted_sql = ["sql", "source_code", "ddl"]
             .iter()
             .find_map(|key| args.get(*key).and_then(Value::as_str));
@@ -658,6 +664,11 @@ impl OracleDispatcher {
                 "action",
                 "plscope",
                 "warnings",
+                "historical",
+                "sql_id",
+                "top_n",
+                "max_points",
+                "allow_plan_table_write",
             ]
             .iter()
             .filter_map(|key| args.get(*key).map(|value| (*key, value)))
@@ -706,9 +717,14 @@ impl OracleDispatcher {
                 // A failed sink cannot change the guard's verdict or cause the
                 // statement to execute. The Auditor poisons further appends.
                 tracing::error!(
-                    "failed to append signed guard refusal; original SQL remains refused"
+                    "failed to append signed refusal; original request remains refused"
                 );
             }
+        }
+        // A policy refusal is not a SQL-classifier counterexample. Keep it in
+        // the signed audit without contaminating the opt-in guard corpus.
+        if envelope.error_class == ErrorClass::PolicyDenied {
+            return;
         }
         let refusal_class = envelope
             .structured_reason
