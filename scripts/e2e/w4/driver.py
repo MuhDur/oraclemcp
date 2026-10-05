@@ -237,6 +237,19 @@ def verify_envelope(reply, descriptor=None):
                     f"outputSchema missing required key {key}")
 
 
+def golden_path(golden_root, name):
+    """Resolve a JSON golden beneath its root, including legacy basenames."""
+    require(isinstance(name, str)
+            and re.fullmatch(r"(?:[a-zA-Z0-9_.-]+/)*[a-zA-Z0-9_.-]+\.json", name)
+            and all(part not in {".", ".."} for part in name.split("/")),
+            "unsafe golden filename")
+    root = golden_root.resolve()
+    path = (root / name).resolve()
+    require(path.is_relative_to(root), "golden path escapes root")
+    require(path.is_file(), f"golden file {name} is missing")
+    return path
+
+
 def verify_expect(expect, reply, golden_root=None):
     require(isinstance(expect, dict) and len(EXPECT_KINDS & expect.keys()) == 1,
             "expect needs exactly one rows/error_class/json_subset/golden/goldens selector")
@@ -263,9 +276,7 @@ def verify_expect(expect, reply, golden_root=None):
     elif "golden" in expect:
         require(golden_root is not None, "golden root missing")
         name = expect["golden"]
-        require(re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name) is not None,
-                "unsafe golden filename")
-        golden = json.loads((golden_root / name).read_text())
+        golden = json.loads(golden_path(golden_root, name).read_text())
         require(scrub(structured) == golden, "scrubbed golden differs")
     else:
         require(golden_root is not None, "golden root missing")
@@ -274,9 +285,7 @@ def verify_expect(expect, reply, golden_root=None):
                 "goldens needs exactly the proved rollback and unknown terminal variants")
         goldens = []
         for name in names:
-            require(isinstance(name, str) and re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name),
-                    "unsafe golden filename")
-            goldens.append(json.loads((golden_root / name).read_text()))
+            goldens.append(json.loads(golden_path(golden_root, name).read_text()))
         require(scrub(structured) in goldens,
                 "scrubbed result differs from both proved terminal-outcome goldens")
     return scrub(structured)
@@ -768,29 +777,17 @@ def verify_expect_shape(expect):
     if "json_subset" in expect:
         require(isinstance(expect["json_subset"], dict) and expect["json_subset"],
                 "json_subset must be a nonempty object")
-    if "golden" in expect:
-        name = expect["golden"]
-        require(isinstance(name, str) and name.count("${lane}") <= 1
-                and re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name.replace("${lane}", "lane")),
-                "invalid golden filename")
-        lanes = (("free23", "xe18", "xe21") if "${lane}" in name else (None,))
-        for lane in lanes:
-            concrete = name if lane is None else name.replace("${lane}", lane)
-            require(re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", concrete) is not None, "invalid golden filename")
-            require((ROOT / "tests/golden/w4" / concrete).is_file(), f"golden file {concrete} is missing")
-    if "goldens" in expect:
-        names = expect["goldens"]
-        require(isinstance(names, list) and len(names) == 2,
+    if "golden" in expect or "goldens" in expect:
+        names = [expect["golden"]] if "golden" in expect else expect["goldens"]
+        require(isinstance(names, list) and len(names) == (1 if "golden" in expect else 2),
                 "goldens needs exactly two terminal-outcome golden names")
         for name in names:
-            require(isinstance(name, str) and name.count("${lane}") <= 1
-                    and re.fullmatch(r"[a-zA-Z0-9_.-]+\.json", name.replace("${lane}", "lane")),
+            require(isinstance(name, str) and name.count("${lane}") <= 1,
                     "invalid golden filename")
             lanes = (("free23", "xe18", "xe21") if "${lane}" in name else (None,))
             for lane in lanes:
                 concrete = name if lane is None else name.replace("${lane}", lane)
-                require((ROOT / "tests/golden/w4" / concrete).is_file(),
-                        f"golden file {concrete} is missing")
+                golden_path(ROOT / "tests/golden/w4", concrete)
 
 
 def merge_expectation(base, overlay):
@@ -4262,8 +4259,40 @@ def metadata_pool_config_selftest():
     print(compact({"selftest": "metadata_pool_baseline_off_on_config", "verdict": "pass"}))
 
 
+def golden_path_selftest():
+    # Preserve fixtures under target; each run is isolated, including its symlinks.
+    directory = ROOT / "target/e2e/w4/selftest" / ("golden-path-" + secrets.token_hex(8))
+    root = directory / "goldens"
+    nested = root / "ops-tools"
+    nested.mkdir(parents=True)
+    expected = {"status": "proved"}
+    for path in (root / "legacy.json", nested / "profile.json", directory / "outside.json"):
+        path.write_text(json.dumps(expected))
+    (root / "escape.json").symlink_to(directory / "outside.json")
+    (root / "outside").symlink_to(directory, target_is_directory=True)
+    reply = {"result": {"structuredContent": expected}}
+    for name in ("legacy.json", "ops-tools/profile.json"):
+        verify_expect({"golden": name}, reply, root)
+    verify_expect({"goldens": ["legacy.json", "ops-tools/profile.json"]}, reply, root)
+    for name in ("../outside.json", "ops-tools/../legacy.json", "./legacy.json",
+                 "/absolute.json", "ops-tools//profile.json", "ops-tools/profile.txt",
+                 "ops-tools\\profile.json", "escape.json", "outside/outside.json",
+                 "missing.json", "ops-tools", "", None):
+        for selector in ("golden", "goldens"):
+            expectation = {selector: name if selector == "golden" else ["legacy.json", name]}
+            try:
+                verify_expect(expectation, reply, root)
+            except DriverError:
+                pass
+            else:
+                raise DriverError(f"golden path selftest accepted {name!r} via {selector}")
+    verify_expect_shape({"golden": "ops-tools/ops-tools-list-profiles.${lane}.json"})
+    print(compact({"selftest": "golden_relative_paths_and_escape_refusals", "verdict": "pass"}))
+
+
 def selftest():
     metadata_pool_config_selftest()
+    golden_path_selftest()
     audit_report_timeline_selftest()
     release_schedule_selftest()
     retention_probe_selftest()

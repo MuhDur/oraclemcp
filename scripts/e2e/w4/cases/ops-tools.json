@@ -1313,7 +1313,7 @@
       "arguments": {}
     },
     "expect": {
-      "golden": "ops-tools-list-profiles.${lane}.json"
+      "golden": "ops-tools/ops-tools-list-profiles.${lane}.json"
     },
     "db_reread": [],
     "audit_expect": [],
