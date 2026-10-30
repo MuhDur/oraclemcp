@@ -1368,6 +1368,7 @@ fn doctor_state_layout(audit_path_configured: bool) -> Option<DoctorStateLayout>
         current_audit_path: default_audit_path(),
         migration_backup_dir: state_dir.join("doctor-migrations").join("backups"),
         audit_path_configured,
+        broker_diagnostics_dir: state_dir,
     })
 }
 

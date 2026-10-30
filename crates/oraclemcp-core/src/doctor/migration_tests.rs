@@ -41,6 +41,7 @@ fn legacy_layout(root: &std::path::Path) -> DoctorStateLayout {
         current_audit_path: root.join("state").join("audit").join("audit.jsonl"),
         migration_backup_dir: root.join("state").join("doctor-migrations").join("backups"),
         audit_path_configured: false,
+        broker_diagnostics_dir: root.join("state"),
     }
 }
 

@@ -116,6 +116,64 @@ impl Client {
         }
     }
 }
+/// Kills the detached broker a test's clients spawned, even when the test
+/// panics. The pid comes from the root's locator and is signalled only after
+/// confirming it is still an `oraclemcp broker` serving this test's root, so a
+/// recycled pid is never touched.
+struct BrokerReaper(std::path::PathBuf);
+impl BrokerReaper {
+    fn new(root: &Path) -> Self {
+        Self(root.to_path_buf())
+    }
+    fn broker_pid(&self) -> Option<u32> {
+        let locator = std::fs::read(self.0.join("state/oraclemcp/broker.json")).ok()?;
+        let locator: Value = serde_json::from_slice(&locator).ok()?;
+        u32::try_from(locator["pid"].as_u64()?).ok()
+    }
+}
+#[cfg(target_os = "linux")]
+fn is_test_broker(pid: u32, root: &Path) -> bool {
+    let read = |name: &str| std::fs::read(format!("/proc/{pid}/{name}")).unwrap_or_default();
+    let args = read("cmdline");
+    let environ = read("environ");
+    let state = format!("XDG_STATE_HOME={}", root.join("state").display());
+    args.split(|byte| *byte == 0).any(|arg| arg == b"broker")
+        && environ
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == state.as_bytes())
+}
+#[cfg(all(unix, not(target_os = "linux")))]
+fn is_test_broker(pid: u32, _root: &Path) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "command="])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("oraclemcp broker"))
+}
+#[cfg(windows)]
+fn is_test_broker(pid: u32, _root: &Path) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains("oraclemcp"))
+}
+impl Drop for BrokerReaper {
+    fn drop(&mut self) {
+        let Some(pid) = self.broker_pid() else {
+            return;
+        };
+        if !is_test_broker(pid, &self.0) {
+            return;
+        }
+        #[cfg(unix)]
+        let _ = Command::new("kill")
+            .args(["-KILL", &pid.to_string()])
+            .status();
+        #[cfg(windows)]
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F"])
+            .status();
+    }
+}
 fn test_binary() -> std::ffi::OsString {
     std::env::var_os("ORACLEMCP_BROKER_TEST_BINARY")
         .unwrap_or_else(|| env!("CARGO_BIN_EXE_oraclemcp").into())
@@ -166,6 +224,7 @@ fn config_with_ceiling(root: &Path, live: bool, ceiling: &str) -> std::path::Pat
 }
 fn five_clients(live: bool) {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), live);
     let mut clients: Vec<_> = (0..5)
         .map(|index| Client::spawn(root.path(), &path, index))
@@ -383,6 +442,7 @@ fn five_stdio_processes_auto_attach_without_a_live_database() {
 #[test]
 fn http_listener_does_not_inherit_stdio_remote_bind_authorization() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), false);
     let mut client = Client::spawn_with_settings(
         root.path(),
@@ -468,6 +528,7 @@ fn five_stdio_processes_auto_attach_live_free23() {
 #[test]
 fn broker_death_returns_transient_then_respawns_without_replaying_call() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), true);
     let mut client = Client::spawn(root.path(), &path, 0);
     assert!(client.response(1).get("result").is_some());
@@ -608,6 +669,7 @@ fn count(client: &mut Client, id: i64, sql: &str, binds: Value) -> u64 {
 #[test]
 fn two_live_stdio_clients_isolate_cancellation_and_keep_sibling_available() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), true);
     let mut a = Client::spawn(root.path(), &path, 0);
     let mut b = Client::spawn(root.path(), &path, 1);
@@ -666,6 +728,7 @@ fn two_live_stdio_clients_isolate_cancellation_and_keep_sibling_available() {
 #[test]
 fn two_live_stdio_clients_commit_independent_write_intents() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config_with_ceiling(root.path(), true, "DDL");
     let mut a = Client::spawn(root.path(), &path, 0);
     let mut b = Client::spawn(root.path(), &path, 1);
@@ -741,6 +804,7 @@ fn two_live_stdio_clients_commit_independent_write_intents() {
 #[test]
 fn held_dml_stays_in_its_own_stdio_session_and_rolls_back() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config_with_ceiling(root.path(), true, "DDL");
     let mut nonce = [0; 8];
     getrandom::getrandom(&mut nonce).unwrap();
@@ -965,6 +1029,7 @@ fn drive_diagnostics(client: &mut Client, root: &Path) {
 #[test]
 fn undrained_stdio_spawner_stderr_does_not_block_sibling() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), false);
     let mut first = Client::spawn_with_settings(
         root.path(),
@@ -1010,6 +1075,7 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool, undrained_diag
     use std::net::{TcpListener, TcpStream};
     const OAUTH_KEY: &str = "synthetic-broker-oauth-signing-key-32bytes";
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), true);
     let address = TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -1538,6 +1604,7 @@ fn http_stdio_coexistence(stdio_first: bool, kill_frontend: bool, undrained_diag
 #[test]
 fn live_bad_first_credentials_do_not_pin_the_root_broker() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), true);
     for password in [Some("synthetic-wrong-first-password"), None] {
         let wrong = Client::spawn_with_password(root.path(), &path, 91, password);
@@ -1598,6 +1665,7 @@ fn live_bad_first_credentials_do_not_pin_the_root_broker() {
 #[test]
 fn guard_refusal_is_visible_in_signed_audit_report_live_free23() {
     let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
     let path = config(root.path(), true);
     let mut client = Client::spawn(root.path(), &path, 37);
     assert!(client.response(1).get("result").is_some());
@@ -1696,6 +1764,148 @@ fn guard_refusal_is_visible_in_signed_audit_report_live_free23() {
         assert!(
             std::time::Instant::now() < deadline,
             "stdio cleanup must finish before removing fixture directory"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Run `oraclemcp doctor --json` against a test root and return check 13.
+fn doctor_state_layout_check(root: &Path, config: &Path) -> Value {
+    let mut command = Command::new(test_binary());
+    for (key, _) in std::env::vars().filter(|(key, _)| key.starts_with("ORACLEMCP_")) {
+        command.env_remove(key);
+    }
+    let output = command
+        .args(["doctor", "--json"])
+        .env("ORACLEMCP_CONFIG", config)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("BROKER_TEST_KEY", "synthetic-test-key-32-bytes-minimum")
+        .env("BROKER_TEST_PASSWORD", "offline")
+        .output()
+        .unwrap();
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        panic!(
+            "doctor --json output: {error}: {}",
+            String::from_utf8_lossy(&output.stdout)
+        )
+    });
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["id"] == 13)
+        .cloned()
+        .expect("state layout check")
+}
+
+#[cfg(unix)]
+#[test]
+fn wide_mode_diagnostics_refusal_reaches_the_client_and_doctor() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let root = tempfile::tempdir().unwrap();
+    let _broker = BrokerReaper::new(root.path());
+    let config = config(root.path(), false);
+    let state = root.path().join("state/oraclemcp");
+    std::fs::create_dir_all(&state).unwrap();
+    for dir in [root.path().join("state"), state.clone()] {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let state = std::fs::canonicalize(&state).unwrap();
+    let wide = state.join("broker-diagnostics.0.jsonl");
+    std::fs::write(&wide, "earlier event\n").unwrap();
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    // The broker fails before its diagnostics sink exists and its stdio is
+    // /dev/null; the client must still receive the typed, actionable reason.
+    let client = Client::spawn(root.path(), &config, 0);
+    let refused = client.response(1);
+    let error = &refused["error"]["data"];
+    assert_eq!(error["error_class"], "RUNTIME_STATE_REQUIRED", "{refused}");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.starts_with(
+            "ORACLEMCP_BROKER_STARTUP_FAILED: ORACLEMCP_BROKER_DIAGNOSTICS_NOT_PRIVATE:"
+        ),
+        "{message}"
+    );
+    assert!(message.contains(&wide.display().to_string()), "{message}");
+    assert!(message.contains("mode 0644"), "{message}");
+    assert_eq!(
+        error["next_steps"],
+        json!([format!(
+            "run `chmod 600 {}` (or remove the file), then reconnect",
+            wide.display()
+        )])
+    );
+    drop(client);
+    assert_eq!(
+        std::fs::metadata(&wide).unwrap().permissions().mode() & 0o777,
+        0o644,
+        "the broker must refuse, not silently repair"
+    );
+    assert_eq!(std::fs::read_to_string(&wide).unwrap(), "earlier event\n");
+
+    // doctor reports where the files are and why the broker cannot start.
+    let check = doctor_state_layout_check(root.path(), &config);
+    assert_eq!(check["status"], "warn", "{check}");
+    let detail = check["detail"].as_str().unwrap();
+    assert!(
+        detail.contains(&format!(
+            "broker diagnostics: {}",
+            state.join("broker-diagnostics.{0,1,2}.jsonl").display()
+        )),
+        "{detail}"
+    );
+    assert!(
+        detail.contains(&format!("{} has mode 0644, not 0600", wide.display())),
+        "{detail}"
+    );
+    assert!(
+        detail.contains("last broker startup failure (pid ")
+            && detail.contains("RUNTIME_STATE_REQUIRED: ORACLEMCP_BROKER_DIAGNOSTICS_NOT_PRIVATE"),
+        "{detail}"
+    );
+    assert!(
+        check["fix"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("run `chmod 600 {}`", wide.display())),
+        "{check}"
+    );
+
+    // After the documented fix, a new client starts the broker normally and
+    // the startup record no longer reports a current failure.
+    std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let client = Client::spawn(root.path(), &config, 1);
+    let initialized = client.response(1);
+    assert!(initialized.get("result").is_some(), "{initialized}");
+    let check = doctor_state_layout_check(root.path(), &config);
+    let detail = check["detail"].as_str().unwrap();
+    assert!(detail.contains("no recorded startup failure"), "{detail}");
+    assert!(!detail.contains("has mode 0644"), "{detail}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn detached_broker_is_reaped_when_a_test_ends_early() {
+    let root = tempfile::tempdir().unwrap();
+    let config = config(root.path(), false);
+    let pid = {
+        let broker = BrokerReaper::new(root.path());
+        let client = Client::spawn(root.path(), &config, 0);
+        assert!(client.response(1).get("result").is_some());
+        let pid = broker.broker_pid().expect("broker locator");
+        assert!(is_test_broker(pid, root.path()));
+        drop(client);
+        // The broker is detached: it outlives its spawning proxy.
+        assert!(is_test_broker(pid, root.path()));
+        pid
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while is_test_broker(pid, root.path()) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "test broker {pid} survived its reaper"
         );
         std::thread::sleep(Duration::from_millis(20));
     }

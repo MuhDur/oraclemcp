@@ -395,6 +395,44 @@ fn attach_or_spawn_broker(
             format!("cannot spawn local broker: {e}"),
         )
     })?;
+    let child_pid = child.id();
+    let mut child_failed = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let attached = loop {
+        match oraclemcp::broker::attach(store, request) {
+            Ok(stream) => break Ok(stream),
+            Err(error) if error.error_class != ErrorClass::Transient => break Err(error),
+            Err(error) => {
+                // The broker's stdio is /dev/null: a child that exited with a
+                // failure before serving left its typed reason in the root.
+                if child_failed.is_none()
+                    && let Ok(Some(status)) = child.try_wait()
+                    && !status.success()
+                {
+                    child_failed = Some(status);
+                }
+                if let Some(status) = child_failed {
+                    if let Some(cause) =
+                        broker_diagnostics::startup_failure_for(store.root(), child_pid)
+                    {
+                        break Err(broker_startup_failed(cause));
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        break Err(ErrorEnvelope::new(
+                            ErrorClass::RuntimeStateRequired,
+                            format!(
+                                "ORACLEMCP_BROKER_STARTUP_FAILED: the local broker exited ({status}) before serving and left no startup record in {}",
+                                store.root().display()
+                            ),
+                        ));
+                    }
+                } else if std::time::Instant::now() >= deadline {
+                    break Err(error);
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
     // Attachment may succeed before a losing election child exits. Retain its
     // handle in a reaper instead of dropping it and leaving a zombie for the
     // whole lifetime of this proxy. Waiting for the winning detached broker
@@ -404,20 +442,18 @@ fn attach_or_spawn_broker(
             tracing::warn!(%error, "failed to reap spawned broker process");
         }
     });
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match oraclemcp::broker::attach(store, request) {
-            Ok(stream) => return Ok(stream),
-            Err(error)
-                if error.error_class != ErrorClass::Transient
-                    || std::time::Instant::now() >= deadline =>
-            {
-                return Err(error);
-            }
-            Err(_) => {}
-        }
-        std::thread::sleep(std::time::Duration::from_millis(25));
-    }
+    attached
+}
+
+/// Surface the spawned broker's own typed startup refusal to the client.
+fn broker_startup_failed(cause: ErrorEnvelope) -> ErrorEnvelope {
+    let mut error = ErrorEnvelope::new(
+        cause.error_class,
+        format!("ORACLEMCP_BROKER_STARTUP_FAILED: {}", cause.message),
+    );
+    error.ora_code = cause.ora_code;
+    error.next_steps = cause.next_steps;
+    error
 }
 
 pub(super) fn run_stdio_broker_proxy(
@@ -631,23 +667,26 @@ pub(super) fn run_stdio_broker_proxy(
 }
 
 pub(super) fn run_broker(_allow_no_auth: bool, strict_custom_tools: bool) -> ExitCode {
+    // A spawned broker's stdio is /dev/null. Open the root first so a failure
+    // before serving is kept in its private startup record for the client.
+    let store = match FileStore::open_default() {
+        Ok(store) => store,
+        Err(e) => {
+            return broker_exit_code(Err(ErrorEnvelope::new(ErrorClass::Internal, e.to_string())));
+        }
+    };
+    let serving = std::cell::Cell::new(false);
     let result = (|| -> Result<(), ErrorEnvelope> {
         let config = OracleMcpConfig::load(None)
             .map_err(|e| ErrorEnvelope::new(ErrorClass::InvalidArguments, e.to_string()))?;
         let policy = serde_json::to_string(&strict_custom_tools)
             .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
         let identity = oraclemcp::broker::BrokerIdentity::from_config(&config, &policy)?;
-        let store = FileStore::open_default()
-            .map_err(|e| ErrorEnvelope::new(ErrorClass::Internal, e.to_string()))?;
         let broker = oraclemcp::broker::BrokerListener::bind(&store, identity)?;
         // Only the elected owner writes the root's bounded diagnostics ring.
         // No request thread ever writes to an inherited launcher pipe.
-        let diagnostics = broker_diagnostics::Diagnostics::open(store.root()).map_err(|e| {
-            ErrorEnvelope::new(
-                ErrorClass::Internal,
-                format!("cannot open broker diagnostics: {e}"),
-            )
-        })?;
+        let diagnostics = broker_diagnostics::Diagnostics::open(store.root())
+            .map_err(broker_diagnostics::OpenError::into_envelope)?;
         let _telemetry = oraclemcp_telemetry::init_telemetry_with_writer(
             "info",
             OtlpConfig::from_env(),
@@ -691,6 +730,10 @@ pub(super) fn run_broker(_allow_no_auth: bool, strict_custom_tools: bool) -> Exi
             Mutex::new(HttpListenerState::default()),
             std::sync::Condvar::new(),
         ));
+        serving.set(true);
+        if let Err(error) = broker_diagnostics::clear_startup_failure(store.root()) {
+            tracing::warn!(%error, "could not clear an earlier broker startup record");
+        }
         broker.serve(
             oraclemcp::broker::IDLE_TIMEOUT,
             move |reader, writer, peer| {
@@ -798,16 +841,26 @@ pub(super) fn run_broker(_allow_no_auth: bool, strict_custom_tools: bool) -> Exi
             },
         )
     })();
+    if let Err(error) = &result
+        && !serving.get()
+        && !is_lost_election(error)
+        && let Err(record_error) = broker_diagnostics::record_startup_failure(store.root(), error)
+    {
+        tracing::error!(error = %record_error, "could not record the broker startup failure");
+    }
     broker_exit_code(result)
+}
+
+/// A racing candidate that lost the root's owner election is not a failure.
+fn is_lost_election(error: &ErrorEnvelope) -> bool {
+    error.error_class == ErrorClass::Transient
+        && error.message.starts_with("ORACLEMCP_BROKER_OWNER_LOCKED:")
 }
 
 pub(super) fn broker_exit_code(result: Result<(), ErrorEnvelope>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error)
-            if error.error_class == ErrorClass::Transient
-                && error.message.starts_with("ORACLEMCP_BROKER_OWNER_LOCKED:") =>
-        {
+        Err(error) if is_lost_election(&error) => {
             // A racing candidate is done once another broker owns the root.
             // Its proxy attaches to that winner; this is normal startup.
             tracing::debug!("another broker won the local service election");

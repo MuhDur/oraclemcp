@@ -2,8 +2,9 @@
 
 use cap_fs_ext::{FollowSymlinks, MetadataExt as _, OpenOptionsFollowExt as _};
 use cap_std::fs::{Dir, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom, Write};
-use std::path::Path;
+use oraclemcp_error::{ErrorClass, ErrorEnvelope};
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, SyncSender};
@@ -12,6 +13,171 @@ const FILE_BYTES: usize = 512 * 1024;
 const FILE_COUNT: usize = 3;
 const EVENT_BYTES: usize = 16 * 1024;
 const QUEUED_EVENTS: usize = 64;
+/// Private record of the last failure before a broker started serving. Its
+/// stdio is `/dev/null`, so this is how the spawning client learns why.
+pub(super) const STARTUP_ERROR_FILE: &str = "broker-startup-error.json";
+const STARTUP_RECORD_BYTES: u64 = 64 * 1024;
+
+/// Why the private diagnostics ring could not be opened.
+#[derive(Debug)]
+pub(super) enum OpenError {
+    /// A pre-existing slot is readable or writable by group or others.
+    NotPrivate {
+        path: PathBuf,
+        mode: u32,
+    },
+    /// A slot is a hard link or not a regular file.
+    NotLoneRegularFile {
+        path: PathBuf,
+    },
+    Io(io::Error),
+}
+
+impl From<io::Error> for OpenError {
+    fn from(error: io::Error) -> Self {
+        Self::Io(error)
+    }
+}
+
+impl std::fmt::Display for OpenError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotPrivate { path, mode } => write!(
+                f,
+                "diagnostic sink {} must be private (0600), found {mode:04o}",
+                path.display()
+            ),
+            Self::NotLoneRegularFile { path } => write!(
+                f,
+                "diagnostic sink {} must be a lone regular file",
+                path.display()
+            ),
+            Self::Io(error) => error.fmt(f),
+        }
+    }
+}
+
+impl OpenError {
+    /// The typed, actionable refusal a broker reports for this sink.
+    pub(super) fn into_envelope(self) -> ErrorEnvelope {
+        match self {
+            Self::NotPrivate { path, mode } => ErrorEnvelope::new(
+                ErrorClass::RuntimeStateRequired,
+                format!(
+                    "ORACLEMCP_BROKER_DIAGNOSTICS_NOT_PRIVATE: broker diagnostics file {} has mode {mode:04o}; \
+                     the broker writes diagnostics only to a private 0600 file and was not started",
+                    path.display()
+                ),
+            )
+            .with_next_step(format!(
+                "run `chmod 600 {}` (or remove the file), then reconnect",
+                path.display()
+            )),
+            Self::NotLoneRegularFile { path } => ErrorEnvelope::new(
+                ErrorClass::RuntimeStateRequired,
+                format!(
+                    "ORACLEMCP_BROKER_DIAGNOSTICS_UNSAFE: broker diagnostics file {} is a hard link or not a regular file; \
+                     the broker was not started",
+                    path.display()
+                ),
+            )
+            .with_next_step(format!(
+                "remove {} and reconnect; the broker recreates it privately",
+                path.display()
+            )),
+            Self::Io(error) => ErrorEnvelope::new(
+                ErrorClass::Internal,
+                format!("cannot open broker diagnostics: {error}"),
+            ),
+        }
+    }
+}
+
+/// Create-or-open without following links. Never truncates on open: an unsafe
+/// pre-existing file must be refused unmodified.
+fn private_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options
+}
+
+/// Authenticate an opened sink file: a lone regular file, private on Unix.
+fn check_private(file: &File, path: PathBuf) -> Result<(), OpenError> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.nlink() != 1 {
+        return Err(OpenError::NotLoneRegularFile { path });
+    }
+    #[cfg(unix)]
+    {
+        use cap_std::fs::PermissionsExt as _;
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            return Err(OpenError::NotPrivate { path, mode });
+        }
+    }
+    Ok(())
+}
+
+/// Record why this broker process failed before serving. Best effort: the
+/// record is written only to a private lone regular file, never through a link.
+pub(super) fn record_startup_failure(root: &Path, error: &ErrorEnvelope) -> Result<(), OpenError> {
+    let directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    // Open without truncating so an unsafe pre-existing file is never modified.
+    let mut file = directory.open_with(STARTUP_ERROR_FILE, &private_options())?;
+    check_private(&file, root.join(STARTUP_ERROR_FILE))?;
+    let record = serde_json::json!({"pid": std::process::id(), "error": error});
+    file.set_len(0)?;
+    file.seek(SeekFrom::Start(0))?;
+    serde_json::to_writer(&mut file, &record).map_err(io::Error::other)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+/// Forget an earlier failure once a broker has started serving, so neither a
+/// later client nor doctor reports it as current.
+pub(super) fn clear_startup_failure(root: &Path) -> Result<(), OpenError> {
+    let directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
+    let file = match directory.open_with(STARTUP_ERROR_FILE, &{
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).follow(FollowSymlinks::No);
+        options
+    }) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    check_private(&file, root.join(STARTUP_ERROR_FILE))?;
+    file.set_len(0)?;
+    Ok(())
+}
+
+/// The typed startup failure recorded by broker process `pid`, if any.
+pub(super) fn startup_failure_for(root: &Path, pid: u32) -> Option<ErrorEnvelope> {
+    let directory = Dir::open_ambient_dir(root, cap_std::ambient_authority()).ok()?;
+    let mut options = OpenOptions::new();
+    options.read(true).follow(FollowSymlinks::No);
+    let file = directory.open_with(STARTUP_ERROR_FILE, &options).ok()?;
+    check_private(&file, root.join(STARTUP_ERROR_FILE)).ok()?;
+    let mut text = String::new();
+    file.take(STARTUP_RECORD_BYTES)
+        .read_to_string(&mut text)
+        .ok()?;
+    let record: serde_json::Value = serde_json::from_str(&text).ok()?;
+    if record.get("pid")?.as_u64()? != u64::from(pid) {
+        return None;
+    }
+    serde_json::from_value(record.get("error")?.clone()).ok()
+}
 
 #[derive(Clone)]
 pub(super) struct Diagnostics {
@@ -20,36 +186,13 @@ pub(super) struct Diagnostics {
 }
 
 impl Diagnostics {
-    pub fn open(root: &Path) -> io::Result<Self> {
+    pub fn open(root: &Path) -> Result<Self, OpenError> {
         let directory = Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
         let mut files = Vec::new();
         for index in 0..FILE_COUNT {
-            let mut options = OpenOptions::new();
-            options
-                .read(true)
-                .write(true)
-                .create(true)
-                .follow(FollowSymlinks::No);
-            #[cfg(unix)]
-            {
-                use cap_std::fs::OpenOptionsExt as _;
-                options.mode(0o600);
-            }
-            let file =
-                directory.open_with(format!("broker-diagnostics.{index}.jsonl"), &options)?;
-            let metadata = file.metadata()?;
-            if !metadata.is_file() || metadata.nlink() != 1 {
-                return Err(io::Error::other(
-                    "diagnostic sink must be a lone regular file",
-                ));
-            }
-            #[cfg(unix)]
-            {
-                use cap_std::fs::PermissionsExt as _;
-                if metadata.permissions().mode() & 0o077 != 0 {
-                    return Err(io::Error::other("diagnostic sink must be private (0600)"));
-                }
-            }
+            let name = format!("broker-diagnostics.{index}.jsonl");
+            let file = directory.open_with(&name, &private_options())?;
+            check_private(&file, root.join(&name))?;
             files.push(file);
         }
         let ring = Ring {
@@ -200,6 +343,77 @@ mod tests {
                 serde_json::from_str::<serde_json::Value>(event).unwrap();
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wide_mode_sink_is_a_typed_actionable_refusal_and_is_left_unchanged() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let wide = root.path().join("broker-diagnostics.1.jsonl");
+        std::fs::write(&wide, "earlier event\n").unwrap();
+        std::fs::set_permissions(&wide, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let Err(error) = Diagnostics::open(root.path()) else {
+            panic!("a group/other-readable sink must be refused");
+        };
+        assert!(
+            matches!(&error, OpenError::NotPrivate { path, mode } if path == &wide && *mode == 0o644),
+            "{error:?}"
+        );
+        let envelope = error.into_envelope();
+        assert_eq!(envelope.error_class, ErrorClass::RuntimeStateRequired);
+        assert!(
+            envelope
+                .message
+                .starts_with("ORACLEMCP_BROKER_DIAGNOSTICS_NOT_PRIVATE:"),
+            "{}",
+            envelope.message
+        );
+        assert!(envelope.message.contains(&wide.display().to_string()));
+        assert!(envelope.message.contains("0644"));
+        assert_eq!(
+            envelope.next_steps,
+            [format!(
+                "run `chmod 600 {}` (or remove the file), then reconnect",
+                wide.display()
+            )]
+        );
+        assert_eq!(std::fs::read_to_string(&wide).unwrap(), "earlier event\n");
+        let mode = std::fs::metadata(&wide).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "refusal must not silently chmod the file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_failure_record_is_private_pid_bound_and_clearable() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let error = ErrorEnvelope::new(ErrorClass::InvalidArguments, "synthetic startup failure")
+            .with_next_step("fix the synthetic cause");
+        assert_eq!(startup_failure_for(root.path(), std::process::id()), None);
+        record_startup_failure(root.path(), &error).unwrap();
+        let path = root.path().join(STARTUP_ERROR_FILE);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert_eq!(
+            startup_failure_for(root.path(), std::process::id()),
+            Some(error.clone())
+        );
+        // Another process's (stale) record is never reported for this child.
+        assert_eq!(
+            startup_failure_for(root.path(), std::process::id() + 1),
+            None
+        );
+        clear_startup_failure(root.path()).unwrap();
+        assert_eq!(startup_failure_for(root.path(), std::process::id()), None);
+
+        // The record follows the sink's rules: no link is ever written through.
+        let linked = tempfile::tempdir().unwrap();
+        let victim = linked.path().join("victim");
+        std::fs::write(&victim, "unchanged").unwrap();
+        std::os::unix::fs::symlink(&victim, linked.path().join(STARTUP_ERROR_FILE)).unwrap();
+        assert!(record_startup_failure(linked.path(), &error).is_err());
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "unchanged");
     }
 
     #[cfg(unix)]

@@ -296,6 +296,9 @@ pub struct DoctorStateLayout {
     /// True when `[audit].path` is explicitly configured; doctor must not
     /// override an operator-owned audit location.
     pub audit_path_configured: bool,
+    /// Store root holding the detached broker's private diagnostics ring
+    /// (`broker-diagnostics.{0,1,2}.jsonl`) and its startup-failure record.
+    pub broker_diagnostics_dir: PathBuf,
 }
 
 /// Signed-audit posture derived by the CLI without constructing an auditor.
@@ -3462,20 +3465,144 @@ fn check_state_layout(ctx: &DoctorContext<'_>) -> CheckResult {
             ),
         ),
     };
+    let (broker_status, broker_detail, broker_fix) =
+        broker_diagnostics_observation(&layout.broker_diagnostics_dir);
     let status = if audit_status == CheckStatus::Fail {
         CheckStatus::Fail
-    } else if audit_status == CheckStatus::Warn || layout_status == CheckStatus::Warn {
+    } else if audit_status == CheckStatus::Warn
+        || layout_status == CheckStatus::Warn
+        || broker_status == CheckStatus::Warn
+    {
         CheckStatus::Warn
     } else if audit_status == CheckStatus::Skip || layout_status == CheckStatus::Skip {
         CheckStatus::Skip
     } else {
         CheckStatus::Pass
     };
-    let result = CheckResult::new(ID, NAME, status, format!("{audit_detail}; {layout_detail}"));
-    let fix = fix.or(lock_fix);
-    match fix {
-        Some(fix) => result.with_fix(fix),
-        None => result,
+    let result = CheckResult::new(
+        ID,
+        NAME,
+        status,
+        format!("{audit_detail}; {layout_detail}; {broker_detail}"),
+    );
+    let fixes = [
+        fix.map(str::to_owned),
+        lock_fix.map(str::to_owned),
+        broker_fix,
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if fixes.is_empty() {
+        result
+    } else {
+        result.with_fix(fixes.join("; "))
+    }
+}
+
+/// Names of the detached broker's private files under the store root.
+const BROKER_DIAGNOSTICS_FILES: [&str; 3] = [
+    "broker-diagnostics.0.jsonl",
+    "broker-diagnostics.1.jsonl",
+    "broker-diagnostics.2.jsonl",
+];
+const BROKER_STARTUP_ERROR_FILE: &str = "broker-startup-error.json";
+
+/// Offline, read-only report of where the broker writes its diagnostics, and
+/// of anything that would stop (or did stop) it from starting. A diagnostics
+/// file wider than 0600 or a non-lone/non-regular file makes the broker refuse
+/// to start; a non-empty startup record is the last pre-serving failure.
+fn broker_diagnostics_observation(dir: &Path) -> (CheckStatus, String, Option<String>) {
+    fn unsafe_reason(path: &Path) -> Option<String> {
+        let metadata = fs::symlink_metadata(path).ok()?;
+        if !metadata.file_type().is_file() {
+            return Some(format!("{} is not a regular file", path.display()));
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if metadata.nlink() != 1 {
+                return Some(format!(
+                    "{} has {} hard links",
+                    path.display(),
+                    metadata.nlink()
+                ));
+            }
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                return Some(format!("{} has mode {mode:04o}, not 0600", path.display()));
+            }
+        }
+        None
+    }
+    let mut problems = Vec::new();
+    let mut fixes = Vec::new();
+    let mut present = 0;
+    for name in BROKER_DIAGNOSTICS_FILES {
+        let path = dir.join(name);
+        if fs::symlink_metadata(&path).is_ok() {
+            present += 1;
+        }
+        if let Some(reason) = unsafe_reason(&path) {
+            fixes.push(format!(
+                "run `chmod 600 {}` (or remove it); the broker refuses to start while a diagnostics file is not a private lone regular file",
+                path.display()
+            ));
+            problems.push(reason);
+        }
+    }
+    let startup = dir.join(BROKER_STARTUP_ERROR_FILE);
+    let startup_detail = if let Some(reason) = unsafe_reason(&startup) {
+        problems.push(reason);
+        fixes.push(format!("remove {} and reconnect", startup.display()));
+        "unreadable (unsafe file)".to_owned()
+    } else {
+        let recorded = fs::File::open(&startup).ok().and_then(|file| {
+            let mut text = String::new();
+            file.take(64 * 1024).read_to_string(&mut text).ok()?;
+            let record: serde_json::Value = serde_json::from_str(&text).ok()?;
+            let error = record.get("error")?;
+            Some(format!(
+                "last broker startup failure (pid {}): {}: {}",
+                record
+                    .get("pid")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+                error
+                    .get("error_class")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("UNKNOWN"),
+                error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+            ))
+        });
+        match recorded {
+            Some(failure) => {
+                problems.push(failure.clone());
+                fixes.push(
+                    "fix the recorded broker startup failure, then reconnect; the record is cleared when a broker starts serving"
+                        .to_owned(),
+                );
+                failure
+            }
+            None => "no recorded startup failure".to_owned(),
+        }
+    };
+    let detail = format!(
+        "broker diagnostics: {} ({present}/3 ring files present; startup record {}: {startup_detail})",
+        dir.join("broker-diagnostics.{0,1,2}.jsonl").display(),
+        startup.display()
+    );
+    if problems.is_empty() {
+        (CheckStatus::Pass, detail, None)
+    } else {
+        (
+            CheckStatus::Warn,
+            format!("{detail}; {}", problems.join("; ")),
+            Some(fixes.join("; ")),
+        )
     }
 }
 
@@ -6025,6 +6152,94 @@ mod tests {
         assert_ne!(check.status, CheckStatus::Warn, "{}", check.detail);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn state_layout_reports_broker_diagnostics_location_and_blockers() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = doctor_tmp_dir("broker-diagnostics");
+        let state = root.join("state");
+        fs::create_dir_all(&state).unwrap();
+        let layout = DoctorStateLayout {
+            legacy_audit_path: root.join("config").join("audit.jsonl"),
+            current_audit_path: state.join("audit").join("audit.jsonl"),
+            migration_backup_dir: state.join("doctor-migrations").join("backups"),
+            audit_path_configured: false,
+            broker_diagnostics_dir: state.clone(),
+        };
+        let run = || {
+            let report = doctor(&DoctorContext {
+                state_layout: Some(layout.clone()),
+                ..DoctorContext::default()
+            });
+            check_by_id(&report, 13).clone()
+        };
+
+        let clean = run();
+        let location = format!(
+            "broker diagnostics: {}",
+            state.join("broker-diagnostics.{0,1,2}.jsonl").display()
+        );
+        assert!(clean.detail.contains(&location), "{}", clean.detail);
+        assert!(
+            clean.detail.contains("0/3 ring files present"),
+            "{}",
+            clean.detail
+        );
+        assert!(
+            clean.detail.contains("no recorded startup failure"),
+            "{}",
+            clean.detail
+        );
+        assert!(
+            clean
+                .fix
+                .as_deref()
+                .is_none_or(|fix| !fix.contains("chmod 600"))
+        );
+
+        let wide = state.join("broker-diagnostics.0.jsonl");
+        fs::write(&wide, "").unwrap();
+        fs::set_permissions(&wide, fs::Permissions::from_mode(0o644)).unwrap();
+        let startup = state.join("broker-startup-error.json");
+        fs::write(
+            &startup,
+            r#"{"pid":4242,"error":{"isError":true,"error_class":"RUNTIME_STATE_REQUIRED","message":"ORACLEMCP_BROKER_DIAGNOSTICS_NOT_PRIVATE: synthetic"}}"#,
+        )
+        .unwrap();
+        fs::set_permissions(&startup, fs::Permissions::from_mode(0o600)).unwrap();
+        let blocked = run();
+        assert_eq!(blocked.status, CheckStatus::Warn, "{}", blocked.detail);
+        assert!(
+            blocked.detail.contains("1/3 ring files present"),
+            "{}",
+            blocked.detail
+        );
+        assert!(
+            blocked
+                .detail
+                .contains(&format!("{} has mode 0644, not 0600", wide.display())),
+            "{}",
+            blocked.detail
+        );
+        assert!(
+            blocked.detail.contains(
+                "last broker startup failure (pid 4242): RUNTIME_STATE_REQUIRED: ORACLEMCP_BROKER_DIAGNOSTICS_NOT_PRIVATE: synthetic"
+            ),
+            "{}",
+            blocked.detail
+        );
+        let fix = blocked.fix.expect("actionable fix");
+        assert!(
+            fix.contains(&format!("run `chmod 600 {}`", wide.display())),
+            "{fix}"
+        );
+        // Doctor is read-only: it neither repairs nor rewrites broker files.
+        assert_eq!(
+            fs::metadata(&wide).unwrap().permissions().mode() & 0o777,
+            0o644
+        );
+    }
+
     #[test]
     fn audit_posture_is_not_inferred_from_the_default_audit_path() {
         let root = doctor_tmp_dir("audit-posture");
@@ -6033,6 +6248,7 @@ mod tests {
             current_audit_path: root.join("state").join("audit").join("audit.jsonl"),
             migration_backup_dir: root.join("state").join("doctor-migrations").join("backups"),
             audit_path_configured: false,
+            broker_diagnostics_dir: root.join("state"),
         };
 
         let disabled = doctor(&DoctorContext {
