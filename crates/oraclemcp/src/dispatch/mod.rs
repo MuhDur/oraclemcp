@@ -8504,11 +8504,13 @@ async fn observed_scn_for_audit(
                 catalog_cache.scn_capability(),
                 ScnCapability::NotGranted { .. }
             );
-            catalog_cache.cache_scn_capability(ScnCapability::NotGranted { reason });
             if !was_not_granted {
                 append_scn_capability_degraded_audit(ctx, &failure)
                     .map_err(|error| DbError::Refused(Box::new(error)))?;
             }
+            // Publish only after the degradation is durable. A failed append
+            // must leave the next read responsible for probing and auditing.
+            catalog_cache.cache_scn_capability(ScnCapability::NotGranted { reason });
             Ok(None)
         }
         ScnProbeOutcome::Desync => Err(DbError::ConnectionLost(

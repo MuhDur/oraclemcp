@@ -562,6 +562,74 @@ fn dispatcher_scn_capability(dispatcher: &OracleDispatcher) -> ScnCapability {
 }
 
 #[test]
+fn issue46_failed_degradation_audit_does_not_cache_unaudited_capability() {
+    let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+        .build()
+        .expect("asupersync test runtime builds");
+    runtime.block_on(async {
+        let cx = Cx::current().expect("runtime installs Cx");
+        let auditor = failing_auditor();
+        let subject = system_generated_read_subject();
+        let cache = OracleCatalogResolverCache::new();
+        let scn_queries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let connection = ScnCapabilityCountingMock {
+            scn_queries: Arc::clone(&scn_queries),
+            unavailable: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            empty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            sqls: Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let ctx = AuditEntryCtx {
+            auditor: Some(&auditor),
+            subject: &subject,
+            db_evidence: None,
+        };
+        for attempt in 1..=2 {
+            let error = observed_scn_for_audit(&cx, &connection, &cache, ctx)
+                .await
+                .expect_err("each unaudited degradation must refuse");
+            assert!(
+                error
+                    .into_envelope()
+                    .message
+                    .contains("audit append failed")
+            );
+            assert_eq!(
+                cache.scn_capability(),
+                ScnCapability::Unprobed,
+                "failed append must not publish a cached, unaudited degradation"
+            );
+            assert_eq!(
+                scn_queries.load(std::sync::atomic::Ordering::SeqCst),
+                attempt
+            );
+        }
+        let (healthy_auditor, sink) = auditor_with_sink();
+        let ctx = AuditEntryCtx {
+            auditor: Some(&healthy_auditor),
+            subject: &subject,
+            db_evidence: None,
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                observed_scn_for_audit(&cx, &connection, &cache, ctx)
+                    .await
+                    .expect("durably recorded degradation"),
+                None
+            );
+        }
+        assert_eq!(scn_queries.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert!(matches!(
+            cache.scn_capability(),
+            ScnCapability::NotGranted { .. }
+        ));
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].tool, "scn_capability_probe");
+        assert_eq!(records[0].outcome, AuditOutcome::Failed);
+    });
+}
+
+#[test]
 fn issue46_reconnect_reprobes_once() {
     let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
         .build()
