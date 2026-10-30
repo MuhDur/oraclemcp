@@ -783,10 +783,14 @@ impl ErrorEnvelope {
     /// Append a remediation step.
     #[must_use]
     pub fn with_next_step(mut self, step: impl Into<String>) -> Self {
+        let step = step.into();
+        if step.trim().is_empty() {
+            return self;
+        }
         if self.next_steps.len() == 1 && self.next_steps[0] == self.error_class.next_action() {
             self.next_steps.clear();
         }
-        self.next_steps.push(step.into());
+        self.next_steps.push(step);
         self
     }
 
@@ -1583,6 +1587,34 @@ mod tests {
             assert!(!category.next_action().trim().is_empty(), "{category:?}");
             assert!(!category.meaning().trim().is_empty(), "{category:?}");
             assert!(!category.typical_cause().trim().is_empty(), "{category:?}");
+        }
+    }
+
+    #[test]
+    fn blank_remediation_preserves_a_safe_next_action() {
+        for blank in ["", " \n\t"] {
+            for class in ErrorClass::ALL {
+                let envelope = ErrorEnvelope::new(class, "synthetic refusal").with_next_step(blank);
+                assert_eq!(envelope.next_steps, [class.next_action()], "{class:?}");
+            }
+            for category in ReasonCategory::ALL {
+                let envelope =
+                    ErrorEnvelope::new(ErrorClass::ForbiddenStatement, "synthetic refusal")
+                        .with_structured_reason(StructuredReason::new(category))
+                        .with_next_step(blank);
+                assert_eq!(
+                    envelope.next_steps,
+                    [category.next_action()],
+                    "{category:?}"
+                );
+            }
+            let envelope = ErrorEnvelope::new(ErrorClass::InvalidArguments, "synthetic refusal")
+                .with_next_step("supply the documented required argument")
+                .with_next_step(blank);
+            assert_eq!(
+                envelope.next_steps,
+                ["supply the documented required argument"]
+            );
         }
     }
 
