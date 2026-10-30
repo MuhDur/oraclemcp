@@ -6902,6 +6902,73 @@ mod tests {
         ));
     }
 
+    /// Run the trusted-view relation proof for one application view whose
+    /// definition is pure; only `trusted_views` differs between calls.
+    async fn application_view_purity(cx: &Cx, trusted_views: &[String]) -> (Purity, Vec<String>) {
+        let source = "SELECT 1 AS N FROM DUAL";
+        let source_length = source.chars().count().to_string();
+        let conn = ScriptedRows::new([vec![row(&[
+            ("TEXT_VC", Some(source)),
+            ("TEXT_LENGTH", Some(source_length.as_str())),
+            ("EDITIONING_VIEW", Some("N")),
+        ])]]);
+        let mut view = dictionary_view_object("REPORTING_VIEW");
+        view.owner = "APP".to_owned();
+        view.synonym_chain.clear();
+        let cache = OracleCatalogResolverCache::new();
+        let purity = resolved_relations_read_purity_with_trusted_views(
+            cx,
+            &conn,
+            &[view],
+            &[],
+            TrustedViewProofPolicy {
+                cache: &cache,
+                context: TrustedViewProofContext {
+                    fga_policy: FgaEvidencePolicy::RequireProof,
+                    trusted_views,
+                    view_depth: 0,
+                    view_path: &[],
+                    state: &Mutex::new(StatementViewProofState::default()),
+                },
+            },
+        )
+        .await
+        .expect("an unfinished view proof is an ordinary unproven result");
+        let queries = conn
+            .queries
+            .lock()
+            .expect("queries lock")
+            .iter()
+            .map(|(sql, _)| sql.clone())
+            .collect();
+        (purity, queries)
+    }
+
+    /// h16xc: eligibility, not source purity, gates the trusted-view proof.
+    /// An unconfigured view with a pure definition must stay Unknown without
+    /// reading its source; naming it in `trusted_views` is what starts the
+    /// source proof. (Complete positive proofs are the live W4 issue35 cases.)
+    #[test]
+    fn issue35_untrusted_view_with_pure_source_stays_unknown() {
+        run_with_cx(|cx| async move {
+            let (_, trusted_queries) =
+                application_view_purity(&cx, &["APP.REPORTING_VIEW".to_owned()]).await;
+            assert_eq!(
+                trusted_queries.first().map(String::as_str),
+                Some(CatalogQueryId::TrustedViewText.spec().sql),
+                "a configured view must start its source proof"
+            );
+            for untrusted in [Vec::new(), vec!["APP.OTHER_VIEW".to_owned()]] {
+                let (purity, queries) = application_view_purity(&cx, &untrusted).await;
+                assert_eq!(purity, Purity::Unknown, "{untrusted:?}");
+                assert!(
+                    queries.is_empty(),
+                    "an ineligible view must not reach source proof: {queries:#?}"
+                );
+            }
+        });
+    }
+
     #[test]
     fn issue35_dictionary_identity_drift_refuses_before_dependency_io() {
         run_with_cx(|cx| async move {
