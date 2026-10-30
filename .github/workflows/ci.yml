@@ -776,6 +776,8 @@ jobs:
       - run: cargo test -p oraclemcp --all-targets
       - name: Build engine-free opt-out binary
         run: cargo build -p oraclemcp --no-default-features
+      - name: Verify engine-free artifact omits all nine PL/SQL tools
+        run: python3 scripts/release_artifact_acceptance.py --binary target/debug/oraclemcp --target engine-free-linux --expect-engine false
       - name: Keep engine-free opt-out build and tests green
         run: cargo test -p oraclemcp --all-targets --no-default-features
       - name: Assert all nine PL/SQL tools are registered

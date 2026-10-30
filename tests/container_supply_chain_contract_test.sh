@@ -18,6 +18,7 @@ esac
 python3 - "$ROOT" <<'PY'
 from __future__ import annotations
 
+import importlib.util
 import pathlib
 import re
 import sys
@@ -181,6 +182,9 @@ def validate_ci(workflow: str) -> None:
             "default engine-enabled feature tests are missing")
     require("cargo build -p oraclemcp --no-default-features" in feature_body,
             "engine-free opt-out binary build is missing")
+    require("release_artifact_acceptance.py --binary target/debug/oraclemcp "
+            "--target engine-free-linux --expect-engine false" in feature_body,
+            "engine-free opt-out artifact surface is not checked")
     require("--no-default-features" in feature_body,
             "engine-free opt-out tests are missing")
     require("scripts/plsql_feature_lane_check.sh --selftest" in feature_body,
@@ -213,6 +217,8 @@ def validate_release(workflow: str) -> None:
             "release does not enforce the antlr-codegen gate")
     require("release_artifact_acceptance.py --binary" in acceptance.group("body"),
             "release archives are not executed on native runners")
+    require(re.search(r"--expect-engine(?:=|\s+)false\b", workflow) is None,
+            "release artifacts must require the engine-enabled surface")
     require("artifact-acceptance" in workflow, "release publish gates do not depend on archive acceptance")
 
 
@@ -453,6 +459,30 @@ def validate_operations(source: str) -> None:
     )
 
 
+# Unit contract for the checker shared by native archive and image execution.
+# Real artifact execution remains a separate acceptance step.
+spec = importlib.util.spec_from_file_location(
+    "release_artifact_acceptance", root / "scripts/release_artifact_acceptance.py")
+acceptance = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(acceptance)
+required_tools = {
+    "oracle_plsql_parse", "oracle_plsql_analyze", "oracle_plsql_what_breaks",
+    "oracle_plsql_lineage", "oracle_lineage", "oracle_plsql_sast",
+    "oracle_plsql_doc", "oracle_plsql_live_snapshot", "oracle_plsql_blast_radius",
+}
+require(acceptance.EXPECTED_TOOLS == required_tools, "nine-tool acceptance contract drifted")
+for surface in ("--json info", "tools/list"):
+    acceptance.verify_tool_surface(required_tools | {"oracle_query"}, True, surface)
+    acceptance.verify_tool_surface({"oracle_query"}, False, surface)
+    for tool in required_tools:
+        for names, engine in ((required_tools - {tool}, True), ({tool}, False)):
+            try:
+                acceptance.verify_tool_surface(names, engine, surface)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError(f"{surface} accepted incorrect engine={engine} tool {tool}")
+
 validate_ci(ci)
 validate_release(release)
 validate_docker_recovery(docker_recovery)
@@ -478,6 +508,12 @@ require(
 
 rejects("PSScriptAnalyzer version drift", validate_ci, ci.replace('"1.25.0"', '"1.25.1"', 1))
 rejects("advisory PL/SQL lane", validate_ci, ci.replace("  plsql-intelligence:\n", "  plsql-intelligence:\n    continue-on-error: true\n", 1))
+rejects("engine-free artifact check expects the engine", validate_ci,
+        ci.replace("--target engine-free-linux --expect-engine false",
+                   "--target engine-free-linux --expect-engine true", 1))
+rejects("release artifact check opts out of the engine", validate_release,
+        release.replace('release_artifact_acceptance.py --binary "$binary"',
+                        'release_artifact_acceptance.py --binary "$binary" --expect-engine false', 1))
 rejects("missing native archive acceptance target", validate_release,
         release.replace("            runner: macos-15\n            archive: tar.gz", "            runner: macos-15\n            archive: tar.gz", 1)
         .replace("          - target: aarch64-apple-darwin\n            runner: macos-15\n            archive: tar.gz\n", "", 1))

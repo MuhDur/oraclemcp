@@ -43,6 +43,16 @@ def parse_frames(data: bytes) -> list[dict[str, object]]:
     return messages
 
 
+def verify_tool_surface(names: set[str], expected_engine: bool, surface: str) -> None:
+    expected = EXPECTED_TOOLS if expected_engine else set()
+    observed = EXPECTED_TOOLS & names
+    if observed != expected:
+        raise RuntimeError(
+            f"{surface} PL/SQL tools differ: missing={sorted(expected - observed)} "
+            f"unexpected={sorted(observed - expected)}"
+        )
+
+
 def command_for(binary: str | None, image: str | None, mode: str, config: Path) -> list[str]:
     if image:
         container_config = "/tmp/oraclemcp-release-acceptance.toml"
@@ -63,7 +73,10 @@ def main() -> int:
     source.add_argument("--binary")
     source.add_argument("--image")
     parser.add_argument("--target", required=True)
+    parser.add_argument("--expect-engine", choices=("true", "false"), default="true",
+                        help="release artifacts require true; false checks the engine-free opt-out")
     args = parser.parse_args()
+    expected_engine = args.expect_engine == "true"
 
     with tempfile.TemporaryDirectory(prefix="oraclemcp-release-acceptance-") as home:
         env = os.environ.copy()
@@ -87,12 +100,10 @@ def main() -> int:
         if info.returncode != 0:
             raise RuntimeError(f"--json info failed ({info.returncode}): {info.stderr.decode(errors='replace')}")
         info_value = json.loads(info.stdout)
-        if info_value.get("engine") is not True:
-            raise RuntimeError(f"--json info did not report engine=true: {info_value}")
+        if info_value.get("engine") is not expected_engine:
+            raise RuntimeError(f"--json info did not report engine={args.expect_engine}: {info_value}")
         info_tools = set(info_value.get("tools", []))
-        missing_info = sorted(EXPECTED_TOOLS - info_tools)
-        if missing_info:
-            raise RuntimeError(f"--json info missing required tools: {missing_info}")
+        verify_tool_surface(info_tools, expected_engine, "--json info")
         doctor = run(command_for(args.binary, args.image, "--json doctor", config), env=env)
         if doctor.returncode != 0:
             raise RuntimeError(f"doctor failed ({doctor.returncode}): {doctor.stderr.decode(errors='replace')}")
@@ -115,14 +126,12 @@ def main() -> int:
             raise RuntimeError(f"tools/list did not return a result: {replies}")
         tools = tools_reply["result"].get("tools", [])  # type: ignore[union-attr]
         names = {tool.get("name") for tool in tools if isinstance(tool, dict)}
-        missing = sorted(EXPECTED_TOOLS - names)
-        if missing:
-            raise RuntimeError(f"tools/list missing required tools: {missing}; returned {sorted(names)}")
+        verify_tool_surface(names, expected_engine, "tools/list")
         print(f"target={args.target}")
         print(version.stdout.decode(errors="replace").strip())
         print(
-            f"engine=true doctor=PASS tool_count={len(tools)} "
-            f"required_tools={','.join(sorted(EXPECTED_TOOLS))}"
+            f"engine={args.expect_engine} doctor=PASS tool_count={len(tools)} "
+            f"required_tools={','.join(sorted(EXPECTED_TOOLS)) if expected_engine else 'none'}"
         )
     return 0
 
