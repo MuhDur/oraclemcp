@@ -13857,6 +13857,9 @@ impl OracleDispatcher {
                 owner_and_name_arg(cx, state.conn.as_ref(), a.owner, a.table, "name").await?;
             let sql = oraclemcp_db::read_lob_sql(&owner, &table, &a.clob_column, &a.pk_column)
                 .map_err(DbError::into_envelope)?;
+            // Keep the validated source name through serialization so named
+            // masking rules see the column the caller actually requested.
+            let clob_column = a.clob_column.to_ascii_uppercase();
             let mut response = GuardedReadExecutor::new(self)
                 .run_server_read(
                     cx,
@@ -13886,7 +13889,7 @@ impl OracleDispatcher {
             let Some(cell) = response["rows"]
                 .as_array()
                 .and_then(|rows| rows.first())
-                .map(|row| &row["LOB_VALUE"])
+                .map(|row| &row[&clob_column])
             else {
                 let pk_column = a.pk_column.to_ascii_uppercase();
                 return Err(ErrorEnvelope::new(
@@ -13926,7 +13929,7 @@ impl OracleDispatcher {
             let clob = json!({
                 "owner": owner,
                 "table": table,
-                "column": a.clob_column.to_ascii_uppercase(),
+                "column": clob_column,
                 "pk_column": a.pk_column.to_ascii_uppercase(),
                 "value": value,
                 "char_count": char_count,

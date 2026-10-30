@@ -1637,11 +1637,18 @@
    "http"
   ],
   "requires": [],
-  "setup": [],
+  "setup": [
+   {
+    "sql": "CREATE TABLE ${owner}.D7_READLOB_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_READ_${run_id} PRIMARY KEY, SECRET_TEXT CLOB)"
+   },
+   {
+    "sql": "INSERT INTO ${owner}.D7_READLOB_${run_id} (ID, SECRET_TEXT) VALUES (1, 'W4_MASK_CANARY_' || '${run_id}')"
+   }
+  ],
   "call": {
    "arguments": {
     "owner": "${owner}",
-    "table": "D7_MASKLOB_${run_id}",
+    "table": "D7_READLOB_${run_id}",
     "clob_column": "SECRET_TEXT",
     "pk_column": "ID",
     "pk_value": "1",
@@ -1657,25 +1664,38 @@
     },
     "rows": [
      {
-      "LOB_VALUE": "<masked>"
+      "SECRET_TEXT": "<masked>"
      }
     ],
     "mask_certificate": {
      "decisions": [
       {
        "action": "mask",
-       "column": "LOB_VALUE",
-       "source": "mask_unknown_default"
+       "column": "SECRET_TEXT",
+       "source": "rule",
+       "rule_index": 0,
+       "rule_tag": "w4.synthetic.mask"
       }
      ]
     }
    }
   },
-  "db_reread": [],
+  "db_reread": [
+   {
+    "sql": "SELECT DBMS_LOB.SUBSTR(SECRET_TEXT, 100, 1) FROM ${owner}.D7_READLOB_${run_id} WHERE ID = 1",
+    "rows": [
+     [
+      "W4_MASK_CANARY_${run_id}"
+     ]
+    ]
+   }
+  ],
   "audit_expect": [],
   "on_unsupported": {
    "error_class": "INVALID_ARGUMENTS"
-  }
+  },
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT ID FROM ${owner}.D7_READLOB_${run_id} WHERE ID = 1"
  },
  {
   "case_id": "w4_plscope_inspect_identifiers_for_pkg",

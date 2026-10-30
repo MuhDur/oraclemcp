@@ -4311,7 +4311,7 @@ mod tests {
             crate::query::read_lob_sql("hr", "docs", "body", "id").expect("valid column and key");
         assert_eq!(
             lob,
-            "SELECT BODY AS LOB_VALUE FROM HR.DOCS WHERE ID = :1 FETCH FIRST 1 ROW ONLY"
+            "SELECT BODY FROM HR.DOCS WHERE ID = :1 FETCH FIRST 1 ROW ONLY"
         );
         for names in [
             ["hr;drop", "docs", "body", "id"],

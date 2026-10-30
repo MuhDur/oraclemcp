@@ -62,7 +62,7 @@ pub fn read_lob_sql(
     let clob_column = clob_column.to_ascii_uppercase();
     let pk_column = pk_column.to_ascii_uppercase();
     Ok(format!(
-        "SELECT {clob_column} AS LOB_VALUE \
+        "SELECT {clob_column} \
          FROM {owner}.{table} \
          WHERE {pk_column} = :1 \
          FETCH FIRST 1 ROW ONLY"

@@ -2236,10 +2236,10 @@ impl OracleConnection for OneRowMock {
         if catalog_extract_empty_rowset(&sql_lower) {
             return Ok(Vec::new());
         }
-        if sql_lower.contains("as lob_value") {
+        if sql_lower.contains("select body from ") {
             return Ok(vec![OracleRow {
                 columns: vec![(
-                    "LOB_VALUE".to_owned(),
+                    "BODY".to_owned(),
                     OracleCell::new("CLOB", Some("sensitive document".to_owned())),
                 )],
             }]);
@@ -2388,10 +2388,10 @@ impl OracleConnection for ReadClobMock {
         sql: &str,
         binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        if sql.to_ascii_lowercase().contains("as lob_value") {
+        if sql.to_ascii_lowercase().contains("select body from ") {
             return Ok(if self.row_present {
                 vec![OracleRow {
-                    columns: vec![("LOB_VALUE".to_owned(), OracleCell::new("CLOB", None))],
+                    columns: vec![("BODY".to_owned(), OracleCell::new("CLOB", None))],
                 }]
             } else {
                 Vec::new()
@@ -2447,6 +2447,7 @@ fn read_clob_null_value_on_existing_row_succeeds() {
         )
         .expect("a present row with a NULL CLOB is a successful read");
     assert_eq!(out["row_count"], json!(1), "{out}");
+    assert_eq!(out["rows"], json!([{ "BODY": null }]), "{out}");
     assert!(out["clob"]["value"].is_null(), "{out}");
     assert_eq!(out["clob"]["owner"], json!("APP"), "{out}");
     assert_eq!(out["clob"]["pk_column"], json!("ID"), "{out}");

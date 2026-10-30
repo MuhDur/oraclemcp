@@ -1077,9 +1077,17 @@ fn custom_read_tool_masked_and_audit_certified() {
 
 #[test]
 fn read_clob_masked_and_certified() {
+    use oraclemcp_db::{ResultMaskingAction, ResultMaskingRule};
+
     let (auditor, sink) = auditor_with_sink();
-    let dispatcher =
-        dispatcher_with(ddl_level(), auditor).with_result_masking_policy(Some(mask_all_policy()));
+    let policy = ResultMaskingPolicy::new(
+        vec![
+            ResultMaskingRule::column("BODY", ResultMaskingAction::Mask)
+                .with_policy_tag("document.body"),
+        ],
+        true,
+    );
+    let dispatcher = dispatcher_with(ddl_level(), auditor).with_result_masking_policy(Some(policy));
 
     let read = dispatcher
         .dispatch(
@@ -1094,10 +1102,19 @@ fn read_clob_masked_and_certified() {
         )
         .expect("ordinary table LOB read passes the governed read path");
     assert_eq!(read["clob"]["owner"], json!("APP"));
+    assert_eq!(read["clob"]["value"], json!("<masked>"));
+    assert_eq!(read["rows"], json!([{ "BODY": "<masked>" }]));
     assert!(!read["clob"].to_string().contains("sensitive document"));
     let certificate = read["mask_certificate"]
         .as_object()
         .expect("masked LOB read carries a certificate");
+    assert_eq!(
+        certificate["decisions"],
+        json!([{
+            "column": "BODY", "oracle_type": "CLOB", "action": "mask",
+            "source": "rule", "rule_index": 0, "rule_tag": "document.body",
+        }])
+    );
     let records = sink.records();
     let completed = records
         .last()
@@ -1116,6 +1133,62 @@ fn read_clob_masked_and_certified() {
                 "certificate_bound": certificate["audit_entry_hash"] == json!(completed.entry_hash),
             },
         })],
+    );
+}
+
+#[test]
+fn read_clob_named_column_rule_tokenizes_the_source_value() {
+    use oraclemcp_db::{ProfileMaskingSalt, ResultMaskingAction, ResultMaskingRule};
+
+    let (auditor, sink) = auditor_with_sink();
+    let policy = ResultMaskingPolicy::new(
+        vec![
+            ResultMaskingRule::column("BODY", ResultMaskingAction::Tokenize)
+                .with_policy_tag("document.body"),
+        ],
+        true,
+    )
+    .with_token_salt(
+        ProfileMaskingSalt::new("document-salt", vec![7; 32]).expect("synthetic test salt"),
+    );
+    let dispatcher = dispatcher_with(ddl_level(), auditor).with_result_masking_policy(Some(policy));
+    let read = dispatcher
+        .dispatch(
+            "oracle_read_clob",
+            json!({
+                "owner": "APP", "name": "EMPLOYEES", "clob_column": "body",
+                "pk_column": "ID", "pk_value": "1",
+            }),
+        )
+        .expect("named CLOB tokenization succeeds");
+    let token = read["clob"]["value"].as_str().expect("token value");
+    assert!(token.starts_with("tok_v1_"), "{read}");
+    assert_eq!(read["rows"][0]["BODY"], json!(token));
+    assert!(!read.to_string().contains("sensitive document"));
+    assert_eq!(
+        read["mask_certificate"]["decisions"],
+        json!([{
+            "column": "BODY", "oracle_type": "CLOB", "action": "tokenize",
+            "source": "rule", "rule_index": 0, "rule_tag": "document.body",
+            "salt_id": "document-salt",
+        }])
+    );
+    let records = sink.records();
+    let completed = records.last().expect("completed audit");
+    assert_eq!(completed.outcome, AuditOutcome::Succeeded);
+    assert_eq!(
+        read["mask_certificate"]["audit_entry_hash"],
+        json!(completed.entry_hash)
+    );
+    assert_eq!(
+        read["mask_certificate"]["decisions"],
+        serde_json::to_value(
+            completed
+                .result_masking
+                .as_ref()
+                .expect("signed masking decision")
+        )
+        .expect("serialize audit certificate")["decisions"]
     );
 }
 
