@@ -9451,7 +9451,9 @@ fn oracle_diff_flashback_retention_error_surfaces_typed_tool_envelope() {
     assert_eq!(err.error_class, ErrorClass::FlashbackRetentionExceeded);
     assert_eq!(err.ora_code, Some(8180));
     assert!(
-        err.next_steps.iter().any(|step| step.contains("newer SCN")),
+        err.next_steps.iter().any(|step| {
+            step == "retry with a SCN/timestamp inside the database's readable flashback range"
+        }),
         "{:?}",
         err.next_steps
     );
