@@ -82,8 +82,6 @@ fn parse_loopback_http_url(url: &str) -> SocketAddr {
     let authority = rest.split('/').next().unwrap_or(rest);
     let normalized = if let Some(port) = authority.strip_prefix("localhost:") {
         format!("127.0.0.1:{port}")
-    } else if authority.starts_with("[::1]:") {
-        authority.to_owned()
     } else {
         authority.to_owned()
     };

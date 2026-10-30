@@ -220,7 +220,7 @@ async fn confirmed_execute(
 #[derive(Debug)]
 enum LiveRaceOutcome {
     Executed,
-    Refused(ErrorEnvelope),
+    Refused(Box<ErrorEnvelope>),
     Setup,
 }
 
@@ -287,7 +287,7 @@ fn independently_create_edition_child(
         .await
         {
             Ok(_) => LiveRaceOutcome::Executed,
-            Err(error) => LiveRaceOutcome::Refused(error),
+            Err(error) => LiveRaceOutcome::Refused(Box::new(error)),
         }
     })
 }
