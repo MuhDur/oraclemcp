@@ -3,11 +3,12 @@
 //! `Cx`-first and `async` (B1): callers get bounded session reuse without a
 //! Tokio/r2d2 boundary, and cancellation is observed through explicit
 //! `&asupersync::Cx` checkpoints around checkout and through the native-async
-//! DB calls themselves. A cancelled or failed pooled call discards the checked-out
-//! connection DIRTY (it never returns to the idle set) so a torn round trip can
-//! never be reused. A known safe, idempotent read failure may be retried once
-//! under the shared driver taxonomy; only the final result decides whether the
-//! session can return to the idle set.
+//! DB calls themselves. A cancelled call or an uncertain failure discards the
+//! checked-out connection DIRTY so a torn round trip can never be reused. An
+//! invalidated metadata READ ONLY snapshot can return to idle after a proven
+//! rollback and liveness check. A known safe, idempotent read failure may be
+//! retried once under the shared driver taxonomy; only the final result decides
+//! whether the session can return to the idle set.
 //!
 //! ## Sizing and failover posture (B4)
 //!
@@ -1107,6 +1108,7 @@ impl OraclePool {
             )
             .await;
             let mut control_failed = first.control_failed;
+            let mut reusable_snapshot_error = first.reusable_snapshot_error;
             let first_result = first.result;
             let result = match &first_result {
                 Err(error)
@@ -1131,6 +1133,7 @@ impl OraclePool {
                     )
                     .await;
                     control_failed = retried.control_failed;
+                    reusable_snapshot_error = retried.reusable_snapshot_error;
                     retried.result
                 }
                 _ => first_result,
@@ -1152,7 +1155,8 @@ impl OraclePool {
                 .connection()
                 .set_request_deadline(cx, previous_deadline);
             let restore_error = quota_restore.err().or_else(|| deadline_restore.err());
-            let release_error = if result.is_ok() && restore_error.is_none() {
+            let reusable = result.is_ok() || reusable_snapshot_error;
+            let release_error = if reusable && restore_error.is_none() {
                 checkout
                     .connection()
                     .run_session_release_statements(cx)
@@ -1161,14 +1165,14 @@ impl OraclePool {
             } else {
                 None
             };
-            // Any final failure may have crossed an Oracle boundary and must
-            // be discarded. A successful call returns to idle only after
-            // request limits are restored, operator-owned release hooks pass,
-            // and a final liveness check succeeds.
-            let discard_after_call = match &result {
-                Err(_) => true,
-                Ok(_) if release_error.is_some() => true,
-                Ok(_) => self.manager.has_broken(cx, checkout.connection()).await,
+            // ORA-01466 invalidates the read snapshot, not the transport. Only
+            // an armed READ ONLY attempt with successful rollback may retain
+            // that error's session. All other final errors still discard;
+            // reuse also requires restored limits, release hooks and liveness.
+            let discard_after_call = match reusable {
+                false => true,
+                true if release_error.is_some() => true,
+                true => self.manager.has_broken(cx, checkout.connection()).await,
             };
             let discard = discard_after_call || restore_error.is_some();
             if discard && let Err(error) = checkout.connection().close(cx).await {
@@ -2132,6 +2136,168 @@ mod tests {
             });
     }
 
+    #[cfg(feature = "live-xe")]
+    #[test]
+    fn live_metadata_snapshot_invalidation_retains_session_and_read_only() {
+        use oraclemcp_guard::{OperatingLevel, SessionLevelState};
+        let password = std::env::var("ORACLEMCP_TEST_PASSWORD")
+            .expect("live metadata snapshot regression requires Oracle credentials");
+        let opts = OracleConnectOptions {
+            connect_string: std::env::var("ORACLEMCP_TEST_DSN").expect("live DSN"),
+            username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("live user")),
+            password: Some(password),
+            ..Default::default()
+        };
+        let reactor = asupersync::runtime::reactor::create_reactor().expect("live reactor");
+        RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cx = Cx::current().unwrap();
+                let ddl = Arc::new(
+                    RustOracleConnection::connect(&cx, opts.clone())
+                        .await
+                        .expect("DDL fixture session"),
+                );
+                let owner = ddl.describe(&cx).await.unwrap().current_schema.unwrap();
+                let pool = OraclePool::connect(
+                    &cx,
+                    opts,
+                    PoolSettings {
+                        max_size: 1,
+                        min_idle: 1,
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("live metadata pool");
+                let scope = pool
+                    .metadata_read_only_scope(
+                        &cx,
+                        SessionLevelState::new(OperatingLevel::ReadOnly, false),
+                    )
+                    .unwrap();
+                let sid_sql = "SELECT SYS_CONTEXT('USERENV', 'SID') AS SID FROM dual";
+                let before = pool.query_rows(&cx, sid_sql, Vec::new()).await.unwrap();
+                let before_sid = before[0]
+                    .text("SID")
+                    .expect("physical session SID")
+                    .to_owned();
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_micros()
+                    % 1_000_000_000;
+                let table = format!("E2E_MRO_S_{}_{}", std::process::id(), stamp);
+                ddl.execute(
+                    &cx,
+                    &format!("CREATE TABLE {table} (ID NUMBER, NOTE VARCHAR2(40))"),
+                    &[],
+                )
+                .await
+                .expect("create run-owned table immediately before describe");
+                match crate::describe_columns(&cx, &pool, &owner, &table).await {
+                    Ok(columns) => assert_eq!(columns.len(), 2),
+                    Err(error) => {
+                        let envelope = error.into_envelope();
+                        assert_eq!(envelope.ora_code, Some(1466));
+                        assert_eq!(envelope.error_class, oraclemcp_error::ErrorClass::Transient);
+                    }
+                }
+                assert_eq!(
+                    pool.metrics().discarded,
+                    0,
+                    "post-CREATE describe retains its session"
+                );
+
+                // Force the real error on BOTH attempts: establish a snapshot,
+                // then change the table's data object on a separate session.
+                // This avoids relying on Oracle's post-CREATE timing window.
+                let attempts = Arc::new(AtomicUsize::new(0));
+                let result = pool
+                    .with_conn(&cx, |cx, conn| {
+                        let ddl = Arc::clone(&ddl);
+                        let attempts = Arc::clone(&attempts);
+                        let truncate = format!("TRUNCATE TABLE {table}");
+                        let query = format!("SELECT ID FROM {table}");
+                        Box::pin(async move {
+                            attempts.fetch_add(1, Ordering::SeqCst);
+                            conn.query_rows(cx, "SELECT DUMMY FROM dual", &[]).await?;
+                            ddl.execute(cx, &truncate, &[]).await?;
+                            conn.query_rows(cx, &query, &[]).await
+                        })
+                    })
+                    .await;
+                let error = result.expect_err("both old READ ONLY snapshots must fail");
+                assert_eq!(
+                    error.retry_action(),
+                    oraclemcp_error::OracleRetryAction::RetrySameConnection
+                );
+                let envelope = error.into_envelope();
+                assert_eq!(envelope.ora_code, Some(1466));
+                assert_eq!(envelope.error_class, oraclemcp_error::ErrorClass::Transient);
+                assert_eq!(
+                    attempts.load(Ordering::SeqCst),
+                    2,
+                    "only one replay is allowed"
+                );
+                let metrics = pool.metrics();
+                assert_eq!(
+                    (
+                        metrics.open,
+                        metrics.idle,
+                        metrics.in_use,
+                        metrics.discarded
+                    ),
+                    (1, 1, 0, 0)
+                );
+                assert!(metrics.is_balanced());
+                let after = pool.query_rows(&cx, sid_sql, Vec::new()).await.unwrap();
+                assert_eq!(
+                    before_sid,
+                    after[0].text("SID").expect("retained session SID"),
+                    "no reconnect shortcut"
+                );
+
+                // A later request can observe the new definition on the same
+                // healthy session after the short DDL visibility window.
+                asupersync::time::sleep(asupersync::time::wall_now(), Duration::from_secs(2)).await;
+                let columns = crate::describe_columns(&cx, &pool, &owner, &table)
+                    .await
+                    .expect("fresh READ ONLY describe recovers");
+                assert_eq!(
+                    columns
+                        .iter()
+                        .filter_map(|row| row.text("COLUMN_NAME"))
+                        .collect::<Vec<_>>(),
+                    ["ID", "NOTE"]
+                );
+                assert_eq!(pool.metrics().discarded, 0);
+                let insert = format!("INSERT INTO {table} (ID) VALUES (731)");
+                let refused = pool
+                    .with_conn(&cx, |cx, conn| {
+                        let insert = insert.clone();
+                        Box::pin(async move { conn.execute(cx, &insert, &[]).await })
+                    })
+                    .await
+                    .expect_err("the recovered session still enforces READ ONLY");
+                assert_eq!(refused.into_envelope().ora_code, Some(1456));
+                assert!(
+                    ddl.query_rows(&cx, &format!("SELECT ID FROM {table}"), &[])
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                drop(scope);
+                pool.close(&cx).await.unwrap();
+                ddl.execute(&cx, &format!("DROP TABLE {table} PURGE"), &[])
+                    .await
+                    .unwrap();
+                ddl.close(&cx).await.unwrap();
+            });
+    }
+
     fn recorded_metadata_checkout(
         enabled: bool,
         elevated: bool,
@@ -2233,6 +2399,86 @@ mod tests {
         assert_eq!(calls, ["rollback", "arm", "read", "rollback"]);
         assert_eq!((metrics.open, metrics.idle, metrics.discarded), (0, 0, 1));
         assert!(metrics.is_balanced());
+    }
+
+    #[test]
+    fn metadata_snapshot_error_retains_only_a_successfully_cleaned_session() {
+        use crate::metadata_read_only::RecordingMetadataConnection;
+        use oraclemcp_guard::{OperatingLevel, SessionLevelState};
+        for fail_cleanup in [false, true] {
+            let pool = OraclePool::for_test_at_open_count(
+                PoolSettings {
+                    max_size: 1,
+                    min_idle: 0,
+                    ..Default::default()
+                },
+                0,
+            );
+            let recording = RecordingMetadataConnection {
+                fail_cleanup,
+                ..Default::default()
+            };
+            let calls = Arc::clone(&recording.calls);
+            {
+                let mut state = pool.state.lock().unwrap();
+                state.open_count = 1;
+                state.idle.push(Box::new(recording));
+            }
+            RuntimeBuilder::current_thread()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let cx = Cx::current().unwrap();
+                    let _scope = pool
+                        .metadata_read_only_scope(
+                            &cx,
+                            SessionLevelState::new(OperatingLevel::ReadOnly, false),
+                        )
+                        .unwrap();
+                    let error = pool
+                        .with_conn(&cx, |cx, conn| {
+                            Box::pin(async move {
+                                conn.query_rows(cx, "SELECT 1 FROM dual", &[]).await?;
+                                Err::<(), _>(DbError::ServerQuery(
+                                    "ORA-01466: table definition has changed".into(),
+                                ))
+                            })
+                        })
+                        .await
+                        .expect_err("snapshot failure stays visible");
+                    assert_eq!(error.into_envelope().ora_code, Some(1466));
+                    let metrics = pool.metrics();
+                    assert!(metrics.is_balanced());
+                    if fail_cleanup {
+                        assert_eq!((metrics.open, metrics.idle, metrics.discarded), (0, 0, 1));
+                        assert_eq!(
+                            *calls.lock().unwrap(),
+                            ["rollback", "arm", "read", "rollback"]
+                        );
+                    } else {
+                        assert_eq!(
+                            (
+                                metrics.open,
+                                metrics.idle,
+                                metrics.released,
+                                metrics.discarded
+                            ),
+                            (1, 1, 1, 0)
+                        );
+                        assert_eq!(
+                            *calls.lock().unwrap(),
+                            [
+                                "rollback", "arm", "read", "rollback", "rollback", "arm", "read",
+                                "rollback"
+                            ]
+                        );
+                        pool.query_rows(&cx, "SELECT 1 FROM dual", Vec::new())
+                            .await
+                            .expect("next metadata request reuses the session");
+                        assert_eq!(pool.metrics().discarded, 0);
+                    }
+                });
+        }
     }
 
     #[test]

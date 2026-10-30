@@ -18,6 +18,9 @@ const CLEANUP_MASKED_POLLS: u32 = 100;
 pub(crate) struct MetadataReadAttempt<T> {
     pub(crate) result: Result<T, DbError>,
     pub(crate) control_failed: bool,
+    /// An invalidated read snapshot leaves a healthy session reusable only
+    /// after the READ ONLY transaction has been rolled back successfully.
+    pub(crate) reusable_snapshot_error: bool,
 }
 
 pub(crate) async fn metadata_read_attempt<T, F, Fut>(
@@ -46,6 +49,7 @@ where
             return MetadataReadAttempt {
                 result: Err(error),
                 control_failed: true,
+                reusable_snapshot_error: false,
             };
         }
     }
@@ -54,6 +58,7 @@ where
         return MetadataReadAttempt {
             result,
             control_failed: false,
+            reusable_snapshot_error: false,
         };
     }
     // Ignore the exhausted primary cancellation while driving cleanup, with
@@ -72,15 +77,25 @@ where
         ))
     });
     match cleanup {
-        Ok(()) => MetadataReadAttempt {
-            result,
-            control_failed: false,
-        },
+        Ok(()) => {
+            let reusable_snapshot_error = matches!(
+                &result,
+                Err(error @ (DbError::Query(message) | DbError::ServerQuery(message)))
+                    if oraclemcp_error::parse_ora_code(message) == Some(1466)
+                        && !error.is_uncertain_session_state()
+            );
+            MetadataReadAttempt {
+                result,
+                control_failed: false,
+                reusable_snapshot_error,
+            }
+        }
         Err(cleanup_error) => MetadataReadAttempt {
             // Never turn an original query refusal into an apparently
             // successful read because its cleanup also failed.
             result: result.and_then(|_| Err(cleanup_error)),
             control_failed: true,
+            reusable_snapshot_error: false,
         },
     }
 }
@@ -255,6 +270,81 @@ mod tests {
             *conn.calls.lock().unwrap(),
             ["rollback", "arm", "read", "rollback"]
         );
+    }
+
+    fn run_error(
+        conn: &RecordingMetadataConnection,
+        level: Option<&SessionLevelState>,
+        error: DbError,
+    ) -> MetadataReadAttempt<Vec<OracleRow>> {
+        asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let cx = Cx::current().unwrap();
+                metadata_read_attempt(&cx, conn, level, || async {
+                    conn.query_rows(&cx, "SELECT 1 FROM dual", &[]).await?;
+                    Err(error)
+                })
+                .await
+            })
+    }
+
+    #[test]
+    fn metadata_snapshot_error_is_reusable_only_after_successful_read_only_cleanup() {
+        let level = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        for fail_cleanup in [false, true] {
+            let conn = RecordingMetadataConnection {
+                fail_cleanup,
+                ..Default::default()
+            };
+            let attempt = run_error(
+                &conn,
+                Some(&level),
+                DbError::ServerQuery("ORA-01466: table definition has changed".into()),
+            );
+            assert!(attempt.result.is_err(), "the read error must be returned");
+            assert_eq!(attempt.control_failed, fail_cleanup);
+            assert_eq!(attempt.reusable_snapshot_error, !fail_cleanup);
+            assert_eq!(
+                *conn.calls.lock().unwrap(),
+                ["rollback", "arm", "read", "rollback"]
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_snapshot_error_without_read_only_cleanup_is_not_reusable() {
+        let mut elevated = SessionLevelState::new(OperatingLevel::Admin, false);
+        elevated
+            .escalate_window(OperatingLevel::ReadWrite, Duration::from_secs(60))
+            .unwrap();
+        for level in [None, Some(&elevated)] {
+            let conn = RecordingMetadataConnection::default();
+            let attempt = run_error(
+                &conn,
+                level,
+                DbError::Query("ORA-01466: table definition has changed".into()),
+            );
+            assert!(!attempt.reusable_snapshot_error);
+            assert_eq!(*conn.calls.lock().unwrap(), ["read"]);
+        }
+    }
+
+    #[test]
+    fn metadata_cleanup_does_not_make_other_errors_reusable() {
+        let level = SessionLevelState::new(OperatingLevel::ReadOnly, false);
+        for error in [
+            DbError::Query("ORA-01456: cannot perform insert/delete/update".into()),
+            DbError::Query("ORA-03113: end-of-file on communication channel".into()),
+            DbError::Query("ORA-01466: snapshot changed; ORA-03113: lost connection".into()),
+            DbError::Internal("ORA-01466: untrusted internal detail".into()),
+        ] {
+            let conn = RecordingMetadataConnection::default();
+            let attempt = run_error(&conn, Some(&level), error);
+            assert!(!attempt.control_failed);
+            assert!(!attempt.reusable_snapshot_error);
+        }
     }
 
     #[test]
