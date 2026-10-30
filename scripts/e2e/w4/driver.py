@@ -68,7 +68,7 @@ class DriverError(RuntimeError):
 RETENTION_SOURCE_SKIP = "RETENTION_SOURCE_NEWER_THAN_EXPIRED_SCN"
 RETENTION_HISTORY_SKIP = "RETENTION_SCN_HISTORY_UNAVAILABLE"
 RETENTION_SKIP_CODES = [RETENTION_SOURCE_SKIP, RETENTION_HISTORY_SKIP]
-AWR_SKIP_CODES = ["AWR_PACK_NOT_ENABLED", "AWR_CATALOG_UNAVAILABLE", "AWR_NO_SNAPSHOTS",
+AWR_SKIP_CODES = ["AWR_LICENSE_NOT_ATTESTED", "AWR_PACK_NOT_ENABLED", "AWR_CATALOG_UNAVAILABLE", "AWR_NO_SNAPSHOTS",
                   "AWR_NO_SQL_HISTORY", "AWR_TOP_SQL_HAS_NO_PLAN_HISTORY"]
 
 
@@ -1294,7 +1294,8 @@ def pick_port():
 
 
 def write_lab_config(path, lane, dsn, port, owner=None, cross=None,
-                     metadata_pool=False, metadata_read_only_transaction=None):
+                     metadata_pool=False, metadata_read_only_transaction=None,
+                     diagnostics_pack_licensed=False):
     audience = f"http://127.0.0.1:{port}/mcp"
     content = f'''schema_version = 2
 default_profile = "{lane}"
@@ -1356,13 +1357,13 @@ default_level = "READ_ONLY"
 
 [[profiles]]
 name = "{lane}_licensed"
-description = "synthetic W4 lane with an explicit Diagnostics Pack license attestation"
+description = "synthetic W4 Diagnostics Pack profile; attestation comes from the explicit CLI option"
 connect_string = "{dsn}"
 username = "system"
 credential_ref = "env:W4_DB_PASSWORD"
 max_level = "ADMIN"
 default_level = "READ_ONLY"
-diagnostics_pack_licensed = true
+diagnostics_pack_licensed = {str(diagnostics_pack_licensed).lower()}
 '''
     content += f'''
 [[profiles]]
@@ -2983,7 +2984,10 @@ def summary_table(rows):
 
 def verify_awr_skip_evidence(reason):
     code = reason["code"]
-    if code == "AWR_PACK_NOT_ENABLED":
+    if code == "AWR_LICENSE_NOT_ATTESTED":
+        require(reason.get("diagnostics_pack_licensed") is False,
+                "AWR attestation skip needs the actual absent licence attestation")
+    elif code == "AWR_PACK_NOT_ENABLED":
         require(reason.get("pack_setting") == "NONE",
                 "AWR pack skip needs the actual disabled server setting")
     elif code == "AWR_CATALOG_UNAVAILABLE":
@@ -3012,8 +3016,12 @@ def verify_awr_skip_evidence(reason):
             raise DriverError("unknown AWR environment skip")
 
 
-def probe_awr_environment(connection):
+def probe_awr_environment(connection, *, diagnostics_pack_licensed=False):
     """Observe prerequisites without enabling packs or creating licensed snapshots."""
+    if diagnostics_pack_licensed is not True:
+        raise EnvironmentSkip({
+            "code": "AWR_LICENSE_NOT_ATTESTED", "diagnostics_pack_licensed": False,
+            "message": "--diagnostics-pack-licensed was not supplied; no AWR history probe or licensed tool call was run"})
     cursor = connection.cursor()
     evidence = {}
     catalog = "V$PARAMETER"
@@ -3414,7 +3422,8 @@ def _run_lane(args, output):
     port = pick_port()
     audience = write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
                                metadata_pool=args.metadata_pool,
-                               metadata_read_only_transaction=args.metadata_read_only_transaction)
+                               metadata_read_only_transaction=args.metadata_read_only_transaction,
+                               diagnostics_pack_licensed=args.diagnostics_pack_licensed)
     secret = secrets.token_hex(32)
     key = secrets.token_hex(32)
     env = {name: value for name, value in os.environ.items() if not name.startswith("ORACLEMCP_")}
@@ -3482,7 +3491,8 @@ def _run_lane(args, output):
                     write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
                                      owner=owner, cross="W4X_" + fixture_id,
                                      metadata_pool=args.metadata_pool,
-                                     metadata_read_only_transaction=args.metadata_read_only_transaction)
+                                     metadata_read_only_transaction=args.metadata_read_only_transaction,
+                                     diagnostics_pack_licensed=args.diagnostics_pack_licensed)
                 needs_retention_probe = any(
                     case.get("runtime_retention_probe")
                     and (not args.case or case["case_id"] in args.case)
@@ -3504,7 +3514,7 @@ def _run_lane(args, output):
                        and (not args.case or case["case_id"] in args.case)
                        and transport in case["transports"] for case in family_cases):
                     try:
-                        probe_awr_environment(connection)
+                        probe_awr_environment(connection, diagnostics_pack_licensed=args.diagnostics_pack_licensed)
                     except EnvironmentSkip as exc:
                         awr_skip = exc.reason
                 client_env = {**env, "XDG_STATE_HOME": str(state)}
@@ -3956,6 +3966,55 @@ def retention_probe_selftest():
 
 
 
+def awr_attestation_config_selftest():
+    import tomllib
+    path = ROOT / "target/e2e/w4/selftest/awr-attestation-profiles.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_lab_config(path, "free23", "localhost:1523/FREEPDB1", 7070)
+    profiles = tomllib.loads(path.read_text())["profiles"]
+    licensed = next(profile for profile in profiles if profile["name"] == "free23_licensed")
+    require(licensed.get("diagnostics_pack_licensed") is False,
+            "generated profile silently attested to a Diagnostics Pack licence")
+    write_lab_config(path, "free23", "localhost:1523/FREEPDB1", 7070,
+                     diagnostics_pack_licensed=True)
+    profiles = tomllib.loads(path.read_text())["profiles"]
+    require(next(profile for profile in profiles if profile["name"] == "free23_licensed")
+            .get("diagnostics_pack_licensed") is True
+            and all(profile.get("diagnostics_pack_licensed", False) is False
+                    for profile in profiles if profile["name"] != "free23_licensed"),
+            "explicit attestation was lost or leaked into unlicensed profiles")
+    print(compact({"selftest": "awr_profile_attestation_is_explicit", "verdict": "pass"}))
+
+
+def awr_unattested_probe_selftest():
+    class NoOracle:
+        def cursor(self):
+            raise DriverError("unattested AWR probe reached Oracle")
+    try:
+        probe_awr_environment(NoOracle())
+    except EnvironmentSkip as exc:
+        reason = exc.reason
+    else:
+        raise DriverError("unattested AWR case was treated as available")
+    require(reason["code"] == "AWR_LICENSE_NOT_ATTESTED"
+            and reason.get("diagnostics_pack_licensed") is False,
+            "unattested AWR skip lost its exact attestation evidence")
+    case = next(case for case in load_cases() if case.get("runtime_awr_probe"))
+    row = environment_skip_row(case, "stdio", "free23", reason)
+    require(row["actual"] is None and row["verdict"] == "skip"
+            and run_verdict([row, {"case_id": "following", "verdict": "pass"}]) == "skip"
+            and run_verdict([row, {"case_id": "failed", "verdict": "fail"}]) == "fail",
+            "unattested AWR was counted as a pass or hid a failure")
+    for value in (True, 0, None):
+        try:
+            verify_awr_skip_evidence({**reason, "diagnostics_pack_licensed": value})
+        except DriverError:
+            pass
+        else:
+            raise DriverError("unattested AWR skip accepted contradictory evidence")
+    print(compact({"selftest": "awr_unattested_skips_before_any_oracle_probe", "verdict": "pass"}))
+
+
 def awr_environment_selftest():
     class AwrConnection:
         """Unit-only catalog responses; real Oracle is proved separately."""
@@ -3990,7 +4049,7 @@ def awr_environment_selftest():
             ("AWR_TOP_SQL_HAS_NO_PLAN_HISTORY", AwrConnection(points=0)),
             ("AWR_CATALOG_UNAVAILABLE", AwrConnection(error="ORA-00942: table or view does not exist"))):
         try:
-            probe_awr_environment(connection)
+            probe_awr_environment(connection, diagnostics_pack_licensed=True)
         except EnvironmentSkip as exc:
             require(exc.reason["code"] == code, "wrong typed AWR environment reason")
             row = environment_skip_row(case, "stdio", "free23", exc.reason)
@@ -4010,12 +4069,12 @@ def awr_environment_selftest():
             require(len(connection.queries) == 1, "disabled pack caused an AWR history read")
         require(not any("DBMS_WORKLOAD_REPOSITORY" in q for q in connection.queries),
                 "AWR probe created an unapproved snapshot")
-    available = probe_awr_environment(AwrConnection())
+    available = probe_awr_environment(AwrConnection(), diagnostics_pack_licensed=True)
     require(available["snapshot_count"] == 2 and available["plan_point_count"] == 1,
             "real available history must retain the positive case")
     for error in ("ORA-03113: end-of-file on communication channel", "ORA-00600: internal error"):
         try:
-            probe_awr_environment(AwrConnection(error=error))
+            probe_awr_environment(AwrConnection(error=error), diagnostics_pack_licensed=True)
         except EnvironmentSkip:
             raise DriverError("unexpected AWR failure was hidden as an environment skip")
         except DriverError:
@@ -4677,6 +4736,8 @@ def selftest():
     retention_probe_selftest()
     flashback_grant_selftest()
     awr_environment_selftest()
+    awr_attestation_config_selftest()
+    awr_unattested_probe_selftest()
     failed_results_selftest()
     killed_dml_audit_selftest()
     level_expiry_audit_selftest()
@@ -5151,6 +5212,8 @@ def main():
     parser.add_argument("--lane", choices=("free23", "xe18", "xe21"))
     parser.add_argument("--binary", type=Path)
     parser.add_argument("--binary-source-sha", help="verified source revision of an external binary")
+    parser.add_argument("--diagnostics-pack-licensed", action="store_true",
+                        help="explicitly attest Diagnostics Pack licensing for the disposable lab before AWR reads")
     parser.add_argument("--metadata-reachability-probe", action="store_true")
     parser.add_argument("--metadata-pool", action="store_true",
                         help="use the same two-slot metadata pool for baseline/off/on proofs")
