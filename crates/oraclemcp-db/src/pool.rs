@@ -3121,6 +3121,10 @@ mod tests {
                     Err(error) => panic!("TCP accept: {error}"),
                 }
             };
+            // Winsock inherits the listener's nonblocking mode on accept.
+            // The silent peer must wait for client EOF, not close early on
+            // WouldBlock and turn the acquisition timeout into a logon error.
+            socket.set_nonblocking(false).unwrap();
             socket
                 .set_read_timeout(Some(Duration::from_secs(3)))
                 .unwrap();
