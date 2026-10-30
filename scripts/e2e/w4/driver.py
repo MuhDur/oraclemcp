@@ -48,11 +48,12 @@ OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "au
                         "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
                         "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner",
                         "environment_skips", "runtime_awr_probe", "audit_optional_prefix", "test_id",
-                        "name_alias_matrix", "mask_certificate_audit", "catalog_rows_positive", "view_proof_audit"}
+                        "name_alias_matrix", "mask_certificate_audit", "catalog_rows_positive", "view_proof_audit",
+                        "runtime_timeout_probe"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
-                    "trusted_views", "short_admin"}
+                    "trusted_views", "short_admin", "synthetic_owner_short"}
 LEVELS = ("READ_ONLY", "READ_WRITE", "DDL", "ADMIN")
 # A multi-step case captures structured values from one step and feeds them
 # to later ones (a confirmation token from a preview, for example).
@@ -498,9 +499,16 @@ def validate_case(case, filename):
         require(isinstance(case["view_proof_audit"], list) and case["view_proof_audit"]
                 and all(isinstance(target, str) and "." in target for target in case["view_proof_audit"]),
                 "view_proof_audit needs exact qualified fixture views")
-    if case.get("profile_variant") in {"synthetic_raw", "synthetic_owner"}:
+    if case.get("profile_variant") in {"synthetic_raw", "synthetic_owner", "synthetic_owner_short"}:
         require(case["level"] == "READ_ONLY" and case.get("setup_phase") == "before_server",
                 "synthetic fixture profiles require precreated READ_ONLY fixtures")
+    if "runtime_timeout_probe" in case:
+        require(case["runtime_timeout_probe"] is True
+                and case["case_id"] == "w4_runtime_issue48_timeout_zero_refused_and_long_read_cut_at_2s"
+                and case["tool"] == "oracle_query"
+                and case.get("profile_variant") == "synthetic_owner_short"
+                and case["expect"] == {"error_class": "TIMEOUT"},
+                "runtime timeout probe needs its exact two-second owner query case")
     if case.get("profile_variant") == "synthetic_owner_rw":
         require(case["level"] == "READ_WRITE",
                 "synthetic owner write profile is restricted to explicit READ_WRITE cases")
@@ -1411,6 +1419,16 @@ max_level = "READ_ONLY"
 default_level = "READ_ONLY"
 '''
         content += f'''
+[[profiles]]
+name = "{lane}_owner_short"
+description = "run-owned W4 pure long read with a two-second whole-request budget"
+connect_string = "{dsn}"
+username = "{owner}"
+credential_ref = "env:W4_OWNER_PASSWORD"
+max_level = "READ_ONLY"
+default_level = "READ_ONLY"
+call_timeout_seconds = 2
+
 [[profiles]]
 name = "{lane}_owner_rw"
 description = "synthetic W4 disposable owner fixture for explicit EXPLAIN write tests"
@@ -2377,6 +2395,151 @@ def verify_name_alias_matrix(client, case):
     return observations
 
 
+def verify_zero_timeout_startup(exit_code, stdout, stderr):
+    require(exit_code == 2 and "profiles.w4_zero.call_timeout_seconds" in stderr
+            and "minimum 1" in stderr and '"jsonrpc"' not in stdout,
+            f"zero-timeout startup needs exit2 and the typed minimum error: {exit_code}, {stderr[:240]}")
+
+
+def zero_timeout_startup_probe(binary, env):
+    config = Path(env["ORACLEMCP_CONFIG"]).parent / "timeout-zero.toml"
+    config.write_text('''[[profiles]]
+name = "w4_zero"
+connect_string = "localhost:1523/FREEPDB1"
+call_timeout_seconds = 0
+''')
+    child = subprocess.run([str(binary), "serve", "--profile", "w4_zero", "--allow-no-auth"],
+                           env={**env, "ORACLEMCP_CONFIG": str(config)}, input="",
+                           capture_output=True, text=True, timeout=10)
+    verify_zero_timeout_startup(child.returncode, child.stdout, child.stderr)
+    return {"exit_code": child.returncode, "field": "profiles.w4_zero.call_timeout_seconds",
+            "minimum_seconds": 1, "verdict": "pass"}
+
+
+def verify_timeout_budget(reply, elapsed, query_observed):
+    verify_expect({"error_class": "TIMEOUT"}, reply)
+    require(query_observed, "independent Oracle observer never saw the exact admitted long read")
+    require(1 <= elapsed <= 10, f"two-second profile response outside 1–10s bound: {elapsed:.3f}s")
+
+
+def active_long_read_sessions(connection, owner, sql):
+    return connection.cursor().execute(
+        "SELECT COUNT(*) FROM V$SESSION S JOIN V$SQL Q ON Q.SQL_ID=S.SQL_ID "
+        "AND Q.CHILD_NUMBER=S.SQL_CHILD_NUMBER WHERE S.USERNAME=:1 "
+        "AND S.STATUS='ACTIVE' AND Q.COMMAND_TYPE=3 AND INSTR(Q.SQL_TEXT,:2)>0",
+        (owner, sql)).fetchone()[0]
+
+
+def long_read_owner(sql):
+    identity = re.search(r"\b(?:FROM|JOIN) (W4O_W4[0-9]{4}[A-F0-9]{6})\.T_PARENT_", sql)
+    require(identity is not None, "timeout query must use its exact run-owned fixture")
+    return identity[1]
+
+
+def calibrate_long_read(case, lane, env, observer):
+    """Prove a lower bound, then cancel the independent calibration connection.
+
+    This is not an MCP timeout proof; the actual two-second request follows it.
+    """
+    import oracledb
+    sql = case["call"]["arguments"]["sql"]
+    owner = long_read_owner(sql)
+    settings = load_lane(HERE / "rig.toml", lane)
+    connection = oracledb.connect(user=owner, password=env["W4_OWNER_PASSWORD"], dsn=settings["dsn"])
+    connection.call_timeout = 0
+    result, done = {}, threading.Event()
+    def request():
+        try:
+            result["rows"] = connection.cursor().execute(sql).fetchall()
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            done.set()
+    worker = threading.Thread(target=request, daemon=True)
+    start = time.monotonic()
+    worker.start()
+    observed_seconds = None
+    try:
+        admission_deadline = start + 5
+        while active_long_read_sessions(observer, owner, sql) == 0:
+            require(not done.is_set() and time.monotonic() < admission_deadline,
+                    "calibration SQL did not enter active Oracle execution within5s")
+            done.wait(timeout=0.05)
+        start = time.monotonic()
+        deadline = start + 31
+        while time.monotonic() < deadline:
+            require(not done.wait(timeout=min(0.1, max(0, deadline-time.monotonic()))),
+                    "calibration finished before proving a greater-than-30s lower bound")
+        observed_seconds = time.monotonic() - start
+        require(not done.is_set() and active_long_read_sessions(observer, owner, sql) > 0,
+                "exact calibration SQL was not still active after31s")
+    finally:
+        connection.cancel()
+        worker.join(timeout=10)
+        require(done.is_set(), "calibration did not stop after bounded observer cancellation")
+        connection.close()
+    return {"sql_sha256": hashlib.sha256(sql.encode()).hexdigest(),
+            "sql_shape_sha256": sha256(scrub(sql)), "call_timeout_ms": 0,
+            "still_active_after_seconds": observed_seconds,
+            "completion_time_measured": False, "cancel_requested_after_lower_bound": True}
+
+
+def timeout_budget_call(client, case, connection):
+    sql = case["call"]["arguments"]["sql"]
+    owner = long_read_owner(sql)
+    require(active_long_read_sessions(connection, owner, sql) == 0,
+            "exact long read was already active before the timeout call")
+    result, done = {}, threading.Event()
+    def request():
+        start = time.monotonic()
+        try:
+            result["reply"] = client.rpc("tools/call", {"name": case["tool"],
+                                                        "arguments": case["call"]["arguments"]})
+        except Exception as exc:
+            result["error"] = exc
+        finally:
+            result["elapsed"] = time.monotonic() - start
+            done.set()
+    worker = threading.Thread(target=request, daemon=True)
+    deadline = time.monotonic() + 12
+    worker.start()
+    observed = False
+    while not done.is_set() and time.monotonic() < deadline:
+        if active_long_read_sessions(connection, owner, sql) > 0:
+            observed = True
+            break
+        time.sleep(0.05)
+    worker.join(timeout=max(0, deadline - time.monotonic()))
+    require(done.is_set(), "two-second request did not finish within the 12s harness deadline")
+    if "error" in result:
+        raise result["error"]
+    return result["reply"], {"call_timeout_seconds": 2, "oracle_query_observed": observed,
+        "elapsed_seconds": result["elapsed"], "response_bound_seconds": [1, 10]}
+
+
+def timeout_session_probe(client, profile, observer, owner):
+    args = {"sql": "SELECT SYS_CONTEXT('USERENV','SID') AS SID FROM dual"}
+    reply = client.rpc("tools/call", {"name": "oracle_query", "arguments": args})
+    payload = tool_payload(reply)
+    explicit_switch = False
+    if payload.get("isError") is True:
+        error = payload.get("structuredContent", {})
+        require(error.get("error_class") == "CONNECTION_FAILED" and "quarantin" in error.get("message", "").lower(),
+                "post-timeout read must succeed or explicitly refuse a quarantined session: " + compact(error))
+        switched = client.rpc("tools/call", {"name": "oracle_switch_profile", "arguments": {"profile": profile}})
+        require(tool_payload(switched).get("isError") is not True, "quarantined session could not be replaced")
+        explicit_switch = True
+        reply = client.rpc("tools/call", {"name": "oracle_query", "arguments": args})
+    require(tool_payload(reply).get("isError") is not True, "post-timeout session did not recover a short read")
+    rows = tool_payload(reply).get("structuredContent", {}).get("rows", [])
+    require(len(rows) == 1 and str(rows[0].get("SID", "")).isdigit(), "short read did not return a real session ID")
+    sid = int(rows[0]["SID"])
+    identity = observer.cursor().execute(
+        "SELECT SERIAL# FROM V$SESSION WHERE SID=:1 AND USERNAME=:2", (sid, owner)).fetchall()
+    require(len(identity) == 1, "short-read session identity was not independently confirmed")
+    return {"sid": sid, "serial": int(identity[0][0]), "explicit_profile_switch": explicit_switch}
+
+
 def active_exact_read_count(connection, sql):
     # The native adapter annotates and paginates the sent SQL. Match the entire
     # caller SELECT inside that execution envelope, rather than a preparation
@@ -2526,7 +2689,7 @@ def doctor_phase_observations_valid(exit_code, observations):
 
 
 def run_case(client, case, transport, lane, capabilities, connection, barriers,
-             binary, audit_path, env, descriptor=None):
+             binary, audit_path, env, descriptor=None, timeout_calibrations=None):
     start = time.monotonic()
     supported = set(case["requires"]) <= capabilities
     expected = expected_for_case(case, capabilities)
@@ -2587,7 +2750,30 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         before = len(audit_records(audit_path))
         captures = (run_steps(client, case, row, binary, audit_path, env, connection)
                     if "steps" in case else {})
-        if "kill_served_session_user" in case["call"] and supported:
+        if case.get("runtime_timeout_probe") and supported:
+            row["timeout_zero_startup"] = zero_timeout_startup_probe(binary, env)
+            if timeout_calibrations is None:
+                timeout_calibrations = {}
+            if lane not in timeout_calibrations:
+                timeout_calibrations[lane] = calibrate_long_read(case, lane, env, connection)
+            row["long_read_calibration"] = timeout_calibrations[lane]
+            require(row["long_read_calibration"]["sql_shape_sha256"]
+                    == sha256(scrub(case["call"]["arguments"]["sql"])),
+                    "long-read calibration does not match this exact query shape")
+            owner = long_read_owner(case["call"]["arguments"]["sql"])
+            before_session = timeout_session_probe(client, lane + "_owner_short", connection, owner)
+            reply, row["timeout_budget"] = timeout_budget_call(client, case, connection)
+            row["actual"] = scrub(tool_payload(reply))
+            verify_timeout_budget(reply, row["timeout_budget"]["elapsed_seconds"],
+                                  row["timeout_budget"]["oracle_query_observed"])
+            row["timeout_budget"]["verdict"] = "pass"
+            after_session = timeout_session_probe(client, lane + "_owner_short", connection, owner)
+            require((before_session["sid"], before_session["serial"])
+                    != (after_session["sid"], after_session["serial"]),
+                    "whole-request timeout must retire the uncertain session before recovery")
+            row["timeout_session"] = {"before": before_session, "after": after_session,
+                "disposition": "retired_and_replaced", "short_read_succeeded": True}
+        elif "kill_served_session_user" in case["call"] and supported:
             reply, recovery_actual = killed_session_recovery_call(client, case, connection, descriptor, lane)
             row["killed_session_recovery"] = recovery_actual
         elif "kill_served_session_dml_user" in case["call"] and supported:
@@ -3495,6 +3681,7 @@ def _run_lane(args, output):
         if case["case_id"] in release_ids:
             case["test_id"] = release_ids[case["case_id"]]
     rows, descriptors, fixture_runs, selected_case_ids = [], None, {}, set()
+    timeout_calibrations = {}
     output.update({"checkout_sha": checkout_sha,
                    "binary_source_sha": args.binary_source_sha or (checkout_sha if built_here else None),
                    "binary_sha256": binary_sha256, "fixture_runs": fixture_runs,
@@ -3527,7 +3714,7 @@ def _run_lane(args, output):
                     wait_for_setup_ready(
                         settings, password,
                         f"SELECT ID FROM {owner}.T_PARENT_{fixture_id} WHERE ROWNUM <= 1")
-                    if any(case.get("profile_variant") in {"synthetic_owner", "synthetic_owner_rw"}
+                    if any(case.get("profile_variant") in {"synthetic_owner", "synthetic_owner_rw", "synthetic_owner_short"}
                            for case in family_cases if transport in case["transports"]):
                         # The disposable owner needs the same FGA catalog proof
                         # that every served relation read requires.
@@ -3634,6 +3821,7 @@ def _run_lane(args, output):
                     desired_profile = (args.lane + "_raw" if variant == "synthetic_raw"
                                        else args.lane + "_licensed" if variant == "synthetic_licensed"
                                        else args.lane + "_owner" if variant == "synthetic_owner"
+                                       else args.lane + "_owner_short" if variant == "synthetic_owner_short"
                                        else args.lane + "_owner_rw" if variant == "synthetic_owner_rw"
                                        else args.lane + "_cross_rw" if variant == "synthetic_cross_rw"
                                        else args.lane + "_cross_rw_strict" if variant == "synthetic_cross_rw_strict"
@@ -3668,7 +3856,7 @@ def _run_lane(args, output):
                                              "W4O_" + fixture_id if fixture_id else None):
                         row = run_case(client, case, transport, args.lane, capabilities, connection,
                                        barriers, binary, audit_path, client_env,
-                                       discovered.get(case["tool"]))
+                                       discovered.get(case["tool"]), timeout_calibrations=timeout_calibrations)
                     if case.get("flashback_grant_owner"):
                         row["flashback_grant"] = {"scope": "case", "revoked": True}
                     rows.append(row)
@@ -4792,7 +4980,36 @@ def argument_deprecations_selftest():
     print(compact({"selftest": "exact_argument_deprecation_metadata", "verdict": "pass"}))
 
 
+def timeout_budget_selftest():
+    # Checker unit cases; actual profile/Oracle timing is verified by the live case.
+    case = next(case for case in load_cases() if case.get("runtime_timeout_probe"))
+    sql = case["call"]["arguments"]["sql"].replace("${owner}", "W4O_W40000ABCDEF")
+    require(long_read_owner(sql) == "W4O_W40000ABCDEF", "long-read owner fixture expansion differs")
+    stderr = "profiles.w4_zero.call_timeout_seconds: minimum 1"
+    verify_zero_timeout_startup(2, "", stderr)
+    for exit_code, stdout, error in ((0, "", stderr), (2, "", "other error"),
+                                    (2, '{"jsonrpc":"2.0"}', stderr)):
+        try:
+            verify_zero_timeout_startup(exit_code, stdout, error)
+        except DriverError:
+            continue
+        raise DriverError("zero-timeout checker accepted startup without exact refusal")
+    timeout = {"result": {"isError": True, "structuredContent": {"error_class": "TIMEOUT"}}}
+    verify_timeout_budget(timeout, 2, True)
+    for reply, elapsed, observed in ((timeout, 0.1, True), (timeout, 11, True),
+                                     (timeout, 2, False),
+                                     ({"result": {"isError": True, "structuredContent": {
+                                         "error_class": "FORBIDDEN_STATEMENT"}}}, 2, True)):
+        try:
+            verify_timeout_budget(reply, elapsed, observed)
+        except DriverError:
+            continue
+        raise DriverError("timeout checker accepted a fast refusal, late response or unobserved query")
+    print(compact({"selftest": "exact_zero_refusal_and_observed_bounded_timeout", "verdict": "pass"}))
+
+
 def selftest():
+    timeout_budget_selftest()
     argument_deprecations_selftest()
     json_subset_refusal_selftest()
     metadata_pool_config_selftest()

@@ -135,5 +135,21 @@
     "audit_expect": [],
     "on_unsupported": {"error_class": "RUNTIME_STATE_REQUIRED"},
     "cleanup": []
+  },
+  {
+    "case_id": "w4_runtime_issue48_timeout_zero_refused_and_long_read_cut_at_2s",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_owner_short",
+    "setup_phase": "before_server",
+    "runtime_timeout_probe": true,
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "setup": [],
+    "call": {"arguments": {"sql": "SELECT /* W4MARK_LONGREAD_${run_id} */ COUNT(*) AS C FROM (SELECT LEVEL AS N FROM dual CONNECT BY LEVEL <= 10000) a CROSS JOIN (SELECT LEVEL AS N FROM dual CONNECT BY LEVEL <= 10000) b CROSS JOIN (SELECT LEVEL AS N FROM dual CONNECT BY LEVEL <= 10000) c CROSS JOIN ${owner}.T_PARENT_${run_id} p WHERE p.ID = 1"}},
+    "expect": {"error_class": "TIMEOUT"},
+    "db_reread": [{"sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id}", "rows": [[2]]}],
+    "audit_expect": [],
+    "on_unsupported": {"error_class": "TIMEOUT"}
   }
 ]
