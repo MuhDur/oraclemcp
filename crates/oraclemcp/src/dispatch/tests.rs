@@ -1645,6 +1645,67 @@ fn issue53_sample_rows_refuses_view_before_execution() {
 }
 
 #[test]
+fn sample_rows_accepts_name_issue_40() {
+    let (dispatcher, _) = semantic_dispatcher();
+    let response = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({"owner": "APP", "name": "ORDERS"}),
+        )
+        .expect("canonical name");
+    assert_eq!(response["rows"][0]["ID"], "1");
+    assert!(response.get("_meta").is_none());
+}
+
+#[test]
+fn describe_accepts_name_issue_40() {
+    let (dispatcher, _) = semantic_dispatcher();
+    let response = dispatcher
+        .dispatch("oracle_describe", json!({"owner": "APP", "name": "ORDERS"}))
+        .expect("canonical name");
+    assert_eq!(response["owner"], "APP");
+    assert_eq!(response["table"], "ORDERS");
+    assert!(
+        response["columns"]
+            .as_array()
+            .expect("described columns")
+            .iter()
+            .any(|column| column["COLUMN_NAME"] == "ID")
+    );
+    assert!(response.get("_meta").is_none());
+}
+
+#[test]
+fn deprecated_object_alias_metadata_issue_40() {
+    let (dispatcher, state) = semantic_dispatcher();
+    let response = dispatcher
+        .dispatch(
+            "oracle_sample_rows",
+            json!({"owner": "APP", "table": "ORDERS"}),
+        )
+        .expect("deprecated table alias");
+    assert_eq!(
+        response["_meta"]["deprecations"],
+        json!([{
+            "argument": "table", "canonical": "name", "removal": "0.14.0",
+            "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0."
+        }])
+    );
+    let before = state.caller_queries.load(Ordering::SeqCst);
+    for table in ["ORDERS", "DIFFERENT"] {
+        let error = dispatcher
+            .dispatch(
+                "oracle_sample_rows",
+                json!({"owner": "APP", "name": "ORDERS", "table": table}),
+            )
+            .expect_err("both argument spellings");
+        assert_eq!(error.error_class, ErrorClass::InvalidArguments);
+        assert!(error.message.contains("name") && error.message.contains("table"));
+        assert_eq!(state.caller_queries.load(Ordering::SeqCst), before);
+    }
+}
+
+#[test]
 fn fga_handler_table_refused_before_execution() {
     let (dispatcher, state) = semantic_dispatcher();
     *state.fga_handler_table.lock().expect("FGA fixture lock") = Some("ORDERS".to_owned());

@@ -1051,7 +1051,24 @@
   "profile_variant": "synthetic_raw",
   "setup_phase": "before_server",
   "setup_ready_sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} WHERE ROWNUM <= 1",
-  "test_id": "w4_sample_rows_common_name"
+  "test_id": "w4_alias_arg_sample_rows_table_equivalent",
+  "steps": [
+    {
+      "tool": "oracle_sample_rows",
+      "arguments": {"owner": "${owner}", "table": "T_PARENT_${run_id}", "max_rows": 1},
+      "expect": {
+        "json_subset": {"columns": ["ID", "LABEL"], "row_count": 1,
+          "rows": [{"ID": "1", "LABEL": "parent-1"}], "truncated": true},
+        "deprecations": [{"argument": "table", "canonical": "name", "removal": "0.14.0",
+          "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0."}]
+      }
+    },
+    {
+      "tool": "oracle_sample_rows",
+      "arguments": {"owner": "${owner}", "name": "T_PARENT_${run_id}", "table": "T_PARENT_${run_id}"},
+      "expect": {"error_class": "INVALID_ARGUMENTS"}
+    }
+  ]
 },
  {
   "case_id": "w4_sample_rows_vpd_rows_only",

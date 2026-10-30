@@ -112,6 +112,9 @@ pub(crate) fn registry_tool_rows() -> Vec<serde_json::Value> {
                 "visible_from": level.as_str(),
                 "destructive": tool.destructive,
                 "alias_of": registry::alias_target(&tool.name),
+                "argument_aliases": tool.input_schema.as_ref()
+                    .and_then(|schema| schema.get("x-deprecated-aliases"))
+                    .cloned().unwrap_or_else(|| serde_json::json!([])),
             })
         })
         .collect()
@@ -154,6 +157,20 @@ fn alias_tools_table(rows: &[serde_json::Value]) -> String {
             row["name"].as_str().unwrap_or_default(),
             row["alias_of"].as_str().unwrap_or_default(),
         ));
+    }
+    out.push_str("\nDeprecated argument aliases remain accepted until their removal version. Send only one spelling of each argument; canonical-plus-alias and two-alias requests are refused, even when values are equal. A lone alias emits `_meta.deprecations`.\n\n| Tool | Deprecated argument | Canonical argument | Removal |\n| --- | --- | --- | --- |\n");
+    for row in rows {
+        if let Some(aliases) = row["argument_aliases"].as_array() {
+            for alias in aliases {
+                out.push_str(&format!(
+                    "| `{}` | `{}` | `{}` | {} |\n",
+                    row["name"].as_str().unwrap_or_default(),
+                    alias["argument"].as_str().unwrap_or_default(),
+                    alias["canonical"].as_str().unwrap_or_default(),
+                    alias["removal"].as_str().unwrap_or_default(),
+                ));
+            }
+        }
     }
     out
 }
@@ -993,6 +1010,31 @@ mod tests {
                 "README alias table drifted; run scripts/docs_generate.sh --write"
             );
         }
+    }
+
+    #[test]
+    fn generated_docs_list_argument_aliases_with_removal_version() {
+        let markdown = tools_markdown();
+        let rows = registry_tool_rows();
+        let mut count = 0;
+        for row in rows {
+            for alias in row["argument_aliases"]
+                .as_array()
+                .expect("argument aliases")
+            {
+                count += 1;
+                let line = format!(
+                    "| `{}` | `{}` | `{}` | 0.14.0 |",
+                    row["name"].as_str().unwrap(),
+                    alias["argument"].as_str().unwrap(),
+                    alias["canonical"].as_str().unwrap()
+                );
+                assert!(markdown.contains(&line), "missing {line}");
+                assert_eq!(alias["removal"], "0.14.0");
+            }
+        }
+        assert!(count >= 75);
+        assert!(markdown.contains("even when values are equal"));
     }
 
     #[test]

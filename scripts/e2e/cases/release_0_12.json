@@ -512,14 +512,14 @@
     "input": {
       "arguments": {
         "name": "W4_<run>_T",
-        "limit": 1
+        "max_rows": 1
       }
     },
     "tool_or_path": "oracle_sample_rows",
     "pre_fix_outcome": "0.11.0 ignored name and failed missing table",
-    "post_fix_expected": "name alias accepted like oracle_describe",
+    "post_fix_expected": "canonical name and deprecated table spelling return the same bounded fixture row",
     "assertions": [
-      "sample row has fixture id; registry advertises name alias"
+      "canonical name returns fixture id; table emits one exact deprecation note; equal name plus table is refused"
     ],
     "versions": [
       "version:18",
@@ -532,7 +532,7 @@
       "SampleRowsArgs",
       "tool_registry"
     ],
-    "test_id": "w4_sample_rows_common_name",
+    "test_id": "w4_alias_arg_sample_rows_table_equivalent",
     "confidentiality_reviewed": true,
     "evidence_path": "target/e2e/w4/{lane}/rel012_i40_common_name.jsonl"
   },

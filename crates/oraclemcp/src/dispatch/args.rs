@@ -2,8 +2,169 @@
 //! object, relocated from the former single-file `dispatch.rs`. Fields are
 //! `pub(super)` so the dispatcher handlers in the parent module read them.
 
-use serde::{Deserialize, Deserializer};
-use serde_json::Value;
+use serde::{Deserialize, Deserializer, Serialize};
+use serde_json::{Map, Value};
+
+/// Deprecated spellings accepted before the strict DTO decoder. The same
+/// declarations drive discovery, response metadata, and generated tool docs.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ArgumentAlias {
+    pub tool: &'static str,
+    pub alias: &'static str,
+    pub canonical: &'static str,
+    pub removal: &'static str,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub(crate) struct DeprecationNote {
+    pub argument: &'static str,
+    pub canonical: &'static str,
+    pub removal: &'static str,
+    pub note: String,
+}
+
+impl ArgumentAlias {
+    pub(crate) fn deprecation(self) -> DeprecationNote {
+        DeprecationNote {
+            argument: self.alias,
+            canonical: self.canonical,
+            removal: self.removal,
+            note: format!(
+                "`{}` is deprecated; use `{}`. It will be removed in oraclemcp {}.",
+                self.alias, self.canonical, self.removal
+            ),
+        }
+    }
+}
+
+macro_rules! argument_aliases {
+    ($($tool:literal => {$($alias:literal => $canonical:literal),* $(,)?}),* $(,)?) => {
+        &[$($(ArgumentAlias {
+            tool: $tool,
+            alias: $alias,
+            canonical: $canonical,
+            removal: "0.14.0",
+        }),*),*]
+    };
+}
+
+pub(crate) const ARG_ALIASES: &[ArgumentAlias] = argument_aliases! {
+    "oracle_query" => {"limit" => "max_rows", "export_to_resource" => "export", "stream" => "streaming"},
+    "oracle_diff" => {"db_a" => "profile_a", "db_b" => "profile_b", "keys" => "key", "key_columns" => "key"},
+    "oracle_preview_sql" => {"dbms_output" => "capture_dbms_output", "max_dbms_output_lines" => "dbms_output_max_lines", "max_dbms_output_chars" => "dbms_output_max_chars"},
+    "oracle_undo_to" => {"checkpoint" => "name"},
+    "oracle_preview_dml" => {"dbms_output" => "capture_dbms_output", "max_dbms_output_lines" => "dbms_output_max_lines", "max_dbms_output_chars" => "dbms_output_max_chars", "witness_sql" => "witness", "limit" => "max_rows"},
+    "oracle_execute" => {"token" => "confirm", "confirmation_token" => "confirm", "dbms_output" => "capture_dbms_output", "max_dbms_output_lines" => "dbms_output_max_lines", "max_dbms_output_chars" => "dbms_output_max_chars"},
+    "execute_approved" => {"confirm" => "token", "confirmation_token" => "token", "dbms_output" => "capture_dbms_output", "max_dbms_output_lines" => "dbms_output_max_lines", "max_dbms_output_chars" => "dbms_output_max_chars"},
+    "oracle_set_session_level" => {"target_level" => "level", "token" => "confirm", "confirmation_token" => "confirm", "db" => "profile"},
+    "oracle_compile_object" => {"object_name" => "name", "enable_warnings" => "warnings", "token" => "confirm", "confirmation_token" => "confirm"},
+    "oracle_create_or_replace" => {"sql" => "source_code", "ddl" => "source_code", "token" => "confirm", "confirmation_token" => "confirm"},
+    "oracle_patch_source" => {"object_name" => "name", "search_text" => "old_text", "replacement" => "new_text", "token" => "confirm", "confirmation_token" => "confirm"},
+    "read_patch_preview" => {"object_name" => "name"},
+    "deploy_ddl" => {"sql" => "ddl", "source_code" => "ddl", "token" => "confirm", "confirmation_token" => "confirm"},
+    "oracle_schema_inspect" => {"limit" => "max_rows"},
+    "oracle_search_objects" => {"object_type" => "object_types", "detail" => "detail_level", "limit" => "max_rows"},
+    "oracle_orient" => {"limit" => "max_rows"},
+    "oracle_list_schemas" => {"limit" => "max_rows"},
+    "oracle_describe" => {"table" => "name", "table_name" => "name", "limit" => "max_rows"},
+    "oracle_describe_index" => {"index_name" => "name"},
+    "oracle_describe_trigger" => {"trigger_name" => "name"},
+    "oracle_describe_view" => {"view_name" => "name"},
+    "oracle_get_ddl" => {"object_name" => "name"},
+    "oracle_get_source" => {"object_name" => "name"},
+    "oracle_sample_rows" => {"table" => "name", "table_name" => "name", "limit" => "max_rows"},
+    "oracle_read_clob" => {"table" => "name", "table_name" => "name", "clob_col" => "clob_column", "pk_col" => "pk_column", "pk_val" => "pk_value"},
+    "oracle_compile_errors" => {"object_name" => "name", "limit" => "max_rows"},
+    "oracle_search_source" => {"limit" => "max_rows"},
+    "oracle_plscope_inspect" => {"object_name" => "name", "limit" => "max_rows"},
+    "oracle_db_health" => {"checks" => "health_type", "check" => "health_type"},
+    "oracle_switch_profile" => {"db" => "profile"},
+};
+
+pub(crate) fn aliases_for(tool: &str) -> impl Iterator<Item = &'static ArgumentAlias> {
+    let tool = super::canonical_tool_name(tool);
+    ARG_ALIASES.iter().filter(move |alias| alias.tool == tool)
+}
+
+pub(crate) fn normalize_args(
+    tool: &str,
+    mut args: Map<String, Value>,
+) -> Result<(Map<String, Value>, Vec<DeprecationNote>), oraclemcp_error::ErrorEnvelope> {
+    // Check the original keys before renaming any of them, so a two-alias
+    // conflict reports the two keys the caller actually sent.
+    for alias in aliases_for(tool).filter(|alias| args.contains_key(alias.alias)) {
+        let conflict = args
+            .contains_key(alias.canonical)
+            .then_some(alias.canonical)
+            .or_else(|| {
+                aliases_for(tool)
+                    .find(|other| {
+                        other.canonical == alias.canonical
+                            && other.alias != alias.alias
+                            && args.contains_key(other.alias)
+                    })
+                    .map(|other| other.alias)
+            });
+        if let Some(other) = conflict {
+            return Err(super::invalid_args(format!(
+                "conflicting arguments `{}` and `{other}` for {tool}; send only `{}`",
+                alias.alias, alias.canonical
+            )));
+        }
+    }
+    let mut notes = Vec::new();
+    for alias in aliases_for(tool) {
+        if let Some(mut value) = args.remove(alias.alias) {
+            if alias.tool == "oracle_search_objects"
+                && alias.alias == "object_type"
+                && value.is_string()
+            {
+                value = Value::Array(vec![value]);
+            }
+            args.insert(alias.canonical.to_owned(), value);
+            notes.push(alias.deprecation());
+        }
+    }
+    Ok((args, notes))
+}
+
+pub(super) fn normalize_call_args(
+    tool: &str,
+    value: Value,
+) -> Result<(Value, Vec<DeprecationNote>), oraclemcp_error::ErrorEnvelope> {
+    match value {
+        Value::Object(args) => {
+            normalize_args(tool, args).map(|(args, notes)| (Value::Object(args), notes))
+        }
+        other => Ok((other, Vec::new())),
+    }
+}
+
+pub(super) fn attach_argument_deprecations(
+    mut value: Value,
+    notes: Vec<DeprecationNote>,
+) -> Result<Value, oraclemcp_error::ErrorEnvelope> {
+    if notes.is_empty() {
+        return Ok(value);
+    }
+    let object = value.as_object_mut().ok_or_else(|| {
+        oraclemcp_error::ErrorEnvelope::new(
+            oraclemcp_error::ErrorClass::Internal,
+            "tool returned a non-object result that cannot carry argument metadata",
+        )
+    })?;
+    let metadata = object
+        .entry("_meta")
+        .or_insert_with(|| serde_json::json!({}));
+    let metadata = metadata.as_object_mut().ok_or_else(|| {
+        oraclemcp_error::ErrorEnvelope::new(
+            oraclemcp_error::ErrorClass::Internal,
+            "tool returned non-object response metadata",
+        )
+    })?;
+    metadata.insert("deprecations".to_owned(), serde_json::json!(notes));
+    Ok(value)
+}
 
 /// Strict uppercase object type accepted by the advertised object-type enums.
 /// Tool-specific subsets are checked by the early dispatcher validator.
@@ -99,7 +260,7 @@ pub(super) struct QueryArgs {
     pub(super) binds: Vec<Value>,
     #[serde(default)]
     pub(super) cursor: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
     #[serde(default)]
     pub(super) max_result_bytes: Option<usize>,
@@ -138,7 +299,7 @@ pub(super) struct QueryArgs {
     /// E3/E3b: when true, materialize the (bounded) full result as an
     /// `oracle-export://{id}` resource and return a `resource_link` instead of
     /// inlining rows. Default false preserves the inline, paginated behavior.
-    #[serde(default, alias = "export_to_resource")]
+    #[serde(default)]
     pub(super) export: bool,
     /// Inline result representation. JSON is the compatibility-preserving
     /// default; Arrow encodes the already-governed page as base64 IPC.
@@ -157,7 +318,7 @@ pub(super) struct QueryArgs {
     /// `export` and `as_of` (a typed refusal). Streaming never touches the
     /// fail-closed classifier — it only changes DELIVERY of an already-proven
     /// read.
-    #[serde(default, alias = "stream")]
+    #[serde(default)]
     pub(super) streaming: bool,
     /// K9: STRUCTURED flashback / AS-OF read target. The agent passes a NORMAL
     /// `SELECT` here plus an `as_of` value — never hand-written `AS OF` SQL. The
@@ -248,15 +409,15 @@ pub(super) struct DiffArgs {
     /// `profile_b` selects the cross-database mode: the same proven read runs
     /// against two databases in the fleet, each classified and masked under its
     /// own profile.
-    #[serde(default, alias = "db_a")]
+    #[serde(default)]
     pub(super) profile_a: Option<String>,
     /// Connection profile for side B. See [`DiffArgs::profile_a`].
-    #[serde(default, alias = "db_b")]
+    #[serde(default)]
     pub(super) profile_b: Option<String>,
     /// Optional key columns used to align rows and report `changed`. When empty,
     /// the dispatcher attempts primary-key inference for one simple local table;
     /// otherwise it falls back to keyless multiset add/remove.
-    #[serde(default, alias = "keys", alias = "key_columns")]
+    #[serde(default)]
     pub(super) key: Vec<String>,
     #[serde(default)]
     pub(super) max_rows: Option<usize>,
@@ -314,11 +475,11 @@ pub(super) struct PreviewSqlArgs {
     pub(super) hold: bool,
     #[serde(default, deserialize_with = "explicit_grant_string")]
     pub(super) scoped_grant: Option<String>,
-    #[serde(default, alias = "dbms_output")]
+    #[serde(default)]
     pub(super) capture_dbms_output: bool,
-    #[serde(default, alias = "max_dbms_output_lines")]
+    #[serde(default)]
     pub(super) dbms_output_max_lines: Option<usize>,
-    #[serde(default, alias = "max_dbms_output_chars")]
+    #[serde(default)]
     pub(super) dbms_output_max_chars: Option<usize>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
@@ -337,7 +498,7 @@ pub(super) struct CheckpointArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct UndoToArgs {
-    #[serde(default, alias = "checkpoint")]
+    #[serde(default)]
     pub(super) name: Option<String>,
 }
 
@@ -356,20 +517,20 @@ pub(super) struct PreviewDmlArgs {
     pub(super) hold: bool,
     #[serde(default, deserialize_with = "explicit_grant_string")]
     pub(super) scoped_grant: Option<String>,
-    #[serde(default, alias = "dbms_output")]
+    #[serde(default)]
     pub(super) capture_dbms_output: bool,
-    #[serde(default, alias = "max_dbms_output_lines")]
+    #[serde(default)]
     pub(super) dbms_output_max_lines: Option<usize>,
-    #[serde(default, alias = "max_dbms_output_chars")]
+    #[serde(default)]
     pub(super) dbms_output_max_chars: Option<usize>,
     /// An optional read the server runs *inside the sandbox*, once before the DML
     /// and once after, to show the rows it changed. It is proven read-only by the
     /// unchanged classifier, like any other read.
-    #[serde(default, alias = "witness_sql")]
+    #[serde(default)]
     pub(super) witness: Option<String>,
     #[serde(default)]
     pub(super) witness_binds: Vec<Value>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
@@ -398,16 +559,16 @@ pub(super) struct ExecuteArgs {
     /// exclusive with `commit`.
     #[serde(default)]
     pub(super) hold: bool,
-    #[serde(default, alias = "token", alias = "confirmation_token")]
+    #[serde(default)]
     pub(super) confirm: Option<String>,
     /// Explicit signed scoped-grant reference; never inferred from active grants.
     #[serde(default, deserialize_with = "explicit_grant_string")]
     pub(super) scoped_grant: Option<String>,
-    #[serde(default, alias = "dbms_output")]
+    #[serde(default)]
     pub(super) capture_dbms_output: bool,
-    #[serde(default, alias = "max_dbms_output_lines")]
+    #[serde(default)]
     pub(super) dbms_output_max_lines: Option<usize>,
-    #[serde(default, alias = "max_dbms_output_chars")]
+    #[serde(default)]
     pub(super) dbms_output_max_chars: Option<usize>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
@@ -416,7 +577,7 @@ pub(super) struct ExecuteArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ExecuteApprovedArgs {
-    #[serde(default, alias = "confirm", alias = "confirmation_token")]
+    #[serde(default)]
     pub(super) token: Option<String>,
     #[serde(default, deserialize_with = "explicit_grant_string")]
     pub(super) scoped_grant: Option<String>,
@@ -430,30 +591,28 @@ pub(super) struct ExecuteApprovedArgs {
     pub(super) timeout_seconds: Option<u64>,
     #[serde(default)]
     pub(super) save_output: Option<String>,
-    #[serde(default, alias = "dbms_output")]
+    #[serde(default)]
     pub(super) capture_dbms_output: bool,
-    #[serde(default, alias = "max_dbms_output_lines")]
+    #[serde(default)]
     pub(super) dbms_output_max_lines: Option<usize>,
-    #[serde(default, alias = "max_dbms_output_chars")]
+    #[serde(default)]
     pub(super) dbms_output_max_chars: Option<usize>,
 }
 
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SetSessionLevelArgs {
-    /// Historical alias inputs were accepted and ignored; retain that
-    /// documented contract until T3.3 replaces the alias decoder.
-    #[serde(default, rename = "db")]
-    pub(super) _db: Option<String>,
+    /// Historical profile inputs remain accepted and ignored; selecting a
+    /// profile is exclusively the switch-profile tool's responsibility.
     #[serde(default, rename = "profile")]
     pub(super) _profile: Option<String>,
-    #[serde(default, alias = "target_level")]
+    #[serde(default)]
     pub(super) level: Option<String>,
     #[serde(default)]
     pub(super) ttl_seconds: Option<u64>,
     #[serde(default)]
     pub(super) execute: bool,
-    #[serde(default, alias = "token", alias = "confirmation_token")]
+    #[serde(default)]
     pub(super) confirm: Option<String>,
     #[serde(default)]
     pub(super) action: Option<String>,
@@ -465,15 +624,15 @@ pub(super) struct CompileObjectArgs {
     pub(super) object_type: ObjectTypeArg,
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(default, alias = "object_name")]
+    #[serde(default)]
     pub(super) name: Option<String>,
     #[serde(default)]
     pub(super) plscope: bool,
-    #[serde(default, alias = "enable_warnings")]
+    #[serde(default)]
     pub(super) warnings: bool,
     #[serde(default)]
     pub(super) execute: bool,
-    #[serde(default, alias = "token", alias = "confirmation_token")]
+    #[serde(default)]
     pub(super) confirm: Option<String>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
@@ -482,11 +641,11 @@ pub(super) struct CompileObjectArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CreateOrReplaceArgs {
-    #[serde(default, alias = "sql", alias = "ddl")]
+    #[serde(default)]
     pub(super) source_code: Option<String>,
     #[serde(default)]
     pub(super) execute: bool,
-    #[serde(default, alias = "token", alias = "confirmation_token")]
+    #[serde(default)]
     pub(super) confirm: Option<String>,
     #[serde(default)]
     pub(super) include_errors: Option<bool>,
@@ -499,17 +658,17 @@ pub(super) struct CreateOrReplaceArgs {
 pub(super) struct PatchSourceArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(default, alias = "object_name")]
+    #[serde(default)]
     pub(super) name: Option<String>,
     #[serde(default)]
     pub(super) object_type: Option<ObjectTypeArg>,
-    #[serde(default, alias = "search_text")]
+    #[serde(default)]
     pub(super) old_text: Option<String>,
-    #[serde(default, alias = "replacement")]
+    #[serde(default)]
     pub(super) new_text: Option<String>,
     #[serde(default)]
     pub(super) execute: bool,
-    #[serde(default, alias = "token", alias = "confirmation_token")]
+    #[serde(default)]
     pub(super) confirm: Option<String>,
     #[serde(default)]
     pub(super) include_errors: Option<bool>,
@@ -522,7 +681,7 @@ pub(super) struct PatchSourceArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ReadPatchPreviewArgs {
-    #[serde(default, alias = "object_name")]
+    #[serde(default)]
     pub(super) name: Option<String>,
     #[serde(default)]
     pub(super) max_chars: Option<usize>,
@@ -533,11 +692,11 @@ pub(super) struct ReadPatchPreviewArgs {
 pub(super) struct DeployDdlArgs {
     #[serde(default)]
     pub(super) name: Option<String>,
-    #[serde(default, alias = "sql", alias = "source_code")]
+    #[serde(default)]
     pub(super) ddl: Option<String>,
     #[serde(default)]
     pub(super) execute: bool,
-    #[serde(default, alias = "token", alias = "confirmation_token")]
+    #[serde(default)]
     pub(super) confirm: Option<String>,
     #[serde(default)]
     pub(super) include_errors: Option<bool>,
@@ -556,7 +715,7 @@ pub(super) struct SchemaInspectArgs {
     pub(super) object_type: Option<ObjectTypeArg>,
     #[serde(default)]
     pub(super) name_like: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
     #[serde(default)]
     pub(super) cursor: Option<String>,
@@ -568,14 +727,12 @@ pub(super) struct SearchObjectsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
     #[serde(default)]
-    pub(super) object_type: Option<ObjectTypeArg>,
-    #[serde(default)]
     pub(super) object_types: Option<Vec<ObjectTypeArg>>,
     #[serde(default)]
     pub(super) name_like: Option<String>,
-    #[serde(default, alias = "detail")]
+    #[serde(default)]
     pub(super) detail_level: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
     /// H3: search the egress-filtered names-only object index across every
     /// MCP-visible profile. The dispatcher rejects richer detail levels in
@@ -595,7 +752,7 @@ pub(super) struct OrientArgs {
     pub(super) include: Vec<String>,
     #[serde(default)]
     pub(super) fleet: bool,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
     #[serde(default)]
     pub(super) cursor: Option<String>,
@@ -606,7 +763,7 @@ pub(super) struct OrientArgs {
 pub(super) struct ListSchemasArgs {
     #[serde(default)]
     pub(super) name_like: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
 }
 
@@ -615,9 +772,9 @@ pub(super) struct ListSchemasArgs {
 pub(super) struct DescribeArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(default, alias = "table_name", alias = "name")]
+    #[serde(default, rename = "name")]
     pub(super) table: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
 }
 
@@ -626,7 +783,6 @@ pub(super) struct DescribeArgs {
 pub(super) struct DescribeIndexArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "index_name")]
     pub(super) name: String,
 }
 
@@ -635,7 +791,6 @@ pub(super) struct DescribeIndexArgs {
 pub(super) struct DescribeTriggerArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "trigger_name")]
     pub(super) name: String,
 }
 
@@ -644,7 +799,6 @@ pub(super) struct DescribeTriggerArgs {
 pub(super) struct DescribeViewArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "view_name")]
     pub(super) name: String,
 }
 
@@ -654,7 +808,6 @@ pub(super) struct GetDdlArgs {
     pub(super) object_type: ObjectTypeArg,
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "object_name")]
     pub(super) name: String,
 }
 
@@ -663,7 +816,6 @@ pub(super) struct GetDdlArgs {
 pub(super) struct GetSourceArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "object_name")]
     pub(super) name: String,
     #[serde(default)]
     pub(super) object_type: Option<ObjectTypeArg>,
@@ -680,9 +832,9 @@ pub(super) struct GetSourceArgs {
 pub(super) struct SampleRowsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "table_name", alias = "name")]
+    #[serde(rename = "name")]
     pub(super) table: String,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
 }
 
@@ -728,7 +880,7 @@ pub(super) struct DbHealthArgs {
     /// `"all"` (default) or a comma-separated list of subcheck names
     /// (`invalid_objects`, `unusable_indexes`, `tablespace_undo`,
     /// `sequence_ceiling`, `disabled_constraints`, `buffer_cache_hit_ratio`).
-    #[serde(default, alias = "checks", alias = "check")]
+    #[serde(default)]
     pub(super) health_type: Option<String>,
     #[serde(default)]
     pub(super) timeout_seconds: Option<u64>,
@@ -739,13 +891,10 @@ pub(super) struct DbHealthArgs {
 pub(super) struct ReadClobArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(alias = "table_name")]
+    #[serde(rename = "name")]
     pub(super) table: String,
-    #[serde(alias = "clob_col")]
     pub(super) clob_column: String,
-    #[serde(alias = "pk_col")]
     pub(super) pk_column: String,
-    #[serde(alias = "pk_val")]
     pub(super) pk_value: String,
     #[serde(default)]
     pub(super) max_chars: Option<usize>,
@@ -754,7 +903,7 @@ pub(super) struct ReadClobArgs {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct SwitchProfileArgs {
-    #[serde(default, alias = "db")]
+    #[serde(default)]
     pub(super) profile: Option<String>,
 }
 
@@ -763,9 +912,9 @@ pub(super) struct SwitchProfileArgs {
 pub(super) struct CompileErrorsArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
-    #[serde(default, alias = "object_name")]
+    #[serde(default)]
     pub(super) name: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
 }
 
@@ -779,7 +928,7 @@ pub(super) struct SearchSourceArgs {
     pub(super) object_type: Option<ObjectTypeArg>,
     #[serde(default)]
     pub(super) name_like: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
     #[serde(default)]
     pub(super) max_line_chars: Option<usize>,
@@ -791,9 +940,8 @@ pub(super) struct PlscopeInspectArgs {
     #[serde(default)]
     pub(super) owner: Option<String>,
     #[serde(default)]
-    #[serde(alias = "object_name")]
     pub(super) name: Option<String>,
-    #[serde(default, alias = "limit")]
+    #[serde(default)]
     pub(super) max_rows: Option<usize>,
 }
 
@@ -808,6 +956,338 @@ pub(super) struct ExplainPlanArgs {
 }
 
 #[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // Frozen from the 62 alias attributes (75 spellings) before this migration.
+    // This inventory deliberately stays independent of ARG_ALIASES.
+    type FormerAliases = (
+        &'static str,
+        &'static [(&'static str, &'static [&'static str])],
+    );
+    const FORMER_SERDE_ALIASES: &[FormerAliases] = &[
+        (
+            "oracle_query",
+            &[
+                ("max_rows", &["limit"]),
+                ("export", &["export_to_resource"]),
+                ("streaming", &["stream"]),
+            ],
+        ),
+        (
+            "oracle_diff",
+            &[
+                ("profile_a", &["db_a"]),
+                ("profile_b", &["db_b"]),
+                ("key", &["keys", "key_columns"]),
+            ],
+        ),
+        (
+            "oracle_preview_sql",
+            &[
+                ("capture_dbms_output", &["dbms_output"]),
+                ("dbms_output_max_lines", &["max_dbms_output_lines"]),
+                ("dbms_output_max_chars", &["max_dbms_output_chars"]),
+            ],
+        ),
+        ("oracle_undo_to", &[("name", &["checkpoint"])]),
+        (
+            "oracle_preview_dml",
+            &[
+                ("capture_dbms_output", &["dbms_output"]),
+                ("dbms_output_max_lines", &["max_dbms_output_lines"]),
+                ("dbms_output_max_chars", &["max_dbms_output_chars"]),
+                ("witness", &["witness_sql"]),
+                ("max_rows", &["limit"]),
+            ],
+        ),
+        (
+            "oracle_execute",
+            &[
+                ("confirm", &["token", "confirmation_token"]),
+                ("capture_dbms_output", &["dbms_output"]),
+                ("dbms_output_max_lines", &["max_dbms_output_lines"]),
+                ("dbms_output_max_chars", &["max_dbms_output_chars"]),
+            ],
+        ),
+        (
+            "execute_approved",
+            &[
+                ("token", &["confirm", "confirmation_token"]),
+                ("capture_dbms_output", &["dbms_output"]),
+                ("dbms_output_max_lines", &["max_dbms_output_lines"]),
+                ("dbms_output_max_chars", &["max_dbms_output_chars"]),
+            ],
+        ),
+        (
+            "oracle_set_session_level",
+            &[
+                ("level", &["target_level"]),
+                ("confirm", &["token", "confirmation_token"]),
+            ],
+        ),
+        (
+            "oracle_compile_object",
+            &[
+                ("name", &["object_name"]),
+                ("warnings", &["enable_warnings"]),
+                ("confirm", &["token", "confirmation_token"]),
+            ],
+        ),
+        (
+            "oracle_create_or_replace",
+            &[
+                ("source_code", &["sql", "ddl"]),
+                ("confirm", &["token", "confirmation_token"]),
+            ],
+        ),
+        (
+            "oracle_patch_source",
+            &[
+                ("name", &["object_name"]),
+                ("old_text", &["search_text"]),
+                ("new_text", &["replacement"]),
+                ("confirm", &["token", "confirmation_token"]),
+            ],
+        ),
+        ("read_patch_preview", &[("name", &["object_name"])]),
+        (
+            "deploy_ddl",
+            &[
+                ("ddl", &["sql", "source_code"]),
+                ("confirm", &["token", "confirmation_token"]),
+            ],
+        ),
+        ("oracle_schema_inspect", &[("max_rows", &["limit"])]),
+        (
+            "oracle_search_objects",
+            &[("detail_level", &["detail"]), ("max_rows", &["limit"])],
+        ),
+        ("oracle_orient", &[("max_rows", &["limit"])]),
+        ("oracle_list_schemas", &[("max_rows", &["limit"])]),
+        (
+            "oracle_describe",
+            &[("table", &["table_name", "name"]), ("max_rows", &["limit"])],
+        ),
+        ("oracle_describe_index", &[("name", &["index_name"])]),
+        ("oracle_describe_trigger", &[("name", &["trigger_name"])]),
+        ("oracle_describe_view", &[("name", &["view_name"])]),
+        ("oracle_get_ddl", &[("name", &["object_name"])]),
+        ("oracle_get_source", &[("name", &["object_name"])]),
+        (
+            "oracle_sample_rows",
+            &[("table", &["table_name", "name"]), ("max_rows", &["limit"])],
+        ),
+        ("oracle_db_health", &[("health_type", &["checks", "check"])]),
+        (
+            "oracle_read_clob",
+            &[
+                ("table", &["table_name"]),
+                ("clob_column", &["clob_col"]),
+                ("pk_column", &["pk_col"]),
+                ("pk_value", &["pk_val"]),
+            ],
+        ),
+        ("oracle_switch_profile", &[("profile", &["db"])]),
+        (
+            "oracle_compile_errors",
+            &[("name", &["object_name"]), ("max_rows", &["limit"])],
+        ),
+        ("oracle_search_source", &[("max_rows", &["limit"])]),
+        (
+            "oracle_plscope_inspect",
+            &[("name", &["object_name"]), ("max_rows", &["limit"])],
+        ),
+    ];
+
+    #[test]
+    fn every_former_serde_alias_is_in_the_alias_map() {
+        let serde_attribute = ["#[", "serde"].concat();
+        assert!(
+            !include_str!("args.rs")
+                .split(&serde_attribute)
+                .skip(1)
+                .any(|suffix| {
+                    suffix
+                        .split(']')
+                        .next()
+                        .unwrap_or_default()
+                        .trim_start()
+                        .trim_start_matches('(')
+                        .split(',')
+                        .any(|option| {
+                            option.split('=').next().unwrap_or_default().trim() == "alias"
+                        })
+                }),
+            "serde aliases bypass deprecation notes and the conflict rule"
+        );
+        let mut count = 0;
+        for &(tool, fields) in FORMER_SERDE_ALIASES {
+            let accepted = super::strict_contract_tests::runtime_fields(tool);
+            for &(old_field, spellings) in fields {
+                let canonical = if old_field == "table" {
+                    "name"
+                } else {
+                    old_field
+                };
+                for &alias in spellings {
+                    count += 1;
+                    if alias == canonical {
+                        assert!(accepted.iter().any(|field| field == canonical));
+                    } else {
+                        assert!(
+                            aliases_for(tool)
+                                .any(|entry| entry.alias == alias && entry.canonical == canonical),
+                            "missing {tool}.{alias} -> {canonical}"
+                        );
+                        assert!(
+                            !accepted.iter().any(|field| field == alias),
+                            "{tool} DTO still accepts {alias} without the map"
+                        );
+                    }
+                }
+            }
+        }
+        assert_eq!(count, 75);
+        let unique = ARG_ALIASES
+            .iter()
+            .map(|entry| (entry.tool, entry.alias))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(unique.len(), ARG_ALIASES.len());
+        assert!(
+            ARG_ALIASES
+                .iter()
+                .all(|entry| entry.alias != entry.canonical && entry.removal == "0.14.0")
+        );
+    }
+
+    #[test]
+    fn alias_map_lone_alias_decodes_with_deprecation_note() {
+        let registry = crate::registry::tool_registry();
+        for tool in &registry.tools {
+            let schema = tool.input_schema.as_ref().expect("schema");
+            let properties = schema["properties"].as_object().expect("properties");
+            for alias in
+                aliases_for(&tool.name).filter(|alias| properties.contains_key(alias.canonical))
+            {
+                let value = if alias.alias == "object_type" {
+                    json!("TABLE")
+                } else {
+                    super::strict_contract_tests::placeholder(&properties[alias.canonical])
+                };
+                let mut input = super::strict_contract_tests::minimal(schema)
+                    .as_object()
+                    .unwrap()
+                    .clone();
+                input.remove(alias.canonical);
+                input.insert(alias.alias.to_owned(), value.clone());
+                super::strict_contract_tests::decode(&tool.name, Value::Object(input.clone()))
+                    .unwrap_or_else(|error| {
+                        panic!("{} {} failed to decode: {error:?}", tool.name, alias.alias)
+                    });
+                let (args, notes) = normalize_args(&tool.name, input).expect("lone alias");
+                assert_eq!(
+                    notes,
+                    vec![alias.deprecation()],
+                    "{} {}",
+                    tool.name,
+                    alias.alias
+                );
+                assert!(notes[0].note.contains("removed in oraclemcp 0.14.0"));
+                let expected = if alias.alias == "object_type" {
+                    json!(["TABLE"])
+                } else {
+                    value
+                };
+                assert_eq!(args.get(alias.canonical), Some(&expected));
+                assert!(!args.contains_key(alias.alias));
+            }
+        }
+        let value = json!({"table": "T", "name": "custom-value"})
+            .as_object()
+            .unwrap()
+            .clone();
+        let (untouched, notes) = normalize_args("app_synthetic_tool", value.clone()).unwrap();
+        assert_eq!(untouched, value);
+        assert!(notes.is_empty());
+    }
+
+    #[test]
+    fn alias_map_canonical_plus_alias_equal_values_is_invalid_arguments() {
+        for alias in ARG_ALIASES {
+            for canonical in [json!("same"), json!("different")] {
+                let args = Map::from_iter([
+                    (alias.alias.to_owned(), json!("same")),
+                    (alias.canonical.to_owned(), canonical),
+                ]);
+                let error =
+                    normalize_args(alias.tool, args).expect_err("both spellings must refuse");
+                assert_eq!(
+                    error.error_class,
+                    oraclemcp_error::ErrorClass::InvalidArguments
+                );
+                assert!(
+                    error.message.contains(alias.alias) && error.message.contains(alias.canonical)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn alias_map_two_aliases_same_canonical_is_invalid_arguments() {
+        for first in ARG_ALIASES {
+            for second in aliases_for(first.tool)
+                .filter(|entry| entry.canonical == first.canonical && entry.alias != first.alias)
+            {
+                let args = Map::from_iter([
+                    (first.alias.to_owned(), json!("same")),
+                    (second.alias.to_owned(), json!("same")),
+                ]);
+                let error = normalize_args(first.tool, args).expect_err("two aliases must refuse");
+                assert_eq!(
+                    error.error_class,
+                    oraclemcp_error::ErrorClass::InvalidArguments
+                );
+                assert!(
+                    error.message.contains(first.alias) && error.message.contains(second.alias)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepted_spellings_table_describe_get_sample_tools() {
+        for (tool, aliases) in [
+            ("oracle_describe", vec!["name", "table", "table_name"]),
+            ("oracle_sample_rows", vec!["name", "table", "table_name"]),
+            ("oracle_describe_index", vec!["name", "index_name"]),
+            ("oracle_describe_trigger", vec!["name", "trigger_name"]),
+            ("oracle_describe_view", vec!["name", "view_name"]),
+            ("oracle_get_ddl", vec!["name", "object_name"]),
+            ("oracle_get_source", vec!["name", "object_name"]),
+            ("oracle_compile_errors", vec!["name", "object_name"]),
+            ("oracle_plscope_inspect", vec!["name", "object_name"]),
+            ("oracle_read_clob", vec!["name", "table", "table_name"]),
+        ] {
+            for spelling in aliases {
+                let mut args = json!({(spelling): "SYNTHETIC_OBJECT"});
+                if tool == "oracle_get_ddl" {
+                    args["object_type"] = json!("TABLE");
+                }
+                if tool == "oracle_read_clob" {
+                    args["clob_column"] = json!("BODY");
+                    args["pk_column"] = json!("ID");
+                    args["pk_value"] = json!("1");
+                }
+                super::strict_contract_tests::decode(tool, args)
+                    .unwrap_or_else(|error| panic!("{tool} {spelling}: {error:?}"));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod strict_contract_tests {
     use super::*;
     use crate::dispatch::{canonical_tool_name, ensure_no_args, parse_args};
@@ -818,7 +1298,7 @@ mod strict_contract_tests {
 
     // Use the dispatcher's actual typed decoder, including each compatibility
     // wrapper's distinct DTO, without opening a database lane.
-    fn decode(name: &str, args: Value) -> Result<(), ErrorEnvelope> {
+    pub(super) fn decode(name: &str, args: Value) -> Result<(), ErrorEnvelope> {
         macro_rules! typed {
             ($ty:ty) => {
                 parse_args::<$ty>(name, args).map(|_| ())
@@ -887,7 +1367,7 @@ mod strict_contract_tests {
             .collect()
     }
 
-    fn runtime_fields(name: &str) -> Vec<String> {
+    pub(super) fn runtime_fields(name: &str) -> Vec<String> {
         macro_rules! fields {
             ($ty:ty) => {
                 serde_fields::<$ty>()
@@ -938,7 +1418,7 @@ mod strict_contract_tests {
         }
     }
 
-    fn placeholder(schema: &Value) -> Value {
+    pub(super) fn placeholder(schema: &Value) -> Value {
         if let Some(choice) = schema
             .get("enum")
             .and_then(Value::as_array)
@@ -964,7 +1444,7 @@ mod strict_contract_tests {
         }
     }
 
-    fn minimal(schema: &Value) -> Value {
+    pub(super) fn minimal(schema: &Value) -> Value {
         placeholder(schema)
     }
 
@@ -974,53 +1454,6 @@ mod strict_contract_tests {
         // Construct exactly that contract so this DTO differential catches
         // mismatches instead of silently filling fields the schema omitted.
         minimal(schema)
-    }
-
-    fn alias_canonical_field(tool: &str, property: &str) -> Option<&'static str> {
-        match (tool, property) {
-            ("oracle_switch_profile", "db") => Some("profile"),
-            ("switch_database", "profile") => Some("db"),
-            ("oracle_set_session_level", "target_level") => Some("level"),
-            ("oracle_plscope_inspect", "object_name") => Some("name"),
-            ("execute_approved", "confirm" | "confirmation_token") => Some("token"),
-            (
-                "oracle_compile_object" | "compile_object" | "compile_with_warnings",
-                "object_name",
-            ) => Some("name"),
-            ("oracle_create_or_replace" | "create_or_replace", "sql" | "ddl") => {
-                Some("source_code")
-            }
-            ("oracle_patch_source" | "patch_package" | "patch_view", "object_name") => Some("name"),
-            ("oracle_patch_source" | "patch_package" | "patch_view", "search_text") => {
-                Some("old_text")
-            }
-            ("oracle_patch_source" | "patch_package" | "patch_view", "replacement") => {
-                Some("new_text")
-            }
-            ("deploy_ddl", "sql" | "source_code") => Some("ddl"),
-            ("oracle_describe", "table_name" | "name") => Some("table"),
-            ("describe_table", "table" | "name") => Some("table_name"),
-            ("oracle_describe_index", "index_name") => Some("name"),
-            ("describe_index", "name") => Some("index_name"),
-            ("oracle_describe_trigger", "trigger_name") => Some("name"),
-            ("describe_trigger", "name") => Some("trigger_name"),
-            ("oracle_describe_view", "view_name") => Some("name"),
-            ("describe_view", "name") => Some("view_name"),
-            ("oracle_get_ddl", "object_name") => Some("name"),
-            ("get_ddl", "name") => Some("object_name"),
-            ("oracle_get_source", "object_name") => Some("name"),
-            ("get_object_source", "name") => Some("object_name"),
-            ("oracle_sample_rows", "table_name" | "name") => Some("table"),
-            ("oracle_read_clob", "table_name") => Some("table"),
-            ("oracle_read_clob", "clob_col") => Some("clob_column"),
-            ("oracle_read_clob", "pk_col") => Some("pk_column"),
-            ("oracle_read_clob", "pk_val") => Some("pk_value"),
-            ("get_clob", "table_name") => Some("table"),
-            ("get_clob", "clob_column") => Some("clob_col"),
-            ("get_clob", "pk_column") => Some("pk_col"),
-            ("get_clob", "pk_value") => Some("pk_val"),
-            _ => None,
-        }
     }
 
     fn log_case(case_id: &str, tool: &str, expected: &Value, actual: &Value) {
@@ -1079,8 +1512,10 @@ mod strict_contract_tests {
                 "oracle_read_clob",
                 json!({"table_name": "T", "clob_col": "C", "pk_col": "ID", "pk_val": "1"}),
             ),
-            ("enable_writes", json!({"db": "old", "profile": "old"})),
-            ("disable_writes", json!({"db": "old", "profile": "old"})),
+            ("enable_writes", json!({"db": "old"})),
+            ("enable_writes", json!({"profile": "old"})),
+            ("disable_writes", json!({"db": "old"})),
+            ("disable_writes", json!({"profile": "old"})),
         ] {
             let result = decode(tool, args);
             assert!(result.is_ok(), "{tool} old alias must decode: {result:?}");
@@ -1161,11 +1596,8 @@ mod strict_contract_tests {
             for (property, property_schema) in accepted {
                 let mut args = minimal.clone();
                 let fields = args.as_object_mut().expect("object schema");
-                // Test an alias in place of its canonical field. Sending both
-                // is a duplicate-field conflict, which T3.3 handles.
-                if let Some(canonical) = alias_canonical_field(&tool.name, property) {
-                    fields.remove(canonical);
-                }
+                // Published properties are canonical. Alias acceptance and
+                // conflicts are exercised separately through normalize_args.
                 fields.insert(property.clone(), placeholder(property_schema));
                 let result = decode(&tool.name, args);
                 if let Err(error) = result {

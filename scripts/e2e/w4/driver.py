@@ -291,6 +291,9 @@ def verify_expect(expect, reply, golden_root=None, awr_context=None):
             goldens.append(json.loads(golden_path(golden_root, name).read_text()))
         require(scrub(structured) in goldens,
                 "scrubbed result differs from both proved terminal-outcome goldens")
+    if "deprecations" in expect:
+        require(payload.get("_meta", {}).get("deprecations", []) == expect["deprecations"],
+                "exact response deprecation notes differ")
     if "json_keys" in expect:
         require(set(structured) == set(expect["json_keys"]), "exact JSON key set differs")
     if expect.get("awr_timeline_exact"):
@@ -792,7 +795,8 @@ def validate_steps(case):
                  & case["call"].keys()),
             "steps cannot be combined with parallel, cancel, retry or raw calls")
     require(case.get("profile_variant", "masked") not in {"synthetic_raw", "synthetic_owner"}
-            or (case["case_id"] in {"rel012_i35_dictionary_view", "rel012_i40_common_name_matrix"}
+            or (case["case_id"] in {"rel012_i35_dictionary_view", "rel012_i40_common_name_matrix",
+                                   "w4_sample_rows_bounded_max_rows"}
                 and case["level"] == "READ_ONLY"
                 and all(step.get("tool") in {"oracle_query", "oracle_describe", "oracle_describe_view", "oracle_describe_index", "oracle_describe_trigger", "oracle_get_ddl", "oracle_get_source", "oracle_sample_rows"} for step in steps)),
             "steps need a writable lab profile")
@@ -872,7 +876,12 @@ def validate_steps(case):
 def verify_expect_shape(expect):
     require(isinstance(expect, dict) and len(EXPECT_KINDS & expect.keys()) == 1,
             "expect must select one verification mode")
-    require(set(expect) <= EXPECT_KINDS | {"ora_code", "reason_code", "json_keys", "awr_timeline_exact"}, "unknown expect key")
+    require(set(expect) <= EXPECT_KINDS | {"ora_code", "reason_code", "json_keys", "awr_timeline_exact", "deprecations"}, "unknown expect key")
+    if "deprecations" in expect:
+        require(isinstance(expect["deprecations"], list) and all(
+            isinstance(note, dict) and set(note) == {"argument", "canonical", "removal", "note"}
+            and all(isinstance(value, str) and value for value in note.values())
+            for note in expect["deprecations"]), "deprecations must be exact metadata notes")
     if "json_keys" in expect:
         require("json_subset" in expect and isinstance(expect["json_keys"], list)
                 and expect["json_keys"] and all(isinstance(key, str) and key for key in expect["json_keys"])
@@ -2309,27 +2318,62 @@ def verify_mask_audit_binding(reply, records, chain_verified):
     return {"audit_entry_hash": matches[0]["entry_hash"], "certificate_verified": True}
 
 
+def argument_deprecation(alias, canonical="name"):
+    return {"argument": alias, "canonical": canonical, "removal": "0.14.0",
+            "note": f"`{alias}` is deprecated; use `{canonical}`. It will be removed in oraclemcp 0.14.0."}
+
+
 def verify_name_alias_matrix(client, case):
     descriptors = list_tools(client)
-    legacy = {"oracle_describe": "table", "oracle_describe_view": "view_name",
-              "oracle_describe_index": "index_name", "oracle_describe_trigger": "trigger_name",
-              "oracle_get_ddl": "object_name", "oracle_get_source": "object_name",
-              "oracle_sample_rows": "table"}
+    legacy = {"oracle_describe": {"table", "table_name"}, "oracle_describe_view": {"view_name"},
+              "oracle_describe_index": {"index_name"}, "oracle_describe_trigger": {"trigger_name"},
+              "oracle_get_ddl": {"object_name"}, "oracle_get_source": {"object_name"},
+              "oracle_sample_rows": {"table", "table_name"}}
     calls = [step for step in case["steps"] if "tool" in step]
     require({step["tool"] for step in calls} == set(legacy) and len(calls) == 7,
             "common-name matrix must execute all seven distinct tools")
     observations = []
     for step in calls:
-        tool, alias = step["tool"], legacy[step["tool"]]
-        properties = descriptors[tool]["inputSchema"]["properties"]
-        require("name" in properties and alias in properties
-                and properties["name"].get("description") and properties[alias].get("description"),
-                f"{tool}: name or its documented legacy alias is missing from the real registry")
-        duplicate = {**step["arguments"], alias: step["arguments"]["name"]}
-        actual = client.rpc("tools/call", {"name": tool, "arguments": duplicate})
-        verify_expect({"error_class": "INVALID_ARGUMENTS"}, actual)
-        observations.append({"tool": tool, "name_advertised": True, "alias": alias,
-                             "duplicate_alias": scrub(tool_payload(actual))})
+        tool = step["tool"]
+        schema = descriptors[tool]["inputSchema"]
+        properties = schema["properties"]
+        aliases = sorted(legacy[tool])
+        require("name" in properties and properties["name"].get("description")
+                and not (set(aliases) & properties.keys()),
+                f"{tool}: schema must advertise only the canonical name")
+        declared = schema.get("x-deprecated-aliases", [])
+        require(all(declared.count(argument_deprecation(alias)) == 1 for alias in aliases),
+                f"{tool}: missing exact deprecated alias annotation")
+        canonical = client.rpc("tools/call", {"name": tool, "arguments": step["arguments"]})
+        expected = verify_expect({**step["expect"], "deprecations": []}, canonical,
+                                 golden_root=ROOT / "tests/golden/w4")
+        for alias in aliases:
+            arguments = dict(step["arguments"])
+            arguments[alias] = arguments.pop("name")
+            reply = client.rpc("tools/call", {"name": tool, "arguments": arguments})
+            actual = verify_expect({**step["expect"], "deprecations": [argument_deprecation(alias)]},
+                                   reply, golden_root=ROOT / "tests/golden/w4")
+            require(actual == expected, f"{tool}: {alias} result differs from canonical name")
+            stem = f"w4_alias_arg_{tool.removeprefix('oracle_')}_{alias}"
+            observations.append({"case_id": stem + "_equivalent", "tool": tool, "alias": alias,
+                                 "expected": expected, "actual": actual, "verdict": "pass"})
+            for value, suffix in ((step["arguments"]["name"], "equal"), ("W4_DIFFERENT", "different")):
+                conflict = client.rpc("tools/call", {"name": tool,
+                    "arguments": {**step["arguments"], alias: value}})
+                refusal = verify_expect({"error_class": "INVALID_ARGUMENTS"}, conflict)
+                require(all(key in refusal.get("message", "") for key in ("name", alias)),
+                        f"{tool}: conflict must name both argument keys")
+                observations.append({"case_id": stem + "_conflict_" + suffix, "tool": tool,
+                    "alias": alias, "expected": "INVALID_ARGUMENTS", "actual": refusal, "verdict": "pass"})
+        if len(aliases) > 1:
+            arguments = {key: value for key, value in step["arguments"].items() if key != "name"}
+            arguments.update({alias: step["arguments"]["name"] for alias in aliases})
+            conflict = client.rpc("tools/call", {"name": tool, "arguments": arguments})
+            refusal = verify_expect({"error_class": "INVALID_ARGUMENTS"}, conflict)
+            require(all(alias in refusal.get("message", "") for alias in aliases),
+                    f"{tool}: conflict must name both aliases")
+            observations.append({"case_id": f"w4_alias_arg_{tool.removeprefix('oracle_')}_two_aliases_conflict",
+                "tool": tool, "alias": aliases, "expected": "INVALID_ARGUMENTS", "actual": refusal, "verdict": "pass"})
     return observations
 
 
@@ -4727,7 +4771,29 @@ def golden_path_selftest():
     print(compact({"selftest": "golden_relative_paths_and_escape_refusals", "verdict": "pass"}))
 
 
+def argument_deprecations_selftest():
+    # Checker unit cases only; the live alias matrix uses the release binary.
+    note = argument_deprecation("table")
+    expected = {"json_subset": {"rows": [{"ID": "1"}]}, "deprecations": [note]}
+    verify_expect_shape(expected)
+    reply = {"result": {"isError": False, "structuredContent": {"rows": [{"ID": "1"}]},
+                        "_meta": {"deprecations": [note]}}}
+    verify_expect(expected, reply)
+    for notes in ([], [note, note], [{**note, "canonical": "table"}],
+                  [{**note, "removal": "0.15.0"}], [{**note, "note": "wrong"}]):
+        bad = {"result": {**reply["result"], "_meta": {"deprecations": notes}}}
+        try:
+            verify_expect(expected, bad)
+        except DriverError:
+            continue
+        raise DriverError("deprecation checker accepted missing, extra, or incorrect metadata")
+    verify_expect({"json_subset": {"rows": [{"ID": "1"}]}, "deprecations": []},
+                  {"result": {"isError": False, "structuredContent": {"rows": [{"ID": "1"}]}}})
+    print(compact({"selftest": "exact_argument_deprecation_metadata", "verdict": "pass"}))
+
+
 def selftest():
+    argument_deprecations_selftest()
     json_subset_refusal_selftest()
     metadata_pool_config_selftest()
     golden_path_selftest()

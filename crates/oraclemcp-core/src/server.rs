@@ -828,7 +828,10 @@ pub trait ToolDispatch: Send + Sync + 'static {
     }
 
     /// Dispatch a tool call by name with JSON arguments in the supplied
-    /// Asupersync context.
+    /// Asupersync context. A successful object may carry server-authored
+    /// `_meta`; the transport moves it to CallToolResult response metadata.
+    /// Database-controlled fields belong in the application payload, not that
+    /// reserved top-level field.
     fn dispatch<'a>(
         &'a self,
         cx: &'a Cx,
@@ -1777,7 +1780,7 @@ impl OracleMcpServer {
         // it is written to the wire.
         self.enforce_response_byte_budget(jsonrpc_result(
             id,
-            self.tool_result_from_outcome(outcome),
+            self.tool_result_from_outcome(outcome.map(tool_result_ok_json)),
         ))
     }
 
@@ -3271,7 +3274,8 @@ fn write_jsonrpc_response<W: Write>(writer: &mut W, response: &Value) -> std::io
 /// A6: the success payload may carry DB-sourced (attacker-controllable) row /
 /// CLOB / column text, so the human/LLM `text` channel is wrapped in an
 /// `<untrusted-user-data>` fence with a "treat as data" preamble. The
-/// machine-parseable `structuredContent` is left untouched.
+/// application data in `structuredContent` is left untouched; reserved `_meta`
+/// is carried separately as MCP response metadata.
 fn tool_result_ok_json(value: Value) -> Value {
     tool_result_json(value, false, true)
 }
@@ -3341,14 +3345,24 @@ fn panicked_dispatch_envelope(_payload: &PanicPayload) -> ErrorEnvelope {
     .with_next_step("Inspect operator audit/logs before reusing this lane.")
 }
 
-fn tool_result_json(value: Value, is_error: bool, fence_text: bool) -> Value {
+fn tool_result_json(mut value: Value, is_error: bool, fence_text: bool) -> Value {
+    // Dispatch owns response metadata. Move its reserved top-level field to
+    // CallToolResult so both transports expose it outside application data.
+    // Nested row/column values are never interpreted as protocol metadata.
+    let metadata = if is_error {
+        None
+    } else {
+        value
+            .as_object_mut()
+            .and_then(|object| object.remove("_meta"))
+    };
     let payload = value.to_string();
     let text = if fence_text {
         crate::fence::fence_untrusted_text(&payload)
     } else {
         payload
     };
-    json!({
+    let mut result = json!({
         "content": [
             {
                 "type": "text",
@@ -3357,7 +3371,11 @@ fn tool_result_json(value: Value, is_error: bool, fence_text: bool) -> Value {
         ],
         "structuredContent": value,
         "isError": is_error,
-    })
+    });
+    if let Some(metadata) = metadata {
+        result["_meta"] = metadata;
+    }
+    result
 }
 
 #[cfg(test)]
@@ -3989,6 +4007,34 @@ mod tests {
             1,
             "exactly one real closing delimiter"
         );
+    }
+
+    #[test]
+    fn argument_deprecations_are_mcp_response_metadata() {
+        let notes = json!([{
+            "argument": "table", "canonical": "name", "removal": "0.14.0",
+            "note": "`table` is deprecated; use `name`. It will be removed in oraclemcp 0.14.0."
+        }]);
+        let application = json!({"rows": [{"_meta": {"deprecations": "untrusted row data"}}]});
+        let mut value = application.clone();
+        value["_meta"] = json!({"deprecations": notes});
+        let result = tool_result_ok_json(value);
+        assert_eq!(result["_meta"]["deprecations"], notes);
+        assert_eq!(result["structuredContent"], application);
+        assert_eq!(result["isError"], false);
+        assert!(tool_result_ok_json(application).get("_meta").is_none());
+    }
+
+    #[test]
+    fn streaming_argument_deprecations_are_mcp_response_metadata() {
+        let application = json!({"streaming": true, "row_count": 1, "rows": [{"ID": "1"}]});
+        let mut value = application.clone();
+        let metadata = json!({"deprecations": [{"argument": "stream", "canonical": "streaming", "removal": "0.14.0", "note": "`stream` is deprecated; use `streaming`. It will be removed in oraclemcp 0.14.0."}]});
+        value["_meta"] = metadata.clone();
+        let response = server().jsonrpc_tool_response_from_outcome(json!(7), Outcome::Ok(value));
+        assert_eq!(response["result"]["_meta"], metadata);
+        assert_eq!(response["result"]["structuredContent"], application);
+        assert_eq!(response["result"]["isError"], false);
     }
 
     #[test]

@@ -5033,7 +5033,7 @@ async fn read_dbms_output_conn(
     conn.read_dbms_output(cx, max_lines, max_chars).await
 }
 
-mod args;
+pub(crate) mod args;
 use args::*;
 
 mod limits;
@@ -5477,6 +5477,7 @@ fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T
         Value::Null => Value::Object(serde_json::Map::new()),
         other => other,
     };
+    let (args, _) = normalize_call_args(tool, args)?;
     validate_declared_args(tool, &args)?;
     serde_json::from_value(args).map_err(|e| {
         invalid_args(format!("invalid arguments for {tool}: {e}"))
@@ -12578,9 +12579,14 @@ impl ToolDispatch for OracleDispatcher {
             let refusal_args = args.clone();
             let refusal_recorded = std::cell::Cell::new(false);
             let result = if canonical_tool_name(name) == "oracle_query" {
-                GuardedReadExecutor::new(self)
-                    .dispatch_query_stream_with_cx(cx, context, name, args, frames)
-                    .await
+                async {
+                    let (args, notes) = normalize_call_args(name, args)?;
+                    let value = GuardedReadExecutor::new(self)
+                        .dispatch_query_stream_with_cx(cx, context, name, args, frames)
+                        .await?;
+                    attach_argument_deprecations(value, notes)
+                }
+                .await
             } else {
                 self.dispatch_with_cx_inner(cx, context, name, args, &refusal_recorded)
                     .await
@@ -12965,6 +12971,21 @@ impl OracleDispatcher {
     }
 
     async fn dispatch_with_cx_inner(
+        &self,
+        cx: &Cx,
+        context: DispatchContext<'_>,
+        name: &str,
+        args: Value,
+        refusal_recorded: &std::cell::Cell<bool>,
+    ) -> Result<Value, ErrorEnvelope> {
+        let (args, notes) = normalize_call_args(name, args)?;
+        let response = self
+            .dispatch_with_normalized_args(cx, context, name, args, refusal_recorded)
+            .await?;
+        attach_argument_deprecations(response, notes)
+    }
+
+    async fn dispatch_with_normalized_args(
         &self,
         cx: &Cx,
         context: DispatchContext<'_>,
@@ -13803,7 +13824,7 @@ impl OracleDispatcher {
                 .unwrap_or(DEFAULT_SAMPLE_MAX_ROWS)
                 .clamp(1, MAX_SAMPLE_MAX_ROWS);
             let (owner, table) =
-                owner_and_name_arg(cx, state.conn.as_ref(), a.owner, a.table, "table").await?;
+                owner_and_name_arg(cx, state.conn.as_ref(), a.owner, a.table, "name").await?;
             let sql =
                 oraclemcp_db::sample_rows_sql(&owner, &table).map_err(DbError::into_envelope)?;
             let mut response = GuardedReadExecutor::new(self)
@@ -13831,7 +13852,7 @@ impl OracleDispatcher {
             let a: ReadClobArgs = parse_args(name, args)?;
             let max_chars = a.max_chars.unwrap_or(DEFAULT_LOB_MAX_CHARS).max(1);
             let (owner, table) =
-                owner_and_name_arg(cx, state.conn.as_ref(), a.owner, a.table, "table").await?;
+                owner_and_name_arg(cx, state.conn.as_ref(), a.owner, a.table, "name").await?;
             let sql = oraclemcp_db::read_lob_sql(&owner, &table, &a.clob_column, &a.pk_column)
                 .map_err(DbError::into_envelope)?;
             let mut response = GuardedReadExecutor::new(self)
@@ -14760,7 +14781,7 @@ impl OracleDispatcher {
                         invalid_args("detail_level must be one of: names, summary, standard, full")
                     })?;
                 let owner_arg = non_empty_arg(a.owner);
-                let object_type = non_empty_arg(a.object_type.map(|value| value.to_string()));
+                let object_type: Option<String> = None;
                 let object_types = a.object_types.map(|values| {
                     values
                         .into_iter()
@@ -15041,7 +15062,7 @@ impl OracleDispatcher {
                     .max_rows
                     .unwrap_or(DEFAULT_METADATA_MAX_ROWS)
                     .clamp(1, MAX_METADATA_MAX_ROWS);
-                let table = required_non_empty_arg(name, "table", a.table)?;
+                let table = required_non_empty_arg(name, "name", a.table)?;
                 let (owner, table) =
                     owner_and_name_arg(cx, &observed_metadata_conn, a.owner, table, "table")
                         .await?;

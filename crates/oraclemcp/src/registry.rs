@@ -186,6 +186,59 @@ fn object_schema(props: Value, required: &[&str]) -> Value {
     })
 }
 
+/// Canonicalize the historical schema fragments through the runtime alias
+/// declarations. Deprecated inputs remain discoverable as annotations, never
+/// as canonical schema properties or requirements.
+fn canonicalize_argument_schema(tool: &str, schema: &mut Value) {
+    let aliases = crate::dispatch::args::aliases_for(tool).collect::<Vec<_>>();
+    if aliases.is_empty() {
+        return;
+    }
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for alias in &aliases {
+        if let Some(property) = properties.remove(alias.alias) {
+            let canonical = properties
+                .entry(alias.canonical.to_owned())
+                .or_insert_with(|| property.clone());
+            if canonical
+                .get("description")
+                .and_then(Value::as_str)
+                .is_some_and(|description| description.to_ascii_lowercase().contains("alias for "))
+                && !property
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|description| {
+                        description.to_ascii_lowercase().contains("alias for ")
+                    })
+            {
+                *canonical = property;
+            }
+        }
+    }
+    if let Some(required) = schema.get_mut("required").and_then(Value::as_array_mut) {
+        let mut names = std::collections::BTreeSet::new();
+        for field in std::mem::take(required) {
+            let Some(name) = field.as_str() else { continue };
+            let canonical = aliases
+                .iter()
+                .find(|alias| alias.alias == name)
+                .map_or(name, |alias| alias.canonical);
+            if names.insert(canonical.to_owned()) {
+                required.push(json!(canonical));
+            }
+        }
+    }
+    schema["x-deprecated-aliases"] = json!(
+        aliases
+            .iter()
+            .filter(|alias| schema["properties"].get(alias.canonical).is_some())
+            .map(|alias| alias.deprecation())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Merge property fragments into a base `properties` object. Keys serialize
 /// sorted (serde_json is built without preserve_order here), so merge order is
 /// wire-irrelevant; this only de-duplicates the recurring fragment literals.
@@ -1949,6 +2002,9 @@ pub fn tool_registry() -> ToolRegistry {
     crate::plsql_tools::register_tools(&mut registry);
 
     for tool in &mut registry.tools {
+        if let Some(schema) = tool.input_schema.as_mut() {
+            canonicalize_argument_schema(&tool.name, schema);
+        }
         if advertises_confirmation_preview(tool) {
             let always_preview = matches!(tool.name.as_str(), "oracle_preview_sql" | "preview_sql");
             tool.output_schema = Some(confirmation_preview_output_schema(always_preview));
@@ -2315,6 +2371,56 @@ mod tests {
     }
 
     #[test]
+    fn schemas_advertise_only_canonical_argument_names() {
+        for tool in tool_registry().tools {
+            let schema = tool.input_schema.as_ref().expect("schema");
+            let properties = schema["properties"].as_object().expect("properties");
+            for alias in crate::dispatch::args::aliases_for(&tool.name) {
+                assert!(
+                    !properties.contains_key(alias.alias),
+                    "{} advertises deprecated {} as canonical",
+                    tool.name,
+                    alias.alias
+                );
+                if properties.contains_key(alias.canonical) {
+                    let notes = schema["x-deprecated-aliases"]
+                        .as_array()
+                        .expect("declared aliases");
+                    assert_eq!(
+                        notes
+                            .iter()
+                            .filter(|note| note["argument"] == alias.alias)
+                            .collect::<Vec<_>>(),
+                        vec![&json!(alias.deprecation())],
+                        "{} {}",
+                        tool.name,
+                        alias.alias
+                    );
+                }
+                assert!(
+                    !schema["required"]
+                        .as_array()
+                        .expect("required")
+                        .iter()
+                        .any(|field| field == alias.alias)
+                );
+            }
+        }
+    }
+
+    fn declares_argument_alias(schema: &Value, alias: &str, canonical: &str) -> bool {
+        schema["x-deprecated-aliases"]
+            .as_array()
+            .is_some_and(|notes| {
+                notes.iter().any(|note| {
+                    note["argument"] == alias
+                        && note["canonical"] == canonical
+                        && note["removal"] == "0.14.0"
+                })
+            })
+    }
+
+    #[test]
     fn alias_backed_required_arguments_are_required_by_json_schema() {
         const REQUIRED: &[(&str, &[&str])] = &[
             ("oracle_compile_object", &["object_type", "name"]),
@@ -2371,8 +2477,11 @@ mod tests {
                 .as_array()
                 .unwrap_or_else(|| panic!("{name} has a required array"));
             for field in *required_alias_fields {
+                let canonical = crate::dispatch::args::aliases_for(name)
+                    .find(|alias| alias.alias == *field)
+                    .map_or(*field, |alias| alias.canonical);
                 assert!(
-                    declared.iter().any(|entry| entry == field),
+                    declared.iter().any(|entry| entry == canonical),
                     "{name} must declare canonical alias-backed field {field} as required"
                 );
             }
@@ -2405,7 +2514,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} must advertise object properties"));
             assert!(properties.contains_key("max_rows"), "{name}");
             assert!(
-                properties.contains_key("limit"),
+                !properties.contains_key("limit")
+                    && declares_argument_alias(schema, "limit", "max_rows"),
                 "{name} must advertise the accepted limit alias"
             );
         }
@@ -2428,7 +2538,8 @@ mod tests {
             .and_then(Value::as_object)
             .expect("oracle_switch_profile must advertise object properties");
         assert!(properties.contains_key("profile"));
-        assert!(properties.contains_key("db"));
+        assert!(!properties.contains_key("db"));
+        assert!(declares_argument_alias(schema, "db", "profile"));
         let required = schema
             .get("required")
             .and_then(Value::as_array)
@@ -2446,7 +2557,7 @@ mod tests {
     fn compatibility_schemas_reject_empty_calls_and_accept_canonical_fields() {
         let registry = tool_registry();
         let valid_calls = [
-            ("switch_database", json!({"db": "free23"})),
+            ("switch_database", json!({"profile": "free23"})),
             (
                 "oracle_plscope_inspect",
                 json!({"name": "W4O_W40000ABCDEF"}),
@@ -2517,7 +2628,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} must advertise object properties"));
             for key in ["confirm", "token", "confirmation_token"] {
                 assert!(
-                    properties.contains_key(key),
+                    properties.contains_key(key)
+                        || crate::dispatch::args::aliases_for(name).any(|alias| alias.alias == key
+                            && declares_argument_alias(schema, key, alias.canonical)),
                     "{name} must advertise accepted {key} spelling"
                 );
             }
@@ -2617,7 +2730,9 @@ mod tests {
                 "max_dbms_output_chars",
             ] {
                 assert!(
-                    properties.contains_key(key),
+                    properties.contains_key(key)
+                        || crate::dispatch::args::aliases_for(name).any(|alias| alias.alias == key
+                            && declares_argument_alias(schema, key, alias.canonical)),
                     "{name} must advertise accepted {key} spelling"
                 );
             }
@@ -2643,7 +2758,8 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} must advertise object properties"));
             assert!(properties.contains_key("warnings"), "{name}");
             assert!(
-                properties.contains_key("enable_warnings"),
+                !properties.contains_key("enable_warnings")
+                    && declares_argument_alias(schema, "enable_warnings", "warnings"),
                 "{name} must advertise accepted enable_warnings spelling"
             );
         }
@@ -2938,15 +3054,17 @@ mod tests {
                 .iter()
                 .find(|tool| tool.name == *tool_name)
                 .unwrap_or_else(|| panic!("{tool_name} must be registered"));
-            let properties = tool
-                .input_schema
-                .as_ref()
-                .and_then(|schema| schema.get("properties"))
+            let schema = tool.input_schema.as_ref().expect("schema");
+            let properties = schema
+                .get("properties")
                 .and_then(Value::as_object)
                 .unwrap_or_else(|| panic!("{tool_name} must advertise object properties"));
             for spelling in *spellings {
                 assert!(
-                    properties.contains_key(*spelling),
+                    properties.contains_key(*spelling)
+                        || crate::dispatch::args::aliases_for(tool_name)
+                            .any(|alias| alias.alias == *spelling
+                                && declares_argument_alias(schema, spelling, alias.canonical)),
                     "{tool_name} must advertise accepted argument spelling {spelling}"
                 );
             }
