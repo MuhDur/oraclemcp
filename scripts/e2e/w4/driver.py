@@ -3950,14 +3950,18 @@ def failed_results_selftest():
     ROOT = ROOT / "target/e2e/w4/selftest/red-results-source"
     ROOT.mkdir(parents=True, exist_ok=True)
     base = ROOT / "target/e2e/w4/free23"
-    args = argparse.Namespace(lane="free23", binary_source_sha=None, cargo_test_log=[])
+    args = argparse.Namespace(lane="free23", binary_source_sha="1" * 40, cargo_test_log=[])
     try:
         for stage in ("startup", "case", "cleanup", "interrupt"):
             persist_run_results(base, {"verdict": "pass", "cases": [{"case_id": "old", "verdict": "pass"}]})
             def fail_runner(args, output):
                 primed = json.loads((base / "results.json").read_text())
                 require(primed["verdict"] == "fail" and primed["cases"] == []
-                        and primed["checkout_sha"], "run did not invalidate stale pass before startup")
+                        and primed["checkout_sha"]
+                        and primed["binary_source_sha"] == args.binary_source_sha,
+                        "run did not invalidate stale pass with current source before startup")
+                require((base / "cases.jsonl").read_text() == "",
+                        "run did not invalidate stale JSONL before startup")
                 if stage != "startup":
                     output["capabilities"] = ["version:23"]
                     output["cases"].append({"case_id": "current", "tool": "oracle_query", "lane": "free23",
@@ -3974,12 +3978,15 @@ def failed_results_selftest():
                 raise DriverError("failed run returned success")
             current = json.loads((base / "results.json").read_text())
             require(current["verdict"] == "fail" and current["checkout_sha"]
+                    and current["binary_source_sha"] == args.binary_source_sha
                     and "run_failure" in current and not any(r["case_id"] == "old" for r in current["cases"]),
                     "current failure did not replace stale passing results")
             require((stage == "startup" and current["cases"] == [])
                     or (stage != "startup" and current["cases"]
                         and current["cases"][0]["case_id"] == "current"),
                     "failed results lost completed case evidence")
+            require([json.loads(line) for line in (base / "cases.jsonl").read_text().splitlines()]
+                    == current["cases"], "failed JSONL differs from current failed results")
         summary, output_file = base / "summary.md", base / "output.txt"
         summary.write_text(""); output_file.write_text("")
         try:
