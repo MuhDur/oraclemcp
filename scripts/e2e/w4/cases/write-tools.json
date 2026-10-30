@@ -51,6 +51,67 @@
     "test_id": "w4_query_cte"
   },
   {
+    "case_id": "w4_query_cte_impure_body_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [
+      {"sql": "CREATE OR REPLACE FUNCTION ${owner}.V1VIS_IMPURE_${run_id} RETURN NUMBER AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id}(ID) VALUES (991); COMMIT; RETURN 1; END;"}
+    ],
+    "call": {
+      "arguments": {"sql": "WITH p AS (SELECT ID, ${owner}.V1VIS_IMPURE_${run_id}() AS LABEL FROM ${owner}.T_PARENT_${run_id}) SELECT /* W4MARK_CTEIMPURE1234 */ p.ID, p.LABEL FROM p ORDER BY p.ID"},
+      "vsql_absent_marker": "W4MARK_CTEIMPURE1234"
+    },
+    "expect": {"error_class": "OPERATING_LEVEL_TOO_LOW"},
+    "db_reread": [
+      {"sql": "SELECT ID FROM ${owner}.T_AUTO_${run_id} WHERE ID = 991 ORDER BY ID", "rows": []}
+    ],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+  },
+  {
+    "case_id": "w4_query_cte_real_table_qualifier_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [],
+    "call": {
+      "arguments": {"sql": "WITH p AS (SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}) SELECT /* W4MARK_CTEREALTAB123 */ ${owner}.T_PARENT_${run_id}.ID FROM p ORDER BY ${owner}.T_PARENT_${run_id}.ID"},
+      "vsql_absent_marker": "W4MARK_CTEREALTAB123"
+    },
+    "expect": {"error_class": "OBJECT_NOT_FOUND"},
+    "db_reread": [],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+  },
+  {
+    "case_id": "w4_query_cte_unprojected_member_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "setup_phase": "before_server",
+    "transports": ["stdio", "http"],
+    "requires": ["priv:SELECT_V_SQL"],
+    "setup": [],
+    "call": {
+      "arguments": {"sql": "WITH p AS (SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id}) SELECT /* W4MARK_CTEMEMBER1234 */ p.DANGEROUS_FN FROM p ORDER BY p.ID"},
+      "vsql_absent_marker": "W4MARK_CTEMEMBER1234"
+    },
+    "expect": {"error_class": "OBJECT_NOT_FOUND"},
+    "db_reread": [],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+  },
+  {
     "case_id": "w4_query_cte_read_unqualified_columns",
     "tool": "oracle_query",
     "level": "READ_ONLY",

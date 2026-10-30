@@ -2789,10 +2789,9 @@ impl Visitor for UnresolvedQualifiedCallVisitor<'_> {
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
-        debug_assert!(matches!(
-            self.scopes.pop(),
-            Some(QualifierScopeFrame::Query(_))
-        ));
+        // Retire lexical state in optimized builds too, before checking it.
+        let frame = self.scopes.pop();
+        debug_assert!(matches!(frame, Some(QualifierScopeFrame::Query(_))));
         ControlFlow::Continue(())
     }
 
@@ -3337,8 +3336,9 @@ impl Visitor for QueryBaseObjectCollector {
     }
 
     fn post_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
+        let scope = self.cte_alias_scopes.pop();
         debug_assert!(
-            self.cte_alias_scopes.pop().is_some(),
+            scope.is_some(),
             "every post-visited query must have an alias scope"
         );
         ControlFlow::Continue(())
@@ -6644,6 +6644,55 @@ mod tests {
                 "a genuine in-scope column reference must stay Safe under the .102 guard: {sql:?}"
             );
         }
+    }
+
+    #[test]
+    fn cte_scope_qualified_order_requires_proven_body_and_visible_source() {
+        struct ParentProof;
+        impl SideEffectOracle for ParentProof {
+            fn statement_purity(&self, objects: &[ObjectRef]) -> Purity {
+                if objects == [ObjectRef::new(Some("APP".to_owned()), "T_PARENT")] {
+                    Purity::ProvenReadOnly
+                } else {
+                    Purity::Unknown
+                }
+            }
+        }
+        let strict =
+            Classifier::new(ClassifierConfig::served_strict()).with_oracle(Arc::new(ParentProof));
+        for sql in [
+            "WITH p AS (SELECT ID, LABEL FROM APP.T_PARENT) SELECT p.ID, p.LABEL FROM p ORDER BY p.ID",
+            "WITH seed AS (SELECT ID, LABEL FROM APP.T_PARENT) SELECT p.ID, p.LABEL FROM seed p ORDER BY p.ID",
+            "WITH \"p\" AS (SELECT ID, LABEL FROM APP.T_PARENT) SELECT \"p\".ID FROM \"p\" ORDER BY \"p\".ID",
+        ] {
+            let decision = strict.classify(sql);
+            assert_eq!(decision.danger, DangerLevel::Safe, "{sql}: {decision:?}");
+            assert_eq!(decision.required_level, Some(OperatingLevel::ReadOnly));
+        }
+        for sql in [
+            "WITH p AS (SELECT ID, APP.DANGEROUS_FN() AS LABEL FROM APP.T_PARENT) SELECT p.ID, p.LABEL FROM p ORDER BY p.ID",
+            "WITH p AS (SELECT ID, APP.DANGEROUS_FN AS LABEL FROM APP.T_PARENT) SELECT p.ID, p.LABEL FROM p ORDER BY p.ID",
+            "WITH p AS (SELECT ID, LABEL FROM APP.T_PARENT) SELECT T_PARENT.ID FROM p ORDER BY T_PARENT.ID",
+            "WITH p AS (SELECT ID, LABEL FROM APP.T_PARENT) SELECT APP.T_PARENT.ID FROM p ORDER BY APP.T_PARENT.ID",
+        ] {
+            let decision = strict.classify(sql);
+            assert_ne!(decision.danger, DangerLevel::Safe, "{sql}: {decision:?}");
+            assert_ne!(decision.required_level, Some(OperatingLevel::ReadOnly));
+        }
+    }
+
+    #[test]
+    fn cte_scope_nested_definition_does_not_hide_a_later_base_table() {
+        let sql = "SELECT q.ID FROM (WITH t AS (SELECT ID FROM APP.T_PARENT) SELECT ID FROM t) q JOIN t ON q.ID = t.ID";
+        let statements = Parser::parse_sql(&OracleDialect {}, sql).unwrap();
+        let [sqlparser::ast::Statement::Query(query)] = statements.as_slice() else {
+            panic!("one read query");
+        };
+        let sources = query_base_objects(query);
+        assert_eq!(sources.len(), 2, "nested CTE name leaked: {sources:?}");
+        assert!(sources.contains(&ObjectRef::new(Some("APP".to_owned()), "T_PARENT")));
+        assert!(sources.contains(&ObjectRef::new(None, "t")));
+        assert!(semantic_read_plan_checked(sql).is_ok());
     }
 
     #[test]
