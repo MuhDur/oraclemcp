@@ -227,6 +227,13 @@ pub fn top_sql_query_filtered(
     sql_text: Option<&str>,
 ) -> Result<(CatalogQueryId, Vec<OracleBind>), Box<ErrorEnvelope>> {
     use CatalogQueryId as C;
+    // Enforce the advertised filter contract before any database call: a
+    // malformed filter must be refused, not answered with an empty ranking.
+    let sql_id = sql_id.map(normalize_sql_id).transpose().map_err(Box::new)?;
+    let sql_id = sql_id.as_deref();
+    if let Some(sql_text) = sql_text {
+        validate_sql_text_filter(sql_text)?;
+    }
     let n = OracleBind::I64(i64::from(top_n.clamp(1, 100)));
     let id = match (source, metric, min_pct_of_total.is_some()) {
         (DiagnosticsSource::LiveCursor, TopSqlMetric::Elapsed, false) => C::TopSqlLiveElapsed,
@@ -359,6 +366,23 @@ fn normalize_sql_id(sql_id: &str) -> Result<String, ErrorEnvelope> {
         "sql_id must be the 13-character alphanumeric Oracle SQL identifier",
     )
     .with_next_step("obtain the SQL ID from oracle_top_queries or a trusted Oracle diagnostic"))
+}
+
+/// Longest `sql_text` filter `oracle_top_queries` advertises, in characters.
+const TOP_SQL_TEXT_FILTER_MAX_CHARS: usize = 200;
+
+fn validate_sql_text_filter(sql_text: &str) -> Result<(), Box<ErrorEnvelope>> {
+    let length = sql_text.chars().count();
+    if (1..=TOP_SQL_TEXT_FILTER_MAX_CHARS).contains(&length) {
+        return Ok(());
+    }
+    Err(Box::new(
+        ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!("sql_text must be 1-{TOP_SQL_TEXT_FILTER_MAX_CHARS} characters; got {length}"),
+        )
+        .with_next_step("filter on a shorter distinctive fragment of the statement text"),
+    ))
 }
 
 fn diagnostics_pack_required(feature: &str) -> ErrorEnvelope {
@@ -861,6 +885,48 @@ mod tests {
                     OracleBind::Null,
                     OracleBind::I64(5),
                 ]
+            );
+        }
+    }
+
+    #[test]
+    fn top_queries_filters_enforce_advertised_limits() {
+        let filtered = |sql_id: Option<&str>, sql_text: Option<&str>| {
+            top_sql_query_filtered(
+                DiagnosticsSource::LiveCursor,
+                TopSqlMetric::Elapsed,
+                5,
+                None,
+                sql_id,
+                sql_text,
+            )
+        };
+        for bad in [
+            "",
+            "not a SQL id",
+            "abc123def456",
+            "abc123def45678",
+            "abc123def456!",
+        ] {
+            let error = filtered(Some(bad), None).expect_err("malformed sql_id is refused");
+            assert_eq!(error.error_class, ErrorClass::InvalidArguments, "{bad:?}");
+        }
+        // Normalized exactly like oracle_plan_timeline: trimmed and lowercased.
+        let (_, binds) = filtered(Some(" ABC123DEF4567 "), None).expect("valid sql_id");
+        assert_eq!(binds[0], OracleBind::from("abc123def4567"));
+        assert_eq!(binds[1], OracleBind::from("abc123def4567"));
+
+        let longest = "é".repeat(TOP_SQL_TEXT_FILTER_MAX_CHARS);
+        let (_, binds) = filtered(None, Some(&longest)).expect("200 characters are allowed");
+        assert_eq!(binds[2], OracleBind::from(longest.as_str()));
+        let overlong = "x".repeat(TOP_SQL_TEXT_FILTER_MAX_CHARS + 1);
+        for bad in ["", overlong.as_str()] {
+            let error = filtered(None, Some(bad)).expect_err("out-of-range sql_text is refused");
+            assert_eq!(error.error_class, ErrorClass::InvalidArguments);
+            assert!(
+                error.message.contains("1-200 characters"),
+                "{}",
+                error.message
             );
         }
     }

@@ -956,6 +956,52 @@
     }
   },
   {
+    "case_id": "w4_top_queries_invalid_sql_id_typed_refusal",
+    "tool": "oracle_top_queries",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {"sql_id": "not-a-sql-id"}
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_top_queries_overlong_sql_text_typed_refusal",
+    "tool": "oracle_top_queries",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {"sql_text": "W4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGW4OVERLONGX"}
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
     "case_id": "w4_plan_timeline_awr_or_typed_refusal",
     "tool": "oracle_plan_timeline",
     "level": "READ_ONLY",
