@@ -2346,6 +2346,148 @@ fn live_policy_observations_share_bounded_capacity_and_reuse_sessions() {
     }
 }
 
+/// 1hf0m: the official `oracledb` fallback adapter's default (unpooled) policy
+/// observer is a separate, reused, statement-refusing Oracle session. Pinned
+/// session state must not be visible to it, and the production observation
+/// must report the observer's own context, not the pinned session's.
+#[test]
+fn live_official_policy_observation_session_is_isolated_and_reused() {
+    if env_bool("ORACLEMCP_TEST_POLICY_OFFICIAL") != Some(true) {
+        eprintln!(
+            "[live-xe] SKIP official observer isolation: set ORACLEMCP_TEST_POLICY_OFFICIAL=1"
+        );
+        return;
+    }
+    #[cfg(not(feature = "oracledb"))]
+    panic!("official observer isolation proof requires the oracledb feature");
+    #[cfg(feature = "oracledb")]
+    {
+        async fn session_view(
+            cx: &Cx,
+            conn: &dyn OracleConnection,
+        ) -> (String, Option<String>, String) {
+            let rows = conn
+                .query_rows(
+                    cx,
+                    "SELECT SYS_CONTEXT('USERENV','SID') AS sid, \
+                     SYS_CONTEXT('USERENV','CLIENT_INFO') AS client_info, \
+                     SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema FROM dual",
+                    &[],
+                )
+                .await
+                .expect("session context read");
+            (
+                rows[0].text("SID").expect("SID").to_owned(),
+                rows[0].text("CLIENT_INFO").map(str::to_owned),
+                rows[0].text("CURRENT_SCHEMA").expect("schema").to_owned(),
+            )
+        }
+        let fixture = policy_fixture(false);
+        let fixture_ref = &fixture;
+        let result = std::panic::catch_unwind(|| {
+            run_with_cx(|cx| async move {
+                let fixture = fixture_ref;
+                let mut options = fixture.options();
+                // The official adapter does not support session labels.
+                options.session_identity = None;
+                let conn = OfficialOracleConnection::connect(&cx, options)
+                    .await
+                    .unwrap();
+                assert_eq!(conn.backend(), oraclemcp_db::OracleBackend::OfficialOracle);
+                assert_eq!(
+                    fixture.count(),
+                    1,
+                    "only the pinned official session exists"
+                );
+                conn.execute(
+                    &cx,
+                    "BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO('1HF0M_PINNED'); END;",
+                    &[],
+                )
+                .await
+                .expect("pinned session state");
+                let (pinned_sid, pinned_info, pinned_schema) = session_view(&cx, &conn).await;
+                assert_eq!(pinned_info.as_deref(), Some("1HF0M_PINNED"));
+                assert_eq!(pinned_schema, fixture.user);
+
+                // No pool is configured: the adapter lazily opens its one spare
+                // observer and reuses it for every later observation.
+                let mut observer_sids = Vec::new();
+                for round in 0..3 {
+                    let observer = conn.open_policy_observation_session(&cx).await.unwrap();
+                    let (sid, info, schema) = session_view(&cx, observer.as_ref()).await;
+                    assert_ne!(
+                        sid, pinned_sid,
+                        "round {round}: observer shares the pinned session"
+                    );
+                    assert_eq!(
+                        info, None,
+                        "round {round}: pinned CLIENT_INFO leaked into observer"
+                    );
+                    assert_eq!(schema, fixture.user);
+                    if round == 0 {
+                        // The observer is a diagnostic read checkout: it must
+                        // refuse statements, so it cannot carry state back.
+                        let refused = observer
+                            .execute(
+                                &cx,
+                                "BEGIN DBMS_APPLICATION_INFO.SET_CLIENT_INFO('1HF0M_OBSERVER'); END;",
+                                &[],
+                            )
+                            .await
+                            .expect_err("observation checkout must not execute statements");
+                        assert!(
+                            refused.to_string().contains("does not execute statements"),
+                            "{refused}"
+                        );
+                    }
+                    observer_sids.push(sid);
+                    observer.close(&cx).await.unwrap();
+                    assert_eq!(
+                        fixture.count(),
+                        2,
+                        "round {round}: one pinned + one observer"
+                    );
+                }
+                assert!(
+                    observer_sids.iter().all(|sid| sid == &observer_sids[0]),
+                    "serial observations reuse one observer session: {observer_sids:?}"
+                );
+
+                // The production consumer: observation runs on the observer and
+                // reports that session's context and the 64 real policies.
+                let snapshot = oraclemcp_db::observe_vpd_rls_for_schema(&cx, &conn, "").await;
+                assert_eq!(
+                    snapshot.status,
+                    oraclemcp_db::OracleVpdRlsObservationStatus::PoliciesObserved,
+                    "{snapshot:?}"
+                );
+                assert_eq!(snapshot.policies.len(), 64);
+                let context = snapshot.session.expect("observer context snapshot");
+                assert_eq!(context.session_user, fixture.user);
+                assert_eq!(context.current_schema, fixture.user);
+                assert_eq!(fixture.count(), 2);
+
+                // The pinned session kept its own state and identity throughout.
+                let (sid, info, _) = session_view(&cx, &conn).await;
+                assert_eq!(sid, pinned_sid);
+                assert_eq!(info.as_deref(), Some("1HF0M_PINNED"));
+
+                conn.close(&cx).await.unwrap();
+                fixture.baseline(&cx, 0).await;
+                eprintln!(
+                    "[live-xe] official observer isolation PASS pinned_sid={pinned_sid} observer_sid={} serial_reuse=3 policies=64",
+                    observer_sids[0]
+                );
+            })
+        });
+        fixture.cleanup();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+}
+
 #[test]
 fn live_transient_policy_logon_failure_recovers_without_pinned_reconnect() {
     if env_bool("ORACLEMCP_TEST_POLICY_POOL") != Some(true) {
