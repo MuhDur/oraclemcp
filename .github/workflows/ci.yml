@@ -667,6 +667,10 @@ jobs:
         run: |
           python3 scripts/ci_lane_budget.py --selftest
           python3 scripts/ci_lane_budget.py fuzz-bound
+      - name: CI heartbeat regression
+        run: |
+          python3 scripts/ci_taxonomy.py --check
+          bash scripts/test_ci_heartbeat.sh
       - name: entry-trace contract (required SKIP=FAIL)
         run: bash scripts/check_entry_trace_contract.sh
       # B2.3: Keep-a-Changelog [Unreleased] is a release-debt clock. Any

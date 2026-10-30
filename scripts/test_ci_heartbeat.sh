@@ -2,8 +2,8 @@
 # Fixture replay for scripts/ci_heartbeat.sh (beads bp8ia.6.4, .2.1).
 #
 # A fake `gh` serves recorded or synthetic GitHub API responses per case; the
-# taxonomy is the real `fuzz.yml` tier-B jobs from docs/ci_taxonomy.json plus a
-# synthetic required gate. Each case logs one JSONL line
+# taxonomy uses the real required-job set and `fuzz.yml` tier-B jobs from
+# docs/ci_taxonomy.json. Each case logs one JSONL line
 # {case, expected_exit, actual_exit, scheduled_not_green} and fails the script
 # on any mismatch. `scheduled_setup_failure_exits_nonzero` replays the real
 # 2026-09-23 Fuzz Campaign run (every job failed at "Set up job"), which the
@@ -11,18 +11,19 @@
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source_taxonomy="${CI_HEARTBEAT_TAXONOMY:-$root/docs/ci_taxonomy.json}"
 workdir="$(mktemp -d /var/tmp/oraclemcp-ci-heartbeat.XXXXXX)"
 taxonomy="$workdir/ci_taxonomy.json"
 mkdir -p "$workdir/bin"
 
-python3 - "$root/docs/ci_taxonomy.json" "$taxonomy" <<'PY'
+python3 - "$source_taxonomy" "$taxonomy" <<'PY'
 import json
 import sys
 
 real = json.load(open(sys.argv[1], encoding="utf-8"))
 fuzz = [job for job in real["jobs"] if job["workflow_file"] == "fuzz.yml" and job["tier"] == "scheduled"]
-if len(fuzz) != 11:
-    raise SystemExit(f"expected the 11 fuzz.yml tier-B jobs in docs/ci_taxonomy.json, found {len(fuzz)}")
+if not fuzz:
+    raise SystemExit("docs/ci_taxonomy.json has no fuzz.yml tier-B jobs")
 api_lock = [
     job for job in real["jobs"]
     if job["workflow_file"] == "ci.yml" and job["job_id"] == "api-lock"
@@ -31,23 +32,12 @@ if len(api_lock) != 1:
     raise SystemExit(f"expected exactly one api-lock job in docs/ci_taxonomy.json, found {len(api_lock)}")
 if api_lock[0]["tier"] != "required" or not {"push", "pull_request"}.issubset(api_lock[0]["triggers"]):
     raise SystemExit("expected api-lock to be a required push/PR gate")
-required_ci = [
-    job for job in real["jobs"]
-    if job["workflow_file"] == "ci.yml" and job["tier"] == "required"
-]
-if len(required_ci) != 15:
-    raise SystemExit(f"expected 15 required ci.yml jobs after api-lock restoration, found {len(required_ci)}")
-required = {
-    "check_name": "required gate",
-    "tier": "required",
-    "workflow": "Required",
-    "workflow_file": "required.yml",
-    "job_id": "required",
-    "triggers": ["push"],
-    "path_filtered": False,
-}
-json.dump({"schema": "ci-taxonomy/v1", "repo": "oraclemcp", "jobs": [required, *fuzz]}, open(sys.argv[2], "w"))
+required = [job for job in real["jobs"] if job["tier"] == "required"]
+if not required:
+    raise SystemExit("docs/ci_taxonomy.json has no required jobs")
+json.dump({"schema": "ci-taxonomy/v1", "repo": "oraclemcp", "jobs": [*required, *fuzz]}, open(sys.argv[2], "w"))
 PY
+fuzz_count="$(jq '[.jobs[] | select(.workflow_file == "fuzz.yml" and .tier == "scheduled")] | length' "$taxonomy")"
 
 python3 - "$workdir/bin/gh" <<'PY'
 import sys
@@ -125,8 +115,11 @@ elif "MuhDur/plsql-intelligence/actions/workflows/" in path:
         emit({"workflow_runs": [latest_push, latest_dispatch]})
     else:
         emit(runs(29900000010, "failure" if red else "success", "MuhDur/plsql-intelligence"))
-elif "actions/workflows/required.yml/runs" in path:
-    emit(runs(29900000001))
+elif "actions/workflows/ci.yml/runs" in path:
+    if scenario == "required_unknown_exits_nonzero":
+        emit({"workflow_runs": []})
+    else:
+        emit(runs(29900000001, "failure" if scenario == "required_red_exits_nonzero" else "success"))
 elif "actions/workflows/fuzz.yml/runs" in path:
     if scenario == "scheduled_setup_failure_exits_nonzero":
         print(open(os.path.join(fixtures, recorded + ".runs.json")).read())
@@ -179,9 +172,11 @@ run_case() {
   fi
 }
 
+run_case required_red_exits_nonzero 1 0 0
+run_case required_unknown_exits_nonzero 1 0 0
 run_case scheduled_red_exits_nonzero 1 1 0
-run_case scheduled_setup_failure_exits_nonzero 1 11 0
-run_case scheduled_unknown_exits_nonzero 1 11 0
+run_case scheduled_setup_failure_exits_nonzero 1 "$fuzz_count" 0
+run_case scheduled_unknown_exits_nonzero 1 "$fuzz_count" 0
 run_case scheduled_green_required_green_exits_zero 0 0 0
 run_case driver_advisory_red_still_exits_zero 0 0 1
 run_case sibling_scheduled_red_reported_advisory 0 0 1
