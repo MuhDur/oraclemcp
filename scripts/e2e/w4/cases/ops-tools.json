@@ -666,6 +666,11 @@
         "capture": {}
       },
       {
+        "db_reread": [
+          {"sql": "SELECT ID,LABEL FROM ${owner}.T_PARENT_${run_id} WHERE ID=1", "rows": [[1, "parent-5"]]}
+        ]
+      },
+      {
         "audit_record": {
           "tool": "oracle_execute",
           "decision": "ALLOWED",

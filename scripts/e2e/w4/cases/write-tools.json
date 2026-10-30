@@ -1587,6 +1587,11 @@
             "rows_affected": 1
           }
         }
+      },
+      {
+        "db_reread": [
+          {"sql": "SELECT CHILD_ID FROM ${owner}.T_CHILD_AUD_${run_id} WHERE CHILD_ID >= 404 AND CHILD_ID < 410", "rows": [[405]]}
+        ]
       }
     ]
   },
@@ -2123,6 +2128,11 @@
         }
       },
       {
+        "db_reread": [
+          {"sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "rows": [[1, "parent-1"], [2, "parent-2"]]}
+        ]
+      },
+      {
         "tool": "oracle_query",
         "arguments": {
           "sql": "SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p WHERE p.LABEL = 'w4-held'"
@@ -2144,6 +2154,11 @@
             "discarded_statements": 1
           }
         }
+      },
+      {
+        "db_reread": [
+          {"sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID", "rows": [[1, "parent-1"], [2, "parent-2"]]}
+        ]
       },
       {
         "tool": "oracle_query",
@@ -2378,6 +2393,11 @@
             "rows_affected": 1
           }
         }
+      },
+      {
+        "db_reread": [
+          {"sql": "SELECT CHILD_ID FROM ${owner}.T_CHILD_AUD_${run_id} WHERE CHILD_ID IN (902, 903) ORDER BY CHILD_ID", "rows": [[902]]}
+        ]
       },
       {
         "tool": "oracle_preview_sql",

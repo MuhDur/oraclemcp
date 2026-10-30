@@ -783,7 +783,8 @@ def validate_steps(case):
     {wait_level, deadline_seconds} which polls the session status until the
     level is reached (an event barrier with a deadline, never a bare sleep);
     or {audit_report: {contains: [...]}} which renders this run's audit file;
-    or {audit_record: {tool, ...}} / {audit_records: [...]} which checks exact readable audit fields.
+    or {audit_record: {tool, ...}} / {audit_records: [...]} which checks exact readable audit fields;
+    or {db_reread: [...]} which observes state through the independent Oracle connection.
     """
     steps = case["steps"]
     require(isinstance(steps, list) and 1 <= len(steps) <= 8, "steps needs 1..8 entries")
@@ -798,7 +799,7 @@ def validate_steps(case):
     require(not case["requires"],
             "steps cases run on every lane; an unsupported lane would skip the steps unasserted")
     known = set()
-    for step in steps:
+    for index, step in enumerate(steps):
         require(isinstance(step, dict), "step must be an object")
         if "tool" in step:
             require(set(step) <= {"tool", "arguments", "expect", "capture"}
@@ -815,6 +816,20 @@ def validate_steps(case):
                             and pointer.startswith("/") for name, pointer in capture.items()),
                     "capture maps names to JSON pointers into structuredContent")
             known |= set(capture)
+            if step["tool"] in {"oracle_execute", "oracle_undo_to"}:
+                require(index + 1 < len(steps)
+                        and isinstance(steps[index + 1], dict)
+                        and set(steps[index + 1]) == {"db_reread"},
+                        "a mutating tool step needs an immediate independent db_reread step")
+        elif "db_reread" in step:
+            reads = step["db_reread"]
+            require(set(step) == {"db_reread"} and isinstance(reads, list)
+                    and 1 <= len(reads) <= 8
+                    and all(isinstance(read, dict) and set(read) == {"sql", "rows"}
+                            and isinstance(read["sql"], str)
+                            and read["sql"].lstrip().upper().startswith(("SELECT ", "WITH "))
+                            and isinstance(read["rows"], list) for read in reads),
+                    "db_reread step needs 1..8 exact SELECT/WITH row expectations")
         elif "external_scn_capture" in step:
             require(set(step) == {"external_scn_capture"}
                     and isinstance(step["external_scn_capture"], str)
@@ -2085,6 +2100,13 @@ def run_steps(client, case, row, binary, audit_path, env, connection):
             structured = tool_payload(reply).get("structuredContent", {})
             for name, pointer in step.get("capture", {}).items():
                 captures[name] = json_pointer(structured, pointer)
+        elif "db_reread" in step:
+            observation = {"step": index}
+            observed.append(observation)
+            row["steps"] = observed
+            verify_case_rereads(connection, {
+                "case_id": f"{case['case_id']} step {index}", "db_reread": step["db_reread"]
+            }, observation)
         elif "wait_level" in step:
             audit_scope_start = len(audit_records(audit_path))
             deadline = time.monotonic() + step["deadline_seconds"]
@@ -4072,6 +4094,78 @@ def failed_results_selftest():
     print(compact({"selftest": "current_failed_results_persist_before_nonzero_exit", "verdict": "pass"}))
 
 
+def independent_step_reread_selftest():
+    """Unit-only verifier responses; the live matrix proves actual Oracle state."""
+    events = []
+    sql = "SELECT ID FROM W4_UNIT_STATE"
+    case = {"case_id": "w4_selftest_step_reread", "level": "READ_WRITE", "requires": [],
+            "call": {"arguments": {}}, "steps": [
+                {"tool": "oracle_execute", "arguments": {"sql": "UPDATE W4_UNIT_STATE SET ID=1"},
+                 "expect": {"json_subset": {"committed": True}}},
+                {"db_reread": [{"sql": sql, "rows": [[1]]}]}]}
+    class UnitClient:
+        def rpc(self, method, params):
+            events.append("tool_reply")
+            return {"jsonrpc": "2.0", "id": 1, "result": {
+                "content": [], "isError": False, "structuredContent": {"committed": True}}}
+    class UnitConnection:
+        def __init__(self, value=1, error=False):
+            self.value, self.error = value, error
+        def cursor(self):
+            return self
+        def execute(self, query):
+            require(query == sql, "step reread submitted the wrong independent SQL")
+            events.append("independent_read")
+            if self.error:
+                raise RuntimeError("unit catalog read failed")
+            return self
+        def fetchall(self):
+            return [(self.value,)]
+    def observe(connection, row):
+        events.clear()
+        return run_steps(UnitClient(), case, row, Path("unused"), Path("unused"), {}, connection)
+    validate_steps(case)
+    row = {}
+    observe(UnitConnection(), row)
+    require(events == ["tool_reply", "independent_read"]
+            and row["steps"][1]["db_reread_actual"] == [[[1]]],
+            "step reread did not independently observe state immediately after the tool reply")
+    row = {}
+    try:
+        observe(UnitConnection(value=2), row)
+    except DriverError as exc:
+        require("independent DB re-read differed" in str(exc)
+                and row["steps"][1]["db_reread_actual"] == [[[2]]],
+                "failed step reread lost its actual independent rows")
+    else:
+        raise DriverError("step reread accepted wrong committed state")
+    try:
+        observe(UnitConnection(error=True), {})
+    except RuntimeError as exc:
+        require(str(exc) == "unit catalog read failed", "step reread hid its database failure")
+    else:
+        raise DriverError("step reread accepted a failed database read")
+    for reads in ([], [{}], [{"sql": "UPDATE T SET ID=1", "rows": []}],
+                  [{"sql": sql, "rows": "not rows"}], [{"sql": sql, "rows": []}] * 9):
+        try:
+            validate_steps({**case, "steps": [{"db_reread": reads}]})
+        except DriverError:
+            pass
+        else:
+            raise DriverError("step reread accepted malformed or non-read work")
+    for steps in (case["steps"][:1],
+                  [case["steps"][0], {"wait_level": "READ_WRITE", "deadline_seconds": 1},
+                   case["steps"][1]]):
+        try:
+            validate_steps({**case, "steps": steps})
+        except DriverError as exc:
+            require("immediate independent db_reread" in str(exc),
+                    "mutating step failed for an unrelated validation reason")
+        else:
+            raise DriverError("mutating step accepted a missing or delayed independent reread")
+    print(compact({"selftest": "independent_rows_after_mutating_steps", "verdict": "pass"}))
+
+
 def level_expiry_audit_selftest():
     case = next(case for case in load_cases()
                 if case["case_id"] == "w4_set_session_level_ttl_expiry_returns_readonly")
@@ -4586,6 +4680,7 @@ def selftest():
     failed_results_selftest()
     killed_dml_audit_selftest()
     level_expiry_audit_selftest()
+    independent_step_reread_selftest()
     killed_session_fixture_selftest()
     load_cases()
     expected_live_ids = {
@@ -4903,6 +4998,15 @@ def selftest():
             return {"jsonrpc": "2.0", "id": 1, "result": {
                 "content": [], "isError": not accepted, "structuredContent": structured}}
 
+    class UnitStepDb:
+        def cursor(self):
+            return self
+        def execute(self, sql):
+            require(sql == "SELECT 1 FROM DUAL", "unit replay reread used unexpected SQL")
+            return self
+        def fetchall(self):
+            return [(1,)]
+
     replay_case = {"case_id": "w4_selftest_token_replay", "tool": "oracle_execute",
                    "level": "READ_WRITE", "transports": ["stdio"], "requires": [], "setup": [],
                    "steps": [
@@ -4911,7 +5015,8 @@ def selftest():
                         "capture": {"token": "/execute_confirmation/confirm"}},
                        {"tool": "oracle_execute",
                         "arguments": {"sql": "UPDATE T SET X = 1", "commit": True, "confirm": "${cap:token}"},
-                        "expect": {"json_subset": {"committed": True}}}],
+                        "expect": {"json_subset": {"committed": True}}},
+                       {"db_reread": [{"sql": "SELECT 1 FROM DUAL", "rows": [[1]]}]}],
                    "call": {"arguments": {"sql": "UPDATE T SET X = 1", "commit": True,
                                           "confirm": "${cap:token}"}},
                    "expect": {"error_class": "CHALLENGE_REQUIRED"},
@@ -4920,7 +5025,7 @@ def selftest():
     validate_case(replay_case, "selftest")
 
     def step_row(stub, case):
-        return run_case(stub, case, "stdio", "free23", set(), object(), BarrierPool(),
+        return run_case(stub, case, "stdio", "free23", set(), UnitStepDb(), BarrierPool(),
                         Path("unused"), Path("unused"), {})
 
     honest = StepStub()
