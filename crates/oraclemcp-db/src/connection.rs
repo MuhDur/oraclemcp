@@ -52,9 +52,9 @@ use asupersync::{Budget, Cx, Time};
 use async_trait::async_trait;
 use chrono::{Datelike, Timelike};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 #[cfg(feature = "test-utils")]
 use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::io::Read;
 use std::path::PathBuf;
@@ -2031,6 +2031,10 @@ pub struct RustOracleConnection {
     /// Driver callback identities, keyed by registration id, kept private so
     /// only adapter cleanup can use them. No CQN payload crosses this boundary.
     cqn_client_ids: Mutex<HashMap<u64, Vec<u8>>>,
+    /// Denied optional diagnostics stay unavailable for this physical session.
+    /// Retrying a failed parse on every description leaks a server cursor in
+    /// the pinned driver; a new connection starts with a fresh probe set.
+    denied_describe_probes: Mutex<HashSet<&'static str>>,
     // Outer None: lazily create one spare slot for an unpooled profile.
     // Some(None): explicitly disabled by the profile's configured ceiling.
     policy_observation_pool: crate::pool::PolicyObservationSource,
@@ -2268,9 +2272,33 @@ impl RustOracleConnection {
         Ok(self.query_rows(cx, sql, &[]).await?.into_iter().next())
     }
 
-    async fn describe_first_row(&self, cx: &Cx, sql: &str) -> Result<Option<OracleRow>, DbError> {
-        degrade_describe_probe(self.query_first_row(cx, sql).await)
+    async fn describe_first_row(
+        &self,
+        cx: &Cx,
+        sql: &'static str,
+    ) -> Result<Option<OracleRow>, DbError> {
+        if self
+            .denied_describe_probes
+            .lock()
+            .map_err(|err| DbError::Internal(format!("describe probe lock poisoned: {err}")))?
+            .contains(sql)
+        {
+            return Ok(None);
+        }
+        let result = self.query_first_row(cx, sql).await;
+        if result.as_ref().is_err_and(describe_probe_privilege_denied) {
+            self.denied_describe_probes
+                .lock()
+                .map_err(|err| DbError::Internal(format!("describe probe lock poisoned: {err}")))?
+                .insert(sql);
+        }
+        degrade_describe_probe(result)
     }
+}
+
+fn describe_probe_privilege_denied(error: &DbError) -> bool {
+    matches!(error, DbError::Query(message)
+        if matches!(oraclemcp_error::parse_ora_code(message), Some(942 | 1031)))
 }
 
 /// Preserve cancellation and connection uncertainty from an observational
@@ -2686,6 +2714,7 @@ mod driver {
                 request_quota: None,
             }),
             cqn_client_ids: SyncMutex::new(HashMap::new()),
+            denied_describe_probes: SyncMutex::default(),
             policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         })
     }
@@ -3455,6 +3484,39 @@ mod driver {
         seen
     }
 
+    /// Own one result handle across fallible conversion and dropped futures.
+    /// Statement cursors return to the cache; REF CURSOR handles are not in
+    /// that cache and must be queued for an actual server-side close.
+    struct ResultCursor<'a> {
+        inner: &'a mut oraclemcp_driver_cx::Connection,
+        cursor_id: u32,
+        cached: bool,
+    }
+
+    impl std::ops::Deref for ResultCursor<'_> {
+        type Target = oraclemcp_driver_cx::Connection;
+
+        fn deref(&self) -> &Self::Target {
+            self.inner
+        }
+    }
+
+    impl std::ops::DerefMut for ResultCursor<'_> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            self.inner
+        }
+    }
+
+    impl Drop for ResultCursor<'_> {
+        fn drop(&mut self) {
+            if self.cached {
+                self.inner.release_cursor(self.cursor_id);
+            } else {
+                self.inner.close_cursor(self.cursor_id);
+            }
+        }
+    }
+
     async fn collect_all_rows(
         cx: &Cx,
         inner: &mut oraclemcp_driver_cx::Connection,
@@ -3464,6 +3526,11 @@ mod driver {
         limits: super::WireLimits,
     ) -> Result<Vec<OracleRow>, DbError> {
         let cursor_id = result.cursor_id;
+        let mut inner = ResultCursor {
+            inner,
+            cursor_id,
+            cached: true,
+        };
         let implicit_resultsets = result.implicit_resultsets.take();
         let mut columns = result.columns.clone();
         let mut rows = std::mem::take(&mut result.rows);
@@ -3475,13 +3542,7 @@ mod driver {
             && columns_require_define(&columns)
         {
             let timeout_ms =
-                match limits.effective_timeout_ms(cx, "oracle_db.query_rows.define_fetch") {
-                    Ok(timeout_ms) => timeout_ms,
-                    Err(err) => {
-                        inner.release_cursor(cursor_id);
-                        return Err(err);
-                    }
-                };
+                limits.effective_timeout_ms(cx, "oracle_db.query_rows.define_fetch")?;
             let fetch_result = bounded_fetch_batch(
                 timeout_ms,
                 inner.define_and_fetch_rows_with_columns(
@@ -3493,13 +3554,7 @@ mod driver {
                 ),
             )
             .await;
-            let fetched = match resolve_fetch_batch(cx, inner, fetch_result, opts).await {
-                Ok(fetched) => fetched,
-                Err(err) => {
-                    inner.release_cursor(cursor_id);
-                    return Err(err);
-                }
-            };
+            let fetched = resolve_fetch_batch(cx, &mut inner, fetch_result, opts).await?;
             if !fetched.columns.is_empty() {
                 columns = fetched.columns.clone();
             }
@@ -3508,13 +3563,7 @@ mod driver {
             result.more_rows = fetched.more_rows;
         }
         while has_parent_result && result.more_rows && cursor_id != 0 {
-            let timeout_ms = match limits.effective_timeout_ms(cx, "oracle_db.query_rows.fetch") {
-                Ok(timeout_ms) => timeout_ms,
-                Err(err) => {
-                    inner.release_cursor(cursor_id);
-                    return Err(err);
-                }
-            };
+            let timeout_ms = limits.effective_timeout_ms(cx, "oracle_db.query_rows.fetch")?;
             let fetch_result = if columns_require_define(&columns) {
                 bounded_fetch_batch(
                     timeout_ms,
@@ -3540,13 +3589,7 @@ mod driver {
                 )
                 .await
             };
-            let fetched = match resolve_fetch_batch(cx, inner, fetch_result, opts).await {
-                Ok(fetched) => fetched,
-                Err(err) => {
-                    inner.release_cursor(cursor_id);
-                    return Err(err);
-                }
-            };
+            let fetched = resolve_fetch_batch(cx, &mut inner, fetch_result, opts).await?;
             if !fetched.columns.is_empty() {
                 columns = fetched.columns.clone();
             }
@@ -3556,7 +3599,7 @@ mod driver {
         }
         let mut converted = rows_to_oracle_rows(
             cx,
-            inner,
+            &mut inner,
             &columns,
             rows,
             opts,
@@ -3568,7 +3611,7 @@ mod driver {
         if let Some(implicit_resultsets) = implicit_resultsets
             && let Some(row) = implicit_resultsets_to_row(
                 cx,
-                inner,
+                &mut inner,
                 implicit_resultsets,
                 opts,
                 serialize_opts,
@@ -3577,9 +3620,6 @@ mod driver {
             .await?
         {
             converted.push(row);
-        }
-        if cursor_id != 0 {
-            inner.release_cursor(cursor_id);
         }
         Ok(converted)
     }
@@ -3598,7 +3638,12 @@ mod driver {
         use std::collections::VecDeque;
 
         let cursor_id = result.cursor_id;
-        let collected = async {
+        let mut inner = ResultCursor {
+            inner,
+            cursor_id,
+            cached: true,
+        };
+        async {
             if result.implicit_resultsets.is_some() {
                 return Err(DbError::UnsupportedFeature(
                     "bounded SELECT paging does not admit implicit result sets".to_owned(),
@@ -3632,7 +3677,7 @@ mod driver {
                     ),
                 )
                 .await;
-                let fetched = resolve_fetch_batch(cx, inner, fetch, opts).await?;
+                let fetched = resolve_fetch_batch(cx, &mut inner, fetch, opts).await?;
                 if !fetched.columns.is_empty() {
                     columns = fetched.columns.clone();
                 }
@@ -3648,7 +3693,7 @@ mod driver {
                         bounded_cell_options(serialize_opts, caps.max_result_bytes);
                     let row = row_to_oracle_row(
                         cx,
-                        inner,
+                        &mut inner,
                         &columns,
                         previous_row
                             .as_deref()
@@ -3699,7 +3744,7 @@ mod driver {
                     )
                     .await
                 };
-                let fetched = resolve_fetch_batch(cx, inner, fetch, opts).await?;
+                let fetched = resolve_fetch_batch(cx, &mut inner, fetch, opts).await?;
                 if !fetched.columns.is_empty() {
                     columns = fetched.columns.clone();
                 }
@@ -3708,11 +3753,7 @@ mod driver {
                 result.more_rows = fetched.more_rows;
             }
         }
-        .await;
-        if cursor_id != 0 {
-            inner.release_cursor(cursor_id);
-        }
-        collected
+        .await
     }
 
     pub(super) fn bounded_cell_options(
@@ -5295,8 +5336,20 @@ mod driver {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<OracleCell, DbError>> + 'a>>
     {
         Box::pin(async move {
+            // Wire REF CURSOR ids are UB2. An impossible descriptor never
+            // owned a server handle; sending it in a close piggyback would
+            // poison the next round trip with a malformed TTC packet.
+            if cursor.cursor_id == 0 || u16::try_from(cursor.cursor_id).is_err() {
+                return Err(DbError::Query(
+                    "REF CURSOR fetch failed: invalid server cursor id".to_owned(),
+                ));
+            }
+            let mut inner = ResultCursor {
+                inner,
+                cursor_id: cursor.cursor_id,
+                cached: false,
+            };
             if depth >= serialize_opts.max_nested_cursor_depth {
-                inner.release_cursor(cursor.cursor_id);
                 return Ok(OracleCell::nested_result(
                     oracle_type,
                     OracleNestedResult {
@@ -5308,19 +5361,12 @@ mod driver {
             }
             let (row_cap, fetch_limit, cell_limited) = cursor_caps(cursor, serialize_opts);
             let timeout_ms =
-                match limits.effective_timeout_ms(cx, "oracle_db.query_rows.ref_cursor_fetch") {
-                    Ok(timeout_ms) => timeout_ms,
-                    Err(err) => {
-                        inner.release_cursor(cursor.cursor_id);
-                        return Err(err);
-                    }
-                };
+                limits.effective_timeout_ms(cx, "oracle_db.query_rows.ref_cursor_fetch")?;
             let fetch_result =
                 bounded_fetch_batch(timeout_ms, inner.fetch_cursor(cx, cursor, fetch_limit)).await;
-            let result = match resolve_fetch_batch(cx, inner, fetch_result, opts).await {
+            let result = match resolve_fetch_batch(cx, &mut inner, fetch_result, opts).await {
                 Ok(result) => result,
                 Err(err) => {
-                    inner.release_cursor(cursor.cursor_id);
                     return Err(match err {
                         DbError::Query(message) => {
                             DbError::Query(format!("REF CURSOR fetch failed: {message}"))
@@ -5340,7 +5386,7 @@ mod driver {
             };
             let nested_rows = rows_to_oracle_rows(
                 cx,
-                inner,
+                &mut inner,
                 &columns,
                 rows,
                 opts,
@@ -5518,6 +5564,173 @@ mod driver {
                 password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").ok()?),
                 ..Default::default()
             })
+        }
+
+        #[cfg(feature = "live-xe")]
+        async fn opened_cursors_current(
+            cx: &Cx,
+            inner: &mut oraclemcp_driver_cx::Connection,
+        ) -> i64 {
+            let result = inner.execute_raw(
+                cx,
+                "SELECT s.value FROM v$mystat s JOIN v$statname n ON n.statistic#=s.statistic# WHERE n.name='opened cursors current'",
+                1, &[], ExecuteOptions::default(), None,
+            ).await.expect("cursor cleanup tests require a lab admin with cursor-statistic access");
+            let count = result.rows[0][0]
+                .as_ref()
+                .and_then(QueryValue::as_i64)
+                .unwrap();
+            inner.release_cursor(result.cursor_id);
+            count
+        }
+
+        #[cfg(feature = "live-xe")]
+        fn assert_ref_cursor_closed(exit: &str) {
+            let Some(opts) = live_opts_from_env() else {
+                eprintln!("[live-xe] SKIP cursor cleanup: set ORACLEMCP_TEST_*");
+                return;
+            };
+            let reactor = asupersync::runtime::reactor::create_reactor().unwrap();
+            let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let mut inner = oraclemcp_driver_cx::Connection::connect(
+                    &cx,
+                    to_connect_options(&opts).unwrap(),
+                )
+                .await
+                .expect("live cursor test must connect");
+                let sql = "DECLARE rc SYS_REFCURSOR; BEGIN OPEN rc FOR SELECT 1 AS N FROM dual; DBMS_SQL.RETURN_RESULT(rc); END;";
+                let warmup = inner.execute_raw(
+                    &cx, sql, 0, &[], ExecuteOptions::default(), None,
+                ).await.unwrap();
+                let QueryValue::Cursor(warm_cursor) = &warmup.implicit_resultsets.as_ref().unwrap()[0] else {
+                    panic!("expected warmup REF CURSOR");
+                };
+                inner.close_cursor(warm_cursor.cursor_id);
+                inner.release_cursor(warmup.cursor_id);
+                let baseline = opened_cursors_current(&cx, &mut inner).await;
+                let result = inner
+                    .execute_raw(
+                        &cx,
+                        sql,
+                        0,
+                        &[],
+                        ExecuteOptions::default(),
+                        None,
+                    )
+                    .await
+                    .expect("Oracle opens a real implicit REF CURSOR");
+                let QueryValue::Cursor(cursor) = &result.implicit_resultsets.as_ref().unwrap()[0] else {
+                    panic!("expected real REF CURSOR");
+                };
+                let mut serialize = SerializeOptions::default();
+                let mut limits = super::super::WireLimits::default();
+                if exit == "depth" {
+                    serialize.max_nested_cursor_depth = 0;
+                } else if exit == "deadline" {
+                    limits.request_deadline = Some(cx.now());
+                }
+                let converted = materialize_cursor_cell(
+                    &cx, &mut inner, "REF CURSOR".to_owned(), cursor,
+                    &opts, &serialize, limits, 0,
+                ).await;
+                if exit == "deadline" {
+                    assert!(matches!(converted, Err(DbError::Cancelled(_))));
+                } else {
+                    converted.expect("success and depth truncation both close the cursor");
+                }
+                inner.release_cursor(result.cursor_id);
+                // The statistic query flushes the queued close on this same
+                // session. Re-fetching an old id would be ambiguous because
+                // Oracle can recycle it for a later statement.
+                let after = opened_cursors_current(&cx, &mut inner).await;
+                assert_eq!(after, baseline, "{exit}: REF CURSOR remained open on Oracle");
+                inner.close(&cx).await.unwrap();
+            });
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
+        fn cursor_closed_on_ref_cursor_error() {
+            assert_ref_cursor_closed("deadline");
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
+        fn cursor_closed_on_ref_cursor_depth_refusal() {
+            assert_ref_cursor_closed("depth");
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
+        fn cursor_closed_on_ref_cursor_success() {
+            assert_ref_cursor_closed("success");
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
+        fn cursor_closed_on_collection_error() {
+            let Some(opts) = live_opts_from_env() else {
+                eprintln!("[live-xe] SKIP cursor cleanup: set ORACLEMCP_TEST_*");
+                return;
+            };
+            let reactor = asupersync::runtime::reactor::create_reactor().unwrap();
+            let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let mut inner = oraclemcp_driver_cx::Connection::connect(
+                    &cx,
+                    to_connect_options(&opts).unwrap(),
+                )
+                .await
+                .expect("live cursor test must connect");
+                let sql = "SELECT 1 AS N FROM dual";
+                let mut result = inner
+                    .execute_raw(&cx, sql, 1, &[], ExecuteOptions::default(), None)
+                    .await
+                    .unwrap();
+                let cursor_id = result.cursor_id;
+                assert_ne!(cursor_id, 0);
+                // Inject an adapter conversion error after acquiring a real
+                // cached statement. No mock connection stands in for cleanup.
+                result.rows[0][0] = Some(QueryValue::TimestampTz {
+                    year: 2026,
+                    month: 1,
+                    day: 1,
+                    hour: 0,
+                    minute: 0,
+                    second: 0,
+                    nanosecond: 0,
+                    offset_minutes: i32::MAX,
+                });
+                collect_all_rows(
+                    &cx,
+                    &mut inner,
+                    result,
+                    &opts,
+                    &SerializeOptions::default(),
+                    super::super::WireLimits::default(),
+                )
+                .await
+                .expect_err("invalid timestamp must fail conversion");
+                let next = inner
+                    .execute_raw(&cx, sql, 1, &[], ExecuteOptions::default(), None)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    next.cursor_id, cursor_id,
+                    "conversion failure must release the original cached handle"
+                );
+                inner.release_cursor(next.cursor_id);
+                inner.close(&cx).await.unwrap();
+            });
         }
 
         #[test]
@@ -7275,8 +7488,16 @@ mod driver {
                     ),
                     None => (None, None),
                 };
-                let native_redaction =
-                    crate::native_redaction::probe_native_redaction(cx, self).await?;
+                let native_redaction = if self
+                    .describe_first_row(cx, crate::native_redaction::NATIVE_REDACTION_OPTION_SQL)
+                    .await?
+                    .and_then(|row| row.text("ADVANCED_SECURITY").map(str::to_owned))
+                    .is_some_and(|value| value.trim().eq_ignore_ascii_case("TRUE"))
+                {
+                    crate::native_redaction::NativeRedactionAvailability::Available
+                } else {
+                    crate::native_redaction::NativeRedactionAvailability::RequiresAdvancedSecurity
+                };
                 info.server_features = Some(
                     crate::server_features::ServerFeatures::from_probe(
                         version_tuple,
@@ -8898,6 +9119,23 @@ mod tests {
     }
 
     #[test]
+    fn describe_probe_caches_only_missing_dictionary_privileges() {
+        for code in [942, 1031] {
+            assert!(describe_probe_privilege_denied(&DbError::Query(format!(
+                "ORA-{code:05}: diagnostic catalog denied"
+            ))));
+        }
+        for error in [
+            DbError::Query("ORA-01000: maximum open cursors exceeded".to_owned()),
+            DbError::Query("ORA-03113: connection lost".to_owned()),
+            DbError::Cancelled("ORA-00942: cancelled before a probe".to_owned()),
+            DbError::Internal("ORA-00942: not an Oracle query result".to_owned()),
+        ] {
+            assert!(!describe_probe_privilege_denied(&error), "{error:?}");
+        }
+    }
+
+    #[test]
     fn quarantined_thin_connection_refuses_subsequent_use() {
         use asupersync::runtime::RuntimeBuilder;
 
@@ -8909,6 +9147,7 @@ mod tests {
             })),
             wire_limits: Mutex::new(WireLimits::default()),
             cqn_client_ids: Mutex::new(HashMap::new()),
+            denied_describe_probes: Mutex::new(HashSet::new()),
             policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         };
         let runtime = RuntimeBuilder::current_thread()
@@ -8943,6 +9182,7 @@ mod tests {
             })),
             wire_limits: Mutex::new(WireLimits::default()),
             cqn_client_ids: Mutex::new(HashMap::new()),
+            denied_describe_probes: Mutex::new(HashSet::new()),
             policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         };
         let options = OracleConnectOptions {
@@ -8982,6 +9222,7 @@ mod tests {
             })),
             wire_limits: Mutex::new(WireLimits::default()),
             cqn_client_ids: Mutex::new(HashMap::new()),
+            denied_describe_probes: Mutex::new(HashSet::new()),
             policy_observation_pool: crate::pool::PolicyObservationSource::default(),
         };
         let runtime = RuntimeBuilder::current_thread()
@@ -9022,6 +9263,7 @@ mod tests {
                 inner: Arc::clone(&inner),
                 wire_limits: Mutex::new(WireLimits::default()),
                 cqn_client_ids: Mutex::new(HashMap::new()),
+                denied_describe_probes: Mutex::new(HashSet::new()),
                 policy_observation_pool: crate::pool::PolicyObservationSource::default(),
             };
             let repeated = match conn.lock_inner(&cx).await {
