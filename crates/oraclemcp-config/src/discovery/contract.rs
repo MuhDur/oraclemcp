@@ -203,6 +203,16 @@ pub const CONNECTION_PROFILE_FIELD_DISPOSITIONS: &[FieldDisposition] = &[
         help: "Opt metadata-pool reads at READ_ONLY into fresh READ ONLY transactions; default false. Does not affect the pinned backstop or autonomous transactions.",
     },
     FieldDisposition {
+        field: "edition_change_requests",
+        disposition: Disposition::Commented,
+        help: "Explicit opt-in to the guarded edition change-request lifecycle; default false and rejected on protected profiles.",
+    },
+    FieldDisposition {
+        field: "edition_change_request_ttl_days",
+        disposition: Disposition::Commented,
+        help: "Lifetime of an open edition request, 1..=90 days; default 7.",
+    },
+    FieldDisposition {
         field: "protected",
         disposition: Disposition::Commented,
         help: "Production profile: pins the ceiling immutable; requires max_level = READ_ONLY and rejects literal: secret refs.",
@@ -389,6 +399,8 @@ mod tests {
             max_level: Some(OperatingLevel::ReadOnly),
             default_level: Some(OperatingLevel::ReadOnly),
             metadata_read_only_transaction: Some(true),
+            edition_change_requests: Some(false),
+            edition_change_request_ttl_days: Some(7),
             protected: Some(false),
             require_signed_tools: Some(false),
             read_only_standby: Some(false),
@@ -452,8 +464,8 @@ mod tests {
         // Diagnostics Pack licensing is a separate explicit opt-in.
         assert_eq!(
             CONNECTION_PROFILE_FIELD_DISPOSITIONS.len(),
-            43,
-            "ConnectionProfile has 43 serde fields"
+            45,
+            "ConnectionProfile has 45 serde fields"
         );
     }
 

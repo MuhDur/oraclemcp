@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DispatchContext, DispatchOutcome, OracleMcpServer,
-    change_proposal::{EditionProposal, EditionProposalStatus, normalize_edition_identifier},
+    change_proposal::{ChangeRequestState, EditionProposal, normalize_edition_identifier},
 };
 
 const CONFIRMATION_TTL: Duration = Duration::from_secs(120);
@@ -35,7 +35,7 @@ impl EditionFlipTarget {
     fn edition(self, proposal: &EditionProposal) -> &str {
         match self {
             Self::Merge => &proposal.child_edition,
-            Self::Rollback => &proposal.base_edition,
+            Self::Rollback => &proposal.parent_edition,
         }
     }
 }
@@ -75,7 +75,12 @@ pub struct OperatorLanePolicy {
 
 impl OperatorLanePolicy {
     fn require_admin(&self, proposal: &EditionProposal) -> Result<(), EditionExecutorRefusal> {
-        if proposal.status != EditionProposalStatus::Reviewing {
+        if proposal.status != ChangeRequestState::Reviewing
+            || proposal.stage_revision == 0
+            || proposal.verification_revision != Some(proposal.stage_revision)
+            || proposal.review_revision != Some(proposal.stage_revision)
+            || proposal.database_identity.is_none()
+        {
             return Err(EditionExecutorRefusal::ProposalNotReviewed);
         }
         if self.protected {
@@ -177,6 +182,8 @@ pub struct OperatorConfirmation {
 struct PendingConfirmation {
     subject_key: String,
     proposal_id: String,
+    proposal_revision: u64,
+    stage_revision: u64,
     target: EditionFlipTarget,
     edition: ValidatedEditionIdent,
     lane_generation: Option<u64>,
@@ -242,6 +249,8 @@ impl OperatorEditionExecutor {
             PendingConfirmation {
                 subject_key: subject_key.to_owned(),
                 proposal_id: proposal.proposal_id.clone(),
+                proposal_revision: proposal.proposal_revision,
+                stage_revision: proposal.stage_revision,
                 target,
                 edition,
                 lane_generation,
@@ -297,6 +306,8 @@ impl OperatorEditionExecutor {
         };
         if entry.subject_key != subject_key
             || entry.proposal_id != proposal.proposal_id
+            || entry.proposal_revision != proposal.proposal_revision
+            || entry.stage_revision != proposal.stage_revision
             || entry.target != target
             || entry.edition != edition
             || entry.lane_generation != lane_generation
@@ -311,23 +322,17 @@ impl OperatorEditionExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::change_proposal::EditionProposalStatus;
 
     fn proposal() -> EditionProposal {
-        EditionProposal {
-            schema_version: 1,
-            proposal_id: "synthetic-proposal".to_owned(),
-            profile: "synthetic-admin".to_owned(),
-            child_edition: "CHILD_V2".to_owned(),
-            base_edition: "ORA$BASE".to_owned(),
-            objects: vec!["SYNTHETIC_VIEW".to_owned()],
-            coordination_scope: oraclemcp_db::PdbIdentityScope::LocalOnly {
-                observation: oraclemcp_db::PdbIdentityObservation::Unreadable,
-            },
-            status: EditionProposalStatus::Reviewing,
-            created_at: String::new(),
-            updated_at: String::new(),
-        }
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::change_proposal::ChangeProposalStore::open(root.path()).unwrap();
+        let view = crate::change_proposal::test_reviewed_edition_request(
+            &store,
+            "synthetic-admin",
+            "CHILD_V2",
+            "ORA$BASE",
+        );
+        store.edition_proposal(&view.proposal_id).unwrap()
     }
 
     fn policy() -> OperatorLanePolicy {
@@ -396,10 +401,11 @@ mod tests {
     fn executor_refuses_lane_generation_mismatch() {
         let executor = OperatorEditionExecutor::new();
         let auth = OperatorAuth::authenticated("operator-a".to_owned());
+        let proposal = proposal();
         let preview = executor
             .preview(
                 &auth,
-                &proposal(),
+                &proposal,
                 EditionFlipTarget::Merge,
                 Some(7),
                 &policy(),
@@ -410,7 +416,7 @@ mod tests {
                 .consume_confirmation(
                     &auth,
                     &preview.token,
-                    &proposal(),
+                    &proposal,
                     EditionFlipTarget::Merge,
                     Some(8),
                     &policy()
@@ -424,10 +430,11 @@ mod tests {
     fn executor_confirmation_is_one_use() {
         let executor = OperatorEditionExecutor::new();
         let auth = OperatorAuth::authenticated("operator-a".to_owned());
+        let proposal = proposal();
         let preview = executor
             .preview(
                 &auth,
-                &proposal(),
+                &proposal,
                 EditionFlipTarget::Merge,
                 Some(7),
                 &policy(),
@@ -438,7 +445,7 @@ mod tests {
                 .consume_confirmation(
                     &auth,
                     &preview.token,
-                    &proposal(),
+                    &proposal,
                     EditionFlipTarget::Merge,
                     Some(7),
                     &policy()
@@ -452,13 +459,82 @@ mod tests {
                 .consume_confirmation(
                     &auth,
                     &preview.token,
-                    &proposal(),
+                    &proposal,
                     EditionFlipTarget::Merge,
                     Some(7),
                     &policy()
                 )
                 .unwrap_err(),
             EditionExecutorRefusal::ConfirmationMismatch
+        );
+    }
+
+    #[test]
+    fn executor_refuses_confirmation_after_restaging_even_when_reviewed_again() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::change_proposal::ChangeProposalStore::open(root.path()).unwrap();
+        let mut view = crate::change_proposal::test_reviewed_edition_request(
+            &store,
+            "synthetic-admin",
+            "CHILD_V2",
+            "ORA$BASE",
+        );
+        let executor = OperatorEditionExecutor::new();
+        let auth = OperatorAuth::authenticated("operator-a".into());
+        let first = store.edition_proposal(&view.proposal_id).unwrap();
+        let confirmation = executor
+            .preview(&auth, &first, EditionFlipTarget::Merge, Some(7), &policy())
+            .unwrap();
+        for state in [
+            ChangeRequestState::Staged,
+            ChangeRequestState::Verified,
+            ChangeRequestState::Reviewing,
+        ] {
+            view = store
+                .transition_edition_proposal(crate::change_proposal::test_edition_transition(
+                    &view,
+                    state,
+                    &format!("restage-{state:?}"),
+                ))
+                .unwrap();
+        }
+        let current = store.edition_proposal(&view.proposal_id).unwrap();
+        assert_eq!(current.stage_revision, 2);
+        assert_eq!(
+            executor
+                .consume_confirmation(
+                    &auth,
+                    &confirmation.token,
+                    &current,
+                    EditionFlipTarget::Merge,
+                    Some(7),
+                    &policy()
+                )
+                .unwrap_err(),
+            EditionExecutorRefusal::ConfirmationMismatch
+        );
+        let fresh = executor
+            .preview(
+                &auth,
+                &current,
+                EditionFlipTarget::Merge,
+                Some(7),
+                &policy(),
+            )
+            .unwrap();
+        assert_eq!(
+            executor
+                .consume_confirmation(
+                    &auth,
+                    &fresh.token,
+                    &current,
+                    EditionFlipTarget::Merge,
+                    Some(7),
+                    &policy()
+                )
+                .unwrap()
+                .as_str(),
+            "CHILD_V2"
         );
     }
 

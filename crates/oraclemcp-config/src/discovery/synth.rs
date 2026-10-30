@@ -230,6 +230,8 @@ pub fn synthesize_profiles(
             max_level: Some(OperatingLevel::ReadOnly),
             default_level: Some(OperatingLevel::ReadOnly),
             metadata_read_only_transaction: None,
+            edition_change_requests: None,
+            edition_change_request_ttl_days: None,
             // Everything else is left unset (the writer renders each as a
             // commented, help-annotated menu entry): protected stays unset so an
             // operator can later deliberately opt a target up, mcp_exposed stays

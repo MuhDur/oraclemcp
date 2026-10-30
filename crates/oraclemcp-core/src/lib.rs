@@ -39,6 +39,7 @@ pub mod dashboard_auth;
 mod dashboard_bundle;
 pub mod doctor;
 pub mod edition_executor;
+pub mod edition_journal;
 pub mod export;
 pub mod fence;
 pub mod file_store;

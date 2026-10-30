@@ -1659,6 +1659,7 @@ impl OracleMcpConfig {
                 }
             }
             prof.validate_thin_routing()?;
+            prof.validate_edition_change_requests()?;
             if let Some(masking) = &prof.masking {
                 masking.validate(&prof.name)?;
             }
@@ -1966,6 +1967,8 @@ fn profile_hot_reload_compatible(before: &ConnectionProfile, after: &ConnectionP
         && before.max_level == after.max_level
         && before.default_level == after.default_level
         && before.metadata_read_only_transaction() == after.metadata_read_only_transaction()
+        && before.edition_change_requests() == after.edition_change_requests()
+        && before.edition_change_request_ttl_days() == after.edition_change_request_ttl_days()
         && before.protected == after.protected
         && before.require_signed_tools == after.require_signed_tools
         && before.read_only_standby == after.read_only_standby
@@ -2088,6 +2091,12 @@ pub enum ConfigError {
     /// A `protected` profile declared a `max_level` above `READ_ONLY`.
     #[error("protected profile `{0}` must pin max_level = READ_ONLY (§6.6)")]
     ProtectedNotReadOnly(String),
+    /// Invalid opt-in or TTL for the guarded edition lifecycle.
+    #[error("invalid edition change requests for {profile}: {reason}")]
+    InvalidEditionChangeRequests {
+        profile: String,
+        reason: &'static str,
+    },
     /// A profile's default operating level is above its immutable ceiling.
     #[error(
         "connection profile `{profile}` has default_level {default_level} above max_level {max_level}"
@@ -4022,6 +4031,16 @@ trusted_policy_functions = ['APP.FN', 'APP.PKG.FN', '"Mixed.Owner"."Policy Funct
                 "metadata_read_only_transaction",
                 |_| {},
                 |p| p.metadata_read_only_transaction = Some(true),
+            ),
+            (
+                "edition_change_requests",
+                |_| {},
+                |p| p.edition_change_requests = Some(true),
+            ),
+            (
+                "edition_change_request_ttl_days",
+                |_| {},
+                |p| p.edition_change_request_ttl_days = Some(8),
             ),
             (
                 "credential_ref",

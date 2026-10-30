@@ -223,6 +223,8 @@ fn render_profile_block(synth_profile: &SynthesizedProfile) -> String {
             // protected = true is the safe, instructive value: it pins the
             // ceiling immutable and requires max_level = READ_ONLY (which we set).
             "metadata_read_only_transaction" => push_commented_scalar(&mut scalars, fd, "false"),
+            "edition_change_requests" => push_commented_scalar(&mut scalars, fd, "false"),
+            "edition_change_request_ttl_days" => push_commented_scalar(&mut scalars, fd, "7"),
             "protected" => push_commented_scalar(&mut scalars, fd, "true"),
             "require_signed_tools" => push_commented_scalar(&mut scalars, fd, "true"),
             "read_only_standby" => push_commented_scalar(&mut scalars, fd, "false"),

@@ -4,10 +4,12 @@
 //! deliberately not lane-bound: a lane is selected only when an operator applies
 //! the proposal through `/operator/v1/change-proposals/apply`.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use oraclemcp_config::ConnectionProfile;
 use oraclemcp_db::PdbIdentityScope;
 use oraclemcp_guard::{
     Classifier, ClassifierConfig, EditionLifecycleParse, EditionLifecycleSql, OperatingLevel,
@@ -26,8 +28,10 @@ const CHANGE_PROPOSAL_SCHEMA_VERSION: u8 = 1;
 const MAX_PROPOSAL_STATEMENTS: usize = 32;
 const EDITION_PROPOSAL_COLLECTION: &str = "edition-proposals";
 const EDITION_PROPOSAL_EXTENSION: &str = "json";
-const EDITION_PROPOSAL_SCHEMA_VERSION: u8 = 2;
+const EDITION_PROPOSAL_SCHEMA_VERSION: u8 = 3;
 const MAX_EDITION_PROPOSAL_OBJECTS: usize = 64;
+const DEFAULT_EDITION_TTL_SECONDS: u64 = 7 * 86400;
+const MAX_TRANSITION_RECEIPTS: usize = 4096;
 /// Tamper-token scope for change-proposal list cursors.
 const CHANGE_PROPOSAL_CURSOR_KIND: &str = "change-proposals";
 
@@ -87,13 +91,17 @@ impl ChangeProposalStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self, ChangeProposalError> {
         let store = FileStore::open(root)?;
         let owner = store.acquire_service_owner("change-proposals")?;
-        Ok(Self { store, owner })
+        let result = Self { store, owner };
+        result.list_edition_proposals()?;
+        Ok(result)
     }
 
     /// Open the proposal store under an existing process-wide service owner.
     pub fn open_with_owner(owner: ServiceOwner) -> Result<Self, ChangeProposalError> {
         let store = FileStore::open(owner.root())?;
-        Ok(Self { store, owner })
+        let result = Self { store, owner };
+        result.list_edition_proposals()?;
+        Ok(result)
     }
 
     /// List proposal board entries. Bind values are never included in the view.
@@ -233,6 +241,7 @@ impl ChangeProposalStore {
     /// proposals on the Reviews board. These records are requests only: they
     /// contain no SQL, confirmation, verdict, or executable authority.
     pub fn list_edition_proposals(&self) -> Result<Vec<EditionProposalView>, ChangeProposalError> {
+        let _mutation = self.owner.mutation_guard();
         let dir = self.store.root().join(EDITION_PROPOSAL_COLLECTION);
         if !dir.exists() {
             return Ok(Vec::new());
@@ -244,7 +253,10 @@ impl ChangeProposalStore {
             if path.extension().and_then(|ext| ext.to_str()) != Some(EDITION_PROPOSAL_EXTENSION) {
                 continue;
             }
-            proposals.push(load_edition_proposal_from_path(&path)?.view());
+            proposals.push(
+                self.read_edition_proposal_path(&path, current_seconds())?
+                    .view(),
+            );
         }
         proposals.sort_by(|a, b| {
             b.updated_at
@@ -284,15 +296,18 @@ impl ChangeProposalStore {
             .into_iter()
             .find(|candidate| {
                 candidate.proposal_id != proposal.proposal_id
-                    && same_service_local_branch_scope(
-                        &candidate.coordination_scope,
-                        &candidate.profile,
-                        &proposal.coordination_scope,
-                        &proposal.profile,
-                    )
-                    && candidate.base_edition == proposal.base_edition
+                    && match (&candidate.database_identity, &proposal.database_identity) {
+                        (Some(left), Some(right)) => left == right,
+                        _ => same_service_local_branch_scope(
+                            &candidate.coordination_scope,
+                            &candidate.profile,
+                            &proposal.coordination_scope,
+                            &proposal.profile,
+                        ),
+                    }
+                    && candidate.parent_edition == proposal.parent_edition
                     && candidate.child_edition != proposal.child_edition
-                    && candidate.status != EditionProposalStatus::Withdrawn
+                    && candidate.status.blocks_open_request()
             }))
     }
 
@@ -309,10 +324,124 @@ impl ChangeProposalStore {
         let _mutation = self.owner.mutation_guard();
         let proposal = EditionProposal::from_request(request)?;
         if let Some(conflict) = self.active_pdb_request_conflict(&proposal)? {
-            return Err(ChangeProposalError::OpenPdbRequest(conflict.proposal_id));
+            return Err(ChangeProposalError::OpenRequestConflict {
+                rule: if conflict.parent_edition == proposal.parent_edition {
+                    OpenRequestConflictRule::OracleOneChildPerParent
+                } else {
+                    OpenRequestConflictRule::OraclemcpOnePerPdbPolicy
+                },
+                proposal_id: conflict.proposal_id,
+            });
         }
         self.write_edition_proposal(&proposal)?;
         Ok(proposal.view())
+    }
+
+    /// Open the opted-in lifecycle using evidence supplied by the server's
+    /// catalog probe. Legacy draft metadata deliberately uses the method above.
+    pub fn open_change_request(
+        &self,
+        mut request: EditionProposalCreateRequest,
+        profile: &ConnectionProfile,
+        identity: Option<DatabaseIdentity>,
+        idempotency_key: &str,
+    ) -> Result<EditionProposalView, ChangeProposalError> {
+        let _mutation = self.owner.mutation_guard();
+        if !profile.edition_change_requests()
+            || profile.protected()
+            || profile.max_level() < OperatingLevel::Ddl
+        {
+            return Err(ChangeProposalError::EditionChangeRequestsDisabled);
+        }
+        if profile.name != request.profile
+            || !(1..=90).contains(&profile.edition_change_request_ttl_days())
+        {
+            return Err(ChangeProposalError::Invalid(
+                "invalid lifecycle profile or TTL",
+            ));
+        }
+        let identity = identity.ok_or(ChangeProposalError::DatabaseIdentityRequired)?;
+        identity.validate()?;
+        validate_idempotency_key(idempotency_key)?;
+        request.coordination_scope = identity.coordination_scope();
+        let mut proposal = EditionProposal::from_request(request)?;
+        let request_bytes = serde_json::to_vec(&(
+            &proposal.profile,
+            &proposal.child_edition,
+            &proposal.parent_edition,
+            &proposal.objects,
+            &identity,
+            profile.edition_change_request_ttl_days(),
+        ))
+        .map_err(|e| ChangeProposalError::Json(e.to_string()))?;
+        let request_hash = oraclemcp_audit::sha256_hex(&request_bytes);
+        for candidate in self.list_edition_proposals()? {
+            let full = self.load_edition_proposal(&candidate.proposal_id)?;
+            if candidate.profile == profile.name
+                && let Some(receipt) = &full.open_receipt
+                && receipt.key == idempotency_key
+            {
+                if receipt.receipt.request_hash != request_hash {
+                    return Err(ChangeProposalError::IdempotencyKeyReuse);
+                }
+                return Ok(receipt.receipt.result.clone());
+            }
+        }
+        if let Some(conflict) = self.open_conflict(&identity, &proposal.parent_edition)? {
+            return Err(ChangeProposalError::OpenRequestConflict {
+                proposal_id: conflict.proposal_id,
+                rule: conflict.rule,
+            });
+        }
+        proposal.database_identity = Some(identity);
+        proposal.expires_at = timestamp_seconds(&proposal.created_at)?
+            .checked_add(u64::from(profile.edition_change_request_ttl_days()) * 86400)
+            .ok_or(ChangeProposalError::Invalid("expiry overflow"))?;
+        proposal.open_receipt = Some(OpenReceipt {
+            key: idempotency_key.to_owned(),
+            receipt: TransitionReceipt {
+                request_hash,
+                result: proposal.view(),
+            },
+        });
+        self.write_edition_proposal(&proposal)?;
+        Ok(proposal.view())
+    }
+
+    /// Both conflicts are scoped to this service state store, never to all
+    /// deployments. Prefer the Oracle parent rule when both rules apply.
+    pub fn open_conflict(
+        &self,
+        identity: &DatabaseIdentity,
+        parent_edition: &str,
+    ) -> Result<Option<OpenRequestConflict>, ChangeProposalError> {
+        identity.validate()?;
+        let active: Vec<_> = self
+            .list_edition_proposals()?
+            .into_iter()
+            .filter(|candidate| {
+                candidate.status.blocks_open_request()
+                    && match &candidate.database_identity {
+                        Some(observed) => observed == identity,
+                        None => same_identified_pdb(
+                            &candidate.coordination_scope,
+                            &identity.coordination_scope(),
+                        ),
+                    }
+            })
+            .collect();
+        Ok(active
+            .iter()
+            .find(|candidate| candidate.parent_edition == parent_edition)
+            .or_else(|| active.first())
+            .map(|candidate| OpenRequestConflict {
+                proposal_id: candidate.proposal_id.clone(),
+                rule: if candidate.parent_edition == parent_edition {
+                    OpenRequestConflictRule::OracleOneChildPerParent
+                } else {
+                    OpenRequestConflictRule::OraclemcpOnePerPdbPolicy
+                },
+            }))
     }
 
     fn active_pdb_request_conflict(
@@ -328,7 +457,7 @@ impl ChangeProposalStore {
                         &candidate.coordination_scope,
                         &proposal.coordination_scope,
                     )
-                    && candidate.status != EditionProposalStatus::Withdrawn
+                    && candidate.status.blocks_open_request()
             }))
     }
 
@@ -341,9 +470,36 @@ impl ChangeProposalStore {
     ) -> Result<EditionProposalView, ChangeProposalError> {
         let _mutation = self.owner.mutation_guard();
         let mut proposal = self.load_edition_proposal(&request.proposal_id)?;
-        proposal.transition_to(request.status)?;
+        validate_idempotency_key(&request.idempotency_key)?;
+        let hash = request_hash(&request)?;
+        if let Some(receipt) = proposal.transition_receipts.get(&request.idempotency_key) {
+            if receipt.request_hash != hash {
+                return Err(ChangeProposalError::IdempotencyKeyReuse);
+            }
+            return Ok(receipt.result.clone());
+        }
+        if request.expected_revision != proposal.proposal_revision {
+            return Err(ChangeProposalError::RevisionConflict {
+                expected: request.expected_revision,
+                actual: proposal.proposal_revision,
+            });
+        }
+        if proposal.transition_receipts.len() >= MAX_TRANSITION_RECEIPTS {
+            return Err(ChangeProposalError::Invalid(
+                "transition receipt capacity reached",
+            ));
+        }
+        proposal.transition_to(&request)?;
+        let result = proposal.view();
+        proposal.transition_receipts.insert(
+            request.idempotency_key,
+            TransitionReceipt {
+                request_hash: hash,
+                result: result.clone(),
+            },
+        );
         self.write_edition_proposal(&proposal)?;
-        Ok(proposal.view())
+        Ok(result)
     }
 
     fn load_edition_proposal(
@@ -357,13 +513,38 @@ impl ChangeProposalStore {
         if !path.exists() {
             return Err(ChangeProposalError::UnknownEditionProposal);
         }
-        load_edition_proposal_from_path(&path)
+        let _mutation = self.owner.mutation_guard();
+        self.read_edition_proposal_path(&path, current_seconds())
+    }
+
+    fn read_edition_proposal_path(
+        &self,
+        path: &Path,
+        now: u64,
+    ) -> Result<EditionProposal, ChangeProposalError> {
+        let (mut proposal, migrated) = load_edition_proposal_from_path(path)?;
+        let expired = proposal.status.blocks_open_request() && proposal.expires_at <= now;
+        if expired {
+            proposal.status = ChangeRequestState::Expired;
+            proposal.proposal_revision = proposal
+                .proposal_revision
+                .checked_add(1)
+                .ok_or(ChangeProposalError::Invalid("proposal revision exhausted"))?;
+            proposal.verification_revision = None;
+            proposal.review_revision = None;
+            proposal.updated_at = format!("unix:{now:020}");
+        }
+        if migrated || expired {
+            self.write_edition_proposal(&proposal)?;
+        }
+        Ok(proposal)
     }
 
     fn write_edition_proposal(
         &self,
         proposal: &EditionProposal,
     ) -> Result<(), ChangeProposalError> {
+        proposal.validate()?;
         let id = StoreId::from_safe_segment(proposal.proposal_id.clone())?;
         let mut bytes = serde_json::to_vec_pretty(proposal)
             .map_err(|e| ChangeProposalError::Json(e.to_string()))?;
@@ -404,8 +585,23 @@ pub enum ChangeProposalError {
     #[error("unknown edition proposal")]
     UnknownEditionProposal,
     /// A service-state store already has an open request for this PDB.
-    #[error("an open edition request already exists for this service-state-store PDB: {0}")]
-    OpenPdbRequest(String),
+    #[error("open edition request conflict ({rule:?}, service_state_store): {proposal_id}")]
+    OpenRequestConflict {
+        proposal_id: String,
+        rule: OpenRequestConflictRule,
+    },
+    #[error("REVISION_CONFLICT: expected proposal revision {expected}, observed {actual}")]
+    RevisionConflict { expected: u64, actual: u64 },
+    #[error("idempotency key was already used for a different transition")]
+    IdempotencyKeyReuse,
+    #[error(
+        "stable server-probed DB_UNIQUE_NAME, DBID and CON_UID evidence is required; permit the identity probe (including SELECT on SYS.V_$CONTAINERS), then retry Open; ordinary reads remain available"
+    )]
+    DatabaseIdentityRequired,
+    #[error(
+        "edition_change_requests must be explicitly enabled on an unprotected profile with max_level >= DDL"
+    )]
+    EditionChangeRequestsDisabled,
 }
 
 /// A non-authorizing request to stage editionable objects in one child edition.
@@ -425,17 +621,114 @@ pub struct EditionProposalCreateRequest {
     pub coordination_scope: PdbIdentityScope,
 }
 
-/// The deliberately narrow lifecycle recorded by the Reviews board.
-///
-/// No status means an edition has been created, applied, merged, or otherwise
-/// authorized. Those effects belong to later guarded actions, which must
-/// classify at their point of execution.
+/// Stable server-observed database and container identity. A container name
+/// or its reusable CON_ID slot is never sufficient.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DatabaseIdentity {
+    pub db_unique_name: String,
+    pub dbid: String,
+    pub container_uid: String,
+}
+
+impl DatabaseIdentity {
+    #[must_use]
+    pub fn coordination_scope(&self) -> PdbIdentityScope {
+        PdbIdentityScope::ServiceStateStore {
+            identity: oraclemcp_db::PdbIdentity {
+                dbid: self.dbid.clone(),
+                con_uid: self.container_uid.clone(),
+            },
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), ChangeProposalError> {
+        let stable_number = |value: &str| {
+            value
+                .parse::<u64>()
+                .is_ok_and(|n| n > 0 && n.to_string() == value)
+        };
+        if self.db_unique_name.trim().is_empty()
+            || self.db_unique_name.len() > 128
+            || self.db_unique_name.chars().any(char::is_control)
+            || !stable_number(&self.dbid)
+            || !stable_number(&self.container_uid)
+        {
+            return Err(ChangeProposalError::DatabaseIdentityRequired);
+        }
+        Ok(())
+    }
+}
+
+/// Edition change-request lifecycle; changing metadata never authorizes SQL.
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum EditionProposalStatus {
-    Requested,
+pub enum ChangeRequestState {
+    Open,
+    Staged,
+    Verified,
     Reviewing,
+    Promoted,
+    RolledBack,
     Withdrawn,
+    Expired,
+    Failed,
+    ChildRetired,
+}
+
+impl ChangeRequestState {
+    pub const ALL: [Self; 10] = [
+        Self::Open,
+        Self::Staged,
+        Self::Verified,
+        Self::Reviewing,
+        Self::Promoted,
+        Self::RolledBack,
+        Self::Withdrawn,
+        Self::Expired,
+        Self::Failed,
+        Self::ChildRetired,
+    ];
+
+    pub const TRANSITIONS: &'static [(Self, Self)] = &[
+        (Self::Open, Self::Staged),
+        (Self::Staged, Self::Staged),
+        (Self::Verified, Self::Staged),
+        (Self::Reviewing, Self::Staged),
+        (Self::Staged, Self::Verified),
+        (Self::Verified, Self::Reviewing),
+        (Self::Reviewing, Self::Promoted),
+        (Self::Promoted, Self::RolledBack),
+        (Self::RolledBack, Self::ChildRetired),
+        (Self::Open, Self::Withdrawn),
+        (Self::Staged, Self::Withdrawn),
+        (Self::Verified, Self::Withdrawn),
+        (Self::Reviewing, Self::Withdrawn),
+        (Self::Open, Self::Expired),
+        (Self::Staged, Self::Expired),
+        (Self::Verified, Self::Expired),
+        (Self::Reviewing, Self::Expired),
+        (Self::Open, Self::Failed),
+        (Self::Staged, Self::Failed),
+        (Self::Verified, Self::Failed),
+        (Self::Reviewing, Self::Failed),
+        (Self::Withdrawn, Self::ChildRetired),
+        (Self::Expired, Self::ChildRetired),
+        (Self::Failed, Self::ChildRetired),
+    ];
+
+    #[must_use]
+    pub fn permits(self, next: Self) -> bool {
+        Self::TRANSITIONS.contains(&(self, next))
+    }
+
+    #[must_use]
+    pub const fn blocks_open_request(self) -> bool {
+        matches!(
+            self,
+            Self::Open | Self::Staged | Self::Verified | Self::Reviewing
+        )
+    }
 }
 
 /// A request to update one persisted Reviews-board status.
@@ -443,7 +736,72 @@ pub enum EditionProposalStatus {
 #[serde(deny_unknown_fields)]
 pub struct EditionProposalTransitionRequest {
     pub proposal_id: String,
-    pub status: EditionProposalStatus,
+    pub status: ChangeRequestState,
+    pub expected_revision: u64,
+    pub idempotency_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub objects: Option<Vec<String>>,
+    /// Supplied by the verifier seam, never by an HTTP metadata client.
+    #[serde(skip_deserializing, default)]
+    pub verification_revision: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct TransitionReceipt {
+    request_hash: String,
+    result: EditionProposalView,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+struct OpenReceipt {
+    key: String,
+    receipt: TransitionReceipt,
+}
+
+/// The rule responsible for a service-state-store conflict.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenRequestConflictRule {
+    OracleOneChildPerParent,
+    OraclemcpOnePerPdbPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OpenRequestConflict {
+    pub proposal_id: String,
+    pub rule: OpenRequestConflictRule,
+}
+
+fn current_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_secs())
+}
+
+fn timestamp_seconds(value: &str) -> Result<u64, ChangeProposalError> {
+    let seconds = value
+        .strip_prefix("unix:")
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or(ChangeProposalError::Invalid("invalid creation timestamp"))?;
+    if value != format!("unix:{seconds:020}") {
+        return Err(ChangeProposalError::Invalid("noncanonical timestamp"));
+    }
+    Ok(seconds)
+}
+
+fn validate_idempotency_key(key: &str) -> Result<(), ChangeProposalError> {
+    if key.is_empty() || key.len() > 128 || key.bytes().any(|c| !c.is_ascii_graphic()) {
+        return Err(ChangeProposalError::Invalid(
+            "idempotency key must contain 1..=128 printable ASCII characters",
+        ));
+    }
+    Ok(())
+}
+
+fn request_hash(request: &EditionProposalTransitionRequest) -> Result<String, ChangeProposalError> {
+    let bytes = serde_json::to_vec(request)
+        .map_err(|error| ChangeProposalError::Json(error.to_string()))?;
+    Ok(oraclemcp_audit::sha256_hex(&bytes))
 }
 
 /// Full on-disk edition-proposal record.
@@ -454,12 +812,22 @@ pub struct EditionProposal {
     pub proposal_id: String,
     pub profile: String,
     pub child_edition: String,
-    pub base_edition: String,
+    pub parent_edition: String,
     pub objects: Vec<String>,
     /// Server-derived scope for this service state store's local control plane.
     #[serde(default = "local_only_pdb_scope")]
     pub coordination_scope: PdbIdentityScope,
-    pub status: EditionProposalStatus,
+    pub database_identity: Option<DatabaseIdentity>,
+    pub status: ChangeRequestState,
+    pub proposal_revision: u64,
+    pub stage_revision: u64,
+    pub verification_revision: Option<u64>,
+    pub review_revision: Option<u64>,
+    pub expires_at: u64,
+    #[serde(default)]
+    transition_receipts: BTreeMap<String, TransitionReceipt>,
+    #[serde(default)]
+    open_receipt: Option<OpenReceipt>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -474,11 +842,6 @@ impl EditionProposal {
                 "child_edition must differ from base_edition",
             ));
         }
-        if request.objects.is_empty() {
-            return Err(ChangeProposalError::Invalid(
-                "edition proposal must name at least one object",
-            ));
-        }
         if request.objects.len() > MAX_EDITION_PROPOSAL_OBJECTS {
             return Err(ChangeProposalError::Invalid(
                 "edition proposal has too many objects",
@@ -491,11 +854,6 @@ impl EditionProposal {
             .collect::<Result<Vec<_>, _>>()?;
         objects.sort();
         objects.dedup();
-        if objects.is_empty() {
-            return Err(ChangeProposalError::Invalid(
-                "edition proposal must name at least one object",
-            ));
-        }
 
         let now = unix_timestamp();
         let nonce = SystemTime::now()
@@ -519,32 +877,117 @@ impl EditionProposal {
             proposal_id,
             profile,
             child_edition,
-            base_edition,
+            parent_edition: base_edition,
             objects,
             coordination_scope: request.coordination_scope,
-            status: EditionProposalStatus::Requested,
+            database_identity: None,
+            status: ChangeRequestState::Open,
+            proposal_revision: 0,
+            stage_revision: 0,
+            verification_revision: None,
+            review_revision: None,
+            expires_at: timestamp_seconds(&now)?
+                .checked_add(DEFAULT_EDITION_TTL_SECONDS)
+                .ok_or(ChangeProposalError::Invalid("expiry overflow"))?,
+            transition_receipts: BTreeMap::new(),
+            open_receipt: None,
             created_at: now.clone(),
             updated_at: now,
         })
     }
 
-    fn transition_to(&mut self, next: EditionProposalStatus) -> Result<(), ChangeProposalError> {
-        let valid = matches!(
-            (self.status, next),
-            (
-                EditionProposalStatus::Requested,
-                EditionProposalStatus::Reviewing | EditionProposalStatus::Withdrawn
-            ) | (
-                EditionProposalStatus::Reviewing,
-                EditionProposalStatus::Requested | EditionProposalStatus::Withdrawn
-            )
-        );
-        if !valid {
+    fn transition_to(
+        &mut self,
+        request: &EditionProposalTransitionRequest,
+    ) -> Result<(), ChangeProposalError> {
+        let next = request.status;
+        if !self.status.permits(next) {
             return Err(ChangeProposalError::Invalid(
                 "edition proposal status transition is not allowed",
             ));
         }
+        if request.objects.is_some() && next != ChangeRequestState::Staged {
+            return Err(ChangeProposalError::Invalid(
+                "objects may change only while staging",
+            ));
+        }
+        if !matches!(
+            next,
+            ChangeRequestState::Withdrawn
+                | ChangeRequestState::Expired
+                | ChangeRequestState::Failed
+        ) && self.database_identity.is_none()
+        {
+            return Err(ChangeProposalError::DatabaseIdentityRequired);
+        }
+        match next {
+            ChangeRequestState::Staged => {
+                if let Some(objects) = &request.objects {
+                    if objects.len() > MAX_EDITION_PROPOSAL_OBJECTS {
+                        return Err(ChangeProposalError::Invalid("too many staged objects"));
+                    }
+                    self.objects = objects
+                        .iter()
+                        .cloned()
+                        .map(normalize_edition_object)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    self.objects.sort();
+                    self.objects.dedup();
+                }
+                if self.objects.is_empty() {
+                    return Err(ChangeProposalError::Invalid(
+                        "a successful stage must contain an object",
+                    ));
+                }
+                self.stage_revision = self
+                    .stage_revision
+                    .checked_add(1)
+                    .ok_or(ChangeProposalError::Invalid("stage revision exhausted"))?;
+                self.verification_revision = None;
+                self.review_revision = None;
+            }
+            ChangeRequestState::Verified => {
+                if self.stage_revision == 0
+                    || request.verification_revision != Some(self.stage_revision)
+                {
+                    return Err(ChangeProposalError::Invalid(
+                        "verification must bind the current stage revision",
+                    ));
+                }
+                self.verification_revision = Some(self.stage_revision);
+            }
+            ChangeRequestState::Reviewing
+            | ChangeRequestState::Promoted
+            | ChangeRequestState::RolledBack => {
+                if self.stage_revision == 0
+                    || self.verification_revision != Some(self.stage_revision)
+                {
+                    return Err(ChangeProposalError::Invalid(
+                        "current stage is not verified",
+                    ));
+                }
+                if next == ChangeRequestState::Reviewing {
+                    self.review_revision = Some(self.stage_revision);
+                } else if self.review_revision != Some(self.stage_revision) {
+                    return Err(ChangeProposalError::Invalid(
+                        "current stage has no review bundle",
+                    ));
+                }
+            }
+            ChangeRequestState::Withdrawn
+            | ChangeRequestState::Expired
+            | ChangeRequestState::Failed
+            | ChangeRequestState::ChildRetired => {
+                self.verification_revision = None;
+                self.review_revision = None;
+            }
+            ChangeRequestState::Open => unreachable!("transition table has no edge into Open"),
+        }
         self.status = next;
+        self.proposal_revision = self
+            .proposal_revision
+            .checked_add(1)
+            .ok_or(ChangeProposalError::Invalid("proposal revision exhausted"))?;
         self.updated_at = unix_timestamp();
         Ok(())
     }
@@ -560,10 +1003,16 @@ impl EditionProposal {
             proposal_id: self.proposal_id.clone(),
             profile: self.profile.clone(),
             child_edition: self.child_edition.clone(),
-            base_edition: self.base_edition.clone(),
+            parent_edition: self.parent_edition.clone(),
             objects: self.objects.clone(),
             coordination_scope: self.coordination_scope.clone(),
+            database_identity: self.database_identity.clone(),
             status: self.status,
+            proposal_revision: self.proposal_revision,
+            stage_revision: self.stage_revision,
+            verification_revision: self.verification_revision,
+            review_revision: self.review_revision,
+            expires_at: self.expires_at,
             created_at: self.created_at.clone(),
             updated_at: self.updated_at.clone(),
         }
@@ -578,10 +1027,11 @@ impl EditionProposal {
         if StoreId::from_safe_segment(self.proposal_id.clone()).is_err()
             || normalize_non_empty(self.profile.clone(), "profile")? != self.profile
             || normalize_edition_identifier(self.child_edition.clone())? != self.child_edition
-            || normalize_edition_identifier(self.base_edition.clone())? != self.base_edition
-            || self.child_edition == self.base_edition
-            || self.objects.is_empty()
+            || normalize_edition_identifier(self.parent_edition.clone())? != self.parent_edition
+            || self.child_edition == self.parent_edition
             || self.objects.len() > MAX_EDITION_PROPOSAL_OBJECTS
+            || self.stage_revision > self.proposal_revision
+            || self.transition_receipts.len() > MAX_TRANSITION_RECEIPTS
         {
             return Err(ChangeProposalError::Invalid(
                 "invalid edition proposal record",
@@ -600,6 +1050,85 @@ impl EditionProposal {
                 "invalid edition proposal objects",
             ));
         }
+        if let Some(identity) = &self.database_identity {
+            identity.validate()?;
+            if self.coordination_scope != identity.coordination_scope() {
+                return Err(ChangeProposalError::Invalid(
+                    "database identity disagrees with coordination scope",
+                ));
+            }
+        }
+        if matches!(
+            self.status,
+            ChangeRequestState::Staged
+                | ChangeRequestState::Verified
+                | ChangeRequestState::Reviewing
+                | ChangeRequestState::Promoted
+                | ChangeRequestState::RolledBack
+        ) && (self.objects.is_empty()
+            || self.stage_revision == 0
+            || self.database_identity.is_none())
+        {
+            return Err(ChangeProposalError::Invalid(
+                "staged request lacks objects or database identity",
+            ));
+        }
+        if matches!(
+            self.status,
+            ChangeRequestState::Verified
+                | ChangeRequestState::Reviewing
+                | ChangeRequestState::Promoted
+                | ChangeRequestState::RolledBack
+        ) && self.verification_revision != Some(self.stage_revision)
+        {
+            return Err(ChangeProposalError::Invalid(
+                "verification revision is stale",
+            ));
+        }
+        if matches!(
+            self.status,
+            ChangeRequestState::Reviewing
+                | ChangeRequestState::Promoted
+                | ChangeRequestState::RolledBack
+        ) && self.review_revision != Some(self.stage_revision)
+        {
+            return Err(ChangeProposalError::Invalid("review revision is stale"));
+        }
+        let created = timestamp_seconds(&self.created_at)?;
+        if self.expires_at <= created || self.expires_at - created > 90 * 86400 {
+            return Err(ChangeProposalError::Invalid("invalid expiry timestamp"));
+        }
+        if self.database_identity.is_some() != self.open_receipt.is_some() {
+            return Err(ChangeProposalError::Invalid(
+                "lifecycle request lacks an Open receipt",
+            ));
+        }
+        for (key, receipt) in self
+            .transition_receipts
+            .iter()
+            .map(|(key, receipt)| (key.as_str(), receipt))
+            .chain(
+                self.open_receipt
+                    .iter()
+                    .map(|open| (open.key.as_str(), &open.receipt)),
+            )
+        {
+            validate_idempotency_key(key)?;
+            if receipt.request_hash.len() != 71
+                || !receipt.request_hash.starts_with("sha256:")
+                || !receipt.request_hash[7..]
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit())
+                || receipt.result.proposal_id != self.proposal_id
+                || receipt.result.profile != self.profile
+                || receipt.result.parent_edition != self.parent_edition
+                || receipt.result.child_edition != self.child_edition
+                || receipt.result.database_identity != self.database_identity
+                || receipt.result.proposal_revision > self.proposal_revision
+            {
+                return Err(ChangeProposalError::Invalid("invalid idempotency receipt"));
+            }
+        }
         Ok(())
     }
 }
@@ -611,11 +1140,17 @@ pub struct EditionProposalView {
     pub proposal_id: String,
     pub profile: String,
     pub child_edition: String,
-    pub base_edition: String,
+    pub parent_edition: String,
     pub objects: Vec<String>,
     /// Scope of the service-local coordination claim.
     pub coordination_scope: PdbIdentityScope,
-    pub status: EditionProposalStatus,
+    pub database_identity: Option<DatabaseIdentity>,
+    pub status: ChangeRequestState,
+    pub proposal_revision: u64,
+    pub stage_revision: u64,
+    pub verification_revision: Option<u64>,
+    pub review_revision: Option<u64>,
+    pub expires_at: u64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -1014,21 +1549,93 @@ fn load_proposal_from_path(path: &Path) -> Result<ChangeProposal, ChangeProposal
     Ok(proposal)
 }
 
-fn load_edition_proposal_from_path(path: &Path) -> Result<EditionProposal, ChangeProposalError> {
+fn load_edition_proposal_from_path(
+    path: &Path,
+) -> Result<(EditionProposal, bool), ChangeProposalError> {
     let bytes = fs::read(path).map_err(|e| ChangeProposalError::Io(e.to_string()))?;
-    let mut proposal: EditionProposal =
+    let mut value: Value =
         serde_json::from_slice(&bytes).map_err(|e| ChangeProposalError::Json(e.to_string()))?;
-    if proposal.schema_version == 1 {
-        // Schema 1 mislabeled CON_ID as con_uid. Preserve the request, but
-        // never promote that reusable slot to stable PDB identity. All callers
-        // receive the canonical schema; the next transition persists it.
-        proposal.schema_version = EDITION_PROPOSAL_SCHEMA_VERSION;
-        proposal.coordination_scope = PdbIdentityScope::LocalOnly {
-            observation: oraclemcp_db::PdbIdentityObservation::LegacyContainerIdentity,
+    let version = value["schema_version"]
+        .as_u64()
+        .ok_or(ChangeProposalError::Invalid(
+            "missing edition schema version",
+        ))?;
+    let migrated = matches!(version, 1 | 2);
+    if migrated {
+        let record = value
+            .as_object_mut()
+            .ok_or(ChangeProposalError::Invalid("invalid legacy request"))?;
+        const LEGACY_FIELDS: &[&str] = &[
+            "schema_version",
+            "proposal_id",
+            "profile",
+            "child_edition",
+            "base_edition",
+            "objects",
+            "coordination_scope",
+            "status",
+            "created_at",
+            "updated_at",
+        ];
+        if record
+            .keys()
+            .any(|key| !LEGACY_FIELDS.contains(&key.as_str()))
+        {
+            return Err(ChangeProposalError::Invalid(
+                "unexpected legacy request field",
+            ));
+        }
+        let created = timestamp_seconds(
+            record
+                .get("created_at")
+                .and_then(Value::as_str)
+                .ok_or(ChangeProposalError::Invalid("invalid legacy timestamp"))?,
+        )?;
+        let status = match record.get("status").and_then(Value::as_str) {
+            Some("requested" | "reviewing") => "open",
+            Some("withdrawn") => "withdrawn",
+            _ => return Err(ChangeProposalError::Invalid("invalid legacy state")),
         };
+        let parent = record
+            .remove("base_edition")
+            .ok_or(ChangeProposalError::Invalid("legacy parent missing"))?;
+        record.insert("parent_edition".into(), parent);
+        record.insert("status".into(), Value::String(status.into()));
+        record.insert(
+            "schema_version".into(),
+            Value::from(EDITION_PROPOSAL_SCHEMA_VERSION),
+        );
+        record.insert("database_identity".into(), Value::Null);
+        record.insert("proposal_revision".into(), Value::from(0));
+        record.insert("stage_revision".into(), Value::from(0));
+        record.insert("verification_revision".into(), Value::Null);
+        record.insert("review_revision".into(), Value::Null);
+        record.insert("open_receipt".into(), Value::Null);
+        record.insert("transition_receipts".into(), serde_json::json!({}));
+        record.insert(
+            "expires_at".into(),
+            Value::from(
+                created
+                    .checked_add(DEFAULT_EDITION_TTL_SECONDS)
+                    .ok_or(ChangeProposalError::Invalid("legacy expiry overflow"))?,
+            ),
+        );
+        if version == 1 {
+            // v1 mislabeled reusable CON_ID as CON_UID. Preserve the draft,
+            // never that identity claim, and never any old review authority.
+            record.insert(
+                "coordination_scope".into(),
+                serde_json::to_value(PdbIdentityScope::LocalOnly {
+                    observation: oraclemcp_db::PdbIdentityObservation::LegacyContainerIdentity,
+                })
+                .map_err(|e| ChangeProposalError::Json(e.to_string()))?,
+            );
+        }
     }
+    let proposal: EditionProposal =
+        serde_json::from_value(value).map_err(|e| ChangeProposalError::Json(e.to_string()))?;
     proposal.validate()?;
-    Ok(proposal)
+    Ok((proposal, migrated))
 }
 
 pub(crate) fn normalize_edition_identifier(value: String) -> Result<String, ChangeProposalError> {
@@ -1095,8 +1702,534 @@ fn prefixed_sha256_hex(bytes: &[u8]) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn test_edition_transition(
+    view: &EditionProposalView,
+    status: ChangeRequestState,
+    key: &str,
+) -> EditionProposalTransitionRequest {
+    EditionProposalTransitionRequest {
+        proposal_id: view.proposal_id.clone(),
+        status,
+        expected_revision: view.proposal_revision,
+        idempotency_key: key.to_owned(),
+        objects: None,
+        verification_revision: (status == ChangeRequestState::Verified)
+            .then_some(view.stage_revision),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_verified_edition_request(
+    store: &ChangeProposalStore,
+    profile_name: &str,
+    child: &str,
+    parent: &str,
+) -> EditionProposalView {
+    let profile: ConnectionProfile = serde_json::from_value(serde_json::json!({
+        "name": profile_name, "connect_string": "synthetic:1521/service",
+        "max_level": "ADMIN", "edition_change_requests": true,
+    }))
+    .unwrap();
+    let identity = DatabaseIdentity {
+        db_unique_name: "SYNTHETIC_DB".into(),
+        dbid: "42".into(),
+        container_uid: "9001".into(),
+    };
+    let mut view = store
+        .open_change_request(
+            EditionProposalCreateRequest {
+                profile: profile_name.into(),
+                child_edition: child.into(),
+                base_edition: parent.into(),
+                objects: vec!["SYNTHETIC_VIEW".into()],
+                coordination_scope: identity.coordination_scope(),
+            },
+            &profile,
+            Some(identity),
+            &format!("open-{child}"),
+        )
+        .unwrap();
+    for state in [ChangeRequestState::Staged, ChangeRequestState::Verified] {
+        let request = test_edition_transition(&view, state, &format!("state-{state:?}"));
+        view = store.transition_edition_proposal(request).unwrap();
+    }
+    view
+}
+
+#[cfg(test)]
+pub(crate) fn test_reviewed_edition_request(
+    store: &ChangeProposalStore,
+    profile_name: &str,
+    child: &str,
+    parent: &str,
+) -> EditionProposalView {
+    let view = test_verified_edition_request(store, profile_name, child, parent);
+    store
+        .transition_edition_proposal(test_edition_transition(
+            &view,
+            ChangeRequestState::Reviewing,
+            "state-Reviewing",
+        ))
+        .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lifecycle_profile() -> ConnectionProfile {
+        serde_json::from_value(
+            serde_json::json!({"name":"stage", "connect_string":"synthetic:1521/service",
+            "max_level":"DDL", "edition_change_requests":true}),
+        )
+        .unwrap()
+    }
+    fn database_identity() -> DatabaseIdentity {
+        DatabaseIdentity {
+            db_unique_name: "SYNTHETIC_DB".into(),
+            dbid: "42".into(),
+            container_uid: "9001".into(),
+        }
+    }
+    fn lifecycle_request(child: &str, parent: &str) -> EditionProposalCreateRequest {
+        EditionProposalCreateRequest {
+            profile: "stage".into(),
+            child_edition: child.into(),
+            base_edition: parent.into(),
+            objects: Vec::new(),
+            coordination_scope: local_only_pdb_scope(),
+        }
+    }
+    fn open_empty(store: &ChangeProposalStore) -> EditionProposalView {
+        store
+            .open_change_request(
+                lifecycle_request("CHILD_A", "ORA$BASE"),
+                &lifecycle_profile(),
+                Some(database_identity()),
+                "open-a",
+            )
+            .unwrap()
+    }
+    fn stage(
+        store: &ChangeProposalStore,
+        view: &EditionProposalView,
+        key: &str,
+    ) -> EditionProposalView {
+        let mut request = test_edition_transition(view, ChangeRequestState::Staged, key);
+        request.objects = Some(vec!["SYNTHETIC_VIEW".into()]);
+        store.transition_edition_proposal(request).unwrap()
+    }
+
+    #[test]
+    fn change_request_transition_table_exhaustive() {
+        use ChangeRequestState::*;
+        for from in ChangeRequestState::ALL {
+            for to in ChangeRequestState::ALL {
+                let active = matches!(from, Open | Staged | Verified | Reviewing);
+                let expected = (active && matches!(to, Withdrawn | Expired | Failed))
+                    || (active && to == Staged)
+                    || matches!(
+                        (from, to),
+                        (Staged, Verified)
+                            | (Verified, Reviewing)
+                            | (Reviewing, Promoted)
+                            | (Promoted, RolledBack)
+                            | (RolledBack | Withdrawn | Expired | Failed, ChildRetired)
+                    );
+                assert_eq!(from.permits(to), expected, "{from:?} -> {to:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn open_allows_zero_objects() {
+        let store = ChangeProposalStore::open(store_root("open-zero")).unwrap();
+        let view = open_empty(&store);
+        assert_eq!(view.status, ChangeRequestState::Open);
+        assert!(view.objects.is_empty());
+        assert_eq!(view.proposal_revision, 0);
+        let mut view = stage(&store, &view, "stage");
+        for state in [
+            ChangeRequestState::Verified,
+            ChangeRequestState::Reviewing,
+            ChangeRequestState::Promoted,
+            ChangeRequestState::RolledBack,
+            ChangeRequestState::ChildRetired,
+        ] {
+            view = store
+                .transition_edition_proposal(test_edition_transition(
+                    &view,
+                    state,
+                    &format!("{state:?}"),
+                ))
+                .unwrap();
+            assert_eq!(
+                store.edition_proposal(&view.proposal_id).unwrap().status,
+                state
+            );
+        }
+    }
+
+    #[test]
+    fn stage_increments_revision_and_invalidates_verification() {
+        let store = ChangeProposalStore::open(store_root("restage-verified")).unwrap();
+        let first = stage(&store, &open_empty(&store), "stage-1");
+        let verified = store
+            .transition_edition_proposal(test_edition_transition(
+                &first,
+                ChangeRequestState::Verified,
+                "verify",
+            ))
+            .unwrap();
+        let second = stage(&store, &verified, "stage-2");
+        assert_eq!(second.stage_revision, 2);
+        assert_eq!(second.proposal_revision, verified.proposal_revision + 1);
+        assert_eq!(second.verification_revision, None);
+        assert_eq!(second.review_revision, None);
+        let mut stale_verification =
+            test_edition_transition(&second, ChangeRequestState::Verified, "old-verification");
+        stale_verification.verification_revision = Some(1);
+        assert!(matches!(
+            store.transition_edition_proposal(stale_verification),
+            Err(ChangeProposalError::Invalid(_))
+        ));
+    }
+
+    #[test]
+    fn stage_from_reviewing_withdraws_review_under_cas() {
+        let store = ChangeProposalStore::open(store_root("restage-review")).unwrap();
+        let reviewed = test_reviewed_edition_request(&store, "stage", "CHILD_A", "ORA$BASE");
+        let next = stage(&store, &reviewed, "restage");
+        assert_eq!(next.status, ChangeRequestState::Staged);
+        assert_eq!(next.stage_revision, 2);
+        assert_eq!(next.verification_revision, None);
+        assert_eq!(next.review_revision, None);
+        assert!(matches!(
+            store.transition_edition_proposal(test_edition_transition(
+                &reviewed,
+                ChangeRequestState::Promoted,
+                "stale-promote"
+            )),
+            Err(ChangeProposalError::RevisionConflict { .. })
+        ));
+        assert_eq!(
+            store.edition_proposal(&next.proposal_id).unwrap().status,
+            ChangeRequestState::Staged
+        );
+    }
+
+    #[test]
+    fn revision_cas_conflict_refused() {
+        let store = ChangeProposalStore::open(store_root("revision-cas")).unwrap();
+        let opened = open_empty(&store);
+        let current = stage(&store, &opened, "first-stage");
+        let mut stale = test_edition_transition(&opened, ChangeRequestState::Staged, "stale-stage");
+        stale.objects = Some(vec!["OTHER_VIEW".into()]);
+        assert!(matches!(
+            store.transition_edition_proposal(stale),
+            Err(ChangeProposalError::RevisionConflict {
+                expected: 0,
+                actual: 1
+            })
+        ));
+        assert_eq!(
+            store.edition_proposal(&current.proposal_id).unwrap().view(),
+            current
+        );
+    }
+
+    #[test]
+    fn idempotent_retry_same_key_same_result() {
+        let root = store_root("idempotent-transition");
+        let store = ChangeProposalStore::open(&root).unwrap();
+        let opened = open_empty(&store);
+        assert_eq!(open_empty(&store), opened, "Open is idempotent too");
+        let mut request =
+            test_edition_transition(&opened, ChangeRequestState::Staged, "stage-once");
+        request.objects = Some(vec!["SYNTHETIC_VIEW".into()]);
+        let staged = store.transition_edition_proposal(request.clone()).unwrap();
+        let verified = store
+            .transition_edition_proposal(test_edition_transition(
+                &staged,
+                ChangeRequestState::Verified,
+                "verify",
+            ))
+            .unwrap();
+        drop(store);
+        let store = ChangeProposalStore::open(&root).unwrap();
+        assert_eq!(
+            store.transition_edition_proposal(request).unwrap(),
+            staged,
+            "returns original durable receipt"
+        );
+        assert_eq!(
+            store
+                .edition_proposal(&verified.proposal_id)
+                .unwrap()
+                .view(),
+            verified,
+            "no mutation replayed"
+        );
+    }
+
+    #[test]
+    fn idempotency_key_reuse_with_different_request_refused() {
+        let store = ChangeProposalStore::open(store_root("idempotency-reuse")).unwrap();
+        let opened = open_empty(&store);
+        let staged = stage(&store, &opened, "stage-once");
+        assert!(matches!(
+            store.transition_edition_proposal(test_edition_transition(
+                &staged,
+                ChangeRequestState::Withdrawn,
+                "stage-once"
+            )),
+            Err(ChangeProposalError::IdempotencyKeyReuse)
+        ));
+        assert!(matches!(
+            store.open_change_request(
+                lifecycle_request("CHILD_B", "ORA$BASE"),
+                &lifecycle_profile(),
+                Some(database_identity()),
+                "open-a"
+            ),
+            Err(ChangeProposalError::IdempotencyKeyReuse)
+        ));
+    }
+
+    #[test]
+    fn ttl_expiry_moves_to_expired() {
+        let root = store_root("ttl-expiry");
+        let store = ChangeProposalStore::open(&root).unwrap();
+        let opened = open_empty(&store);
+        let id = StoreId::from_safe_segment(opened.proposal_id.clone()).unwrap();
+        let path = store
+            .store
+            .path_for(EDITION_PROPOSAL_COLLECTION, &id, EDITION_PROPOSAL_EXTENSION)
+            .unwrap();
+        let expired = store
+            .read_edition_proposal_path(&path, opened.expires_at)
+            .unwrap();
+        assert_eq!(expired.status, ChangeRequestState::Expired);
+        assert_eq!(expired.proposal_revision, 1);
+        assert_eq!(expired.verification_revision, None);
+        assert_eq!(
+            store.edition_proposal(&opened.proposal_id).unwrap().status,
+            ChangeRequestState::Expired
+        );
+        assert!(
+            store
+                .open_change_request(
+                    lifecycle_request("CHILD_B", "ORA$BASE"),
+                    &lifecycle_profile(),
+                    Some(database_identity()),
+                    "open-b"
+                )
+                .is_ok(),
+            "expired metadata no longer claims the service-state-store slot"
+        );
+    }
+
+    #[test]
+    fn distinct_full_database_identities_do_not_share_a_request_slot_or_branch() {
+        let store = ChangeProposalStore::open(store_root("different-full-identities")).unwrap();
+        let left = open_empty(&store);
+        let mut other_identity = database_identity();
+        other_identity.db_unique_name = "OTHER_SYNTHETIC_DB".into();
+        let mut profile = lifecycle_profile();
+        profile.name = "stage_two".into();
+        let mut request = lifecycle_request("CHILD_B", "ORA$BASE");
+        request.profile = profile.name.clone();
+        let right = store
+            .open_change_request(request, &profile, Some(other_identity), "other-db")
+            .unwrap();
+        assert_eq!(store.list_edition_proposals().unwrap().len(), 2);
+        let left = store.edition_proposal(&left.proposal_id).unwrap();
+        let right = store.edition_proposal(&right.proposal_id).unwrap();
+        assert!(
+            store
+                .active_edition_branch_conflict(&left)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .active_edition_branch_conflict(&right)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn legacy_status_records_migrate_once() {
+        for version in [1, 2] {
+            for old_status in ["requested", "reviewing", "withdrawn"] {
+                let store = ChangeProposalStore::open(store_root(&format!(
+                    "legacy-{version}-{old_status}"
+                )))
+                .unwrap();
+                let view = store
+                    .create_edition_proposal(lifecycle_request("LEGACY_CHILD", "ORA$BASE"))
+                    .unwrap();
+                let path = store
+                    .store
+                    .path_for(
+                        EDITION_PROPOSAL_COLLECTION,
+                        &StoreId::from_safe_segment(view.proposal_id.clone()).unwrap(),
+                        EDITION_PROPOSAL_EXTENSION,
+                    )
+                    .unwrap();
+                let legacy = serde_json::json!({"schema_version":version,"proposal_id":view.proposal_id,
+                    "profile":view.profile,"child_edition":view.child_edition,"base_edition":view.parent_edition,
+                    "objects":view.objects,"status":old_status,"coordination_scope":view.coordination_scope,
+                    "created_at":view.created_at,"updated_at":view.updated_at});
+                fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+                let canonical = store.edition_proposal(&view.proposal_id).unwrap();
+                assert_eq!(canonical.schema_version, 3);
+                assert_eq!(
+                    canonical.status,
+                    if old_status == "withdrawn" {
+                        ChangeRequestState::Withdrawn
+                    } else {
+                        ChangeRequestState::Open
+                    }
+                );
+                assert_eq!(canonical.database_identity, None);
+                assert_eq!(canonical.stage_revision, 0);
+                assert_eq!(canonical.verification_revision, None);
+                assert_eq!(canonical.review_revision, None);
+                let bytes = fs::read(&path).unwrap();
+                let value: Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(value["schema_version"], 3, "migration is persisted on load");
+                assert!(value.get("base_edition").is_none());
+                assert_eq!(
+                    store.edition_proposal(&view.proposal_id).unwrap(),
+                    canonical
+                );
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    bytes,
+                    "canonical reload preserves the same state"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn ttl_sweeps_on_store_open_and_before_transition() {
+        for on_open in [true, false] {
+            let root = store_root(&format!("ttl-sweep-{on_open}"));
+            let store = ChangeProposalStore::open(&root).unwrap();
+            let view = open_empty(&store);
+            let mut old = store.edition_proposal(&view.proposal_id).unwrap();
+            let now = current_seconds();
+            old.created_at = format!("unix:{:020}", now - 8 * 86400);
+            old.updated_at = old.created_at.clone();
+            old.expires_at = now - 86400;
+            let receipt = &mut old.open_receipt.as_mut().unwrap().receipt.result;
+            receipt.created_at = old.created_at.clone();
+            receipt.updated_at = old.updated_at.clone();
+            receipt.expires_at = old.expires_at;
+            store.write_edition_proposal(&old).unwrap();
+            let store = if on_open {
+                drop(store);
+                ChangeProposalStore::open(&root).unwrap()
+            } else {
+                store
+            };
+            if !on_open {
+                assert!(matches!(
+                    store.transition_edition_proposal(test_edition_transition(
+                        &view,
+                        ChangeRequestState::Withdrawn,
+                        "before-transition"
+                    )),
+                    Err(ChangeProposalError::RevisionConflict {
+                        expected: 0,
+                        actual: 1
+                    })
+                ));
+            }
+            let expired = store.edition_proposal(&view.proposal_id).unwrap();
+            assert_eq!(expired.status, ChangeRequestState::Expired);
+            assert_eq!(expired.proposal_revision, 1);
+        }
+    }
+
+    #[test]
+    fn container_name_alone_is_not_identity() {
+        let store = ChangeProposalStore::open(store_root("identity-required")).unwrap();
+        let name_only = DatabaseIdentity {
+            db_unique_name: "SYNTHETIC_DB".into(),
+            dbid: String::new(),
+            container_uid: "PDB_NAME".into(),
+        };
+        assert!(matches!(
+            store.open_change_request(
+                lifecycle_request("CHILD_A", "ORA$BASE"),
+                &lifecycle_profile(),
+                Some(name_only),
+                "name-only"
+            ),
+            Err(ChangeProposalError::DatabaseIdentityRequired)
+        ));
+        let error = store
+            .open_change_request(
+                lifecycle_request("CHILD_A", "ORA$BASE"),
+                &lifecycle_profile(),
+                None,
+                "missing",
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("SYS.V_$CONTAINERS"));
+        assert!(
+            error
+                .to_string()
+                .contains("ordinary reads remain available")
+        );
+        assert!(store.list_edition_proposals().unwrap().is_empty());
+        assert!(
+            store
+                .create_edition_proposal(lifecycle_request("LEGACY_CHILD", "ORA$BASE"))
+                .is_ok(),
+            "local-only draft metadata remains available"
+        );
+    }
+
+    #[test]
+    fn open_conflict_same_parent_edition_names_oracle_rule() {
+        let store = ChangeProposalStore::open(store_root("oracle-parent-conflict")).unwrap();
+        open_empty(&store);
+        assert!(matches!(
+            store.open_change_request(
+                lifecycle_request("CHILD_B", "ORA$BASE"),
+                &lifecycle_profile(),
+                Some(database_identity()),
+                "open-b"
+            ),
+            Err(ChangeProposalError::OpenRequestConflict {
+                rule: OpenRequestConflictRule::OracleOneChildPerParent,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn open_conflict_same_pdb_names_oraclemcp_policy() {
+        let store = ChangeProposalStore::open(store_root("product-pdb-conflict")).unwrap();
+        open_empty(&store);
+        assert!(matches!(
+            store.open_change_request(
+                lifecycle_request("CHILD_B", "OTHER_PARENT"),
+                &lifecycle_profile(),
+                Some(database_identity()),
+                "open-b"
+            ),
+            Err(ChangeProposalError::OpenRequestConflict {
+                rule: OpenRequestConflictRule::OraclemcpOnePerPdbPolicy,
+                ..
+            })
+        ));
+    }
 
     #[test]
     fn proposal_view_omits_bind_values_and_stored_verdict_payloads() {
@@ -1295,14 +2428,14 @@ mod tests {
             })
             .expect("create edition proposal");
 
-        assert_eq!(proposal.status, EditionProposalStatus::Requested);
+        assert_eq!(proposal.status, ChangeRequestState::Open);
         assert_eq!(proposal.child_edition, "CHILD_V2");
-        assert_eq!(proposal.base_edition, "ORA$BASE");
+        assert_eq!(proposal.parent_edition, "ORA$BASE");
         let record_path = root
             .join(EDITION_PROPOSAL_COLLECTION)
             .join(format!("{}.json", proposal.proposal_id));
         let record = fs::read_to_string(&record_path).expect("persisted record");
-        assert!(record.contains("\"status\": \"requested\""));
+        assert!(record.contains("\"status\": \"open\""));
         for forbidden in ["sql", "bind", "confirm", "execute", "verdict", "grant"] {
             assert!(
                 !record.contains(forbidden),
@@ -1316,17 +2449,19 @@ mod tests {
         assert_eq!(listed, vec![proposal.clone()]);
 
         let transitioned = store
-            .transition_edition_proposal(EditionProposalTransitionRequest {
-                proposal_id: proposal.proposal_id.clone(),
-                status: EditionProposalStatus::Reviewing,
-            })
-            .expect("transition to review");
-        assert_eq!(transitioned.status, EditionProposalStatus::Reviewing);
+            .transition_edition_proposal(test_edition_transition(
+                &proposal,
+                ChangeRequestState::Withdrawn,
+                "withdraw",
+            ))
+            .expect("withdraw draft metadata without database authority");
+        assert_eq!(transitioned.status, ChangeRequestState::Withdrawn);
         let replay = store
-            .transition_edition_proposal(EditionProposalTransitionRequest {
-                proposal_id: proposal.proposal_id,
-                status: EditionProposalStatus::Reviewing,
-            })
+            .transition_edition_proposal(test_edition_transition(
+                &transitioned,
+                ChangeRequestState::Withdrawn,
+                "withdraw-again",
+            ))
             .expect_err("replaying the same status must not reset a request");
         assert!(matches!(replay, ChangeProposalError::Invalid(_)));
     }
@@ -1375,7 +2510,10 @@ mod tests {
                 "CHILD_B",
             ))
             .expect_err("same PDB must serialize in one service state store");
-        assert!(matches!(conflict, ChangeProposalError::OpenPdbRequest(_)));
+        assert!(matches!(
+            conflict,
+            ChangeProposalError::OpenRequestConflict { .. }
+        ));
         store
             .create_edition_proposal(edition_request(
                 identified_scope("db-a", "pdb-2"),
@@ -1415,7 +2553,7 @@ mod tests {
                 match worker.join().expect("request thread") {
                     Ok(_) => admitted += 1,
                     Err(error) => assert!(
-                        matches!(error, ChangeProposalError::OpenPdbRequest(_)),
+                        matches!(error, ChangeProposalError::OpenRequestConflict { .. }),
                         "unexpected failure: {error}"
                     ),
                 }
@@ -1434,49 +2572,64 @@ mod tests {
         for round in 0..16 {
             let store =
                 ChangeProposalStore::open(store_root(&format!("pdb-transition-{round}"))).unwrap();
+            let staged = stage(&store, &open_empty(&store), "initial-stage");
             let view = store
-                .create_edition_proposal(edition_request(
-                    identified_scope("db-a", "pdb-1"),
-                    "OLD_CHILD",
+                .transition_edition_proposal(test_edition_transition(
+                    &staged,
+                    ChangeRequestState::Verified,
+                    "initial-verify",
                 ))
                 .unwrap();
             let start = Arc::new(Barrier::new(2));
-            let workers = [
-                EditionProposalStatus::Reviewing,
-                EditionProposalStatus::Withdrawn,
-            ]
-            .map(|status| {
-                let handle = ChangeProposalStore::open_with_owner(store.owner.clone()).unwrap();
-                let start = Arc::clone(&start);
-                let proposal_id = view.proposal_id.clone();
-                std::thread::spawn(move || {
-                    start.wait();
-                    (
-                        status,
-                        handle.transition_edition_proposal(EditionProposalTransitionRequest {
-                            proposal_id,
-                            status,
-                        }),
-                    )
-                })
-            });
+            let workers =
+                [ChangeRequestState::Reviewing, ChangeRequestState::Withdrawn].map(|status| {
+                    let handle = ChangeProposalStore::open_with_owner(store.owner.clone()).unwrap();
+                    let start = Arc::clone(&start);
+                    let view = view.clone();
+                    std::thread::spawn(move || {
+                        start.wait();
+                        let mut result = handle.transition_edition_proposal(
+                            test_edition_transition(&view, status, &format!("{status:?}")),
+                        );
+                        // CAS makes the losing request explicit. Withdrawal may
+                        // retry once with the newly observed review revision.
+                        if status == ChangeRequestState::Withdrawn
+                            && matches!(result, Err(ChangeProposalError::RevisionConflict { .. }))
+                        {
+                            let current =
+                                handle.edition_proposal(&view.proposal_id).unwrap().view();
+                            result = handle.transition_edition_proposal(test_edition_transition(
+                                &current,
+                                status,
+                                "withdraw-after-review",
+                            ));
+                        }
+                        (status, result)
+                    })
+                });
             for worker in workers {
                 let (status, result) = worker.join().unwrap();
-                if status == EditionProposalStatus::Withdrawn {
+                if status == ChangeRequestState::Withdrawn {
                     assert!(result.is_ok(), "withdrawal must complete: {result:?}");
                 } else if let Err(error) = result {
-                    assert!(matches!(error, ChangeProposalError::Invalid(_)));
+                    assert!(matches!(
+                        error,
+                        ChangeProposalError::Invalid(_)
+                            | ChangeProposalError::RevisionConflict { .. }
+                    ));
                 }
             }
             assert_eq!(
                 store.edition_proposal(&view.proposal_id).unwrap().status,
-                EditionProposalStatus::Withdrawn
+                ChangeRequestState::Withdrawn
             );
             store
-                .create_edition_proposal(edition_request(
-                    identified_scope("db-a", "pdb-1"),
-                    "NEW_CHILD",
-                ))
+                .open_change_request(
+                    lifecycle_request("NEW_CHILD", "ORA$BASE"),
+                    &lifecycle_profile(),
+                    Some(database_identity()),
+                    "replacement",
+                )
                 .expect("withdrawal frees the PDB request slot");
         }
     }
@@ -1510,24 +2663,36 @@ mod tests {
         let view = store
             .create_edition_proposal(edition_request(identified_scope("db-a", "3"), "OLD_CHILD"))
             .expect("request");
-        let mut legacy = store.edition_proposal(&view.proposal_id).unwrap();
-        legacy.schema_version = 1;
-        store.write_edition_proposal(&legacy).unwrap();
+        let id = StoreId::from_safe_segment(view.proposal_id.clone()).unwrap();
+        let path = store
+            .store
+            .path_for(EDITION_PROPOSAL_COLLECTION, &id, EDITION_PROPOSAL_EXTENSION)
+            .unwrap();
+        let legacy = serde_json::json!({
+            "schema_version":1, "proposal_id":view.proposal_id, "profile":view.profile,
+            "child_edition":view.child_edition, "base_edition":view.parent_edition,
+            "objects":view.objects, "coordination_scope":view.coordination_scope,
+            "status":"reviewing", "created_at":view.created_at, "updated_at":view.updated_at,
+        });
+        fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
         let canonical = store.edition_proposal(&view.proposal_id).unwrap();
-        assert_eq!(canonical.schema_version, 2);
+        assert_eq!(canonical.schema_version, 3);
+        assert_eq!(canonical.status, ChangeRequestState::Open);
+        assert_eq!(canonical.verification_revision, None);
         assert_eq!(
             canonical.coordination_scope,
             PdbIdentityScope::LocalOnly {
                 observation: oraclemcp_db::PdbIdentityObservation::LegacyContainerIdentity,
             }
         );
-        assert_eq!(canonical.child_edition, legacy.child_edition);
-        assert_eq!(canonical.objects, legacy.objects);
+        assert_eq!(canonical.child_edition, view.child_edition);
+        assert_eq!(canonical.objects, view.objects);
         let transitioned = store
-            .transition_edition_proposal(EditionProposalTransitionRequest {
-                proposal_id: view.proposal_id.clone(),
-                status: EditionProposalStatus::Reviewing,
-            })
+            .transition_edition_proposal(test_edition_transition(
+                &canonical.view(),
+                ChangeRequestState::Withdrawn,
+                "withdraw-migrated",
+            ))
             .unwrap();
         assert_eq!(
             transitioned.coordination_scope,
@@ -1542,7 +2707,7 @@ mod tests {
         )
         .unwrap();
         let persisted: EditionProposal = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(persisted.schema_version, 2);
+        assert_eq!(persisted.schema_version, 3);
         assert_eq!(persisted.coordination_scope, canonical.coordination_scope);
     }
 
@@ -1563,6 +2728,9 @@ mod tests {
                 "CHILD_B",
             ))
             .expect_err("persisted same-PDB request must survive restart");
-        assert!(matches!(conflict, ChangeProposalError::OpenPdbRequest(_)));
+        assert!(matches!(
+            conflict,
+            ChangeProposalError::OpenRequestConflict { .. }
+        ));
     }
 }

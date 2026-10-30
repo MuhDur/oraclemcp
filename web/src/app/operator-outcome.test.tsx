@@ -533,7 +533,14 @@ describe("dashboard retained-data projections", () => {
         proposals: [
           {
             proposal_id: "edition-1",
-            base_edition: "ORA$BASE",
+            schema_version: 3,
+            proposal_revision: 3,
+            stage_revision: 1,
+            verification_revision: 1,
+            review_revision: 1,
+            expires_at: 2_000_000_000,
+            database_identity: { db_unique_name: "SYNTHETIC_DB", dbid: "42", container_uid: "9001" },
+            parent_edition: "ORA$BASE",
             child_edition: "APP_V2",
             status: "reviewing"
           }

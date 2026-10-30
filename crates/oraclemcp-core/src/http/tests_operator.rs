@@ -3282,6 +3282,73 @@ fn change_proposal_apply_preserves_the_exact_lane_generation() {
 }
 
 #[test]
+fn local_only_principal_can_read_but_cannot_open_an_effect_capable_request() {
+    struct LocalOnlyReader(Arc<AtomicUsize>);
+    impl ToolDispatch for LocalOnlyReader {
+        fn dispatch<'a>(&'a self, _: &'a Cx, _: DispatchContext<'a>, name: &'a str, args: Value) -> DispatchFuture<'a> {
+            assert_eq!(name, "oracle_query");
+            assert_eq!(args["sql"], "SELECT 1 AS N FROM DUAL");
+            self.0.fetch_add(1, AtomicOrdering::SeqCst);
+            Box::pin(async { Outcome::Ok(serde_json::json!({"rows":[{"N":"1"}], "row_count":1})) })
+        }
+    }
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(LocalOnlyReader(Arc::clone(&calls))));
+    let scope = server.service_state_pdb_identity_blocking_with_context(DispatchContext::default());
+    assert!(matches!(scope, oraclemcp_db::PdbIdentityScope::LocalOnly { .. }));
+    let dir = dashboard_test_dir("local-only-open-refused-read-allowed");
+    let store = crate::change_proposal::ChangeProposalStore::open(dir.join("state")).unwrap();
+    let profile: oraclemcp_config::ConnectionProfile = serde_json::from_value(serde_json::json!({
+        "name":"stage", "connect_string":"synthetic:1521/service", "max_level":"DDL", "edition_change_requests":true,
+    })).unwrap();
+    let error = store.open_change_request(crate::change_proposal::EditionProposalCreateRequest {
+        profile:"stage".into(), child_edition:"CHILD_A".into(), base_edition:"ORA$BASE".into(),
+        objects:Vec::new(), coordination_scope:scope,
+    }, &profile, None, "unproven-open").unwrap_err();
+    assert!(matches!(error, crate::change_proposal::ChangeProposalError::DatabaseIdentityRequired));
+    assert!(error.to_string().contains("SYS.V_$CONTAINERS"));
+    assert!(store.list_edition_proposals().unwrap().is_empty());
+    let read = server.run_tool_blocking("oracle_query".into(), serde_json::json!({"sql":"SELECT 1 AS N FROM DUAL"}));
+    assert_ne!(read["isError"], true);
+    assert_eq!(read["structuredContent"]["row_count"], 1);
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 1);
+}
+
+#[test]
+fn verified_review_submission_is_cas_idempotent_and_each_http_attempt_is_audited() {
+    let (auditor, sink) = operator_auditor();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let server = server_with_dispatch(Arc::new(WorkbenchDispatch { calls: Arc::clone(&calls) }));
+    let dir = dashboard_test_dir("verified-review-cas");
+    let store = Arc::new(crate::change_proposal::ChangeProposalStore::open(dir.join("state")).unwrap());
+    let verified = crate::change_proposal::test_verified_edition_request(&store, "stage", "CHILD_A", "ORA$BASE");
+    let cfg = HttpTransportConfig { operator_auditor:Some(auditor), change_proposals:Some(store), ..Default::default() };
+    let body = serde_json::json!({"proposal_id":verified.proposal_id, "status":"reviewing",
+        "expected_revision":verified.proposal_revision, "idempotency_key":"submit-verified"});
+    let call = |arguments: &Value| handle_http_request(&server, &cfg,
+        operator_json_post("/operator/v1/edition-proposals/transition", arguments));
+    let first = call(&body); assert_eq!(first.status, 200);
+    let proposal = response_json(&first)["data"]["proposal"].clone();
+    assert_eq!(proposal["status"], "reviewing");
+    assert_eq!(proposal["verification_revision"], 1);
+    assert_eq!(proposal["review_revision"], 1);
+    let repeated = call(&body); assert_eq!(repeated.status, 200);
+    assert_eq!(response_json(&repeated)["data"]["proposal"], proposal);
+    let mut stale_body = body.clone();
+    stale_body["idempotency_key"] = serde_json::json!("stale-submit");
+    let stale = call(&stale_body);
+    assert_eq!(stale.status, 409);
+    assert_eq!(response_json(&stale)["data"]["error"], "REVISION_CONFLICT");
+    let forged = call(&serde_json::json!({"proposal_id":verified.proposal_id,"status":"promoted",
+        "expected_revision":3,"idempotency_key":"forge-promotion"}));
+    assert_eq!(forged.status, 400);
+    assert_eq!(calls.load(AtomicOrdering::SeqCst), 0, "metadata never dispatches SQL");
+    let records = sink.records(); assert_eq!(records.len(), 8);
+    for pair in records[..4].chunks_exact(2) { assert_operator_audit_pair(pair, AuditDecision::Allowed, AuditOutcome::Succeeded); }
+    for pair in records[4..].chunks_exact(2) { assert_operator_audit_pair(pair, AuditDecision::Blocked, AuditOutcome::Failed); }
+}
+
+#[test]
 fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     let (auditor, sink) = operator_auditor();
     let calls = Arc::new(AtomicUsize::new(0));
@@ -3320,7 +3387,7 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     );
     assert_eq!(
         draft_json["data"]["proposal"]["status"],
-        serde_json::json!("requested")
+        serde_json::json!("open")
     );
     assert_eq!(
         draft_json["data"]["proposal"]["coordination_scope"],
@@ -3346,6 +3413,15 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
         serde_json::json!(proposal_id)
     );
 
+    let unverified = handle_http_request(
+        &server, &cfg,
+        operator_json_post("/operator/v1/edition-proposals/transition", &serde_json::json!({
+            "proposal_id": proposal_id, "status": "reviewing", "expected_revision": 0,
+            "idempotency_key": "unverified-review",
+        })),
+    );
+    assert_eq!(unverified.status, 400, "legacy drafts cannot manufacture verification");
+
     let transition = handle_http_request(
         &server,
         &cfg,
@@ -3353,14 +3429,16 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
             "/operator/v1/edition-proposals/transition",
             &serde_json::json!({
                 "proposal_id": proposal_id,
-                "status": "reviewing"
+                "status": "withdrawn",
+                "expected_revision": 0,
+                "idempotency_key": "withdraw-draft"
             }),
         ),
     );
     assert_eq!(transition.status, 200);
     assert_eq!(
         response_json(&transition)["data"]["proposal"]["status"],
-        serde_json::json!("reviewing")
+        serde_json::json!("withdrawn")
     );
 
     // A stored request has no apply route and cannot smuggle SQL, a stored
@@ -3389,7 +3467,7 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     let records = sink.records();
     assert_eq!(
         records.len(),
-        8,
+        10,
         "every board read/write attempt is audited"
     );
     assert_operator_audit_pair(
@@ -3404,10 +3482,11 @@ fn edition_proposals_are_persisted_review_requests_not_replayable_authority() {
     );
     assert_operator_audit_pair(
         &records[4..6],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
+        AuditDecision::Blocked,
+        AuditOutcome::Failed,
     );
-    assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_operator_audit_pair(&records[6..8], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[8..10], AuditDecision::Blocked, AuditOutcome::Failed);
 }
 
 #[test]
@@ -3562,33 +3641,11 @@ fn edition_merge_and_rollback_use_executor_not_oracle_execute() {
         change_proposals: Some(store),
         ..Default::default()
     };
-    let draft = handle_http_request(
-        &server,
-        &config,
-        operator_json_post(
-            "/operator/v1/edition-proposals/draft",
-            &serde_json::json!({
-                "profile": "synthetic_stage",
-                "child_edition": "synthetic_child",
-                "base_edition": "synthetic_base",
-                "objects": ["SYNTHETIC_VIEW"]
-            }),
-        ),
-    );
-    assert_eq!(draft.status, 200);
-    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
-        .as_str()
-        .expect("proposal id")
-        .to_owned();
-    let reviewing = handle_http_request(
-        &server,
-        &config,
-        operator_json_post(
-            "/operator/v1/edition-proposals/transition",
-            &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
-        ),
-    );
-    assert_eq!(reviewing.status, 200);
+    // Prepare a verified request through the legal offline state sequence.
+    // HTTP effect and audit assertions below cover only the actual route calls.
+    let proposal_id = crate::change_proposal::test_reviewed_edition_request(
+        config.change_proposals.as_deref().unwrap(), "synthetic_stage", "SYNTHETIC_CHILD", "SYNTHETIC_BASE",
+    ).proposal_id;
 
     for action in ["merge", "rollback"] {
         let path = match action {
@@ -3673,33 +3730,11 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
         ..Default::default()
     };
 
-    let draft = handle_http_request(
-        &server,
-        &cfg,
-        operator_json_post(
-            "/operator/v1/edition-proposals/draft",
-            &serde_json::json!({
-                "profile": "synthetic_stage",
-                "child_edition": "synthetic_child",
-                "base_edition": "synthetic_base",
-                "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
-            }),
-        ),
-    );
-    assert_eq!(draft.status, 200);
-    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
-        .as_str()
-        .expect("proposal id")
-        .to_owned();
-    let reviewing = handle_http_request(
-        &server,
-        &cfg,
-        operator_json_post(
-            "/operator/v1/edition-proposals/transition",
-            &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
-        ),
-    );
-    assert_eq!(reviewing.status, 200);
+    // Prepare a verified request through the legal offline state sequence.
+    // HTTP effect and audit assertions below cover only the actual route calls.
+    let proposal_id = crate::change_proposal::test_reviewed_edition_request(
+        cfg.change_proposals.as_deref().unwrap(), "synthetic_stage", "SYNTHETIC_CHILD", "SYNTHETIC_BASE",
+    ).proposal_id;
 
     // The first call is a preview. It mints a one-use operator confirmation
     // without sending any statement to the database.
@@ -3803,41 +3838,12 @@ fn edition_default_flip_requires_admin_confirmation_reclassification_and_audit()
 
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 2);
     let records = sink.records();
-    assert_eq!(
-        records.len(),
-        12,
-        "every default-edition attempt is hash-chain audited"
-    );
-    assert_operator_audit_pair(
-        &records[0..2],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[2..4],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[4..6],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[6..8],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[8..10],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[10..12],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
+    // Four actual preview/apply requests; each has a pending/terminal pair.
+    assert_eq!(records.len(), 8);
+    for pair in records.chunks_exact(2) {
+        assert_operator_audit_pair(pair, AuditDecision::Allowed, AuditOutcome::Succeeded);
+    }
+
 }
 
 #[test]
@@ -3861,36 +3867,12 @@ fn edition_default_flip_preserves_the_exact_lane_generation() {
         session_lifecycle: Some(Arc::new(StaticLaneLifecycle::one_lane())),
         ..Default::default()
     };
-    let draft = handle_http_request(
-        &server,
-        &cfg,
-        operator_json_post(
-            "/operator/v1/edition-proposals/draft",
-            &serde_json::json!({
-                "profile": "prod",
-                "child_edition": "synthetic_child",
-                "base_edition": "synthetic_base",
-                "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
-            }),
-        ),
-    );
-    assert_eq!(draft.status, 200);
-    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
-        .as_str()
-        .expect("proposal id")
-        .to_owned();
-    assert_eq!(
-        handle_http_request(
-            &server,
-            &cfg,
-            operator_json_post(
-                "/operator/v1/edition-proposals/transition",
-                &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
-            ),
-        )
-        .status,
-        200
-    );
+    // Prepare a verified request through the legal offline state sequence.
+    // HTTP effect and audit assertions below cover only the actual route calls.
+    let proposal_id = crate::change_proposal::test_reviewed_edition_request(
+        cfg.change_proposals.as_deref().unwrap(), "prod", "SYNTHETIC_CHILD", "SYNTHETIC_BASE",
+    ).proposal_id;
+
     let flip = |generation: Option<u64>, key: &str| {
         let mut body = serde_json::json!({
             "proposal_id": proposal_id,
@@ -3973,55 +3955,22 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
         change_proposals: Some(store),
         ..Default::default()
     };
-    let draft = |child: &str| {
-        handle_http_request(
-            &server,
-            &cfg,
-            operator_json_post(
-                "/operator/v1/edition-proposals/draft",
-                &serde_json::json!({
-                    "profile": "synthetic_stage",
-                    "child_edition": child,
-                    "base_edition": "synthetic_base",
-                    "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
-                }),
-            ),
-        )
-    };
-    let first = draft("synthetic_child_a");
-    let first_id = response_json(&first)["data"]["proposal"]["proposal_id"]
-        .as_str()
-        .expect("first proposal id")
-        .to_owned();
-    assert_eq!(
-        handle_http_request(
-            &server,
-            &cfg,
-            operator_json_post(
-                "/operator/v1/edition-proposals/transition",
-                &serde_json::json!({ "proposal_id": first_id, "status": "reviewing" }),
-            ),
-        )
-        .status,
-        200
+    // Prepare a verified request through the legal offline state sequence.
+    // HTTP effect and audit assertions below cover only the actual route calls.
+    let first_id = crate::change_proposal::test_reviewed_edition_request(
+        cfg.change_proposals.as_deref().unwrap(), "synthetic_stage", "SYNTHETIC_CHILD_A", "SYNTHETIC_BASE",
+    ).proposal_id;
+
+    // A second independent store may hold the same PDB. Copy its valid,
+    // internally consistent record to model board replay after admission.
+    let other_root = dir.join("independent-state");
+    let other = crate::change_proposal::ChangeProposalStore::open(&other_root).unwrap();
+    let competing = crate::change_proposal::test_reviewed_edition_request(
+        &other, "synthetic_stage", "SYNTHETIC_CHILD_B", "SYNTHETIC_BASE",
     );
-    // The HTTP draft route serializes two live requests for the same identified
-    // PDB.  Model instead a valid record replayed into the durable board after
-    // that admission check: apply must still catch this fork before Oracle.
-    let first_path = dir
-        .join("state")
-        .join("edition-proposals")
-        .join(format!("{first_id}.json"));
-    let mut replayed: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(&first_path).expect("first durable proposal"))
-            .expect("first proposal JSON");
-    replayed["proposal_id"] = serde_json::json!("edition-replayed-child-b");
-    replayed["child_edition"] = serde_json::json!("SYNTHETIC_CHILD_B");
-    std::fs::write(
-        first_path.with_file_name("edition-replayed-child-b.json"),
-        serde_json::to_vec(&replayed).expect("replayed proposal JSON"),
-    )
-    .expect("replayed durable proposal");
+    let filename = format!("{}.json", competing.proposal_id);
+    let record = std::fs::read(other_root.join("edition-proposals").join(&filename)).unwrap();
+    std::fs::write(dir.join("state").join("edition-proposals").join(filename), record).unwrap();
 
     // The second non-withdrawn child is ambiguous board state.  Refuse before
     // the confirmation is consumed or a database can report ORA-38807 late.
@@ -4081,24 +4030,12 @@ fn edition_default_flip_refuses_forked_or_replayed_review_state() {
     assert_eq!(calls.load(AtomicOrdering::SeqCst), 0);
 
     let records = sink.records();
-    assert_eq!(records.len(), 10);
-    assert_operator_audit_pair(
-        &records[0..2],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[2..4],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(&records[4..6], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
-    assert_operator_audit_pair(
-        &records[8..10],
-        AuditDecision::Blocked,
-        AuditOutcome::Failed,
-    );
+    // All three refused HTTP requests still require both audit records.
+    assert_eq!(records.len(), 6);
+    for pair in records.chunks_exact(2) {
+        assert_operator_audit_pair(pair, AuditDecision::Blocked, AuditOutcome::Failed);
+    }
+
 }
 
 #[test]
@@ -4160,35 +4097,11 @@ fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
         change_proposals: Some(store),
         ..Default::default()
     };
-    let draft = handle_http_request(
-        &server,
-        &cfg,
-        operator_json_post(
-            "/operator/v1/edition-proposals/draft",
-            &serde_json::json!({
-                "profile": "synthetic_stage",
-                "child_edition": "synthetic_child",
-                "base_edition": "synthetic_base",
-                "objects": ["SYNTHETIC_EDITIONABLE_VIEW"]
-            }),
-        ),
-    );
-    let proposal_id = response_json(&draft)["data"]["proposal"]["proposal_id"]
-        .as_str()
-        .expect("proposal id")
-        .to_owned();
-    assert_eq!(
-        handle_http_request(
-            &server,
-            &cfg,
-            operator_json_post(
-                "/operator/v1/edition-proposals/transition",
-                &serde_json::json!({ "proposal_id": proposal_id, "status": "reviewing" }),
-            ),
-        )
-        .status,
-        200
-    );
+    // Prepare a verified request through the legal offline state sequence.
+    // HTTP effect and audit assertions below cover only the actual route calls.
+    let proposal_id = crate::change_proposal::test_reviewed_edition_request(
+        cfg.change_proposals.as_deref().unwrap(), "synthetic_stage", "SYNTHETIC_CHILD", "SYNTHETIC_BASE",
+    ).proposal_id;
 
     let preview = handle_http_request(
         &server,
@@ -4223,23 +4136,10 @@ fn edition_default_flip_surfaces_a_live_policy_refusal_as_an_audited_block() {
         "a current dispatcher denial wins over any prior review-board state"
     );
     let records = sink.records();
-    assert_eq!(records.len(), 8);
-    assert_operator_audit_pair(
-        &records[0..2],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[2..4],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(
-        &records[4..6],
-        AuditDecision::Allowed,
-        AuditOutcome::Succeeded,
-    );
-    assert_operator_audit_pair(&records[6..8], AuditDecision::Blocked, AuditOutcome::Failed);
+    assert_eq!(records.len(), 4); // preview and refused apply, two records each
+    assert_operator_audit_pair(&records[0..2], AuditDecision::Allowed, AuditOutcome::Succeeded);
+    assert_operator_audit_pair(&records[2..4], AuditDecision::Blocked, AuditOutcome::Failed);
+
 }
 
 fn change_proposals_test_config() -> (OracleMcpServer, HttpTransportConfig, String) {

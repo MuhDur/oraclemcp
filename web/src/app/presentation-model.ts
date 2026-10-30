@@ -1461,12 +1461,14 @@ export function vectorClusterFixture(): VectorClusterViewModel {
 
 // ── Edition linear timeline (Arc D) ──────────────────────────────────────────
 // Oracle editions are inherently LINEAR: every child edition has exactly one
-// parent (`base_edition`). The Reviews board renders the proposal chain as a
+// parent (`parent_edition`). The Reviews board renders the proposal chain as a
 // timeline, NOT a git graph. The honesty guarantee is that a non-linear shape is
 // detected and flagged, never quietly drawn as a straight line — if a base
 // edition ever has two children, that is a branch and the model says so.
 
-export type EditionStatus = "requested" | "reviewing" | "withdrawn";
+const EDITION_STATUSES = ["open", "staged", "verified", "reviewing", "promoted",
+  "rolled_back", "withdrawn", "expired", "failed", "child_retired"] as const;
+export type EditionStatus = (typeof EDITION_STATUSES)[number];
 
 export type EditionStageViewModel = {
   edition: string;
@@ -1505,9 +1507,16 @@ export type EditionProposalInput = {
 export type EditionProposalWire = {
   proposal_id: string;
   profile?: string;
-  base_edition: string;
+  parent_edition: string;
   child_edition: string;
   status: EditionStatus;
+  schema_version: 3;
+  proposal_revision: number;
+  stage_revision: number;
+  verification_revision: number | null;
+  review_revision: number | null;
+  expires_at: number;
+  database_identity: { db_unique_name: string; dbid: string; container_uid: string } | null;
   objects?: string[];
   created_at?: string;
   updated_at?: string;
@@ -1518,15 +1527,13 @@ export type EditionProposalsData = {
   proposals: EditionProposalWire[];
 };
 
-const EDITION_STATUSES: readonly EditionStatus[] = ["requested", "reviewing", "withdrawn"];
-
 /** Project persisted proposal edges into the linear timeline builder's input. */
 export function parseEditionProposals(
   data: EditionProposalsData | null
 ): EditionProposalInput[] {
   const proposals = Array.isArray(data?.proposals) ? data.proposals : [];
   return proposals.flatMap((proposal) => {
-    const base = typeof proposal.base_edition === "string" ? proposal.base_edition : "";
+    const base = typeof proposal.parent_edition === "string" ? proposal.parent_edition : "";
     const child = typeof proposal.child_edition === "string" ? proposal.child_edition : "";
     if (!base || !child) {
       return [];
@@ -1545,15 +1552,22 @@ export function parseEditionProposals(
 }
 
 const EDITION_STATUS_TONE: Readonly<Record<EditionStatus, DashboardTone>> = {
-  requested: "info",
+  open: "info",
+  staged: "info",
+  verified: "ok",
   reviewing: "ok",
-  withdrawn: "off"
+  promoted: "ok",
+  rolled_back: "warn",
+  withdrawn: "off",
+  expired: "warn",
+  failed: "warn",
+  child_retired: "off"
 };
 
 export function toEditionTimelineViewModel(
   proposals: readonly EditionProposalInput[]
 ): EditionTimelineViewModel {
-  // One edge per proposal: base_edition -> child_edition.
+  // One edge per proposal: parent_edition -> child_edition.
   const childrenByBase = new Map<string, EditionProposalInput[]>();
   const parentsByChild = new Map<string, Set<string>>();
   const nodes = new Set<string>();
@@ -1708,7 +1722,11 @@ export function toEditionTimelineViewModel(
     warnings.push(`${duplicateEdgeCount} duplicate edition edge(s) detected.`);
   }
   const linear = proposals.length === 0 || warnings.length === 0;
-  const tone = proposals.length === 0 ? "off" : linear ? "ok" : "warn";
+  const expired = proposals.filter((proposal) => proposal.status === "expired");
+  const retirementHint = expired.length > 0
+    ? ` Review expired requests and retire their child editions: ${expired.map((proposal) => proposal.childEdition).join(", ")}.`
+    : "";
+  const tone = proposals.length === 0 ? "off" : linear && expired.length === 0 ? "ok" : "warn";
   return {
     grammarVersion: DASHBOARD_GRAMMAR.grammarVersion,
     linear,
@@ -1724,9 +1742,9 @@ export function toEditionTimelineViewModel(
         : linear
           ? `${stages.length}-stage linear edition chain`
           : `Non-linear edition graph (${warnings.length} issue(s))`,
-    detail: linear
+    detail: (linear
       ? "Each edition derives from exactly one parent; rendered as a straight timeline."
-      : warnings.join(" "),
+      : warnings.join(" ")) + retirementHint,
     tone
   };
 }
@@ -1745,7 +1763,7 @@ export function editionTimelineFixture(): EditionTimelineViewModel {
       proposalId: "prop-2",
       baseEdition: "REVIEW_1",
       childEdition: "REVIEW_2",
-      status: "requested",
+      status: "open",
       objectCount: 1
     }
   ]);

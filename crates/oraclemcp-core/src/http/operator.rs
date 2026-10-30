@@ -36,7 +36,7 @@
 //! name in exactly the environment it was written in.
 use super::*;
 use crate::change_proposal::{
-    EditionProposalCreateRequest, EditionProposalStatus, EditionProposalTransitionRequest,
+    ChangeRequestState, EditionProposalCreateRequest, EditionProposalTransitionRequest,
 };
 use crate::edition_executor::{
     EditionApplyInput, EditionFlipTarget, OperatorAuth, OperatorEditionExecutor,
@@ -1746,7 +1746,7 @@ fn handle_operator_edition_proposal_route(
                     &request.path,
                     json!({
                         "source": "edition_proposals",
-                        "status": "requested",
+                        "status": "open",
                         "proposal": proposal,
                         "authority": "request_only",
                     }),
@@ -1769,11 +1769,23 @@ fn handle_operator_edition_proposal_route(
                         json!({
                             "source": "edition_proposals",
                             "error": "invalid_edition_proposal_transition",
-                            "message": "edition proposal transition body must contain only proposal_id and a non-authorizing status",
+                            "message": "edition proposal transition needs proposal_id, expected_revision, idempotency_key and a non-authorizing status",
                         }),
                     );
                 }
             };
+            if !matches!(
+                transition.status,
+                ChangeRequestState::Reviewing | ChangeRequestState::Withdrawn
+            ) || transition.objects.is_some()
+            {
+                return operator_edition_proposal_error_response(
+                    &request.path,
+                    ChangeProposalError::Invalid(
+                        "metadata clients may only submit a verified request for review or withdraw it",
+                    ),
+                );
+            }
             match store.transition_edition_proposal(transition) {
                 Ok(proposal) => operator_json_response(
                     200,
@@ -1890,7 +1902,11 @@ fn handle_operator_edition_default_flip(
             return operator_edition_proposal_error_response(&context.original_request.path, error);
         }
     };
-    if proposal.status != EditionProposalStatus::Reviewing {
+    if proposal.status != ChangeRequestState::Reviewing
+        || proposal.verification_revision != Some(proposal.stage_revision)
+        || proposal.review_revision != Some(proposal.stage_revision)
+        || proposal.stage_revision == 0
+    {
         return operator_json_response(
             409,
             &context.original_request.path,
@@ -1964,7 +1980,7 @@ fn handle_operator_edition_default_flip(
     let executor = context.config.operator_idempotency.edition_executor();
     let target_edition = match flip {
         EditionFlipTarget::Merge => &proposal.child_edition,
-        EditionFlipTarget::Rollback => &proposal.base_edition,
+        EditionFlipTarget::Rollback => &proposal.parent_edition,
     };
     let Some(confirm) = apply
         .confirm
@@ -2672,7 +2688,13 @@ fn operator_change_proposal_error_response(
         ChangeProposalError::Invalid(_) => (400, "invalid_change_proposal"),
         ChangeProposalError::UnknownProposal => (404, "unknown_change_proposal"),
         ChangeProposalError::UnknownEditionProposal => (404, "unknown_edition_proposal"),
-        ChangeProposalError::OpenPdbRequest(_) => (409, "pdb_request_already_open"),
+        ChangeProposalError::OpenRequestConflict { .. } => (409, "pdb_request_already_open"),
+        ChangeProposalError::RevisionConflict { .. } => (409, "REVISION_CONFLICT"),
+        ChangeProposalError::IdempotencyKeyReuse => (409, "idempotency_key_reused"),
+        ChangeProposalError::DatabaseIdentityRequired => (409, "DATABASE_IDENTITY_REQUIRED"),
+        ChangeProposalError::EditionChangeRequestsDisabled => {
+            (403, "edition_change_requests_disabled")
+        }
         ChangeProposalError::FileStore(FileStoreError::InvalidSegment { .. }) => {
             (400, "invalid_change_proposal")
         }
@@ -2702,7 +2724,13 @@ fn operator_edition_proposal_error_response(
         ChangeProposalError::Invalid(_) => (400, "invalid_edition_proposal"),
         ChangeProposalError::UnknownEditionProposal => (404, "unknown_edition_proposal"),
         ChangeProposalError::UnknownProposal => (404, "unknown_edition_proposal"),
-        ChangeProposalError::OpenPdbRequest(_) => (409, "pdb_request_already_open"),
+        ChangeProposalError::OpenRequestConflict { .. } => (409, "pdb_request_already_open"),
+        ChangeProposalError::RevisionConflict { .. } => (409, "REVISION_CONFLICT"),
+        ChangeProposalError::IdempotencyKeyReuse => (409, "idempotency_key_reused"),
+        ChangeProposalError::DatabaseIdentityRequired => (409, "DATABASE_IDENTITY_REQUIRED"),
+        ChangeProposalError::EditionChangeRequestsDisabled => {
+            (403, "edition_change_requests_disabled")
+        }
         ChangeProposalError::FileStore(FileStoreError::InvalidSegment { .. }) => {
             (400, "invalid_edition_proposal")
         }

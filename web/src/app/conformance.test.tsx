@@ -219,14 +219,14 @@ describe("OMCP skin conformance", () => {
         proposalId: "a",
         baseEdition: "ORA$BASE",
         childEdition: "LEFT",
-        status: "requested",
+        status: "open",
         objectCount: 1
       },
       {
         proposalId: "b",
         baseEdition: "ORA$BASE",
         childEdition: "RIGHT",
-        status: "requested",
+        status: "open",
         objectCount: 1
       }
     ]);

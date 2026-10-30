@@ -863,6 +863,12 @@ pub struct ConnectionProfile {
     /// or protect against autonomous transactions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata_read_only_transaction: Option<bool>,
+    /// Opt in to the guarded edition change-request lifecycle. Defaults off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition_change_requests: Option<bool>,
+    /// Lifetime of an open edition request, in days (1..=90; default 7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edition_change_request_ttl_days: Option<u16>,
     /// Production profile: the ceiling is pinned and immutable (§6.6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub protected: Option<bool>,
@@ -1021,6 +1027,11 @@ impl std::fmt::Debug for ConnectionProfile {
                 &self.metadata_read_only_transaction,
             )
             .field("protected", &self.protected)
+            .field("edition_change_requests", &self.edition_change_requests)
+            .field(
+                "edition_change_request_ttl_days",
+                &self.edition_change_request_ttl_days,
+            )
             .field("require_signed_tools", &self.require_signed_tools)
             .field("read_only_standby", &self.read_only_standby)
             .field("trusted_view_count", &trusted_view_count)
@@ -1099,6 +1110,33 @@ impl ConnectionProfile {
     #[must_use]
     pub fn metadata_read_only_transaction(&self) -> bool {
         self.metadata_read_only_transaction.unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn edition_change_requests(&self) -> bool {
+        self.edition_change_requests.unwrap_or(false)
+    }
+
+    #[must_use]
+    pub fn edition_change_request_ttl_days(&self) -> u16 {
+        self.edition_change_request_ttl_days.unwrap_or(7)
+    }
+
+    pub(crate) fn validate_edition_change_requests(&self) -> Result<(), ConfigError> {
+        let reason = if self.protected() && self.edition_change_requests() {
+            Some("edition_change_requests cannot be enabled on a protected profile")
+        } else if !(1..=90).contains(&self.edition_change_request_ttl_days()) {
+            Some("edition_change_request_ttl_days must be in 1..=90")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(ConfigError::InvalidEditionChangeRequests {
+                profile: self.name.clone(),
+                reason,
+            });
+        }
+        Ok(())
     }
 
     /// The effective starting level (defaults to `READ_ONLY`).
@@ -1236,6 +1274,8 @@ impl ConnectionProfile {
             max_level,
             default_level,
             metadata_read_only_transaction,
+            edition_change_requests,
+            edition_change_request_ttl_days,
             protected,
             require_signed_tools,
             read_only_standby,
@@ -1443,6 +1483,55 @@ pub fn resolve_inheritance(profiles: &mut [ConnectionProfile]) -> Result<(), Con
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edition_change_requests_defaults_false() {
+        let config = crate::OracleMcpConfig::from_toml_str(
+            "[[profiles]]\nname='dev'\nconnect_string='synthetic:1521/service'\n",
+        )
+        .unwrap();
+        assert!(!config.profiles[0].edition_change_requests());
+        assert_eq!(config.profiles[0].edition_change_request_ttl_days(), 7);
+    }
+
+    #[test]
+    fn edition_change_requests_on_protected_profile_refused_at_load() {
+        let error = crate::OracleMcpConfig::from_toml_str(
+            "[[profiles]]\nname='prod'\nconnect_string='synthetic:1521/service'\nprotected=true\nedition_change_requests=true\n",
+        ).unwrap_err();
+        assert!(matches!(
+            error,
+            ConfigError::InvalidEditionChangeRequests { .. }
+        ));
+    }
+
+    #[test]
+    fn ttl_days_out_of_range_refused() {
+        for days in [0, 91] {
+            let error = crate::OracleMcpConfig::from_toml_str(&format!(
+                "[[profiles]]\nname='dev'\nconnect_string='synthetic:1521/service'\nedition_change_request_ttl_days={days}\n",
+            )).unwrap_err();
+            assert!(matches!(
+                error,
+                ConfigError::InvalidEditionChangeRequests { .. }
+            ));
+        }
+        for days in [1, 90] {
+            assert!(crate::OracleMcpConfig::from_toml_str(&format!(
+                "[[profiles]]\nname='dev'\nconnect_string='synthetic:1521/service'\nedition_change_request_ttl_days={days}\n",
+            )).is_ok());
+        }
+    }
+
+    #[test]
+    fn edition_change_request_config_inherits_and_honors_explicit_opt_out() {
+        let config = crate::OracleMcpConfig::from_toml_str(
+            "[[profiles]]\nname='base'\nconnect_string='synthetic:1521/service'\nedition_change_requests=true\nedition_change_request_ttl_days=9\n\n[[profiles]]\nname='child'\nbase='base'\nedition_change_requests=false\n",
+        ).unwrap();
+        assert!(config.profiles[0].edition_change_requests());
+        assert!(!config.profiles[1].edition_change_requests());
+        assert_eq!(config.profiles[1].edition_change_request_ttl_days(), 9);
+    }
     use oraclemcp_guard::SqlPolicyEffectConfig;
     use proptest::prelude::*;
 
@@ -1468,6 +1557,8 @@ mod tests {
             max_level: None,
             default_level: None,
             metadata_read_only_transaction: None,
+            edition_change_requests: None,
+            edition_change_request_ttl_days: None,
             protected: None,
             require_signed_tools: None,
             read_only_standby: None,

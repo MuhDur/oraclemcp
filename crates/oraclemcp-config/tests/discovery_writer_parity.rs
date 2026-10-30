@@ -72,6 +72,8 @@ fn fully_populated_profile() -> ConnectionProfile {
         max_level: Some(OperatingLevel::ReadOnly),
         default_level: Some(OperatingLevel::ReadOnly),
         metadata_read_only_transaction: Some(true),
+        edition_change_requests: Some(false),
+        edition_change_request_ttl_days: Some(7),
         protected: Some(false),
         require_signed_tools: Some(false),
         read_only_standby: Some(false),

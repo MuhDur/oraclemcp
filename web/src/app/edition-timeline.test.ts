@@ -9,17 +9,37 @@ import { EditionTimelineRenderer } from "./skin";
 // parent base_edition). The console orders the proposal chain into a straight
 // timeline and flags any non-linear shape rather than flattening it.
 
-function data(proposals: EditionProposalsData["proposals"]): EditionProposalsData {
-  return { source: "self_lane", proposals };
+function data(proposals: Array<Pick<EditionProposalsData["proposals"][number],
+  "proposal_id" | "parent_edition" | "child_edition" | "status"> & { objects?: string[] }>): EditionProposalsData {
+  return { source: "self_lane", proposals: proposals.map((proposal) => ({
+    schema_version: 3 as const,
+    proposal_revision: proposal.status === "reviewing" ? 3 : 0,
+    stage_revision: proposal.status === "reviewing" ? 1 : 0,
+    verification_revision: proposal.status === "reviewing" ? 1 : null,
+    review_revision: proposal.status === "reviewing" ? 1 : null,
+    expires_at: 2_000_000_000,
+    database_identity: proposal.status === "reviewing"
+      ? { db_unique_name: "SYNTHETIC_DB", dbid: "42", container_uid: "9001" }
+      : null,
+    ...proposal
+  })) };
 }
 
 describe("edition proposal parsing", () => {
+  it("prompts retirement for expired requests while preserving the topology", () => {
+    const model = toEditionTimelineViewModel([
+      { proposalId: "expired", baseEdition: "ORA$BASE", childEdition: "EXPIRED_CHILD", status: "expired", objectCount: 0 }
+    ]);
+    expect(model.linear).toBe(true);
+    expect(model.tone).toBe("warn");
+    expect(model.detail).toContain("retire their child editions: EXPIRED_CHILD");
+  });
   it("reads base->child edges and drops rows missing either edition", () => {
     const input = parseEditionProposals(
       data([
         {
           proposal_id: "p1",
-          base_edition: "ORA$BASE",
+          parent_edition: "ORA$BASE",
           child_edition: "REVIEW_1",
           status: "reviewing",
           objects: ["HR.EMP", "HR.DEPT"]
@@ -27,9 +47,9 @@ describe("edition proposal parsing", () => {
         // Malformed: missing child edition — dropped, never guessed.
         {
           proposal_id: "p2",
-          base_edition: "REVIEW_1",
+          parent_edition: "REVIEW_1",
           child_edition: "",
-          status: "requested"
+          status: "open"
         }
       ])
     );
@@ -45,7 +65,7 @@ describe("edition proposal parsing", () => {
       data([
         {
           proposal_id: "p1",
-          base_edition: "ORA$BASE",
+          parent_edition: "ORA$BASE",
           child_edition: "REVIEW_1",
           status: "merged" as never
         }
@@ -58,7 +78,7 @@ describe("edition proposal parsing", () => {
 describe("edition timeline view-model", () => {
   it("orders a chain into strict linear stages", () => {
     const model = toEditionTimelineViewModel([
-      { proposalId: "b", baseEdition: "REVIEW_1", childEdition: "REVIEW_2", status: "requested", objectCount: 1 },
+      { proposalId: "b", baseEdition: "REVIEW_1", childEdition: "REVIEW_2", status: "open", objectCount: 1 },
       { proposalId: "a", baseEdition: "ORA$BASE", childEdition: "REVIEW_1", status: "reviewing", objectCount: 2 }
     ]);
     expect(model.linear).toBe(true);
@@ -72,8 +92,8 @@ describe("edition timeline view-model", () => {
 
   it("flags a branch (a base with two children) as non-linear", () => {
     const model = toEditionTimelineViewModel([
-      { proposalId: "a", baseEdition: "ORA$BASE", childEdition: "LEFT", status: "requested", objectCount: 1 },
-      { proposalId: "b", baseEdition: "ORA$BASE", childEdition: "RIGHT", status: "requested", objectCount: 1 }
+      { proposalId: "a", baseEdition: "ORA$BASE", childEdition: "LEFT", status: "open", objectCount: 1 },
+      { proposalId: "b", baseEdition: "ORA$BASE", childEdition: "RIGHT", status: "open", objectCount: 1 }
     ]);
     expect(model.linear).toBe(false);
     expect(model.branchedFrom).toEqual(["ORA$BASE"]);
@@ -82,7 +102,7 @@ describe("edition timeline view-model", () => {
 
   it("detects a two-node cycle and terminates with bounded stages", () => {
     const model = toEditionTimelineViewModel([
-      { proposalId: "a", baseEdition: "A", childEdition: "B", status: "requested", objectCount: 1 },
+      { proposalId: "a", baseEdition: "A", childEdition: "B", status: "open", objectCount: 1 },
       { proposalId: "b", baseEdition: "B", childEdition: "A", status: "reviewing", objectCount: 1 }
     ]);
 
@@ -98,7 +118,7 @@ describe("edition timeline view-model", () => {
 
   it("detects a self-cycle without looping", () => {
     const model = toEditionTimelineViewModel([
-      { proposalId: "self", baseEdition: "A", childEdition: "A", status: "requested", objectCount: 1 }
+      { proposalId: "self", baseEdition: "A", childEdition: "A", status: "open", objectCount: 1 }
     ]);
 
     expect(model.linear).toBe(false);
@@ -108,12 +128,12 @@ describe("edition timeline view-model", () => {
 
   it("detects multiple parents and disconnected chains", () => {
     const multipleParents = toEditionTimelineViewModel([
-      { proposalId: "a", baseEdition: "A", childEdition: "C", status: "requested", objectCount: 1 },
-      { proposalId: "b", baseEdition: "B", childEdition: "C", status: "requested", objectCount: 1 }
+      { proposalId: "a", baseEdition: "A", childEdition: "C", status: "open", objectCount: 1 },
+      { proposalId: "b", baseEdition: "B", childEdition: "C", status: "open", objectCount: 1 }
     ]);
     const disconnected = toEditionTimelineViewModel([
-      { proposalId: "a", baseEdition: "A", childEdition: "B", status: "requested", objectCount: 1 },
-      { proposalId: "b", baseEdition: "C", childEdition: "D", status: "requested", objectCount: 1 }
+      { proposalId: "a", baseEdition: "A", childEdition: "B", status: "open", objectCount: 1 },
+      { proposalId: "b", baseEdition: "C", childEdition: "D", status: "open", objectCount: 1 }
     ]);
 
     expect(multipleParents.linear).toBe(false);
