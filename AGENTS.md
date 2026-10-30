@@ -25,87 +25,32 @@ in-session go-ahead. crates.io publishes and registry listings are permanent
 (versions immutable, names claimed forever); treat publishing as a gated,
 deliberate step.
 
-## Swarm operating constitution
+## Working rules
 
-Eighteen rules. Rules 1-12 were mined from the 2026-07 multi-repo swarm
-retrospective (`docs/plan/RETRO_SWARM_CAMPAIGN_2026-07.md` §3G,
-`docs/plan/PLAN_ENGINEERING_PROGRAM.md` §27.3); rules 13-17 were mined from the
-2026-07-21 five-agent session, one per incident it produced (rule 18 from an
-incident during the session that encoded the others). Binding on every
-agent in this repo, solo or swarmed — most are new; a few name-and-link existing
-rules above so the constitution stays the one place to check:
+Binding on every agent, solo or swarmed. They come from past incidents
+(`docs/plan/RETRO_SWARM_2026-10-04.md`, `docs/plan/SWARM_RECAP_2026-10.md`).
 
-1. Never defer planned work on your own initiative — deferral is the
-   operator's call, not an agent's judgment call.
-2. Green means *honestly* green; surface red before the operator finds it.
-3. Claims must be evidence-backed — never assert what you haven't just run
-   and checked.
-4. Reread this file (and `README.md`) until understood, every session,
-   before acting.
-5. Think before acting ("ultrathink"): verify, then execute — don't patch on
-   a hunch.
-6. Be resource-disciplined: don't trash the host, the disk, or the
-   token/session budget (`CARGO_BUILD_JOBS` caps, scoped `-p` builds over
-   full-workspace ones, no unbounded concurrent compiles).
-7. Keep driving autonomously, but follow explicit operator choices — model,
-   agent freshness, scope — *exactly*; deviation is the fastest path to anger.
-8. The fail-closed guard is sacred and tighten-only — see "The safety
-   invariant" below; this rule doesn't restate it, it just makes the
-   constitution complete.
-9. Confidentiality is absolute: field-test/live-customer identifiers never
-   leave quarantine (`todelete/`, gitignored) or enter a committed artifact.
-10. No surprise costs — cloud resources (OCI, etc.) stay free-tier; a hard
-    rule, not a target.
-11. Land complete, not sliced across version bumps or half-shipped across
-    sessions.
-12. Escalate blockers to the operator; delegate unforeseen work to the
-    tracker (`br create`), don't quietly derail the authoritative prompt's
-    scope.
-13. **A modified file that is not yours is another agent mid-edit, not a
-    defect.** Check `git status` on a file before declaring it broken, and
-    judge the committed truth (`git show HEAD:<path>`) before filing a build
-    blocker or going idle on one.
-14. **Close evidence comes from a tree verified clean of other agents' work.**
-    Derive the evidence `source` block from git rather than asserting it;
-    commit your in-scope work first, and bind the proof to HEAD in the shared
-    checkout with the scoped clean-tree check (`audit_bead_closes.py --scope`),
-    which excludes other agents' in-flight files. Never create git worktrees
-    (see "No git worktrees" below).
-15. **Read the gate verdict yourself; never infer a pass from a successful
-    push.** `git push` reports what the remote accepted, not what the gate
-    decided. A gate that printed a failure is a failure no matter how the push
-    went.
-16. **Never block a turn on an unbounded wait.** Check once, report, move on.
-    Every wait carries a deadline, and reaching the deadline is a result to
-    report — not a reason to wait again. A blocked turn queues every dispatch
-    behind it.
-17. **A struct field and its initializers are ONE logical change, landed in ONE
-    commit by ONE agent.** The same holds for any edit whose halves do not
-    compile apart: a `git mv` and its references, a trait method and its impls,
-    an enum variant and its exhaustive matches. Split it across panes and you
-    break the build for everyone in the shared checkout.
-18. **Commit explicit paths, then verify what landed.** `git commit -- <path>...`
-    and `git show --stat HEAD`; never `-a`/`git add -A` in a shared checkout.
-    A deletion of a path that still exists in the working tree is a stale index
-    snapshot committed over someone else's landed work, not a delete.
-
-Rules 13-18 are mechanized, one subcommand per rule, so the question each one
-answers is settled by git or an exit status rather than by a buffer or a hope:
-
-```bash
-scripts/swarm_discipline.sh foreign-edit <path>...          # 13
-scripts/swarm_discipline.sh evidence-source --kind close --from <evidence.json>  # 14
-scripts/swarm_discipline.sh verified-push \
-  --gate-cmd 'cargo fmt --all -- --check && scripts/build_lease.sh -- cargo clippy --workspace --all-targets -- -D warnings && scripts/build_lease.sh -- cargo test --workspace' \
-  -- origin main                                            # 15
-scripts/swarm_discipline.sh bounded-run --timeout 120 -- <cmd>                   # 16
-scripts/swarm_discipline.sh unbounded-wait-lint                                  # 16
-scripts/swarm_discipline.sh struct-atomicity --staged                            # 17
-scripts/swarm_discipline.sh stale-delete-check --staged                           # 18
-```
-
-Exit 65 from any of them is a refusal, not advice. `--selftest` proves each
-refusal and each acceptance; CI runs it alongside the other lints.
+1. Never defer planned work on your own initiative; deferral is the
+   operator's call.
+2. Green means honestly green. Surface red before the operator finds it.
+3. Claim only what you have just run and checked.
+4. Follow explicit operator choices (model, scope, agent count) exactly.
+5. The fail-closed guard is sacred and tighten-only (see "The safety
+   invariant").
+6. Confidentiality: field-test/live-customer identifiers never leave
+   `todelete/` (gitignored) or enter a committed artifact.
+7. No surprise costs: cloud resources (OCI etc.) stay free-tier.
+8. Be resource-disciplined: scoped `-p` builds, a per-agent target dir, no
+   unbounded concurrent compiles.
+9. A modified file that is not yours is another agent mid-edit, not a defect.
+   Check `git status` / `git show HEAD:<path>` before calling it broken.
+10. Commit explicit paths (`git commit -- <path>...`), then check what landed
+    with `git show --stat HEAD`. Never `-a`, `git add -A` or `--amend` in the
+    shared checkout. A struct field and its initializers (or a trait method
+    and its impls, an enum variant and its matches) land in one commit.
+11. Never block a turn on an unbounded wait. Check once, report, move on.
+12. Escalate blockers to the operator; file unforeseen work with `br create`
+    instead of quietly widening scope.
 
 ## Honest Work and Anti-Ceremony (binding for agents and humans alike)
 
@@ -217,20 +162,6 @@ cargo check -p <crate>                             # scoped iteration: never gat
   `RUSTC_WRAPPER` override can defeat any repo-local Cargo setting; treat such
   an override as bypassing a safety control, not as normal repository use.
 
-Before launching a multi-agent wave, run the host + scheduler preflight. It
-refuses wrong-model, insufficient-quota, near-full-context, oversized-wave, and
-low memory/PID/FD headroom states before a spawn occurs:
-
-```bash
-scripts/swarm_spawn_preflight.sh --agents 4 \
-  --requested-model fable --candidate-model fable \
-  --quota-remaining 4 --context-remaining-pct 80
-```
-
-The documented default ceiling is 8 agents per wave with at least 20% context
-remaining. The exact per-agent and fixed host reserves are documented in
-[`docs/multi-agent-build-policy.md`](docs/multi-agent-build-policy.md).
-
 ## The safety invariant (do not weaken)
 
 The core invariant is the **fail-closed SQL guard** — NOT "read-only forever".
@@ -274,16 +205,12 @@ shipped, and no npm/npx channel is offered.
 ## Issue tracking
 
 This repo's issues are tracked in this checkout's local `.beads/` database.
-Do not use the parent `plsql-intelligence` tracker for new oraclemcp work unless
-the operator explicitly asks for a cross-repo migration. Work beads from this
-repo root with `br`:
+Work beads from this repo root with `br`:
 
 ```bash
 br ready --json                      # unblocked work
-br update <id> --status in_progress  # claim
-python3 scripts/audit_bead_closes.py --template <id> --scope <path>  # scaffold evidence
-scripts/bead_tracker_guard.sh close <id> --evidence \
-  tests/artifacts/evidence/closes/<id>.json --summary "…"
+br update <id> --status in_progress --assignee <name>  # claim
+br close <id> --reason "<commit> <test command(s)>; verified by <reviewer>"
 br create "Title" -t bug|feature|task -p 0-4 --deps discovered-from:<id>
 br sync --flush-only                 # export .beads/issues.jsonl before commit
 ```
@@ -292,14 +219,12 @@ Types: `bug`, `feature`, `task`, `epic`, `chore`. Priorities: `0` critical …
 `4` backlog (default `2`). Never use markdown TODO lists or a second tracker.
 Commit `.beads/` changes with the code or planning change they describe.
 
-Never use raw `br close` or `br update <id> --status open` in a swarm. The
-guarded close requires committed evidence and binds the work commit, evidence
-commit, and canonical evidence path into `close_reason`. Release a claim with
-`scripts/bead_tracker_guard.sh release-claim <id>`; it serializes with guarded
-closes and preserves a bead that became closed. When a false close is found,
-correct that original bead with `bead_tracker_guard.sh correct-false-close
---original-bead <id> ...`, never only a sibling. See
-[`docs/bead-close-evidence.md`](docs/bead-close-evidence.md).
+**Done** means: real code plus a real test that fails when the fix is reverted
+(planted fault), reviewed by someone other than the author with the
+beads-compliance-and-completion-verification skill. The close reason names the
+commit, the test command and the reviewer. No evidence JSON, ledgers or proof
+commits: the commit and the test are the evidence. A bead found falsely closed
+is reopened with a comment saying why.
 
 ## bv - graph-aware triage sidecar
 
