@@ -12032,7 +12032,10 @@ async fn create_or_replace_inner(
     let diagnostic_quarantine = ctx.quarantine;
     let mut executed = execute_sql(
         ctx,
-        canonical_tool_name(tool_name),
+        // This typed path issued a CreateOrReplace grant even when entered
+        // through deploy_ddl. Consume the same action and attribute its audit
+        // to that action; deploy_ddl's generic DDL branch remains separate.
+        "oracle_create_or_replace",
         ExecuteArgs {
             sql: source.clone(),
             binds: Vec::new(),

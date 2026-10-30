@@ -10047,6 +10047,88 @@ fn deploy_ddl_preview_uses_create_or_replace_path() {
 }
 
 #[test]
+fn deploy_ddl_confirmed_apply_preserves_typed_and_generic_routes() {
+    for (source, marker) in [
+        (
+            "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual",
+            "oracle_create_or_replace",
+        ),
+        ("ALTER TABLE emp_stage ADD (id NUMBER)", "deploy_ddl"),
+    ] {
+        let state = Arc::new(ExecState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(ExecRecordingMock::new(state.clone())),
+            Some("dev".to_owned()),
+            ddl_level(),
+        );
+        let mut arguments = json!({"ddl": source, "timeout_seconds": 2, "wait_seconds": 7});
+        let preview = dispatcher
+            .dispatch("deploy_ddl", arguments.clone())
+            .expect("preview");
+        arguments["execute"] = json!(true);
+        arguments["confirm"] = preview["confirmation"]["confirm"].clone();
+        assert!(arguments["confirm"].is_string());
+        let applied = dispatcher
+            .dispatch("deploy_ddl", arguments)
+            .expect("apply its own grant");
+        assert_eq!(applied["applied"], json!(true));
+        assert_eq!(applied["committed"], json!(true));
+        assert_eq!(applied["compatibility_tool"], json!("deploy_ddl"));
+        assert_eq!(applied["wait_seconds"], json!(7));
+        assert_eq!(state.commits.load(Ordering::SeqCst), 1);
+        let executed = state.executed.lock().expect("exec mutex");
+        assert_eq!(executed.len(), 1);
+        assert!(executed[0].0.contains(&format!("tool={marker}")));
+        assert!(executed[0].0.ends_with(source));
+    }
+}
+
+#[test]
+fn deploy_ddl_create_or_replace_grants_cannot_cross_generic_execution() {
+    let state = Arc::new(ExecState::default());
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(ExecRecordingMock::new(state.clone())),
+        Some("dev".to_owned()),
+        ddl_level(),
+    );
+    let source = "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual";
+    let typed = dispatcher
+        .dispatch("deploy_ddl", json!({"ddl": source, "timeout_seconds": 2}))
+        .expect("typed preview");
+    let err = dispatcher
+        .dispatch(
+            "oracle_execute",
+            json!({
+                "sql": source, "commit": true, "timeout_seconds": 2,
+                "confirm": typed["confirmation"]["confirm"],
+            }),
+        )
+        .expect_err("typed grant cannot authorize generic execution of the same SQL");
+    assert_eq!(err.error_class, ErrorClass::RepreviewRequired);
+
+    let generic = dispatcher
+        .dispatch(
+            "oracle_preview_sql",
+            json!({
+                "sql": source, "commit": true, "timeout_seconds": 2,
+            }),
+        )
+        .expect("generic preview");
+    let err = dispatcher
+        .dispatch(
+            "deploy_ddl",
+            json!({
+                "ddl": source, "execute": true, "timeout_seconds": 2,
+                "confirm": generic["execute_confirmation"]["confirm"],
+            }),
+        )
+        .expect_err("generic grant cannot authorize typed execution of the same SQL");
+    assert_eq!(err.error_class, ErrorClass::RepreviewRequired);
+    assert!(state.executed.lock().expect("exec mutex").is_empty());
+    assert_eq!(state.commits.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn deploy_ddl_execute_requires_confirmation_without_executing() {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_with_profile_level(
