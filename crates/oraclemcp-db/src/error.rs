@@ -193,7 +193,7 @@ pub enum FlashbackRefusalKind {
     /// they must never silently become current reads.
     CapabilityUnavailable,
     /// Oracle no longer has enough undo/SCN mapping data for the requested
-    /// target (`ORA-01555`, `ORA-08180`, `ORA-08186`).
+    /// target (`ORA-01555`, `ORA-08180`, `ORA-08181`, `ORA-08186`).
     RetentionExceeded,
     /// The table/index definition changed after the requested target
     /// (`ORA-01466`).
@@ -235,7 +235,7 @@ impl FlashbackRefusalKind {
                 "the selected Oracle server version/profile does not expose the required DBMS_FLASHBACK capability"
             }
             FlashbackRefusalKind::RetentionExceeded => {
-                "the requested flashback target is outside available retention"
+                "the requested SCN/timestamp is outside the readable flashback range"
             }
             FlashbackRefusalKind::DefinitionChanged => {
                 "the object definition changed after the requested flashback target"
@@ -255,7 +255,7 @@ impl FlashbackRefusalKind {
                 "retry without as_of/oracle_diff only if a current read is explicitly acceptable; this request was not silently degraded",
             ],
             FlashbackRefusalKind::RetentionExceeded => &[
-                "retry with a newer SCN/timestamp inside the database undo/flashback retention window",
+                "retry with a SCN/timestamp inside the database's readable flashback range",
                 "for future comparisons, record the current SCN before the change and use that observed_scn",
             ],
             FlashbackRefusalKind::DefinitionChanged => &[
@@ -888,7 +888,11 @@ pub(crate) fn classify_flashback_refusal_message(
         // Oracle returns ORA-08186 when `TIMESTAMP_TO_SCN` cannot map an
         // otherwise valid AS OF timestamp into retained history. This only
         // becomes a retention refusal on this contextual flashback path.
-        Some(1555 | 8180 | 8186) => Some((FlashbackRefusalKind::RetentionExceeded, ora_code)),
+        // ORA-08181 also covers SCNs before the available database incarnation.
+        // Keep it contextual; an ordinary invalid-SCN error is not a flashback refusal.
+        Some(1555 | 8180 | 8181 | 8186) => {
+            Some((FlashbackRefusalKind::RetentionExceeded, ora_code))
+        }
         Some(1466) => Some((FlashbackRefusalKind::DefinitionChanged, ora_code)),
         Some(8182 | 8185 | 8187 | 8189..=8199) => {
             Some((FlashbackRefusalKind::NotFlashbackable, ora_code))
@@ -1487,9 +1491,11 @@ mod tests {
 
         assert_eq!(env.error_class, ErrorClass::FlashbackRetentionExceeded);
         assert_eq!(env.ora_code, Some(8180));
-        assert!(env.message.contains("outside available retention"));
+        assert!(env.message.contains("outside the readable flashback range"));
         assert!(
-            env.next_steps.iter().any(|step| step.contains("newer SCN")),
+            env.next_steps.iter().any(|step| {
+                step == "retry with a SCN/timestamp inside the database's readable flashback range"
+            }),
             "{:?}",
             env.next_steps
         );
@@ -1567,6 +1573,14 @@ mod tests {
 
     #[test]
     fn flashback_refusal_classifier_is_contextual_and_conservative() {
+        let invalid_scn = "ORA-08181: specified number is not a valid system change number";
+        assert_eq!(
+            classify_flashback_refusal_message(invalid_scn),
+            Some((FlashbackRefusalKind::RetentionExceeded, Some(8181)))
+        );
+        let plain = DbError::Query(invalid_scn.to_owned()).into_envelope();
+        assert_ne!(plain.error_class, ErrorClass::FlashbackRetentionExceeded);
+        assert_eq!(plain.ora_code, Some(8181));
         assert_eq!(
             classify_flashback_refusal_message(
                 "ORA-06550: line 1, column 7:\nPLS-00201: identifier 'DBMS_FLASHBACK' must be declared"

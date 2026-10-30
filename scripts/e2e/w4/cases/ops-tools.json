@@ -532,7 +532,7 @@
     },
     "expect": {
       "error_class": "FLASHBACK_RETENTION_EXCEEDED",
-      "ora_code": 1555
+      "ora_code": 8181
     },
     "db_reread": [],
     "audit_expect": [],

@@ -29,7 +29,7 @@ import time
 import tempfile
 import tomllib
 
-from fixture import (admin_password, kill_session_sql, load_lane, new_run_id,
+from fixture import (admin_password, connect_admin, kill_session_sql, load_lane, new_run_id,
                      set_flashback_grant, setup as fixture_setup, teardown as fixture_teardown)
 from scrub import scrub
 
@@ -3067,15 +3067,40 @@ def select_requested_cases(file_cases, generated_cases, requested):
 
 
 def probe_expired_retention_scn(connection):
-    """Find a real expired SCN and prove it against the durable W4 registry.
+    """Prove unavailable history against the durable W4 registry.
 
-    `V$UNDOSTAT` supplies the lab's current retention observation; the candidate
-    is accepted only when an independent system connection reproduces a
-    flashback retention error while reading `W4_RIG.W4_RUNS`.  This keeps the
-    served oracle_diff case free of invented SCNs and makes the fixture usable
-    despite lane-specific SCN rates and undo pressure.
+    Prefer a database-derived SCN immediately before its current incarnation.
+    ORA-08181 there proves unavailable SCN history, not physical undo expiry.
+    If no positive earlier boundary is available, retain the undo-age probe,
+    which accepts only a real ORA-01555. Never turn an absent precondition into
+    a passing retention case.
     """
     cursor = connection.cursor()
+    current_scn, resetlogs_scn = cursor.execute(
+        "SELECT CURRENT_SCN, RESETLOGS_CHANGE# FROM V$DATABASE").fetchone()
+    require(type(current_scn) is int and type(resetlogs_scn) is int
+            and 0 < resetlogs_scn <= current_scn,
+            "V$DATABASE did not report a valid current incarnation boundary")
+    if resetlogs_scn > 1:
+        scn = resetlogs_scn - 1
+        try:
+            cursor.execute("BEGIN DBMS_FLASHBACK.ENABLE_AT_SYSTEM_CHANGE_NUMBER(:1); END;", (scn,))
+            cursor.execute("SELECT COUNT(*) FROM W4_RIG.W4_RUNS").fetchone()
+        except Exception as exc:
+            message = str(exc).split("\n", 1)[0]
+            match = re.match(r"ORA-(\d{5}):", message)
+            code = int(match.group(1)) if match else None
+            if code in {1555, 8180, 8181}:
+                return {"strategy": "before_current_incarnation", "scn_a": scn,
+                        "scn_b": current_scn, "resetlogs_change_scn": resetlogs_scn,
+                        "ora_code": code, "external_error": message}
+            if code != 1466:
+                raise DriverError(f"incarnation history probe failed unexpectedly: {message[:180]}") from exc
+        finally:
+            try:
+                cursor.execute("BEGIN DBMS_FLASHBACK.DISABLE; END;")
+            except Exception as cleanup:
+                raise DriverError("retention probe could not disable flashback") from cleanup
     retention = cursor.execute("SELECT MAX(TUNED_UNDORETENTION) FROM V$UNDOSTAT").fetchone()[0]
     require(type(retention) is int and retention > 0,
             "V$UNDOSTAT did not report a positive tuned undo retention")
@@ -3118,7 +3143,8 @@ def probe_expired_retention_scn(connection):
                     definition_errors.append(candidate)
                 continue
             if "ORA-01555" in message:
-                return {"tuned_undo_retention_seconds": retention,
+                return {"strategy": "undo_age", "ora_code": 1555,
+                        "tuned_undo_retention_seconds": retention,
                         "seconds_past": seconds, "multiplier": multiplier,
                         "scn_a": scn, "scn_b": current_scn,
                         "external_error": message.split("\n", 1)[0]}
@@ -3139,6 +3165,26 @@ def probe_expired_retention_scn(connection):
                        "(ORA-01466); no honest expired-SCN candidate exists on this database",
             "tuned_undo_retention_seconds": retention, "candidates": definition_errors})
     raise DriverError("lab retained every SCN tested beyond its reported undo retention")
+
+
+def prepare_retention_probe(lane, settings):
+    # Keep a failed flashback/cleanup probe off the independent reread connection.
+    connection, _ = connect_admin(lane, settings)
+    try:
+        return probe_expired_retention_scn(connection)
+    finally:
+        connection.close()
+
+
+def retention_precondition_failure_row(case, transport, lane, failure):
+    return {"case_id": case["case_id"], "test_id": case.get("test_id", case["case_id"]),
+            "tool": case["tool"], "level": case["level"], "lane": lane,
+            "input_sha256": sha256({"tool": case["tool"], "level": case["level"],
+                                    "arguments": case["call"]["arguments"],
+                                    "precondition": "retention"}),
+            "transport": transport, "expected": case["expect"], "actual": None,
+            "verdict": "fail", "duration_ms": 0,
+            "verification_failure": {"stage": "retention_precondition", **failure}}
 
 
 def plsql_project_path(run_id, transport, lane):
@@ -3352,12 +3398,16 @@ def _run_lane(args, output):
                     and transport in case["transports"]
                     for case in family_cases)
                 retention_skip = None
+                retention_failure = None
                 try:
-                    retention_probe = (probe_expired_retention_scn(connection)
+                    retention_probe = (prepare_retention_probe(args.lane, settings)
                                        if needs_retention_probe else None)
                 except EnvironmentSkip as exc:
                     retention_probe = None
                     retention_skip = exc.reason
+                except Exception as exc:
+                    retention_probe = None
+                    retention_failure = {"class": type(exc).__name__, "detail": str(exc)[:240]}
                 awr_skip = None
                 if any(case.get("runtime_awr_probe")
                        and (not args.case or case["case_id"] in args.case)
@@ -3376,6 +3426,7 @@ def _run_lane(args, output):
                             arguments = case["call"]["arguments"]
                             arguments["scn_a"] = retention_probe["scn_a"]
                             arguments["scn_b"] = retention_probe["scn_b"]
+                            case["expect"]["ora_code"] = retention_probe["ora_code"]
                             case["retention_probe"] = retention_probe
                 for case in expanded_family:
                     if (case.get("setup_phase") == "before_server"
@@ -3424,6 +3475,10 @@ def _run_lane(args, output):
                 current_level = "READ_ONLY"
                 current_profile = args.lane
                 for case in cases:
+                    if case.get("runtime_retention_probe") and retention_failure is not None:
+                        rows.append(retention_precondition_failure_row(
+                            case, transport, args.lane, retention_failure))
+                        continue
                     if case.get("runtime_awr_probe") and awr_skip is not None:
                         rows.append(environment_skip_row(case, transport, args.lane, awr_skip))
                         continue
@@ -3552,7 +3607,9 @@ def retention_probe_selftest():
             return self
 
         def execute(self, sql, binds=()):
-            if "MAX(TUNED_UNDORETENTION)" in sql:
+            if "CURRENT_SCN, RESETLOGS_CHANGE#" in sql:
+                self.row = (10000, 1)
+            elif "MAX(TUNED_UNDORETENTION)" in sql:
                 self.row = (100,)
             elif "CURRENT_SCN FROM V$DATABASE" in sql:
                 self.row = (10000,)
@@ -3570,6 +3627,57 @@ def retention_probe_selftest():
 
         def fetchone(self):
             return self.row
+
+    class IncarnationConnection(RetentionProbeConnection):
+        """Unit proof only; live labs independently confirm the real boundary."""
+        def __init__(self, error="ORA-08181: invalid SCN", cleanup_error=False):
+            super().__init__(None)
+            self.error, self.cleanup_error = error, cleanup_error
+            self.enabled, self.disabled = [], 0
+
+        def execute(self, sql, binds=()):
+            if "CURRENT_SCN, RESETLOGS_CHANGE#" in sql:
+                self.row = (10000, 2000)
+                return self
+            if "ENABLE_AT_SYSTEM_CHANGE_NUMBER" in sql:
+                self.enabled.append(binds[0])
+                raise RuntimeError(self.error)
+            if "DBMS_FLASHBACK.DISABLE" in sql:
+                self.disabled += 1
+                if self.cleanup_error:
+                    raise RuntimeError("ORA-03113: cleanup failed")
+                return self
+            return super().execute(sql, binds)
+
+    boundary = IncarnationConnection()
+    proof = probe_expired_retention_scn(boundary)
+    require(proof["scn_a"] == proof["resetlogs_change_scn"] - 1 == 1999
+            and proof["scn_b"] == 10000 and proof["ora_code"] == 8181
+            and proof["strategy"] == "before_current_incarnation"
+            and boundary.enabled == [1999] and boundary.disabled == 1
+            and not boundary.timestamp_seconds,
+            "incarnation probe did not prove the exact database-derived boundary")
+    case = next(case for case in load_cases() if case.get("runtime_retention_probe"))
+    for broken in (IncarnationConnection("ORA-00942: missing table"),
+                   IncarnationConnection(cleanup_error=True)):
+        try:
+            probe_expired_retention_scn(broken)
+        except EnvironmentSkip:
+            raise DriverError("failed boundary preparation was hidden as a skip")
+        except DriverError as exc:
+            row = retention_precondition_failure_row(case, "stdio", "free23", {
+                "class": type(exc).__name__, "detail": str(exc)})
+            following = {**row, "case_id": "following", "verdict": "pass"}
+            require(run_verdict([row, following]) == "fail"
+                    and row["actual"] is None
+                    and row["verification_failure"]["stage"] == "retention_precondition"
+                    and summary_table([row, following])["oracle_diff"]["stdio"]
+                    == {"pass": 1, "fail": 1, "skip": 0},
+                    "failed retention precondition lost its per-case failure or later result")
+        else:
+            raise DriverError("unexpected or unclean boundary preparation passed")
+    print(compact({"selftest": "retention_incarnation_boundary_and_per_case_failure",
+                   "verdict": "pass"}))
 
     for code in ("ORA-08180", "ORA-08186"):
         connection = RetentionProbeConnection(code)
