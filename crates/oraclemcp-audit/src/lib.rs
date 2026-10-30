@@ -47,7 +47,7 @@ pub use record::{
     AuditResultMaskingCertificate, AuditResultMaskingColumnDecision, AuditResultMaskingSource,
     AuditSubject, AuditVerdict, AuditVerdictCertificate, AuditVerdictCertificateError,
     AuditVerdictConstruct, AuditVerdictDerivationStep, AuditVerdictOperatingLevel,
-    AuditVerdictRuleId, BoundAuditVerdictCertificate, DbEvidence, GENESIS_HASH,
+    AuditVerdictRuleId, AuditViewProof, BoundAuditVerdictCertificate, DbEvidence, GENESIS_HASH,
     REDACTED_SQL_PREVIEW, SigningKey, SigningKeyError, normalized_sql_sha256, sha256_hex,
 };
 pub use rekor::{

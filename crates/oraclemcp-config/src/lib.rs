@@ -1994,22 +1994,9 @@ fn validate_trusted_proof_targets(
     parts: usize,
 ) -> Result<(), ConfigError> {
     for entry in entries.unwrap_or_default() {
-        let valid = entry.split('.').count() == parts
-            && entry.split('.').all(|part| {
-                let bytes = part.as_bytes();
-                let simple = !part.is_empty()
-                    && bytes[0].is_ascii_alphabetic()
-                    && bytes.iter().all(|byte| {
-                        byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$' | b'#')
-                    });
-                let quoted = bytes.len() >= 3
-                    && bytes.first() == Some(&b'"')
-                    && bytes.last() == Some(&b'"')
-                    && bytes[1..bytes.len() - 1].iter().all(|byte| {
-                        byte.is_ascii_graphic() && !matches!(byte, b'"' | b'*' | b'%' | b'.')
-                    });
-                simple || quoted
-            });
+        let valid = oraclemcp_guard::parse_trusted_proof_target(entry).is_some_and(|identity| {
+            identity.len() == parts || (field == "trusted_policy_functions" && identity.len() == 2)
+        });
         if !valid {
             return Err(ConfigError::InvalidTrustedProofTarget {
                 profile: profile.to_owned(),
@@ -2299,6 +2286,53 @@ mod tests {
         assert!(!cfg.http.dashboard_workbench);
         assert!(cfg.monitor_profile.is_none());
         assert!(!cfg.profiles[0].dashboard_ddl_workbench());
+    }
+
+    #[test]
+    fn trusted_views_rejects_wildcards_and_malformed_names() {
+        for entry in ["APP.*", "APP.V@LINK", "APP..V", "APP.V;SELECT 1 FROM DUAL"] {
+            let source = format!(
+                r#"[[profiles]]
+name = "proof"
+connect_string = "synthetic:1521/service"
+trusted_views = ['{entry}']
+"#
+            );
+            assert!(
+                matches!(
+                    OracleMcpConfig::from_toml_str(&source),
+                    Err(ConfigError::InvalidTrustedProofTarget { .. })
+                ),
+                "{entry}"
+            );
+        }
+    }
+
+    #[test]
+    fn trusted_proof_config_accepts_standalone_packaged_and_quoted_identities() {
+        let config = OracleMcpConfig::from_toml_str(
+            r#"
+[[profiles]]
+name = "proof"
+connect_string = "synthetic:1521/service"
+protected = true
+trusted_views = ['app.report', '"Mixed.Owner"."view name"']
+trusted_policy_functions = ['APP.FN', 'APP.PKG.FN', '"Mixed.Owner"."Policy Function"']
+"#,
+        )
+        .expect("exact identities are eligible configuration even on protected profiles");
+        assert_eq!(
+            config.profiles[0].max_level(),
+            oraclemcp_guard::OperatingLevel::ReadOnly
+        );
+        assert_eq!(
+            config.profiles[0]
+                .trusted_policy_functions
+                .as_ref()
+                .unwrap()
+                .len(),
+            3
+        );
     }
 
     #[test]

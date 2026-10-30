@@ -106,7 +106,7 @@ pub use stepup::{
     ChallengeStatus, CiToken, StepUpChallenge, StepUpOption, StepUpRegistry, StepUpResolution,
 };
 pub use token::{ALLOW_ONCE_TTL, AllowOnceError, AllowOnceStore, sql_digest};
-pub use view_eligibility::is_builtin_dictionary_view;
+pub use view_eligibility::{is_builtin_dictionary_view, parse_trusted_proof_target};
 
 /// Re-export the shared agent-facing error envelope.
 pub use oraclemcp_error as error;

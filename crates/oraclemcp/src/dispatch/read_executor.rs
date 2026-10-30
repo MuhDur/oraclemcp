@@ -607,6 +607,7 @@ pub(super) struct ResolvedRead {
     pub(super) decision: GuardDecision,
     pub(super) fga_evidence: FgaEvidence,
     pub(super) relation_security: Vec<RelationSecurityObservation>,
+    pub(super) view_proofs: Vec<oraclemcp_audit::AuditViewProof>,
 }
 
 /// Per-read proof policy supplied by the active dispatcher profile.
@@ -614,6 +615,36 @@ pub(super) struct ReadProofPolicy<'a> {
     pub(super) fga_evidence: FgaEvidencePolicy,
     pub(super) require_security_feature_evidence: bool,
     pub(super) trusted_views: &'a [String],
+}
+
+/// Bind a special read path's view admission before it can submit caller SQL.
+/// PENDING records admission only; it makes no claim about fetch completion.
+pub(super) async fn append_view_proof_admission_audit(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    ctx: AuditEntryCtx<'_>,
+    tool: &str,
+    sql: &str,
+    proofs: &[oraclemcp_audit::AuditViewProof],
+) -> Result<(), ErrorEnvelope> {
+    if proofs.is_empty() || ctx.auditor.is_none() {
+        return Ok(());
+    }
+    let mut evidence = collect_read_audit_db_evidence(cx, ctx.auditor, conn)
+        .await?
+        .unwrap_or_default();
+    evidence.view_proofs = proofs.to_vec();
+    append_audit(
+        AuditEntryCtx {
+            db_evidence: Some(&evidence),
+            ..ctx
+        },
+        tool,
+        sql,
+        "READ_ONLY",
+        None,
+        AuditOutcome::Pending,
+    )
 }
 
 /// Resolve relation identities for EXPLAIN's hard-parse closure before the
@@ -677,6 +708,34 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
     let relations = proof.relations.clone();
     let fga_evidence = proof.fga_evidence;
     let relation_security = proof.relation_security.clone();
+    let view_proofs = if proof
+        .view_proofs
+        .iter()
+        .any(|proof| proof.basis != oraclemcp_db::ViewProofBasis::ProvenRelation)
+    {
+        proof
+            .view_proofs
+            .iter()
+            .map(|proof| oraclemcp_audit::AuditViewProof {
+                identity_hash: proof.identity_hash.clone(),
+                source_hash: proof.source_hash.clone(),
+                dependency_hash: proof.dependency_hash.clone(),
+                basis: match proof.basis {
+                    oraclemcp_db::ViewProofBasis::TrustedSource => "trusted_source",
+                    oraclemcp_db::ViewProofBasis::ObjectOracleMaintained => {
+                        "object_oracle_maintained"
+                    }
+                    oraclemcp_db::ViewProofBasis::OwnerOracleMaintained => {
+                        "owner_oracle_maintained"
+                    }
+                    oraclemcp_db::ViewProofBasis::ProvenRelation => "proven_relation",
+                }
+                .to_owned(),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     if policy.require_security_feature_evidence
         && let Some(observation) = relation_security.iter().find(|observation| {
             observation.ols == RelationSecurityState::Unavailable
@@ -715,6 +774,7 @@ pub(super) async fn resolve_query_block_read_with_security_policy(
         decision,
         fga_evidence,
         relation_security,
+        view_proofs,
     })
 }
 
@@ -782,6 +842,8 @@ pub(super) struct ReadExecutionPlan {
     pub(super) fga_evidence: FgaEvidence,
     /// OLS/RAS/Redaction evidence bound to every resolved relation.
     pub(super) relation_security: Vec<RelationSecurityObservation>,
+    /// Signed audit commitments from this exact admission's view proof.
+    pub(super) view_proofs: Vec<oraclemcp_audit::AuditViewProof>,
     /// R36 evidence admitted under the profile observation policy.
     pub(super) hard_parse_observations: Vec<&'static str>,
 }
@@ -1330,23 +1392,31 @@ impl<'a> GuardedReadExecutor<'a> {
                 )
                 .await
             };
-            let (gate, verdict_certificate, rls_vpd_relations, fga_evidence, relation_security) =
-                match classified {
-                    Ok(read) => (
-                        Ok(()),
-                        Some(read.decision.verdict_certificate().clone()),
-                        read.relations,
-                        read.fga_evidence,
-                        read.relation_security,
-                    ),
-                    Err(error) => (
-                        Err(error),
-                        None,
-                        Vec::new(),
-                        FgaEvidence::Proven,
-                        Vec::new(),
-                    ),
-                };
+            let (
+                gate,
+                verdict_certificate,
+                rls_vpd_relations,
+                fga_evidence,
+                relation_security,
+                view_proofs,
+            ) = match classified {
+                Ok(read) => (
+                    Ok(()),
+                    Some(read.decision.verdict_certificate().clone()),
+                    read.relations,
+                    read.fga_evidence,
+                    read.relation_security,
+                    read.view_proofs,
+                ),
+                Err(error) => (
+                    Err(error),
+                    None,
+                    Vec::new(),
+                    FgaEvidence::Proven,
+                    Vec::new(),
+                    Vec::new(),
+                ),
+            };
             let hard_parse_relations = rls_vpd_relations.clone();
             (
                 ReadExecutionPlan {
@@ -1361,6 +1431,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     policy: policy.attachment.clone(),
                     fga_evidence,
                     relation_security,
+                    view_proofs,
                     hard_parse_observations: Vec::new(),
                 },
                 semantic_metadata,
@@ -1673,6 +1744,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     fga_evidence,
                     hard_parse_relations,
                     relation_security,
+                    view_proofs,
                 ) = match classified {
                     Ok(read) => (
                         Ok(()),
@@ -1680,11 +1752,13 @@ impl<'a> GuardedReadExecutor<'a> {
                         read.fga_evidence,
                         read.relations,
                         read.relation_security,
+                        read.view_proofs,
                     ),
                     Err(error) => (
                         Err(error),
                         None,
                         FgaEvidence::Proven,
+                        Vec::new(),
                         Vec::new(),
                         Vec::new(),
                     ),
@@ -1701,6 +1775,7 @@ impl<'a> GuardedReadExecutor<'a> {
                     policy: policy.attachment.clone(),
                     fga_evidence,
                     relation_security,
+                    view_proofs,
                     hard_parse_observations: Vec::new(),
                 }
             };
@@ -1841,6 +1916,19 @@ impl<'a> GuardedReadExecutor<'a> {
             let relation_security = prepared.relation_security.clone();
             let hard_parse_observations = prepared.hard_parse_observations.clone();
             let admitted = AdmittedRead::new(prepared, ReadQueryProvenance::CallerRead)?;
+            append_view_proof_admission_audit(
+                cx,
+                conn,
+                AuditEntryCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject: &audit_subject(context, &self.default_audit_subject),
+                    db_evidence: None,
+                },
+                "oracle_query",
+                &admitted.plan.executed_sql,
+                &admitted.plan.view_proofs,
+            )
+            .await?;
             if fga_evidence == FgaEvidence::Unavailable {
                 append_fga_evidence_unavailable_audit(
                     AuditEntryCtx {
@@ -1920,6 +2008,7 @@ impl<'a> GuardedReadExecutor<'a> {
             policy: _,
             fga_evidence,
             relation_security,
+            view_proofs,
             hard_parse_observations: _,
         } = prepared;
         let timeout_seconds = a.timeout_seconds;
@@ -2020,6 +2109,11 @@ impl<'a> GuardedReadExecutor<'a> {
                 // result as an oracle-export://{id} resource and return a
                 // resource_link instead of inlining the rows.
                 if a.export {
+                    append_view_proof_admission_audit(
+                        cx, &read_conn,
+                        AuditEntryCtx { auditor: self.auditor.as_deref(), subject: &request_subject, db_evidence: None },
+                        &audit_tool, &executed_sql, &view_proofs,
+                    ).await?;
                     let result_masking = self.result_masking_policy()?;
                     return export_query_to_resource(
                         cx,
@@ -2057,8 +2151,11 @@ impl<'a> GuardedReadExecutor<'a> {
                     ));
                 }
 
-                let read_audit_evidence =
+                let mut read_audit_evidence =
                     collect_read_audit_db_evidence(cx, auditor, &read_conn).await?;
+                if !view_proofs.is_empty() {
+                    read_audit_evidence.get_or_insert_with(DbEvidence::default).view_proofs = view_proofs.clone();
+                }
                 let read_audit = AuditEntryCtx {
                     auditor,
                     subject: &request_subject,
@@ -2426,6 +2523,7 @@ impl OracleDispatcher {
             policy: _,
             fga_evidence: _,
             relation_security: _,
+            view_proofs: _,
             hard_parse_observations: _,
         } = prepared;
         dispatch_checkpoint(cx, "oraclemcp.dispatch.query.row_stream.before")?;
@@ -2613,6 +2711,19 @@ impl OracleDispatcher {
         )
         .await?;
         let relations = admitted.relations;
+        append_view_proof_admission_audit(
+            cx,
+            observed_conn,
+            AuditEntryCtx {
+                auditor: self.auditor.as_deref(),
+                subject,
+                db_evidence: None,
+            },
+            "oracle_diff",
+            &executed_sql,
+            &admitted.view_proofs,
+        )
+        .await?;
         if admitted.fga_evidence == FgaEvidence::Unavailable {
             append_fga_evidence_unavailable_audit(
                 AuditEntryCtx {
@@ -2811,6 +2922,19 @@ impl OracleDispatcher {
             )
             .await?;
             let relations = admitted.relations;
+            append_view_proof_admission_audit(
+                cx,
+                &observed,
+                AuditEntryCtx {
+                    auditor: self.auditor.as_deref(),
+                    subject,
+                    db_evidence: None,
+                },
+                "oracle_diff",
+                &executed_sql,
+                &admitted.view_proofs,
+            )
+            .await?;
             if admitted.fga_evidence == FgaEvidence::Unavailable {
                 append_fga_evidence_unavailable_audit(
                     AuditEntryCtx {

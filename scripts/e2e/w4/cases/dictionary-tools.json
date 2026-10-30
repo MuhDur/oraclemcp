@@ -2077,7 +2077,80 @@
   "profile_variant": "synthetic_raw"
  },
  {
+  "case_id": "w4_query_issue35_user_objects",
+  "audit_optional_prefix": {
+   "record": {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED", "failure": {"error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"}},
+   "max_count": 1,
+   "reason": "A cold disposable owner may emit one signed unavailable SCN observation before the exact query audit pair. It is separate from the dictionary read and cached on this session."
+  },
+  "view_proof_audit": ["SYS.USER_OBJECTS"],
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": [],
+  "setup": [],
+  "setup_phase": "before_server",
+  "profile_variant": "synthetic_owner",
+  "call": {"arguments": {"sql": "SELECT OBJECT_NAME, OBJECT_TYPE, STATUS FROM USER_OBJECTS WHERE OBJECT_NAME = 'T_PARENT_${run_id}' AND OBJECT_TYPE = 'TABLE'"}},
+  "expect": {"rows": [{"OBJECT_NAME": "T_PARENT_${run_id}", "OBJECT_TYPE": "TABLE", "STATUS": "VALID"}]},
+  "db_reread": [],
+  "audit_expect": [
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+  ],
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_issue35_user_tab_columns",
+  "audit_optional_prefix": {
+   "record": {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED", "failure": {"error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"}},
+   "max_count": 1,
+   "reason": "A cold disposable owner may emit one signed unavailable SCN observation before the exact query audit pair. It is separate from the dictionary read and cached on this session."
+  },
+  "view_proof_audit": ["SYS.USER_TAB_COLUMNS"],
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": [],
+  "setup": [],
+  "setup_phase": "before_server",
+  "profile_variant": "synthetic_owner",
+  "call": {"arguments": {"sql": "SELECT COLUMN_NAME, DATA_TYPE FROM USER_TAB_COLUMNS WHERE TABLE_NAME = 'T_PARENT_${run_id}' ORDER BY COLUMN_ID"}},
+  "expect": {"rows": [{"COLUMN_NAME": "ID", "DATA_TYPE": "NUMBER"}, {"COLUMN_NAME": "LABEL", "DATA_TYPE": "VARCHAR2"}]},
+  "db_reread": [],
+  "audit_expect": [
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+  ],
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_issue35_user_sequences",
+  "audit_optional_prefix": {
+   "record": {"tool": "scn_capability_probe", "decision": "ALLOWED", "outcome": "FAILED", "failure": {"error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"}},
+   "max_count": 1,
+   "reason": "A cold disposable owner may emit one signed unavailable SCN observation before the exact query audit pair. It is separate from the dictionary read and cached on this session."
+  },
+  "view_proof_audit": ["SYS.USER_SEQUENCES"],
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": [],
+  "setup": [],
+  "setup_phase": "before_server",
+  "profile_variant": "synthetic_owner",
+  "call": {"arguments": {"sql": "SELECT SEQUENCE_NAME, INCREMENT_BY FROM USER_SEQUENCES WHERE SEQUENCE_NAME = 'SEQ_W4_${run_id}'"}},
+  "expect": {"rows": [{"SEQUENCE_NAME": "SEQ_W4_${run_id}", "INCREMENT_BY": "1"}]},
+  "db_reread": [],
+  "audit_expect": [
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+  ],
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
   "case_id": "w4_query_issue35_trusted_view_rows",
+  "view_proof_audit": ["${owner}.V35_OUTER_${run_id}", "${owner}.V35_INNER_${run_id}"],
   "tool": "oracle_query",
   "level": "READ_ONLY",
   "transports": ["stdio", "http"],
@@ -2096,6 +2169,88 @@
    {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
    {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
   ],
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_issue35_trusted_quoted_view_rows",
+  "view_proof_audit": ["${owner}.\"v35 quoted ${run_id}\""],
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": [],
+  "setup": [
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.\"v35 quoted ${run_id}\" AS SELECT ID FROM ${owner}.T_PARENT_${run_id}"}
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT ID FROM ${owner}.\"v35 quoted ${run_id}\" WHERE ID = 1",
+  "profile_variant": "trusted_views",
+  "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.\"v35 quoted ${run_id}\" WHERE ID = 1"}},
+  "expect": {"rows": [{"ID": "1"}]},
+  "db_reread": [],
+  "audit_expect": [
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "PENDING"},
+   {"tool": "oracle_query", "decision": "ALLOWED", "outcome": "SUCCEEDED"}
+  ],
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_issue35_untrusted_inner_view_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": ["priv:SELECT_V_SQL"],
+  "setup": [
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.V35_UIN_${run_id} AS SELECT ID FROM ${owner}.T_PARENT_${run_id}"},
+   {"sql": "CREATE OR REPLACE VIEW ${owner}.V35_UOUT_${run_id} AS SELECT ID FROM ${owner}.V35_UIN_${run_id}"}
+  ],
+  "setup_phase": "before_server",
+  "setup_ready_sql": "SELECT ID FROM ${owner}.V35_UOUT_${run_id} WHERE ID = 1",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {"sql": "SELECT ID FROM ${owner}.V35_UOUT_${run_id} /* W4MARK_V35UIN0000001 */", "max_rows": 1},
+   "vsql_absent_marker": "W4MARK_V35UIN0000001"
+  },
+  "expect": {"error_class": "FORBIDDEN_STATEMENT"},
+  "db_reread": [],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_issue35_trusted_view_over_vpd_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": ["priv:SELECT_V_SQL"],
+  "setup": [{"sql": "CREATE OR REPLACE VIEW ${owner}.V35_VPD_${run_id} AS SELECT ID FROM ${owner}.T_SECURE_${run_id}"}],
+  "setup_phase": "before_server",
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {"sql": "SELECT ID FROM ${owner}.V35_VPD_${run_id} /* W4MARK_V35VPD0000001 */", "max_rows": 1},
+   "vsql_absent_marker": "W4MARK_V35VPD0000001"
+  },
+  "expect": {"error_class": "FORBIDDEN_STATEMENT"},
+  "db_reread": [],
+  "audit_expect": [],
+  "audit_zero_executions": true,
+  "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
+ },
+ {
+  "case_id": "w4_query_issue35_trusted_policy_without_engine_refused",
+  "tool": "oracle_query",
+  "level": "READ_ONLY",
+  "transports": ["stdio", "http"],
+  "requires": ["priv:SELECT_V_SQL"],
+  "setup": [],
+  "profile_variant": "trusted_views",
+  "call": {
+   "arguments": {"sql": "SELECT ID FROM ${owner}.T_SECURE_${run_id} /* W4MARK_V35POL0000001 */", "max_rows": 1},
+   "vsql_absent_marker": "W4MARK_V35POL0000001"
+  },
+  "expect": {"error_class": "FORBIDDEN_STATEMENT"},
+  "db_reread": [],
+  "audit_expect": [],
+  "audit_zero_executions": true,
   "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
  },
  {

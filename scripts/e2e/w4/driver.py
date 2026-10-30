@@ -48,7 +48,7 @@ OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "au
                         "steps", "expect_by_version", "cleanup", "cleanup_reread", "plan_contains", "row_contains",
                         "finding_row_contains", "runtime_retention_probe", "flashback_grant_owner",
                         "environment_skips", "runtime_awr_probe", "audit_optional_prefix", "test_id",
-                        "name_alias_matrix", "mask_certificate_audit", "catalog_rows_positive"}
+                        "name_alias_matrix", "mask_certificate_audit", "catalog_rows_positive", "view_proof_audit"}
 PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
@@ -369,6 +369,61 @@ def verify_audit(expected, records, verified, optional_prefix=None):
     for item, record in zip(expected, records):
         require(deep_subset(item, record),
                 f"wrong ordered audit record for {item.get('tool', 'unknown tool')}")
+    return records
+
+
+def view_commitment(domain, value):
+    return "sha256:" + hashlib.sha256(domain.encode() + b"\0" + value).hexdigest()
+
+
+def verify_view_proof_audit(connection, targets, records):
+    """Compare signed commitments with the actual fixture's catalog source/identity."""
+    require(len(records) == 2, "view proof needs pending and terminal read audit")
+    proofs = records[0].get("db_evidence", {}).get("view_proofs", [])
+    require(proofs and proofs == records[1].get("db_evidence", {}).get("view_proofs"),
+            "view proof missing or different between pending and terminal audit")
+    require(all(record.get("schema_version", 0) >= 13 for record in records),
+            "view commitments require a schema that authenticates them")
+    for proof in proofs:
+        require(set(proof) == {"identity_hash", "source_hash", "dependency_hash", "basis"}
+                and proof["basis"] in {"trusted_source", "object_oracle_maintained",
+                                      "owner_oracle_maintained", "proven_relation"}
+                and all(re.fullmatch(r"sha256:[0-9a-f]{64}", proof[field] or "")
+                        for field in ("identity_hash", "dependency_hash")),
+                "malformed or unlabeled view proof commitment")
+    for target in targets:
+        owner, name = target.split(".", 1)
+        name = name.strip('"')
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT object_id, edition_name FROM all_objects "
+                           "WHERE owner=:1 AND object_name=:2 AND object_type='VIEW'",
+                           [owner, name])
+            identities = cursor.fetchall()
+            require(len(identities) == 1, "view fixture must have one exact catalog identity")
+            object_id, edition = identities[0]
+            identity = json.dumps([owner, name, "VIEW", object_id, edition],
+                                  separators=(",", ":"), ensure_ascii=False).encode()
+            identity_hash = view_commitment("oraclemcp:view-identity:v1", identity)
+            matches = [proof for proof in proofs if proof["identity_hash"] == identity_hash]
+            require(len(matches) == 1, "signed view proof lacks the exact catalog identity")
+            proof = matches[0]
+            if owner == "SYS":
+                require(proof["basis"] == "object_oracle_maintained"
+                        and proof["source_hash"] is None,
+                        "dictionary proof must name its real maintenance evidence basis")
+            else:
+                cursor.execute("SELECT text_vc, text_length FROM all_views "
+                               "WHERE owner=:1 AND view_name=:2", [owner, name])
+                source, length = cursor.fetchone()
+                require(source is not None and len(source) == length,
+                        "fixture source is unavailable or truncated")
+                require(proof["basis"] == "trusted_source"
+                        and proof["source_hash"] == "sha256:" + hashlib.sha256(source.encode()).hexdigest(),
+                        "signed source hash differs from the actual complete view definition")
+            require(proof["dependency_hash"] != view_commitment(
+                        "oraclemcp:view-dependencies:v1", b"[]"),
+                    "fixture view needs a nonempty dependency commitment")
+    return {"nodes": len(proofs), "catalog_targets": len(targets), "signed": True}
 
 
 def verify_level_expiry_audit(case, reply, records, verified):
@@ -436,6 +491,10 @@ def validate_case(case, filename):
     require(case["level"] in {"READ_ONLY", "READ_WRITE", "DDL", "ADMIN"}, "invalid level")
     require(case.get("profile_variant", "masked") in PROFILE_VARIANTS,
             f"profile_variant must be one of {sorted(PROFILE_VARIANTS)}")
+    if "view_proof_audit" in case:
+        require(isinstance(case["view_proof_audit"], list) and case["view_proof_audit"]
+                and all(isinstance(target, str) and "." in target for target in case["view_proof_audit"]),
+                "view_proof_audit needs exact qualified fixture views")
     if case.get("profile_variant") in {"synthetic_raw", "synthetic_owner"}:
         require(case["level"] == "READ_ONLY" and case.get("setup_phase") == "before_server",
                 "synthetic fixture profiles require precreated READ_ONLY fixtures")
@@ -493,15 +552,21 @@ def validate_case(case, filename):
                 "flashback grant is reserved for the positive disposable-owner diff case")
     if "audit_optional_prefix" in case:
         prefix = case["audit_optional_prefix"]
-        require(case["case_id"] == "w4_runtime_issue47_killed_session_dml_not_replayed"
-                and "kill_served_session_dml_user" in case["call"]
+        prefix_consumer = (case["case_id"] == "w4_runtime_issue47_killed_session_dml_not_replayed"
+                           and "kill_served_session_dml_user" in case["call"])
+        prefix_consumer = prefix_consumer or (
+            case["case_id"] in {"w4_query_issue35_user_objects", "w4_query_issue35_user_tab_columns",
+                                "w4_query_issue35_user_sequences"}
+            and case.get("profile_variant") == "synthetic_owner"
+            and case["tool"] == "oracle_query" and case.get("view_proof_audit"))
+        require(prefix_consumer
                 and isinstance(prefix, dict) and set(prefix) == {"record", "max_count", "reason"}
                 and type(prefix["max_count"]) is int and prefix["max_count"] == 1
                 and isinstance(prefix["reason"], str) and prefix["reason"].strip()
                 and prefix["record"] == {"tool": "scn_capability_probe", "decision": "ALLOWED",
                                          "outcome": "FAILED", "failure": {
                                              "error_class": "FLASHBACK_CAPABILITY_UNAVAILABLE"}},
-                "killed-DML audit allows only one explicitly explained degraded SCN prefix")
+                "this declared cold-session case allows only one exact degraded SCN prefix")
     if "steps" in case:
         validate_steps(case)
     require(isinstance(case["transports"], list) and case["transports"]
@@ -1308,7 +1373,8 @@ username = "system"
 credential_ref = "env:W4_DB_PASSWORD"
 max_level = "READ_ONLY"
 default_level = "READ_ONLY"
-trusted_views = ["{owner}.V35_INNER_{run_owner_suffix}", "{owner}.V35_OUTER_{run_owner_suffix}", "{owner}.V35_SIDE_{run_owner_suffix}"]
+trusted_views = ["{owner}.V35_INNER_{run_owner_suffix}", "{owner}.V35_OUTER_{run_owner_suffix}", "{owner}.V35_SIDE_{run_owner_suffix}", "{owner}.V35_UOUT_{run_owner_suffix}", "{owner}.V35_VPD_{run_owner_suffix}", '{owner}."v35 quoted {run_owner_suffix}"']
+trusted_policy_functions = ["{owner}.PKG_W4_{run_owner_suffix}.POLICY_FN"]
 
 [[profiles]]
 name = "{lane}_owner"
@@ -2625,7 +2691,10 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if case["audit_expect"]:
             records = audit_records(audit_path)[before:]
             verified = audit_verify(binary, audit_path, env)
-            verify_audit(case["audit_expect"], records, verified, case.get("audit_optional_prefix"))
+            records = verify_audit(case["audit_expect"], records, verified, case.get("audit_optional_prefix"))
+            if case.get("view_proof_audit"):
+                row["view_proof_audit"] = verify_view_proof_audit(
+                    connection, case["view_proof_audit"], records)
             if case["case_id"] == "w4_set_session_level_ttl_expiry_returns_readonly":
                 row["ttl_refusal_audit"] = verify_level_expiry_audit(case, reply, records, verified)
             if "kill_served_session_dml_user" in case["call"] and supported:

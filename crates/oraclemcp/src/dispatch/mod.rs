@@ -8033,6 +8033,7 @@ fn present(value: Option<String>) -> Option<String> {
 
 fn db_evidence_from_connection_info(info: OracleConnectionInfo) -> DbEvidence {
     DbEvidence {
+        view_proofs: Vec::new(),
         availability: Some("captured".to_owned()),
         db_unique_name: present(info.db_unique_name),
         service_name: present(info.service_name),
@@ -15632,6 +15633,11 @@ impl OracleDispatcher {
                 .await?;
                 let fga_evidence = read.fga_evidence;
                 let relation_security = read.relation_security;
+                read_executor::append_view_proof_admission_audit(
+                    cx, conn,
+                    AuditEntryCtx { auditor: self.auditor.as_deref(), subject: &request_subject, db_evidence: None },
+                    "oracle_explain_plan", &a.sql, &read.view_proofs,
+                ).await?;
                 if fga_evidence == FgaEvidence::Unavailable {
                     append_fga_evidence_unavailable_audit(
                         AuditEntryCtx {

@@ -5314,6 +5314,66 @@ pub type oraclemcp_db::TypeRepr::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::TypeRepr where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::TypeRepr where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::TypeRepr::vzip(self) -> V
+pub enum oraclemcp_db::ViewProofBasis
+pub oraclemcp_db::ViewProofBasis::ObjectOracleMaintained
+pub oraclemcp_db::ViewProofBasis::OwnerOracleMaintained
+pub oraclemcp_db::ViewProofBasis::ProvenRelation
+pub oraclemcp_db::ViewProofBasis::TrustedSource
+impl core::clone::Clone for oraclemcp_db::ViewProofBasis
+pub fn oraclemcp_db::ViewProofBasis::clone(&self) -> oraclemcp_db::ViewProofBasis
+impl core::cmp::Eq for oraclemcp_db::ViewProofBasis
+impl core::cmp::PartialEq for oraclemcp_db::ViewProofBasis
+pub fn oraclemcp_db::ViewProofBasis::eq(&self, &oraclemcp_db::ViewProofBasis) -> bool
+impl core::fmt::Debug for oraclemcp_db::ViewProofBasis
+pub fn oraclemcp_db::ViewProofBasis::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_db::ViewProofBasis
+impl core::marker::StructuralPartialEq for oraclemcp_db::ViewProofBasis
+impl serde_core::ser::Serialize for oraclemcp_db::ViewProofBasis
+pub fn oraclemcp_db::ViewProofBasis::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for oraclemcp_db::ViewProofBasis
+impl core::marker::Send for oraclemcp_db::ViewProofBasis
+impl core::marker::Sync for oraclemcp_db::ViewProofBasis
+impl core::marker::Unpin for oraclemcp_db::ViewProofBasis
+impl core::marker::UnsafeUnpin for oraclemcp_db::ViewProofBasis
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ViewProofBasis
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ViewProofBasis
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ViewProofBasis where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ViewProofBasis where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ViewProofBasis where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofBasis::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ViewProofBasis where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ViewProofBasis where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ViewProofBasis where U: core::convert::From<T>
+pub fn oraclemcp_db::ViewProofBasis::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ViewProofBasis where U: core::convert::Into<T>
+pub type oraclemcp_db::ViewProofBasis::Error = core::convert::Infallible
+pub fn oraclemcp_db::ViewProofBasis::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ViewProofBasis where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ViewProofBasis::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ViewProofBasis::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ViewProofBasis where T: core::clone::Clone
+pub type oraclemcp_db::ViewProofBasis::Owned = T
+pub fn oraclemcp_db::ViewProofBasis::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ViewProofBasis::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ViewProofBasis
+impl<T> core::any::Any for oraclemcp_db::ViewProofBasis where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofBasis::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ViewProofBasis where T: ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofBasis::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ViewProofBasis where T: ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofBasis::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ViewProofBasis where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ViewProofBasis::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ViewProofBasis
+pub fn oraclemcp_db::ViewProofBasis::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ViewProofBasis
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ViewProofBasis
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ViewProofBasis
+impl<T> typenum::type_operators::Same for oraclemcp_db::ViewProofBasis
+pub type oraclemcp_db::ViewProofBasis::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewProofBasis where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ViewProofBasis where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ViewProofBasis::vzip(self) -> V
 pub enum oraclemcp_db::ViewTier
 pub oraclemcp_db::ViewTier::All
 pub oraclemcp_db::ViewTier::Dba
@@ -10775,6 +10835,7 @@ pub struct oraclemcp_db::ReadPlanProof
 pub oraclemcp_db::ReadPlanProof::fga_evidence: oraclemcp_db::FgaEvidence
 pub oraclemcp_db::ReadPlanProof::relation_security: alloc::vec::Vec<oraclemcp_db::RelationSecurityObservation>
 pub oraclemcp_db::ReadPlanProof::relations: alloc::vec::Vec<oraclemcp_guard::resolver::ResolvedObject>
+pub oraclemcp_db::ReadPlanProof::view_proofs: alloc::vec::Vec<oraclemcp_db::ViewProof>
 impl oraclemcp_guard::purity::SideEffectOracle for oraclemcp_db::ReadPlanProof
 pub fn oraclemcp_db::ReadPlanProof::proves_value_column(&self, &oraclemcp_guard::resolver::RawName) -> bool
 pub fn oraclemcp_db::ReadPlanProof::statement_purity(&self, &[oraclemcp_guard::purity::ObjectRef]) -> oraclemcp_guard::purity::Purity
@@ -13068,6 +13129,127 @@ pub type oraclemcp_db::ViewDescription::Output = T
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewDescription where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ViewDescription where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::ViewDescription::vzip(self) -> V
+pub struct oraclemcp_db::ViewProof
+pub oraclemcp_db::ViewProof::basis: oraclemcp_db::ViewProofBasis
+pub oraclemcp_db::ViewProof::children: alloc::vec::Vec<alloc::string::String>
+pub oraclemcp_db::ViewProof::dependency_hash: alloc::string::String
+pub oraclemcp_db::ViewProof::identity: oraclemcp_db::ViewProofIdentity
+pub oraclemcp_db::ViewProof::identity_hash: alloc::string::String
+pub oraclemcp_db::ViewProof::source_hash: core::option::Option<alloc::string::String>
+impl core::clone::Clone for oraclemcp_db::ViewProof
+pub fn oraclemcp_db::ViewProof::clone(&self) -> oraclemcp_db::ViewProof
+impl core::cmp::Eq for oraclemcp_db::ViewProof
+impl core::cmp::PartialEq for oraclemcp_db::ViewProof
+pub fn oraclemcp_db::ViewProof::eq(&self, &oraclemcp_db::ViewProof) -> bool
+impl core::fmt::Debug for oraclemcp_db::ViewProof
+pub fn oraclemcp_db::ViewProof::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ViewProof
+impl serde_core::ser::Serialize for oraclemcp_db::ViewProof
+pub fn oraclemcp_db::ViewProof::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for oraclemcp_db::ViewProof
+impl core::marker::Send for oraclemcp_db::ViewProof
+impl core::marker::Sync for oraclemcp_db::ViewProof
+impl core::marker::Unpin for oraclemcp_db::ViewProof
+impl core::marker::UnsafeUnpin for oraclemcp_db::ViewProof
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ViewProof
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ViewProof
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ViewProof where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ViewProof where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ViewProof where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ViewProof::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ViewProof where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ViewProof where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ViewProof where U: core::convert::From<T>
+pub fn oraclemcp_db::ViewProof::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ViewProof where U: core::convert::Into<T>
+pub type oraclemcp_db::ViewProof::Error = core::convert::Infallible
+pub fn oraclemcp_db::ViewProof::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ViewProof where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ViewProof::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ViewProof::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ViewProof where T: core::clone::Clone
+pub type oraclemcp_db::ViewProof::Owned = T
+pub fn oraclemcp_db::ViewProof::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ViewProof::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ViewProof
+impl<T> core::any::Any for oraclemcp_db::ViewProof where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ViewProof::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ViewProof where T: ?core::marker::Sized
+pub fn oraclemcp_db::ViewProof::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ViewProof where T: ?core::marker::Sized
+pub fn oraclemcp_db::ViewProof::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ViewProof where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ViewProof::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ViewProof
+pub fn oraclemcp_db::ViewProof::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ViewProof
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ViewProof
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ViewProof
+impl<T> typenum::type_operators::Same for oraclemcp_db::ViewProof
+pub type oraclemcp_db::ViewProof::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewProof where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ViewProof where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ViewProof::vzip(self) -> V
+pub struct oraclemcp_db::ViewProofIdentity
+pub oraclemcp_db::ViewProofIdentity::edition: core::option::Option<alloc::string::String>
+pub oraclemcp_db::ViewProofIdentity::kind: alloc::string::String
+pub oraclemcp_db::ViewProofIdentity::name: alloc::string::String
+pub oraclemcp_db::ViewProofIdentity::object_id: core::option::Option<u64>
+pub oraclemcp_db::ViewProofIdentity::owner: alloc::string::String
+impl core::clone::Clone for oraclemcp_db::ViewProofIdentity
+pub fn oraclemcp_db::ViewProofIdentity::clone(&self) -> oraclemcp_db::ViewProofIdentity
+impl core::cmp::Eq for oraclemcp_db::ViewProofIdentity
+impl core::cmp::PartialEq for oraclemcp_db::ViewProofIdentity
+pub fn oraclemcp_db::ViewProofIdentity::eq(&self, &oraclemcp_db::ViewProofIdentity) -> bool
+impl core::fmt::Debug for oraclemcp_db::ViewProofIdentity
+pub fn oraclemcp_db::ViewProofIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_db::ViewProofIdentity
+impl serde_core::ser::Serialize for oraclemcp_db::ViewProofIdentity
+pub fn oraclemcp_db::ViewProofIdentity::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl core::marker::Freeze for oraclemcp_db::ViewProofIdentity
+impl core::marker::Send for oraclemcp_db::ViewProofIdentity
+impl core::marker::Sync for oraclemcp_db::ViewProofIdentity
+impl core::marker::Unpin for oraclemcp_db::ViewProofIdentity
+impl core::marker::UnsafeUnpin for oraclemcp_db::ViewProofIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_db::ViewProofIdentity
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_db::ViewProofIdentity
+impl<'a, T, E> asn1_rs::traits::AsTaggedExplicit<'a, E> for oraclemcp_db::ViewProofIdentity where T: 'a
+impl<'a, T, E> asn1_rs::traits::AsTaggedImplicit<'a, E> for oraclemcp_db::ViewProofIdentity where T: 'a
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_db::ViewProofIdentity where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofIdentity::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_db::ViewProofIdentity where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_db::ViewProofIdentity where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_db::ViewProofIdentity where U: core::convert::From<T>
+pub fn oraclemcp_db::ViewProofIdentity::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_db::ViewProofIdentity where U: core::convert::Into<T>
+pub type oraclemcp_db::ViewProofIdentity::Error = core::convert::Infallible
+pub fn oraclemcp_db::ViewProofIdentity::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_db::ViewProofIdentity where U: core::convert::TryFrom<T>
+pub type oraclemcp_db::ViewProofIdentity::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_db::ViewProofIdentity::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_db::ViewProofIdentity where T: core::clone::Clone
+pub type oraclemcp_db::ViewProofIdentity::Owned = T
+pub fn oraclemcp_db::ViewProofIdentity::clone_into(&self, &mut T)
+pub fn oraclemcp_db::ViewProofIdentity::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_db::ViewProofIdentity
+impl<T> core::any::Any for oraclemcp_db::ViewProofIdentity where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofIdentity::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_db::ViewProofIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofIdentity::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_db::ViewProofIdentity where T: ?core::marker::Sized
+pub fn oraclemcp_db::ViewProofIdentity::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_db::ViewProofIdentity where T: core::clone::Clone
+pub unsafe fn oraclemcp_db::ViewProofIdentity::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_db::ViewProofIdentity
+pub fn oraclemcp_db::ViewProofIdentity::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_db::ViewProofIdentity
+impl<T> tracing::instrument::Instrument for oraclemcp_db::ViewProofIdentity
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_db::ViewProofIdentity
+impl<T> typenum::type_operators::Same for oraclemcp_db::ViewProofIdentity
+pub type oraclemcp_db::ViewProofIdentity::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_db::ViewProofIdentity where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::ViewProofIdentity where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_db::ViewProofIdentity::vzip(self) -> V
 pub struct oraclemcp_db::WalletCertValidity
 pub oraclemcp_db::WalletCertValidity::not_after: i64
 pub oraclemcp_db::WalletCertValidity::not_before: i64

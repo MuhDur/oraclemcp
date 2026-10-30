@@ -899,14 +899,14 @@ impl CatalogQueryId {
                 NameResolution,
             ),
             Self::DictionaryViewIdentity => (
-                "SELECT oracle_maintained, edition_name FROM all_objects WHERE owner = :1 AND object_name = :2 AND object_type = 'VIEW' AND status = 'VALID' AND ROWNUM <= 2",
+                "SELECT object_id, oracle_maintained, edition_name FROM all_objects WHERE owner = :1 AND object_name = :2 AND object_type = 'VIEW' AND status = 'VALID' AND ROWNUM <= 2",
                 TT,
                 "prove one eligible dictionary view is Oracle maintained",
                 InternalProof,
                 ReadPurity,
             ),
             Self::DictionaryViewDependencies => (
-                "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, u.oracle_maintained AS owner_oracle_maintained FROM (SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name FROM all_dependencies WHERE owner = :1 AND name = :2 AND type = 'VIEW' ORDER BY referenced_owner, referenced_name, referenced_type) d LEFT JOIN all_users u ON u.username = d.referenced_owner WHERE ROWNUM <= :3",
+                "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, d.dependency_depth, d.dependency_cycle, o.object_id, o.edition_name, o.oracle_maintained AS object_oracle_maintained, u.oracle_maintained AS owner_oracle_maintained FROM (SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name, LEVEL AS dependency_depth, CONNECT_BY_ISCYCLE AS dependency_cycle FROM all_dependencies START WITH owner = :1 AND name = :2 AND type = 'VIEW' CONNECT BY NOCYCLE PRIOR referenced_owner = owner AND PRIOR referenced_name = name AND PRIOR referenced_type = type AND PRIOR referenced_link_name IS NULL AND LEVEL <= 9) d LEFT JOIN all_users u ON u.username = d.referenced_owner LEFT JOIN all_objects o ON o.owner = d.referenced_owner AND o.object_name = d.referenced_name AND o.object_type = d.referenced_type WHERE ROWNUM <= :3 ORDER BY d.referenced_owner, d.referenced_name, d.referenced_type, o.object_id",
                 TTI,
                 "prove one eligible dictionary view has a bounded Oracle-maintained dependency closure",
                 InternalProof,

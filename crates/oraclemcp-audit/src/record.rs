@@ -22,6 +22,7 @@ const AUDIT_SCHEMA_V9: u16 = 9;
 const AUDIT_SCHEMA_V10: u16 = 10;
 const AUDIT_SCHEMA_V11: u16 = 11;
 const AUDIT_SCHEMA_V12: u16 = 12;
+const AUDIT_SCHEMA_V13: u16 = 13;
 
 /// Application-domain label prefixing every v11+ entry-hash preimage.
 ///
@@ -39,6 +40,7 @@ const AUDIT_SCHEMA_V12: u16 = 12;
 /// form.
 const AUDIT_ENTRY_HASH_DOMAIN: &[u8] = b"oraclemcp:audit-entry-hash:v11\n";
 const AUDIT_ENTRY_HASH_DOMAIN_V12: &[u8] = b"oraclemcp:audit-entry-hash:v12\n";
+const AUDIT_ENTRY_HASH_DOMAIN_V13: &[u8] = b"oraclemcp:audit-entry-hash:v13\n";
 
 /// Stable, non-secret replacement for the historical raw-SQL preview field.
 ///
@@ -55,7 +57,7 @@ const AUDIT_ENTRY_HASH_DOMAIN_V12: &[u8] = b"oraclemcp:audit-entry-hash:v12\n";
 pub const REDACTED_SQL_PREVIEW: &str = "<sql text redacted; see sql_sha256>";
 
 /// Current on-disk audit record schema.
-pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V12;
+pub const AUDIT_SCHEMA_VERSION: u16 = AUDIT_SCHEMA_V13;
 
 /// Redaction-safe cause attached to a failed tool operation. The values are
 /// constrained category names only; message text, SQL, binds, and identifiers
@@ -359,6 +361,9 @@ impl Default for AuditSubject {
 /// Optional database-observed evidence attached to an audit record.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbEvidence {
+    /// Exact read-view proof commitments; authenticated by schema v13 onward.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub view_proofs: Vec<AuditViewProof>,
     /// `captured` when live evidence was available, or a stable
     /// `db_evidence_unavailable:*` marker when the server could not read it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -406,6 +411,20 @@ pub struct DbEvidence {
     /// Database open mode from `V$DATABASE`, when available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub open_mode: Option<String>,
+}
+
+/// Hash commitments to one proven view definition and dependency closure.
+/// Source text and raw object names are never stored in this audit field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditViewProof {
+    /// Domain-separated commitment to the exact owner/name/object/edition.
+    pub identity_hash: String,
+    /// SHA-256 of complete source, absent for dictionary evidence without text.
+    pub source_hash: Option<String>,
+    /// Commitment to the complete sorted dependency identities and proof bases.
+    pub dependency_hash: String,
+    /// Honest evidence basis, such as trusted source or Oracle-maintained object.
+    pub basis: String,
 }
 
 impl DbEvidence {
@@ -1267,7 +1286,7 @@ impl AuditRecord {
         let sql_normalized_sha256 = normalized_sql_sha256(&draft.sql);
         let sql_preview = REDACTED_SQL_PREVIEW.to_owned();
         let agent_identity = draft.subject.legacy_agent_identity();
-        let entry_hash = compute_entry_hash_v12(
+        let content_hash = compute_entry_hash_v12(
             seq,
             &timestamp,
             &agent_identity,
@@ -1289,6 +1308,7 @@ impl AuditRecord {
             prev_hash,
             failure.as_ref(),
         );
+        let entry_hash = bind_view_proofs_v13(&content_hash, draft.db_evidence.as_ref());
         AuditRecord {
             schema_version: AUDIT_SCHEMA_VERSION,
             seq,
@@ -1323,6 +1343,14 @@ impl AuditRecord {
     /// recompute-from-genesis. Pair it with [`Self::signature_is_valid`].
     #[must_use]
     pub fn hash_is_valid(&self) -> bool {
+        if self.schema_version < AUDIT_SCHEMA_V13
+            && self
+                .db_evidence
+                .as_ref()
+                .is_some_and(|evidence| !evidence.view_proofs.is_empty())
+        {
+            return false;
+        }
         let recomputed = if self.schema_version <= 1 {
             compute_entry_hash_v1(
                 self.seq,
@@ -1507,8 +1535,8 @@ impl AuditRecord {
                 self.outcome,
                 &self.prev_hash,
             )
-        } else if self.schema_version == AUDIT_SCHEMA_V12 {
-            compute_entry_hash_v12(
+        } else if matches!(self.schema_version, AUDIT_SCHEMA_V12 | AUDIT_SCHEMA_V13) {
+            let content_hash = compute_entry_hash_v12(
                 self.seq,
                 &self.timestamp,
                 &self.agent_identity,
@@ -1529,7 +1557,12 @@ impl AuditRecord {
                 self.outcome,
                 &self.prev_hash,
                 self.failure.as_ref(),
-            )
+            );
+            if self.schema_version == AUDIT_SCHEMA_V13 {
+                bind_view_proofs_v13(&content_hash, self.db_evidence.as_ref())
+            } else {
+                content_hash
+            }
         } else if self.schema_version == AUDIT_SCHEMA_V11 {
             compute_entry_hash_v11(
                 self.seq,
@@ -2485,6 +2518,25 @@ fn compute_entry_hash_v12(
     sha256_hex(&canonical)
 }
 
+fn bind_view_proofs_v13(content_hash: &str, evidence: Option<&DbEvidence>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(AUDIT_ENTRY_HASH_DOMAIN_V13);
+    hash_str(&mut hasher, content_hash);
+    let proofs = evidence.map_or(&[][..], |evidence| evidence.view_proofs.as_slice());
+    hasher.update((proofs.len() as u64).to_be_bytes());
+    for proof in proofs {
+        hash_str(&mut hasher, &proof.identity_hash);
+        hash_opt_str(&mut hasher, proof.source_hash.as_deref());
+        hash_str(&mut hasher, &proof.dependency_hash);
+        hash_str(&mut hasher, &proof.basis);
+    }
+    let mut out = String::from("sha256:");
+    for byte in hasher.finalize() {
+        push_hex_byte(&mut out, byte);
+    }
+    out
+}
+
 fn canonical_push_failure(out: &mut Vec<u8>, failure: Option<&AuditFailureCause>) {
     let Some(failure) = failure else {
         out.push(0);
@@ -2862,7 +2914,7 @@ mod tests {
                 d.outcome,
                 prev_hash,
             ),
-            AUDIT_SCHEMA_V12 => compute_entry_hash_v12(
+            AUDIT_SCHEMA_V12 | AUDIT_SCHEMA_V13 => compute_entry_hash_v12(
                 seq,
                 &timestamp,
                 &agent_identity,
@@ -2885,6 +2937,11 @@ mod tests {
                 None,
             ),
             other => panic!("unsupported test schema {other}"),
+        };
+        let entry_hash = if schema_version == AUDIT_SCHEMA_V13 {
+            bind_view_proofs_v13(&entry_hash, d.db_evidence.as_ref())
+        } else {
+            entry_hash
         };
         AuditRecord {
             schema_version,
@@ -4100,6 +4157,7 @@ mod tests {
             action: Some("execute".to_owned()),
             database_role: Some("PRIMARY".to_owned()),
             open_mode: Some("READ WRITE".to_owned()),
+            view_proofs: Vec::new(),
         });
         let sql_sha256 = sha256_hex(d.sql.as_bytes());
         let sql_normalized_sha256 = normalized_sql_sha256(&d.sql);
@@ -4383,6 +4441,7 @@ mod tests {
             action: Some("execute".to_owned()),
             database_role: Some("PRIMARY".to_owned()),
             open_mode: Some("READ WRITE".to_owned()),
+            view_proofs: Vec::new(),
         });
         d.cancel = Some(AuditCancel::new("User", "session_delete"));
         d.rows_affected = Some(7);
@@ -4789,6 +4848,43 @@ mod tests {
     }
 
     #[test]
+    fn view_proof_commitments_are_signed_and_cannot_be_injected_into_old_records() {
+        let k = key();
+        let mut d = draft();
+        let proof = AuditViewProof {
+            identity_hash: "sha256:identity".to_owned(),
+            source_hash: Some("sha256:source".to_owned()),
+            dependency_hash: "sha256:dependencies".to_owned(),
+            basis: "trusted_source".to_owned(),
+        };
+        d.db_evidence = Some(DbEvidence {
+            view_proofs: vec![proof.clone()],
+            ..Default::default()
+        });
+        let record = AuditRecord::chained_signed(&d, 1, GENESIS_HASH, "t1".to_owned(), &k);
+        assert!(record.hash_is_valid());
+        assert!(record.signature_is_valid(&k));
+        for field in 0..4 {
+            let mut tampered = record.clone();
+            let proof = &mut tampered.db_evidence.as_mut().unwrap().view_proofs[0];
+            match field {
+                0 => proof.identity_hash.push('x'),
+                1 => proof.source_hash = None,
+                2 => proof.dependency_hash.push('x'),
+                _ => proof.basis = "owner_oracle_maintained".to_owned(),
+            }
+            assert!(!tampered.hash_is_valid(), "tampered proof field {field}");
+        }
+        d.db_evidence.as_mut().unwrap().view_proofs.clear();
+        let mut old =
+            signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V12, 1, GENESIS_HASH, &k);
+        assert!(old.hash_is_valid());
+        assert!(old.signature_is_valid(&k));
+        old.db_evidence.as_mut().unwrap().view_proofs.push(proof);
+        assert!(!old.hash_is_valid(), "v12 did not sign the added proof");
+    }
+
+    #[test]
     fn previous_schema_version_still_verifies() {
         let signing_key = key();
         let record = signed_record_for_schema(AUDIT_SCHEMA_V11, 1, GENESIS_HASH, &signing_key);
@@ -4825,17 +4921,16 @@ mod tests {
             "the v11 domain label must change the digest of identical content"
         );
 
-        // A record produced by the current constructor is v12 and verifies, and
-        // reproduces exactly the v12 entry hash for the same inputs.
+        // The current constructor agrees with its versioned recomputation.
         let current = AuditRecord::chained_signed(&d, 7, GENESIS_HASH, "t7".to_owned(), &k);
         assert_eq!(current.schema_version, AUDIT_SCHEMA_VERSION);
         assert!(current.hash_is_valid());
         assert!(current.signature_is_valid(&k));
         assert_eq!(
             current.entry_hash,
-            signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_V12, 7, GENESIS_HASH, &k)
+            signed_record_for_schema_with_draft(&d, AUDIT_SCHEMA_VERSION, 7, GENESIS_HASH, &k)
                 .entry_hash,
-            "the constructor's v12 hash matches the versioned recomputation"
+            "the constructor hash matches the versioned recomputation"
         );
 
         // A record tagged with an unknown future schema fails closed rather than
@@ -4955,7 +5050,7 @@ mod tests {
         );
         // Forge the redacted field and recompute the (unkeyed) hash so the
         // bare-hash check would pass — but leave the old MAC in place. Recompute
-        // under the record's current schema (v12) so the bare-hash check really
+        // under the record's current schema so the bare-hash check really
         // would pass; the MAC is what still catches the forgery.
         forged.sql_preview = "SELECT 1".to_owned();
         forged.entry_hash = compute_entry_hash_v12(
@@ -4980,6 +5075,7 @@ mod tests {
             &forged.prev_hash,
             forged.failure.as_ref(),
         );
+        forged.entry_hash = bind_view_proofs_v13(&forged.entry_hash, forged.db_evidence.as_ref());
         assert!(
             forged.hash_is_valid(),
             "recompute-from-genesis defeats the bare hash chain"

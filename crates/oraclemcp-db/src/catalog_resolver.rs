@@ -7,7 +7,7 @@
 //! deliberately unresolved.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::sync::RwLock;
+use std::sync::{Mutex, RwLock};
 use std::time::Duration;
 
 use asupersync::Cx;
@@ -19,6 +19,7 @@ use oraclemcp_guard::{
     RoutineIdentifier, RoutineRef, SemanticReadPlan, SideEffectOracle, StatementScope, SynonymHop,
     SyntacticRole, hard_parse_user_calls, semantic_read_plan_checked,
 };
+use sha2::{Digest, Sha256};
 
 use crate::catalog_facts::read_closure_database_identity;
 #[cfg(test)]
@@ -44,6 +45,152 @@ const MAX_ARGUMENT_ROWS: usize = 512;
 const MAX_SESSION_ROLES: usize = 256;
 const MAX_DICTIONARY_VIEW_DEPENDENCIES: usize = 256;
 const MAX_TRUSTED_VIEW_DEPTH: u8 = 8;
+
+/// The catalog evidence used for an exact node in a view's read closure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewProofBasis {
+    /// Complete application-view source passed the recursive read proof.
+    TrustedSource,
+    /// The visible object's own Oracle-maintained flag is Y.
+    ObjectOracleMaintained,
+    /// The object row is hidden; its visible dependency owner is Oracle maintained.
+    OwnerOracleMaintained,
+    /// A resolved base table passed the ordinary relation/policy proof.
+    ProvenRelation,
+}
+
+/// Statement-local commitments to an exact view or dependency identity.
+/// No source text or reusable admission fact is persisted here.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ViewProof {
+    /// Exact catalog identity, including the session-visible edition.
+    pub identity: ViewProofIdentity,
+    /// Owner, name, object kind, object id (when visible), and edition commitment.
+    pub identity_hash: String,
+    /// Complete TEXT_VC bytes, absent when source was not the evidence basis.
+    pub source_hash: Option<String>,
+    /// Sorted child identities, source/dependency hashes, and evidence bases.
+    pub dependency_hash: String,
+    /// The evidence actually available for this node.
+    pub basis: ViewProofBasis,
+    /// Child identity commitments into this statement's flattened proof graph.
+    pub children: Vec<String>,
+}
+
+/// Exact local identity of a proof node; hidden object rows have no id.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct ViewProofIdentity {
+    /// Exact Oracle owner.
+    pub owner: String,
+    /// Exact Oracle object name.
+    pub name: String,
+    /// Oracle catalog object type.
+    pub kind: String,
+    /// ALL_OBJECTS.OBJECT_ID when visible.
+    pub object_id: Option<u64>,
+    /// ALL_OBJECTS.EDITION_NAME when visible/applicable.
+    pub edition: Option<String>,
+}
+
+#[derive(Default)]
+struct StatementViewProofState {
+    identities: HashSet<String>,
+    proofs: HashMap<String, ViewProof>,
+}
+
+impl StatementViewProofState {
+    fn charge(&mut self, identity: String) -> bool {
+        self.identities.insert(identity);
+        self.identities.len() <= MAX_DICTIONARY_VIEW_DEPENDENCIES
+    }
+
+    fn record(&mut self, proof: ViewProof) -> bool {
+        if !self.charge(proof.identity_hash.clone()) {
+            return false;
+        }
+        self.proofs.insert(proof.identity_hash.clone(), proof);
+        true
+    }
+
+    fn snapshot(&self) -> Vec<ViewProof> {
+        let mut proofs = self.proofs.values().cloned().collect::<Vec<_>>();
+        proofs.sort_by(|a, b| a.identity_hash.cmp(&b.identity_hash));
+        proofs
+    }
+}
+
+fn view_proof_hash(domain: &str, bytes: &[u8]) -> String {
+    let mut hash = Sha256::new();
+    hash.update(domain.as_bytes());
+    hash.update([0]);
+    hash.update(bytes);
+    let hex: String = hash
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
+}
+
+fn view_identity_hash(
+    owner: &str,
+    name: &str,
+    kind: &str,
+    object_id: Option<u64>,
+    edition: Option<&str>,
+) -> String {
+    view_proof_hash(
+        "oraclemcp:view-identity:v1",
+        &serde_json::to_vec(&(owner, name, kind, object_id, edition))
+            .expect("identity serialization"),
+    )
+}
+
+fn relation_view_identity_hash(relation: &ResolvedObject) -> String {
+    view_identity_hash(
+        &relation.owner,
+        &relation.name,
+        match relation.kind {
+            CatalogObjectKind::View => "VIEW",
+            _ => "TABLE",
+        },
+        Some(relation.identity.object_id),
+        relation.identity.edition.as_deref(),
+    )
+}
+
+fn view_dependencies_hash(mut dependencies: Vec<ViewProof>) -> String {
+    dependencies.sort_by(|a, b| a.identity_hash.cmp(&b.identity_hash));
+    dependencies.dedup();
+    view_proof_hash(
+        "oraclemcp:view-dependencies:v1",
+        &serde_json::to_vec(&dependencies).expect("proof serialization"),
+    )
+}
+
+fn relation_view_identity(relation: &ResolvedObject) -> ViewProofIdentity {
+    ViewProofIdentity {
+        owner: relation.owner.clone(),
+        name: relation.name.clone(),
+        kind: if relation.kind == CatalogObjectKind::View {
+            "VIEW"
+        } else {
+            "TABLE"
+        }
+        .to_owned(),
+        object_id: Some(relation.identity.object_id),
+        edition: relation.identity.edition.clone(),
+    }
+}
+
+fn view_source_hash(source: &str) -> String {
+    let hex: String = Sha256::digest(source.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("sha256:{hex}")
+}
 
 /// Maximum VPD/RLS policy rows surfaced in one diagnostic observation.
 pub const MAX_VPD_RLS_POLICY_ROWS: usize = 64;
@@ -513,6 +660,17 @@ pub async fn resolved_relations_read_purity(
     relations: &[ResolvedObject],
     values: &[RawName],
 ) -> Result<oraclemcp_guard::Purity, DbError> {
+    let state = Mutex::new(StatementViewProofState::default());
+    resolved_relations_read_purity_inner(cx, conn, relations, values, &state).await
+}
+
+async fn resolved_relations_read_purity_inner(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+    values: &[RawName],
+    state: &Mutex<StatementViewProofState>,
+) -> Result<Purity, DbError> {
     if relations.is_empty() {
         return Ok(oraclemcp_guard::Purity::ProvenReadOnly);
     }
@@ -526,7 +684,7 @@ pub async fn resolved_relations_read_purity(
         match relation.kind {
             CatalogObjectKind::Table => {}
             CatalogObjectKind::View if dictionary_view_identity_is_eligible(relation) => {
-                if !dictionary_view_closure_is_proven(cx, conn, relation).await? {
+                if !dictionary_view_closure_is_proven(cx, conn, relation, state).await? {
                     return Ok(oraclemcp_guard::Purity::Unknown);
                 }
             }
@@ -618,6 +776,7 @@ struct TrustedViewProofContext<'a> {
     trusted_views: &'a [String],
     view_depth: u8,
     view_path: &'a [ReadObjectIdentity],
+    state: &'a Mutex<StatementViewProofState>,
 }
 
 #[derive(Clone, Copy)]
@@ -648,13 +807,14 @@ async fn resolved_relations_read_purity_with_trusted_views(
             policy_relations.push(relation.clone());
         }
     }
-    resolved_relations_read_purity(cx, conn, &policy_relations, values).await
+    resolved_relations_read_purity_inner(cx, conn, &policy_relations, values, policy.context.state)
+        .await
 }
 
 fn trusted_view_identity_is_eligible(relation: &ResolvedObject, trusted_views: &[String]) -> bool {
     trusted_views
         .iter()
-        .any(|candidate| candidate == &format!("{}.{}", relation.owner, relation.name))
+        .any(|candidate| matches!(oraclemcp_guard::parse_trusted_proof_target(candidate).as_deref(), Some([owner, name]) if owner == &relation.owner && name == &relation.name))
 }
 
 async fn trusted_view_source_is_proven(
@@ -738,7 +898,36 @@ async fn trusted_view_source_is_proven(
             "trusted view source closure was not proven"
         );
     }
-    Ok(proof.is_ok())
+    let Ok(proof) = proof else {
+        return Ok(false);
+    };
+    let Ok(mut state) = policy.context.state.lock() else {
+        return Ok(false);
+    };
+    let Some(dependencies) = proof
+        .relations
+        .iter()
+        .map(|dependency| {
+            state
+                .proofs
+                .get(&relation_view_identity_hash(dependency))
+                .cloned()
+        })
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(false);
+    };
+    Ok(state.record(ViewProof {
+        identity: relation_view_identity(relation),
+        identity_hash: relation_view_identity_hash(relation),
+        source_hash: Some(view_source_hash(&source)),
+        children: dependencies
+            .iter()
+            .map(|proof| proof.identity_hash.clone())
+            .collect(),
+        dependency_hash: view_dependencies_hash(dependencies),
+        basis: ViewProofBasis::TrustedSource,
+    }))
 }
 
 fn trusted_view_text_vc_is_unavailable(error: &DbError) -> bool {
@@ -776,6 +965,7 @@ async fn dictionary_view_closure_is_proven(
     cx: &Cx,
     conn: &dyn OracleConnection,
     relation: &ResolvedObject,
+    state: &Mutex<StatementViewProofState>,
 ) -> Result<bool, DbError> {
     let identity = run_catalog_query(
         cx,
@@ -788,6 +978,10 @@ async fn dictionary_view_closure_is_proven(
     )
     .await?;
     if identity.len() != 1
+        || identity[0]
+            .parse_i64("OBJECT_ID")
+            .and_then(|id| u64::try_from(id).ok())
+            != Some(relation.identity.object_id)
         || identity[0].text("ORACLE_MAINTAINED") != Some("Y")
         || optional_text(&identity[0], "EDITION_NAME") != relation.identity.edition
     {
@@ -808,14 +1002,71 @@ async fn dictionary_view_closure_is_proven(
     if dependencies.is_empty() || dependencies.len() > MAX_DICTIONARY_VIEW_DEPENDENCIES {
         return Ok(false);
     }
-    let complete = dependencies.iter().all(|row| {
-        required_text(row, "REFERENCED_OWNER").is_some()
-            && required_text(row, "REFERENCED_NAME").is_some()
-            && required_text(row, "REFERENCED_TYPE").is_some()
-            && row.text("REFERENCED_LINK_NAME").is_none()
-            && row.text("OWNER_ORACLE_MAINTAINED") == Some("Y")
-    });
-    Ok(complete)
+    let mut proofs = Vec::new();
+    for row in &dependencies {
+        let (Some(owner), Some(name), Some(kind)) = (
+            required_text(row, "REFERENCED_OWNER"),
+            required_text(row, "REFERENCED_NAME"),
+            required_text(row, "REFERENCED_TYPE"),
+        ) else {
+            return Ok(false);
+        };
+        if row.text("REFERENCED_LINK_NAME").is_some()
+            || row.parse_i64("DEPENDENCY_CYCLE") != Some(0)
+            || !matches!(row.parse_i64("DEPENDENCY_DEPTH"), Some(1..=8))
+        {
+            return Ok(false);
+        }
+        let object_id = row
+            .parse_i64("OBJECT_ID")
+            .and_then(|id| u64::try_from(id).ok())
+            .filter(|id| *id > 0);
+        let basis = match (object_id, row.text("OBJECT_ORACLE_MAINTAINED")) {
+            (Some(_), Some("Y")) => ViewProofBasis::ObjectOracleMaintained,
+            (None, None) if row.text("OWNER_ORACLE_MAINTAINED") == Some("Y") => {
+                ViewProofBasis::OwnerOracleMaintained
+            }
+            _ => return Ok(false),
+        };
+        proofs.push(ViewProof {
+            identity: ViewProofIdentity {
+                owner: owner.clone(),
+                name: name.clone(),
+                kind: kind.clone(),
+                object_id,
+                edition: optional_text(row, "EDITION_NAME"),
+            },
+            identity_hash: view_identity_hash(
+                &owner,
+                &name,
+                &kind,
+                object_id,
+                row.text("EDITION_NAME"),
+            ),
+            source_hash: None,
+            dependency_hash: view_dependencies_hash(Vec::new()),
+            basis,
+            children: Vec::new(),
+        });
+    }
+    let root = ViewProof {
+        identity: relation_view_identity(relation),
+        identity_hash: relation_view_identity_hash(relation),
+        source_hash: None,
+        dependency_hash: view_dependencies_hash(proofs.clone()),
+        basis: ViewProofBasis::ObjectOracleMaintained,
+        children: proofs
+            .iter()
+            .map(|proof| proof.identity_hash.clone())
+            .collect(),
+    };
+    let Ok(mut state) = state.lock() else {
+        return Ok(false);
+    };
+    Ok(proofs
+        .into_iter()
+        .chain([root])
+        .all(|proof| state.record(proof)))
 }
 
 /// Statement class used to match Oracle FGA policy flags. The mutation effect
@@ -1639,6 +1890,8 @@ pub struct ReadPlanProof {
     pub fga_evidence: FgaEvidence,
     /// OLS/RAS/Redaction evidence for each exact base relation in this proof.
     pub relation_security: Vec<RelationSecurityObservation>,
+    /// All exact view/dependency commitments observed during this statement.
+    pub view_proofs: Vec<ViewProof>,
     by_source: HashMap<ObjectRef, Vec<ReadObjectIdentity>>,
     by_identity: HashMap<ReadObjectIdentity, Purity>,
     proved_value_columns: HashSet<RawName>,
@@ -1892,6 +2145,7 @@ pub async fn prove_semantic_read_plan(
     fga_policy: FgaEvidencePolicy,
     trusted_views: &[String],
 ) -> Result<ReadPlanProof, ReadPlanProofError> {
+    let state = Mutex::new(StatementViewProofState::default());
     prove_semantic_read_plan_inner(
         cx,
         conn,
@@ -1902,6 +2156,7 @@ pub async fn prove_semantic_read_plan(
             trusted_views,
             view_depth: 0,
             view_path: &[],
+            state: &state,
         },
     )
     .await
@@ -1926,7 +2181,11 @@ async fn prove_semantic_read_plan_inner(
             "table-function callee has no complete routine effect proof",
         ));
     }
-    cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
+    // Recursive source proof shares only this statement's generation. Clearing
+    // it here would erase the outer view's resolved projection columns.
+    if trusted_view_context.view_depth == 0 {
+        cache.invalidate(CatalogInvalidation::SemanticProofRefresh);
+    }
     let mut session: Option<ResolveCtx> = None;
     let mut contexts = Vec::with_capacity(plan.blocks.len());
     for block in &plan.blocks {
@@ -1993,6 +2252,19 @@ async fn prove_semantic_read_plan_inner(
                 .or_default()
                 .push(ReadObjectIdentity::from(object.as_ref()));
             relations.push(*object);
+        }
+    }
+    {
+        let mut state = trusted_view_context
+            .state
+            .lock()
+            .map_err(|_| ReadPlanProofError::Unproven("view proof state poisoned"))?;
+        for relation in &relations {
+            if !state.charge(relation_view_identity_hash(relation)) {
+                return Err(ReadPlanProofError::Unproven(
+                    "statement_relation_closure_cap_exceeded",
+                ));
+            }
         }
     }
     let relation_security = observe_relation_security_for_read(cx, conn, &relations)
@@ -2095,10 +2367,34 @@ async fn prove_semantic_read_plan_inner(
         .iter()
         .map(|object| (ReadObjectIdentity::from(object), Purity::ProvenReadOnly))
         .collect();
+    let view_proofs = {
+        let mut state = trusted_view_context
+            .state
+            .lock()
+            .map_err(|_| ReadPlanProofError::Unproven("view proof state poisoned"))?;
+        for relation in &relations {
+            if relation.kind == CatalogObjectKind::Table
+                && !state.record(ViewProof {
+                    identity: relation_view_identity(relation),
+                    identity_hash: relation_view_identity_hash(relation),
+                    source_hash: None,
+                    dependency_hash: view_dependencies_hash(Vec::new()),
+                    basis: ViewProofBasis::ProvenRelation,
+                    children: Vec::new(),
+                })
+            {
+                return Err(ReadPlanProofError::Unproven(
+                    "statement_relation_closure_cap_exceeded",
+                ));
+            }
+        }
+        state.snapshot()
+    };
     Ok(ReadPlanProof {
         relations,
         fga_evidence,
         relation_security,
+        view_proofs,
         by_source,
         by_identity,
         proved_value_columns,
@@ -6411,6 +6707,7 @@ mod tests {
             relations: vec![object.clone()],
             fga_evidence: FgaEvidence::Proven,
             relation_security: Vec::new(),
+            view_proofs: Vec::new(),
             by_source: HashMap::from([(source.clone(), vec![ReadObjectIdentity::from(&object)])]),
             by_identity: HashMap::from([(
                 ReadObjectIdentity::from(&object),
@@ -6578,6 +6875,8 @@ mod tests {
             ("REFERENCED_TYPE", Some("TABLE")),
             ("REFERENCED_LINK_NAME", None),
             ("OWNER_ORACLE_MAINTAINED", Some("Y")),
+            ("DEPENDENCY_DEPTH", Some("1")),
+            ("DEPENDENCY_CYCLE", Some("0")),
         ])
     }
 
@@ -6597,6 +6896,125 @@ mod tests {
             &view,
             &["APP.REPORTING_VIEW".to_owned()]
         ));
+        assert!(trusted_view_identity_is_eligible(
+            &view,
+            &["app.\"reporting_view\"".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn issue35_dictionary_identity_drift_refuses_before_dependency_io() {
+        run_with_cx(|cx| async move {
+            for (object_id, edition) in [("89", None), ("88", Some("OTHER_EDITION"))] {
+                let conn = ScriptedRows::new([vec![row(&[
+                    ("ORACLE_MAINTAINED", Some("Y")),
+                    ("OBJECT_ID", Some(object_id)),
+                    ("EDITION_NAME", edition),
+                ])]]);
+                assert!(
+                    !dictionary_view_closure_is_proven(
+                        &cx,
+                        &conn,
+                        &dictionary_view_object("USER_OBJECTS"),
+                        &Mutex::new(StatementViewProofState::default())
+                    )
+                    .await
+                    .unwrap()
+                );
+                assert_eq!(conn.queries.lock().unwrap().len(), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn issue35_dictionary_dependency_object_flag_vetoes_maintained_owner() {
+        run_with_cx(|cx| async move {
+            for (flag, expected) in [("N", false), ("Y", true)] {
+                let conn = ScriptedRows::new([
+                    vec![row(&[
+                        ("ORACLE_MAINTAINED", Some("Y")),
+                        ("OBJECT_ID", Some("88")),
+                        ("EDITION_NAME", None),
+                    ])],
+                    vec![row(&[
+                        ("REFERENCED_OWNER", Some("SYSTEM")),
+                        ("REFERENCED_NAME", Some("USER_VIEW")),
+                        ("REFERENCED_TYPE", Some("VIEW")),
+                        ("REFERENCED_LINK_NAME", None),
+                        ("OBJECT_ID", Some("99")),
+                        ("OBJECT_ORACLE_MAINTAINED", Some(flag)),
+                        ("OWNER_ORACLE_MAINTAINED", Some("Y")),
+                        ("DEPENDENCY_DEPTH", Some("1")),
+                        ("DEPENDENCY_CYCLE", Some("0")),
+                    ])],
+                ]);
+                let state = Mutex::new(StatementViewProofState::default());
+                assert_eq!(
+                    dictionary_view_closure_is_proven(
+                        &cx,
+                        &conn,
+                        &dictionary_view_object("USER_OBJECTS"),
+                        &state
+                    )
+                    .await
+                    .unwrap(),
+                    expected
+                );
+                if expected {
+                    assert!(
+                        state
+                            .lock()
+                            .unwrap()
+                            .snapshot()
+                            .iter()
+                            .all(|proof| proof.basis == ViewProofBasis::ObjectOracleMaintained)
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn issue35_dictionary_closure_consumes_the_shared_statement_budget() {
+        run_with_cx(|cx| async move {
+            for (previous, expected) in [(254, true), (255, false)] {
+                let conn = ScriptedRows::new([
+                    vec![row(&[
+                        ("ORACLE_MAINTAINED", Some("Y")),
+                        ("OBJECT_ID", Some("88")),
+                        ("EDITION_NAME", None),
+                    ])],
+                    vec![dictionary_dependency_row()],
+                ]);
+                let mut previous_branch = StatementViewProofState::default();
+                for index in 0..previous {
+                    assert!(previous_branch.charge(format!("previous-branch-{index}")));
+                }
+                let state = Mutex::new(previous_branch);
+                assert_eq!(
+                    dictionary_view_closure_is_proven(
+                        &cx,
+                        &conn,
+                        &dictionary_view_object("USER_OBJECTS"),
+                        &state
+                    )
+                    .await
+                    .unwrap(),
+                    expected
+                );
+                if expected {
+                    assert_eq!(state.lock().unwrap().identities.len(), 256);
+                    assert!(
+                        state
+                            .lock()
+                            .unwrap()
+                            .snapshot()
+                            .iter()
+                            .any(|proof| proof.basis == ViewProofBasis::OwnerOracleMaintained)
+                    );
+                }
+            }
+        });
     }
 
     #[test]
@@ -6625,6 +7043,7 @@ mod tests {
                             trusted_views: &trusted_views,
                             view_depth: 0,
                             view_path: &[],
+                            state: &Mutex::new(StatementViewProofState::default()),
                         },
                     },
                 )
@@ -6666,6 +7085,7 @@ mod tests {
                             trusted_views: &trusted_views,
                             view_depth: 0,
                             view_path: &[],
+                            state: &Mutex::new(StatementViewProofState::default()),
                         },
                     },
                 )
@@ -6706,6 +7126,7 @@ mod tests {
                             trusted_views: &trusted_views,
                             view_depth: 0,
                             view_path: &[],
+                            state: &Mutex::new(StatementViewProofState::default()),
                         },
                     },
                 )
@@ -6746,6 +7167,7 @@ mod tests {
                             trusted_views: &trusted_views,
                             view_depth: 1,
                             view_path: &view_path,
+                            state: &Mutex::new(StatementViewProofState::default()),
                         },
                     },
                 )
@@ -6778,6 +7200,7 @@ mod tests {
                             trusted_views: &trusted_views,
                             view_depth: MAX_TRUSTED_VIEW_DEPTH,
                             view_path: &[],
+                            state: &Mutex::new(StatementViewProofState::default()),
                         },
                     },
                 )
@@ -6794,6 +7217,7 @@ mod tests {
             let conn = ScriptedRows::new([
                 vec![row(&[
                     ("ORACLE_MAINTAINED", Some("Y")),
+                    ("OBJECT_ID", Some("88")),
                     ("EDITION_NAME", None),
                 ])],
                 vec![dictionary_dependency_row()],
