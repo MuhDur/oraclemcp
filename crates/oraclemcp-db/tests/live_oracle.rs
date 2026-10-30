@@ -2513,15 +2513,15 @@ fn live_abandoned_policy_logons_retain_capacity() {
                     fixture.count() <= 2,
                     "recovery retains the physical ceiling"
                 );
+                assert!(
+                    recovery_started.elapsed() < Duration::from_secs(40),
+                    "observation did not recover after logon retirement: {recovered:?}"
+                );
                 if recovered.visibility
                     == oraclemcp_db::OraclePolicyCatalogVisibility::PolicyRowsVisible
                 {
                     break;
                 }
-                assert!(
-                    recovery_started.elapsed() < Duration::from_secs(40),
-                    "observation did not recover after logon retirement: {recovered:?}"
-                );
                 asupersync::time::sleep(cx.now(), Duration::from_millis(1100)).await;
             }
             let source = conn
