@@ -1,5 +1,10 @@
 # Bead close evidence
 
+> **Retired 2026-10-30 (operator ruling, bead oraclemcp-idcex).** No longer
+> required or run in CI. A bead closes with
+> `br close <id> --reason "<commit> <tests>; verified by <reviewer>"` (see
+> AGENTS.md "Issue tracking"). Kept for history.
+
 A bead close is a claim: *this work is done, and here is why you should believe
 it.* The failure this exists to prevent is the close that makes the claim and
 skips the reason — the one that says "verified against 23ai" with nothing to

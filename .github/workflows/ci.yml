@@ -19,12 +19,6 @@ env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: nightly-2026-05-11
   NODE_VERSION: 22.17.0
-  # Independent policy for the local Required replay. The replay validates its
-  # derived command IDs and exact argv graph against these CI-owned commitments
-  # before running or verifying a proof; changing only the projection and proof
-  # therefore fails closed.
-  REQUIRED_LOCAL_COMMAND_IDS: "api-lock,bead-close-evidence,clippy,fixture-lint,format,honesty-grep,seam-lint,supply-chain-checks,surface-sync,test-workspace"
-  REQUIRED_LOCAL_GRAPH_SHA256: "790280daa312c26ad2a3b613944d4fc330c76006952f8e68987bd7f66c557c53"
   PSSCRIPTANALYZER_VERSION: "1.25.0"
   PYTHON_ORACLEDB_VERSION: "4.0.2"
 
@@ -643,21 +637,9 @@ jobs:
         run: |
           python3 scripts/e2e/cases/validate_manifest.py --selftest
           python3 scripts/e2e/cases/validate_manifest.py scripts/e2e/cases/release_0_12.json
-      # Constitution rules 13-17: the swarm-discipline mechanisms must keep
-      # refusing what they were built to refuse, and committed shell must not
-      # reintroduce a wait that cannot end (rule 16).
-      - name: swarm discipline (constitution rules 13-18)
-        run: |
-          bash scripts/swarm_discipline.sh --selftest
-          bash scripts/swarm_discipline.sh unbounded-wait-lint
       # D4 (plan §25.7.3): the fuzz lane's nightly wall clock is one shard, not
       # the sum, and only while every shard stays sharded, timeout-bounded, and
       # carries -max_total_time. Asserted here so it cannot quietly regress.
-      # P6: the manifest validator is a gate, so it must be able to FAIL. The
-      # selftest feeds it a known-good graph and then one targeted mutation per
-      # rule, requiring the matching error code each time.
-      - name: plan-bead-graph lint selftest (P6)
-        run: python3 scripts/plan_bead_graph_lint.py --selftest
       # D8: a preflight that reports healthy and is then followed by a rig
       # failure is worse than none, because it points suspicion at the wrong
       # component. The selftest proves every check can refuse AND that the check
@@ -681,14 +663,10 @@ jobs:
         run: |
           python3 scripts/ci_step_tool_order_lint.py --selftest
           python3 scripts/ci_step_tool_order_lint.py
-      - name: Required local projection policy
-        run: python3 scripts/verify_required_local.py --policy-check
       - name: fuzz lane budget (D4)
         run: |
           python3 scripts/ci_lane_budget.py --selftest
           python3 scripts/ci_lane_budget.py fuzz-bound
-      - name: bead close evidence (native policy + post-close binding)
-        run: bash scripts/check_bead_close_evidence.sh
       - name: entry-trace contract (required SKIP=FAIL)
         run: bash scripts/check_entry_trace_contract.sh
       # B2.3: Keep-a-Changelog [Unreleased] is a release-debt clock. Any

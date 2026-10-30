@@ -1,5 +1,8 @@
 # Local Required proof
 
+> **Retired 2026-10-30 (operator ruling, bead oraclemcp-idcex).** No longer
+> required or run in CI; CI itself is the gate. Kept for history.
+
 `scripts/verify_required_local.sh` is the local counterpart to the effective
 `required` profile in `.github/required/_quality.yml`. It emits
 `required-proof/v2`: an exact SHA, tool versions, enforced resource budget, and
