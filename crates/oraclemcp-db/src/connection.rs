@@ -3188,17 +3188,19 @@ mod driver {
             request_quota: None,
         }
         .effective_timeout_ms(cx, context)?;
-        inner
+        let result = inner
             .execute_raw(
                 cx,
                 sql,
                 0,
                 &bind_rows,
-                ExecuteOptions::default(),
+                ExecuteOptions::default().with_cache_statement(false),
                 timeout_ms,
             )
             .await
-            .map_err(|err| driver_execute_error(err, opts, context))
+            .map_err(|err| driver_execute_error(err, opts, context))?;
+        inner.close_cursor(result.cursor_id);
+        Ok(result)
     }
 
     /// Convert a trusted, profile-owned session statement failure into the
@@ -3249,9 +3251,16 @@ mod driver {
     ) -> Result<(), DbError> {
         for (index, stmt) in statements.iter().enumerate() {
             let result = inner
-                .execute_raw(cx, stmt, 0, &[], ExecuteOptions::default(), timeout_ms)
+                .execute_raw(
+                    cx,
+                    stmt,
+                    0,
+                    &[],
+                    ExecuteOptions::default().with_cache_statement(false),
+                    timeout_ms,
+                )
                 .await
-                .map(|_| ())
+                .map(|result| inner.close_cursor(result.cursor_id))
                 .map_err(|err| driver_execute_error(err, opts, hook_phase));
             redact_session_hook_result(result, hook_phase, index + 1)?;
         }
@@ -3268,24 +3277,34 @@ mod driver {
         limits: super::WireLimits,
         opts: &OracleConnectOptions,
         context: &'static str,
-    ) -> Result<QueryResult, DbError> {
+    ) -> Result<(QueryResult, bool), DbError> {
         let bind_rows: Vec<Vec<BindValue>> = if binds.is_empty() {
             Vec::new()
         } else {
             vec![binds.to_vec()]
         };
         let timeout_ms = limits.effective_timeout_ms(cx, context)?;
+        // Cache only a parsed SELECT shape. This is a cache eligibility check,
+        // not SQL admission: unsupported query shapes still execute uncached.
+        // In particular, a cached DDL cursor can acknowledge without applying
+        // the definition; commands and PL/SQL must always be freshly parsed.
+        let cached = cacheable_query(sql);
         inner
             .execute_raw(
                 cx,
                 sql,
                 prefetch_rows,
                 &bind_rows,
-                ExecuteOptions::default(),
+                ExecuteOptions::default().with_cache_statement(cached),
                 timeout_ms,
             )
             .await
+            .map(|result| (result, cached))
             .map_err(|err| driver_query_error(err, opts, Some(context)))
+    }
+
+    fn cacheable_query(sql: &str) -> bool {
+        oraclemcp_guard::semantic_read_plan_checked(sql).is_ok()
     }
 
     pub(super) fn prefetch_rows_for_statement(sql: &str) -> u32 {
@@ -3538,6 +3557,7 @@ mod driver {
         cx: &Cx,
         inner: &mut oraclemcp_driver_cx::Connection,
         mut result: QueryResult,
+        cached: bool,
         opts: &OracleConnectOptions,
         serialize_opts: &SerializeOptions,
         limits: super::WireLimits,
@@ -3546,7 +3566,7 @@ mod driver {
         let mut inner = ResultCursor {
             inner,
             cursor_id,
-            cached: true,
+            cached,
         };
         let implicit_resultsets = result.implicit_resultsets.take();
         let mut columns = result.columns.clone();
@@ -3646,6 +3666,7 @@ mod driver {
         cx: &Cx,
         inner: &mut oraclemcp_driver_cx::Connection,
         mut result: QueryResult,
+        cached: bool,
         opts: &OracleConnectOptions,
         serialize_opts: &SerializeOptions,
         limits: super::WireLimits,
@@ -3658,7 +3679,7 @@ mod driver {
         let mut inner = ResultCursor {
             inner,
             cursor_id,
-            cached: true,
+            cached,
         };
         async {
             if result.implicit_resultsets.is_some() {
@@ -5554,6 +5575,77 @@ mod driver {
         use oraclemcp_driver_cx::{CollectionElement, ObjectAttribute, ObjectType, decode_object};
         use serde_json::json;
 
+        #[test]
+        fn statement_cache_admits_queries_and_excludes_commands() {
+            for sql in [
+                "SELECT 1 FROM dual",
+                "/* audit marker */ SELECT 1 FROM dual",
+                "WITH q AS (SELECT 1 AS n FROM dual) SELECT n FROM q",
+            ] {
+                assert!(cacheable_query(sql), "query lost caching: {sql}");
+            }
+            for sql in [
+                "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;",
+                "ALTER PROCEDURE p COMPILE",
+                "GRANT SELECT ON t TO u",
+                "REVOKE SELECT ON t FROM u",
+                "BEGIN NULL; END;",
+                "DECLARE n NUMBER; BEGIN n := 1; END;",
+                "UPDATE t SET n = 1",
+                "WITH q AS (SELECT 1 FROM dual) DELETE FROM t",
+                "SELECT 1 FROM dual; DROP TABLE t",
+            ] {
+                assert!(!cacheable_query(sql), "command entered cache: {sql}");
+            }
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
+        fn live_statement_cache_reuses_select_and_closes_uncached_commands() {
+            use crate::OracleConnection;
+            let Some(mut opts) = live_opts_from_env() else {
+                eprintln!("[live-xe] SKIP statement cache: set ORACLEMCP_TEST_*");
+                return;
+            };
+            opts.statement_cache_size = Some(20);
+            let reactor = asupersync::runtime::reactor::create_reactor().unwrap();
+            let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let conn = super::super::RustOracleConnection::connect(&cx, opts).await.unwrap();
+                let sql = format!("SELECT 47 AS N FROM dual /* kogf0_{}_{:?} */",
+                    std::process::id(), std::time::SystemTime::now());
+                let stats_sql = "SELECT SUM(PARSE_CALLS) AS PC, SUM(EXECUTIONS) AS EX FROM V$SQL WHERE SQL_TEXT=:1";
+                let binds = [OracleBind::from(sql.clone())];
+                let first = conn.query_rows(&cx, &sql, &[]).await.unwrap();
+                assert_eq!(first[0].parse_i64("N"), Some(47));
+                let before = conn.query_rows(&cx, stats_sql, &binds).await.unwrap();
+                let second = conn.query_rows(&cx, &sql, &[]).await.unwrap();
+                assert_eq!(second[0].parse_i64("N"), Some(47));
+                let after = conn.query_rows(&cx, stats_sql, &binds).await.unwrap();
+                assert_eq!(after[0].parse_i64("PC"), before[0].parse_i64("PC"), "SELECT reparsed instead of reusing its cached cursor");
+                assert_eq!(after[0].parse_i64("EX").unwrap(), before[0].parse_i64("EX").unwrap() + 1);
+
+                conn.execute(&cx, "BEGIN NULL; END;", &[]).await.unwrap();
+                let baseline = {
+                    let mut inner = conn.lock_inner(&cx).await.unwrap();
+                    opened_cursors_current(&cx, &mut inner).await
+                };
+                for _ in 0..64 {
+                    conn.execute(&cx, "BEGIN NULL; END;", &[]).await.unwrap();
+                }
+                let remaining = {
+                    let mut inner = conn.lock_inner(&cx).await.unwrap();
+                    opened_cursors_current(&cx, &mut inner).await
+                };
+                assert_eq!(remaining, baseline, "uncached commands leaked server cursors");
+                conn.close(&cx).await.unwrap();
+            });
+        }
+
         fn lob(ora_type_num: u8, size: u64) -> LobValue {
             LobValue {
                 ora_type_num,
@@ -5731,6 +5823,7 @@ mod driver {
                     &cx,
                     &mut inner,
                     result,
+                    true,
                     &opts,
                     &SerializeOptions::default(),
                     super::super::WireLimits::default(),
@@ -6507,6 +6600,7 @@ mod driver {
                     &cx,
                     &mut inner,
                     result,
+                    true,
                     &opts,
                     &SerializeOptions::default(),
                     super::super::WireLimits {
@@ -7554,7 +7648,7 @@ mod driver {
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let result = execute_with_timeout(
+            let (result, cached) = execute_with_timeout(
                 cx,
                 &mut inner,
                 sql,
@@ -7569,6 +7663,7 @@ mod driver {
                 cx,
                 &mut inner,
                 result,
+                cached,
                 &self.opts,
                 serialize_opts,
                 limits.clone(),
@@ -7579,7 +7674,7 @@ mod driver {
                     cell.oracle_type == "TIMESTAMP WITH LOCAL TIME ZONE" && cell.value.is_some()
                 })
             }) {
-                let zone_result = execute_with_timeout(
+                let (zone_result, cached) = execute_with_timeout(
                     cx,
                     &mut inner,
                     "SELECT SESSIONTIMEZONE AS SESSION_ZONE FROM dual",
@@ -7594,6 +7689,7 @@ mod driver {
                     cx,
                     &mut inner,
                     zone_result,
+                    cached,
                     &self.opts,
                     serialize_opts,
                     limits,
@@ -7625,7 +7721,7 @@ mod driver {
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let result = execute_with_timeout(
+            let (result, cached) = execute_with_timeout(
                 cx,
                 &mut inner,
                 sql,
@@ -7640,6 +7736,7 @@ mod driver {
                 cx,
                 &mut inner,
                 result,
+                cached,
                 &self.opts,
                 serialize_opts,
                 limits,
@@ -7661,6 +7758,11 @@ mod driver {
             serialize_opts: &SerializeOptions,
         ) -> Result<QueryRowStreamStart, DbError> {
             super::db_checkpoint(cx, "oracle_db.query_row_stream.before")?;
+            if !cacheable_query(sql) {
+                return Ok(QueryRowStreamStart::Fallback {
+                    reason: "statement needs the uncached cursor-chunked path".to_owned(),
+                });
+            }
             let driver_binds: Vec<BindValue> =
                 binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let arraysize = arraysize.clamp(1, u32::MAX as usize) as u32;
@@ -7757,7 +7859,7 @@ mod driver {
             let ordered_binds = order_named_binds_for_driver(sql, binds)?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let result = execute_with_timeout(
+            let (result, cached) = execute_with_timeout(
                 cx,
                 &mut inner,
                 sql,
@@ -7768,8 +7870,16 @@ mod driver {
                 "query named",
             )
             .await?;
-            let rows = collect_all_rows(cx, &mut inner, result, &self.opts, serialize_opts, limits)
-                .await?;
+            let rows = collect_all_rows(
+                cx,
+                &mut inner,
+                result,
+                cached,
+                &self.opts,
+                serialize_opts,
+                limits,
+            )
+            .await?;
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.query_rows_named.after")?;
             Ok(rows)
@@ -7792,7 +7902,7 @@ mod driver {
             let ordered_binds = order_named_binds_for_driver(sql, binds)?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let result = execute_with_timeout(
+            let (result, cached) = execute_with_timeout(
                 cx,
                 &mut inner,
                 sql,
@@ -7807,6 +7917,7 @@ mod driver {
                 cx,
                 &mut inner,
                 result,
+                cached,
                 &self.opts,
                 serialize_opts,
                 limits,
@@ -7824,7 +7935,7 @@ mod driver {
             let binds: Vec<BindValue> = binds.iter().map(to_bind).collect::<Result<_, _>>()?;
             let limits = self.wire_limits()?;
             let mut inner = self.lock_inner(cx).await?;
-            let result = execute_with_timeout(
+            let (result, cached) = execute_with_timeout(
                 cx, &mut inner, sql, 0, &binds, limits, &self.opts, "execute",
             )
             .await
@@ -7832,6 +7943,11 @@ mod driver {
                 DbError::Query(msg) => DbError::Execute(msg),
                 other => other,
             })?;
+            drop(ResultCursor {
+                inner: &mut inner,
+                cursor_id: result.cursor_id,
+                cached,
+            });
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.execute.after")?;
             Ok(result.row_count)
@@ -8003,7 +8119,7 @@ mod driver {
             let limits = self.wire_limits()?;
             let serialize_opts = SerializeOptions::default();
             let mut inner = self.lock_inner(cx).await?;
-            let result = execute_with_timeout(
+            let (result, cached) = execute_with_timeout(
                 cx,
                 &mut inner,
                 plsql_block,
@@ -8019,9 +8135,14 @@ mod driver {
                 other => other,
             })?;
             let rows_affected = result.row_count;
+            let mut result_cursor = ResultCursor {
+                inner: &mut inner,
+                cursor_id: result.cursor_id,
+                cached,
+            };
             let out_binds = routine_out_binds(
                 cx,
-                &mut inner,
+                &mut result_cursor,
                 &result,
                 args,
                 &self.opts,
@@ -8029,6 +8150,7 @@ mod driver {
                 limits,
             )
             .await?;
+            drop(result_cursor);
             drop(inner);
             super::db_checkpoint(cx, "oracle_db.call_routine.after")?;
             Ok(ExecuteOutcome::new(rows_affected, out_binds))
@@ -8126,7 +8248,7 @@ mod driver {
                                 buffer_size: 22,
                             },
                         ]],
-                        ExecuteOptions::default(),
+                        ExecuteOptions::default().with_cache_statement(false),
                         timeout,
                     )
                     .await
@@ -8134,6 +8256,11 @@ mod driver {
                         DbError::Query(message) => DbError::Execute(message),
                         other => other,
                     })?;
+                let _cursor = ResultCursor {
+                    inner: &mut inner,
+                    cursor_id: result.cursor_id,
+                    cached: false,
+                };
                 let status = output_value(&result, 1)
                     .and_then(QueryValue::as_i64)
                     .ok_or_else(|| {
@@ -8227,12 +8354,15 @@ mod driver {
                         super::DBMS_FLASHBACK_DISABLE,
                         0,
                         &[],
-                        ExecuteOptions::default(),
+                        ExecuteOptions::default().with_cache_statement(false),
                         timeout,
                     )
                     .await;
                 match result {
-                    Ok(_) => Ok(()),
+                    Ok(result) => {
+                        inner.close_cursor(result.cursor_id);
+                        Ok(())
+                    },
                     Err(error) => {
                         let message = format!(
                             "DBMS_FLASHBACK.DISABLE cleanup failed; the thin connection was discarded: {}",
