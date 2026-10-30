@@ -4728,6 +4728,23 @@ mod tests {
     /// R36: Oracle's own "no such view" / "insufficient privileges" answer on
     /// either FGA catalog read means the principal cannot read the catalog.
     #[test]
+    fn fga_catalog_invisible_is_unknown() {
+        // R36 distinguishes unavailable evidence for profile policy, but it
+        // must never become proven purity. Preserve the original named check
+        // at the purity boundary as well as the Unavailable-variant check below.
+        run_with_cx(|cx| async move {
+            for code in ["ORA-00942", "ORA-01031"] {
+                let conn = ScriptedRows::results([Err(DbError::Query(format!(
+                    "{code}: catalog inaccessible"
+                )))]);
+                let evidence =
+                    fga_closure(&cx, &conn, &[table_object()], FgaStatementKind::Select).await;
+                assert_eq!(evidence.purity(), Purity::Unknown, "{code}: {evidence:?}");
+            }
+        });
+    }
+
+    #[test]
     fn fga_catalog_invisible_is_unavailable() {
         run_with_cx(|cx| async move {
             for code in ["ORA-00942", "ORA-01031"] {

@@ -662,3 +662,35 @@ fn block_exposes(block: &QueryBlock, qualifier: &str) -> bool {
                     .is_some_and(|part| normalized_part(part) == qualifier)
         })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semantic_read_plan_refuses_depth_cap_exhaustion() {
+        assert_eq!(MAX_BLOCK_DEPTH, 32, "the 6.2 depth contract is fixed at 32");
+        // Exercise the production walker with valid nested SQL, independently
+        // of sqlparser's own, lower recursion budget on deeply nested input.
+        let mut sql = "SELECT id FROM app.orders".to_owned();
+        for depth in 0..=MAX_BLOCK_DEPTH {
+            let mut parser = Parser::new(&OracleDialect {})
+                .with_recursion_limit(1024)
+                .try_with_sql(&sql)
+                .expect("valid nested query");
+            let statements = parser.parse_statements().expect("valid nested query");
+            let sqlparser::ast::Statement::Query(query) = &statements[0] else {
+                panic!("query");
+            };
+            let result = build(query);
+            if depth == MAX_BLOCK_DEPTH {
+                assert_eq!(result, Err(PlanMismatch::RelationPlanCapExceeded));
+            } else {
+                let plan = result.expect("shallower query remains representable");
+                assert!(plan.blocks.len() < MAX_QUERY_BLOCKS);
+                assert_eq!(plan.relations.len(), 1);
+            }
+            sql = format!("SELECT id FROM ({sql}) nested_{depth}");
+        }
+    }
+}

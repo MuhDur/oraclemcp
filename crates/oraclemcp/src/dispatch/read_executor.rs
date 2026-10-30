@@ -791,10 +791,21 @@ pub(super) struct ReadExecutionPlan {
 /// No caller outside this module can construct the token or reach the
 /// execution step without a successful verdict.
 ///
-/// ```compile_fail
+/// The constructor itself must remain private. Pin the diagnostic so a
+/// missing import or an inaccessible argument type cannot satisfy this test.
+///
+/// ```compile_fail,E0624
+/// use oraclemcp::dispatch::AdmittedRead;
+/// let _ = AdmittedRead::new;
+/// ```
+///
+/// The fields must also remain private; mention every field to avoid a
+/// missing-field diagnostic accidentally standing in for privacy.
+///
+/// ```compile_fail,E0451
 /// use oraclemcp::dispatch::AdmittedRead;
 /// fn inspect(read: AdmittedRead) {
-///     let AdmittedRead { plan: _ } = read;
+///     let AdmittedRead { plan: _, provenance: _ } = read;
 /// }
 /// ```
 pub struct AdmittedRead {

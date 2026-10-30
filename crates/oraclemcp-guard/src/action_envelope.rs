@@ -2,7 +2,7 @@
 
 use oraclemcp_audit::hmac_sha256;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::OperatingLevel;
 
@@ -135,10 +135,42 @@ pub struct BindEnvelope {
     pub value_hmac: [u8; 32],
 }
 
+// Own the canonical allocation through hashing and erase it before freeing.
+// Taking it from Zeroizing preserves that public codec's contract while making
+// this production lifetime observable safely, before deallocation, in tests.
+struct CanonicalBindBuffer(Vec<u8>);
+
+impl CanonicalBindBuffer {
+    fn new(mut canonical: Zeroizing<Vec<u8>>) -> Self {
+        Self(std::mem::take(&mut *canonical))
+    }
+}
+
+impl std::ops::Deref for CanonicalBindBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for CanonicalBindBuffer {
+    fn drop(&mut self) {
+        self.0.as_mut_slice().zeroize();
+        self.0.spare_capacity_mut().zeroize();
+        #[cfg(test)]
+        CANONICAL_WIPE_OBSERVER.with(|observer| {
+            if let Some(observe) = observer.borrow_mut().as_mut() {
+                observe(&self.0);
+            }
+        });
+    }
+}
+
 impl BindEnvelope {
     #[must_use]
     pub fn from_binds(key: &[u8; 32], binds: &[CanonicalBind<'_>]) -> Self {
-        let canonical = canonical_binds(binds);
+        let canonical = CanonicalBindBuffer::new(canonical_binds(binds));
         Self {
             arity: binds.len(),
             types: binds.iter().map(CanonicalBind::bind_type).collect(),
@@ -258,5 +290,42 @@ impl ActionEnvelopeV1 {
     #[must_use]
     pub fn digest(&self) -> [u8; 32] {
         Sha256::digest(self.canonical_bytes()).into()
+    }
+}
+
+#[cfg(test)]
+type WipeObserver = Box<dyn FnMut(&[u8])>;
+
+#[cfg(test)]
+std::thread_local! {
+    static CANONICAL_WIPE_OBSERVER: std::cell::RefCell<Option<WipeObserver>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+mod wipe_tests {
+    use super::*;
+
+    #[test]
+    fn bind_canonical_buffer_zeroized() {
+        let binds = [CanonicalBind::String("synthetic-secret")];
+        let canonical = canonical_binds(&binds);
+        assert!(
+            canonical
+                .windows(16)
+                .any(|bytes| bytes == b"synthetic-secret")
+        );
+        let expected_length = canonical.len();
+        drop(canonical);
+        let observed = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let captured = observed.clone();
+        CANONICAL_WIPE_OBSERVER.with(|observer| {
+            *observer.borrow_mut() = Some(Box::new(move |bytes| {
+                captured.borrow_mut().push(bytes.to_vec());
+            }));
+        });
+        let envelope = BindEnvelope::from_binds(&[9; 32], &binds);
+        CANONICAL_WIPE_OBSERVER.with(|observer| *observer.borrow_mut() = None);
+        assert_eq!(envelope.arity, 1);
+        assert_eq!(*observed.borrow(), vec![vec![0; expected_length]]);
     }
 }

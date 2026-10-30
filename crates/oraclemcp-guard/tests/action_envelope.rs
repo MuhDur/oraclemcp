@@ -4,7 +4,6 @@ use oraclemcp_guard::{
 };
 use proptest::prelude::*;
 use sha2::{Digest, Sha256};
-use zeroize::Zeroize;
 
 fn sample() -> ActionEnvelopeV1 {
     let binds = [
@@ -99,24 +98,24 @@ fn bind_hmac_dictionary_attack_fails() {
     let key = [9; 32];
     let target = canonical_binds(&[CanonicalBind::I64(42_424)]);
     let recorded = bind_value_hmac(&key, &target);
+    // Independently assemble the documented domain framing. Inequality alone
+    // also passes for a constant or unrelated digest that binds no value.
+    let mut message = Vec::new();
+    for part in [b"omcp/bind-hmac/v1".as_slice(), target.as_slice()] {
+        message.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        message.extend_from_slice(part);
+    }
+    assert_eq!(recorded, oraclemcp_audit::hmac_sha256(&key, &message));
+    assert_eq!(
+        BindEnvelope::from_binds(&key, &[CanonicalBind::I64(42_424)]).value_hmac,
+        recorded
+    );
     for id in 0..100_000 {
         let guess = canonical_binds(&[CanonicalBind::I64(id)]);
         let plain_sha: [u8; 32] = Sha256::digest(&*guess).into();
         assert_ne!(plain_sha, recorded);
         assert_ne!(bind_value_hmac(&[8; 32], &guess), recorded);
     }
-}
-
-#[test]
-fn bind_canonical_buffer_zeroized() {
-    let mut canonical = canonical_binds(&[CanonicalBind::String("synthetic-secret")]);
-    assert!(
-        canonical
-            .windows(16)
-            .any(|window| window == b"synthetic-secret")
-    );
-    canonical.zeroize();
-    assert!(canonical.iter().all(|byte| *byte == 0));
 }
 
 proptest! {

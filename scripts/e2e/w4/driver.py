@@ -3977,7 +3977,8 @@ def failed_results_selftest():
                     and "run_failure" in current and not any(r["case_id"] == "old" for r in current["cases"]),
                     "current failure did not replace stale passing results")
             require((stage == "startup" and current["cases"] == [])
-                    or (stage != "startup" and current["cases"][0]["case_id"] == "current"),
+                    or (stage != "startup" and current["cases"]
+                        and current["cases"][0]["case_id"] == "current"),
                     "failed results lost completed case evidence")
         summary, output_file = base / "summary.md", base / "output.txt"
         summary.write_text(""); output_file.write_text("")

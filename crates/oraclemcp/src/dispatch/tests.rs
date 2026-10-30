@@ -1645,6 +1645,24 @@ fn issue53_sample_rows_refuses_view_before_execution() {
 }
 
 #[test]
+fn fga_handler_table_refused_before_execution() {
+    let (dispatcher, state) = semantic_dispatcher();
+    *state.fga_handler_table.lock().expect("FGA fixture lock") = Some("ORDERS".to_owned());
+    let error = dispatcher
+        .dispatch("oracle_query", json!({"sql": "SELECT id FROM APP.ORDERS"}))
+        .expect_err("an autonomous FGA handler must refuse before application SQL");
+    assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+    assert_eq!(
+        error
+            .structured_reason
+            .as_ref()
+            .and_then(|reason| reason.offending_construct.as_deref()),
+        Some("fga_handler_autonomous")
+    );
+    assert_eq!(state.caller_queries.load(Ordering::SeqCst), 0);
+}
+
+#[test]
 fn fga_handler_table_refused_for_sample_rows_and_server_reads() {
     let (dispatcher, state) = semantic_dispatcher();
     *state.fga_handler_table.lock().expect("FGA fixture lock") = Some("ORDERS".to_owned());
