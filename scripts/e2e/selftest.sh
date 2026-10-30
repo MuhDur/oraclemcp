@@ -31,20 +31,71 @@ if [ ! -x "$binary" ]; then e2e_run_command setup cargo build -p oraclemcp; bina
 # every ORACLEMCP_* variable as server configuration and correctly rejects it.
 export ORACLEMCP_CONFIG="$profiles" E2E_SELFTEST_PASSWORD="$ORACLEMCP_TEST_PASSWORD" XDG_STATE_HOME="$run_dir/state"
 e2e_run_command assert python3 "$ROOT/scripts/e2e/w4/export_selftest_cases.py" --check
-set +e; env -u ORACLEMCP_SELFTEST_BINARY -u ORACLEMCP_E2E_ARTIFACT_DIR "$binary" --json selftest --profile selftest_admin --budget 120 >"$run_dir/clean.json" 2>"$run_dir/clean.stderr"; clean_status=$?; set -e
-[ "$clean_status" -eq 0 ] || { cat "$run_dir/clean.stderr" >&2; e2e_finish_fail "selftest_e2e_clean_lane_exit_0 status=$clean_status"; }
+# Predeclare the expected outcome from an independent catalog read. A lab
+# account without this grant exercises exit 3; a fully readable lane exercises
+# clean exit 0. Neither expectation is inferred from selftest's own verdict.
+expected_status="$(python3 - <<'PY'
+import os
+import oracledb
+
+with oracledb.connect(user=os.environ["ORACLEMCP_TEST_USER"],
+                      password=os.environ["ORACLEMCP_TEST_PASSWORD"],
+                      dsn=os.environ["ORACLEMCP_TEST_DSN"]) as connection:
+    try:
+        connection.cursor().execute("SELECT COUNT(*) FROM SYS.ALL_AUDIT_POLICIES WHERE ROWNUM<=1").fetchone()
+    except oracledb.DatabaseError as error:
+        if error.args[0].code not in (942, 1031):
+            raise
+        print(3)
+    else:
+        print(0)
+PY
+)"
+http_args=()
+if [ -n "${E2E_SELFTEST_HTTP_URL:-}" ]; then http_args=(--http "$E2E_SELFTEST_HTTP_URL"); fi
+set +e; env -u ORACLEMCP_SELFTEST_BINARY -u ORACLEMCP_E2E_ARTIFACT_DIR "$binary" --json selftest --profile selftest_admin --budget 120 "${http_args[@]}" >"$run_dir/clean.json" 2>"$run_dir/clean.stderr"; clean_status=$?; set -e
+[ "$clean_status" -eq "$expected_status" ] || { cat "$run_dir/clean.stderr" >&2; e2e_finish_fail "selftest field round status=$clean_status expected=$expected_status"; }
 grep -Fq 'pinned max_level = READ_ONLY' "$run_dir/clean.json" || e2e_finish_fail "forced READ_ONLY not reported"
-python3 - "$run_dir/clean.json" <<'PY'
+python3 - "$run_dir/clean.json" "$expected_status" <<'PY'
 import json
 import sys
 
 report = json.load(open(sys.argv[1], encoding="utf-8"))
+expected_status = int(sys.argv[2])
+if report["exit_code"] != expected_status or any(outcome["outcome"] == "defect" for outcome in report["outcomes"]):
+    raise SystemExit("selftest environment/clean classification differs from independent privilege probe")
+if expected_status == 3:
+    if not any(outcome["outcome"] == "environment" and outcome["privilege"] == "SELECT ON SYS.ALL_AUDIT_POLICIES"
+               for outcome in report["outcomes"]):
+        raise SystemExit("selftest_e2e_missing_grant_exit_3 did not name the exact privilege")
+    print("selftest_e2e_missing_grant_exit_3: pass")
+else:
+    print("selftest_e2e_clean_lane_exit_0: pass")
 writes = [outcome for outcome in report["outcomes"] if outcome["probe"].startswith("write:")]
 if not writes or any(outcome["outcome"] != "expected_refusal" for outcome in writes):
     raise SystemExit("selftest_e2e_forced_readonly_on_admin_profile: write sweep was not wholly expected_refusal")
-if report.get("audit_records") != 0:
-    raise SystemExit("selftest_e2e_forced_readonly_on_admin_profile: audit recorded a probe action")
+if report.get("audit_records", 0) < 1:
+    raise SystemExit("selftest_e2e_forced_readonly_on_admin_profile: no authenticated audit proof")
+proof = [outcome for outcome in report["outcomes"] if outcome["probe"] == "forced_readonly_audit"]
+if len(proof) != 1 or proof[0]["outcome"] != "pass" or "authenticated" not in proof[0]["detail"]:
+    raise SystemExit("selftest_e2e_forced_readonly_on_admin_profile: audit proof failed")
 PY
+if [ "$expected_status" -eq 0 ]; then
+  python3 - <<'PY'
+import os
+import oracledb
+
+with oracledb.connect(user=os.environ["ORACLEMCP_TEST_USER"],
+                      password=os.environ["ORACLEMCP_TEST_PASSWORD"],
+                      dsn=os.environ["ORACLEMCP_TEST_DSN"]) as connection:
+    count = connection.cursor().execute(
+        "SELECT COUNT(*) FROM V$SQL WHERE COMMAND_TYPE=2 AND INSTR(UPPER(SQL_TEXT),:1)>0",
+        ("ORACLEMCP_SELFTEST_MARKER",)).fetchone()[0]
+    if count:
+        raise SystemExit("selftest write marker reached Oracle V$SQL")
+print("selftest_e2e_write_marker_absent: pass")
+PY
+fi
 # The live Oracle listener accepts TCP but cannot speak MCP/HTTP.  That makes
 # this a deterministic transport defect (exit 2), unlike an unresolvable host
 # which is deliberately classified as an environmental finding (exit 3).
@@ -56,8 +107,10 @@ canary_password='selftest-password-canary'
 canary="http://${ORACLEMCP_TEST_DSN#//}/${canary_host}/${canary_schema}/${canary_table}?bind=${canary_bind}&password=${canary_password}"
 set +e; env -u ORACLEMCP_SELFTEST_BINARY -u ORACLEMCP_E2E_ARTIFACT_DIR "$binary" --json selftest --profile selftest_admin --http "$canary" --issue-draft "$run_dir/drafts" --budget 120 >"$run_dir/defect.json" 2>"$run_dir/defect.stderr"; defect_status=$?; set -e
 [ "$defect_status" -eq 2 ] || e2e_finish_fail "selftest_e2e_injected_defect_exit_2 status=$defect_status"
+set +e; env -u ORACLEMCP_SELFTEST_BINARY -u ORACLEMCP_E2E_ARTIFACT_DIR "$binary" selftest --profile selftest_admin --http "$canary" --budget 120 >"$run_dir/defect-human.txt" 2>"$run_dir/defect-human.stderr"; human_status=$?; set -e
+[ "$human_status" -eq 2 ] || e2e_finish_fail "selftest human injected defect status=$human_status"
 for canary_marker in "$canary_host" "$canary_schema" "$canary_table" "$canary_bind" "$canary_password"; do
-  if grep -R -Fq "$canary_marker" "$run_dir/defect.json" "$run_dir/defect.stderr" "$run_dir/drafts"; then
+  if grep -R -Fq "$canary_marker" "$run_dir/defect.json" "$run_dir/defect.stderr" "$run_dir/defect-human.txt" "$run_dir/defect-human.stderr" "$run_dir/drafts"; then
     e2e_finish_fail "selftest_e2e_redaction_canaries leaked $canary_marker"
   fi
 done

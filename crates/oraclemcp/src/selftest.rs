@@ -33,6 +33,7 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use clap::Args;
+use oraclemcp_audit::{AuditDecision, SigningKey, VerifyOutcome, verify_reader_with};
 use oraclemcp_config::OracleMcpConfig;
 use oraclemcp_core::redacted::{REDACTED, redact_operator_text};
 use serde::Deserialize;
@@ -63,6 +64,8 @@ pub(crate) struct SelftestCliArgs {
 const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Row cap advertised on every read probe.
 const SELFTEST_ROW_CAP: u64 = 5;
+const SELFTEST_AUDIT_KEY_ENV: &str = "SELFTEST_AUDIT_KEY";
+const SELFTEST_AUDIT_KEY_ID: &str = "selftest";
 /// The synthetic write placed in every write probe; a well-formed INSERT so the
 /// classifier sees a write, refused by the READ_ONLY level gate before Oracle.
 const WRITE_MARKER: &str =
@@ -549,6 +552,7 @@ fn looks_like_ezconnect(body: &str) -> bool {
 struct DerivedConfig {
     config_path: PathBuf,
     audit_path: PathBuf,
+    audit_key: String,
     /// Isolated state/home dirs so the run cannot touch the operator's state.
     state_dir: PathBuf,
     home_dir: PathBuf,
@@ -581,12 +585,12 @@ fn derive_readonly_config(profile: &str, source: &Path) -> Result<DerivedConfig,
     {
         for table in tables.iter_mut() {
             if table.get("name").and_then(|name| name.as_str()) == Some(profile) {
-                // The immutable ceiling for the run. The run never rewrites this
-                // file and never requests elevation past it.
-                table["max_level"] = value("READ_ONLY");
-                table["default_level"] = value("READ_ONLY");
                 found = true;
             }
+            // Profile switching must not expose another writable ceiling in
+            // this derived service. Every reachable profile stays READ_ONLY.
+            table["max_level"] = value("READ_ONLY");
+            table["default_level"] = value("READ_ONLY");
         }
     }
     if !found {
@@ -606,13 +610,20 @@ fn derive_readonly_config(profile: &str, source: &Path) -> Result<DerivedConfig,
     std::fs::create_dir_all(&home_dir)
         .map_err(|error| format!("cannot create home dir: {error}"))?;
 
-    let audit = doc
-        .entry("audit")
-        .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()));
-    let audit_table = audit
-        .as_table_mut()
-        .ok_or_else(|| "config `audit` is not a table".to_owned())?;
-    audit_table["path"] = value(audit_path.to_string_lossy().to_string());
+    let mut random_key = [0u8; 32];
+    getrandom::getrandom(&mut random_key)
+        .map_err(|error| format!("cannot generate isolated audit key: {error}"))?;
+    let audit_key = random_key
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    // This child owns a fresh ordinary server journal. Keep the operator's
+    // historical keys and external shipping destinations out of that journal.
+    let mut audit = toml_edit::Table::new();
+    audit["path"] = value(audit_path.to_string_lossy().to_string());
+    audit["key_id"] = value(SELFTEST_AUDIT_KEY_ID);
+    audit["key_ref"] = value(format!("env:{SELFTEST_AUDIT_KEY_ENV}"));
+    doc["audit"] = toml_edit::Item::Table(audit);
 
     std::fs::write(&config_path, doc.to_string())
         .map_err(|error| format!("cannot write derived config: {error}"))?;
@@ -620,6 +631,7 @@ fn derive_readonly_config(profile: &str, source: &Path) -> Result<DerivedConfig,
     Ok(DerivedConfig {
         config_path,
         audit_path,
+        audit_key,
         state_dir,
         home_dir,
         _temp: temp,
@@ -647,6 +659,7 @@ impl StdioClient {
             .arg("--profile")
             .arg(profile)
             .env("ORACLEMCP_CONFIG", &config.config_path)
+            .env(SELFTEST_AUDIT_KEY_ENV, &config.audit_key)
             .env("XDG_STATE_HOME", &config.state_dir)
             .env("HOME", &config.home_dir)
             .env_remove("ORACLEMCP_STDIO_TOKEN")
@@ -940,45 +953,42 @@ fn advertised_read_arguments(tool: &str, cases: &[ReadonlyCase], schema: Option<
 fn audit_shows_no_privileged_action(
     path: &Path,
     write_tools: &BTreeSet<String>,
+    key_material: &str,
 ) -> Result<usize, String> {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        // No audit file means no audited action at all — vacuously safe.
-        return Ok(0);
-    };
-    let mut count = 0usize;
-    for (index, line) in text.lines().enumerate() {
-        if line.trim().is_empty() {
-            continue;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("selftest audit journal is unavailable: {error}"))?;
+    let key = SigningKey::new(SELFTEST_AUDIT_KEY_ID, key_material.as_bytes().to_vec())
+        .map_err(|error| format!("cannot verify selftest audit key: {error}"))?;
+    let mut privileged_action = None;
+    let verdict = verify_reader_with(BufReader::new(file), &[key], |record| {
+        // A denied write is the expected result of a READ_ONLY refusal probe.
+        // Only an allowed privileged operation contradicts that boundary.
+        if record.decision == AuditDecision::Allowed
+            && (write_tools.contains(&record.tool)
+                || matches!(
+                    record.danger_level.as_str(),
+                    "GUARDED" | "DESTRUCTIVE" | "FORBIDDEN"
+                ))
+        {
+            privileged_action = Some(record.seq);
         }
-        let Ok(record) = serde_json::from_str::<Value>(line) else {
-            return Err(format!("audit line {} is not JSON", index + 1));
-        };
-        count += 1;
-        let danger = record
-            .get("danger_level")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_ascii_uppercase();
-        if matches!(danger.as_str(), "GUARDED" | "DESTRUCTIVE" | "FORBIDDEN") {
-            return Err(format!(
-                "audit line {} recorded a {danger} action",
-                index + 1
-            ));
+    })
+    .map_err(|error| format!("selftest audit journal cannot be authenticated: {error}"))?;
+    match verdict {
+        VerifyOutcome::Ok { records: 0 } => {
+            Err("selftest audit journal contains no records".to_owned())
         }
-        let decision = record
-            .get("decision")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_ascii_uppercase();
-        let tool = record.get("tool").and_then(Value::as_str).unwrap_or("");
-        if decision == "ALLOWED" && write_tools.contains(tool) {
-            return Err(format!(
-                "audit line {} allowed write tool `{tool}`",
-                index + 1
-            ));
+        VerifyOutcome::Ok { records } => match privileged_action {
+            Some(seq) => Err(format!(
+                "authenticated audit record {seq} allowed a privileged action"
+            )),
+            None => Ok(records),
+        },
+        VerifyOutcome::Broken { seq, .. } => {
+            Err(format!("selftest audit chain is broken at record {seq}"))
         }
+        _ => Err("selftest audit verification did not produce a supported verdict".to_owned()),
     }
-    Ok(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -986,74 +996,240 @@ fn audit_shows_no_privileged_action(
 // ---------------------------------------------------------------------------
 
 /// Probe a running Streamable HTTP listener with a raw `initialize`.
-fn probe_http_transport(url: &str) -> (Class, String) {
-    use std::io::Read;
-    use std::net::{TcpStream, ToSocketAddrs};
+fn probe_timeout(budget: Duration, elapsed: Duration) -> Duration {
+    budget.saturating_sub(elapsed).min(PROBE_TIMEOUT)
+}
 
-    let base = url.trim_end_matches('/');
-    let authority = base
-        .strip_prefix("http://")
-        .or_else(|| base.strip_prefix("https://"))
-        .unwrap_or(base)
-        .split('/')
-        .next()
-        .unwrap_or(base);
-    let mcp_path = if base.ends_with("/mcp") { "" } else { "/mcp" };
-    let Some(addr) = authority
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut addrs| addrs.next())
-    else {
-        return (
-            Class::Environment,
-            format!("HTTP listener `{url}` did not resolve"),
-        );
+fn http_initialize_reply(raw: &[u8]) -> (Class, String) {
+    let Some((header, body)) = raw.split_at_checked(
+        raw.windows(4)
+            .position(|bytes| bytes == b"\r\n\r\n")
+            .map_or(raw.len(), |index| index + 4),
+    ) else {
+        return (Class::Defect, "HTTP response framing is invalid".to_owned());
     };
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-11-25",
-            "capabilities": {},
-            "clientInfo": { "name": "oraclemcp-selftest", "version": env!("CARGO_PKG_VERSION") }
-        }
-    })
-    .to_string();
-    let request = format!(
-        "POST {mcp_path} HTTP/1.1\r\nhost: {authority}\r\ncontent-type: application/json\r\n\
-         accept: application/json, text/event-stream\r\nmcp-protocol-version: 2025-11-25\r\n\
-         content-length: {}\r\nconnection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let Ok(mut stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(5)) else {
-        return (
-            Class::Environment,
-            format!("HTTP listener `{url}` is not reachable"),
-        );
-    };
-    let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
-    if stream.write_all(request.as_bytes()).is_err() {
+    let status = std::str::from_utf8(header).ok().and_then(|header| {
+        header
+            .lines()
+            .next()
+            .filter(|line| line.starts_with("HTTP/1.1 ") || line.starts_with("HTTP/1.0 "))?
+            .split_whitespace()
+            .nth(1)?
+            .parse::<u16>()
+            .ok()
+    });
+    if let Some(length) = http_content_length(raw)
+        && length != body.len()
+    {
         return (
             Class::Defect,
-            "HTTP listener closed the request early".to_owned(),
+            "HTTP response body length differs from its frame".to_owned(),
         );
     }
-    let mut raw = String::new();
-    if stream.read_to_string(&mut raw).is_err() {
+    if matches!(status, Some(401 | 403)) {
         return (
-            Class::Defect,
-            "HTTP listener response was unreadable".to_owned(),
+            Class::Environment,
+            "HTTP listener requires authentication unavailable to this probe".to_owned(),
         );
     }
-    if raw.contains("\"result\"") && raw.contains("protocolVersion") {
+    let content_type = std::str::from_utf8(header).ok().and_then(|header| {
+        header.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-type")
+                .then_some(value.trim())
+        })
+    });
+    let replies = match content_type
+        .and_then(|value| value.split(';').next())
+        .map(str::trim)
+    {
+        Some("application/json") => serde_json::from_slice::<Value>(body)
+            .ok()
+            .map(|reply| vec![reply]),
+        Some("text/event-stream") => sse_json_replies(body),
+        _ => None,
+    };
+    let reply = replies.as_ref().and_then(|replies| {
+        let mut matches = replies
+            .iter()
+            .filter(|reply| reply.get("id") == Some(&json!(1)));
+        let reply = matches.next()?;
+        matches.next().is_none().then_some(reply)
+    });
+    if status == Some(200)
+        && reply.is_some_and(|reply| {
+            reply["jsonrpc"] == "2.0"
+                && reply["id"] == 1
+                && reply["result"]["protocolVersion"] == "2025-11-25"
+        })
+    {
         (Class::Pass, "HTTP initialize succeeded".to_owned())
     } else {
         (
             Class::Defect,
-            "HTTP initialize did not return a protocol version".to_owned(),
+            "HTTP initialize did not return the expected JSON-RPC protocol version".to_owned(),
         )
     }
+}
+
+fn sse_json_replies(body: &[u8]) -> Option<Vec<Value>> {
+    let text = std::str::from_utf8(body).ok()?;
+    let mut replies = Vec::new();
+    let mut data = Vec::new();
+    for line in text.lines().chain(std::iter::once("")) {
+        if line.is_empty() {
+            if !data.is_empty() {
+                let payload = data.join("\n");
+                if !payload.trim().is_empty() {
+                    replies.push(serde_json::from_str(&payload).ok()?);
+                }
+                data.clear();
+            }
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data.push(value.strip_prefix(' ').unwrap_or(value));
+        }
+    }
+    Some(replies)
+}
+
+fn http_content_length(raw: &[u8]) -> Option<usize> {
+    let end = raw.windows(4).position(|bytes| bytes == b"\r\n\r\n")?;
+    std::str::from_utf8(&raw[..end])
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())
+                .flatten()
+        })
+}
+
+/// Probe a plain HTTP listener with bounded DNS, I/O and response bytes.
+fn probe_http_transport(url: &str, timeout: Duration) -> (Class, String) {
+    use std::io::Read;
+    use std::net::{TcpStream, ToSocketAddrs};
+    if timeout.is_zero() {
+        return (
+            Class::Skipped,
+            "overall budget exhausted before HTTP probe".to_owned(),
+        );
+    }
+    let deadline = Instant::now() + timeout;
+    let Some(base) = url.trim_end_matches('/').strip_prefix("http://") else {
+        return (
+            Class::Environment,
+            "HTTP probe requires a plain HTTP listener; TLS probing is unavailable".to_owned(),
+        );
+    };
+    let (authority, path) = base
+        .split_once('/')
+        .map_or((base, "/mcp".to_owned()), |(authority, path)| {
+            (authority, format!("/{path}"))
+        });
+    if authority.is_empty()
+        || url.len() > 4096
+        || url.bytes().any(|byte| byte.is_ascii_whitespace())
+        || authority.contains(['@', '?', '#'])
+    {
+        return (
+            Class::Environment,
+            "HTTP listener URL is invalid".to_owned(),
+        );
+    }
+    let address = if authority.ends_with(']') || !authority.contains(':') {
+        format!("{authority}:80")
+    } else {
+        authority.to_owned()
+    };
+    let (sender, receiver) = mpsc::channel();
+    if std::thread::Builder::new()
+        .name("selftest-http-dns".to_owned())
+        .spawn(move || {
+            let address = address
+                .to_socket_addrs()
+                .ok()
+                .and_then(|mut addresses| addresses.next());
+            let _ = sender.send(address);
+        })
+        .is_err()
+    {
+        return (
+            Class::Environment,
+            "HTTP resolver could not start".to_owned(),
+        );
+    }
+    let Some(address) = receiver
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .ok()
+        .flatten()
+    else {
+        return (
+            Class::Environment,
+            "HTTP listener resolution failed or exceeded the probe budget".to_owned(),
+        );
+    };
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let Ok(mut stream) =
+        TcpStream::connect_timeout(&address, remaining.min(Duration::from_secs(5)))
+    else {
+        return (
+            Class::Environment,
+            "HTTP listener is not reachable within the probe budget".to_owned(),
+        );
+    };
+    let body = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params": {
+        "protocolVersion":"2025-11-25","capabilities":{},
+        "clientInfo":{"name":"oraclemcp-selftest","version":env!("CARGO_PKG_VERSION")}}})
+    .to_string();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nhost: {authority}\r\ncontent-type: application/json\r\naccept: application/json, text/event-stream\r\nmcp-protocol-version: 2025-11-25\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero()
+        || stream.set_write_timeout(Some(remaining)).is_err()
+        || stream.write_all(request.as_bytes()).is_err()
+    {
+        return (
+            Class::Defect,
+            "HTTP listener did not accept the bounded initialize request".to_owned(),
+        );
+    }
+    let mut raw = Vec::new();
+    let mut buffer = [0u8; 4096];
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return (
+                Class::Defect,
+                "HTTP initialize exceeded the probe budget".to_owned(),
+            );
+        }
+        match stream.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) if raw.len() + count <= 256 * 1024 => raw.extend_from_slice(&buffer[..count]),
+            Ok(_) => {
+                return (
+                    Class::Defect,
+                    "HTTP initialize exceeded the response byte cap".to_owned(),
+                );
+            }
+            Err(_) => {
+                return (
+                    Class::Defect,
+                    "HTTP initialize response was unreadable within the probe budget".to_owned(),
+                );
+            }
+        }
+        if let Some(length) = http_content_length(&raw)
+            && let Some(end) = raw.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+            && raw.len() - end - 4 >= length
+        {
+            break;
+        }
+    }
+    http_initialize_reply(&raw)
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,7 +1354,7 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                 "capabilities": {},
                 "clientInfo": { "name": "oraclemcp-selftest", "version": env!("CARGO_PKG_VERSION") }
             }),
-            PROBE_TIMEOUT,
+            probe_timeout(budget, started.elapsed()),
         );
         match init {
             Ok(reply) if reply.pointer("/result/protocolVersion").is_some() => {
@@ -1203,7 +1379,11 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
 
         // Advertisement sweep: the served registry must match exactly.
         let advertised = client
-            .request("tools/list", json!({}), PROBE_TIMEOUT)
+            .request(
+                "tools/list",
+                json!({}),
+                probe_timeout(budget, started.elapsed()),
+            )
             .ok()
             .and_then(|reply| reply.pointer("/result/tools").cloned())
             .and_then(|tools| tools.as_array().cloned())
@@ -1250,7 +1430,11 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                     continue;
                 }
                 let case_started = Instant::now();
-                let observed = client.tool_call(&case.tool, case.arguments.clone(), PROBE_TIMEOUT);
+                let observed = client.tool_call(
+                    &case.tool,
+                    case.arguments.clone(),
+                    probe_timeout(budget, started.elapsed()),
+                );
                 let (class, error_class, detail) = classify_read_case(&case.expect, &observed);
                 let mut record = ProbeRecord::new(
                     &case.case_id,
@@ -1274,6 +1458,12 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                     && let Observed::Success(result) = &observed
                 {
                     outcomes.push(effective_access_probe(result));
+                    if let Some(version) = result
+                        .pointer("/structuredContent/connection/server_version")
+                        .and_then(Value::as_str)
+                    {
+                        outcomes.push(ProbeRecord::new("oracle_version", Class::Pass, version));
+                    }
                 }
             }
 
@@ -1290,7 +1480,8 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                 }
                 let args_value = elevation_arguments(tool).expect("elevation tool has arguments");
                 let case_started = Instant::now();
-                let observed = client.tool_call(tool, args_value, PROBE_TIMEOUT);
+                let observed =
+                    client.tool_call(tool, args_value, probe_timeout(budget, started.elapsed()));
                 let (class, error_class) = classify_elevation(tool, &observed);
                 let mut record = ProbeRecord::new(
                     format!("elevation:{tool}"),
@@ -1317,7 +1508,8 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                 }
                 let args_value = synthetic_arguments(schemas.get(tool), true);
                 let case_started = Instant::now();
-                let observed = client.tool_call(tool, args_value, PROBE_TIMEOUT);
+                let observed =
+                    client.tool_call(tool, args_value, probe_timeout(budget, started.elapsed()));
                 let (class, error_class) = classify_write_observed(&observed);
                 let mut record = ProbeRecord::new(
                     format!("write:{tool}"),
@@ -1345,7 +1537,8 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                 }
                 let args_value = advertised_read_arguments(tool, &cases, schemas.get(tool));
                 let case_started = Instant::now();
-                let observed = client.tool_call(tool, args_value, PROBE_TIMEOUT);
+                let observed =
+                    client.tool_call(tool, args_value, probe_timeout(budget, started.elapsed()));
                 let (class, error_class) = classify_generic_read(&observed);
                 let mut record = ProbeRecord::new(
                     format!("advertised:{tool}"),
@@ -1354,6 +1547,16 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
                 );
                 record.error_class = error_class;
                 record.duration_ms = case_started.elapsed().as_millis() as u64;
+                if tool == "oracle_plsql_live_snapshot"
+                    && record.error_class.as_deref() == Some("TRANSIENT")
+                    && matches!(&observed, Observed::Error { message, .. }
+                        if message.contains("Oracle transport connection was lost"))
+                    && outcomes.iter().any(|record| {
+                        record.probe == "oracle_version" && record.detail.starts_with("18.")
+                    })
+                {
+                    record.detail = "XE18 catalog transport loss; see oraclemcp-02yqe".to_owned();
+                }
                 outcomes.push(record);
             }
         } else {
@@ -1373,7 +1576,7 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
 
     // HTTP transport probe when a listener is configured.
     if let Some(url) = args.http.as_deref() {
-        let (class, detail) = probe_http_transport(url);
+        let (class, detail) = probe_http_transport(url, probe_timeout(budget, started.elapsed()));
         let mut record = ProbeRecord::new("transport_http", class, redactor.scrub(&detail));
         record.duration_ms = 0;
         outcomes.push(record);
@@ -1386,24 +1589,26 @@ pub(crate) fn run(robot_json: bool, args: SelftestCliArgs) -> ExitCode {
     }
 
     // Verify the run's own audit proves no privileged action.
-    let audit_records = match audit_shows_no_privileged_action(&derived.audit_path, &write_set) {
-        Ok(count) => {
-            outcomes.push(ProbeRecord::new(
-                "forced_readonly_audit",
-                Class::Pass,
-                format!("{count} audit records, no privileged action"),
-            ));
-            count
-        }
-        Err(message) => {
-            outcomes.push(ProbeRecord::new(
-                "forced_readonly_audit",
-                Class::Defect,
-                redactor.scrub(&message),
-            ));
-            0
-        }
-    };
+    let audit_records =
+        match audit_shows_no_privileged_action(&derived.audit_path, &write_set, &derived.audit_key)
+        {
+            Ok(count) => {
+                outcomes.push(ProbeRecord::new(
+                    "forced_readonly_audit",
+                    Class::Pass,
+                    format!("{count} authenticated audit records, no privileged action"),
+                ));
+                count
+            }
+            Err(message) => {
+                outcomes.push(ProbeRecord::new(
+                    "forced_readonly_audit",
+                    Class::Defect,
+                    redactor.scrub(&message),
+                ));
+                0
+            }
+        };
 
     finish(
         robot_json,
@@ -1488,6 +1693,24 @@ fn privilege_detail(observed: &Observed) -> Option<String> {
 }
 
 /// Run `doctor --online` as a child with the derived READ_ONLY config.
+fn doctor_missing_catalog_privilege(body: &[u8]) -> Option<(String, String)> {
+    let report: Value = serde_json::from_slice(body).ok()?;
+    let check = report.get("checks")?.as_array()?.iter().find(|check| {
+        check["name"] == "FGA catalog visibility"
+            && matches!(check["status"].as_str(), Some("warn" | "fail"))
+            && check["detail"]
+                .as_str()
+                .is_some_and(|detail| detail.contains("fga_catalog_unreadable"))
+            && check["fix"]
+                .as_str()
+                .is_some_and(|fix| fix.contains("SYS.ALL_AUDIT_POLICIES"))
+    })?;
+    Some((
+        check["detail"].as_str()?.to_owned(),
+        "SELECT ON SYS.ALL_AUDIT_POLICIES".to_owned(),
+    ))
+}
+
 fn run_doctor_online(
     exe: &Path,
     derived: &DerivedConfig,
@@ -1507,6 +1730,7 @@ fn run_doctor_online(
         .arg(profile)
         .arg("--online")
         .env("ORACLEMCP_CONFIG", &derived.config_path)
+        .env(SELFTEST_AUDIT_KEY_ENV, &derived.audit_key)
         .env("XDG_STATE_HOME", &derived.state_dir)
         .env("HOME", &derived.home_dir)
         .env_remove("RUST_LOG")
@@ -1525,7 +1749,10 @@ fn run_doctor_online(
             return record;
         }
     };
-    let deadline = Instant::now() + PROBE_TIMEOUT.max(Duration::from_secs(30));
+    let deadline = Instant::now()
+        + budget
+            .saturating_sub(started.elapsed())
+            .min(Duration::from_secs(30));
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
@@ -1562,6 +1789,14 @@ fn run_doctor_online(
             "doctor --online did not finish",
         ),
     };
+    if let Some(output) = output.as_ref()
+        && let Some((detail, privilege)) = doctor_missing_catalog_privilege(&output.stdout)
+    {
+        record.class = Class::Environment;
+        record.error_class = Some("INSUFFICIENT_PRIVILEGE".to_owned());
+        record.detail = redactor.scrub(&detail);
+        record.privilege = Some(privilege);
+    }
     if let Some(output) = output
         && !output.stderr.is_empty()
         && record.class == Class::Defect
@@ -1590,9 +1825,13 @@ fn finish(
     }
     let classes: Vec<Class> = outcomes.iter().map(|record| record.class).collect();
     let code = exit_code_for(&classes);
+    let oracle_version = outcomes
+        .iter()
+        .find(|record| record.probe == "oracle_version")
+        .map(|record| record.detail.as_str());
 
     if let Some(dir) = args.issue_draft.as_deref()
-        && let Err(error) = write_issue_drafts(dir, &outcomes, redactor)
+        && let Err(error) = write_issue_drafts(dir, &outcomes, redactor, oracle_version)
     {
         eprintln!("oraclemcp selftest: could not write issue drafts: {error}");
     }
@@ -1601,6 +1840,7 @@ fn finish(
         let report = json!({
             "schema": "oraclemcp.selftest/v1",
             "oraclemcp_version": env!("CARGO_PKG_VERSION"),
+            "oracle_version": oracle_version,
             "profile": redactor.scrub(&args.profile),
             "duration_ms": started.elapsed().as_millis() as u64,
             "audit_records": audit_records,
@@ -1682,6 +1922,7 @@ fn write_issue_drafts(
     dir: &Path,
     outcomes: &[ProbeRecord],
     redactor: &Redactor,
+    oracle_version: Option<&str>,
 ) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     for record in outcomes
@@ -1705,11 +1946,13 @@ fn write_issue_drafts(
              refusal, and an environment condition should be reported as environment.\n\n\
              ## Versions\n\
              - oraclemcp: {version}\n\
+             - Oracle: {oracle_version}\n\
              - error class: {class}\n\n\
              <!-- Sanitized: no host, schema, table, bind, or credential identifiers. -->\n",
             probe = redactor.scrub(&record.probe),
             detail = redactor.scrub(&record.detail),
             version = env!("CARGO_PKG_VERSION"),
+            oracle_version = redactor.scrub(oracle_version.unwrap_or("not reported")),
             class = record.error_class.as_deref().unwrap_or("none"),
         );
         std::fs::write(dir.join(format!("selftest-{slug}.md")), body)?;
@@ -1736,6 +1979,104 @@ mod tests {
         assert_eq!(exit_code_for(&[Class::Pass, Class::ExpectedRefusal]), 0);
         assert_eq!(exit_code_for(&[Class::Skipped]), 0);
         assert_eq!(exit_code_for(&[Class::Defect]), 2);
+    }
+
+    #[test]
+    fn doctor_missing_catalog_has_exact_environment_privilege() {
+        let report = json!({"checks": [{"name": "FGA catalog visibility", "status": "warn",
+            "detail": "fga_catalog_unreadable: ALL_AUDIT_POLICIES (ORA-00942)",
+            "fix": "GRANT SELECT ON SYS.ALL_AUDIT_POLICIES to the served account"}]});
+        let (_, privilege) =
+            doctor_missing_catalog_privilege(&serde_json::to_vec(&report).unwrap())
+                .expect("missing grant is an environment finding even when doctor exit is zero");
+        assert_eq!(privilege, "SELECT ON SYS.ALL_AUDIT_POLICIES");
+        let unrelated = json!({"checks": [{"name": "Write posture", "status": "warn",
+            "detail": "principal can write", "fix": "use a least-privilege principal"}]});
+        assert!(
+            doctor_missing_catalog_privilege(&serde_json::to_vec(&unrelated).unwrap()).is_none()
+        );
+    }
+
+    #[test]
+    fn probe_timeouts_meet_remaining_overall_budget() {
+        assert_eq!(
+            probe_timeout(Duration::from_secs(300), Duration::ZERO),
+            PROBE_TIMEOUT
+        );
+        assert_eq!(
+            probe_timeout(Duration::from_secs(10), Duration::from_secs(9)),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            probe_timeout(Duration::from_secs(1), Duration::from_secs(2)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn http_initialize_requires_a_real_protocol_reply() {
+        let valid = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\"}}";
+        assert_eq!(http_initialize_reply(valid).0, Class::Pass);
+        let sse = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\nid: 0\nretry: 3000\ndata:\n\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"protocolVersion\":\"2025-11-25\"}}\n\n";
+        assert_eq!(http_initialize_reply(sse).0, Class::Pass);
+        assert!(sse_json_replies(b"data: not JSON\n\n").is_none());
+        for invalid in [
+            b"HTTP/1.1 200 OK\r\n\r\n<html>result protocolVersion</html>".as_slice(),
+            b"HTTP/1.1 500 Failed\r\n\r\n{\"result\":{\"protocolVersion\":\"2025-11-25\"}}"
+                .as_slice(),
+            b"HTTP/1.1 200 OK\r\nContent-Length: 10000\r\n\r\n{}".as_slice(),
+        ] {
+            assert_eq!(http_initialize_reply(invalid).0, Class::Defect);
+        }
+    }
+
+    #[test]
+    fn http_probe_uses_mcp_path_and_absolute_deadline() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        let peer = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "probe never connected");
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
+                    Err(error) => panic!("accept probe: {error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let count = socket.read(&mut request).unwrap();
+            assert!(request[..count].starts_with(b"POST /mcp HTTP/1.1\r\n"));
+            let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100000\r\n\r\n");
+            for _ in 0..100 {
+                std::thread::sleep(Duration::from_millis(20));
+                if socket.write_all(b" ").is_err() {
+                    break;
+                }
+            }
+        });
+        let start = Instant::now();
+        assert_eq!(
+            probe_http_transport(&format!("http://{address}/mcp"), Duration::from_millis(80)).0,
+            Class::Defect
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(1),
+            "dripping bytes must not renew the deadline"
+        );
+        peer.join().unwrap();
     }
 
     #[test]
@@ -1800,8 +2141,7 @@ mod tests {
         );
 
         // Index every W4 case by id.
-        let mut w4: std::collections::HashMap<String, (String, bool, bool)> =
-            std::collections::HashMap::new();
+        let mut w4 = std::collections::HashMap::new();
         for entry in std::fs::read_dir(&w4_dir).expect("read W4 cases dir") {
             let path = entry.expect("W4 dir entry").path();
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
@@ -1809,7 +2149,10 @@ mod tests {
             }
             let text = std::fs::read_to_string(&path).expect("read W4 case file");
             let parsed: Value = serde_json::from_str(&text).expect("W4 case file is JSON");
-            let Some(items) = parsed.as_array() else {
+            let Some(items) = parsed
+                .as_array()
+                .or_else(|| parsed.get("cases")?.as_array())
+            else {
                 continue;
             };
             for item in items {
@@ -1829,9 +2172,19 @@ mod tests {
                     .and_then(Value::as_array)
                     .map(|items| items.is_empty())
                     .unwrap_or(true);
-                w4.insert(
-                    id.to_owned(),
-                    (level.to_owned(), setup_empty, requires_empty),
+                assert!(
+                    w4.insert(
+                        id.to_owned(),
+                        (
+                            level.to_owned(),
+                            setup_empty,
+                            requires_empty,
+                            item["tool"].clone(),
+                            item["expect"]["error_class"].clone()
+                        )
+                    )
+                    .is_none(),
+                    "duplicate W4 case {id}"
                 );
             }
         }
@@ -1842,7 +2195,7 @@ mod tests {
                 "embedded case `{}` must be READ_ONLY",
                 case.case_id
             );
-            let (level, setup_empty, requires_empty) =
+            let (level, setup_empty, requires_empty, tool, error_class) =
                 w4.get(&case.source_case_id).unwrap_or_else(|| {
                     panic!(
                         "embedded case `{}` references unknown W4 case `{}`",
@@ -1863,6 +2216,25 @@ mod tests {
                 requires_empty,
                 "W4 source `{}` has no extra requirements",
                 case.source_case_id
+            );
+            assert_eq!(
+                tool.as_str(),
+                Some(case.tool.as_str()),
+                "W4 source tool drift"
+            );
+            assert_eq!(
+                case.expect.kind,
+                if error_class.is_null() {
+                    "rows"
+                } else {
+                    "typed_error"
+                },
+                "W4 source expectation drift"
+            );
+            assert_eq!(
+                case.expect.error_class.as_deref(),
+                error_class.as_str(),
+                "W4 source error class drift"
             );
         }
     }
@@ -1951,7 +2323,13 @@ mod tests {
             "HTTP initialize failed against canary-db.internal:1521/SECRETSVC as CANARY_USER (password Sup3rSecretCanary)",
         );
         defect.error_class = Some("CONNECT_FAILED".to_owned());
-        write_issue_drafts(temp.path(), &[defect], &redactor).expect("write draft");
+        write_issue_drafts(
+            temp.path(),
+            &[defect],
+            &redactor,
+            Some("Oracle Database 23ai Free"),
+        )
+        .expect("write draft");
         let drafts: Vec<_> = std::fs::read_dir(temp.path())
             .expect("read drafts")
             .filter_map(Result::ok)
@@ -1983,30 +2361,133 @@ mod tests {
         assert!(scrubbed.contains(REDACTED));
     }
 
+    fn signed_audit_record(
+        tool: &str,
+        danger: &str,
+        decision: AuditDecision,
+    ) -> oraclemcp_audit::AuditRecord {
+        use oraclemcp_audit::{AuditEntryDraft, AuditOutcome, AuditSubject, GENESIS_HASH};
+        let key = SigningKey::new(
+            SELFTEST_AUDIT_KEY_ID,
+            b"0123456789abcdef0123456789abcdef".to_vec(),
+        )
+        .expect("key");
+        oraclemcp_audit::AuditRecord::chained_signed(
+            &AuditEntryDraft {
+                subject: AuditSubject::new("process", "selftest-unit"),
+                db_evidence: None,
+                cancel: None,
+                result_masking: None,
+                tool: tool.to_owned(),
+                sql: "SELECT 1 FROM dual".to_owned(),
+                danger_level: danger.to_owned(),
+                decision,
+                rows_affected: None,
+                outcome: AuditOutcome::Succeeded,
+            },
+            1,
+            GENESIS_HASH,
+            "unix:1".to_owned(),
+            &key,
+        )
+    }
+
+    #[test]
+    fn selftest_audit_requires_nonempty_authenticated_records() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let audit = temp.path().join("missing.jsonl");
+        let writes = BTreeSet::new();
+        let key = "0123456789abcdef0123456789abcdef";
+        assert!(
+            audit_shows_no_privileged_action(&audit, &writes, key).is_err(),
+            "missing journal must not prove a read-only run"
+        );
+        for body in ["", "not JSON\n", "{}\n"] {
+            std::fs::write(&audit, body).expect("bad audit");
+            assert!(audit_shows_no_privileged_action(&audit, &writes, key).is_err());
+        }
+        let mut record = signed_audit_record("oracle_query", "SAFE", AuditDecision::Allowed);
+        std::fs::write(&audit, serde_json::to_string(&record).expect("JSON") + "\n")
+            .expect("valid audit");
+        assert_eq!(
+            audit_shows_no_privileged_action(&audit, &writes, key).expect("signed read"),
+            1
+        );
+        assert!(
+            audit_shows_no_privileged_action(
+                &audit,
+                &writes,
+                "different-key-material-32-characters"
+            )
+            .is_err()
+        );
+        record.tool = "oracle_describe".to_owned();
+        std::fs::write(&audit, serde_json::to_string(&record).expect("JSON") + "\n")
+            .expect("tampered audit");
+        assert!(
+            audit_shows_no_privileged_action(&audit, &writes, key).is_err(),
+            "an otherwise safe record with a broken signature must fail"
+        );
+    }
+
     #[test]
     fn audit_scan_flags_privileged_actions() {
         let temp = tempfile::tempdir().expect("temp dir");
         let audit = temp.path().join("audit.jsonl");
         let writes: BTreeSet<String> = ["oracle_execute".to_owned()].into_iter().collect();
+        let key = "0123456789abcdef0123456789abcdef";
+        for (tool, danger, decision, accepted) in [
+            ("oracle_query", "SAFE", AuditDecision::Allowed, true),
+            ("oracle_execute", "FORBIDDEN", AuditDecision::Blocked, true),
+            ("oracle_execute", "SAFE", AuditDecision::Allowed, false),
+            ("oracle_query", "DESTRUCTIVE", AuditDecision::Allowed, false),
+        ] {
+            let record = signed_audit_record(tool, danger, decision);
+            std::fs::write(&audit, serde_json::to_string(&record).expect("JSON") + "\n")
+                .expect("audit");
+            assert_eq!(
+                audit_shows_no_privileged_action(&audit, &writes, key).is_ok(),
+                accepted
+            );
+        }
+    }
 
-        std::fs::write(
-            &audit,
-            "{\"danger_level\":\"READ_ONLY\",\"decision\":\"ALLOWED\",\"tool\":\"oracle_query\"}\n",
-        )
-        .expect("write safe audit");
+    #[test]
+    fn derived_selftest_profiles_and_audit_are_isolated() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let source = temp.path().join("source.toml");
+        let original = r#"
+[[profiles]]
+name = "selected"
+connect_string = "localhost:1523/FREEPDB1"
+max_level = "ADMIN"
+[[profiles]]
+name = "other"
+connect_string = "localhost:1523/FREEPDB1"
+max_level = "DDL"
+[audit]
+key_ref = "env:OPERATOR_AUDIT_KEY"
+key_id = "operator"
+[audit.shipping]
+worm_path = "/operator/audit-mirror"
+"#;
+        std::fs::write(&source, original).expect("source config");
+        let derived = derive_readonly_config("selected", &source).expect("derived config");
+        let text = std::fs::read_to_string(&derived.config_path).expect("config");
+        let doc: DocumentMut = text.parse().expect("TOML");
+        for profile in doc["profiles"].as_array_of_tables().expect("profiles") {
+            assert_eq!(profile["max_level"].as_str(), Some("READ_ONLY"));
+            assert_eq!(profile["default_level"].as_str(), Some("READ_ONLY"));
+        }
         assert_eq!(
-            audit_shows_no_privileged_action(&audit, &writes).expect("safe audit"),
-            1
+            doc["audit"]["key_ref"].as_str(),
+            Some("env:SELFTEST_AUDIT_KEY")
         );
-
-        std::fs::write(
-            &audit,
-            "{\"danger_level\":\"DESTRUCTIVE\",\"decision\":\"ALLOWED\",\"tool\":\"oracle_execute\"}\n",
-        )
-        .expect("write privileged audit");
-        assert!(
-            audit_shows_no_privileged_action(&audit, &writes).is_err(),
-            "a destructive action must fail the verification"
+        assert!(doc["audit"].get("shipping").is_none());
+        assert!(!text.contains(&derived.audit_key));
+        assert_eq!(
+            std::fs::read_to_string(source).expect("unchanged source"),
+            original
         );
     }
 }
