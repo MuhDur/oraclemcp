@@ -1055,7 +1055,17 @@ jobs:
               print(capability)
           PY
           )
-          manifest_args=()
+          # Preserve the unmodified output of W4's exact Rust test runs as
+          # explicit evidence; missing/empty output must fail validation.
+          cargo_log=target/e2e/w4/free23/cargo-tests.log
+          python3 - "$results" "$cargo_log" <<'PYLOG'
+          import json
+          import sys
+          from pathlib import Path
+
+          Path(sys.argv[2]).write_text(json.loads(Path(sys.argv[1]).read_text())["cargo_test_output"])
+          PYLOG
+          manifest_args=(--cargo-test-log "$cargo_log")
           for capability in "${capabilities[@]}"; do
             manifest_args+=(--capability "$capability")
           done
@@ -1068,6 +1078,7 @@ jobs:
           name: e2e-oracle-free23-w4-${{ github.run_number }}
           path: |
             target/e2e/w4/free23/results.json
+            target/e2e/w4/free23/cargo-tests.log
             target/e2e/w4/free23/*.jsonl
           if-no-files-found: error
           retention-days: 30

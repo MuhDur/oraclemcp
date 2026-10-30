@@ -5,8 +5,8 @@ The manifest is an input to the external W4 runner. A case listed here is not
 evidence that its regression is fixed. --check-results reads a JSON object with
 ``cases`` (case_id, lane, transport, test_id, verdict) and ``cargo_test_logs``
 (paths to unmodified cargo test output). Every applicable live case must have
-one matching pass, and each unit test must appear as ``test ... ok`` in cargo
-output. ``--capability`` adds measured target capabilities to the lane's
+one matching pass, and each Rust unit test must resolve to a source ``#[test]``
+function and appear as ``test ... ok`` in cargo output. ``--capability`` adds measured target capabilities to the lane's
 version and ADB label; it must not be used to assume a privilege exists.
 """
 
@@ -14,13 +14,17 @@ import argparse
 import copy
 import json
 import re
+import secrets
+import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = HERE / "release_0_12.json"
 SCHEMA = HERE / "release_0_12.schema.json"
+ROOT = HERE.parents[2]
 LANE_CAPABILITIES = {
     "xe18": {"version:18"},
     "xe21": {"version:21"},
@@ -106,7 +110,8 @@ def strings(value):
     if isinstance(value, str):
         yield value
     elif isinstance(value, dict):
-        for item in value.values():
+        for key, item in value.items():
+            yield key
             yield from strings(item)
     elif isinstance(value, list):
         for item in value:
@@ -124,10 +129,11 @@ def named_values(value):
 
 
 def check_synthetic_input(case):
-    for item in strings(case["input"]):
+    for item in strings(case):
         for name, pattern in FORBIDDEN_INPUT.items():
             if pattern.search(item):
-                fail(f"{case['case_id']}: input contains {name}")
+                fail(f"{case['case_id']}: case contains {name}")
+    for item in strings(case["input"]):
         if not item.lstrip().upper().startswith(("SELECT ", "WITH ", "UPDATE ", "INSERT ", "DELETE ")):
             continue
         cte_names = {name.upper() for name in CTE_NAME.findall(item)}
@@ -147,6 +153,116 @@ def check_synthetic_input(case):
             not isinstance(value, str) or not FIXTURE_NAME.fullmatch(value)
         ):
             fail(f"{case['case_id']}: non-synthetic {key}")
+
+
+def rust_tokens(source):
+    """Keep literal tokens opaque; comments and quoted test text are not items."""
+    pattern = re.compile(r'//[^\n]*|/\*|b?r(?P<hashes>\#*)"|b?"(?:\\.|[^"\\])*"'
+                         r"|b?'(?:\\.|[^'\\\n])'|[A-Za-z_][A-Za-z0-9_]*|[^\s]", re.S)
+    tokens, position = [], 0
+    while match := pattern.search(source, position):
+        token, position = match.group(), match.end()
+        if token.startswith("//"):
+            continue
+        if token == "/*":
+            depth = 1
+            while depth:
+                boundary = re.search(r"/\*|\*/", source[position:])
+                if boundary is None:
+                    fail("unterminated Rust comment")
+                position += boundary.end()
+                depth += 1 if boundary.group() == "/*" else -1
+            continue
+        if match.group("hashes") is not None:
+            end = source.find('"' + match.group("hashes"), position)
+            if end < 0:
+                fail("unterminated Rust raw string")
+            position = end + 1 + len(match.group("hashes"))
+            token = source[match.start():position]
+        tokens.append(token)
+    return tokens
+
+
+def closing_token(tokens, start, opening, closing):
+    depth = 1
+    for index in range(start + 1, len(tokens)):
+        depth += (tokens[index] == opening) - (tokens[index] == closing)
+        if depth == 0:
+            return index
+    fail("unbalanced Rust item")
+
+
+def rust_scope(tokens):
+    """Read module declarations and attributed functions at this scope only."""
+    items, attributes, index = [], [], 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "#" and tokens[index + 1:index + 2] == ["["]:
+            end = closing_token(tokens, index + 1, "[", "]")
+            attributes.append(tokens[index + 2:end])
+            index = end + 1
+            continue
+        if token == "mod" and index + 2 < len(tokens) and tokens[index + 2] in (";", "{"):
+            name, body = tokens[index + 1], None
+            end = index + 2
+            if tokens[end] == "{":
+                end = closing_token(tokens, end, "{", "}")
+                body = tokens[index + 3:end]
+            items.append(("mod", name, attributes, body))
+            attributes, index = [], end + 1
+            continue
+        if token == "fn" and index + 1 < len(tokens):
+            if ["test"] in attributes:
+                items.append(("test", tokens[index + 1], [], None))
+            attributes = []
+        if token == "{":
+            index = closing_token(tokens, index, "{", "}")
+            attributes = []
+        elif token == ";":
+            attributes = []
+        index += 1
+    return items
+
+
+def rust_test_exists(test_id):
+    crate, *modules, function = test_id.split("::")
+    package = ROOT / "crates" / crate.replace("_", "-")
+    manifest = package / "Cargo.toml"
+    if not manifest.is_file():
+        return False
+    cargo = tomllib.loads(manifest.read_text())
+    lib = cargo.get("lib", {})
+    roots = []
+    if lib.get("name", cargo["package"]["name"].replace("-", "_")) == crate:
+        roots.append(package / lib.get("path", "src/lib.rs"))
+    for binary in cargo.get("bin", [{"name": cargo["package"]["name"], "path": "src/main.rs"}]):
+        if binary["name"].replace("-", "_") == crate:
+            roots.append(package / binary.get("path", "src/main.rs"))
+
+    def resolve(tokens, file, directory, remaining):
+        items = rust_scope(tokens)
+        if not remaining:
+            return any(kind == "test" and name == function for kind, name, _, _ in items)
+        for kind, name, attributes, body in items:
+            if kind != "mod" or name != remaining[0]:
+                continue
+            if body is not None:
+                if resolve(body, file, directory / name, remaining[1:]):
+                    return True
+                continue
+            overrides = [attribute[2] for attribute in attributes
+                         if len(attribute) == 3 and attribute[:2] == ["path", "="]]
+            candidates = ([file.parent / json.loads(overrides[0])] if overrides else
+                          [directory / (name + ".rs"), directory / name / "mod.rs"])
+            for child in candidates:
+                if child.is_file():
+                    child_directory = child.parent if child.name == "mod.rs" else child.with_suffix("")
+                    if resolve(rust_tokens(child.read_text()), child, child_directory, remaining[1:]):
+                        return True
+        return False
+
+    return any(resolve(rust_tokens(file.read_text()), file, file.parent, modules)
+               for file in roots if file.is_file())
 
 
 def validate_manifest(cases, schema):
@@ -169,6 +285,8 @@ def validate_manifest(cases, schema):
         if case["reproducible"] == "unit" and re.fullmatch(r"[A-Za-z0-9_]+(?:::[A-Za-z0-9_]+)+", case["test_id"]) is None:
             fail(f"{case_id}: unit test_id must be a Rust test path")
         check_synthetic_input(case)
+        if case["reproducible"] == "unit" and not rust_test_exists(case["test_id"]):
+            fail(f"{case_id}: test_id does not resolve to an existing #[test] fn: {case['test_id']}")
         issues.add(case["issue"])
         log(case_id, "manifest", "pass")
     missing = set(range(28, 57)) - issues
@@ -186,7 +304,7 @@ def required_live(cases, lane, extra_capabilities=()):
             and set(case["capabilities"]).issubset(available)]
 
 
-def validate_results(cases, results, lane, transport, extra_capabilities=()):
+def validate_results(cases, results, lane, transport, extra_capabilities=(), cargo_output=None):
     if transport not in {"stdio", "http"}:
         fail("--transport must be stdio or http")
     runs = results.get("cases", [])
@@ -210,7 +328,8 @@ def validate_results(cases, results, lane, transport, extra_capabilities=()):
             log(case_id, "result", "red")
             fail(f"red or mismatched live case {case_id} on {lane}/{transport}")
         log(case_id, "result", "pass")
-    cargo_output = results.get("cargo_test_output", "")
+    if cargo_output is None:
+        cargo_output = results.get("cargo_test_output", "")
     if not isinstance(cargo_output, str):
         fail("results.cargo_test_output must be a string")
     for case in cases:
@@ -221,6 +340,17 @@ def validate_results(cases, results, lane, transport, extra_capabilities=()):
             log(case["case_id"], "unit_result", "missing")
             fail(f"missing green cargo test {case['test_id']}")
         log(case["case_id"], "unit_result", "pass")
+
+
+def read_cargo_test_logs(paths):
+    """Explicit CLI logs are the evidence, not a possibly stale embedded copy."""
+    output = []
+    for path in paths:
+        text = path.read_text()
+        if not text.strip():
+            fail(f"empty cargo test log: {path}")
+        output.append(text)
+    return "\n".join(output)
 
 
 def selftest(cases, schema):
@@ -243,10 +373,78 @@ def selftest(cases, schema):
     rejected("unsanitized_ocid", lambda xs: xs[0]["input"].update({"id": "ocid1.autonomousdatabase.oc1.example"}), "OCID")
     rejected("non_synthetic_object", lambda xs: xs[0]["input"].update({"sql": "SELECT id FROM CUSTOMER_TABLE"}), "non-synthetic SQL object")
     rejected("unreviewed", lambda xs: xs[0].update(confidentiality_reviewed=False), "expected True")
+    unit_index = next(index for index, case in enumerate(cases) if case["reproducible"] == "unit")
+    rejected("nonexistent_test_id", lambda xs: xs[unit_index].update(
+        test_id="oraclemcp_config::profile::tests::planted_missing_test"), "existing #[test] fn")
+    rejected("wrong_test_module", lambda xs: xs[unit_index].update(
+        test_id="oraclemcp_config::wrong_module::tests::issue48_zero_call_timeout_refused_at_load"),
+        "existing #[test] fn")
+    rejected("ordinary_function_is_not_test", lambda xs: xs[unit_index].update(
+        test_id="oraclemcp::tests::issue51::second_serve_instance_reports_audit_lock"),
+        "existing #[test] fn")
+    issue48 = next(case for case in cases if case["issue"] == 48)
+    if issue48["test_id"] != "oraclemcp_config::profile::tests::issue48_zero_call_timeout_refused_at_load":
+        fail("#48 must bind the real zero-timeout config regression")
+    print("issue48_existing_test: pass")
+    lexical = rust_scope(rust_tokens('''
+        /* outer /* nested */ #[test] fn commented() {} */
+        const TEXT: &str = r###"#[test] fn quoted() { }"###;
+        fn ordinary() {}
+        #[test] fn real() { let text = "{ \\\n            }"; }
+        mod inner { #[test] fn nested() {} }
+    '''))
+    if [name for kind, name, _, _ in lexical if kind == "test"] != ["real"]:
+        fail("Rust source resolver confused comments, strings, nested scopes or unattributed functions with tests")
+    print("rust_test_source_tokens: pass")
+    for field, value, reason in (
+        ("title", "field.example.com", "hostname"),
+        ("pre_fix_outcome", "10.23.45.67", "IP address"),
+        ("post_fix_expected", "host=synthetic", "connect string"),
+        ("assertions", ["ocid1.database.oc1.example"], "OCID"),
+        ("symbols", ["/tmp/wallet/cert.pem"], "wallet path"),
+        ("tool_or_path", "field.internal", "hostname"),
+    ):
+        rejected("non_input_" + field, lambda xs, field=field, value=value:
+                 xs[0].update({field: value}), reason)
+    rejected("nested_string_key", lambda xs: xs[0]["input"].update(
+        {"field.example.com": "synthetic"}), "hostname")
     live = required_live(cases, "free23")
     results = {"cases": [{"case_id": c["case_id"], "lane": "free23", "transport": "stdio", "verdict": "pass", "test_id": c["test_id"]} for c in live],
                "cargo_test_output": "\n".join(f"test {c['test_id'].split('::', 1)[-1]} ... ok" for c in cases if c["reproducible"] == "unit")}
     validate_results(cases, results, "free23", "stdio")
+    for output in ("", "test missing::test ... ok\n", results["cargo_test_output"].replace(" ... ok", " ... ignored")):
+        try:
+            validate_results(cases, results, "free23", "stdio", cargo_output=output)
+        except ValidationError as exc:
+            if "missing green cargo test" not in str(exc):
+                fail(f"explicit cargo evidence: wrong refusal {exc}")
+        else:
+            fail("explicit cargo logs accepted missing/ignored tests via the embedded green output")
+    print("explicit_cargo_logs_override_embedded_evidence: pass")
+    # Exercise the public CLI, including file reading and explicit-log precedence.
+    # These are validator fixtures, not evidence of an executed Rust test.
+    work = ROOT / "target/e2e/manifest-selftest" / secrets.token_hex(8)
+    work.mkdir(parents=True)
+    result_path, log_path = work / "results.json", work / "cargo.log"
+    result_path.write_text(json.dumps(results))
+    command = [sys.executable, str(Path(__file__).resolve()), "--check-results",
+               str(result_path), "--lane", "free23", "--transport", "stdio",
+               "--cargo-test-log", str(log_path)]
+    for name, output, expected in (
+        ("cli_green_log", results["cargo_test_output"], 0),
+        ("cli_empty_log", "", 1),
+        ("cli_ignored_log", results["cargo_test_output"].replace(" ... ok", " ... ignored"), 1),
+    ):
+        log_path.write_text(output)
+        checked = subprocess.run(command, capture_output=True, text=True, timeout=30)
+        if checked.returncode != expected:
+            fail(f"{name}: unexpected CLI exit {checked.returncode}: {checked.stderr}")
+        print(f"{name}: pass")
+    checked = subprocess.run(command[:-1] + [str(work / "missing.log")],
+                             capture_output=True, text=True, timeout=30)
+    if checked.returncode != 1 or "No such file" not in checked.stderr:
+        fail("cli_missing_log: missing explicit evidence was accepted")
+    print("cli_missing_log: pass")
     results["cases"].pop()
     try:
         validate_results(cases, results, "free23", "stdio")
@@ -278,9 +476,13 @@ def main():
     parser.add_argument("--lane", choices=LANE_CAPABILITIES)
     parser.add_argument("--transport", choices=("stdio", "http"))
     parser.add_argument("--capability", action="append", default=[])
+    parser.add_argument("--cargo-test-log", action="append", type=Path, default=[],
+                        help="Unmodified cargo test output; repeat for multiple real runs. Overrides embedded output.")
     args = parser.parse_args()
     if (args.required_ids or args.check_results) and (not args.lane or not args.transport):
         parser.error("--required-ids/--check-results need --lane and --transport")
+    if args.cargo_test_log and not args.check_results:
+        parser.error("--cargo-test-log needs --check-results")
     try:
         schema = json.loads(SCHEMA.read_text())
         cases = validate_manifest(json.loads(args.manifest.read_text()), schema)
@@ -291,9 +493,11 @@ def main():
                 print(case["case_id"])
         elif args.check_results:
             results = json.loads(args.check_results.read_text())
-            for log_path in results.get("cargo_test_logs", []):
-                results["cargo_test_output"] = results.get("cargo_test_output", "") + "\n" + Path(log_path).read_text()
-            validate_results(cases, results, args.lane, args.transport, args.capability)
+            explicit_output = read_cargo_test_logs(args.cargo_test_log) if args.cargo_test_log else None
+            if explicit_output is None:
+                for log_path in results.get("cargo_test_logs", []):
+                    results["cargo_test_output"] = results.get("cargo_test_output", "") + "\n" + Path(log_path).read_text()
+            validate_results(cases, results, args.lane, args.transport, args.capability, explicit_output)
             print(f"results: pass ({args.lane}/{args.transport})")
         else:
             print(f"manifest: pass ({len(cases)} cases, {len({c['issue'] for c in cases})} issues)")
