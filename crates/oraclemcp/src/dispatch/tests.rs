@@ -3149,12 +3149,10 @@ impl OracleConnection for EditionLifecycleMock {
             .expect("edition query mutex")
             .push((sql.to_owned(), binds.to_vec()));
         let lower_sql = sql.to_ascii_lowercase();
-        if lower_sql.contains("sys_context('userenv','dbid')")
-            && lower_sql.contains("sys_context('userenv','con_id')")
-        {
+        if lower_sql.contains("sys_context('userenv','dbid')") && lower_sql.contains("c.con_uid") {
             return Ok(vec![semantic_row(&[
-                ("DBID", Some("synthetic-db")),
-                ("CON_ID", Some("synthetic-pdb")),
+                ("DBID", Some("424242")),
+                ("CON_UID", Some("9001")),
             ])]);
         }
         if lower_sql.contains("from all_editions") {
@@ -8869,8 +8867,8 @@ fn edition_service_owned_reservation_refuses_a_second_session_before_dictionary_
     };
     let pdb_scope = oraclemcp_db::PdbIdentityScope::ServiceStateStore {
         identity: oraclemcp_db::PdbIdentity {
-            dbid: "synthetic-db".to_owned(),
-            con_uid: "synthetic-pdb".to_owned(),
+            dbid: "424242".to_owned(),
+            con_uid: "9001".to_owned(),
         },
     };
     let state = Arc::new(EditionLifecycleState::default());

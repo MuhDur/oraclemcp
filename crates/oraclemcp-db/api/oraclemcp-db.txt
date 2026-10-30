@@ -3,6 +3,7 @@ pub use oraclemcp_db::StatementOutcome
 pub use oraclemcp_db::error_envelope
 pub mod oraclemcp_db::catalog_facts
 pub enum oraclemcp_db::catalog_facts::PdbIdentityObservation
+pub oraclemcp_db::catalog_facts::PdbIdentityObservation::LegacyContainerIdentity
 pub oraclemcp_db::catalog_facts::PdbIdentityObservation::Unreadable
 impl core::clone::Clone for oraclemcp_db::catalog_facts::PdbIdentityObservation
 pub fn oraclemcp_db::catalog_facts::PdbIdentityObservation::clone(&self) -> oraclemcp_db::catalog_facts::PdbIdentityObservation
@@ -3599,6 +3600,7 @@ impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusi
 impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_db::OracleVpdRlsObservationStatus where V: ppv_lite86::types::MultiLane<T>
 pub fn oraclemcp_db::OracleVpdRlsObservationStatus::vzip(self) -> V
 pub enum oraclemcp_db::PdbIdentityObservation
+pub oraclemcp_db::PdbIdentityObservation::LegacyContainerIdentity
 pub oraclemcp_db::PdbIdentityObservation::Unreadable
 impl core::clone::Clone for oraclemcp_db::catalog_facts::PdbIdentityObservation
 pub fn oraclemcp_db::catalog_facts::PdbIdentityObservation::clone(&self) -> oraclemcp_db::catalog_facts::PdbIdentityObservation

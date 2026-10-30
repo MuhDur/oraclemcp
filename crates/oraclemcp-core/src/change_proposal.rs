@@ -26,7 +26,7 @@ const CHANGE_PROPOSAL_SCHEMA_VERSION: u8 = 1;
 const MAX_PROPOSAL_STATEMENTS: usize = 32;
 const EDITION_PROPOSAL_COLLECTION: &str = "edition-proposals";
 const EDITION_PROPOSAL_EXTENSION: &str = "json";
-const EDITION_PROPOSAL_SCHEMA_VERSION: u8 = 1;
+const EDITION_PROPOSAL_SCHEMA_VERSION: u8 = 2;
 const MAX_EDITION_PROPOSAL_OBJECTS: usize = 64;
 /// Tamper-token scope for change-proposal list cursors.
 const CHANGE_PROPOSAL_CURSOR_KIND: &str = "change-proposals";
@@ -303,6 +303,10 @@ impl ChangeProposalStore {
         &self,
         request: EditionProposalCreateRequest,
     ) -> Result<EditionProposalView, ChangeProposalError> {
+        // All handles cloned from this service owner share the gate. The
+        // conflict scan and atomic write must be one mutation, across profiles
+        // and parent editions; locking only the final write admits two requests.
+        let _mutation = self.owner.mutation_guard();
         let proposal = EditionProposal::from_request(request)?;
         if let Some(conflict) = self.active_pdb_request_conflict(&proposal)? {
             return Err(ChangeProposalError::OpenPdbRequest(conflict.proposal_id));
@@ -335,6 +339,7 @@ impl ChangeProposalStore {
         &self,
         request: EditionProposalTransitionRequest,
     ) -> Result<EditionProposalView, ChangeProposalError> {
+        let _mutation = self.owner.mutation_guard();
         let mut proposal = self.load_edition_proposal(&request.proposal_id)?;
         proposal.transition_to(request.status)?;
         self.write_edition_proposal(&proposal)?;
@@ -452,6 +457,7 @@ pub struct EditionProposal {
     pub base_edition: String,
     pub objects: Vec<String>,
     /// Server-derived scope for this service state store's local control plane.
+    #[serde(default = "local_only_pdb_scope")]
     pub coordination_scope: PdbIdentityScope,
     pub status: EditionProposalStatus,
     pub created_at: String,
@@ -1010,8 +1016,17 @@ fn load_proposal_from_path(path: &Path) -> Result<ChangeProposal, ChangeProposal
 
 fn load_edition_proposal_from_path(path: &Path) -> Result<EditionProposal, ChangeProposalError> {
     let bytes = fs::read(path).map_err(|e| ChangeProposalError::Io(e.to_string()))?;
-    let proposal: EditionProposal =
+    let mut proposal: EditionProposal =
         serde_json::from_slice(&bytes).map_err(|e| ChangeProposalError::Json(e.to_string()))?;
+    if proposal.schema_version == 1 {
+        // Schema 1 mislabeled CON_ID as con_uid. Preserve the request, but
+        // never promote that reusable slot to stable PDB identity. All callers
+        // receive the canonical schema; the next transition persists it.
+        proposal.schema_version = EDITION_PROPOSAL_SCHEMA_VERSION;
+        proposal.coordination_scope = PdbIdentityScope::LocalOnly {
+            observation: oraclemcp_db::PdbIdentityObservation::LegacyContainerIdentity,
+        };
+    }
     proposal.validate()?;
     Ok(proposal)
 }
@@ -1367,6 +1382,168 @@ mod tests {
                 "CHILD_C",
             ))
             .expect("different PDB remains independent");
+    }
+
+    #[test]
+    fn concurrent_profiles_share_one_pdb_request_slot_across_store_handles() {
+        use std::sync::{Arc, Barrier};
+        const CALLERS: usize = 16;
+        for round in 0..4 {
+            let store = ChangeProposalStore::open(store_root(&format!("pdb-concurrent-{round}")))
+                .expect("store");
+            let start = Arc::new(Barrier::new(CALLERS));
+            let workers = (0..CALLERS)
+                .map(|index| {
+                    let handle = ChangeProposalStore::open_with_owner(store.owner.clone())
+                        .expect("same service owner");
+                    let start = Arc::clone(&start);
+                    std::thread::spawn(move || {
+                        let mut request = edition_request_for_profile(
+                            &format!("profile_{index}"),
+                            identified_scope("db-a", "pdb-1"),
+                            &format!("CHILD_{index}"),
+                        );
+                        // The service policy is per PDB, not merely per parent.
+                        request.base_edition = format!("PARENT_{index}");
+                        start.wait();
+                        handle.create_edition_proposal(request)
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut admitted = 0;
+            for worker in workers {
+                match worker.join().expect("request thread") {
+                    Ok(_) => admitted += 1,
+                    Err(error) => assert!(
+                        matches!(error, ChangeProposalError::OpenPdbRequest(_)),
+                        "unexpected failure: {error}"
+                    ),
+                }
+            }
+            assert_eq!(
+                admitted, 1,
+                "exactly one positive request per PDB, round {round}"
+            );
+            assert_eq!(store.list_edition_proposals().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn concurrent_review_cannot_resurrect_a_withdrawn_pdb_request() {
+        use std::sync::{Arc, Barrier};
+        for round in 0..16 {
+            let store =
+                ChangeProposalStore::open(store_root(&format!("pdb-transition-{round}"))).unwrap();
+            let view = store
+                .create_edition_proposal(edition_request(
+                    identified_scope("db-a", "pdb-1"),
+                    "OLD_CHILD",
+                ))
+                .unwrap();
+            let start = Arc::new(Barrier::new(2));
+            let workers = [
+                EditionProposalStatus::Reviewing,
+                EditionProposalStatus::Withdrawn,
+            ]
+            .map(|status| {
+                let handle = ChangeProposalStore::open_with_owner(store.owner.clone()).unwrap();
+                let start = Arc::clone(&start);
+                let proposal_id = view.proposal_id.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    (
+                        status,
+                        handle.transition_edition_proposal(EditionProposalTransitionRequest {
+                            proposal_id,
+                            status,
+                        }),
+                    )
+                })
+            });
+            for worker in workers {
+                let (status, result) = worker.join().unwrap();
+                if status == EditionProposalStatus::Withdrawn {
+                    assert!(result.is_ok(), "withdrawal must complete: {result:?}");
+                } else if let Err(error) = result {
+                    assert!(matches!(error, ChangeProposalError::Invalid(_)));
+                }
+            }
+            assert_eq!(
+                store.edition_proposal(&view.proposal_id).unwrap().status,
+                EditionProposalStatus::Withdrawn
+            );
+            store
+                .create_edition_proposal(edition_request(
+                    identified_scope("db-a", "pdb-1"),
+                    "NEW_CHILD",
+                ))
+                .expect("withdrawal frees the PDB request slot");
+        }
+    }
+
+    #[test]
+    fn independent_service_stores_do_not_claim_pdb_global_exclusivity() {
+        let left = ChangeProposalStore::open(store_root("pdb-service-left")).expect("left store");
+        let right =
+            ChangeProposalStore::open(store_root("pdb-service-right")).expect("right store");
+        for (store, profile, child) in [
+            (&left, "left_profile", "LEFT_CHILD"),
+            (&right, "right_profile", "RIGHT_CHILD"),
+        ] {
+            let view = store
+                .create_edition_proposal(edition_request_for_profile(
+                    profile,
+                    identified_scope("db-a", "pdb-1"),
+                    child,
+                ))
+                .expect("each independent store admits its own request");
+            let scope = serde_json::to_value(view.coordination_scope).unwrap();
+            assert_eq!(scope["coordination_scope"], "service_state_store");
+            assert!(!scope.to_string().contains("global"));
+            assert_eq!(store.list_edition_proposals().unwrap().len(), 1);
+        }
+    }
+
+    #[test]
+    fn legacy_container_slot_is_migrated_to_explicit_local_only_identity() {
+        let store = ChangeProposalStore::open(store_root("pdb-legacy-identity")).expect("store");
+        let view = store
+            .create_edition_proposal(edition_request(identified_scope("db-a", "3"), "OLD_CHILD"))
+            .expect("request");
+        let mut legacy = store.edition_proposal(&view.proposal_id).unwrap();
+        legacy.schema_version = 1;
+        store.write_edition_proposal(&legacy).unwrap();
+        let canonical = store.edition_proposal(&view.proposal_id).unwrap();
+        assert_eq!(canonical.schema_version, 2);
+        assert_eq!(
+            canonical.coordination_scope,
+            PdbIdentityScope::LocalOnly {
+                observation: oraclemcp_db::PdbIdentityObservation::LegacyContainerIdentity,
+            }
+        );
+        assert_eq!(canonical.child_edition, legacy.child_edition);
+        assert_eq!(canonical.objects, legacy.objects);
+        let transitioned = store
+            .transition_edition_proposal(EditionProposalTransitionRequest {
+                proposal_id: view.proposal_id.clone(),
+                status: EditionProposalStatus::Reviewing,
+            })
+            .unwrap();
+        assert_eq!(
+            transitioned.coordination_scope,
+            canonical.coordination_scope
+        );
+        let id = StoreId::from_safe_segment(view.proposal_id).unwrap();
+        let bytes = fs::read(
+            store
+                .store
+                .path_for(EDITION_PROPOSAL_COLLECTION, &id, EDITION_PROPOSAL_EXTENSION)
+                .unwrap(),
+        )
+        .unwrap();
+        let persisted: EditionProposal = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(persisted.schema_version, 2);
+        assert_eq!(persisted.coordination_scope, canonical.coordination_scope);
     }
 
     #[test]

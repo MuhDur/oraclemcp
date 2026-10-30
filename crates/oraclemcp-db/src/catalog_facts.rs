@@ -97,13 +97,14 @@ pub struct ClosureDatabaseIdentity {
 /// Stable Oracle PDB identity usable as a service-state-store coordination key.
 ///
 /// `DBID` identifies the database and `CON_ID` identifies its current container
-/// within that database. Both are available to an ordinary PDB session without
-/// catalog-view grants.
+/// within that database. CON_UID comes from the exact current V$CONTAINERS row;
+/// an unreadable catalog gives local-only coordination rather than substituting
+/// the reusable container slot CON_ID.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PdbIdentity {
     /// Database DBID read from USERENV.
     pub dbid: String,
-    /// Container coordination identifier read from USERENV's `CON_ID`.
+    /// Actual V$CONTAINERS.CON_UID, never the container slot CON_ID.
     pub con_uid: String,
 }
 
@@ -113,6 +114,8 @@ pub struct PdbIdentity {
 pub enum PdbIdentityObservation {
     /// The closed session-identity query failed or returned an incomplete row.
     Unreadable,
+    /// An older persisted request recorded a container slot without a stable UID.
+    LegacyContainerIdentity,
 }
 
 /// Coordination scope available to one request.
@@ -125,7 +128,7 @@ pub enum PdbIdentityObservation {
 pub enum PdbIdentityScope {
     /// Stable identity permits coordination within this service state store.
     ServiceStateStore {
-        /// The DBID/CON_ID identity the store keys requests by.
+        /// The DBID/CON_UID identity the store keys requests by.
         identity: PdbIdentity,
     },
     /// Stable identity is unavailable; only local request observation is safe.
@@ -567,8 +570,8 @@ fn pdb_identity_scope_from_rows(rows: &[OracleRow]) -> PdbIdentityScope {
         };
     };
     let (Some(dbid), Some(con_uid)) = (
-        required_text(row, "DBID", "PDB identity").ok(),
-        required_text(row, "CON_ID", "PDB identity").ok(),
+        pdb_identity_number(row, "DBID"),
+        pdb_identity_number(row, "CON_UID"),
     ) else {
         return PdbIdentityScope::LocalOnly {
             observation: PdbIdentityObservation::Unreadable,
@@ -577,6 +580,18 @@ fn pdb_identity_scope_from_rows(rows: &[OracleRow]) -> PdbIdentityScope {
     PdbIdentityScope::ServiceStateStore {
         identity: PdbIdentity { dbid, con_uid },
     }
+}
+
+fn pdb_identity_number(row: &OracleRow, column: &str) -> Option<String> {
+    let value = required_text(row, column, "PDB identity").ok()?;
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(|value| value.to_string())
 }
 
 /// Compare stored facts with a new live extraction, mapping all incomplete reads to Unknown.
@@ -941,7 +956,7 @@ mod tests {
         assert!(matches!(mapped, Err(Revalidation::Unknown(_))));
     }
 
-    fn pdb_identity_row(dbid: Option<&str>, con_id: Option<&str>) -> OracleRow {
+    fn pdb_identity_row(dbid: Option<&str>, con_uid: Option<&str>) -> OracleRow {
         OracleRow {
             columns: vec![
                 (
@@ -949,15 +964,19 @@ mod tests {
                     crate::OracleCell::new("VARCHAR2", dbid.map(str::to_owned)),
                 ),
                 (
+                    "CON_UID".into(),
+                    crate::OracleCell::new("VARCHAR2", con_uid.map(str::to_owned)),
+                ),
+                (
                     "CON_ID".into(),
-                    crate::OracleCell::new("VARCHAR2", con_id.map(str::to_owned)),
+                    crate::OracleCell::new("VARCHAR2", Some("3".to_owned())),
                 ),
             ],
         }
     }
 
     #[test]
-    fn pdb_identity_scope_uses_dbid_and_con_id_not_container_name() {
+    fn pdb_identity_scope_uses_dbid_and_con_uid_not_container_slot_or_name() {
         assert_eq!(
             pdb_identity_scope_from_rows(&[pdb_identity_row(Some("424242"), Some("9001"))]),
             PdbIdentityScope::ServiceStateStore {
@@ -967,6 +986,83 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn pdb_identity_scope_does_not_substitute_a_reusable_container_slot() {
+        let row = OracleRow {
+            columns: vec![
+                (
+                    "DBID".into(),
+                    crate::OracleCell::new("VARCHAR2", Some("424242".into())),
+                ),
+                (
+                    "CON_ID".into(),
+                    crate::OracleCell::new("VARCHAR2", Some("3".into())),
+                ),
+            ],
+        };
+        assert!(matches!(
+            pdb_identity_scope_from_rows(&[row]),
+            PdbIdentityScope::LocalOnly {
+                observation: PdbIdentityObservation::Unreadable
+            }
+        ));
+        for invalid in ["0", "not-an-id", "-1", "18446744073709551616"] {
+            assert!(
+                matches!(
+                    pdb_identity_scope_from_rows(&[pdb_identity_row(
+                        Some("424242"),
+                        Some(invalid)
+                    )]),
+                    PdbIdentityScope::LocalOnly { .. }
+                ),
+                "{invalid}"
+            );
+        }
+    }
+
+    #[test]
+    fn live_pdb_identity_matches_uid_or_explicitly_reports_local_only() {
+        if std::env::var("ORACLEMCP_PDB_IDENTITY_LIVE").as_deref() != Ok("1") {
+            eprintln!("set ORACLEMCP_PDB_IDENTITY_LIVE=1 for the real lab identity check");
+            return;
+        }
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use crate::{AuthAdapter, OracleConnectOptions, RustOracleConnection};
+            let cx = Cx::current().expect("runtime Cx");
+            let dsn = std::env::var("ORACLEMCP_TEST_DSN").expect("lab DSN");
+            assert!(dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"));
+            let conn = RustOracleConnection::connect(&cx, OracleConnectOptions {
+                connect_string: dsn,
+                username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("lab user")),
+                password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").expect("lab password")),
+                auth_adapter: AuthAdapter::Password,
+                ..Default::default()
+            }).await.expect("real lab connection");
+            let observed = read_pdb_identity_scope(&cx, &conn).await;
+            if std::env::var("ORACLEMCP_PDB_IDENTITY_EXPECT_LOCAL").as_deref() == Ok("1") {
+                assert_eq!(observed, PdbIdentityScope::LocalOnly { observation: PdbIdentityObservation::Unreadable });
+            } else {
+                let reference = conn.query_rows(&cx,
+                    "SELECT SYS_CONTEXT('USERENV','DBID') AS expected_dbid, con_uid AS expected_uid, con_id AS container_slot FROM v$containers WHERE con_id=TO_NUMBER(SYS_CONTEXT('USERENV','CON_ID'))",
+                    &[]).await.expect("independent UID census");
+                assert_eq!(reference.len(), 1);
+                let expected_dbid = required_text(&reference[0], "EXPECTED_DBID", "live identity").unwrap();
+                let expected_uid = required_text(&reference[0], "EXPECTED_UID", "live identity").unwrap();
+                assert_ne!(expected_uid, required_text(&reference[0], "CONTAINER_SLOT", "live identity").unwrap(), "the fixture must distinguish UID from slot");
+                assert_eq!(observed, PdbIdentityScope::ServiceStateStore { identity: PdbIdentity { dbid: expected_dbid, con_uid: expected_uid } });
+            }
+            // An unavailable identity is an observation, never a refusal or a
+            // poisoned connection: the principal can still perform its read.
+            let rows = conn.query_rows(&cx, "SELECT 1 AS continued_read FROM dual", &[]).await.expect("ordinary read continues");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].parse_i64("CONTINUED_READ"), Some(1));
+            conn.close(&cx).await.expect("close lab connection");
+        });
     }
 
     #[test]
