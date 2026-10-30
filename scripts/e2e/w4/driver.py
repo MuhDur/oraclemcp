@@ -272,7 +272,9 @@ def verify_expect(expect, reply, golden_root=None, awr_context=None):
         require(structured.get("error_class") in expect["error_classes"],
                 "wrong typed refusal class")
     elif "json_subset" in expect:
-        require(payload.get("isError") is not True, "expected JSON but tool refused")
+        expected_error = "error_class" in expect["json_subset"]
+        require(payload.get("isError") is expected_error,
+                "expected typed JSON refusal" if expected_error else "expected JSON success")
         require(deep_subset(expect["json_subset"], structured), "JSON subset differs")
     elif "golden" in expect:
         require(golden_root is not None, "golden root missing")
@@ -408,7 +410,9 @@ def coverage_status(tools, cases):
                 or not any(set(case["requires"]) <= facts for facts in declared)):
             continue
         for call in [case, *case.get("steps", [])]:
-            if "tool" in call and not ({"error_class", "error_classes"} & call["expect"].keys()):
+            if ("tool" in call
+                    and not ({"error_class", "error_classes"} & call["expect"].keys())
+                    and "error_class" not in call["expect"].get("json_subset", {})):
                 positives.add(call["tool"])
     canonical = {name for name in tools if name.startswith("oracle_")}
     missing = sorted(canonical - positives)
@@ -813,6 +817,15 @@ def verify_expect_shape(expect):
     if "json_subset" in expect:
         require(isinstance(expect["json_subset"], dict) and expect["json_subset"],
                 "json_subset must be a nonempty object")
+        subset = expect["json_subset"]
+        if "error_class" in subset:
+            require(isinstance(subset["error_class"], str) and subset["error_class"],
+                    "JSON refusal needs an exact error class")
+            require("isError" not in subset or subset["isError"] is True,
+                    "JSON refusal cannot expect isError=false")
+        elif "isError" in subset:
+            require(subset["isError"] is False,
+                    "JSON refusal needs an exact error class")
     if "golden" in expect or "goldens" in expect:
         names = [expect["golden"]] if "golden" in expect else expect["goldens"]
         require(isinstance(names, list) and len(names) == (1 if "golden" in expect else 2),
@@ -3907,6 +3920,52 @@ def level_expiry_audit_selftest():
     print(compact({"selftest": "ttl_expiry_exact_signed_refusal_not_started", "verdict": "pass"}))
 
 
+def json_subset_refusal_selftest():
+    """Verifier regressions only; live runtime behavior is exercised separately."""
+    def rejected(label, operation):
+        try:
+            operation()
+        except DriverError:
+            return
+        raise DriverError(f"JSON refusal verifier accepted planted {label}")
+
+    cases = {case["case_id"]: case for case in load_cases()}
+    for case_id in ("w4_runtime_issue47_killed_session_dml_not_replayed",
+                    "w4_runtime_issue50_session_busy"):
+        case = cases[case_id]
+        expected = case["expect"]
+        structured = {"isError": True, **expected["json_subset"]}
+        reply = {"jsonrpc": "2.0", "id": 1, "result": {
+            "content": [], "isError": True, "structuredContent": structured}}
+        verify_expect_shape(expected)
+        verify_envelope(reply)
+        verify_expect(expected, reply)
+        rejected("success_instead_of_refusal", lambda: verify_expect(
+            expected, {**reply, "result": {**reply["result"], "isError": False}}))
+        rejected("refusal_instead_of_success", lambda: verify_expect(
+            {"json_subset": {"rows": [[1]]}},
+            {**reply, "result": {**reply["result"],
+                                 "structuredContent": {**structured, "rows": [[1]]}}}))
+        for key, value in expected["json_subset"].items():
+            wrong = {**structured, key: False if value is True else "wrong"}
+            rejected(f"wrong_{key}", lambda: verify_expect(
+                expected, {**reply, "result": {**reply["result"], "structuredContent": wrong}}))
+            missing = {name: item for name, item in structured.items() if name != key}
+            rejected(f"missing_{key}", lambda: verify_expect(
+                expected, {**reply, "result": {**reply["result"], "structuredContent": missing}}))
+        step_case = {"case_id": "w4_json_refusal_step", "requires": [],
+                     "expect": {"error_class": "INVALID_ARGUMENTS"},
+                     "steps": [{"tool": case["tool"], "expect": expected}]}
+        for refusal_case in (case, step_case):
+            require(coverage_status({case["tool"]: {}}, [refusal_case])["missing_positive"]
+                    == [case["tool"]], "JSON refusal counted as positive tool coverage")
+    for subset in ({"error_class": ""}, {"error_class": None},
+                   {"error_class": "SESSION_BUSY", "isError": False}, {"isError": True}):
+        rejected("invalid_refusal_expectation", lambda: verify_expect_shape({"json_subset": subset}))
+    print(compact({"selftest": "json_subset_exact_typed_refusal_and_no_positive_coverage",
+                   "verdict": "pass"}))
+
+
 def killed_dml_audit_selftest():
     """Unit audit transcripts, not a substitute for live killed-session proof."""
     case = next(case for case in load_cases()
@@ -4331,6 +4390,7 @@ def golden_path_selftest():
 
 
 def selftest():
+    json_subset_refusal_selftest()
     metadata_pool_config_selftest()
     golden_path_selftest()
     audit_report_timeline_selftest()
