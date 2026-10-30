@@ -2438,6 +2438,9 @@ fn live_abandoned_policy_logons_retain_capacity() {
             let conn = RustOracleConnection::connect(&cx, fixture.options())
                 .await
                 .unwrap();
+            let sid_sql = "SELECT SYS_CONTEXT('USERENV','SID') AS SID FROM dual";
+            let before = conn.query_rows(&cx, sid_sql, &[]).await.unwrap();
+            let pinned_sid = before[0].text("SID").expect("pinned SID").to_owned();
             fixture.sql(&format!(
                 "create or replace trigger {}.xr_slow_logon after logon on {}.schema begin sys.dbms_lock.sleep(12); end;\n/",
                 fixture.user, fixture.user
@@ -2499,10 +2502,50 @@ fn live_abandoned_policy_logons_retain_capacity() {
             );
             // This retirement bound is ONLY for the finite 12s logon fixture.
             fixture.baseline(&cx, 1).await;
+            fixture.sql(&format!("drop trigger {}.xr_slow_logon;", fixture.user));
+            // Transport closure starts the bounded retirement grace. A fresh
+            // probe must recover automatically when it ends, without replacing
+            // the pinned connection. The existing failure TTL still applies.
+            let recovery_started = Instant::now();
+            loop {
+                let recovered = oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn).await;
+                assert!(
+                    fixture.count() <= 2,
+                    "recovery retains the physical ceiling"
+                );
+                if recovered.visibility
+                    == oraclemcp_db::OraclePolicyCatalogVisibility::PolicyRowsVisible
+                {
+                    break;
+                }
+                assert!(
+                    recovery_started.elapsed() < Duration::from_secs(40),
+                    "observation did not recover after logon retirement: {recovered:?}"
+                );
+                asupersync::time::sleep(cx.now(), Duration::from_millis(1100)).await;
+            }
+            let source = conn
+                .policy_observation_pool()
+                .expect("shared observation pool");
+            assert_eq!(source.quarantined_connections(), 0);
+            assert_eq!(source.metrics().open, 1);
+            assert!(source.metrics().is_balanced());
+            let reused = oraclemcp_db::bounded_policy_catalog_probe(&cx, &conn).await;
+            assert_eq!(
+                reused.visibility,
+                oraclemcp_db::OraclePolicyCatalogVisibility::PolicyRowsVisible
+            );
+            assert_eq!(source.metrics().open, 1, "successful observers are reused");
+            let after = conn.query_rows(&cx, sid_sql, &[]).await.unwrap();
+            assert_eq!(
+                pinned_sid,
+                after[0].text("SID").expect("original pinned SID")
+            );
             conn.close(&cx).await.unwrap();
             fixture.baseline(&cx, 0).await;
             eprintln!(
-                "[live-xe] abandoned-logon lifecycle PASS physical_limit=2 concurrent_probes=4 unconfirmed_slot_not_replaced; finite fixture retirement only"
+                "[live-xe] abandoned-logon lifecycle PASS physical_limit=2 concurrent_probes=4 recovery_ms={} original_pinned_sid=true; finite fixture retirement only",
+                recovery_started.elapsed().as_millis()
             );
         });
     });

@@ -92,7 +92,7 @@ impl OfficialOracleConnection {
     /// and unsupported TLS overrides are refused here so a later selector can
     /// route them directly to driver-cx; none is silently dropped.
     pub async fn connect(cx: &Cx, options: OracleConnectOptions) -> Result<Self, DbError> {
-        Self::connect_for_backend_registry(cx, options)
+        Self::connect_for_backend_registry(cx, options, None)
             .await
             .map_err(ConnectFailure::into_error)
     }
@@ -107,6 +107,7 @@ impl OfficialOracleConnection {
     pub(crate) async fn connect_for_backend_registry(
         cx: &Cx,
         options: OracleConnectOptions,
+        logon_custody: Option<crate::pool::ObservationLogonCustody>,
     ) -> Result<Self, ConnectFailure> {
         db_checkpoint(cx, "official Oracle connect before actor startup")
             .map_err(ConnectFailure::RawAcquisition)?;
@@ -117,9 +118,12 @@ impl OfficialOracleConnection {
             .acquire(cx)
             .await
             .map_err(ConnectFailure::RawAcquisition)?;
+        let logon_owner = logon_custody
+            .as_ref()
+            .map(crate::pool::ObservationLogonCustody::hold);
         let actor = Arc::new(
             BlockingConnectionActor::spawn(
-                move || OfficialActorResource::with_connect_slot(connect_slot),
+                move || OfficialActorResource::with_connect_slot(connect_slot, logon_owner),
                 execute_actor_command,
             )
             .map_err(ConnectFailure::RawAcquisition)?,
@@ -302,14 +306,21 @@ struct OfficialActorResource {
     /// healthy session is returned; every failed/cancelled setup retains it
     /// until the actor and its native thread actually retire.
     connect_slot: Option<OfficialConnectSlot>,
+    // Dropped after the connection and cursor fields, so an abandoned logon
+    // cannot release pool custody while this native actor still owns its wire.
+    _logon_owner: Option<crate::pool::ObservationLogonOwner>,
 }
 
 impl OfficialActorResource {
-    fn with_connect_slot(connect_slot: OfficialConnectSlot) -> Self {
+    fn with_connect_slot(
+        connect_slot: OfficialConnectSlot,
+        logon_owner: Option<crate::pool::ObservationLogonOwner>,
+    ) -> Self {
         Self {
             connection: None,
             stream: None,
             connect_slot: Some(connect_slot),
+            _logon_owner: logon_owner,
         }
     }
 
@@ -1686,6 +1697,7 @@ mod tests {
     enum AcceptedSocketMode {
         Hold,
         Reject,
+        RejectFirstThenHold,
     }
 
     struct BlackholeListener {
@@ -1712,13 +1724,21 @@ mod tests {
                         match listener.accept() {
                             Ok((stream, _)) => {
                                 let (count, changed) = &*accepted_thread;
-                                *count
-                                    .lock()
-                                    .unwrap_or_else(std::sync::PoisonError::into_inner) += 1;
+                                let ordinal = {
+                                    let mut count = count
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                                    *count += 1;
+                                    *count
+                                };
                                 changed.notify_all();
                                 match mode {
                                     AcceptedSocketMode::Hold => held_streams.push(stream),
-                                    AcceptedSocketMode::Reject => {
+                                    AcceptedSocketMode::RejectFirstThenHold if ordinal > 1 => {
+                                        held_streams.push(stream)
+                                    }
+                                    AcceptedSocketMode::Reject
+                                    | AcceptedSocketMode::RejectFirstThenHold => {
                                         let _ = stream.shutdown(Shutdown::Both);
                                     }
                                 }
@@ -2043,8 +2063,24 @@ mod tests {
             .expect("bind real loopback TNS blackhole");
         let (result_tx, result_rx) = std::sync::mpsc::channel();
         let options = blackhole_options(&endpoint);
+        let custody = crate::pool::ObservationLogonCustody::new();
+        let worker_custody = custody.clone();
         thread::spawn(move || {
-            let _ = result_tx.send(run_official_connect(options, Duration::from_secs(2)));
+            let result = block_on_backend(async move {
+                let runtime_cx = Cx::current().expect("test runtime Cx");
+                let request_cx = Cx::for_testing_with_budget(
+                    Budget::new().with_timeout(runtime_cx.now(), Duration::from_secs(2)),
+                );
+                let _owner = worker_custody.hold();
+                OfficialOracleConnection::connect_for_backend_registry(
+                    &request_cx,
+                    options,
+                    Some(worker_custody.clone()),
+                )
+                .await
+                .map_err(ConnectFailure::into_error)
+            });
+            let _ = result_tx.send(result);
         });
         assert!(endpoint.wait_for_connections(1, Duration::from_secs(5)));
         let result = result_rx
@@ -2052,9 +2088,20 @@ mod tests {
             .expect("deadline returns before peer cleanup");
         assert_typed_connect_timeout(result);
         assert_eq!(OfficialConnectGuard::shared().available_for_test(), 1);
+        assert!(
+            !custody.transport_closed_for(Instant::now(), Duration::ZERO),
+            "caller timeout must not end custody of the still-blocked native actor"
+        );
         drop(endpoint);
         let start = Instant::now();
         assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
+        while !custody.transport_closed_for(Instant::now(), Duration::ZERO) {
+            assert!(
+                start.elapsed() < Duration::from_secs(10),
+                "retired actor ends wire custody"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
         let elapsed = start.elapsed();
         emit_blackhole_case(
             "official_connect_blackhole_slots_recover_after_peer_close",
@@ -2065,6 +2112,59 @@ mod tests {
             "both production slots reacquirable within 10000ms after peer close",
             "both production slots reacquirable",
         );
+    }
+
+    #[test]
+    fn router_abandoned_official_logon_keeps_custody_until_actor_retires() {
+        let _serial = blackhole_test_lock();
+        let endpoint = BlackholeListener::bind(AcceptedSocketMode::RejectFirstThenHold)
+            .expect("reject native acquisition and hold the real official alternate");
+        let options = blackhole_options(&endpoint);
+        let custody = crate::pool::ObservationLogonCustody::new();
+        let worker_custody = custody.clone();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let result = block_on_backend(async move {
+                let runtime_cx = Cx::current().expect("test runtime Cx");
+                let request_cx = Cx::for_testing_with_budget(
+                    Budget::new().with_timeout(runtime_cx.now(), Duration::from_secs(2)),
+                );
+                let _owner = worker_custody.hold();
+                crate::connection::connect_oracle_with_logon_custody(
+                    &request_cx,
+                    options,
+                    Some(worker_custody.clone()),
+                )
+                .await
+                .map(|_| ())
+            });
+            let _ = result_tx.send(result);
+        });
+        assert!(endpoint.wait_for_connections(2, Duration::from_secs(5)));
+        let result = result_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("bounded caller deadline");
+        assert!(
+            matches!(
+                result,
+                Err(DbError::Cancelled(_) | DbError::Quarantined { .. })
+            ),
+            "{result:?}"
+        );
+        assert!(
+            !custody.transport_closed_for(Instant::now(), Duration::ZERO),
+            "registry must preserve the official actor's custody owner"
+        );
+        drop(endpoint);
+        let started = Instant::now();
+        while !custody.transport_closed_for(Instant::now(), Duration::ZERO) {
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "closed actor must release custody"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(wait_for_shared_guard_slots(2, Duration::from_secs(10)));
     }
 
     #[test]
@@ -2125,7 +2225,7 @@ mod tests {
                 .await
                 .expect("official setup reserves its only connect slot")
         });
-        let mut resource = OfficialActorResource::with_connect_slot(slot);
+        let mut resource = OfficialActorResource::with_connect_slot(slot, None);
         assert_eq!(
             guard.available_for_test(),
             0,

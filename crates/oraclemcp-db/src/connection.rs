@@ -1797,7 +1797,9 @@ impl BackendConnectFailure {
 }
 
 #[cfg(feature = "oracledb")]
-struct ProductionBackendConnectionFactory;
+struct ProductionBackendConnectionFactory {
+    logon_custody: Option<crate::pool::ObservationLogonCustody>,
+}
 
 #[cfg(feature = "oracledb")]
 #[async_trait(?Send)]
@@ -1811,7 +1813,9 @@ impl BackendConnectionFactory for ProductionBackendConnectionFactory {
         match backend {
             OracleBackend::OfficialOracle => {
                 crate::oracledb_backend::OfficialOracleConnection::connect_for_backend_registry(
-                    cx, options,
+                    cx,
+                    options,
+                    self.logon_custody.clone(),
                 )
                 .await
                 .map(|connection| Box::new(connection) as Box<dyn OracleConnection>)
@@ -1960,14 +1964,27 @@ pub async fn connect_oracle(
     cx: &Cx,
     options: OracleConnectOptions,
 ) -> Result<Box<dyn OracleConnection>, DbError> {
+    connect_oracle_with_logon_custody(cx, options, None).await
+}
+
+pub(crate) async fn connect_oracle_with_logon_custody(
+    cx: &Cx,
+    options: OracleConnectOptions,
+    logon_custody: Option<crate::pool::ObservationLogonCustody>,
+) -> Result<Box<dyn OracleConnection>, DbError> {
     #[cfg(feature = "oracledb")]
     {
-        return connect_with_backend_registry(cx, options, &ProductionBackendConnectionFactory)
-            .await;
+        return connect_with_backend_registry(
+            cx,
+            options,
+            &ProductionBackendConnectionFactory { logon_custody },
+        )
+        .await;
     }
 
     #[cfg(not(feature = "oracledb"))]
     {
+        let _ = logon_custody;
         RustOracleConnection::connect(cx, options)
             .await
             .map(|connection| Box::new(connection) as Box<dyn OracleConnection>)

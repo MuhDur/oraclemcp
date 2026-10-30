@@ -24,7 +24,8 @@
 //! checkout accounting and retained quarantine capacity. `is_balanced` proves
 //! completed client checkout accounting, not zero Oracle server sessions.
 //! `is_bounded` includes abandoned observation slots whose server retirement is
-//! unconfirmed; these slots cannot be replaced until source shutdown.
+//! unconfirmed. Abandoned logons can recover after transport retirement and a
+//! bounded grace; established query quarantines retain their charge until shutdown.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future as StdFuture;
@@ -126,10 +127,23 @@ impl OracleConnectionManager {
 }
 
 impl OracleConnectionManager {
-    async fn connect(&self, cx: &Cx, observation: bool) -> Result<PooledConnection, DbError> {
+    async fn connect(
+        &self,
+        cx: &Cx,
+        observation: bool,
+        custody: Option<&ObservationLogonCustody>,
+    ) -> Result<PooledConnection, DbError> {
+        // This owner drops after the nested async connector and its socket.
+        // A synchronous alternate adds its own owner until its actor exits.
+        let _owner = custody.map(ObservationLogonCustody::hold);
         db_checkpoint(cx, "oracle_pool.connect.before")?;
         let conn: PooledConnection = if observation {
-            crate::connection::connect_oracle(cx, self.opts.clone()).await?
+            crate::connection::connect_oracle_with_logon_custody(
+                cx,
+                self.opts.clone(),
+                custody.cloned(),
+            )
+            .await?
         } else {
             Box::new(RustOracleConnection::connect(cx, self.opts.clone()).await?)
         };
@@ -290,6 +304,73 @@ struct QuarantinedObservation {
     // Keep admission charged even after sending a best-effort interrupt/EOF.
     // In-band cancellation need not stop a server-side PL/SQL sleep.
     _permit: Option<PoolCapacityPermit>,
+    logon_custody: Option<ObservationLogonCustody>,
+}
+
+// A closed logon transport does not prove immediate server retirement. The
+// operator-approved bounded retirement policy retains its charge for a further
+// 30 seconds. Established query quarantines have no logon ticket and retain
+// their existing source-close-only treatment.
+const OBSERVATION_LOGON_RETIRE_GRACE: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+pub(crate) struct ObservationLogonCustody {
+    state: Arc<Mutex<ObservationLogonState>>,
+}
+
+struct ObservationLogonState {
+    owners: usize,
+    closed_at: Option<std::time::Instant>,
+}
+
+pub(crate) struct ObservationLogonOwner {
+    custody: ObservationLogonCustody,
+}
+
+impl ObservationLogonCustody {
+    pub(crate) fn new() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(ObservationLogonState {
+                owners: 0,
+                closed_at: Some(std::time::Instant::now()),
+            })),
+        }
+    }
+
+    pub(crate) fn hold(&self) -> ObservationLogonOwner {
+        if let Ok(mut state) = self.state.lock() {
+            state.owners = state.owners.saturating_add(1);
+            state.closed_at = None;
+        }
+        ObservationLogonOwner {
+            custody: self.clone(),
+        }
+    }
+
+    pub(crate) fn transport_closed_for(&self, now: std::time::Instant, grace: Duration) -> bool {
+        self.state.lock().is_ok_and(|state| {
+            state.owners == 0
+                && state.closed_at.is_some_and(|closed_at| {
+                    now.checked_duration_since(closed_at)
+                        .is_some_and(|elapsed| elapsed >= grace)
+                })
+        })
+    }
+}
+
+impl Drop for ObservationLogonOwner {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.custody.state.lock() {
+            if let Some(remaining) = state.owners.checked_sub(1) {
+                state.owners = remaining;
+                if remaining == 0 {
+                    state.closed_at = Some(std::time::Instant::now());
+                }
+            } else {
+                state.closed_at = None;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -853,10 +934,11 @@ impl OraclePool {
         let deadline =
             checkout_deadline(asupersync::time::wall_now(), settings.acquire_timeout_secs)?;
         for _ in 0..settings.min_idle {
-            let acquisition = asupersync::time::timeout_at(deadline, manager.connect(cx, false))
-                .await
-                .map_err(|_| pool_acquire_timeout())
-                .and_then(|result| result);
+            let acquisition =
+                asupersync::time::timeout_at(deadline, manager.connect(cx, false, None))
+                    .await
+                    .map_err(|_| pool_acquire_timeout())
+                    .and_then(|result| result);
             match acquisition {
                 Ok(connection) => idle.push(connection),
                 Err(error) => {
@@ -905,8 +987,9 @@ impl OraclePool {
         }
     }
 
-    /// Slots charged for abandoned observations with unconfirmed server
-    /// retirement. They cannot be reused or replaced until source shutdown.
+    /// Slots charged for abandoned observations. Pending logons retain their
+    /// charge through transport retirement and its grace period; established
+    /// query quarantines retain it until source shutdown.
     #[must_use]
     pub fn quarantined_connections(&self) -> u32 {
         self.state
@@ -1256,8 +1339,10 @@ impl OraclePool {
                 "observation permit had no idle or openable slot".to_owned(),
             ));
         }
-        let pending = PendingOpenSlot::observation(Arc::clone(&self.state), permit);
-        match self.manager.connect(cx, true).await {
+        let custody = ObservationLogonCustody::new();
+        let pending =
+            PendingOpenSlot::observation(Arc::clone(&self.state), permit, custody.clone());
+        match self.manager.connect(cx, true, Some(&custody)).await {
             Ok(connection) => Ok((connection, pending.complete_observation())),
             Err(error @ (DbError::Cancelled(_) | DbError::CallTimeout { .. })) => {
                 // Cancellation can also be reported by the connector after
@@ -1288,18 +1373,54 @@ impl OraclePool {
     }
 
     fn check_quarantined_capacity(&self) -> Result<(), DbError> {
+        self.retire_abandoned_logons()?;
         let state = self
             .state
             .lock()
             .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
         if state.quarantined.len() >= self.settings.max_size as usize {
+            let pending_logon = state
+                .quarantined
+                .iter()
+                .any(|entry| entry.logon_custody.is_some());
             Err(DbError::Pool(
-                "observation capacity quarantined: server cancellation is unconfirmed; reconnect required"
-                    .to_owned(),
+                if pending_logon {
+                    "observation capacity quarantined: waiting for abandoned logon transport retirement"
+                } else {
+                    "observation capacity quarantined: server cancellation is unconfirmed; reconnect required"
+                }.to_owned(),
             ))
         } else {
             Ok(())
         }
+    }
+
+    fn retire_abandoned_logons(&self) -> Result<(), DbError> {
+        let mut retired = Vec::new();
+        {
+            let mut state = self
+                .state
+                .lock()
+                .map_err(|err| DbError::Internal(format!("pool lock poisoned: {err}")))?;
+            let now = std::time::Instant::now();
+            let mut index = 0;
+            while index < state.quarantined.len() {
+                let entry = &state.quarantined[index];
+                let releasable = entry.connection.is_none()
+                    && entry.logon_custody.as_ref().is_some_and(|custody| {
+                        custody.transport_closed_for(now, OBSERVATION_LOGON_RETIRE_GRACE)
+                    });
+                if releasable {
+                    retired.push(state.quarantined.swap_remove(index));
+                    state.open_count = state.open_count.saturating_sub(1);
+                } else {
+                    index += 1;
+                }
+            }
+        }
+        // Returning permits may wake callbacks which reenter the pool.
+        drop(retired);
+        Ok(())
     }
 
     async fn acquire_checkout_permit(
@@ -1372,7 +1493,7 @@ impl OraclePool {
             }
             if self.reserve_new_connection()? {
                 let pending_slot = PendingOpenSlot::new(Arc::clone(&self.state));
-                match self.manager.connect(cx, !validate_idle).await {
+                match self.manager.connect(cx, !validate_idle, None).await {
                     Ok(conn) => {
                         pending_slot.complete();
                         return Ok(conn);
@@ -1494,6 +1615,7 @@ struct PendingOpenSlot {
     state: Arc<Mutex<PoolState>>,
     active: bool,
     observation_permit: Option<PoolCapacityPermit>,
+    logon_custody: Option<ObservationLogonCustody>,
 }
 
 impl PendingOpenSlot {
@@ -1502,6 +1624,7 @@ impl PendingOpenSlot {
             state,
             active: true,
             observation_permit: None,
+            logon_custody: None,
         }
     }
 
@@ -1509,11 +1632,16 @@ impl PendingOpenSlot {
         self.active = false;
     }
 
-    fn observation(state: Arc<Mutex<PoolState>>, permit: PoolCapacityPermit) -> Self {
+    fn observation(
+        state: Arc<Mutex<PoolState>>,
+        permit: PoolCapacityPermit,
+        custody: ObservationLogonCustody,
+    ) -> Self {
         Self {
             state,
             active: true,
             observation_permit: Some(permit),
+            logon_custody: Some(custody),
         }
     }
 
@@ -1546,6 +1674,7 @@ impl Drop for PendingOpenSlot {
                     state.quarantined.push(QuarantinedObservation {
                         connection: None,
                         _permit: Some(permit),
+                        logon_custody: self.logon_custody.take(),
                     });
                 } else {
                     state.open_count = state.open_count.saturating_sub(1);
@@ -1683,6 +1812,7 @@ fn quarantine_observation(
     state.quarantined.push(QuarantinedObservation {
         connection: Some(connection),
         _permit: permit,
+        logon_custody: None,
     });
     Ok(())
 }
@@ -3252,6 +3382,94 @@ mod tests {
         let metrics = pool.metrics();
         assert_eq!(metrics.open, max, "open never exceeds the ceiling");
         assert!(metrics.is_bounded());
+    }
+
+    #[test]
+    fn abandoned_logon_returns_capacity_only_after_transport_owners_and_grace_end() {
+        let pool = OraclePool::for_test_at_open_count(
+            PoolSettings {
+                max_size: 1,
+                min_idle: 0,
+                ..Default::default()
+            },
+            0,
+        );
+        let permit = acquire_capacity(&pool.capacity);
+        assert!(pool.reserve_new_connection().unwrap());
+        let custody = ObservationLogonCustody::new();
+        let caller = custody.hold();
+        let native_actor = custody.hold();
+        drop(PendingOpenSlot::observation(
+            Arc::clone(&pool.state),
+            permit,
+            custody.clone(),
+        ));
+        drop(caller);
+        // Even an old timestamp cannot release a still-owned transport.
+        custody.state.lock().unwrap().closed_at =
+            Some(Instant::now() - OBSERVATION_LOGON_RETIRE_GRACE);
+        assert!(pool.check_quarantined_capacity().is_err());
+        assert_eq!(pool.metrics().open, 1);
+        drop(native_actor);
+        assert!(
+            pool.check_quarantined_capacity().is_err(),
+            "transport closure starts, not skips, the grace"
+        );
+        let mut waiting = Box::pin(pool.capacity.acquire());
+        let mut task_cx = Context::from_waker(Waker::noop());
+        assert!(waiting.as_mut().poll(&mut task_cx).is_pending());
+        custody.state.lock().unwrap().closed_at =
+            Some(Instant::now() - OBSERVATION_LOGON_RETIRE_GRACE);
+        pool.check_quarantined_capacity()
+            .expect("bounded retirement releases quarantine");
+        assert_eq!(pool.quarantined_connections(), 0);
+        assert_eq!(pool.metrics().open, 0);
+        assert!(matches!(
+            waiting.as_mut().poll(&mut task_cx),
+            Poll::Ready(Ok(_))
+        ));
+        assert!(pool.metrics().is_balanced());
+    }
+
+    #[test]
+    fn poisoned_logon_custody_never_reports_transport_closure() {
+        let custody = ObservationLogonCustody::new();
+        let poison = custody.clone();
+        let _ = std::panic::catch_unwind(move || {
+            let _guard = poison.state.lock().unwrap();
+            panic!("poison transport custody");
+        });
+        assert!(!custody.transport_closed_for(
+            Instant::now() + OBSERVATION_LOGON_RETIRE_GRACE,
+            Duration::ZERO
+        ));
+    }
+
+    #[test]
+    fn observation_without_a_logon_retirement_ticket_stays_quarantined() {
+        let pool = OraclePool::for_test_at_open_count(
+            PoolSettings {
+                max_size: 1,
+                min_idle: 0,
+                ..Default::default()
+            },
+            1,
+        );
+        pool.state
+            .lock()
+            .unwrap()
+            .quarantined
+            .push(QuarantinedObservation {
+                connection: None,
+                _permit: None,
+                logon_custody: None,
+            });
+        let error = pool
+            .check_quarantined_capacity()
+            .expect_err("no transport proof, no release");
+        assert!(error.to_string().contains("reconnect required"));
+        assert_eq!(pool.metrics().open, 1);
+        assert_eq!(pool.quarantined_connections(), 1);
     }
 
     #[test]
