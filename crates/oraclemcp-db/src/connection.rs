@@ -5601,6 +5601,67 @@ mod driver {
 
         #[cfg(feature = "live-xe")]
         #[test]
+        #[ignore = "requires explicit version-matrix lab credentials"]
+        fn live_read_only_explain_behavior() {
+            use crate::OracleConnection;
+            let opts = live_opts_from_env().expect("explicit matrix credentials required");
+            let reactor = asupersync::runtime::reactor::create_reactor().unwrap();
+            let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+                .with_reactor(reactor)
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                let cx = Cx::current().unwrap();
+                let conn = super::super::RustOracleConnection::connect(&cx, opts).await.unwrap();
+                let version = conn.describe(&cx).await.unwrap().server_version;
+                let verified = crate::resolve_plan_table(&cx, &conn, None).await.unwrap();
+                assert_eq!((verified.owner(), verified.name()), ("SYS", "PLAN_TABLE$"));
+                let id = crate::PlanStatementId::generate().unwrap();
+                let table = format!("OMCP_I166_{}", &id.as_str()[5..17]);
+                conn.execute(&cx, &format!("CREATE TABLE {table} (ID NUMBER)"), &[]).await.unwrap();
+                let outcome = async {
+                    conn.execute(&cx, &format!("INSERT INTO {table} VALUES (1)"), &[]).await?;
+                    conn.commit(&cx).await?;
+                    conn.execute(&cx, "SET TRANSACTION READ ONLY", &[]).await?;
+                    let explain_sql = format!("EXPLAIN PLAN SET STATEMENT_ID='{}' INTO SYS.PLAN_TABLE$ FOR SELECT ID FROM {table}", id.as_str());
+                    let raw = {
+                        let mut inner = conn.lock_inner(&cx).await?;
+                        let raw = inner.execute_raw(&cx, &explain_sql, 0, &[],
+                            ExecuteOptions::default().with_cache_statement(false), Some(30_000)).await;
+                        if let Ok(result) = &raw { inner.close_cursor(result.cursor_id); }
+                        raw
+                    };
+                    let codes: Vec<i32> = raw.as_ref().err().map(|error| {
+                        regex::Regex::new(r"ORA-(\d{5})").unwrap().captures_iter(&error.to_string())
+                            .map(|capture| capture[1].parse().unwrap()).collect()
+                    }).unwrap_or_default();
+                    if raw.is_err() && !codes.contains(&1456) {
+                        return Err(DbError::Internal(format!("EXPLAIN failed for unrelated Oracle codes: {codes:?}")));
+                    }
+                    let refused = conn.execute(&cx, &format!("UPDATE {table} SET ID=2"), &[]).await
+                        .err().ok_or_else(|| DbError::Internal("EXPLAIN cleared the actual Oracle READ ONLY transaction".to_owned()))?;
+                    if parse_ora_code(&refused.to_string()) != Some(1456) {
+                        return Err(DbError::Internal("READ ONLY write probe failed for an unrelated reason".to_owned()));
+                    }
+                    Ok::<_, DbError>((raw.is_ok(), codes))
+                }.await;
+                conn.rollback(&cx).await.unwrap();
+                let remaining = conn.query_rows(&cx,
+                    "SELECT COUNT(*) AS N FROM SYS.PLAN_TABLE$ WHERE STATEMENT_ID=:1",
+                    &[OracleBind::from(id.as_str())]).await.unwrap();
+                let cleaned = remaining[0].parse_i64("N") == Some(0);
+                conn.execute(&cx, &format!("DROP TABLE {table} PURGE"), &[]).await.unwrap();
+                conn.close(&cx).await.unwrap();
+                assert!(cleaned, "generated statement id retained plan rows after rollback");
+                let (allowed, codes) = outcome.unwrap();
+                println!("{}", json!({"probe":"impact_explain_read_only", "lane":std::env::var("ORACLE_MATRIX_ACTIVE_LANE").ok(),
+                    "server_version":version, "explain_succeeded":allowed, "ora_codes":codes,
+                    "read_only_preserved":true, "plan_rows_after_rollback":0}));
+            });
+        }
+
+        #[cfg(feature = "live-xe")]
+        #[test]
         fn live_statement_cache_reuses_select_and_closes_uncached_commands() {
             use crate::OracleConnection;
             let Some(mut opts) = live_opts_from_env() else {

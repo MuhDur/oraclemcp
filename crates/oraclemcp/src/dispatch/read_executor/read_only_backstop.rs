@@ -107,7 +107,6 @@ impl ReadOnlyBackstop {
     }
 
     /// Whether the read-only transaction is currently believed to be in force.
-    #[cfg(test)]
     pub(crate) fn is_armed(&self) -> bool {
         self.armed.get()
     }

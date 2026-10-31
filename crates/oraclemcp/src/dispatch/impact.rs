@@ -354,7 +354,6 @@ pub(super) async fn compute_cost_impact(
     cx: &Cx,
     conn: &dyn OracleConnection,
     read_only_backstop: &super::ReadOnlyBackstop,
-    checkpoints: &super::CheckpointWorkspace,
     quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
     sql: &str,
     relations: &[ResolvedObject],
@@ -367,7 +366,7 @@ pub(super) async fn compute_cost_impact(
     // The preview carries an explicit unavailable cost at READ_ONLY. Do not
     // probe catalogs or issue SAVEPOINT/ROLLBACK against the still-armed
     // database-side transaction backstop.
-    if level == OperatingLevel::ReadOnly {
+    if level == OperatingLevel::ReadOnly || read_only_backstop.is_armed() {
         return Ok(unavailable(UnavailableReason::ReadOnlyTxn));
     }
     if relations.is_empty()
@@ -408,21 +407,6 @@ pub(super) async fn compute_cost_impact(
     let savepoint_name = impact_savepoint_name(&statement_id);
     let savepoint_sql = format!("SAVEPOINT {savepoint_name}");
     let rollback_sql = format!("ROLLBACK TO {savepoint_name}");
-
-    // The session can have been elevated after a read request armed Oracle's
-    // transaction-level backstop. Once this preview is admitted at
-    // READ_WRITE, end that old read-only transaction before the diagnostic
-    // write. The READ_ONLY branch above returns without touching it.
-    match read_only_backstop.clear_before_write(cx, conn).await {
-        Ok(true) => checkpoints.clear(),
-        Ok(false) => {}
-        Err(error) => {
-            let message = format!(
-                "could not end the armed read-only transaction before impact EXPLAIN; the estimate was not run and the session was quarantined: {error}"
-            );
-            return Err(quarantined_impact_error(quarantine, message));
-        }
-    }
 
     if let Err(error) = conn.execute(cx, &savepoint_sql, &[]).await {
         return if super::is_read_only_transaction_error(&error) {
@@ -631,7 +615,6 @@ pub(super) async fn enrich_preview_impact(
     cx: &Cx,
     conn: &dyn OracleConnection,
     read_only_backstop: &super::ReadOnlyBackstop,
-    checkpoints: &super::CheckpointWorkspace,
     quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
     catalog_cache: &OracleCatalogResolverCache,
     sql: &str,
@@ -695,7 +678,6 @@ pub(super) async fn enrich_preview_impact(
                     cx,
                     conn,
                     read_only_backstop,
-                    checkpoints,
                     quarantine,
                     sql,
                     &relations,
@@ -1042,7 +1024,6 @@ mod tests {
         let conn = CountingConnection::default();
         let cache = OracleCatalogResolverCache::new();
         let backstop = super::super::ReadOnlyBackstop::new();
-        let checkpoints = super::super::CheckpointWorkspace::new();
         let quarantine = Mutex::new(None);
         let mut response = json!({
             "execute_confirmation": null,
@@ -1051,7 +1032,6 @@ mod tests {
         let conn_ref = &conn;
         let cache_ref = &cache;
         let backstop_ref = &backstop;
-        let checkpoints_ref = &checkpoints;
         let quarantine_ref = &quarantine;
         let response_ref = &mut response;
         run_with_cx(|cx| async move {
@@ -1060,7 +1040,6 @@ mod tests {
                 &cx,
                 conn_ref,
                 backstop_ref,
-                checkpoints_ref,
                 quarantine_ref,
                 cache_ref,
                 "UPDATE ACCOUNTS SET ACTIVE = 0 WHERE ID = 1",
@@ -1100,7 +1079,6 @@ mod tests {
         let conn = CountingConnection::default();
         let cache = OracleCatalogResolverCache::new();
         let mut backstop = super::super::ReadOnlyBackstop::new();
-        let checkpoints = super::super::CheckpointWorkspace::new();
         let quarantine = Mutex::new(None);
         let conn_ref = &conn;
         let backstop_ref = &mut backstop;
@@ -1122,7 +1100,6 @@ mod tests {
         let conn_ref = &conn;
         let cache_ref = &cache;
         let backstop_ref = &mut backstop;
-        let checkpoints_ref = &checkpoints;
         let quarantine_ref = &quarantine;
         let response_ref = &mut response;
         run_with_cx(|cx| async move {
@@ -1131,7 +1108,6 @@ mod tests {
                 &cx,
                 conn_ref,
                 backstop_ref,
-                checkpoints_ref,
                 quarantine_ref,
                 cache_ref,
                 "UPDATE ACCOUNTS SET ACTIVE = 0 WHERE ID = 1",
@@ -1168,7 +1144,6 @@ mod tests {
     fn impact_cost_read_only_unavailable_backstop_untouched() {
         let conn = CountingConnection::default();
         let mut backstop = super::super::ReadOnlyBackstop::new();
-        let checkpoints = super::super::CheckpointWorkspace::new();
         let quarantine = Mutex::new(None);
         let conn_ref = &conn;
         let backstop_ref = &mut backstop;
@@ -1185,14 +1160,12 @@ mod tests {
         conn.calls.lock().expect("calls").clear();
         let conn_ref = &conn;
         let backstop_ref = &backstop;
-        let checkpoints_ref = &checkpoints;
         let quarantine_ref = &quarantine;
         let status = run_with_cx(|cx| async move {
             compute_cost_impact(
                 &cx,
                 conn_ref,
                 backstop_ref,
-                checkpoints_ref,
                 quarantine_ref,
                 "UPDATE accounts SET active = 0 WHERE id = 1",
                 &[],
@@ -1306,8 +1279,7 @@ mod tests {
                     .map_err(|error| format!("{name}: fixture commit failed: {error}"))?;
 
                 let cache = OracleCatalogResolverCache::new();
-                let backstop = super::super::super::ReadOnlyBackstop::new();
-                let checkpoints = super::super::super::CheckpointWorkspace::new();
+                let mut backstop = super::super::super::ReadOnlyBackstop::new();
                 let quarantine = std::sync::Mutex::new(None);
                 let mut response = json!({
                     "execute_confirmation": {},
@@ -1319,7 +1291,6 @@ mod tests {
                     &cx,
                     &conn,
                     &backstop,
-                    &checkpoints,
                     &quarantine,
                     &cache,
                     &format!("UPDATE {qualified} SET ID = ID WHERE ID = 1"),
@@ -1369,9 +1340,41 @@ mod tests {
                 if count != Some(1) {
                     return Err(format!("{name}: preview changed the DML target: {count:?}"));
                 }
+                let mut limited = json!({"execute_confirmation": {}, "gate_decision": "allow"});
+                enrich_preview_impact(&mut limited, &cx, &conn, &backstop,
+                    &quarantine, &cache, &format!("UPDATE {qualified} SET ID=ID WHERE ID=1"),
+                    Some(OperatingLevel::ReadWrite), true, false, false, false,
+                    OperatingLevel::ReadWrite, None, Some(0), false)
+                    .await.map_err(|error| format!("{name}: zero-budget preview: {error}"))?;
+                let limited_value = &limited["impact"]["cost"]["value"];
+                let cost = limited_value["total_cost"].as_u64()
+                    .ok_or_else(|| format!("{name}: zero-budget cost missing"))?;
+                if limited_value["max_query_cost"] != json!(0)
+                    || limited_value["within_max_query_cost"] != json!(cost == 0) {
+                    return Err(format!("{name}: cost was not compared with zero budget: {limited_value}"));
+                }
+                // Elevation does not authorize a preview to end an existing
+                // Oracle READ ONLY transaction merely to obtain an estimate.
+                backstop.ensure_armed(&cx, &conn,
+                    &oraclemcp_guard::SessionLevelState::new(OperatingLevel::ReadOnly, false))
+                    .await.map_err(|error| format!("{name}: arm backstop: {}", error.message))?;
+                let mut armed = json!({"execute_confirmation": {}, "gate_decision": "allow"});
+                enrich_preview_impact(&mut armed, &cx, &conn, &backstop,
+                    &quarantine, &cache, &format!("UPDATE {qualified} SET ID = ID WHERE ID = 1"),
+                    Some(OperatingLevel::ReadWrite), true, false, false, false,
+                    OperatingLevel::ReadWrite, None, Some(u64::MAX), false)
+                    .await.map_err(|error| format!("{name}: armed preview: {error}"))?;
+                if armed.pointer("/impact/cost/reason").and_then(Value::as_str) != Some("read_only_txn")
+                    || !backstop.is_armed() {
+                    return Err(format!("{name}: elevated preview disarmed backstop or wrote PLAN_TABLE: {} armed={}",
+                        armed["impact"]["cost"], backstop.is_armed()));
+                }
                 Ok::<(), String>(())
             }
             .await;
+            conn.rollback(&cx)
+                .await
+                .map_err(|error| format!("{name}: fixture rollback: {error}"))?;
             let cleanup = conn
                 .execute(&cx, &format!("DROP TABLE {qualified} PURGE"), &[])
                 .await
@@ -1419,6 +1422,303 @@ mod tests {
                 )),
             }
         }
+
+        async fn live_preview_cost(
+            cx: &Cx,
+            conn: &dyn OracleConnection,
+            sql: &str,
+        ) -> Result<Value, DbError> {
+            let decision = super::super::super::DEFAULT_CLASSIFIER.classify(sql);
+            let mut session =
+                oraclemcp_guard::SessionLevelState::new(OperatingLevel::ReadWrite, false);
+            session
+                .set_current_level(OperatingLevel::ReadWrite)
+                .unwrap();
+            let (gate, _, _) = super::super::super::gate_decision_json(&decision.gate(&session));
+            assert_eq!(
+                gate,
+                json!("allow"),
+                "fixture SQL must be admitted before impact probes"
+            );
+            let mut response = json!({"execute_confirmation": {}, "gate_decision": gate});
+            enrich_preview_impact(
+                &mut response,
+                cx,
+                conn,
+                &super::super::super::ReadOnlyBackstop::new(),
+                &std::sync::Mutex::new(None),
+                &OracleCatalogResolverCache::new(),
+                sql,
+                decision.required_level,
+                true,
+                false,
+                false,
+                false,
+                OperatingLevel::ReadWrite,
+                None,
+                Some(u64::MAX),
+                false,
+            )
+            .await?;
+            Ok(response["impact"]["cost"].clone())
+        }
+
+        async fn live_count(
+            cx: &Cx,
+            conn: &dyn OracleConnection,
+            table: &str,
+        ) -> Result<i64, DbError> {
+            let rows = conn
+                .query_rows(cx, &format!("SELECT COUNT(*) AS N FROM {table}"), &[])
+                .await?;
+            rows.first()
+                .and_then(|row| row.parse_i64("N"))
+                .ok_or_else(|| DbError::Internal("live canary count missing".to_owned()))
+        }
+
+        async fn assert_live_impact_safety(lane: &str) -> Result<(), DbError> {
+            let schema = std::env::var(format!("ORACLE_MATRIX_{lane}_SCHEMA"))
+                .expect("run-owned fixture schema required; outer fixture owns teardown");
+            assert!(is_plan_table_identifier(&schema));
+            let cx = Cx::current().unwrap();
+            let conn = RustOracleConnection::connect(&cx, options(lane)).await?;
+            conn.execute(
+                &cx,
+                &format!("ALTER SESSION SET CURRENT_SCHEMA={schema}"),
+                &[],
+            )
+            .await?;
+            let id = PlanStatementId::generate()?;
+            let suffix = &id.as_str()[5..13];
+            let a = format!("{schema}.T16A_{suffix}");
+            let b = format!("{schema}.T16B_{suffix}");
+            let canary = format!("{schema}.C16_{suffix}");
+            for table in [&a, &b, &canary] {
+                conn.execute(&cx, &format!("CREATE TABLE {table} (ID NUMBER)"), &[])
+                    .await?;
+            }
+            conn.execute(&cx, &format!("INSERT INTO {a} VALUES (1)"), &[])
+                .await?;
+            conn.execute(&cx, &format!("INSERT INTO {b} VALUES (2)"), &[])
+                .await?;
+            conn.commit(&cx).await?;
+            let sql_a = format!("UPDATE {a} SET ID=ID WHERE ID=1");
+            let sql_b = format!("UPDATE {b} SET ID=ID WHERE ID=2");
+
+            // Copy the real plan-column types, including LONG, rather than an
+            // ID-only fake that would reject EXPLAIN before its trigger fires.
+            let columns = conn.query_rows(&cx, "SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH FROM SYS.ALL_TAB_COLUMNS WHERE OWNER='SYS' AND TABLE_NAME='PLAN_TABLE$' ORDER BY COLUMN_ID", &[]).await?;
+            assert!(!columns.is_empty());
+            let definitions: Vec<String> = columns
+                .iter()
+                .map(|row| {
+                    let name = row.text("COLUMN_NAME").unwrap();
+                    assert!(is_plan_table_identifier(name));
+                    let kind = match row.text("DATA_TYPE").unwrap() {
+                        "VARCHAR2" => {
+                            format!("VARCHAR2({} BYTE)", row.parse_i64("DATA_LENGTH").unwrap())
+                        }
+                        "NUMBER" | "DATE" | "LONG" | "CLOB" => {
+                            row.text("DATA_TYPE").unwrap().to_owned()
+                        }
+                        other => panic!("unsupported real PLAN_TABLE fixture column type {other}"),
+                    };
+                    format!("\"{name}\" {kind}")
+                })
+                .collect();
+            conn.execute(
+                &cx,
+                &format!(
+                    "CREATE TABLE {schema}.PLAN_TABLE ({})",
+                    definitions.join(",")
+                ),
+                &[],
+            )
+            .await?;
+            conn.execute(&cx, &format!("CREATE OR REPLACE TRIGGER {schema}.TR16_{suffix} BEFORE INSERT ON {schema}.PLAN_TABLE FOR EACH ROW DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {canary} VALUES (1); COMMIT; END;"), &[]).await?;
+            conn.execute(
+                &cx,
+                &format!("INSERT INTO {schema}.PLAN_TABLE (STATEMENT_ID) VALUES ('CONTROL')"),
+                &[],
+            )
+            .await?;
+            conn.rollback(&cx).await?;
+            assert_eq!(
+                live_count(&cx, &conn, &canary).await?,
+                1,
+                "autonomous trigger positive control"
+            );
+            conn.execute(&cx, &format!("DELETE FROM {canary}"), &[])
+                .await?;
+            conn.commit(&cx).await?;
+            assert_eq!(
+                live_preview_cost(&cx, &conn, &sql_a).await?,
+                json!({"status":"unavailable","reason":"plan_table_unverified"})
+            );
+            assert_eq!(
+                live_count(&cx, &conn, &canary).await?,
+                0,
+                "preview fired local PLAN_TABLE trigger"
+            );
+            conn.execute(&cx, &format!("DROP TABLE {schema}.PLAN_TABLE PURGE"), &[])
+                .await?;
+            eprintln!(
+                "{lane}: impact_cost_live_local_plan_table_autonomous_trigger_never_fires PASS"
+            );
+
+            conn.execute(
+                &cx,
+                &format!("CREATE SYNONYM {schema}.PLAN_TABLE FOR {a}"),
+                &[],
+            )
+            .await?;
+            assert_eq!(
+                live_preview_cost(&cx, &conn, &sql_a).await?,
+                json!({"status":"unavailable","reason":"plan_table_unverified"})
+            );
+            conn.execute(&cx, &format!("DROP SYNONYM {schema}.PLAN_TABLE"), &[])
+                .await?;
+            eprintln!("{lane}: impact_cost_live_private_synonym_plan_table_refused PASS");
+
+            let table = resolve_plan_table(&cx, &conn, None)
+                .await
+                .expect("verified standard plan table");
+            let cache = OracleCatalogResolverCache::new();
+            for sql in [&sql_a, &sql_b] {
+                let relations = resolve_dml_relations(&cx, &conn, &cache, sql)
+                    .await
+                    .unwrap();
+                assert!(
+                    prove_hard_parse_effect_closure(&cx, &conn, sql, &relations)
+                        .await
+                        .is_proven()
+                );
+            }
+            let id_a = PlanStatementId::generate()?;
+            let id_b = PlanStatementId::generate()?;
+            conn.execute(&cx, "SAVEPOINT I166_INTERLEAVED", &[]).await?;
+            explain_plan(&cx, &conn, &sql_a, &table, &id_a, false).await?;
+            explain_plan(&cx, &conn, &sql_b, &table, &id_b, false).await?;
+            // A is read again AFTER B was inserted on the same physical session.
+            // A MAX(plan_id) implementation now returns the wrong object.
+            for (id, own, other) in [
+                (&id_a, format!("T16A_{suffix}"), format!("T16B_{suffix}")),
+                (&id_b, format!("T16B_{suffix}"), format!("T16A_{suffix}")),
+            ] {
+                let plan = plan_cost_estimate(&cx, &conn, &table, id).await?.unwrap();
+                assert!(
+                    plan.rows
+                        .iter()
+                        .any(|row| row.object_name.as_deref() == Some(&own))
+                );
+                assert!(
+                    !plan
+                        .rows
+                        .iter()
+                        .any(|row| row.object_name.as_deref() == Some(&other))
+                );
+            }
+            conn.execute(&cx, "ROLLBACK TO I166_INTERLEAVED", &[])
+                .await?;
+            for id in [&id_a, &id_b] {
+                assert!(plan_cost_estimate(&cx, &conn, &table, id).await?.is_none());
+            }
+            eprintln!("{lane}: impact_cost_live_interleaved_statement_ids_isolated PASS");
+
+            conn.execute(&cx, &format!("CREATE OR REPLACE FUNCTION {schema}.VP16_{suffix}(s VARCHAR2,o VARCHAR2) RETURN VARCHAR2 AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {canary} VALUES (1); COMMIT; RETURN '1=1'; END;"), &[]).await?;
+            conn.execute(&cx, &format!("BEGIN DBMS_RLS.ADD_POLICY(object_schema=>'{schema}',object_name=>'T16A_{suffix}',policy_name=>'VP16_{suffix}',function_schema=>'{schema}',policy_function=>'VP16_{suffix}',statement_types=>'SELECT,UPDATE'); END;"), &[]).await?;
+            conn.execute(&cx, &format!("DELETE FROM {canary}"), &[])
+                .await?;
+            conn.commit(&cx).await?;
+            assert_eq!(
+                live_preview_cost(&cx, &conn, &sql_a).await?,
+                json!({"status":"unavailable","reason":"vpd"})
+            );
+            assert_eq!(
+                live_count(&cx, &conn, &canary).await?,
+                0,
+                "preview invoked VPD policy code"
+            );
+            conn.execute(
+                &cx,
+                &format!(
+                    "DECLARE p VARCHAR2(4000); BEGIN p := {schema}.VP16_{suffix}(NULL,NULL); END;"
+                ),
+                &[],
+            )
+            .await?;
+            assert_eq!(
+                live_count(&cx, &conn, &canary).await?,
+                1,
+                "VPD callback positive control did not fire"
+            );
+            conn.execute(
+                &cx,
+                &format!(
+                    "BEGIN DBMS_RLS.DROP_POLICY('{schema}','T16A_{suffix}','VP16_{suffix}'); END;"
+                ),
+                &[],
+            )
+            .await?;
+            eprintln!("{lane}: impact_cost_live_vpd_unavailable PASS");
+
+            // Reuse the live W4 optimizer callback fixture, including its real
+            // compilation check, rather than manufacturing catalog rows.
+            let cases: Value = serde_json::from_str(include_str!(
+                "../../../../scripts/e2e/w4/cases/explain-plan.json"
+            ))
+            .unwrap();
+            let case = cases
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|case| case["case_id"] == "w4_explain_plan_odci_canary_not_invoked")
+                .unwrap();
+            for step in case["setup"].as_array().unwrap() {
+                let sql = step["sql"].as_str().unwrap();
+                if sql.starts_with("GRANT ") {
+                    continue;
+                }
+                let sql = sql
+                    .replace("${owner}", &schema)
+                    .replace("${run_id}", suffix);
+                conn.execute(&cx, &sql, &[]).await?;
+            }
+            let odci_canary = format!("{schema}.T_ODCI_CANARY_{suffix}");
+            let odci_sql = format!("UPDATE {a} SET ID=ID WHERE {schema}.FN_ODCI_{suffix}(ID)=1");
+            assert_eq!(
+                live_preview_cost(&cx, &conn, &odci_sql).await?,
+                json!({"status":"unavailable","reason":"hard_parse_callbacks"})
+            );
+            assert_eq!(
+                live_count(&cx, &conn, &odci_canary).await?,
+                0,
+                "preview invoked ODCIStatsSelectivity"
+            );
+            conn.execute(&cx, &format!("DECLARE s NUMBER; r NUMBER; BEGIN r := {schema}.TY_ODCI_{suffix}.ODCIStatsSelectivity(NULL,s,NULL,NULL,NULL,1,NULL); END;"), &[]).await?;
+            assert_eq!(
+                live_count(&cx, &conn, &odci_canary).await?,
+                1,
+                "ODCI callback positive control did not fire"
+            );
+            eprintln!("{lane}: impact_cost_live_odci_canary_never_invoked PASS");
+            conn.rollback(&cx).await?;
+            conn.close(&cx).await?;
+            Ok(())
+        }
+
+        macro_rules! live_safety_test {
+            ($test:ident, $lane:literal) => {
+                #[test]
+                #[ignore = "requires a run-owned fixture schema and live matrix credentials"]
+                fn $test() {
+                    run_with_cx(|_| async { assert_live_impact_safety($lane).await }).unwrap();
+                }
+            };
+        }
+        live_safety_test!(impact_cost_live_safety_free23, "FREE23");
+        live_safety_test!(impact_cost_live_safety_xe21, "XE21");
+        live_safety_test!(impact_cost_live_safety_xe18, "XE18");
 
         macro_rules! live_lane_test {
         ($test:ident, $lane:literal) => {

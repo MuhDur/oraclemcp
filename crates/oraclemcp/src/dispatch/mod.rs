@@ -13135,7 +13135,6 @@ impl OracleDispatcher {
                     cx,
                     state.conn.as_ref(),
                     &state.read_only_backstop,
-                    &state.checkpoints,
                     &self.quarantine,
                     &state.catalog_cache,
                     &sql,

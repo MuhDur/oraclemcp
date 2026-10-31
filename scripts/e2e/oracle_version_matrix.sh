@@ -67,6 +67,7 @@ export E2E_SCENARIO E2E_LANE E2E_PROFILE E2E_LEVEL
 
 selected_lanes=()
 expect_lane_arg=0
+impact_explain_only=0
 for arg in "$@"; do
   if [ "$expect_lane_arg" = "1" ]; then
     selected_lanes+=("$arg")
@@ -75,6 +76,10 @@ for arg in "$@"; do
   fi
   if [ "$arg" = "--lane" ]; then
     expect_lane_arg=1
+    continue
+  fi
+  if [ "$arg" = "--impact-explain-only" ]; then
+    impact_explain_only=1
     continue
   fi
   set +e
@@ -86,6 +91,7 @@ for arg in "$@"; do
     3)
       echo "Run the Oracle version-matrix operating-level ladder e2e (XE 18 / XE 21 / FREE 23ai)."
       echo "Options: --lane <xe18|xe21|free23> (repeatable; default all three)"
+      echo "         --impact-explain-only (record raw EXPLAIN behavior while Oracle remains READ ONLY)"
       e2e_usage_common
       exit 0
       ;;
@@ -169,6 +175,25 @@ cd "$ROOT"
 e2e_log_event "scenario_start" "setup" "running" 0 "Oracle version-matrix ladder e2e: lanes=${selected_lanes[*]}"
 require_matrix_env
 command -v python3 >/dev/null 2>&1 || e2e_finish_fail "python3 is required for the version-matrix MCP harness"
+
+# Credentials stay in the environment, outside command logs. The native DB
+# test records raw Oracle codes and proves the backstop still rejects writes.
+run_impact_read_only_explain_probe() (
+  export ORACLEMCP_TEST_DSN="$(lane_dsn "$1")"
+  export ORACLEMCP_TEST_USER="$(lane_user "$1")"
+  export ORACLEMCP_TEST_PASSWORD="$(lane_password "$1")"
+  export ORACLE_MATRIX_ACTIVE_LANE="$1"
+  timeout -k 10 180 cargo test -p oraclemcp-db --features live-xe --lib \
+    live_read_only_explain_behavior -- --ignored --nocapture
+)
+for impact_lane in "${selected_lanes[@]}"; do
+  e2e_run_command assert run_impact_read_only_explain_probe "$impact_lane" || \
+    e2e_finish_fail "READ ONLY EXPLAIN behavior probe failed for $impact_lane"
+done
+if [ "$impact_explain_only" = 1 ]; then
+  e2e_finish_pass
+  exit 0
+fi
 
 if [ -n "${ORACLEMCP_ORACLE_MATRIX_BINARY:-}" ]; then
   BINARY="$ORACLEMCP_ORACLE_MATRIX_BINARY"
