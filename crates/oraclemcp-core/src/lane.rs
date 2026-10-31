@@ -5059,10 +5059,11 @@ mod tests {
         }
         start_fresh.wait();
         for caller in fresh_callers {
-            assert!(matches!(
-                caller.join().expect("fresh caller joined"),
-                Outcome::Ok(_)
-            ));
+            let outcome = caller.join().expect("fresh caller joined");
+            assert!(
+                matches!(outcome, Outcome::Ok(_)),
+                "fresh caller returned {outcome:?}"
+            );
         }
 
         assert_eq!(harness.registry.lane_count(), 1);
