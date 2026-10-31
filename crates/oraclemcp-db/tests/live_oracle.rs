@@ -1882,9 +1882,9 @@ fn live_midflight_oracle_timeout_keeps_pinned_connection_usable() {
     });
 }
 
-/// xrna0: the real private ALL_POLICIES synonym must point at the lab view
-/// protected by a 12-second VPD predicate. This opt-in fixture deliberately
-/// slows the actual product catalog query, never a substitute connection.
+/// xrna0/ospa7: a fixture-owned SQL translation profile routes the exact
+/// visibility query through a view of SYS.all_policies with a sleeping VPD
+/// callback. This slows the actual product query, never a substitute connection.
 #[test]
 fn live_slow_policy_probe_isolated_from_pinned_session() {
     if env_bool("ORACLEMCP_TEST_SLOW_POLICY_PROBE") != Some(true) {
@@ -1904,7 +1904,7 @@ fn live_slow_policy_probe_isolated_from_pinned_session() {
                 .await
                 .expect("slow-probe fixture connection");
             let raw_started = Instant::now();
-            oraclemcp_db::run_catalog_query(
+            let visibility_rows = oraclemcp_db::run_catalog_query(
                 &cx,
                 &conn,
                 oraclemcp_db::CatalogQueryId::AllPoliciesVisibility,
@@ -1913,11 +1913,12 @@ fn live_slow_policy_probe_isolated_from_pinned_session() {
             .await
             .expect("real slow ALL_POLICIES query");
             let raw_elapsed = raw_started.elapsed();
+            assert_eq!(visibility_rows[0].parse_i64("VISIBLE_POLICY_ROWS"), Some(1));
             assert!(
                 raw_elapsed >= Duration::from_secs(12),
                 "fixture must really stall the catalog query for 12s"
             );
-            // The same private synonym must not shadow authorization evidence.
+            // The diagnostic delay must not slow authorization evidence.
             let proof_started = Instant::now();
             let policy_rows = oraclemcp_db::run_catalog_query(
                 &cx,
@@ -1929,7 +1930,7 @@ fn live_slow_policy_probe_isolated_from_pinned_session() {
                 ],
             )
             .await
-            .expect("authoritative SYS policy lookup through a shadowing synonym");
+            .expect("authoritative SYS policy lookup bypasses diagnostic delay");
             assert!(!policy_rows.is_empty(), "positive policy evidence survives");
             assert!(proof_started.elapsed() < Duration::from_secs(1));
             let previous = cx.now() + Duration::from_secs(30);
@@ -2145,15 +2146,31 @@ end;
 /
 "#, user=fixture.user, password=fixture.password));
     if slow {
+        let probe_sql = oraclemcp_db::CatalogQueryId::AllPoliciesVisibility
+            .spec()
+            .sql
+            .replace('\'', "''");
         fixture.sql(&format!(r#"
-create function {user}.xr_slow_policy(s varchar2, t varchar2) return varchar2 as begin sys.dbms_lock.sleep(12); return '1=1'; end;
+create function {user}.xr_slow_policy(s varchar2, t varchar2) return varchar2 as begin
+sys.dbms_application_info.set_action('XR_POLICY_DELAY');
+sys.dbms_lock.sleep(12);
+sys.dbms_application_info.set_action(null);
+return '1=1';
+end;
 /
 create view {user}.xr_policy_view as select p.* from sys.all_policies p;
 begin
 sys.dbms_rls.add_policy(object_schema=>'{user}',object_name=>'XR_POLICY_VIEW',policy_name=>'XR_SLOW_P',function_schema=>'{user}',policy_function=>'XR_SLOW_POLICY',statement_types=>'SELECT');
+sys.dbms_sql_translator.create_profile('{user}.xr_delay_profile');
+sys.dbms_sql_translator.set_attribute('{user}.xr_delay_profile',sys.dbms_sql_translator.attr_foreign_sql_syntax,'FALSE');
+sys.dbms_sql_translator.register_sql_translation('{user}.xr_delay_profile','{probe_sql}',
+'SELECT COUNT(*) AS VISIBLE_POLICY_ROWS FROM (SELECT 1 FROM {user}.xr_policy_view WHERE ROWNUM <= 1)');
 end;
 /
-create synonym {user}.all_policies for {user}.xr_policy_view;
+create trigger {user}.xr_delay_on_logon after logon on {user}.schema begin
+execute immediate 'alter session set sql_translation_profile={user}.xr_delay_profile';
+end;
+/
 "#, user=fixture.user));
     }
     fixture
@@ -2944,6 +2961,14 @@ fn live_timed_out_policy_observations_return_sessions_to_baseline() {
                     assert!(
                         detail.contains("server cancellation is unconfirmed"),
                         "{detail}"
+                    );
+                    let sleeping = fixture.sql(&format!(
+                        "select 'SLEEPING:'||count(*) from sys.v_$session where username='{}' and action='XR_POLICY_DELAY' and event='PL/SQL lock timer';",
+                        fixture.user
+                    ));
+                    assert!(
+                        sleeping.lines().any(|line| line.trim() == "SLEEPING:1"),
+                        "the actual observer must still be sleeping in Oracle: {sleeping}"
                     );
                 } else {
                     assert!(detail.contains("capacity quarantined"), "{detail}");
