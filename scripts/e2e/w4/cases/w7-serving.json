@@ -107,21 +107,21 @@
     "case_id": "w4_query_nextval_udf_refused",
     "setup": [
       {
-        "sql": "CREATE SEQUENCE ${owner}.SW7_${run_id} START WITH 41 INCREMENT BY 1 NOCACHE"
+        "sql": "CREATE SEQUENCE ${cross}.SW7_${run_id} START WITH 41 INCREMENT BY 1 NOCACHE"
       },
       {
-        "sql": "CREATE OR REPLACE FUNCTION ${owner}.FN_W7SEQ_${run_id} RETURN NUMBER AUTHID DEFINER IS n NUMBER; BEGIN SELECT ${owner}.SW7_${run_id}.NEXTVAL INTO n FROM dual; RETURN n; END;"
+        "sql": "CREATE OR REPLACE FUNCTION ${cross}.FN_W7SEQ_${run_id} RETURN NUMBER AUTHID DEFINER IS n NUMBER; BEGIN SELECT ${cross}.SW7_${run_id}.NEXTVAL INTO n FROM dual; RETURN n; END;"
       }
     ],
     "call": {
       "arguments": {
-        "sql": "SELECT /* W4MARK_E03C5C22B362A1E69733 */ ${owner}.FN_W7SEQ_${run_id}() AS N FROM dual"
+        "sql": "SELECT /* W4MARK_E03C5C22B362A1E69733 */ ${cross}.FN_W7SEQ_${run_id}() AS N FROM dual"
       },
       "vsql_absent_marker": "W4MARK_E03C5C22B362A1E69733"
     },
     "db_reread": [
       {
-        "sql": "SELECT LAST_NUMBER FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER='${owner}' AND SEQUENCE_NAME='SW7_${run_id}'",
+        "sql": "SELECT LAST_NUMBER FROM ALL_SEQUENCES WHERE SEQUENCE_OWNER='${cross}' AND SEQUENCE_NAME='SW7_${run_id}'",
         "rows": [
           [
             41
