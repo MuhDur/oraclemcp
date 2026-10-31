@@ -1600,6 +1600,42 @@ mod tests {
     }
 
     #[test]
+    fn compile_fbi_probe_limit_is_not_complete_expression_evidence() {
+        let mut mock = builtin_index_mock("UPPER(\"LABEL\")");
+        let expression = mock.index_expressions[0].clone();
+        // Distinct positions keep the duplicate-row check from masking the cap.
+        mock.index_expressions = (1..=PROBE_LIMIT)
+            .map(|position| {
+                let mut row = expression.clone();
+                row.columns[4].1.value = Some(position.to_string());
+                row
+            })
+            .collect();
+        assert_eq!(mock.index_expressions.len(), PROBE_LIMIT as usize);
+        assert_eq!(
+            compile_index_probe(&mock),
+            HardParseEffectClosureV1::Unavailable {
+                reason: "truncated"
+            }
+        );
+    }
+
+    #[test]
+    fn compile_fbi_extra_index_expression_refuses_after_expected_index_is_complete() {
+        let mut mock = builtin_index_mock("UPPER(\"LABEL\")");
+        let mut extra = mock.index_expressions[0].clone();
+        extra.columns[1].1.value = Some("IX_OUTSIDE_COMPILE_SET".into());
+        // Retain the valid expected index so the final coverage check succeeds.
+        mock.index_expressions.push(extra);
+        assert_eq!(
+            compile_index_probe(&mock),
+            HardParseEffectClosureV1::Unavailable {
+                reason: "callback_unprovable"
+            }
+        );
+    }
+
+    #[test]
     fn compile_fbi_expression_changes_are_bound_into_catalog_digest() {
         let proof = |expression| {
             let mock = builtin_index_mock(expression);
