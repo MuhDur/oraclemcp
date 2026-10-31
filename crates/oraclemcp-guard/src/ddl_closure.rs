@@ -17,8 +17,8 @@ use crate::purity::{
     AdmissionContext, EffectRefusal, OperatorStatementClass, RoutineEffect, RoutineEffectsV1, admit,
 };
 
-/// Oracle's exact DDL event names. `Ddl` is a trigger subscription, not a
-/// sufficiently precise event for a collection request.
+/// Oracle events relevant to a DDL closure. `Ddl` and `ServerError` are
+/// trigger subscriptions, not exact DDL events for a collection request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DdlEvent {
@@ -38,6 +38,8 @@ pub enum DdlEvent {
     #[serde(rename = "DISASSOCIATE STATISTICS")]
     DisassociateStatistics,
     Ddl,
+    #[serde(rename = "SERVERERROR")]
+    ServerError,
 }
 
 impl DdlEvent {
@@ -59,6 +61,8 @@ impl DdlEvent {
             "ASSOCIATE STATISTICS" => Self::AssociateStatistics,
             "DISASSOCIATE STATISTICS" => Self::DisassociateStatistics,
             "DDL" => Self::Ddl,
+            // DBA_TRIGGERS uses ERROR; CREATE TRIGGER uses SERVERERROR.
+            "ERROR" | "SERVERERROR" => Self::ServerError,
             _ => return None,
         })
     }
@@ -104,7 +108,7 @@ pub fn ddl_event_for_statement(sql: &str) -> Result<Option<DdlEvent>, MutationUn
         DdlEvent::from_catalog(&first)
     };
     event
-        .filter(|event| *event != DdlEvent::Ddl)
+        .filter(|event| !matches!(event, DdlEvent::Ddl | DdlEvent::ServerError))
         .map(Some)
         .ok_or(MutationUnavailableReason::UnsupportedMechanism)
 }
@@ -339,7 +343,7 @@ impl DdlEffectClosureV1 {
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.unavailable.is_empty()
-            && self.event != DdlEvent::Ddl
+            && !matches!(self.event, DdlEvent::Ddl | DdlEvent::ServerError)
             && !self.object.owner.is_empty()
             && !self.object.name.is_empty()
             && !self.object.object_type.is_empty()
@@ -365,7 +369,10 @@ impl DdlEffectClosureV1 {
                     && !trigger.last_ddl_time.is_empty()
                     && matches!(trigger.timing.as_str(), "BEFORE EVENT" | "AFTER EVENT")
                     && (trigger.events.contains(&self.event)
-                        || trigger.events.contains(&DdlEvent::Ddl))
+                        || trigger.events.contains(&DdlEvent::Ddl)
+                        || trigger.events.contains(&DdlEvent::ServerError))
+                    && (!trigger.events.contains(&DdlEvent::ServerError)
+                        || trigger.timing == "AFTER EVENT")
                     && (trigger.scope != DdlTriggerScope::Schema
                         || trigger.schema.as_ref() == self.session_user.as_ref())
                     && !matches!(trigger.predicate, DdlPredicate::Unknown { .. })
@@ -594,6 +601,57 @@ mod tests {
             DdlPredicate::from_catalog(Some(&deep), &closure.object),
             DdlPredicate::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn ddl_closure_servererror_effects_use_ddl_admission_for_every_event() {
+        let mut closure = complete(RoutineEffectsV1::new([RoutineEffect::Dml]));
+        closure.triggers[0].events = BTreeSet::from([DdlEvent::ServerError]);
+        closure.triggers[0].timing = "AFTER EVENT".into();
+        for event in [
+            DdlEvent::Create,
+            DdlEvent::Alter,
+            DdlEvent::Drop,
+            DdlEvent::Truncate,
+            DdlEvent::Rename,
+            DdlEvent::Grant,
+            DdlEvent::Revoke,
+            DdlEvent::Comment,
+            DdlEvent::Analyze,
+            DdlEvent::Audit,
+            DdlEvent::Noaudit,
+            DdlEvent::AssociateStatistics,
+            DdlEvent::DisassociateStatistics,
+        ] {
+            closure.event = event;
+            assert!(closure.is_complete());
+            assert_eq!(
+                closure.admit(),
+                Err(DdlClosureRefusal::Effect(EffectRefusal::DdlTriggerEffect(
+                    RoutineEffect::Dml
+                )))
+            );
+        }
+        for subscription in [DdlEvent::Ddl, DdlEvent::ServerError] {
+            closure.event = subscription;
+            assert!(
+                !closure.is_complete(),
+                "subscriptions are not exact requests"
+            );
+        }
+        assert_eq!(
+            DdlEvent::from_catalog("SERVERERROR   "),
+            Some(DdlEvent::ServerError)
+        );
+        assert_eq!(
+            DdlEvent::from_catalog("ERROR   "),
+            Some(DdlEvent::ServerError)
+        );
+        assert_eq!(
+            serde_json::to_string(&DdlEvent::ServerError).unwrap(),
+            "\"SERVERERROR\""
+        );
+        assert!(ddl_event_for_statement("SERVERERROR anything").is_err());
     }
 
     #[test]

@@ -69,6 +69,17 @@ fn required(row: &OracleRow, column: &str) -> Result<String, Unknown> {
         .ok_or(Unknown::CatalogIncomplete)
 }
 
+/// Oracle blank-pads several dictionary discriminators. Normalize only those
+/// fixed spellings; identifier and expression bytes retain their exact meaning.
+fn discriminator(row: &OracleRow, column: &str) -> Result<String, Unknown> {
+    let value = required(row, column)?;
+    let value = value.trim_end_matches(' ');
+    if value.is_empty() {
+        return Err(Unknown::CatalogIncomplete);
+    }
+    Ok(value.to_owned())
+}
+
 fn hash_is_valid(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -91,7 +102,6 @@ fn event_set(text: &str) -> Result<BTreeSet<DdlEvent>, Unknown> {
                 | "LOGOFF"
                 | "STARTUP"
                 | "SHUTDOWN"
-                | "SERVERERROR"
                 | "DB_ROLE_CHANGE"
                 | "SUSPEND"
                 | "CLONE"
@@ -103,7 +113,7 @@ fn event_set(text: &str) -> Result<BTreeSet<DdlEvent>, Unknown> {
             return Err(Unknown::UnsupportedMechanism);
         }
     }
-    if database_event && !result.is_empty() {
+    if database_event && !result.is_empty() && !result.contains(&DdlEvent::ServerError) {
         return Err(Unknown::UnsupportedMechanism);
     }
     Ok(result)
@@ -113,14 +123,14 @@ fn selected_trigger(
     row: &OracleRow,
     closure: &DdlEffectClosureV1,
 ) -> Result<Option<DdlTriggerFact>, Unknown> {
-    let status = required(row, "STATUS")?;
+    let status = discriminator(row, "STATUS")?;
     if status == "DISABLED" {
         return Ok(None);
     }
     if status != "ENABLED" {
         return Err(Unknown::CatalogIncomplete);
     }
-    let scope = match required(row, "BASE_OBJECT_TYPE")?.as_str() {
+    let scope = match discriminator(row, "BASE_OBJECT_TYPE")?.as_str() {
         "SCHEMA" => DdlTriggerScope::Schema,
         "DATABASE" => DdlTriggerScope::Database,
         _ => return Err(Unknown::CatalogIncomplete),
@@ -137,16 +147,18 @@ fn selected_trigger(
             return Ok(None);
         }
     }
-    let events = event_set(&required(row, "TRIGGERING_EVENT")?)?;
-    if !events.contains(&closure.event) && !events.contains(&DdlEvent::Ddl) {
+    let events = event_set(&discriminator(row, "TRIGGERING_EVENT")?)?;
+    if !events.contains(&closure.event)
+        && !events.contains(&DdlEvent::Ddl)
+        && !events.contains(&DdlEvent::ServerError)
+    {
         return Ok(None);
     }
-    let timing = required(row, "TRIGGER_TYPE")?;
+    let timing = discriminator(row, "TRIGGER_TYPE")?;
     if !matches!(timing.as_str(), "BEFORE EVENT" | "AFTER EVENT")
-        // Oracle emits the fixed-width catalog discriminator as "PL/SQL     ".
-        // Keep its original bytes in metadata_sha256; normalize only padding.
-        || required(row, "ACTION_TYPE")?.trim_end_matches(' ') != "PL/SQL"
-        || required(row, "CROSSEDITION")? != "NO"
+        || (events.contains(&DdlEvent::ServerError) && timing != "AFTER EVENT")
+        || discriminator(row, "ACTION_TYPE")? != "PL/SQL"
+        || discriminator(row, "CROSSEDITION")? != "NO"
     {
         return Err(Unknown::UnsupportedMechanism);
     }
@@ -214,7 +226,7 @@ pub async fn collect_ddl_effect_closure(
 ) -> DdlEffectClosureV1 {
     let mut closure = DdlEffectClosureV1::new(event, object);
     if container.is_empty()
-        || event == DdlEvent::Ddl
+        || matches!(event, DdlEvent::Ddl | DdlEvent::ServerError)
         || [
             &closure.object.owner,
             &closure.object.name,
@@ -511,6 +523,14 @@ mod tests {
     }
 
     fn collect_test(catalog: &Catalog, effects: &Effects) -> DdlEffectClosureV1 {
+        collect_test_event(catalog, effects, DdlEvent::Create)
+    }
+
+    fn collect_test_event(
+        catalog: &Catalog,
+        effects: &Effects,
+        event: DdlEvent,
+    ) -> DdlEffectClosureV1 {
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .expect("runtime");
@@ -519,7 +539,7 @@ mod tests {
             collect_ddl_effect_closure(
                 &cx,
                 catalog,
-                DdlEvent::Create,
+                event,
                 DdlObject {
                     owner: "OTHER".into(),
                     name: "T".into(),
@@ -577,6 +597,100 @@ mod tests {
             closure.admit(),
             Ok(oraclemcp_guard::OperatingLevel::ReadOnly)
         );
+    }
+
+    #[test]
+    fn ddl_closure_database_trigger_padded_discriminators_collected() {
+        let mut padded = trigger("CREATE OR ALTER   ");
+        for (column, value) in [
+            ("BASE_OBJECT_TYPE", "DATABASE        "),
+            ("TRIGGER_TYPE", "BEFORE EVENT    "),
+            ("STATUS", "ENABLED    "),
+            ("ACTION_TYPE", "PL/SQL     "),
+            ("CROSSEDITION", "NO    "),
+        ] {
+            set(&mut padded, column, value);
+        }
+        let closure = supported(vec![padded.clone()]);
+        assert!(closure.is_complete(), "{:?}", closure.unavailable);
+        assert_eq!(closure.triggers.len(), 1);
+        assert_eq!(closure.triggers[0].scope, DdlTriggerScope::Database);
+        assert_eq!(closure.triggers[0].status, "ENABLED");
+        assert_eq!(closure.triggers[0].timing, "BEFORE EVENT");
+        assert_eq!(
+            closure.triggers[0].events,
+            BTreeSet::from([DdlEvent::Create, DdlEvent::Alter])
+        );
+        set(&mut padded, "STATUS", "DISABLED    ");
+        let disabled = supported(vec![padded]);
+        assert!(disabled.is_complete());
+        assert!(disabled.triggers.is_empty());
+    }
+
+    #[test]
+    fn ddl_closure_servererror_trigger_is_collected_for_every_ddl_event() {
+        let effects = Effects {
+            wrong_source: false,
+        };
+        for scope in ["SCHEMA", "DATABASE        "] {
+            for event in [
+                DdlEvent::Create,
+                DdlEvent::Alter,
+                DdlEvent::Drop,
+                DdlEvent::Truncate,
+                DdlEvent::Rename,
+                DdlEvent::Grant,
+                DdlEvent::Revoke,
+                DdlEvent::Comment,
+                DdlEvent::Analyze,
+                DdlEvent::Audit,
+                DdlEvent::Noaudit,
+                DdlEvent::AssociateStatistics,
+                DdlEvent::DisassociateStatistics,
+            ] {
+                let mut row = trigger("ERROR   ");
+                set(&mut row, "BASE_OBJECT_TYPE", scope);
+                set(&mut row, "TRIGGER_TYPE", "AFTER EVENT   ");
+                let catalog = Catalog {
+                    rows: vec![row.clone()],
+                    ..Default::default()
+                };
+                let closure = collect_test_event(&catalog, &effects, event);
+                assert!(
+                    closure.is_complete(),
+                    "{scope} {event:?}: {:?}",
+                    closure.unavailable
+                );
+                assert_eq!(closure.triggers.len(), 1);
+                assert_eq!(
+                    closure.triggers[0].events,
+                    BTreeSet::from([DdlEvent::ServerError])
+                );
+                set(&mut row, "STATUS", "DISABLED   ");
+                let disabled = collect_test_event(
+                    &Catalog {
+                        rows: vec![row],
+                        ..Default::default()
+                    },
+                    &effects,
+                    event,
+                );
+                assert!(disabled.is_complete());
+                assert!(disabled.triggers.is_empty());
+            }
+        }
+        let mut other_schema = trigger("ERROR");
+        set(&mut other_schema, "TABLE_OWNER", "APP ");
+        set(&mut other_schema, "TRIGGER_TYPE", "AFTER EVENT");
+        assert!(
+            supported(vec![other_schema]).triggers.is_empty(),
+            "schema identifiers must not be trimmed"
+        );
+        let mut mixed = trigger("LOGON OR ERROR");
+        set(&mut mixed, "TRIGGER_TYPE", "AFTER EVENT");
+        assert_eq!(supported(vec![mixed]).triggers.len(), 1);
+        let invalid = collect_test_event(&Catalog::default(), &effects, DdlEvent::ServerError);
+        assert!(invalid.unavailable.contains(&Unknown::InvalidInput));
     }
 
     #[test]

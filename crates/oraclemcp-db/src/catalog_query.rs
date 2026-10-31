@@ -2735,11 +2735,13 @@ order by owner, name, referenced_owner, referenced_name"#
                 ReadPurity,
             ),
             Self::DdlTriggers => (
-                "SELECT owner, trigger_name, table_owner, base_object_type, trigger_type, \
-                   triggering_event, status, when_clause, action_type, crossedition \
+                "SELECT owner, trigger_name, table_owner, RTRIM(base_object_type) AS base_object_type, \
+                   RTRIM(trigger_type) AS trigger_type, RTRIM(triggering_event) AS triggering_event, \
+                   RTRIM(status) AS status, when_clause, RTRIM(action_type) AS action_type, \
+                   RTRIM(crossedition) AS crossedition \
                  FROM (SELECT owner, trigger_name, table_owner, base_object_type, trigger_type, \
                    triggering_event, status, when_clause, action_type, crossedition \
-                   FROM SYS.DBA_TRIGGERS WHERE base_object_type IN ('SCHEMA','DATABASE') \
+                   FROM SYS.DBA_TRIGGERS WHERE RTRIM(base_object_type) IN ('SCHEMA','DATABASE') \
                    ORDER BY owner, trigger_name) WHERE ROWNUM <= :1",
                 I,
                 "collect visible database and schema DDL triggers with positive catalog coverage",

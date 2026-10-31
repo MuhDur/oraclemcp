@@ -1316,6 +1316,7 @@ pub oraclemcp_guard::ddl_closure::DdlEvent::Grant
 pub oraclemcp_guard::ddl_closure::DdlEvent::Noaudit
 pub oraclemcp_guard::ddl_closure::DdlEvent::Rename
 pub oraclemcp_guard::ddl_closure::DdlEvent::Revoke
+pub oraclemcp_guard::ddl_closure::DdlEvent::ServerError
 pub oraclemcp_guard::ddl_closure::DdlEvent::Truncate
 impl oraclemcp_guard::ddl_closure::DdlEvent
 pub fn oraclemcp_guard::ddl_closure::DdlEvent::from_catalog(&str) -> core::option::Option<Self>

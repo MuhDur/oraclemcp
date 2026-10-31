@@ -31,9 +31,115 @@ mod tests {
     use oraclemcp_guard::{OperatingLevel, RoutineEffect};
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    // These cases install different system-event triggers in the same fixture
+    // schema. Concurrent cases would fire each other's canaries and change the
+    // catalog snapshot under collection.
+    static NATIVE_DDL_FIXTURE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    #[ignore = "requires FREE23 catalog visibility; collects existing DATABASE DROP triggers without executing DDL"]
+    fn ddl_closure_live_database_trigger_collected_for_drop() {
+        let _fixture = NATIVE_DDL_FIXTURE.lock().expect("DDL fixture lock");
+        let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("installed Cx");
+            let options = OracleConnectOptions {
+                connect_string: std::env::var("ORACLEMCP_TEST_DSN").expect("explicit FREE23 DSN"),
+                username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("catalog fixture account")),
+                password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").expect("fixture password")),
+                ..Default::default()
+            };
+            let owner = options.username.as_ref().unwrap().to_uppercase();
+            let conn = connect_oracle(&cx, options).await.expect("native fixture connection");
+            assert_eq!(conn.backend(), oraclemcp_db::OracleBackend::RustOracle);
+            let identity = oraclemcp_db::read_closure_database_identity(&cx, conn.as_ref()).await.expect("container identity");
+            let catalog = oraclemcp_db::run_catalog_query(&cx, conn.as_ref(),
+                oraclemcp_db::CatalogQueryId::DdlTriggers, &[257_i64.into()]).await.expect("DDL trigger catalog");
+            let closure = collect_ddl_effect_closure(&cx, conn.as_ref(), DdlEvent::Drop,
+                DdlObject { owner, name: "OMCP_DDL_DROP_OBSERVATION".into(), object_type: "TABLE".into() },
+                &identity.container).await;
+            conn.close(&cx).await.expect("close native connection");
+            println!("{}", serde_json::json!({"case":"ddl_closure_live_database_trigger_collected_for_drop","closure":closure}));
+            assert!(closure.database_triggers_visible);
+            assert!(closure.triggers.iter().any(|fact| fact.scope == oraclemcp_guard::ddl_closure::DdlTriggerScope::Database
+                && fact.name == "XDB_PI_TRIG"), "the enabled FREE23 DATABASE DROP trigger must be retained: {closure:?}");
+            assert!(closure.admit().is_err(), "unproved SYS trigger effects must refuse");
+            for row in &catalog {
+                for column in ["BASE_OBJECT_TYPE", "TRIGGER_TYPE", "TRIGGERING_EVENT", "STATUS", "ACTION_TYPE", "CROSSEDITION"] {
+                    let value = row.text(column).expect("projected catalog discriminator");
+                    assert_eq!(value, value.trim_end_matches(' '), "SQL projection must normalize {column}");
+                }
+            }
+        });
+    }
+
+    #[test]
+    #[ignore = "requires isolated FREE23 CREATE TABLE/TRIGGER fixture and SELECT_CATALOG_ROLE"]
+    fn ddl_closure_live_servererror_trigger_collected_for_create() {
+        let _fixture = NATIVE_DDL_FIXTURE.lock().expect("DDL fixture lock");
+        let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .with_reactor(reactor)
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let cx = Cx::current().expect("installed Cx");
+            let options = OracleConnectOptions {
+                connect_string: std::env::var("ORACLEMCP_TEST_DSN").expect("explicit FREE23 DSN"),
+                username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("isolated synthetic fixture account")),
+                password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").expect("fixture password")),
+                ..Default::default()
+            };
+            let owner = options.username.as_ref().unwrap().to_uppercase();
+            let conn = connect_oracle(&cx, options).await.expect("native fixture connection");
+            assert_eq!(conn.backend(), oraclemcp_db::OracleBackend::RustOracle);
+            let identity = oraclemcp_db::read_closure_database_identity(&cx, conn.as_ref()).await.expect("container identity");
+            let suffix = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+            let trigger = format!("OMCP_DDL_ERR_{suffix:X}");
+            let canary = format!("OMCP_DDL_ERRLOG_{suffix:X}");
+            let result: Result<_, oraclemcp_db::DbError> = async {
+                conn.execute(&cx, &format!("CREATE TABLE {canary} (n NUMBER)"), &[]).await?;
+                conn.execute(&cx, &format!("CREATE TRIGGER {trigger} AFTER SERVERERROR ON SCHEMA DECLARE PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {canary} (n) VALUES (1); COMMIT; END;"), &[]).await?;
+                let catalog = oraclemcp_db::run_catalog_query(&cx, conn.as_ref(),
+                    oraclemcp_db::CatalogQueryId::DdlTriggers, &[257_i64.into()]).await?;
+                let catalog_event = catalog.iter().find(|row| row.text("TRIGGER_NAME") == Some(trigger.as_str()))
+                    .and_then(|row| row.text("TRIGGERING_EVENT")).map(str::to_owned);
+                let closure = collect_ddl_effect_closure(&cx, conn.as_ref(), DdlEvent::Create,
+                    DdlObject { owner: owner.clone(), name: canary.clone(), object_type: "TABLE".into() }, &identity.container).await;
+                let before = conn.query_rows(&cx, &format!("SELECT n FROM {canary}"), &[]).await?.len();
+                // Deliberate raw fixture DDL fails with ORA-00955 and fires the
+                // real error trigger. The collector itself must execute nothing.
+                let failed = conn.execute(&cx, &format!("CREATE TABLE {canary} (n NUMBER)"), &[]).await.is_err();
+                let after = conn.query_rows(&cx, &format!("SELECT n FROM {canary}"), &[]).await?.len();
+                Ok((closure, before, failed, after, catalog_event))
+            }.await;
+            let mut cleanup_errors = Vec::new();
+            for sql in [format!("DROP TRIGGER {trigger}"), format!("DROP TABLE {canary} PURGE")] {
+                if let Err(error) = conn.execute(&cx, &sql, &[]).await { cleanup_errors.push(error); }
+            }
+            conn.close(&cx).await.expect("close native connection");
+            let (closure, before, failed, after, catalog_event) = result.expect("native SERVERERROR fixture");
+            assert!(cleanup_errors.is_empty(), "synthetic fixture cleanup failed: {cleanup_errors:?}");
+            println!("{}", serde_json::json!({"case":"ddl_closure_live_servererror_trigger_collected_for_create","closure":closure,"before":before,"failed_ddl":failed,"after":after,"catalog_event":catalog_event}));
+            assert_eq!(catalog_event.as_deref().and_then(DdlEvent::from_catalog), Some(DdlEvent::ServerError));
+            let fact = closure.triggers.iter().find(|fact| fact.owner == owner && fact.name == trigger).expect("SERVERERROR trigger must be collected even for CREATE");
+            assert!(closure.is_complete(), "{:?}", closure.unavailable);
+            assert!(fact.effects.iter().any(|effect| effect == RoutineEffect::Autonomous));
+            assert!(closure.admit().is_err());
+            assert_eq!(before, 0, "collection must leave the canary empty");
+            assert!(failed, "the deliberate duplicate CREATE must fail");
+            assert!(after >= 1, "the Oracle SERVERERROR body must really commit");
+        });
+    }
+
     #[test]
     #[ignore = "requires isolated FREE23 fixture account with CREATE TABLE/TRIGGER and SELECT_CATALOG_ROLE"]
     fn ddl_closure_live_schema_trigger_collected() {
+        let _fixture = NATIVE_DDL_FIXTURE.lock().expect("DDL fixture lock");
         let reactor = asupersync::runtime::reactor::create_reactor().expect("native reactor");
         let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
             .with_reactor(reactor)
