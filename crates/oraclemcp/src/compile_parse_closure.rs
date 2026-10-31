@@ -805,6 +805,38 @@ mod tests {
 
     #[cfg(feature = "plsql-intelligence")]
     #[test]
+    fn compile_parse_closure_recovered_lexer_with_computed_sql_refuses() {
+        use oraclemcp_db::CompileParseEffectOracle;
+        use plsql_parser::ast::StaticSqlProjection;
+        // The lexer reports the stray euro symbol, while the independent
+        // grammar-tree pass can recover by skipping it between two valid SQL
+        // statements. A computed projection alone is therefore insufficient.
+        let source = "CREATE OR REPLACE PROCEDURE p AS n NUMBER; BEGIN SELECT COUNT(*) INTO n FROM app.a; \u{20ac} SELECT COUNT(*) INTO n FROM app.b; END;";
+        let parsed = plsql_parser::parse_with_backend(
+            source,
+            plsql_core::FileId::new(1),
+            &plsql_parser_antlr::Antlr4RustBackend::new(),
+            &plsql_parser::ParseOptions::default(),
+        );
+        assert!(!parsed.is_clean(), "the real lexer must report its error");
+        assert!(
+            parsed.was_recovered(),
+            "the real backend must mark recovery"
+        );
+        let StaticSqlProjection::Computed { statements } = &parsed.ast.static_sql else {
+            panic!("fixture must independently retain a computed projection");
+        };
+        assert_eq!(statements.len(), 2);
+        assert!(
+            crate::mutation_closure::EngineMutationEffects
+                .static_sql(source)
+                .is_err(),
+            "recovered/unclean source must refuse even when SQL projection is computed"
+        );
+    }
+
+    #[cfg(feature = "plsql-intelligence")]
+    #[test]
     fn compile_parse_closure_extracts_every_static_statement() {
         use oraclemcp_db::CompileParseEffectOracle;
         let oracle = crate::mutation_closure::EngineMutationEffects;

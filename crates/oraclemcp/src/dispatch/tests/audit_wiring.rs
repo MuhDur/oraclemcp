@@ -1471,6 +1471,27 @@ fn session_level_escalation_is_audited() {
     assert!(recs[0].signature.is_some(), "escalation record is signed");
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn compile_object_execute_is_audited_pending_then_signed_outcome() {
+    let (dispatcher, calls) = engine_free_source_dispatcher();
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = dispatcher.with_auditor(auditor);
+    assert_engine_free_compile_requests(
+        &dispatcher,
+        &calls,
+        "oracle_compile_object",
+        json!({"object_type":"PACKAGE","name":"EMP_API","plscope":true,"warnings":true}),
+    );
+    assert!(
+        sink.records()
+            .iter()
+            .all(|record| record.outcome != AuditOutcome::Pending),
+        "unproven source must not start a write audit"
+    );
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn compile_object_execute_is_audited_pending_then_signed_outcome() {
     let (auditor, sink) = auditor_with_sink();
@@ -1515,6 +1536,30 @@ fn compile_object_execute_is_audited_pending_then_signed_outcome() {
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn definite_compile_failure_has_no_prior_session_effect_and_resolves_intent() {
+    let (dispatcher, calls) = engine_free_source_dispatcher();
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = dispatcher.with_auditor(auditor);
+    let intents = write_intent_log("engine-free-compile-refusal");
+    let dispatcher = dispatcher.with_write_intent_log(Arc::clone(&intents));
+    assert_engine_free_compile_requests(
+        &dispatcher,
+        &calls,
+        "oracle_compile_object",
+        json!({"object_type":"PACKAGE","name":"EMP_API","plscope":true,"warnings":true}),
+    );
+    assert!(
+        sink.records()
+            .iter()
+            .all(|record| record.outcome != AuditOutcome::Pending),
+        "unproven source must not start a write audit"
+    );
+    assert!(intents.unresolved().expect("intent snapshot").is_empty());
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn definite_compile_failure_has_no_prior_session_effect_and_resolves_intent() {
     let (auditor, sink) = auditor_with_sink();
@@ -1604,6 +1649,27 @@ fn definite_compile_failure_has_no_prior_session_effect_and_resolves_intent() {
         .expect("connection remains usable after the definite failure");
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn patch_source_execute_is_audited_pending_then_signed_outcome() {
+    let (dispatcher, calls) = engine_free_source_dispatcher();
+    let (auditor, sink) = auditor_with_sink();
+    let dispatcher = dispatcher.with_auditor(auditor);
+    assert_engine_free_compile_requests(
+        &dispatcher,
+        &calls,
+        "oracle_patch_source",
+        json!({"owner":"APP","name":"EMP_API","object_type":"PACKAGE_BODY","old_text":"NULL","new_text":"NULL /* patched */"}),
+    );
+    assert!(
+        sink.records()
+            .iter()
+            .all(|record| record.outcome != AuditOutcome::Pending),
+        "unproven source must not start a write audit"
+    );
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn patch_source_execute_is_audited_pending_then_signed_outcome() {
     let (auditor, sink) = auditor_with_sink();
@@ -1648,6 +1714,20 @@ fn patch_source_execute_is_audited_pending_then_signed_outcome() {
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn audit_write_failure_refuses_compile_before_db_execute() {
+    let (dispatcher, calls) = engine_free_source_dispatcher();
+    let dispatcher = dispatcher.with_auditor(failing_auditor());
+    assert_engine_free_compile_requests(
+        &dispatcher,
+        &calls,
+        "oracle_compile_object",
+        json!({"object_type":"PACKAGE","name":"EMP_API","plscope":true,"warnings":true}),
+    );
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn audit_write_failure_refuses_compile_before_db_execute() {
     let state = Arc::new(ExecState::default());
@@ -1681,6 +1761,20 @@ fn audit_write_failure_refuses_compile_before_db_execute() {
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn audit_write_failure_refuses_patch_before_db_execute() {
+    let (dispatcher, calls) = engine_free_source_dispatcher();
+    let dispatcher = dispatcher.with_auditor(failing_auditor());
+    assert_engine_free_compile_requests(
+        &dispatcher,
+        &calls,
+        "oracle_patch_source",
+        json!({"owner":"APP","name":"EMP_API","object_type":"PACKAGE_BODY","old_text":"NULL","new_text":"NULL /* patched */"}),
+    );
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn audit_write_failure_refuses_patch_before_db_execute() {
     let state = Arc::new(ExecState::default());

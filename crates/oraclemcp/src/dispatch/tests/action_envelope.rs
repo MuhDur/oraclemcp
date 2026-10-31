@@ -161,6 +161,17 @@ fn envelope_action_kind_mismatch_refused() {
     assert_eq!(error.error_class, ErrorClass::RepreviewRequired);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn envelope_cross_tool_action_kind_mismatch_refused_before_database_io() {
+    let source = "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual";
+    assert_engine_free_compile_counterpart(&[
+        ("oracle_preview_sql", json!({"sql":source,"commit":true})),
+        ("oracle_create_or_replace", json!({"source_code":source})),
+    ]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn envelope_cross_tool_action_kind_mismatch_refused_before_database_io() {
     let state = Arc::new(ExecState::default());

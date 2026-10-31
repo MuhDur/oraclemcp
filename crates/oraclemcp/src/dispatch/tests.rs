@@ -27,6 +27,141 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+#[cfg(not(feature = "plsql-intelligence"))]
+fn assert_engine_free_compile_error(error: &ErrorEnvelope) {
+    assert!(
+        matches!(
+            error.error_class,
+            ErrorClass::ForbiddenStatement | ErrorClass::RepreviewRequired
+        ),
+        "{error:?}"
+    );
+    assert_eq!(
+        error
+            .structured_reason
+            .as_ref()
+            .map(|reason| reason.category),
+        Some(ReasonCategory::ParseCallbackUnproven)
+    );
+    assert_eq!(error.statement_outcome, Some(StatementOutcome::NotStarted));
+}
+
+// These unit-only counterparts retain the existing dictionary fixtures. Every
+// attempt to execute or commit is independently counted and fails the test;
+// none of these fixtures is evidence of live Oracle behaviour.
+#[cfg(not(feature = "plsql-intelligence"))]
+struct EngineFreeSourceRecorder {
+    candidate_calls: Arc<AtomicUsize>,
+}
+
+#[cfg(not(feature = "plsql-intelligence"))]
+#[async_trait::async_trait(?Send)]
+impl OracleConnection for EngineFreeSourceRecorder {
+    fn backend(&self) -> OracleBackend {
+        OracleBackend::RustOracle
+    }
+    async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+    async fn describe(&self, cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+        SourceLookupMock.describe(cx).await
+    }
+    async fn query_rows(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        binds: &[OracleBind],
+    ) -> Result<Vec<OracleRow>, DbError> {
+        if sql == CatalogQueryId::GetDdl.spec().sql {
+            OneRowMock.query_rows(cx, sql, binds).await
+        } else {
+            SourceLookupMock.query_rows(cx, sql, binds).await
+        }
+    }
+    async fn execute(&self, _cx: &Cx, _sql: &str, _binds: &[OracleBind]) -> Result<u64, DbError> {
+        self.candidate_calls.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Internal(
+            "engine-free source DDL reached execute".into(),
+        ))
+    }
+    async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+        self.candidate_calls.fetch_add(1, Ordering::SeqCst);
+        Err(DbError::Internal(
+            "engine-free source DDL reached commit".into(),
+        ))
+    }
+    async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+        Ok(())
+    }
+}
+
+#[cfg(not(feature = "plsql-intelligence"))]
+fn engine_free_source_dispatcher() -> (OracleDispatcher, Arc<AtomicUsize>) {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let dispatcher = OracleDispatcher::new_with_profile_level(
+        Box::new(EngineFreeSourceRecorder {
+            candidate_calls: Arc::clone(&calls),
+        }),
+        Some("engine-free-compile".into()),
+        ddl_level(),
+    );
+    (dispatcher, calls)
+}
+
+#[cfg(not(feature = "plsql-intelligence"))]
+fn assert_engine_free_compile_requests(
+    dispatcher: &OracleDispatcher,
+    candidate_calls: &AtomicUsize,
+    tool: &str,
+    args: Value,
+) {
+    // Refuse preview, an attempted direct apply, and an attempted token bypass.
+    // An unavailable proof may never mint a usable preview grant.
+    for mode in 0..3 {
+        let mut args = args.clone();
+        let target = if mode != 0 && matches!(tool, "oracle_preview_sql" | "preview_sql") {
+            args["commit"] = json!(true);
+            "oracle_execute"
+        } else {
+            tool
+        };
+        if mode != 0 && target != "oracle_execute" {
+            args["execute"] = json!(true);
+        }
+        if mode == 2 {
+            args["confirm"] = json!("unavailable-compile-proof-token");
+        }
+        let error = dispatcher
+            .dispatch(target, args)
+            .expect_err("engine-free compile proof must refuse before candidate DDL");
+        assert_engine_free_compile_error(&error);
+        assert_eq!(
+            candidate_calls.load(Ordering::SeqCst),
+            0,
+            "{tool}, mode {mode}: {error:?}"
+        );
+    }
+}
+
+#[cfg(not(feature = "plsql-intelligence"))]
+fn assert_engine_free_compile_counterpart(cases: &[(&str, Value)]) {
+    for (tool, args) in cases {
+        let (dispatcher, calls) = engine_free_source_dispatcher();
+        assert_engine_free_compile_requests(&dispatcher, &calls, tool, args.clone());
+    }
+}
+
+#[cfg(not(feature = "plsql-intelligence"))]
+fn source_tool_needs_engine(name: &str) -> bool {
+    matches!(
+        canonical_tool_name(name),
+        "oracle_compile_object" | "oracle_create_or_replace" | "oracle_patch_source"
+    ) || name == "deploy_ddl"
+}
+
 struct ZeroCallOracleConnection {
     calls: Arc<AtomicUsize>,
 }
@@ -253,6 +388,11 @@ fn impact_attached_to_every_minting_preview() {
             "oracle_set_session_level" => json!({"level": "READ_WRITE"}),
             _ => args_for(&tool.name),
         };
+        #[cfg(not(feature = "plsql-intelligence"))]
+        if source_tool_needs_engine(&tool.name) {
+            assert_engine_free_compile_counterpart(&[(&tool.name, args)]);
+            continue;
+        }
         let result = dispatcher
             .dispatch(&tool.name, args)
             .unwrap_or_else(|error| panic!("{} preview failed: {error:?}", tool.name));
@@ -3845,6 +3985,7 @@ impl OracleConnection for ExecRecordingMock {
     }
 }
 
+#[cfg(feature = "plsql-intelligence")]
 fn diagnostic_row(attribute: &str, text: &str) -> OracleRow {
     OracleRow {
         columns: vec![
@@ -4023,6 +4164,11 @@ fn every_registry_tool_routes_and_deserializes_offline() {
         } else {
             args_for(name)
         };
+        #[cfg(not(feature = "plsql-intelligence"))]
+        if source_tool_needs_engine(name) {
+            assert_engine_free_compile_counterpart(&[(name, args)]);
+            continue;
+        }
         let result = dispatcher.dispatch(name, args);
         if name == "oracle_plan_timeline" {
             let error = result.expect_err("offline mock cannot prove a Diagnostics Pack");
@@ -6780,6 +6926,16 @@ fn source_search_default_line_cap_bounds_and_marks_an_overlong_line() {
     );
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_patch_source",
+        json!({"owner": "APP", "name": "EMP_API", "object_type": "PACKAGE_BODY", "old_text": "NULL", "new_text": "NULL /* patched */"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
     let dispatcher = OracleDispatcher::new_switchable(
@@ -6866,6 +7022,22 @@ fn patch_source_preview_requires_unique_match_and_returns_confirmation() {
     assert_eq!(blocked["confirmation"], Value::Null);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn patch_type_body_and_create_or_replace_share_guard_decision() {
+    assert_engine_free_compile_counterpart(&[
+        (
+            "oracle_patch_source",
+            json!({"owner": "APP", "name": "EMPLOYEE_T", "object_type": "TYPE_BODY", "old_text": "NULL", "new_text": "SELF.id := SELF.id"}),
+        ),
+        (
+            "oracle_create_or_replace",
+            json!({"source_code":"CREATE OR REPLACE TYPE BODY APP.EMPLOYEE_T AS MEMBER PROCEDURE P IS BEGIN SELF.id := SELF.id; END; END;"}),
+        ),
+    ]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn patch_type_body_and_create_or_replace_share_guard_decision() {
     let dispatcher = OracleDispatcher::new_switchable(
@@ -6904,6 +7076,16 @@ fn patch_type_body_and_create_or_replace_share_guard_decision() {
     }
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_patch_source",
+        json!({"owner": "APP", "name": "EMP_API", "object_type": "PACKAGE_BODY", "old_text": "NULL", "new_text": "NULL /* patched */"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
     let state = Arc::new(ExecState::default());
@@ -6947,6 +7129,13 @@ fn patch_source_execute_refetches_and_uses_create_or_replace_gate() {
     assert_eq!(state.commits.load(Ordering::SeqCst), 1);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn patch_view_alias_defaults_to_view_ddl() {
+    assert_engine_free_compile_counterpart(&[("patch_view", args_for("patch_view"))]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn patch_view_alias_defaults_to_view_ddl() {
     let dispatcher = OracleDispatcher::new_switchable(
@@ -6964,6 +7153,25 @@ fn patch_view_alias_defaults_to_view_ddl() {
     assert_eq!(out["confirmation"]["tool"], json!("patch_view"));
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn read_patch_preview_lists_and_reads_last_preview() {
+    let (dispatcher, calls) = engine_free_source_dispatcher();
+    assert_engine_free_compile_requests(
+        &dispatcher,
+        &calls,
+        "patch_package",
+        json!({"owner":"APP","object_name":"EMP_API","search_text":"NULL","replacement":"NULL /* patched */"}),
+    );
+    let out = dispatcher
+        .dispatch("read_patch_preview", json!({}))
+        .expect("refused patch leaves readable empty cache");
+    assert_eq!(out["preview_available"], false);
+    assert_eq!(out["preview_count"], 0);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn read_patch_preview_lists_and_reads_last_preview() {
     let dispatcher = OracleDispatcher::new_switchable(
@@ -9860,6 +10068,16 @@ fn preview_sql_uses_configured_profile_ceiling() {
     assert_eq!(ddl["step_up_target"], json!("DDL"));
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_preview_is_default_and_does_not_execute() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_create_or_replace",
+        json!({"source_code": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_preview_is_default_and_does_not_execute() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
@@ -9891,6 +10109,16 @@ fn create_or_replace_preview_is_default_and_does_not_execute() {
     );
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_plsql_procedure_floors_at_ddl_and_mints_own_grant() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_create_or_replace",
+        json!({"source_code": "CREATE OR REPLACE PROCEDURE p AS BEGIN NULL; END;"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_plsql_procedure_floors_at_ddl_and_mints_own_grant() {
     // oracle-p0d6: a PL/SQL-bearing CREATE OR REPLACE PROCEDURE now floors at
@@ -9942,6 +10170,16 @@ fn create_or_replace_plsql_procedure_floors_at_ddl_and_mints_own_grant() {
     assert_eq!(preview["step_up_target"], json!("DDL"));
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_package_spec_preview_is_ddl_and_mints_confirmation() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_create_or_replace",
+        json!({"source_code": "CREATE OR REPLACE PACKAGE emp_api AS PROCEDURE p; END emp_api;"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_package_spec_preview_is_ddl_and_mints_confirmation() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
@@ -9970,6 +10208,16 @@ fn create_or_replace_package_spec_preview_is_ddl_and_mints_confirmation() {
     assert!(preview["confirmation"]["confirm"].is_string());
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_package_spec_apply_uses_preview_grant_once() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_create_or_replace",
+        json!({"source_code": "CREATE OR REPLACE PACKAGE emp_api AS PROCEDURE p; END emp_api;"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_package_spec_apply_uses_preview_grant_once() {
     let state = Arc::new(ExecState::default());
@@ -10011,6 +10259,22 @@ fn create_or_replace_package_spec_apply_uses_preview_grant_once() {
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 1);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_stored_bodies_preview_and_apply_exactly_once() {
+    assert_engine_free_compile_counterpart(&[
+        (
+            "oracle_create_or_replace",
+            json!({"source_code": "CREATE OR REPLACE PACKAGE BODY emp_api AS PROCEDURE run IS BEGIN NULL; END run; END emp_api;"}),
+        ),
+        (
+            "oracle_create_or_replace",
+            json!({"source_code": "CREATE OR REPLACE TYPE BODY employee_t AS MEMBER FUNCTION label RETURN VARCHAR2 IS BEGIN RETURN 'ok'; END label; END employee_t;"}),
+        ),
+    ]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_stored_bodies_preview_and_apply_exactly_once() {
     for (source, object_type) in [
@@ -10077,6 +10341,22 @@ fn create_or_replace_stored_bodies_preview_and_apply_exactly_once() {
     }
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_stored_call_specs_preview_and_apply_exactly_once() {
+    assert_engine_free_compile_counterpart(&[
+        (
+            "oracle_create_or_replace",
+            json!({"source_code": "CREATE OR REPLACE PACKAGE BODY emp_api AS PROCEDURE run AS LANGUAGE JAVA NAME 'EmployeeApi.run()'; END emp_api;"}),
+        ),
+        (
+            "oracle_create_or_replace",
+            json!({"source_code": "CREATE OR REPLACE TYPE BODY employee_t AS STATIC FUNCTION label RETURN VARCHAR2 AS LANGUAGE C NAME \"employee_label\" LIBRARY employee_lib; END employee_t;"}),
+        ),
+    ]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_stored_call_specs_preview_and_apply_exactly_once() {
     for (source, object_type) in [
@@ -10212,6 +10492,16 @@ fn create_or_replace_requires_ddl_level_without_executing() {
     assert_eq!(err.error_class, ErrorClass::OperatingLevelTooLow);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_execute_requires_confirmation() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_create_or_replace",
+        json!({"source_code": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_execute_requires_confirmation() {
     let state = Arc::new(ExecState::default());
@@ -10234,6 +10524,16 @@ fn create_or_replace_execute_requires_confirmation() {
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn create_or_replace_execute_applies_and_reports_compile_errors() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_create_or_replace",
+        json!({"source_code": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn create_or_replace_execute_applies_and_reports_compile_errors() {
     let state = Arc::new(ExecState::default());
@@ -10298,6 +10598,16 @@ fn create_or_replace_rejects_other_sql_shapes() {
     assert_eq!(err.error_class, ErrorClass::SyntaxError);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn deploy_ddl_preview_uses_create_or_replace_path() {
+    assert_engine_free_compile_counterpart(&[(
+        "deploy_ddl",
+        json!({"ddl": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual", "wait_seconds": 3}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn deploy_ddl_preview_uses_create_or_replace_path() {
     let dispatcher = OracleDispatcher::new_with_profile_level(
@@ -10330,13 +10640,19 @@ fn deploy_ddl_preview_uses_create_or_replace_path() {
 
 #[test]
 fn deploy_ddl_confirmed_apply_preserves_typed_and_generic_routes() {
-    for (source, marker) in [
-        (
-            "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual",
-            "oracle_create_or_replace",
-        ),
-        ("ALTER TABLE emp_stage ADD (id NUMBER)", "deploy_ddl"),
-    ] {
+    #[cfg(not(feature = "plsql-intelligence"))]
+    assert_engine_free_compile_counterpart(&[(
+        "deploy_ddl",
+        json!({"ddl":"CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual", "timeout_seconds":2, "wait_seconds":7}),
+    )]);
+    let source_case = cfg!(feature = "plsql-intelligence").then_some((
+        "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual",
+        "oracle_create_or_replace",
+    ));
+    for (source, marker) in source_case.into_iter().chain(std::iter::once((
+        "ALTER TABLE emp_stage ADD (id NUMBER)",
+        "deploy_ddl",
+    ))) {
         let state = Arc::new(ExecState::default());
         let dispatcher = OracleDispatcher::new_with_profile_level(
             Box::new(ExecRecordingMock::new(state.clone())),
@@ -10365,6 +10681,22 @@ fn deploy_ddl_confirmed_apply_preserves_typed_and_generic_routes() {
     }
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn deploy_ddl_create_or_replace_grants_cannot_cross_generic_execution() {
+    assert_engine_free_compile_counterpart(&[
+        (
+            "deploy_ddl",
+            json!({"ddl": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual", "timeout_seconds": 2}),
+        ),
+        (
+            "oracle_preview_sql",
+            json!({"sql": "CREATE OR REPLACE VIEW emp_v AS SELECT 1 AS id FROM dual", "commit": true, "timeout_seconds": 2}),
+        ),
+    ]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn deploy_ddl_create_or_replace_grants_cannot_cross_generic_execution() {
     let state = Arc::new(ExecState::default());
@@ -12678,6 +13010,16 @@ fn parsed_and_unparsed_ddl_admin_floors_refuse_read_write_before_database_io() {
     assert_eq!(state.rollbacks.load(Ordering::SeqCst), 0);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn compile_object_preview_is_default_and_does_not_execute() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_compile_object",
+        json!({"object_type":"PACKAGE","name":"EMP_API"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn compile_object_preview_is_default_and_does_not_execute() {
     let state = Arc::new(ExecState::default());
@@ -12775,6 +13117,16 @@ fn compile_view_rejects_plsql_only_options_before_execute() {
     assert!(state.executed.lock().expect("exec mutex").is_empty());
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn compile_object_execute_requires_preview_confirmation() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_compile_object",
+        json!({"object_type":"PACKAGE","name":"EMP_API"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn compile_object_execute_requires_preview_confirmation() {
     let state = Arc::new(ExecState::default());
@@ -12798,6 +13150,16 @@ fn compile_object_execute_requires_preview_confirmation() {
     assert_eq!(state.executed.lock().expect("exec mutex").len(), 0);
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn compile_object_execute_runs_statements_and_returns_compile_errors() {
+    assert_engine_free_compile_counterpart(&[(
+        "oracle_compile_object",
+        json!({"object_type":"PACKAGE","name":"EMP_API"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn compile_object_execute_runs_statements_and_returns_compile_errors() {
     let state = Arc::new(ExecState::default());
@@ -12841,6 +13203,16 @@ fn compile_object_execute_runs_statements_and_returns_compile_errors() {
     assert_eq!(executed[0].0, "ALTER PACKAGE APP.EMP_API COMPILE");
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn compile_with_warnings_enables_warnings_and_counts_diagnostics() {
+    assert_engine_free_compile_counterpart(&[(
+        "compile_with_warnings",
+        json!({"object_type":"PACKAGE","object_name":"EMP_API"}),
+    )]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn compile_with_warnings_enables_warnings_and_counts_diagnostics() {
     let state = Arc::new(ExecState::default());
@@ -13368,6 +13740,7 @@ mod qa85_terminal_boundaries {
             })
     }
 
+    #[cfg(feature = "plsql-intelligence")]
     fn assert_uncertain_ddl_preflight_aborts(case: &str, tool: &str, mut args: Value) {
         let state = Arc::new(ExecState::default());
         let intents = write_intent_log(case);
@@ -13666,6 +14039,26 @@ mod qa85_terminal_boundaries {
         });
     }
 
+    #[cfg(not(feature = "plsql-intelligence"))]
+    #[test]
+    fn ddl_mutators_resolve_uncertain_evidence_as_aborted_before_execute() {
+        assert_engine_free_compile_counterpart(&[
+            (
+                "oracle_compile_object",
+                json!({"owner":"APP","object_type":"PACKAGE","name":"EMP_API"}),
+            ),
+            (
+                "oracle_create_or_replace",
+                json!({"source_code":"CREATE OR REPLACE VIEW EMP_V AS SELECT 1 AS ID FROM dual"}),
+            ),
+            (
+                "oracle_patch_source",
+                json!({"owner":"APP","name":"EMP_API","object_type":"PACKAGE_BODY","old_text":"NULL","new_text":"NULL /* patched */"}),
+            ),
+        ]);
+    }
+
+    #[cfg(feature = "plsql-intelligence")]
     #[test]
     fn ddl_mutators_resolve_uncertain_evidence_as_aborted_before_execute() {
         assert_uncertain_ddl_preflight_aborts(
@@ -15356,6 +15749,51 @@ mod read_only_backstop_wiring {
         assert_eq!(retry.error_class, ErrorClass::RuntimeStateRequired);
     }
 
+    #[cfg(not(feature = "plsql-intelligence"))]
+    #[test]
+    fn ddl_preview_preserves_backstop_and_confirmed_compile_clears_it_before_effect() {
+        let state = Arc::new(BackstopRecordingState::default());
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(BackstopRecordingMock {
+                state: Arc::clone(&state),
+            }),
+            Some("dev".to_owned()),
+            SessionLevelState::new(OperatingLevel::Ddl, false),
+        );
+        dispatcher
+            .dispatch("oracle_query", json!({"sql":"SELECT 1 FROM dual"}))
+            .expect("read arms the backstop");
+        elevate_session(&dispatcher, "DDL");
+        for mode in 0..3 {
+            let mut args = json!({"object_type":"PACKAGE","name":"EMP_API"});
+            if mode > 0 {
+                args["execute"] = json!(true);
+            }
+            if mode == 2 {
+                args["confirm"] = json!("unavailable-compile-proof-token");
+            }
+            let error = dispatcher
+                .dispatch("oracle_compile_object", args)
+                .expect_err("engine-free compile refuses before clearing read-only state");
+            assert_engine_free_compile_error(&error);
+            assert!(state.read_only_transaction.load(Ordering::SeqCst));
+            let events = state.events.lock().expect("events mutex");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| event.contains("ALTER PACKAGE") || event == "COMMIT")
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.as_str() == "ROLLBACK")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[cfg(feature = "plsql-intelligence")]
     #[test]
     fn ddl_preview_preserves_backstop_and_confirmed_compile_clears_it_before_effect() {
         let state = Arc::new(BackstopRecordingState::default());

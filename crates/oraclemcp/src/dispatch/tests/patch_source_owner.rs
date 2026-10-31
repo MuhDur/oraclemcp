@@ -111,6 +111,7 @@ fn a_header_naming_another_target_is_refused() {
     }
 }
 
+#[cfg(feature = "plsql-intelligence")]
 fn exec_dispatcher() -> (OracleDispatcher, Arc<ExecState>) {
     let state = Arc::new(ExecState::default());
     let dispatcher = OracleDispatcher::new_switchable(
@@ -132,6 +133,13 @@ fn patch_args(owner: &str) -> Value {
     })
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn applied_patch_executes_the_owner_qualified_statement_and_reports_it() {
+    assert_engine_free_compile_counterpart(&[("oracle_patch_source", patch_args("APP"))]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn applied_patch_executes_the_owner_qualified_statement_and_reports_it() {
     let (dispatcher, state) = exec_dispatcher();
@@ -166,6 +174,16 @@ fn applied_patch_executes_the_owner_qualified_statement_and_reports_it() {
     );
 }
 
+#[cfg(not(feature = "plsql-intelligence"))]
+#[test]
+fn a_confirmation_minted_for_one_owner_cannot_apply_to_another() {
+    assert_engine_free_compile_counterpart(&[
+        ("oracle_patch_source", patch_args("APP")),
+        ("oracle_patch_source", patch_args("OTHER")),
+    ]);
+}
+
+#[cfg(feature = "plsql-intelligence")]
 #[test]
 fn a_confirmation_minted_for_one_owner_cannot_apply_to_another() {
     let (dispatcher, state) = exec_dispatcher();
