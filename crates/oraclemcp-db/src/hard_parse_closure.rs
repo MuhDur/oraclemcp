@@ -1027,6 +1027,7 @@ mod tests {
         object_rows: Vec<OracleRow>,
         synonym_rows: Vec<OracleRow>,
         public_synonym_only: bool,
+        private_synonym_only: bool,
         association: Option<OracleRow>,
         association_denied: bool,
         association_denied_first: bool,
@@ -1090,15 +1091,15 @@ mod tests {
                 return Ok(self.object_rows.clone());
             }
             if sql == CatalogQueryId::Synonyms.spec().sql {
-                return Ok(
-                    if !self.public_synonym_only
-                        || matches!(binds.first(), Some(OracleBind::String(owner)) if owner == "PUBLIC")
-                    {
-                        self.synonym_rows.clone()
-                    } else {
-                        Vec::new()
-                    },
-                );
+                let visible = (!self.public_synonym_only
+                    || matches!(binds.first(), Some(OracleBind::String(owner)) if owner == "PUBLIC"))
+                    && (!self.private_synonym_only
+                        || matches!(binds.first(), Some(OracleBind::String(owner)) if owner == "APP"));
+                return Ok(if visible {
+                    self.synonym_rows.clone()
+                } else {
+                    Vec::new()
+                });
             }
             if sql == CatalogQueryId::ClosureIdentity.spec().sql && self.identity_readable {
                 return Ok(vec![row(&[
@@ -1376,6 +1377,28 @@ mod tests {
             );
             assert!(proof.statements[0].unresolved_local_names.is_empty());
         }
+    }
+
+    #[test]
+    fn compile_absence_proof_private_synonym_alone_blocks_absence() {
+        let mut mock = own_identity_mock();
+        // Objects and PUBLIC synonym reads stay empty. Only the own-schema
+        // synonym exists, and its target cannot be resolved.
+        mock.private_synonym_only = true;
+        mock.synonym_rows = vec![row(&[
+            ("OWNER", "APP"),
+            ("SYNONYM_NAME", "MISSING"),
+            ("TABLE_OWNER", "OTHER"),
+            ("TABLE_NAME", "NOT_VISIBLE"),
+            ("STATUS", "VALID"),
+            ("OBJECT_ID", "73"),
+            ("EDITION_NAME", "ORA$BASE"),
+        ])];
+        let proof = missing_name_proof(mock, "APP", "SELECT id FROM APP.MISSING");
+        let reason = proof.admit().unwrap_err();
+        assert_eq!(reason.callback_class, CompileParseCallbackClass::Resolution);
+        assert_eq!(reason.reason, CompileUnknown::CatalogIncomplete);
+        assert!(proof.statements[0].unresolved_local_names.is_empty());
     }
 
     #[test]
