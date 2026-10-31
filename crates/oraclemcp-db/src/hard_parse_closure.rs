@@ -217,21 +217,58 @@ async fn prove_hard_parse_callbacks(
         if indexes.len() as i64 >= PROBE_LIMIT {
             return unavailable("truncated");
         }
+        let mut function_indexes = BTreeSet::new();
         for index in indexes {
             if strict_compile_policies
-                && (index.text("INDEX_TYPE").is_none()
-                    || index.text("INDEX_NAME").is_none()
-                    || index
-                        .text("INDEX_TYPE")
-                        .is_some_and(|kind| kind.to_ascii_uppercase().contains("FUNCTION-BASED")))
+                && (!matches!(
+                    index.text("INDEX_TYPE"),
+                    Some(
+                        "BITMAP"
+                            | "CLUSTER"
+                            | "DOMAIN"
+                            | "FUNCTION-BASED BITMAP"
+                            | "FUNCTION-BASED DOMAIN"
+                            | "FUNCTION-BASED NORMAL"
+                            | "FUNCTION-BASED NORMAL/REV"
+                            | "IOT - TOP"
+                            | "LOB"
+                            | "NORMAL"
+                            | "NORMAL/REV"
+                    )
+                ) || index.text("INDEX_NAME").is_none_or(str::is_empty))
             {
                 return unavailable("callback_unprovable");
             }
-            if index
-                .text("INDEX_TYPE")
-                .is_some_and(|kind| kind.eq_ignore_ascii_case("DOMAIN"))
-            {
+            if index.text("INDEX_TYPE").is_some_and(|kind| {
+                kind.eq_ignore_ascii_case("DOMAIN")
+                    || (strict_compile_policies && kind.contains("DOMAIN"))
+            }) {
                 return refused("domain_index_callback");
+            }
+            if strict_compile_policies
+                && index
+                    .text("INDEX_TYPE")
+                    .is_some_and(|kind| kind.starts_with("FUNCTION-BASED"))
+            {
+                let (Ok(index_owner), Ok(index_name)) = (
+                    mutation_required(&index, "INDEX_OWNER"),
+                    mutation_required(&index, "INDEX_NAME"),
+                ) else {
+                    return unavailable("callback_unprovable");
+                };
+                if !matches!(
+                    index.text("INDEX_TYPE"),
+                    Some(
+                        "FUNCTION-BASED NORMAL"
+                            | "FUNCTION-BASED NORMAL/REV"
+                            | "FUNCTION-BASED BITMAP"
+                    )
+                ) || mutation_optional(&index, "ITYP_OWNER") != Ok(None)
+                    || mutation_optional(&index, "ITYP_NAME") != Ok(None)
+                    || !function_indexes.insert((index_owner.to_owned(), index_name.to_owned()))
+                {
+                    return unavailable("callback_unprovable");
+                }
             }
             if let Some(index_name) = index.text("INDEX_NAME") {
                 let index_owner = index.text("INDEX_OWNER").unwrap_or(&owner);
@@ -263,6 +300,14 @@ async fn prove_hard_parse_callbacks(
                 if !rows.is_empty() {
                     return unavailable("callback_unprovable");
                 }
+            }
+        }
+
+        if !function_indexes.is_empty() {
+            let proof =
+                prove_builtin_index_expressions(cx, conn, &owner, &name, &function_indexes).await;
+            if !proof.is_proven() {
+                return proof;
             }
         }
 
@@ -315,6 +360,64 @@ async fn prove_hard_parse_callbacks(
     } else {
         HardParseEffectClosureV1::Proven
     }
+}
+
+// Reuse the mutation catalog's complete expression rows and the guard's
+// existing builtin-only expression proof. Neither user-routine effect analysis
+// nor an unreadable expression may turn a function index into a builtin.
+async fn prove_builtin_index_expressions(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    table: &str,
+    indexes: &BTreeSet<(String, String)>,
+) -> HardParseEffectClosureV1 {
+    let rows = match run_catalog_query(
+        cx,
+        conn,
+        CatalogQueryId::MutationIndexExpressions,
+        &[owner.into(), table.into(), PROBE_LIMIT.into()],
+    )
+    .await
+    {
+        Ok(rows) => rows,
+        Err(_) => return unavailable("callback_unprovable"),
+    };
+    if rows.len() as i64 >= PROBE_LIMIT {
+        return unavailable("truncated");
+    }
+    let mut seen = BTreeSet::new();
+    for row in rows {
+        let (Ok(index_owner), Ok(index_name), Ok(Some(expression))) = (
+            mutation_required(&row, "INDEX_OWNER"),
+            mutation_required(&row, "INDEX_NAME"),
+            mutation_optional(&row, "COLUMN_EXPRESSION"),
+        ) else {
+            return unavailable("callback_unprovable");
+        };
+        let Some(position) = row
+            .parse_i64("COLUMN_POSITION")
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value != 0)
+        else {
+            return unavailable("callback_unprovable");
+        };
+        if row.text("TABLE_OWNER") != Some(owner)
+            || row.text("TABLE_NAME") != Some(table)
+            || !indexes.contains(&(index_owner.to_owned(), index_name.to_owned()))
+            || !seen.insert((index_owner.to_owned(), index_name.to_owned(), position))
+            || !oraclemcp_guard::builtin_only_virtual_column_expression("", &expression)
+        {
+            return unavailable("callback_unprovable");
+        }
+    }
+    if indexes
+        .iter()
+        .any(|(owner, name)| !seen.iter().any(|(o, n, _)| o == owner && n == name))
+    {
+        return unavailable("callback_unprovable");
+    }
+    HardParseEffectClosureV1::Proven
 }
 
 fn association_has_statistics_type(row: &OracleRow) -> bool {
@@ -906,6 +1009,9 @@ mod tests {
         association_denied_first: bool,
         association_calls: Mutex<usize>,
         domain_index: bool,
+        indexes: Vec<OracleRow>,
+        index_expressions: Vec<OracleRow>,
+        index_expressions_unreadable: bool,
         user_defined_column_type: bool,
         policy_sql_fragment: Option<&'static str>,
         optional_policy_catalog_denied: bool,
@@ -959,6 +1065,17 @@ mod tests {
             }
             if sql.contains("FROM SYS.all_indexes") && self.domain_index {
                 return Ok(vec![row(&[("INDEX_TYPE", "DOMAIN")])]);
+            }
+            if sql == CatalogQueryId::HardParseIndexes.spec().sql {
+                return Ok(self.indexes.clone());
+            }
+            if sql == CatalogQueryId::MutationIndexExpressions.spec().sql {
+                if self.index_expressions_unreadable {
+                    return Err(DbError::ServerQuery(
+                        "ORA-01031: insufficient privileges".into(),
+                    ));
+                }
+                return Ok(self.index_expressions.clone());
             }
             if self.optional_policy_catalog_denied
                 && [
@@ -1367,6 +1484,182 @@ mod tests {
         runtime.block_on(async move {
             let cx = Cx::current().expect("current cx");
             body(cx).await
+        })
+    }
+
+    #[test]
+    fn compile_fbi_requires_complete_pure_builtin_expressions() {
+        for expression in ["UPPER(\"LABEL\")", "LOWER(UPPER(\"LABEL\"))"] {
+            assert_eq!(
+                compile_index_probe(&builtin_index_mock(expression)),
+                HardParseEffectClosureV1::Proven,
+                "{expression}"
+            );
+        }
+        for expression in [
+            "APP.CANARY_FN(\"LABEL\")",
+            "UPPER(APP.CANARY_FN(\"LABEL\"))",
+            "\"UPPER\"(\"LABEL\")",
+            "UPPER(\"LABEL\") FROM APP.OTHER",
+            "UPPER(\"LABEL\") + APP.CANARY_FN(\"LABEL\")",
+            "UPPER((SELECT LABEL FROM APP.OTHER))",
+            "UPPER(\"LABEL\") /* unfinished",
+            "OPAQUE(\"LABEL\")",
+            "",
+        ] {
+            assert!(
+                !compile_index_probe(&builtin_index_mock(expression)).is_proven(),
+                "{expression}"
+            );
+        }
+        assert!(!compile_index_probe(&builtin_index_mock(&"X".repeat(4000))).is_proven());
+        let mut mixed = builtin_index_mock("UPPER(\"LABEL\")");
+        let mut second = mixed.index_expressions[0].clone();
+        second.columns[4].1.value = Some("2".into());
+        second.columns[5].1.value = Some("APP.CANARY_FN(\"LABEL\")".into());
+        mixed.index_expressions.push(second);
+        assert!(!compile_index_probe(&mixed).is_proven());
+    }
+
+    #[test]
+    fn compile_fbi_missing_mismatched_and_truncated_catalog_is_unknown() {
+        type CatalogMutation = fn(&mut ClosureMock);
+        let mutations: &[(&str, CatalogMutation)] = &[
+            ("unreadable", |m| m.index_expressions_unreadable = true),
+            ("no expression", |m| m.index_expressions.clear()),
+            ("duplicate position", |m| {
+                m.index_expressions.push(m.index_expressions[0].clone());
+            }),
+            ("second index missing expression", |m| {
+                let mut second = m.indexes[0].clone();
+                second.columns[1].1.value = Some("IX_SECOND".into());
+                m.indexes.push(second);
+            }),
+            ("wrong table", |m| {
+                m.index_expressions[0].columns[3].1.value = Some("OTHER".into());
+            }),
+            ("wrong index", |m| {
+                m.index_expressions[0].columns[1].1.value = Some("OTHER".into());
+            }),
+            ("zero position", |m| {
+                m.index_expressions[0].columns[4].1.value = Some("0".into());
+            }),
+            ("missing expression field", |m| {
+                m.index_expressions[0].columns.pop();
+            }),
+            ("partial expression", |m| {
+                m.index_expressions[0].columns[5].1.source_length = Some(4000);
+            }),
+            ("missing implementation evidence", |m| {
+                m.indexes[0].columns.pop();
+            }),
+            ("unknown index kind", |m| {
+                m.indexes[0].columns[2].1.value = Some("OPAQUE".into());
+            }),
+            ("row cap", |m| {
+                m.index_expressions = vec![m.index_expressions[0].clone(); PROBE_LIMIT as usize];
+            }),
+        ];
+        for (label, mutate) in mutations {
+            let mut mock = builtin_index_mock("UPPER(\"LABEL\")");
+            mutate(&mut mock);
+            assert!(
+                matches!(
+                    compile_index_probe(&mock),
+                    HardParseEffectClosureV1::Unavailable { .. }
+                ),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn compile_fbi_still_requires_statistics_type_and_datatype_absence() {
+        let mut mock = builtin_index_mock("UPPER(\"LABEL\")");
+        mock.association = Some(row(&[
+            ("STATSTYPE_SCHEMA", "APP"),
+            ("STATSTYPE_NAME", "CANARY_STATS"),
+        ]));
+        assert_eq!(
+            compile_index_probe(&mock),
+            HardParseEffectClosureV1::Refused {
+                reason: "odci_stats_callback"
+            }
+        );
+        let mut mock = builtin_index_mock("UPPER(\"LABEL\")");
+        mock.user_defined_column_type = true;
+        assert!(!compile_index_probe(&mock).is_proven());
+        let mut mock = builtin_index_mock("UPPER(\"LABEL\")");
+        mock.indexes[0].columns[2].1.value = Some("FUNCTION-BASED DOMAIN".into());
+        assert_eq!(
+            compile_index_probe(&mock),
+            HardParseEffectClosureV1::Refused {
+                reason: "domain_index_callback"
+            }
+        );
+    }
+
+    #[test]
+    fn compile_fbi_expression_changes_are_bound_into_catalog_digest() {
+        let proof = |expression| {
+            let mock = builtin_index_mock(expression);
+            run(|cx| async move {
+                let catalog = CompileCatalog::new(&mock);
+                assert_eq!(
+                    prove_hard_parse_callbacks(
+                        &cx,
+                        &catalog,
+                        "SELECT id FROM APP.ORDERS",
+                        &[relation()],
+                        true
+                    )
+                    .await,
+                    HardParseEffectClosureV1::Proven
+                );
+                let mut proof = empty_compile_proof();
+                proof.catalog_commitments = catalog.into_commitments().unwrap();
+                proof.digest()
+            })
+        };
+        assert_ne!(proof("UPPER(\"LABEL\")"), proof("LOWER(\"LABEL\")"));
+    }
+
+    fn builtin_index_mock(expression: &str) -> ClosureMock {
+        let mut index = row(&[
+            ("INDEX_OWNER", "APP"),
+            ("INDEX_NAME", "IX_UPPER"),
+            ("INDEX_TYPE", "FUNCTION-BASED NORMAL"),
+        ]);
+        for field in ["ITYP_OWNER", "ITYP_NAME"] {
+            index
+                .columns
+                .push((field.into(), OracleCell::new("VARCHAR2", None)));
+        }
+        ClosureMock {
+            indexes: vec![index],
+            index_expressions: vec![row(&[
+                ("INDEX_OWNER", "APP"),
+                ("INDEX_NAME", "IX_UPPER"),
+                ("TABLE_OWNER", "APP"),
+                ("TABLE_NAME", "ORDERS"),
+                ("COLUMN_POSITION", "1"),
+                ("COLUMN_EXPRESSION", expression),
+            ])],
+            ..ClosureMock::default()
+        }
+    }
+
+    fn compile_index_probe(mock: &ClosureMock) -> HardParseEffectClosureV1 {
+        run(|cx| async move {
+            let catalog = CompileCatalog::new(mock);
+            prove_hard_parse_callbacks(
+                &cx,
+                &catalog,
+                "SELECT id FROM APP.ORDERS",
+                &[relation()],
+                true,
+            )
+            .await
         })
     }
 

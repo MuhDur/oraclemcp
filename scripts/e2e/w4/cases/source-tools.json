@@ -2937,5 +2937,51 @@
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
     }
+  },
+  {
+    "case_id": "w4_compile_user_function_fbi_refused_before_ddl",
+    "tool": "oracle_create_or_replace",
+    "level": "DDL",
+    "setup_phase": "before_server",
+    "transports": ["stdio", "http"],
+    "requires": [],
+    "setup": [
+      {"sql": "CREATE TABLE ${cross}.T_CPFBI_${run_id}(ID NUMBER, LABEL VARCHAR2(40))"},
+      {"sql": "INSERT INTO ${cross}.T_CPFBI_${run_id} VALUES (1,'canary')"},
+      {"sql": "CREATE TABLE ${cross}.T_CPFC_${run_id}(ID NUMBER)"},
+      {"sql": "CREATE OR REPLACE FUNCTION ${cross}.F_CPFBI_${run_id}(P VARCHAR2) RETURN VARCHAR2 DETERMINISTIC AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${cross}.T_CPFC_${run_id} VALUES (1); COMMIT; RETURN UPPER(P); END;"},
+      {"sql": "CREATE INDEX ${cross}.IX_CPFBI_${run_id} ON ${cross}.T_CPFBI_${run_id}(${cross}.F_CPFBI_${run_id}(LABEL))"},
+      {"sql": "DECLARE c NUMBER; BEGIN SELECT COUNT(*) INTO c FROM ${cross}.T_CPFC_${run_id}; IF c < 1 THEN RAISE_APPLICATION_ERROR(-20001,'compile FBI effect control failed'); END IF; END;"},
+      {"sql": "TRUNCATE TABLE ${cross}.T_CPFC_${run_id}"}
+    ],
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${cross}.T_CPFBI_${run_id}",
+    "steps": [
+      {
+        "tool": "oracle_create_or_replace",
+        "arguments": {"source_code": "CREATE OR REPLACE VIEW ${cross}.V_CPFBI_${run_id} AS SELECT ID FROM ${cross}.T_CPFBI_${run_id}"},
+        "expect": {"json_subset": {
+          "error_class": "FORBIDDEN_STATEMENT",
+          "statement_outcome": "not_started",
+          "structured_reason": {"category": "PARSE_CALLBACK_UNPROVEN", "offending_construct": "statement=1 callback=Optimizer"}
+        }}
+      }
+    ],
+    "call": {
+      "arguments": {"source_code": "CREATE OR REPLACE VIEW ${cross}.V_CPFBI_${run_id} AS SELECT ID FROM ${cross}.T_CPFBI_${run_id}", "execute": true}
+    },
+    "expect": {"json_subset": {
+      "error_class": "FORBIDDEN_STATEMENT",
+      "statement_outcome": "not_started",
+      "structured_reason": {"category": "PARSE_CALLBACK_UNPROVEN", "offending_construct": "statement=1 callback=Optimizer"}
+    }},
+    "db_reread": [
+      {"sql": "SELECT COUNT(*) FROM ${cross}.T_CPFC_${run_id}", "rows": [[0]]},
+      {"sql": "SELECT COUNT(*) FROM SYS.ALL_OBJECTS WHERE OWNER='${cross}' AND OBJECT_NAME='V_CPFBI_${run_id}'", "rows": [[0]]},
+      {"sql": "SELECT INDEX_TYPE, ITYP_OWNER, ITYP_NAME FROM SYS.ALL_INDEXES WHERE OWNER='${cross}' AND INDEX_NAME='IX_CPFBI_${run_id}'", "rows": [["FUNCTION-BASED NORMAL", null, null]]},
+      {"sql": "SELECT STATUS FROM SYS.ALL_OBJECTS WHERE OWNER='${cross}' AND OBJECT_NAME='F_CPFBI_${run_id}' AND OBJECT_TYPE='FUNCTION'", "rows": [["VALID"]]}
+    ],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
   }
 ]
