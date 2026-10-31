@@ -504,7 +504,7 @@ pub fn invalid_objects_sql(tier: ViewTier) -> (&'static str, String) {
                       CASE WHEN ROW_NUMBER() OVER (PARTITION BY owner, object_type ORDER BY object_name) <= {INVALID_SAMPLE_MAX_NAMES} \
                            THEN object_name END AS sampled_name, \
                       COUNT(*) OVER (PARTITION BY owner, object_type) AS invalid_count \
-               FROM {view} WHERE status = 'INVALID') \
+               FROM SYS.{view} WHERE status = 'INVALID') \
          GROUP BY owner, object_type, invalid_count \
          ORDER BY invalid_count DESC, owner, object_type"
     );
@@ -528,7 +528,7 @@ pub fn unusable_indexes_sql(tier: ViewTier) -> (&'static str, String) {
     };
     let sql = format!(
         "SELECT owner, index_name, table_name, status \
-         FROM {view} WHERE status = 'UNUSABLE' \
+         FROM SYS.{view} WHERE status = 'UNUSABLE' \
          ORDER BY owner, table_name, index_name"
     );
     (view, sql)
@@ -545,7 +545,7 @@ pub fn tablespace_usage_sql() -> (&'static str, String) {
     let sql = format!(
         "SELECT tablespace_name, ROUND(used_percent, 2) AS used_percent, \
                 used_space, tablespace_size \
-         FROM {view} ORDER BY used_percent DESC"
+         FROM SYS.{view} ORDER BY used_percent DESC"
     );
     (view, sql)
 }
@@ -564,7 +564,7 @@ pub fn sequence_ceiling_sql(tier: ViewTier, threshold_pct: u8) -> (&'static str,
     let sql = format!(
         "SELECT sequence_owner, sequence_name, last_number, max_value, increment_by, cycle_flag, \
                 ROUND((last_number / max_value) * 100, 2) AS pct_consumed \
-         FROM {view} \
+         FROM SYS.{view} \
          WHERE cycle_flag = 'N' AND max_value > 0 AND last_number >= max_value * {frac} \
          ORDER BY pct_consumed DESC, sequence_owner, sequence_name"
     );
@@ -581,7 +581,7 @@ pub fn disabled_constraints_sql(tier: ViewTier) -> (&'static str, String) {
     };
     let sql = format!(
         "SELECT owner, table_name, constraint_name, constraint_type, status, validated \
-         FROM {view} \
+         FROM SYS.{view} \
          WHERE status = 'DISABLED' OR validated = 'NOT VALIDATED' \
          ORDER BY owner, table_name, constraint_name"
     );
@@ -598,10 +598,10 @@ pub fn buffer_cache_hit_ratio_sql() -> (&'static str, String) {
     let view = "V$SYSSTAT";
     // Pull the three relevant cumulative stats; the ratio is computed in Rust
     // so the SQL stays a trivial pure read.
-    let sql = format!(
-        "SELECT name, value FROM {view} \
+    let sql = String::from(
+        "SELECT name, value FROM SYS.V_$SYSSTAT \
          WHERE name IN ('db block gets', 'consistent gets', 'physical reads cache') \
-         ORDER BY name"
+         ORDER BY name",
     );
     (view, sql)
 }
@@ -1034,14 +1034,14 @@ mod tests {
     fn invalid_objects_sql_targets_the_right_view_and_predicate() {
         let (dba_view, dba_sql) = invalid_objects_sql(ViewTier::Dba);
         assert_eq!(dba_view, "DBA_OBJECTS");
-        assert!(dba_sql.contains("FROM DBA_OBJECTS"));
+        assert!(dba_sql.contains("FROM SYS.DBA_OBJECTS"));
         assert!(dba_sql.contains("status = 'INVALID'"));
         assert!(is_read_only(&dba_sql));
 
         // DBA→ALL degradation picks the ALL_* view name.
         let (all_view, all_sql) = invalid_objects_sql(ViewTier::All);
         assert_eq!(all_view, "ALL_OBJECTS");
-        assert!(all_sql.contains("FROM ALL_OBJECTS"));
+        assert!(all_sql.contains("FROM SYS.ALL_OBJECTS"));
         assert!(!all_sql.contains("DBA_OBJECTS"));
     }
 
@@ -1086,7 +1086,7 @@ mod tests {
     fn buffer_cache_sql_reads_v_sysstat() {
         let (view, sql) = buffer_cache_hit_ratio_sql();
         assert_eq!(view, "V$SYSSTAT");
-        assert!(sql.contains("FROM V$SYSSTAT"));
+        assert!(sql.contains("FROM SYS.V_$SYSSTAT"));
         assert!(sql.contains("physical reads cache"));
         assert!(is_read_only(&sql));
     }
@@ -1167,7 +1167,14 @@ mod tests {
                 let spec = health_probe_id(view)
                     .expect("registered health probe")
                     .spec();
-                assert_eq!(spec.sql, format!("SELECT 1 FROM {view} WHERE 1 = 0"));
+                let authoritative = match view {
+                    "V$SYSSTAT" => "SYS.V_$SYSSTAT".to_owned(),
+                    _ => format!("SYS.{view}"),
+                };
+                assert_eq!(
+                    spec.sql,
+                    format!("SELECT 1 FROM {authoritative} WHERE 1 = 0")
+                );
                 assert!(spec.binds.0.is_empty());
             }
         }
@@ -1354,7 +1361,7 @@ mod tests {
                     "call timeout; token=never-render-this".to_owned(),
                 )),
                 ScriptMode::InvalidObjectsRegression | ScriptMode::MixedRegression
-                    if lower.contains("from dba_objects") =>
+                    if lower.contains("from sys.dba_objects") =>
                 {
                     Err(DbError::Query(
                         "ORA-00904: invalid identifier; password=never-render-this".to_owned(),
@@ -1668,7 +1675,7 @@ mod tests {
         // Deny all dictionary tiers, V$, and the Statspack table -> everything
         // degrades; nothing is a hard error.
         let conn = TierMock {
-            deny: &["dba_", "all_", "v$", "perfstat"],
+            deny: &["dba_", "all_", "v_$", "perfstat"],
         };
         let report = run_with_cx(|cx| async move {
             preflight(&cx, &conn)

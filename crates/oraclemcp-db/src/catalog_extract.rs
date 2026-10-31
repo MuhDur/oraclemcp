@@ -627,7 +627,7 @@ mod tests {
             }
             if self.synthesize_owners {
                 let public_catalog =
-                    sql.contains("from all_synonyms") || sql.contains("from all_db_links");
+                    sql.contains("from SYS.all_synonyms") || sql.contains("from SYS.all_db_links");
                 let mut owners = binds
                     .iter()
                     .take(32)
@@ -770,15 +770,15 @@ mod tests {
         );
 
         let calls = conn.calls.lock().expect("call log");
-        assert!(calls[0].0.contains("from all_objects"));
+        assert!(calls[0].0.contains("from SYS.all_objects"));
         assert!(calls[0].0.contains("owner in (:1, :2, :3"));
         assert_eq!(calls[0].1.len(), 32);
         assert_eq!(calls[0].1[0], OracleBind::String("DEMO".to_owned()));
         assert_eq!(calls[0].1[1], OracleBind::String("HR".to_owned()));
         assert!(calls[0].1[2..].iter().all(|bind| *bind == OracleBind::Null));
-        assert!(calls[12].0.contains("from all_users"));
+        assert!(calls[12].0.contains("from SYS.all_users"));
         assert!(calls[12].1.is_empty());
-        assert!(calls[17].0.contains("from all_editions"));
+        assert!(calls[17].0.contains("from SYS.all_editions"));
         assert!(calls[17].1.is_empty());
     }
 
@@ -947,7 +947,7 @@ mod tests {
             let filtered_calls = calls
                 .iter()
                 .filter(|(sql, _)| {
-                    !sql.contains("from all_users") && !sql.contains("from all_editions")
+                    !sql.contains("from SYS.all_users") && !sql.contains("from SYS.all_editions")
                 })
                 .collect::<Vec<_>>();
             assert_eq!(filtered_calls.len(), 63);
@@ -995,7 +995,7 @@ mod tests {
                     batch.row_set
                 );
             }
-            for view in ["from all_synonyms", "from all_db_links"] {
+            for view in ["from SYS.all_synonyms", "from SYS.all_db_links"] {
                 let flags = calls
                     .iter()
                     .filter(|(sql, _)| sql.contains(view))
@@ -1009,14 +1009,14 @@ mod tests {
             assert_eq!(
                 calls
                     .iter()
-                    .filter(|(sql, _)| sql.contains("from all_users"))
+                    .filter(|(sql, _)| sql.contains("from SYS.all_users"))
                     .count(),
                 1
             );
             assert_eq!(
                 calls
                     .iter()
-                    .filter(|(sql, _)| sql.contains("from all_editions"))
+                    .filter(|(sql, _)| sql.contains("from SYS.all_editions"))
                     .count(),
                 1
             );

@@ -2937,16 +2937,16 @@ mod tests {
                     "ORA-01031: insufficient privileges".into(),
                 ));
             }
-            if sql.contains("FROM all_objects WHERE owner = :1") && self.local_object {
+            if sql.contains("FROM SYS.all_objects WHERE owner = :1") && self.local_object {
                 return Ok(vec![cell_row(&[("OBJECT_TYPE", "TABLE")])]);
             }
-            if sql.contains("FROM all_synonyms WHERE owner = :1") && self.private_synonym {
+            if sql.contains("FROM SYS.all_synonyms WHERE owner = :1") && self.private_synonym {
                 return Ok(vec![cell_row(&[
                     ("TABLE_OWNER", "APP"),
                     ("TABLE_NAME", "OTHER"),
                 ])]);
             }
-            if sql.contains("FROM all_synonyms WHERE owner = 'PUBLIC'") {
+            if sql.contains("FROM SYS.all_synonyms WHERE owner = 'PUBLIC'") {
                 return Ok(vec![cell_row(&[
                     ("TABLE_OWNER", "SYS"),
                     ("TABLE_NAME", "PLAN_TABLE$"),
@@ -2966,7 +2966,7 @@ mod tests {
                     ("OBJECT_ID", &self.configured_object_id.to_string()),
                 ])]);
             }
-            if sql.contains("FROM all_triggers") && self.configured_enabled_trigger {
+            if sql.contains("FROM SYS.all_triggers") && self.configured_enabled_trigger {
                 return Ok(vec![cell_row(&[("TRIGGER_NAME", "PLAN_TABLE_TRIGGER")])]);
             }
             Ok(Vec::new())
@@ -3033,7 +3033,7 @@ mod tests {
             {
                 return Ok(vec![OracleRow { columns: vec![] }]);
             }
-            if lower_sql.contains("from all_views") {
+            if lower_sql.contains("from sys.all_views") {
                 return Ok(self.view_text.as_ref().map_or_else(Vec::new, |text| {
                     vec![OracleRow {
                         columns: vec![(
@@ -3043,7 +3043,7 @@ mod tests {
                     }]
                 }));
             }
-            if lower_sql.contains("from all_source") && lower_sql.contains("select type") {
+            if lower_sql.contains("from sys.all_source") && lower_sql.contains("select type") {
                 return Ok(self
                     .source_types
                     .iter()
@@ -3162,7 +3162,7 @@ mod tests {
     #[test]
     fn plan_table_catalog_privilege_gap_uses_fixed_sys_table_with_observation() {
         let mut mock = PlanResolverMock::new(unique_plan_service());
-        mock.denied_query_fragment = Some("FROM all_synonyms WHERE owner = 'PUBLIC'");
+        mock.denied_query_fragment = Some("FROM SYS.all_synonyms WHERE owner = 'PUBLIC'");
         let table = run_with_cx(|cx| async move {
             resolve_plan_table(&cx, &mock, None)
                 .await
@@ -3197,7 +3197,7 @@ mod tests {
     #[test]
     fn configured_plan_table_privilege_gap_names_sys_fallback() {
         let mut mock = PlanResolverMock::new(unique_plan_service());
-        mock.denied_query_fragment = Some("FROM all_tables");
+        mock.denied_query_fragment = Some("FROM SYS.all_tables");
         let table = run_with_cx(|cx| async move {
             resolve_plan_table(&cx, &mock, Some("APP.PLAN_TABLE"))
                 .await
@@ -3840,7 +3840,7 @@ mod tests {
         assert_eq!(source.line_count, 2);
         let calls = mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("FROM all_views"));
+        assert!(calls[0].0.contains("FROM SYS.all_views"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -3913,7 +3913,7 @@ mod tests {
         );
         let calls = mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 2, "source read followed by visible-type proof");
-        assert!(calls[0].0.contains("FROM all_source"));
+        assert!(calls[0].0.contains("FROM SYS.all_source"));
         assert!(calls[1].0.contains("SELECT type"));
         assert_eq!(
             calls[1].1,
@@ -4017,9 +4017,9 @@ mod tests {
         assert!(index.expressions.is_empty());
         let calls = index_mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 3);
-        assert!(calls[0].0.contains("FROM all_indexes"));
-        assert!(calls[1].0.contains("FROM all_ind_columns"));
-        assert!(calls[2].0.contains("FROM all_ind_expressions"));
+        assert!(calls[0].0.contains("FROM SYS.all_indexes"));
+        assert!(calls[1].0.contains("FROM SYS.all_ind_columns"));
+        assert!(calls[2].0.contains("FROM SYS.all_ind_expressions"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -4041,7 +4041,7 @@ mod tests {
         assert!(trigger.metadata.is_some());
         let calls = trigger_mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("FROM all_triggers"));
+        assert!(calls[0].0.contains("FROM SYS.all_triggers"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -4062,14 +4062,14 @@ mod tests {
         assert!(view.columns.is_empty());
         let calls = view_mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 3);
-        assert!(calls[0].0.contains("FROM all_views"));
-        assert!(calls[1].0.contains("FROM all_tab_columns"));
+        assert!(calls[0].0.contains("FROM SYS.all_views"));
+        assert!(calls[1].0.contains("FROM SYS.all_tab_columns"));
         assert!(
             calls[2]
                 .0
                 .contains("CAST(NULL AS VARCHAR2(4000)) AS data_default")
         );
-        assert!(calls[2].0.contains("FROM all_tab_cols"));
+        assert!(calls[2].0.contains("FROM SYS.all_tab_cols"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -4095,7 +4095,7 @@ mod tests {
         run_with_cx(|cx| async move { describe_columns(&cx, mm, "hr", "emp_v").await.unwrap() });
         let calls = modern_mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 2);
-        assert!(calls[0].0.contains("FROM all_tab_columns"));
+        assert!(calls[0].0.contains("FROM SYS.all_tab_columns"));
         assert!(calls[1].0.contains("data_default_vc AS data_default"));
         assert_eq!(calls[0].1, vec![]);
         assert_eq!(
@@ -4129,7 +4129,7 @@ mod tests {
         assert!(envelope.message.contains("APP.MISSING_VIEW"));
         let calls = conn.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 1, "view absence stops before column lookup");
-        assert!(calls[0].0.contains("FROM all_views"));
+        assert!(calls[0].0.contains("FROM SYS.all_views"));
         assert_eq!(
             calls[0].1,
             vec![
@@ -4190,8 +4190,8 @@ mod tests {
         assert!(constraints.is_empty());
         let calls = mock.calls.lock().expect("capture lock");
         assert_eq!(calls.len(), 1);
-        assert!(calls[0].0.contains("FROM all_constraints"));
-        assert!(calls[0].0.contains("LEFT JOIN all_cons_columns"));
+        assert!(calls[0].0.contains("FROM SYS.all_constraints"));
+        assert!(calls[0].0.contains("LEFT JOIN SYS.all_cons_columns"));
         assert!(calls[0].0.contains("ROWNUM <= :3"));
         assert_eq!(
             calls[0].1,
@@ -4409,7 +4409,7 @@ mod tests {
                 ]);
             }
 
-            if sql.contains("FROM all_objects") {
+            if sql.contains("FROM SYS.all_objects") {
                 return Ok(vec![
                     cell_row(&[
                         ("OWNER", "HR"),
@@ -4429,7 +4429,7 @@ mod tests {
                 ]);
             }
 
-            if sql.contains("FROM all_tab_modifications") {
+            if sql.contains("FROM SYS.all_tab_modifications") {
                 return Ok(vec![
                     cell_row(&[
                         ("OWNER", "HR"),
@@ -4454,7 +4454,7 @@ mod tests {
                 ]);
             }
 
-            assert!(sql.contains("FROM all_constraints child"));
+            assert!(sql.contains("FROM SYS.all_constraints child"));
             Ok(vec![
                 cell_row(&[
                     ("CHILD_OWNER", "HR"),
@@ -4562,7 +4562,7 @@ mod tests {
         );
         let schema_call = calls
             .iter()
-            .find(|(sql, _)| sql.contains("FROM all_objects"))
+            .find(|(sql, _)| sql.contains("FROM SYS.all_objects"))
             .expect("ALL_OBJECTS schema-map read");
         assert!(schema_call.0.contains("ROWNUM <= :2"));
         assert!(schema_call.0.contains("page_row > :3"));
@@ -4578,11 +4578,19 @@ mod tests {
 
         let fk_call = calls
             .iter()
-            .find(|(sql, _)| sql.contains("FROM all_constraints child"))
+            .find(|(sql, _)| sql.contains("FROM SYS.all_constraints child"))
             .expect("ALL_CONSTRAINTS FK read");
-        assert!(fk_call.0.contains("JOIN all_constraints parent"));
-        assert!(fk_call.0.contains("JOIN all_cons_columns child_columns"));
-        assert!(fk_call.0.contains("JOIN all_cons_columns parent_columns"));
+        assert!(fk_call.0.contains("JOIN SYS.all_constraints parent"));
+        assert!(
+            fk_call
+                .0
+                .contains("JOIN SYS.all_cons_columns child_columns")
+        );
+        assert!(
+            fk_call
+                .0
+                .contains("JOIN SYS.all_cons_columns parent_columns")
+        );
         assert!(fk_call.0.contains("page_row > :3"));
         assert!(
             fk_call
@@ -4635,7 +4643,7 @@ mod tests {
         let calls = mock.calls.lock().expect("orient mock lock");
         let activity_call = calls
             .iter()
-            .find(|(sql, _)| sql.contains("FROM all_tab_modifications"))
+            .find(|(sql, _)| sql.contains("FROM SYS.all_tab_modifications"))
             .expect("ALL_TAB_MODIFICATIONS activity read");
         assert!(activity_call.0.contains("ROWNUM <= :2"));
         assert!(activity_call.0.contains("page_row > :3"));
@@ -4684,7 +4692,7 @@ mod tests {
             .iter()
             .find(|(sql, _)| sql.contains("o.last_ddl_time DESC"))
             .expect("ALL_OBJECTS recent-DDL read");
-        assert!(recent_ddl_call.0.contains("FROM all_objects"));
+        assert!(recent_ddl_call.0.contains("FROM SYS.all_objects"));
         assert!(recent_ddl_call.0.contains("o.last_ddl_time DESC"));
         assert!(recent_ddl_call.0.contains("ROWNUM <= :2"));
         assert!(recent_ddl_call.0.contains("page_row > :3"));
@@ -4720,7 +4728,7 @@ mod tests {
             _binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
             self.seen_sql.lock().unwrap().push(sql.to_owned());
-            if sql.contains("FROM all_objects") {
+            if sql.contains("FROM SYS.all_objects") {
                 // Two objects: a table and a view. (Quoted-identifier case: the
                 // dictionary stores the exact case, so "MixedCase" round-trips.)
                 return Ok(vec![
@@ -4746,7 +4754,7 @@ mod tests {
                     ("COMMENTS", "primary key"),
                 ])]);
             }
-            if sql.contains("FROM all_tables") {
+            if sql.contains("FROM SYS.all_tables") {
                 return Ok(vec![cell_row(&[
                     ("NUM_ROWS", "1234"),
                     ("LAST_ANALYZED", "2026-01-01T00:00:00"),
@@ -4759,7 +4767,7 @@ mod tests {
                     .into_iter()
                     .collect());
             }
-            if sql.contains("FROM all_tab_columns") {
+            if sql.contains("FROM SYS.all_tab_columns") {
                 // Column count query.
                 return Ok(vec![cell_row(&[("COLUMN_COUNT", "3")])]);
             }
@@ -4769,7 +4777,7 @@ mod tests {
             if sql.contains("all_ind_columns") {
                 return Ok(vec![cell_row(&[("COLUMN_NAME", "ID")])]);
             }
-            if sql.contains("FROM all_indexes") {
+            if sql.contains("FROM SYS.all_indexes") {
                 return Ok(vec![cell_row(&[
                     ("INDEX_NAME", "EMP_PK"),
                     ("UNIQUENESS", "UNIQUE"),

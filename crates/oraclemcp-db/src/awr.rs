@@ -338,12 +338,12 @@ SELECT s.snap_id AS snapshot_id, s.instance_number AS instance_number, \
        TO_CHAR(sn.end_interval_time, 'YYYY-MM-DD\"T\"HH24:MI:SS.FF6') AS snapshot_end_time, \
        s.plan_hash_value AS plan_hash_value, \
        COALESCE(s.optimizer_cost, p.cost) AS optimizer_cost \
-FROM dba_hist_sqlstat s \
-JOIN dba_hist_snapshot sn \
+FROM SYS.dba_hist_sqlstat s \
+JOIN SYS.dba_hist_snapshot sn \
   ON sn.snap_id = s.snap_id \
  AND sn.dbid = s.dbid \
  AND sn.instance_number = s.instance_number \
-LEFT JOIN dba_hist_sql_plan p \
+LEFT JOIN SYS.dba_hist_sql_plan p \
   ON p.dbid = s.dbid \
  AND p.sql_id = s.sql_id \
  AND p.plan_hash_value = s.plan_hash_value \
@@ -644,7 +644,7 @@ mod tests {
             assert!(matches!(error, DbError::Cancelled(_)), "{error:?}");
             let sql = conn.sql();
             assert_eq!(sql.len(), 1);
-            assert!(sql[0].contains("v$parameter"));
+            assert!(sql[0].contains("SYS.v_$parameter"));
         });
     }
 
@@ -681,7 +681,7 @@ mod tests {
             assert_eq!(source, DiagnosticsSource::Statspack);
             let sql = conn.sql();
             assert_eq!(sql.len(), 2);
-            assert!(sql[0].contains("v$parameter"));
+            assert!(sql[0].contains("SYS.v_$parameter"));
             assert!(sql[1].contains("perfstat.stats$snapshot"));
         });
     }
@@ -712,7 +712,7 @@ mod tests {
 
             let sql = conn.sql();
             assert_eq!(sql.len(), 2, "both guarded historical probes run");
-            assert!(sql[0].contains("v$parameter"));
+            assert!(sql[0].contains("SYS.v_$parameter"));
             assert!(
                 sql[1]
                     .to_ascii_lowercase()
@@ -848,7 +848,7 @@ mod tests {
         )
         .expect("live query");
         let q = id.spec().sql;
-        assert!(q.to_ascii_lowercase().contains("v$sqlstats"));
+        assert!(q.to_ascii_lowercase().contains("sys.v_$sqlstats"));
         assert!(q.contains("ORDER BY elapsed_time DESC"));
         assert!(q.contains("rownum <= :5"));
         assert_eq!(
@@ -1042,7 +1042,7 @@ mod tests {
     #[test]
     fn every_top_sql_source_metric_and_share_uses_a_fixed_catalog_query() {
         for (source, view) in [
-            (DiagnosticsSource::LiveCursor, "v$sqlstats"),
+            (DiagnosticsSource::LiveCursor, "SYS.v_$sqlstats"),
             (DiagnosticsSource::AwrAsh, "dba_hist_sqlstat"),
             (DiagnosticsSource::Statspack, "stats$sql_summary"),
         ] {
@@ -1164,7 +1164,7 @@ mod tests {
 
             assert_eq!(error.error_class, ErrorClass::PolicyDenied);
             assert_eq!(conn.sql().len(), 1, "never query AWR after NONE");
-            assert!(conn.sql()[0].contains("v$parameter"));
+            assert!(conn.sql()[0].contains("SYS.v_$parameter"));
         });
     }
 

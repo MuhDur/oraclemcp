@@ -93,7 +93,7 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
     if sql.contains("session_roles") {
         return Some(Vec::new());
     }
-    if sql.contains("FROM all_objects WHERE owner = :1 AND object_name = :2") {
+    if sql.contains("FROM SYS.all_objects WHERE owner = :1 AND object_name = :2") {
         return Some(vec![OracleRow {
             columns: vec![
                 ("OWNER".to_owned(), resolver_text(resolver_bind(binds, 0))),
@@ -111,7 +111,7 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
             ],
         }]);
     }
-    if sql.contains("FROM all_synonyms") {
+    if sql.contains("FROM SYS.all_synonyms") {
         return Some(Vec::new());
     }
     if sql.contains("all_tab_columns") && sql.contains("table_name = :2") {
@@ -1050,7 +1050,7 @@ impl OracleConnection for SearchMock {
         if sql.contains("schema_name") {
             return Ok(vec![row(&[("SCHEMA_NAME", "HR"), ("OBJECT_COUNT", "12")])]);
         }
-        if sql.contains("FROM all_objects") {
+        if sql.contains("FROM SYS.all_objects") {
             return Ok(vec![row(&[
                 ("OWNER", "HR"),
                 ("OBJECT_NAME", "EMPLOYEES"),
@@ -1061,7 +1061,7 @@ impl OracleConnection for SearchMock {
         // CatalogQueryId executes these fixed dictionary probes through
         // query_rows. OracleConnection's optional-row default also delegates
         // here, so both call shapes use the same truthful catalog result.
-        if sql.contains("FROM all_tables") {
+        if sql.contains("FROM SYS.all_tables") {
             return Ok(vec![row(&[
                 ("NUM_ROWS", "1234"),
                 ("LAST_ANALYZED", "2026-06-01T08:00:00"),
@@ -1091,7 +1091,7 @@ impl OracleConnection for SearchMock {
                 ]),
             ]);
         }
-        if sql.contains("FROM all_indexes") {
+        if sql.contains("FROM SYS.all_indexes") {
             return Ok(vec![row(&[
                 ("INDEX_NAME", "EMP_PK"),
                 ("UNIQUENESS", "UNIQUE"),

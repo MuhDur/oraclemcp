@@ -226,9 +226,8 @@ pub enum AsOf {
 }
 
 pub(crate) const CURRENT_SCN_SQL: &str =
-    "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL";
-pub(crate) const TIMESTAMP_TO_SCN_SQL: &str =
-    "SELECT TIMESTAMP_TO_SCN(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')) AS OBSERVED_SCN FROM DUAL";
+    "SELECT SYS.DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM SYS.DUAL";
+pub(crate) const TIMESTAMP_TO_SCN_SQL: &str = "SELECT TIMESTAMP_TO_SCN(TO_TIMESTAMP(:1, 'YYYY-MM-DD HH24:MI:SS')) AS OBSERVED_SCN FROM SYS.DUAL";
 
 /// ORA-00904 on [`CURRENT_SCN_SQL`] means the `DBMS_FLASHBACK` expression did
 /// not resolve for THIS session — verified live (18c/21c/23ai) to be a
@@ -1574,7 +1573,7 @@ mod tests {
     fn observed_scn_helpers_use_server_owned_bound_queries() {
         assert_eq!(
             CURRENT_SCN_SQL,
-            "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL",
+            "SELECT SYS.DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM SYS.DUAL",
             "Oracle requires the server-owned SCN expression without parentheses"
         );
         let conn = FlashbackRecorder::default();

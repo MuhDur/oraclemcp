@@ -427,7 +427,8 @@ impl OracleConnection for ScnCapabilityUnavailableMock {
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
-        if sql == "SELECT DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM DUAL" {
+        if sql == "SELECT SYS.DBMS_FLASHBACK.GET_SYSTEM_CHANGE_NUMBER AS OBSERVED_SCN FROM SYS.DUAL"
+        {
             return Err(DbError::Query(
                 "ORA-00904: \"SYS\".\"DBMS_FLASHBACK\": invalid identifier".to_owned(),
             ));

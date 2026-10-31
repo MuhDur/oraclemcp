@@ -472,13 +472,13 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
         }
         return Some(vec![context]);
     }
-    if normalized.contains("from session_roles") {
+    if normalized.contains("from sys.session_roles") {
         return Some(Vec::new());
     }
     if normalized.contains("data_type_owner is not null") {
         return Some(Vec::new());
     }
-    if normalized.contains("from all_synonyms where owner = 'public'")
+    if normalized.contains("from sys.all_synonyms where owner = 'public'")
         && normalized.contains("synonym_name = 'plan_table'")
     {
         return Some(vec![semantic_row(&[
@@ -487,11 +487,12 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             ("DB_LINK", None),
         ])]);
     }
-    if normalized.contains("from all_objects") && normalized.contains("object_name = 'plan_table'")
+    if normalized.contains("from sys.all_objects")
+        && normalized.contains("object_name = 'plan_table'")
     {
         return Some(Vec::new());
     }
-    if normalized.contains("from all_tab_cols")
+    if normalized.contains("from sys.all_tab_cols")
         && normalized.contains("where owner = :1 and table_name = :2")
         && normalized.contains("order by column_id")
     {
@@ -506,7 +507,7 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             ("USER_GENERATED", Some("YES")),
         ])]);
     }
-    if normalized.contains("from all_indexes") && normalized.contains("ityp_owner") {
+    if normalized.contains("from sys.all_indexes") && normalized.contains("ityp_owner") {
         return Some(Vec::new());
     }
     if normalized.contains("t.owner = 'sys'") && normalized.contains("t.table_name = 'plan_table$'")
@@ -517,7 +518,7 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             ("OBJECT_ID", Some("901")),
         ])]);
     }
-    if normalized.contains("from all_objects")
+    if normalized.contains("from sys.all_objects")
         && normalized.contains("object_id, status, edition_name")
     {
         let owner = string_bind(binds, 0).unwrap_or("APP");
@@ -531,7 +532,7 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             ("EDITION_NAME", None),
         ])]);
     }
-    if normalized.contains("from all_tab_columns") && normalized.contains("column_name = :1") {
+    if normalized.contains("from sys.all_tab_columns") && normalized.contains("column_name = :1") {
         let column = string_bind(binds, 0).unwrap_or("ID").to_ascii_uppercase();
         return match column.as_str() {
             "ID" | "EMBEDDING" | "LABEL" => Some(vec![semantic_row(&[
@@ -543,13 +544,14 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             _ => Some(Vec::new()),
         };
     }
-    if normalized.contains("from all_synonyms")
-        || normalized.contains("from all_arguments")
-        || (normalized.contains("from all_tab_columns") && !normalized.contains("table_name = :2"))
+    if normalized.contains("from sys.all_synonyms")
+        || normalized.contains("from sys.all_arguments")
+        || (normalized.contains("from sys.all_tab_columns")
+            && !normalized.contains("table_name = :2"))
     {
         return Some(Vec::new());
     }
-    if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
+    if normalized.contains("from sys.all_tab_columns") && normalized.contains("table_name = :2") {
         let column = string_bind(binds, 2).unwrap_or("VALUE");
         return Some(vec![semantic_row(&[
             ("COLUMN_NAME", Some(column)),
@@ -560,9 +562,7 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
     // here; the bulk catalog-extraction queries (`... WHERE owner IN (...)`, no
     // ROWNUM) must fall through to `catalog_extract_empty_rowset` so they yield an
     // empty rowset with the extraction's own column shape, not this probe shape.
-    if (normalized.contains("from all_policies") || normalized.contains("from sys.all_policies"))
-        && normalized.contains("rownum")
-    {
+    if normalized.contains("from sys.all_policies") && normalized.contains("rownum") {
         if normalized.contains("object_owner = :1")
             || normalized.contains("(object_owner, object_name) in")
         {
@@ -573,10 +573,10 @@ fn mock_plain_table_dictionary(sql: &str, binds: &[OracleBind]) -> Option<Vec<Or
             Some("VISIBLE_POLICY"),
         )])]);
     }
-    if normalized.contains("from all_audit_policies") {
+    if normalized.contains("from sys.all_audit_policies") {
         return Some(Vec::new());
     }
-    if normalized.contains("from all_tab_cols") && normalized.contains("rownum") {
+    if normalized.contains("from sys.all_tab_cols") && normalized.contains("rownum") {
         if normalized.contains("virtual_column = 'yes'") {
             return Some(Vec::new());
         }
@@ -690,10 +690,10 @@ impl OracleConnection for SemanticGuardMock {
             }
             return Ok(vec![context]);
         }
-        if normalized.contains("from session_roles") {
+        if normalized.contains("from sys.session_roles") {
             return Ok(Vec::new());
         }
-        if normalized.contains("from v$parameter") && normalized.contains("compatible") {
+        if normalized.contains("from sys.v_$parameter") && normalized.contains("compatible") {
             if *self
                 .state
                 .compatible_query_unavailable
@@ -716,7 +716,7 @@ impl OracleConnection for SemanticGuardMock {
                 .into_iter()
                 .collect());
         }
-        if normalized.contains("from user_mining_models") {
+        if normalized.contains("from sys.user_mining_models") {
             let models = self
                 .state
                 .embedding_models
@@ -728,7 +728,7 @@ impl OracleConnection for SemanticGuardMock {
                 .map(|model| semantic_row(&[("MODEL_NAME", Some(model.as_str()))]))
                 .collect());
         }
-        if normalized.contains("from all_objects") {
+        if normalized.contains("from sys.all_objects") {
             let name = string_bind(binds, 1).unwrap_or_default();
             let kind = match name {
                 "ORDERS" | "POLICY_TABLE" => "TABLE",
@@ -746,7 +746,7 @@ impl OracleConnection for SemanticGuardMock {
                 ("EDITION_NAME", None),
             ])]);
         }
-        if normalized.contains("from all_synonyms") {
+        if normalized.contains("from sys.all_synonyms") {
             if string_bind(binds, 0) == Some("APP") && string_bind(binds, 1) == Some("ORDERS_ALIAS")
             {
                 return Ok(vec![semantic_row(&[
@@ -762,7 +762,7 @@ impl OracleConnection for SemanticGuardMock {
             }
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_arguments") {
+        if normalized.contains("from sys.all_arguments") {
             return Ok(vec![semantic_row(&[
                 ("SUBPROGRAM_ID", Some("1")),
                 ("OVERLOAD", None),
@@ -772,7 +772,7 @@ impl OracleConnection for SemanticGuardMock {
                 ("DEFAULTED", Some("N")),
             ])]);
         }
-        if normalized.contains("select data_type, data_type_owner from all_tab_columns") {
+        if normalized.contains("select data_type, data_type_owner from sys.all_tab_columns") {
             let data_type = match string_bind(binds, 2) {
                 Some("DOC") => "JSON",
                 Some("ADDRESS") => "ADDRESS_T",
@@ -786,7 +786,7 @@ impl OracleConnection for SemanticGuardMock {
                 ),
             ])]);
         }
-        if normalized.contains("from all_type_attrs") {
+        if normalized.contains("from sys.all_type_attrs") {
             if string_bind(binds, 0) == Some("APP")
                 && string_bind(binds, 1) == Some("ADDRESS_T")
                 && string_bind(binds, 2) == Some("CITY")
@@ -800,10 +800,12 @@ impl OracleConnection for SemanticGuardMock {
             }
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_json_columns") {
+        if normalized.contains("from sys.all_json_columns") {
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_tab_columns") && normalized.contains("column_name = :1") {
+        if normalized.contains("from sys.all_tab_columns")
+            && normalized.contains("column_name = :1")
+        {
             let column = string_bind(binds, 0)
                 .unwrap_or_default()
                 .to_ascii_uppercase();
@@ -817,7 +819,8 @@ impl OracleConnection for SemanticGuardMock {
                 _ => Vec::new(),
             });
         }
-        if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
+        if normalized.contains("from sys.all_tab_columns") && normalized.contains("table_name = :2")
+        {
             let column = string_bind(binds, 2).unwrap_or_default();
             return Ok(
                 (matches!(column, "ID" | "EMBEDDING" | "LABEL" | "DOC" | "ADDRESS"))
@@ -828,14 +831,13 @@ impl OracleConnection for SemanticGuardMock {
                     .collect(),
             );
         }
-        if normalized.contains("from all_tab_columns") {
+        if normalized.contains("from sys.all_tab_columns") {
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_policies") || normalized.contains("from sys.all_policies")
-        {
+        if normalized.contains("from sys.all_policies") {
             return Ok(semantic_policy_rows_for(sql, binds));
         }
-        if normalized.contains("from all_audit_policies") {
+        if normalized.contains("from sys.all_audit_policies") {
             if *self
                 .state
                 .fga_catalog_unreadable
@@ -875,7 +877,7 @@ impl OracleConnection for SemanticGuardMock {
             }
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_tab_cols") {
+        if normalized.contains("from sys.all_tab_cols") {
             if normalized.contains("virtual_column = 'yes'") {
                 let expression = self
                     .state
@@ -1470,11 +1472,11 @@ fn over_refusal_28_29_31_33_admitted_with_every_relation_proven() {
         let events = state.read_events.lock().expect("read events lock");
         let object_proof = events
             .iter()
-            .any(|event| event.to_ascii_lowercase().contains("from all_objects"));
+            .any(|event| event.to_ascii_lowercase().contains("from sys.all_objects"));
         let fga_proof = events.iter().any(|event| {
             event
                 .to_ascii_lowercase()
-                .contains("from all_audit_policies")
+                .contains("from sys.all_audit_policies")
         });
         assert!(
             object_proof,
@@ -1526,19 +1528,19 @@ fn over_refusal_30_32_admitted_with_every_relation_proven() {
             "30_hidden_builtin_virtual_column",
             "SELECT ID FROM APP.ORDERS",
             Some("UPPER(\"LABEL\")"),
-            "from all_tab_cols",
+            "from sys.all_tab_cols",
         ),
         (
             "32_native_json_path",
             "SELECT j.DOC.customer.id FROM APP.ORDERS j",
             None,
-            "select data_type, data_type_owner from all_tab_columns",
+            "select data_type, data_type_owner from sys.all_tab_columns",
         ),
         (
             "32_object_attribute_path",
             "SELECT e.ADDRESS.CITY FROM APP.ORDERS e",
             None,
-            "from all_type_attrs",
+            "from sys.all_type_attrs",
         ),
     ] {
         let (dispatcher, state) = semantic_dispatcher();
@@ -1557,8 +1559,8 @@ fn over_refusal_30_32_admitted_with_every_relation_proven() {
             .position(|event| event.contains("tool=oracle_query */"))
             .expect("exact caller SQL executed");
         let proof_before_caller = [
-            "from all_objects",
-            "from all_audit_policies",
+            "from sys.all_objects",
+            "from sys.all_audit_policies",
             expected_probe,
         ]
         .into_iter()
@@ -1601,7 +1603,7 @@ fn over_refusal_30_32_admitted_with_every_relation_proven() {
         .lock()
         .expect("read events lock")
         .iter()
-        .any(|event| event.to_ascii_lowercase().contains("from all_tab_cols"));
+        .any(|event| event.to_ascii_lowercase().contains("from sys.all_tab_cols"));
     assert!(
         virtual_probe_seen,
         "the user routine virtual row caused the refusal"
@@ -2194,7 +2196,7 @@ impl OracleConnection for OneRowMock {
                 )],
             }]);
         }
-        if sql_lower.contains("from all_users") {
+        if sql_lower.contains("from sys.all_users") {
             return Ok(vec![OracleRow {
                 columns: vec![(
                     "USERNAME".to_owned(),
@@ -2202,7 +2204,7 @@ impl OracleConnection for OneRowMock {
                 )],
             }]);
         }
-        if sql_lower.contains("from all_tab_cols")
+        if sql_lower.contains("from sys.all_tab_cols")
             && sql_lower.contains("where owner = :1 and table_name = :2")
             && sql_lower.contains("order by column_id")
         {
@@ -2509,7 +2511,7 @@ impl OracleConnection for DescribeCatalogMock {
             .expect("describe catalog call mutex")
             .push((sql.to_owned(), binds.to_vec()));
         let sql = sql.to_ascii_lowercase();
-        if sql.contains("from all_views") {
+        if sql.contains("from sys.all_views") {
             if self.view_exists {
                 Ok(vec![OracleRow {
                     columns: vec![
@@ -2534,7 +2536,7 @@ impl OracleConnection for DescribeCatalogMock {
             } else {
                 Ok(Vec::new())
             }
-        } else if sql.contains("from all_tab_cols") {
+        } else if sql.contains("from sys.all_tab_cols") {
             Ok(self.columns.clone())
         } else {
             Ok(Vec::new())
@@ -2556,31 +2558,30 @@ impl OracleConnection for DescribeCatalogMock {
 
 fn catalog_extract_empty_rowset(sql_lower: &str) -> bool {
     [
-        "from all_tab_cols",
-        "from all_constraints",
-        "from all_synonyms",
-        "from all_procedures",
-        "from all_arguments",
-        "from all_mviews",
-        "from all_sequences",
-        "from all_type_attrs",
-        "from all_tab_privs",
-        "from all_db_links",
-        "from all_tab_comments",
-        "from all_col_comments",
-        "from all_editions",
-        "from all_editioning_views",
-        "from all_policies",
+        "from sys.all_tab_cols",
+        "from sys.all_constraints",
+        "from sys.all_synonyms",
+        "from sys.all_procedures",
+        "from sys.all_arguments",
+        "from sys.all_mviews",
+        "from sys.all_sequences",
+        "from sys.all_type_attrs",
+        "from sys.all_tab_privs",
+        "from sys.all_db_links",
+        "from sys.all_tab_comments",
+        "from sys.all_col_comments",
+        "from sys.all_editions",
+        "from sys.all_editioning_views",
         "from sys.all_policies",
-        "from all_associations",
-        "from all_sa_table_policies",
-        "from all_sa_schema_policies",
-        "from all_xs_applied_policies",
-        "from redaction_policies",
-        "from all_operators",
-        "from all_dependencies",
-        "from all_plsql_object_settings",
-        "from all_identifiers",
+        "from sys.all_associations",
+        "from lbacsys.all_sa_table_policies",
+        "from lbacsys.all_sa_schema_policies",
+        "from sys.all_xs_applied_policies",
+        "from sys.redaction_policies",
+        "from sys.all_operators",
+        "from sys.all_dependencies",
+        "from sys.all_plsql_object_settings",
+        "from sys.all_identifiers",
     ]
     .iter()
     .any(|needle| sql_lower.contains(needle))
@@ -3227,7 +3228,7 @@ impl OracleConnection for EditionLifecycleMock {
                 ("CON_UID", Some("9001")),
             ])]);
         }
-        if lower_sql.contains("from all_editions") {
+        if lower_sql.contains("from sys.all_editions") {
             // Snapshot the Oracle dictionary answer before the optional test
             // barrier. This models two independent services that both observe
             // the same empty parent at preflight, then race at CREATE.
@@ -3484,7 +3485,7 @@ impl OracleConnection for ExecRecordingMock {
             return Ok(rows);
         }
         let sql_lc = sql.to_ascii_lowercase();
-        if sql_lc.contains("from all_errors") {
+        if sql_lc.contains("from sys.all_errors") {
             return Ok(self
                 .state
                 .diagnostics
@@ -3492,7 +3493,7 @@ impl OracleConnection for ExecRecordingMock {
                 .expect("diagnostics mutex")
                 .clone());
         }
-        if sql_lc.contains("from all_source") {
+        if sql_lc.contains("from sys.all_source") {
             return Ok(vec![OracleRow {
                     columns: vec![(
                         "TEXT".to_owned(),
@@ -5748,7 +5749,7 @@ impl OracleConnection for SearchObjectsDispatchMock {
                 })
                 .collect(),
         };
-        if sql.contains("FROM all_objects") {
+        if sql.contains("FROM SYS.all_objects") {
             return Ok(vec![row(&[
                 ("OWNER", "APP"),
                 ("OBJECT_NAME", "EMPLOYEES"),
@@ -5763,7 +5764,7 @@ impl OracleConnection for SearchObjectsDispatchMock {
                 ("NULLABLE", "N"),
             ])]);
         }
-        if sql.contains("FROM all_tables") {
+        if sql.contains("FROM SYS.all_tables") {
             return Ok(vec![row(&[
                 ("NUM_ROWS", "999"),
                 ("LAST_ANALYZED", "2026-06-01T00:00:00"),
@@ -5778,7 +5779,7 @@ impl OracleConnection for SearchObjectsDispatchMock {
         if sql.contains("all_tab_comments") {
             return Ok(vec![row(&[("COMMENTS", "emp table")])]);
         }
-        if sql.contains("FROM all_indexes") {
+        if sql.contains("FROM SYS.all_indexes") {
             return Ok(vec![row(&[
                 ("INDEX_NAME", "EMP_PK"),
                 ("UNIQUENESS", "UNIQUE"),
@@ -5943,7 +5944,7 @@ impl OracleConnection for OrientDispatchMock {
         sql: &str,
         _binds: &[OracleBind],
     ) -> Result<Vec<OracleRow>, DbError> {
-        if sql.contains("FROM all_tab_modifications") {
+        if sql.contains("FROM SYS.all_tab_modifications") {
             self.state.dictionary_reads.fetch_add(1, Ordering::SeqCst);
             return Ok(vec![Self::row(&[
                 ("OWNER", "APP"),
@@ -5965,7 +5966,7 @@ impl OracleConnection for OrientDispatchMock {
                 ("LAST_DDL_TIME", "2026-07-13T12:05:00"),
             ])]);
         }
-        if sql.contains("FROM all_constraints child") {
+        if sql.contains("FROM SYS.all_constraints child") {
             self.state.dictionary_reads.fetch_add(1, Ordering::SeqCst);
             return Ok(vec![Self::row(&[
                 ("CHILD_OWNER", "APP"),
@@ -5978,7 +5979,7 @@ impl OracleConnection for OrientDispatchMock {
                 ("COLUMN_POSITION", "1"),
             ])]);
         }
-        if sql.contains("FROM all_objects") {
+        if sql.contains("FROM SYS.all_objects") {
             self.state.dictionary_reads.fetch_add(1, Ordering::SeqCst);
             return Ok(vec![Self::row(&[
                 ("OWNER", "APP"),
@@ -6319,10 +6320,10 @@ fn oracle_describe_not_visible_returns_structured_not_found_with_next_actions() 
     );
     let calls = state.calls.lock().expect("describe catalog call mutex");
     assert_eq!(calls.len(), 2);
-    assert!(calls[0].0.contains("FROM all_tab_columns"));
+    assert!(calls[0].0.contains("FROM SYS.all_tab_columns"));
     assert!(calls[0].0.contains("DATA_DEFAULT_VC"));
     assert!(calls[0].1.is_empty());
-    assert!(calls[1].0.contains("FROM all_tab_cols"));
+    assert!(calls[1].0.contains("FROM SYS.all_tab_cols"));
     assert_eq!(
         calls[1].1,
         vec![
@@ -6373,7 +6374,7 @@ fn oracle_describe_preserves_double_quoted_identifier_case() {
     assert_eq!(description["table"], json!("camelCase"));
     let calls = state.calls.lock().expect("describe catalog call mutex");
     assert_eq!(calls.len(), 3);
-    assert!(calls[0].0.contains("FROM all_tab_columns"));
+    assert!(calls[0].0.contains("FROM SYS.all_tab_columns"));
     assert!(calls[0].0.contains("DATA_DEFAULT_VC"));
     assert!(calls[0].1.is_empty());
     assert!(
@@ -8807,7 +8808,7 @@ fn edition_lifecycle_executes_a_legal_linear_child_and_retires_it_through_ddl_ga
         queries[1]
             .0
             .to_ascii_lowercase()
-            .contains("from all_editions")
+            .contains("from sys.all_editions")
     );
     assert_eq!(
         queries[1].1,
@@ -8979,7 +8980,7 @@ fn edition_service_owned_reservation_refuses_a_second_session_before_dictionary_
         !queries[0]
             .0
             .to_ascii_lowercase()
-            .contains("from all_editions"),
+            .contains("from sys.all_editions"),
         "the local reservation resolves the concurrent conflict before the edition dictionary preflight"
     );
     assert!(
@@ -14338,7 +14339,7 @@ mod top_queries {
         assert_eq!(error.error_class, ErrorClass::PolicyDenied, "{error:?}");
         let queries = queries.lock().expect("historical probe query log");
         assert_eq!(queries.len(), 2, "both guarded probes should degrade");
-        assert!(queries[0].to_ascii_lowercase().contains("v$parameter"));
+        assert!(queries[0].to_ascii_lowercase().contains("sys.v_$parameter"));
         assert!(
             queries[1]
                 .to_ascii_lowercase()
@@ -14382,7 +14383,7 @@ mod plan_timeline {
             _binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
             let normalized = sql.to_ascii_lowercase();
-            if normalized.contains("from v$parameter") {
+            if normalized.contains("from sys.v_$parameter") {
                 return Ok(vec![OracleRow {
                     columns: vec![(
                         "VALUE".to_owned(),
@@ -14390,7 +14391,7 @@ mod plan_timeline {
                     )],
                 }]);
             }
-            if normalized.contains("from dba_hist_sqlstat") {
+            if normalized.contains("from sys.dba_hist_sqlstat") {
                 return Ok(vec![OracleRow {
                     columns: vec![
                         (
@@ -17355,7 +17356,7 @@ impl OracleConnection for FleetMock {
             .map(|(_, object)| *object)
             .unwrap_or("ORDERS");
         if !self.resolves
-            && normalized.contains("from all_objects")
+            && normalized.contains("from sys.all_objects")
             && normalized.contains("object_id, status, edition_name")
         {
             // This database has never heard of the object: nothing to prove a
@@ -17365,7 +17366,7 @@ impl OracleConnection for FleetMock {
         if let Some(rows) = mock_plain_table_dictionary(sql, binds) {
             return Ok(rows);
         }
-        if normalized.contains("from all_tab_modifications") {
+        if normalized.contains("from sys.all_tab_modifications") {
             return Ok(vec![Self::orient_row(&[
                 ("OWNER", "APP"),
                 ("OBJECT_NAME", orient_object),
@@ -17385,7 +17386,7 @@ impl OracleConnection for FleetMock {
                 ("LAST_DDL_TIME", "2026-07-13T12:05:00"),
             ])]);
         }
-        if normalized.contains("from all_constraints child") {
+        if normalized.contains("from sys.all_constraints child") {
             return Ok(vec![Self::orient_row(&[
                 ("CHILD_OWNER", "APP"),
                 ("CHILD_TABLE", "ORDER_LINES"),
@@ -17397,7 +17398,7 @@ impl OracleConnection for FleetMock {
                 ("COLUMN_POSITION", "1"),
             ])]);
         }
-        if normalized.contains("from all_objects") {
+        if normalized.contains("from sys.all_objects") {
             return Ok(vec![Self::orient_row(&[
                 ("OWNER", "APP"),
                 ("OBJECT_NAME", orient_object),

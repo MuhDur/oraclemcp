@@ -7499,7 +7499,7 @@ mod driver {
             if let Some(r) = self
                 .describe_first_row(
                     cx,
-                    "SELECT version_full FROM product_component_version WHERE rownum = 1",
+                    "SELECT version_full FROM SYS.product_component_version WHERE rownum = 1",
                 )
                 .await?
             {
@@ -7508,7 +7508,7 @@ mod driver {
             if let Some(r) = self
                 .describe_first_row(
                     cx,
-                    "SELECT database_role, open_mode, db_unique_name FROM v$database",
+                    "SELECT database_role, open_mode, db_unique_name FROM SYS.v_$database",
                 )
                 .await?
             {
@@ -7517,7 +7517,7 @@ mod driver {
                 info.db_unique_name = r.text("DB_UNIQUE_NAME").map(str::to_owned);
             }
             if let Some(r) = self
-                .describe_first_row(cx, "SELECT instance_name FROM v$instance")
+                .describe_first_row(cx, "SELECT instance_name FROM SYS.v_$instance")
                 .await?
             {
                 info.instance_name = r.text("INSTANCE_NAME").map(str::to_owned);
@@ -7540,7 +7540,7 @@ mod driver {
                     SYS_CONTEXT('USERENV','OS_USER') AS os_user, \
                     SYS_CONTEXT('USERENV','HOST') AS host, \
                     SYS_CONTEXT('USERENV','TERMINAL') AS terminal \
-                 FROM dual",
+                 FROM SYS.dual",
                 )
                 .await?
             {
@@ -7563,7 +7563,7 @@ mod driver {
                 .describe_first_row(
                     cx,
                     "SELECT sid, serial# AS serial_number, service_name, osuser, machine, terminal, program \
-                 FROM v$session \
+                 FROM SYS.v_$session \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                  FETCH FIRST 1 ROWS ONLY",
                 )
@@ -7590,7 +7590,7 @@ mod driver {
                 .describe_first_row(
                     cx,
                     "SELECT client_driver \
-                 FROM v$session_connect_info \
+                 FROM SYS.v_$session_connect_info \
                  WHERE sid = TO_NUMBER(SYS_CONTEXT('USERENV','SID')) \
                    AND client_driver IS NOT NULL \
                  FETCH FIRST 1 ROWS ONLY",
@@ -7645,11 +7645,11 @@ mod driver {
                         // "Oracle AI Database 26ai Free" — match "%DATABASE%"
                         // (not "Oracle Database%") so both namings are captured.
                         "SELECT \
-                         (SELECT product FROM product_component_version \
+                         (SELECT product FROM SYS.product_component_version \
                             WHERE UPPER(product) LIKE '%DATABASE%' AND rownum = 1) AS edition, \
-                         (SELECT value FROM v$option \
+                         (SELECT value FROM SYS.v_$option \
                             WHERE parameter = 'Partitioning') AS partitioning \
-                         FROM dual",
+                         FROM SYS.dual",
                     )
                     .await?
                 {
@@ -7738,7 +7738,7 @@ mod driver {
                 let (zone_result, cached) = execute_with_timeout(
                     cx,
                     &mut inner,
-                    "SELECT SESSIONTIMEZONE AS SESSION_ZONE FROM dual",
+                    "SELECT SESSIONTIMEZONE AS SESSION_ZONE FROM SYS.dual",
                     1,
                     &[],
                     limits.clone(),

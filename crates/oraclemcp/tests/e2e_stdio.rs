@@ -92,7 +92,7 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
     if sql.contains("session_roles") {
         return Some(Vec::new());
     }
-    if sql.contains("FROM all_objects WHERE owner = :1 AND object_name = :2") {
+    if sql.contains("FROM SYS.all_objects WHERE owner = :1 AND object_name = :2") {
         return Some(vec![OracleRow {
             columns: vec![
                 ("OWNER".to_owned(), resolver_text(resolver_bind(binds, 0))),
@@ -110,7 +110,7 @@ fn resolver_dictionary_rows(sql: &str, binds: &[OracleBind]) -> Option<Vec<Oracl
             ],
         }]);
     }
-    if sql.contains("FROM all_synonyms") {
+    if sql.contains("FROM SYS.all_synonyms") {
         return Some(Vec::new());
     }
     if sql.contains("policy_name FROM SYS.ALL_POLICIES WHERE ROWNUM <= 1") {

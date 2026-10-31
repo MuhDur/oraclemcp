@@ -1505,10 +1505,10 @@ mod tests {
                     ("EDITION_NAME", Some("ORA$BASE")),
                 ])]);
             }
-            if sql.contains("FROM session_roles") {
+            if sql.contains("FROM SYS.session_roles") {
                 return Ok(Vec::new());
             }
-            if sql.contains("FROM all_objects WHERE") {
+            if sql.contains("FROM SYS.all_objects WHERE") {
                 let target = if self.catalog_fixture == CqnCatalogFixture::OuterTableInnerView {
                     match binds.get(1) {
                         Some(OracleBind::String(name)) if name == "CQN_TARGET" => "CQN_TARGET",
@@ -1531,7 +1531,7 @@ mod tests {
                     ("EDITION_NAME", Some("ORA$BASE")),
                 ])]);
             }
-            if sql.contains("FROM all_tab_columns") && sql.contains("column_name = :3") {
+            if sql.contains("FROM SYS.all_tab_columns") && sql.contains("column_name = :3") {
                 return Ok(vec![catalog_row(&[
                     ("COLUMN_NAME", Some("ID")),
                     ("COLUMN_ID", Some("1")),
@@ -1555,7 +1555,7 @@ mod tests {
                     Some("VISIBLE_POLICY"),
                 )])]);
             }
-            if sql.contains("FROM all_tab_cols") {
+            if sql.contains("FROM SYS.all_tab_cols") {
                 // The virtual-column gate (VIRTUAL_COLUMN_SQL) filters
                 // virtual_column = 'YES'; the column-visibility proof
                 // (TARGET_COLUMN_CATALOG_PROOF_SQL) does not. The proof must

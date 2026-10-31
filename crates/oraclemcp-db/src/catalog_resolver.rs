@@ -5412,11 +5412,12 @@ mod tests {
             assert!(
                 !queries
                     .iter()
-                    .any(|(sql, _)| sql.to_ascii_lowercase().contains("from all_policies")),
+                    .any(|(sql, _)| sql.to_ascii_lowercase().contains("from sys.all_policies")),
                 "an ALL_POLICIES-only proof cannot clear the redaction feature"
             );
             assert!(queries.iter().any(|(sql, binds)| {
-                sql.to_ascii_lowercase().contains("from redaction_policies")
+                sql.to_ascii_lowercase()
+                    .contains("from sys.redaction_policies")
                     && binds
                         == &[
                             OracleBind::from("APP"),
@@ -5661,11 +5662,10 @@ mod tests {
             assert!(queries.iter().any(|(sql, _)| {
                 sql == CatalogQueryId::RedactionInstallationEvidence.spec().sql
             }));
-            assert!(
-                queries.iter().any(|(sql, _)| {
-                    sql.to_ascii_lowercase().contains("from redaction_policies")
-                })
-            );
+            assert!(queries.iter().any(|(sql, _)| {
+                sql.to_ascii_lowercase()
+                    .contains("from sys.redaction_policies")
+            }));
         });
     }
 
@@ -5766,11 +5766,10 @@ mod tests {
                     .iter()
                     .any(|(sql, _)| sql.contains("all_sa_table_policies"))
             );
-            assert!(
-                !queries.iter().any(|(sql, _)| {
-                    sql.to_ascii_lowercase().contains("from redaction_policies")
-                })
-            );
+            assert!(!queries.iter().any(|(sql, _)| {
+                sql.to_ascii_lowercase()
+                    .contains("from sys.redaction_policies")
+            }));
         });
     }
 
@@ -5791,11 +5790,10 @@ mod tests {
                 })
             ));
             let queries = conn.queries.lock().expect("query log");
-            assert!(
-                queries.iter().any(|(sql, _)| {
-                    sql.to_ascii_lowercase().contains("from redaction_policies")
-                })
-            );
+            assert!(queries.iter().any(|(sql, _)| {
+                sql.to_ascii_lowercase()
+                    .contains("from sys.redaction_policies")
+            }));
         });
     }
 
@@ -5882,7 +5880,7 @@ mod tests {
         assert_eq!(id, CatalogQueryId::DescribeColumns);
         let sql = id.spec().sql.to_ascii_lowercase();
         assert!(sql.contains("data_default_vc as data_default"));
-        assert!(sql.contains("from all_tab_cols"));
+        assert!(sql.contains("from sys.all_tab_cols"));
         assert!(sql.contains("virtual_column, hidden_column, user_generated"));
         assert!(!sql.contains(", data_default "));
     }
@@ -5893,7 +5891,7 @@ mod tests {
         assert_eq!(id, CatalogQueryId::DescribeColumnsLegacy);
         let sql = id.spec().sql.to_ascii_lowercase();
         assert!(sql.contains("cast(null as varchar2(4000)) as data_default"));
-        assert!(sql.contains("from all_tab_cols"));
+        assert!(sql.contains("from sys.all_tab_cols"));
         assert!(sql.contains("virtual_column, hidden_column, user_generated"));
         assert!(!sql.contains("data_default_vc"));
         assert!(!sql.contains(", data_default "));
@@ -5905,7 +5903,7 @@ mod tests {
             .spec()
             .sql
             .to_ascii_lowercase();
-        assert!(sql.contains("from all_tab_columns"));
+        assert!(sql.contains("from sys.all_tab_columns"));
         assert!(sql.contains("table_name = 'all_tab_cols'"));
         assert!(sql.contains("column_name = 'data_default_vc'"));
         assert!(sql.contains("rownum = 1"));

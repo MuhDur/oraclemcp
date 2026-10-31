@@ -112,10 +112,10 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
         }
         return Some(vec![context]);
     }
-    if normalized.contains("from session_roles") {
+    if normalized.contains("from sys.session_roles") {
         return Some(Vec::new());
     }
-    if normalized.contains("from all_objects")
+    if normalized.contains("from sys.all_objects")
         && normalized.contains("object_id, status, edition_name")
     {
         let owner = string_bind(binds, 0).unwrap_or("APP");
@@ -129,16 +129,16 @@ fn sample_rows_catalog(sql: &str, binds: &[OracleBind]) -> Option<Vec<OracleRow>
             ("EDITION_NAME", None),
         ])]);
     }
-    if normalized.contains("from all_synonyms")
-        || normalized.contains("from all_arguments")
-        || (normalized.contains("from all_tab_columns") && !normalized.contains("table_name = :2"))
-        || normalized.contains("from all_policies")
+    if normalized.contains("from sys.all_synonyms")
+        || normalized.contains("from sys.all_arguments")
+        || (normalized.contains("from sys.all_tab_columns")
+            && !normalized.contains("table_name = :2"))
         || normalized.contains("from sys.all_policies")
-        || normalized.contains("from all_tab_cols")
+        || normalized.contains("from sys.all_tab_cols")
     {
         return Some(Vec::new());
     }
-    if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
+    if normalized.contains("from sys.all_tab_columns") && normalized.contains("table_name = :2") {
         let column = string_bind(binds, 2).unwrap_or("RECYCLE_MARKER");
         return Some(vec![catalog_row(&[
             ("COLUMN_NAME", Some(column)),

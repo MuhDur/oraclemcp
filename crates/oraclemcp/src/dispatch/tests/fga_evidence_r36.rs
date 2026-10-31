@@ -444,9 +444,8 @@ impl OracleConnection for CostAuditMock {
                 "ORA-00942: table or view does not exist".to_owned(),
             ));
         }
-        if normalized.contains("from all_policies")
-            || normalized.contains("from sys.all_policies")
-            || normalized.contains("from redaction_policies")
+        if normalized.contains("from sys.all_policies")
+            || normalized.contains("from sys.redaction_policies")
         {
             return Ok(Vec::new());
         }

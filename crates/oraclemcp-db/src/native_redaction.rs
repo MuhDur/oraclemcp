@@ -27,7 +27,7 @@ use crate::{CatalogQueryId, run_catalog_query};
 /// The statement is server-authored and contains no caller data. A failure to
 /// read `v$option` is not treated as a positive capability signal.
 pub const NATIVE_REDACTION_OPTION_SQL: &str =
-    "SELECT value AS advanced_security FROM v$option WHERE parameter = 'Advanced Security'";
+    "SELECT value AS advanced_security FROM SYS.v_$option WHERE parameter = 'Advanced Security'";
 
 /// Server-authored, bound `DBMS_REDACT.ADD_POLICY` call for a full-redaction
 /// policy that is always active for non-exempt users.

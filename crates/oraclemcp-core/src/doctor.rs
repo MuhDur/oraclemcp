@@ -4024,13 +4024,17 @@ mod tests {
             sql: &str,
             _binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
-            if self.unreadable && sql.to_ascii_lowercase().contains("from all_associations") {
+            if self.unreadable
+                && sql
+                    .to_ascii_lowercase()
+                    .contains("from sys.all_associations")
+            {
                 return Err(DbError::ServerQuery(
                     "ORA-01031: insufficient privileges".to_owned(),
                 ));
             }
             let normalized = sql.to_ascii_lowercase();
-            if normalized.contains("from all_synonyms")
+            if normalized.contains("from sys.all_synonyms")
                 && normalized.contains("owner = 'public'")
                 && normalized.contains("synonym_name = 'plan_table'")
             {
@@ -4040,7 +4044,7 @@ mod tests {
                     ("DB_LINK", None),
                 ])]);
             }
-            if normalized.contains("from all_tables t join all_objects")
+            if normalized.contains("from sys.all_tables t join sys.all_objects")
                 && normalized.contains("plan_table$")
             {
                 if self.plan_table_unreadable {
@@ -4200,7 +4204,7 @@ mod tests {
                     ("EDITION_NAME", Some("ORA$BASE")),
                 ])]);
             }
-            if normalized.contains("from session_roles") {
+            if normalized.contains("from sys.session_roles") {
                 return Ok(self
                     .policy_visible
                     .then(|| doctor_row(&[("ROLE", Some("SELECT_CATALOG_ROLE"))]))
@@ -4213,7 +4217,7 @@ mod tests {
                     Some(if self.policy_visible { "1" } else { "0" }),
                 )])]);
             }
-            if normalized.contains("from all_policies") {
+            if normalized.contains("from sys.all_policies") {
                 return Ok(self
                     .policy_visible
                     .then(|| {

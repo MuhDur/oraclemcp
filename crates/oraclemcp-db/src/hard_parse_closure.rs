@@ -379,7 +379,7 @@ mod tests {
             _binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
             self.queries.lock().expect("query log").push(sql.to_owned());
-            if sql.contains("FROM all_associations") {
+            if sql.contains("FROM SYS.all_associations") {
                 let call = {
                     let mut calls = self.association_calls.lock().expect("association calls");
                     let call = *calls;
@@ -393,14 +393,14 @@ mod tests {
                 }
                 return Ok(self.association.iter().cloned().collect());
             }
-            if sql.contains("FROM all_indexes") && self.domain_index {
+            if sql.contains("FROM SYS.all_indexes") && self.domain_index {
                 return Ok(vec![row(&[("INDEX_TYPE", "DOMAIN")])]);
             }
             if self.optional_policy_catalog_denied
                 && [
-                    "FROM all_sa_table_policies",
-                    "FROM all_sa_schema_policies",
-                    "FROM all_xs_applied_policies",
+                    "FROM LBACSYS.all_sa_table_policies",
+                    "FROM LBACSYS.all_sa_schema_policies",
+                    "FROM SYS.all_xs_applied_policies",
                 ]
                 .iter()
                 .any(|view| sql.contains(view))
@@ -409,14 +409,14 @@ mod tests {
                     "ORA-00942: table or view does not exist".into(),
                 ));
             }
-            if sql.contains("FROM all_objects") && sql.contains("ALL_SA_TABLE_POLICIES") {
+            if sql.contains("FROM SYS.all_objects") && sql.contains("ALL_SA_TABLE_POLICIES") {
                 return Ok(self
                     .optional_policy_catalog_names
                     .iter()
                     .map(|name| row(&[("OBJECT_NAME", name)]))
                     .collect());
             }
-            if sql.contains("FROM all_tab_columns") && self.user_defined_column_type {
+            if sql.contains("FROM SYS.all_tab_columns") && self.user_defined_column_type {
                 return Ok(vec![row(&[
                     ("DATA_TYPE_OWNER", "APP"),
                     ("DATA_TYPE", "MY_TYPE"),
@@ -530,14 +530,14 @@ mod tests {
         assert_eq!(result, HardParseEffectClosureV1::Proven);
         let queries = mock.queries.lock().expect("query log");
         for source in [
-            "from all_associations",
-            "from all_tab_columns",
-            "from all_indexes",
-            "from all_policies",
-            "from all_sa_table_policies",
-            "from all_sa_schema_policies",
-            "from all_xs_applied_policies",
-            "from redaction_policies",
+            "from sys.all_associations",
+            "from sys.all_tab_columns",
+            "from sys.all_indexes",
+            "from sys.all_policies",
+            "from lbacsys.all_sa_table_policies",
+            "from lbacsys.all_sa_schema_policies",
+            "from sys.all_xs_applied_policies",
+            "from sys.redaction_policies",
         ] {
             assert!(
                 queries
@@ -634,11 +634,11 @@ mod tests {
     #[test]
     fn hard_parse_closure_refuses_vpd_ols_ras_redaction() {
         for fragment in [
-            "FROM all_policies",
-            "FROM all_sa_table_policies",
-            "FROM all_sa_schema_policies",
-            "FROM all_xs_applied_policies",
-            "FROM redaction_policies",
+            "FROM SYS.all_policies",
+            "FROM LBACSYS.all_sa_table_policies",
+            "FROM LBACSYS.all_sa_schema_policies",
+            "FROM SYS.all_xs_applied_policies",
+            "FROM SYS.redaction_policies",
         ] {
             let mock = ClosureMock {
                 policy_sql_fragment: Some(fragment),
@@ -710,7 +710,7 @@ mod tests {
                 .lock()
                 .expect("query log")
                 .iter()
-                .all(|sql| !sql.contains("FROM all_objects"))
+                .all(|sql| !sql.contains("FROM SYS.all_objects"))
         );
     }
 

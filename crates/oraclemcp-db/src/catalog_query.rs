@@ -2,6 +2,8 @@
 //!
 //! Each query has fixed text and a checked bind schema. Adding a catalog read
 //! requires a new enum variant and an explicit output and audit policy.
+//! Dictionary references name the owning schema directly: a public synonym can
+//! be shadowed by a table in CURRENT_SCHEMA, including ALL_SOURCE/ALL_POLICIES.
 
 use asupersync::Cx;
 
@@ -72,7 +74,7 @@ macro_rules! top_sql_live {
             "ROUND(RATIO_TO_REPORT(",
             $order,
             ") OVER () * 100, 2) AS pct_of_total ",
-            "FROM v$sqlstats WHERE (:1 IS NULL OR sql_id = :2) AND (:3 IS NULL OR INSTR(UPPER(sql_text), UPPER(:4)) > 0) ORDER BY ",
+            "FROM SYS.v_$sqlstats WHERE (:1 IS NULL OR sql_id = :2) AND (:3 IS NULL OR INSTR(UPPER(sql_text), UPPER(:4)) > 0) ORDER BY ",
             $order,
             " DESC NULLS LAST) WHERE ",
             $filter,
@@ -86,11 +88,11 @@ macro_rules! top_sql_awr {
     ($order:literal) => {
         concat!(
             "SELECT * FROM (SELECT s.sql_id, ",
-            "(SELECT SUBSTR(t.sql_text, 1, 200) FROM dba_hist_sqltext t ",
+            "(SELECT SUBSTR(t.sql_text, 1, 200) FROM SYS.dba_hist_sqltext t ",
             "WHERE t.sql_id = s.sql_id AND rownum = 1) AS sql_text, ",
             "SUM(s.executions_delta) AS executions, SUM(s.elapsed_time_delta) AS elapsed_time, ",
             "SUM(s.cpu_time_delta) AS cpu_time, SUM(s.buffer_gets_delta) AS buffer_gets, ",
-            "SUM(s.disk_reads_delta) AS disk_reads FROM dba_hist_sqlstat s ",
+            "SUM(s.disk_reads_delta) AS disk_reads FROM SYS.dba_hist_sqlstat s ",
             "GROUP BY s.sql_id ORDER BY ",
             $order,
             " DESC NULLS LAST) WHERE rownum <= :1"
@@ -191,7 +193,7 @@ pub(crate) const VPD_RLS_POLICY_BY_SCHEMA_SQL: &str = "SELECT object_owner, obje
     pf_owner, package, function, sel, ins, upd, del, enable \
     FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
                  upd, del, enable \
-          FROM all_policies WHERE object_owner = :1 \
+          FROM SYS.all_policies WHERE object_owner = :1 \
           ORDER BY object_owner, object_name, policy_name) \
     WHERE ROWNUM <= :2";
 
@@ -199,7 +201,7 @@ pub(crate) const VPD_RLS_POLICY_BY_OBJECT_SQL: &str = "SELECT object_owner, obje
     pf_owner, package, function, sel, ins, upd, del, enable \
     FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, \
                  upd, del, enable \
-          FROM all_policies WHERE object_owner = :1 AND object_name = :2 \
+          FROM SYS.all_policies WHERE object_owner = :1 AND object_name = :2 \
           ORDER BY object_owner, object_name, policy_name) \
     WHERE ROWNUM <= :3";
 
@@ -902,28 +904,28 @@ impl CatalogQueryId {
                 NameResolution,
             ),
             Self::DictionaryViewIdentity => (
-                "SELECT object_id, oracle_maintained, edition_name FROM all_objects WHERE owner = :1 AND object_name = :2 AND object_type = 'VIEW' AND status = 'VALID' AND ROWNUM <= 2",
+                "SELECT object_id, oracle_maintained, edition_name FROM SYS.all_objects WHERE owner = :1 AND object_name = :2 AND object_type = 'VIEW' AND status = 'VALID' AND ROWNUM <= 2",
                 TT,
                 "prove one eligible dictionary view is Oracle maintained",
                 InternalProof,
                 ReadPurity,
             ),
             Self::DictionaryViewDependencies => (
-                "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, d.dependency_depth, d.dependency_cycle, o.object_id, o.edition_name, o.oracle_maintained AS object_oracle_maintained, u.oracle_maintained AS owner_oracle_maintained FROM (SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name, LEVEL AS dependency_depth, CONNECT_BY_ISCYCLE AS dependency_cycle FROM all_dependencies START WITH owner = :1 AND name = :2 AND type = 'VIEW' CONNECT BY NOCYCLE PRIOR referenced_owner = owner AND PRIOR referenced_name = name AND PRIOR referenced_type = type AND PRIOR referenced_link_name IS NULL AND LEVEL <= 9) d LEFT JOIN all_users u ON u.username = d.referenced_owner LEFT JOIN all_objects o ON o.owner = d.referenced_owner AND o.object_name = d.referenced_name AND o.object_type = d.referenced_type WHERE ROWNUM <= :3 ORDER BY d.referenced_owner, d.referenced_name, d.referenced_type, o.object_id",
+                "SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, d.dependency_depth, d.dependency_cycle, o.object_id, o.edition_name, o.oracle_maintained AS object_oracle_maintained, u.oracle_maintained AS owner_oracle_maintained FROM (SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name, LEVEL AS dependency_depth, CONNECT_BY_ISCYCLE AS dependency_cycle FROM SYS.all_dependencies START WITH owner = :1 AND name = :2 AND type = 'VIEW' CONNECT BY NOCYCLE PRIOR referenced_owner = owner AND PRIOR referenced_name = name AND PRIOR referenced_type = type AND PRIOR referenced_link_name IS NULL AND LEVEL <= 9) d LEFT JOIN SYS.all_users u ON u.username = d.referenced_owner LEFT JOIN SYS.all_objects o ON o.owner = d.referenced_owner AND o.object_name = d.referenced_name AND o.object_type = d.referenced_type WHERE ROWNUM <= :3 ORDER BY d.referenced_owner, d.referenced_name, d.referenced_type, o.object_id",
                 TTI,
                 "prove one eligible dictionary view has a bounded Oracle-maintained dependency closure",
                 InternalProof,
                 ReadPurity,
             ),
             Self::TrustedViewText => (
-                "SELECT text_vc, text_length, editioning_view FROM all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
+                "SELECT text_vc, text_length, editioning_view FROM SYS.all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
                 TT,
                 "read bounded VARCHAR2 source and authoritative length for one exact profile-trusted application view",
                 InternalProof,
                 ReadPurity,
             ),
             Self::TrustedViewTextLegacyMetadata => (
-                "SELECT text_length, editioning_view FROM all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
+                "SELECT text_length, editioning_view FROM SYS.all_views WHERE owner = :1 AND view_name = :2 AND ROWNUM <= 2",
                 TT,
                 "detect a legacy application view definition without reading its LONG source",
                 InternalProof,
@@ -1028,42 +1030,42 @@ impl CatalogQueryId {
                 ReadPurity,
             ),
             Self::ReadOlsTablePolicies => (
-                "SELECT policy_name FROM all_sa_table_policies WHERE schema_name = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= :3",
+                "SELECT policy_name FROM LBACSYS.all_sa_table_policies WHERE schema_name = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= :3",
                 TTI,
                 "prove no enabled OLS table policy on one relation",
                 InternalProof,
                 ReadPurity,
             ),
             Self::ReadOlsSchemaPolicies => (
-                "SELECT policy_name FROM all_sa_schema_policies WHERE schema_name = :1 AND status = 'ENABLED' AND ROWNUM <= :2",
+                "SELECT policy_name FROM LBACSYS.all_sa_schema_policies WHERE schema_name = :1 AND status = 'ENABLED' AND ROWNUM <= :2",
                 TI,
                 "prove no enabled OLS schema policy on one relation owner",
                 InternalProof,
                 ReadPurity,
             ),
             Self::ReadRasPolicies => (
-                "SELECT policy FROM all_xs_applied_policies WHERE schema = :1 AND object = :2 AND status = 'ENABLED' AND sel = 'YES' AND ROWNUM <= :3",
+                "SELECT policy FROM SYS.all_xs_applied_policies WHERE schema = :1 AND object = :2 AND status = 'ENABLED' AND sel = 'YES' AND ROWNUM <= :3",
                 TTI,
                 "prove no enabled RAS SELECT policy on one relation",
                 InternalProof,
                 ReadPurity,
             ),
             Self::ReadRedactionPolicies => (
-                "SELECT policy_name FROM redaction_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND ROWNUM <= :3",
+                "SELECT policy_name FROM SYS.redaction_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND ROWNUM <= :3",
                 TTI,
                 "prove no enabled data-redaction policy on one relation",
                 InternalProof,
                 ReadPurity,
             ),
             Self::OlsInstallationEvidence => (
-                "SELECT value FROM v$option WHERE parameter = 'Oracle Label Security' AND ROWNUM <= 1",
+                "SELECT value FROM SYS.v_$option WHERE parameter = 'Oracle Label Security' AND ROWNUM <= 1",
                 EMPTY,
                 "observe OLS enablement when its optional policy views are absent",
                 InternalProof,
                 ReadPurity,
             ),
             Self::RedactionInstallationEvidence => (
-                "SELECT value AS data_redaction FROM v$option WHERE parameter = 'Data Redaction' AND ROWNUM <= 1",
+                "SELECT value AS data_redaction FROM SYS.v_$option WHERE parameter = 'Data Redaction' AND ROWNUM <= 1",
                 EMPTY,
                 "observe Data Redaction availability before reading policy catalogs",
                 InternalProof,
@@ -1105,35 +1107,35 @@ impl CatalogQueryId {
                 ReadPurity,
             ),
             Self::DbaObjectsProbe => (
-                "SELECT 1 FROM dba_objects WHERE rownum = 1",
+                "SELECT 1 FROM SYS.dba_objects WHERE rownum = 1",
                 EMPTY,
                 "observe DBA_OBJECTS access",
                 VisibilityObservation,
                 Diagnostic,
             ),
             Self::AllObjectsProbe => (
-                "SELECT object_name FROM all_objects WHERE owner = 'SYS' AND object_type = 'VIEW' AND object_name IN ('ALL_SA_TABLE_POLICIES', 'ALL_SA_SCHEMA_POLICIES', 'ALL_XS_APPLIED_POLICIES') UNION SELECT synonym_name AS object_name FROM all_synonyms WHERE owner = 'PUBLIC' AND synonym_name IN ('ALL_SA_TABLE_POLICIES', 'ALL_SA_SCHEMA_POLICIES', 'ALL_XS_APPLIED_POLICIES')",
+                "SELECT object_name FROM SYS.all_objects WHERE owner IN ('SYS', 'LBACSYS') AND object_type = 'VIEW' AND object_name IN ('ALL_SA_TABLE_POLICIES', 'ALL_SA_SCHEMA_POLICIES', 'ALL_XS_APPLIED_POLICIES')",
                 EMPTY,
-                "probe optional SYS OLS/RAS catalogs through ALL_OBJECTS and ALL_SYNONYMS",
+                "probe optional OLS/RAS catalogs at their authoritative owners",
                 InternalProof,
                 Diagnostic,
             ),
             Self::DiagnosticsPackProbe => (
-                "SELECT value FROM v$parameter WHERE name = 'control_management_pack_access'",
+                "SELECT value FROM SYS.v_$parameter WHERE name = 'control_management_pack_access'",
                 EMPTY,
                 "observe Diagnostics Pack availability",
                 VisibilityObservation,
                 Diagnostic,
             ),
             Self::AllIdentifiersProbe => (
-                "SELECT 1 FROM all_identifiers WHERE rownum = 1",
+                "SELECT 1 FROM SYS.all_identifiers WHERE rownum = 1",
                 EMPTY,
                 "observe PL/Scope access",
                 VisibilityObservation,
                 Diagnostic,
             ),
             Self::SessionPrivileges => (
-                "SELECT privilege FROM session_privs",
+                "SELECT privilege FROM SYS.session_privs",
                 EMPTY,
                 "observe effective session privileges",
                 SessionContext,
@@ -1162,7 +1164,7 @@ impl CatalogQueryId {
             ),
             Self::PlscopeIdentifiers => (
                 "SELECT * FROM ( \
-                 SELECT name, type, usage, line, col, signature FROM all_identifiers \
+                 SELECT name, type, usage, line, col, signature FROM SYS.all_identifiers \
                  WHERE owner = :1 AND object_name = :2 ORDER BY line, col \
              ) WHERE ROWNUM <= :3",
                 TTI,
@@ -1172,7 +1174,7 @@ impl CatalogQueryId {
             ),
             Self::PlscopeStatements => (
                 "SELECT * FROM ( \
-                 SELECT type, line, sql_id FROM all_statements \
+                 SELECT type, line, sql_id FROM SYS.all_statements \
                  WHERE owner = :1 AND object_name = :2 ORDER BY line \
              ) WHERE ROWNUM <= :3",
                 TTI,
@@ -1182,14 +1184,14 @@ impl CatalogQueryId {
             ),
             Self::TableStats => (
                 "SELECT num_rows, TO_CHAR(last_analyzed, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_analyzed \
-                 FROM all_tables WHERE owner = :1 AND table_name = :2",
+                 FROM SYS.all_tables WHERE owner = :1 AND table_name = :2",
                 TT,
                 "read gathered table statistics",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::TableStatsStale => (
-                "SELECT stale_stats FROM all_tab_statistics \
+                "SELECT stale_stats FROM SYS.all_tab_statistics \
                  WHERE owner = :1 AND table_name = :2 AND object_type = 'TABLE' \
                    AND partition_name IS NULL",
                 TT,
@@ -1198,7 +1200,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::TableColumnCount => (
-                "SELECT COUNT(*) AS column_count FROM all_tab_columns \
+                "SELECT COUNT(*) AS column_count FROM SYS.all_tab_columns \
                  WHERE owner = :1 AND table_name = :2",
                 TT,
                 "count visible table columns",
@@ -1206,7 +1208,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::ObjectComment => (
-                "SELECT comments FROM all_tab_comments \
+                "SELECT comments FROM SYS.all_tab_comments \
                  WHERE owner = :1 AND table_name = :2",
                 TT,
                 "read object comment",
@@ -1215,8 +1217,8 @@ impl CatalogQueryId {
             ),
             Self::SearchColumns => (
                 "SELECT c.column_name, c.data_type, c.nullable, cc.comments \
-                 FROM all_tab_columns c \
-                 LEFT JOIN all_col_comments cc \
+                 FROM SYS.all_tab_columns c \
+                 LEFT JOIN SYS.all_col_comments cc \
                    ON cc.owner = c.owner AND cc.table_name = c.table_name \
                   AND cc.column_name = c.column_name \
                  WHERE c.owner = :1 AND c.table_name = :2 \
@@ -1227,7 +1229,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::SearchIndexes => (
-                "SELECT index_name, uniqueness FROM all_indexes \
+                "SELECT index_name, uniqueness FROM SYS.all_indexes \
                  WHERE table_owner = :1 AND table_name = :2 \
                  ORDER BY index_name",
                 TT,
@@ -1236,7 +1238,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::SearchIndexColumns => (
-                "SELECT column_name FROM all_ind_columns \
+                "SELECT column_name FROM SYS.all_ind_columns \
                  WHERE index_owner = :1 AND index_name = :2 \
                  ORDER BY column_position",
                 TT,
@@ -1247,7 +1249,7 @@ impl CatalogQueryId {
             Self::DescribeColumns => (
                 "SELECT column_name, data_type, data_length, nullable, data_default_vc AS data_default, \
                         virtual_column, hidden_column, user_generated \
-                 FROM all_tab_cols WHERE owner = :1 AND table_name = :2 \
+                 FROM SYS.all_tab_cols WHERE owner = :1 AND table_name = :2 \
                  ORDER BY column_id",
                 TT,
                 "describe relation columns",
@@ -1258,7 +1260,7 @@ impl CatalogQueryId {
                 "SELECT column_name, data_type, data_length, nullable, \
                         CAST(NULL AS VARCHAR2(4000)) AS data_default, \
                         virtual_column, hidden_column, user_generated \
-                 FROM all_tab_cols WHERE owner = :1 AND table_name = :2 \
+                 FROM SYS.all_tab_cols WHERE owner = :1 AND table_name = :2 \
                  ORDER BY column_id",
                 TT,
                 "describe relation columns without long defaults on older Oracle releases",
@@ -1266,7 +1268,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::DescribeDefaultVcProbe => (
-                "SELECT 1 FROM all_tab_columns \
+                "SELECT 1 FROM SYS.all_tab_columns \
                  WHERE owner = 'SYS' AND table_name = 'ALL_TAB_COLS' \
                    AND column_name = 'DATA_DEFAULT_VC' AND ROWNUM = 1",
                 EMPTY,
@@ -1279,8 +1281,8 @@ impl CatalogQueryId {
                    SELECT c.constraint_name, c.constraint_type, c.status, \
                           c.deferrable, c.deferred, c.validated, c.generated, \
                           c.r_owner, c.r_constraint_name, cc.column_name, cc.position \
-                   FROM all_constraints c \
-                   LEFT JOIN all_cons_columns cc \
+                   FROM SYS.all_constraints c \
+                   LEFT JOIN SYS.all_cons_columns cc \
                      ON cc.owner = c.owner \
                     AND cc.constraint_name = c.constraint_name \
                     AND cc.table_name = c.table_name \
@@ -1306,7 +1308,7 @@ impl CatalogQueryId {
                                 WHEN 'TRIGGER' THEN 7 \
                                 ELSE 99 \
                             END sort_key \
-                     FROM all_source \
+                     FROM SYS.all_source \
                      WHERE owner = :1 AND name = :2 \
                  ) \
                  ORDER BY sort_key, type",
@@ -1317,8 +1319,8 @@ impl CatalogQueryId {
             ),
             Self::PrimaryKeyColumns => (
                 "SELECT cc.column_name \
-                 FROM all_constraints c \
-                 JOIN all_cons_columns cc \
+                 FROM SYS.all_constraints c \
+                 JOIN SYS.all_cons_columns cc \
                    ON cc.owner = c.owner \
                   AND cc.constraint_name = c.constraint_name \
                   AND cc.table_name = c.table_name \
@@ -1332,7 +1334,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::ExplainPlanDisplay => (
-                "SELECT plan_table_output FROM TABLE(DBMS_XPLAN.DISPLAY(:1, :2))",
+                "SELECT plan_table_output FROM TABLE(SYS.DBMS_XPLAN.DISPLAY(:1, :2))",
                 TT,
                 "read diagnostic plan output for one verified table and statement id",
                 DictionaryMetadata,
@@ -1346,119 +1348,119 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::ImpactDbaDdlLocksForObject => (
-                "SELECT owner, name, type, mode_held FROM dba_ddl_locks WHERE owner = :1 AND name = :2 AND ROWNUM <= :3",
+                "SELECT owner, name, type, mode_held FROM SYS.dba_ddl_locks WHERE owner = :1 AND name = :2 AND ROWNUM <= :3",
                 TTI,
                 "observe DDL locks held on one exact target object",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::ImpactVAccessForObject => (
-                "SELECT sid, owner, object, type FROM v$access WHERE owner = :1 AND object = :2 AND ROWNUM <= :3",
+                "SELECT sid, owner, object, type FROM SYS.v_$access WHERE owner = :1 AND object = :2 AND ROWNUM <= :3",
                 TTI,
                 "observe sessions currently accessing one exact target object",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::PlanTableCurrentObjects => (
-                "SELECT object_type FROM all_objects WHERE owner = :1 AND object_name = 'PLAN_TABLE' AND ROWNUM <= 2",
+                "SELECT object_type FROM SYS.all_objects WHERE owner = :1 AND object_name = 'PLAN_TABLE' AND ROWNUM <= 2",
                 T,
                 "check current-schema object shadows for PLAN_TABLE",
                 InternalProof,
                 Diagnostic,
             ),
             Self::PlanTablePrivateSynonym => (
-                "SELECT table_owner, table_name, db_link FROM all_synonyms WHERE owner = :1 AND synonym_name = 'PLAN_TABLE' AND ROWNUM <= 2",
+                "SELECT table_owner, table_name, db_link FROM SYS.all_synonyms WHERE owner = :1 AND synonym_name = 'PLAN_TABLE' AND ROWNUM <= 2",
                 T,
                 "check current-schema private synonym shadows for PLAN_TABLE",
                 InternalProof,
                 Diagnostic,
             ),
             Self::PlanTablePublicSynonym => (
-                "SELECT table_owner, table_name, db_link FROM all_synonyms WHERE owner = 'PUBLIC' AND synonym_name = 'PLAN_TABLE' AND ROWNUM <= 2",
+                "SELECT table_owner, table_name, db_link FROM SYS.all_synonyms WHERE owner = 'PUBLIC' AND synonym_name = 'PLAN_TABLE' AND ROWNUM <= 2",
                 EMPTY,
                 "verify the public PLAN_TABLE synonym target",
                 InternalProof,
                 Diagnostic,
             ),
             Self::PlanTableSysTemporary => (
-                "SELECT t.temporary, t.duration, o.object_id FROM all_tables t JOIN all_objects o ON o.owner = t.owner AND o.object_name = t.table_name AND o.object_type = 'TABLE' WHERE t.owner = 'SYS' AND t.table_name = 'PLAN_TABLE$' AND ROWNUM <= 2",
+                "SELECT t.temporary, t.duration, o.object_id FROM SYS.all_tables t JOIN SYS.all_objects o ON o.owner = t.owner AND o.object_name = t.table_name AND o.object_type = 'TABLE' WHERE t.owner = 'SYS' AND t.table_name = 'PLAN_TABLE$' AND ROWNUM <= 2",
                 EMPTY,
                 "verify the standard SYS plan table is session-private temporary and identify it",
                 InternalProof,
                 Diagnostic,
             ),
             Self::PlanTableConfigured => (
-                "SELECT t.temporary, t.duration, o.object_id FROM all_tables t JOIN all_objects o ON o.owner = t.owner AND o.object_name = t.table_name AND o.object_type = 'TABLE' WHERE t.owner = :1 AND t.table_name = :2 AND ROWNUM <= 2",
+                "SELECT t.temporary, t.duration, o.object_id FROM SYS.all_tables t JOIN SYS.all_objects o ON o.owner = t.owner AND o.object_name = t.table_name AND o.object_type = 'TABLE' WHERE t.owner = :1 AND t.table_name = :2 AND ROWNUM <= 2",
                 TT,
                 "verify the configured plan table is session-private temporary and identify it",
                 InternalProof,
                 Diagnostic,
             ),
             Self::PlanTableTriggers => (
-                "SELECT trigger_name FROM all_triggers WHERE table_owner = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= 1",
+                "SELECT trigger_name FROM SYS.all_triggers WHERE table_owner = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= 1",
                 TT,
                 "refuse configured plan tables with enabled write triggers",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseAssociations => (
-                "SELECT object_type, column_name, statstype_schema, statstype_name FROM all_associations WHERE object_owner = :1 AND object_name = :2 AND ROWNUM <= :3",
+                "SELECT object_type, column_name, statstype_schema, statstype_name FROM SYS.all_associations WHERE object_owner = :1 AND object_name = :2 AND ROWNUM <= :3",
                 TTI,
                 "discover optimizer statistics callbacks associated with one object",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseIndexes => (
-                "SELECT owner AS index_owner, index_name, index_type, ityp_owner, ityp_name FROM all_indexes WHERE table_owner = :1 AND table_name = :2 AND ROWNUM <= :3",
+                "SELECT owner AS index_owner, index_name, index_type, ityp_owner, ityp_name FROM SYS.all_indexes WHERE table_owner = :1 AND table_name = :2 AND ROWNUM <= :3",
                 TTI,
                 "discover indexes and domain index callbacks for one table",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseVpdPolicies => (
-                "SELECT policy_name FROM all_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= :3",
+                "SELECT policy_name FROM SYS.all_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= :3",
                 TTI,
                 "discover enabled SELECT VPD policies for one table",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseOlsTablePolicies => (
-                "SELECT policy_name FROM all_sa_table_policies WHERE schema_name = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= :3",
+                "SELECT policy_name FROM LBACSYS.all_sa_table_policies WHERE schema_name = :1 AND table_name = :2 AND status = 'ENABLED' AND ROWNUM <= :3",
                 TTI,
                 "discover enabled Oracle Label Security table policies",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseOlsSchemaPolicies => (
-                "SELECT policy_name FROM all_sa_schema_policies WHERE schema_name = :1 AND status = 'ENABLED' AND ROWNUM <= :2",
+                "SELECT policy_name FROM LBACSYS.all_sa_schema_policies WHERE schema_name = :1 AND status = 'ENABLED' AND ROWNUM <= :2",
                 TI,
                 "discover enabled Oracle Label Security schema policies",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseRasPolicies => (
-                "SELECT policy FROM all_xs_applied_policies WHERE schema = :1 AND object = :2 AND status = 'ENABLED' AND sel = 'YES' AND ROWNUM <= :3",
+                "SELECT policy FROM SYS.all_xs_applied_policies WHERE schema = :1 AND object = :2 AND status = 'ENABLED' AND sel = 'YES' AND ROWNUM <= :3",
                 TTI,
                 "discover enabled SELECT Real Application Security policies",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseRedactionPolicies => (
-                "SELECT policy_name FROM redaction_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND ROWNUM <= :3",
+                "SELECT policy_name FROM SYS.redaction_policies WHERE object_owner = :1 AND object_name = :2 AND enable = 'YES' AND ROWNUM <= :3",
                 TTI,
                 "discover enabled data-redaction policies",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseOperator => (
-                "SELECT operator_name FROM all_operators WHERE operator_name = :1 AND ROWNUM <= :2",
+                "SELECT operator_name FROM SYS.all_operators WHERE operator_name = :1 AND ROWNUM <= :2",
                 TI,
                 "resolve a user-defined SQL operator before optimizer hard parse",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HardParseColumnTypes => (
-                "SELECT data_type_owner, data_type FROM all_tab_columns WHERE owner = :1 AND table_name = :2 AND data_type_owner IS NOT NULL AND ROWNUM <= :3",
+                "SELECT data_type_owner, data_type FROM SYS.all_tab_columns WHERE owner = :1 AND table_name = :2 AND data_type_owner IS NOT NULL AND ROWNUM <= :3",
                 TTI,
                 "discover user-defined SQL types in a referenced table's columns",
                 InternalProof,
@@ -1467,10 +1469,10 @@ impl CatalogQueryId {
             Self::ListObjects => (
                 "SELECT * FROM ( \
                    WITH args AS ( \
-                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
+                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM SYS.dual \
                    ) \
                    SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                   FROM all_objects o CROSS JOIN args \
+                   FROM SYS.all_objects o CROSS JOIN args \
                    WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
                      AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
                      AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
@@ -1485,9 +1487,9 @@ impl CatalogQueryId {
                 "SELECT * FROM ( \
                    WITH args AS (SELECT :1 owner_filter, :2 type_1, :3 type_2, :4 type_3, \
                        :5 type_4, :6 type_5, :7 type_6, :8 type_7, :9 type_8, :10 type_9, \
-                       :11 type_10, :12 type_11, :13 type_12, :14 type_13, :15 name_filter FROM dual) \
+                       :11 type_10, :12 type_11, :13 type_12, :14 type_13, :15 name_filter FROM SYS.dual) \
                    SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                   FROM all_objects o CROSS JOIN args \
+                   FROM SYS.all_objects o CROSS JOIN args \
                    WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
                      AND o.object_type IN (args.type_1, args.type_2, args.type_3, args.type_4, \
                          args.type_5, args.type_6, args.type_7, args.type_8, args.type_9, \
@@ -1504,10 +1506,10 @@ impl CatalogQueryId {
                 "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
                    SELECT selected.*, ROWNUM AS page_row FROM ( \
                        WITH args AS ( \
-                           SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM dual \
+                           SELECT :1 owner_filter, :2 type_filter, :3 name_filter FROM SYS.dual \
                        ) \
                        SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                       FROM all_objects o CROSS JOIN args \
+                       FROM SYS.all_objects o CROSS JOIN args \
                        WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
                          AND (args.type_filter IS NULL OR o.object_type = args.type_filter) \
                          AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
@@ -1523,10 +1525,10 @@ impl CatalogQueryId {
                 "SELECT owner, object_name, object_type, status, last_ddl_time FROM ( \
                    SELECT selected.*, ROWNUM AS page_row FROM ( \
                        WITH args AS ( \
-                           SELECT :1 owner_filter, :2 name_filter FROM dual \
+                           SELECT :1 owner_filter, :2 name_filter FROM SYS.dual \
                        ) \
                        SELECT o.owner, o.object_name, o.object_type, o.status, o.last_ddl_time \
-                       FROM all_objects o CROSS JOIN args \
+                       FROM SYS.all_objects o CROSS JOIN args \
                        WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter) \
                          AND o.object_type IN ('TABLE', 'VIEW', 'PACKAGE') \
                          AND (args.name_filter IS NULL OR o.object_name LIKE args.name_filter) \
@@ -1542,10 +1544,10 @@ impl CatalogQueryId {
                 "SELECT owner, object_name, object_type FROM ( \
                    SELECT selected.*, ROWNUM AS page_row FROM ( \
                        WITH args AS ( \
-                           SELECT :1 owner_filter FROM dual \
+                           SELECT :1 owner_filter FROM SYS.dual \
                        ) \
                        SELECT o.owner, o.object_name, o.object_type \
-                       FROM all_objects o CROSS JOIN args \
+                       FROM SYS.all_objects o CROSS JOIN args \
                        WHERE args.owner_filter IS NULL OR o.owner = args.owner_filter \
                        ORDER BY o.owner, o.object_type, o.object_name \
                    ) selected WHERE ROWNUM <= :2 \
@@ -1559,10 +1561,10 @@ impl CatalogQueryId {
                 r"SELECT owner, object_name, object_type, last_ddl_time FROM (
                    SELECT selected.*, ROWNUM AS page_row FROM (
                        WITH args AS (
-                           SELECT :1 owner_filter FROM dual
+                           SELECT :1 owner_filter FROM SYS.dual
                        )
                        SELECT o.owner, o.object_name, o.object_type, o.last_ddl_time
-                       FROM all_objects o CROSS JOIN args
+                       FROM SYS.all_objects o CROSS JOIN args
                        WHERE (args.owner_filter IS NULL OR o.owner = args.owner_filter)
                          AND o.last_ddl_time IS NOT NULL
                        ORDER BY o.last_ddl_time DESC, o.owner, o.object_type, o.object_name
@@ -1576,10 +1578,10 @@ impl CatalogQueryId {
             Self::ListSchemas => (
                 "SELECT * FROM ( \
                    WITH args AS ( \
-                       SELECT :1 name_filter FROM dual \
+                       SELECT :1 name_filter FROM SYS.dual \
                    ) \
                    SELECT o.owner AS schema_name, COUNT(*) AS object_count \
-                   FROM all_objects o CROSS JOIN args \
+                   FROM SYS.all_objects o CROSS JOIN args \
                    WHERE args.name_filter IS NULL OR o.owner LIKE args.name_filter \
                    GROUP BY o.owner \
                    ORDER BY o.owner \
@@ -1592,7 +1594,7 @@ impl CatalogQueryId {
             Self::OrientForeignKeysPage => (
                 "SELECT * FROM ( \
                WITH args AS ( \
-                   SELECT :1 owner_filter FROM dual \
+                   SELECT :1 owner_filter FROM SYS.dual \
                ), selected_foreign_keys AS ( \
                    SELECT child_owner, child_table, constraint_name, parent_owner, parent_constraint_name \
                    FROM ( \
@@ -1602,7 +1604,7 @@ impl CatalogQueryId {
                                   child.constraint_name, \
                                   child.r_owner AS parent_owner, \
                                   child.r_constraint_name AS parent_constraint_name \
-                           FROM all_constraints child CROSS JOIN args \
+                           FROM SYS.all_constraints child CROSS JOIN args \
                            WHERE child.constraint_type = 'R' \
                              AND (args.owner_filter IS NULL OR child.owner = args.owner_filter) \
                            ORDER BY child.owner, child.table_name, child.constraint_name \
@@ -1616,13 +1618,13 @@ impl CatalogQueryId {
                       parent_columns.column_name AS parent_column, \
                       child_columns.position AS column_position \
                FROM selected_foreign_keys foreign_key \
-               JOIN all_constraints parent \
+               JOIN SYS.all_constraints parent \
                  ON parent.owner = foreign_key.parent_owner \
                 AND parent.constraint_name = foreign_key.parent_constraint_name \
-               JOIN all_cons_columns child_columns \
+               JOIN SYS.all_cons_columns child_columns \
                  ON child_columns.owner = foreign_key.child_owner \
                 AND child_columns.constraint_name = foreign_key.constraint_name \
-               JOIN all_cons_columns parent_columns \
+               JOIN SYS.all_cons_columns parent_columns \
                  ON parent_columns.owner = parent.owner \
                 AND parent_columns.constraint_name = parent.constraint_name \
                 AND parent_columns.position = child_columns.position \
@@ -1638,7 +1640,7 @@ impl CatalogQueryId {
                 "SELECT owner, object_name, inserts, updates, deletes, last_modified, truncated, drop_segments FROM ( \
                    SELECT selected.*, ROWNUM AS page_row FROM ( \
                        WITH args AS ( \
-                           SELECT :1 owner_filter FROM dual \
+                           SELECT :1 owner_filter FROM SYS.dual \
                        ) \
                        SELECT modifications.table_owner AS owner, \
                               modifications.table_name AS object_name, \
@@ -1648,7 +1650,7 @@ impl CatalogQueryId {
                               modifications.timestamp AS last_modified, \
                               NVL(modifications.truncated, 'NO') AS truncated, \
                               NVL(modifications.drop_segments, 0) AS drop_segments \
-                       FROM all_tab_modifications modifications CROSS JOIN args \
+                       FROM SYS.all_tab_modifications modifications CROSS JOIN args \
                        WHERE (args.owner_filter IS NULL \
                               OR modifications.table_owner = args.owner_filter) \
                          AND modifications.partition_name IS NULL \
@@ -1668,10 +1670,10 @@ impl CatalogQueryId {
             Self::Dependents => (
                 "SELECT * FROM ( \
                    WITH args AS ( \
-                       SELECT :1 owner_filter, :2 name_filter FROM dual \
+                       SELECT :1 owner_filter, :2 name_filter FROM SYS.dual \
                    ) \
                    SELECT DISTINCT d.owner, d.name, d.type \
-                   FROM all_dependencies d CROSS JOIN args \
+                   FROM SYS.all_dependencies d CROSS JOIN args \
                    WHERE d.referenced_owner = args.owner_filter \
                      AND d.referenced_name = args.name_filter \
                      AND NOT (d.owner = args.owner_filter AND d.name = args.name_filter) \
@@ -1685,7 +1687,7 @@ impl CatalogQueryId {
             Self::IndexMetadata => (
                 "SELECT owner, index_name, index_type, table_owner, table_name, \
                 uniqueness, status, partitioned, temporary, generated, degree \
-         FROM all_indexes \
+         FROM SYS.all_indexes \
          WHERE owner = :1 AND index_name = :2",
                 TT,
                 "describe index metadata",
@@ -1694,7 +1696,7 @@ impl CatalogQueryId {
             ),
             Self::IndexColumns => (
                 "SELECT column_position, column_name, descend, column_length, char_length \
-         FROM all_ind_columns \
+         FROM SYS.all_ind_columns \
          WHERE index_owner = :1 AND index_name = :2 \
          ORDER BY column_position",
                 TT,
@@ -1704,7 +1706,7 @@ impl CatalogQueryId {
             ),
             Self::IndexExpressions => (
                 "SELECT column_position, column_expression \
-         FROM all_ind_expressions \
+         FROM SYS.all_ind_expressions \
          WHERE index_owner = :1 AND index_name = :2 \
          ORDER BY column_position",
                 TT,
@@ -1715,7 +1717,7 @@ impl CatalogQueryId {
             Self::TriggerMetadata => (
                 "SELECT owner, trigger_name, trigger_type, triggering_event, \
                 table_owner, table_name, status, when_clause, description, trigger_body \
-         FROM all_triggers \
+         FROM SYS.all_triggers \
          WHERE owner = :1 AND trigger_name = :2",
                 TT,
                 "describe trigger metadata and body",
@@ -1724,7 +1726,7 @@ impl CatalogQueryId {
             ),
             Self::ViewMetadata => (
                 "SELECT owner, view_name, text_length, text \
-         FROM all_views \
+         FROM SYS.all_views \
          WHERE owner = :1 AND view_name = :2",
                 TT,
                 "describe view definition metadata",
@@ -1748,7 +1750,7 @@ impl CatalogQueryId {
             Self::CompileErrors => (
                 "SELECT * FROM ( \
                    SELECT name, type, line, position, text, attribute \
-                   FROM all_errors \
+                   FROM SYS.all_errors \
                    WHERE owner = :1 AND (:2 IS NULL OR name = :3) \
                    ORDER BY name, type, sequence \
                ) WHERE ROWNUM <= :4",
@@ -1760,10 +1762,10 @@ impl CatalogQueryId {
             Self::SearchSource => (
                 "SELECT * FROM ( \
                    WITH args AS ( \
-                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter, :4 needle FROM dual \
+                       SELECT :1 owner_filter, :2 type_filter, :3 name_filter, :4 needle FROM SYS.dual \
                    ) \
                    SELECT s.owner, s.name, s.type, s.line, s.text \
-                   FROM all_source s CROSS JOIN args \
+                   FROM SYS.all_source s CROSS JOIN args \
                    WHERE (args.owner_filter IS NULL OR s.owner = args.owner_filter) \
                      AND (args.type_filter IS NULL OR s.type = args.type_filter) \
                      AND (args.name_filter IS NULL OR s.name LIKE args.name_filter) \
@@ -1776,7 +1778,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::GetSource => (
-                "SELECT line, text FROM all_source \
+                "SELECT line, text FROM SYS.all_source \
                WHERE owner = :1 AND name = :2 AND type = :3 \
                  AND (:4 IS NULL OR line >= :5) \
                  AND (:6 IS NULL OR line <= :7) \
@@ -1795,22 +1797,22 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::GetDdl => (
-                "SELECT DBMS_LOB.SUBSTR(ddl, 4000, 1) AS ddl, DBMS_LOB.GETLENGTH(ddl) AS ddl_length \
-         FROM (SELECT DBMS_METADATA.GET_DDL(:1, :2, :3) AS ddl FROM dual)",
+                "SELECT SYS.DBMS_LOB.SUBSTR(ddl, 4000, 1) AS ddl, SYS.DBMS_LOB.GETLENGTH(ddl) AS ddl_length \
+         FROM (SELECT SYS.DBMS_METADATA.GET_DDL(:1, :2, :3) AS ddl FROM SYS.dual)",
                 TTT,
                 "fetch bounded metadata DDL for one allowlisted object",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::SemanticSearchCompatible => (
-                "SELECT value AS compatible FROM v$parameter WHERE name = 'compatible'",
+                "SELECT value AS compatible FROM SYS.v_$parameter WHERE name = 'compatible'",
                 EMPTY,
                 "prove database compatibility for in-database embedding",
                 InternalProof,
                 Diagnostic,
             ),
             Self::SemanticSearchOnnxModel => (
-                "SELECT model_name FROM user_mining_models \
+                "SELECT model_name FROM SYS.user_mining_models \
                  WHERE mining_function = 'EMBEDDING' AND algorithm = 'ONNX' \
                  ORDER BY model_name FETCH FIRST 2 ROWS ONLY",
                 EMPTY,
@@ -1819,28 +1821,28 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::StagingCurrentEdition => (
-                "SELECT SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS edition_name FROM dual",
+                "SELECT SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS edition_name FROM SYS.dual",
                 EMPTY,
                 "prove the authenticated staging connection is in the requested child edition",
                 SessionContext,
                 ReadPurity,
             ),
             Self::EditionChildren => (
-                "SELECT edition_name FROM all_editions WHERE parent_edition_name = :1",
+                "SELECT edition_name FROM SYS.all_editions WHERE parent_edition_name = :1",
                 BindSchema(&[Text]),
                 "prove a parent edition has no existing child",
                 InternalProof,
                 Diagnostic,
             ),
             Self::EditionsProbeServerVersion => (
-                "SELECT version_full FROM product_component_version WHERE rownum = 1",
+                "SELECT version_full FROM SYS.product_component_version WHERE rownum = 1",
                 EMPTY,
                 "label the Oracle version for version-scoped editions catalog evidence",
                 InternalProof,
                 Diagnostic,
             ),
             Self::EditionsCatalogColumns => (
-                "SELECT table_name, column_name FROM all_tab_columns \
+                "SELECT table_name, column_name FROM SYS.all_tab_columns \
                    WHERE owner = 'SYS' \
                      AND ((table_name = 'USER_USERS' AND column_name = 'EDITIONS_ENABLED') \
                        OR (table_name = 'DBA_USERS' AND column_name IN ('USERNAME', 'EDITIONS_ENABLED')) \
@@ -1854,21 +1856,21 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::EditionsEnabledOwnerSelf => (
-                "SELECT editions_enabled FROM user_users",
+                "SELECT editions_enabled FROM SYS.user_users",
                 EMPTY,
                 "read connected schema editions-enabled flag when supported",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::EditionsEnabledOwnerDba => (
-                "SELECT editions_enabled FROM dba_users WHERE username = :1",
+                "SELECT editions_enabled FROM SYS.dba_users WHERE username = :1",
                 T,
                 "read one exact owner's editions-enabled flag",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::EditionedTypesSelf => (
-                "SELECT object_type FROM (SELECT object_type FROM user_editioned_types ORDER BY object_type) \
+                "SELECT object_type FROM (SELECT object_type FROM SYS.user_editioned_types ORDER BY object_type) \
                    WHERE ROWNUM <= :1",
                 I,
                 "read bounded edition-enabled object types for connected schema",
@@ -1876,7 +1878,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::EditionedTypesDba => (
-                "SELECT object_type FROM (SELECT object_type FROM dba_editioned_types \
+                "SELECT object_type FROM (SELECT object_type FROM SYS.dba_editioned_types \
                    WHERE schema = :1 ORDER BY object_type) WHERE ROWNUM <= :2",
                 TI,
                 "read bounded edition-enabled object types for one exact schema",
@@ -1884,7 +1886,7 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::EditionableTypesCapability => (
-                "SELECT editionable_type FROM (SELECT editionable_type FROM v$editionable_types \
+                "SELECT editionable_type FROM (SELECT editionable_type FROM SYS.v_$editionable_types \
                    WHERE editionable_type = :1) WHERE ROWNUM <= :2",
                 TI,
                 "prove database-level editionability only, not schema enablement",
@@ -2004,28 +2006,28 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::HealthInvalidObjectsDba => (
-                health_invalid_objects_sql!("DBA_OBJECTS"),
+                health_invalid_objects_sql!("SYS.DBA_OBJECTS"),
                 EMPTY,
                 "inspect invalid objects in the privileged dictionary",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthInvalidObjectsAll => (
-                health_invalid_objects_sql!("ALL_OBJECTS"),
+                health_invalid_objects_sql!("SYS.ALL_OBJECTS"),
                 EMPTY,
                 "inspect invalid objects visible to the session",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthUnusableIndexesDba => (
-                health_unusable_indexes_sql!("DBA_INDEXES"),
+                health_unusable_indexes_sql!("SYS.DBA_INDEXES"),
                 EMPTY,
                 "inspect unusable indexes in the privileged dictionary",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthUnusableIndexesAll => (
-                health_unusable_indexes_sql!("ALL_INDEXES"),
+                health_unusable_indexes_sql!("SYS.ALL_INDEXES"),
                 EMPTY,
                 "inspect unusable indexes visible to the session",
                 DictionaryMetadata,
@@ -2033,42 +2035,42 @@ impl CatalogQueryId {
             ),
             Self::HealthTablespaceUsage => (
                 "SELECT tablespace_name, ROUND(used_percent, 2) AS used_percent, used_space, tablespace_size \
-                 FROM DBA_TABLESPACE_USAGE_METRICS ORDER BY used_percent DESC",
+                 FROM SYS.DBA_TABLESPACE_USAGE_METRICS ORDER BY used_percent DESC",
                 EMPTY,
                 "inspect privileged tablespace headroom",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthSequenceCeilingDba => (
-                health_sequence_ceiling_sql!("DBA_SEQUENCES"),
+                health_sequence_ceiling_sql!("SYS.DBA_SEQUENCES"),
                 EMPTY,
                 "inspect privileged sequences near the health threshold",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthSequenceCeilingAll => (
-                health_sequence_ceiling_sql!("ALL_SEQUENCES"),
+                health_sequence_ceiling_sql!("SYS.ALL_SEQUENCES"),
                 EMPTY,
                 "inspect visible sequences near the health threshold",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthDisabledConstraintsDba => (
-                health_disabled_constraints_sql!("DBA_CONSTRAINTS"),
+                health_disabled_constraints_sql!("SYS.DBA_CONSTRAINTS"),
                 EMPTY,
                 "inspect disabled constraints in the privileged dictionary",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthDisabledConstraintsAll => (
-                health_disabled_constraints_sql!("ALL_CONSTRAINTS"),
+                health_disabled_constraints_sql!("SYS.ALL_CONSTRAINTS"),
                 EMPTY,
                 "inspect disabled constraints visible to the session",
                 DictionaryMetadata,
                 Diagnostic,
             ),
             Self::HealthBufferCacheStats => (
-                "SELECT name, value FROM V$SYSSTAT \
+                "SELECT name, value FROM SYS.V_$SYSSTAT \
                  WHERE name IN ('db block gets', 'consistent gets', 'physical reads cache') \
                  ORDER BY name",
                 EMPTY,
@@ -2077,70 +2079,70 @@ impl CatalogQueryId {
                 Diagnostic,
             ),
             Self::HealthProbeDbaObjects => (
-                health_probe_sql!("DBA_OBJECTS"),
+                health_probe_sql!("SYS.DBA_OBJECTS"),
                 EMPTY,
                 "probe privileged object dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeAllObjects => (
-                health_probe_sql!("ALL_OBJECTS"),
+                health_probe_sql!("SYS.ALL_OBJECTS"),
                 EMPTY,
                 "probe visible object dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeDbaIndexes => (
-                health_probe_sql!("DBA_INDEXES"),
+                health_probe_sql!("SYS.DBA_INDEXES"),
                 EMPTY,
                 "probe privileged index dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeAllIndexes => (
-                health_probe_sql!("ALL_INDEXES"),
+                health_probe_sql!("SYS.ALL_INDEXES"),
                 EMPTY,
                 "probe visible index dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeTablespaceUsage => (
-                health_probe_sql!("DBA_TABLESPACE_USAGE_METRICS"),
+                health_probe_sql!("SYS.DBA_TABLESPACE_USAGE_METRICS"),
                 EMPTY,
                 "probe privileged tablespace metrics access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeDbaSequences => (
-                health_probe_sql!("DBA_SEQUENCES"),
+                health_probe_sql!("SYS.DBA_SEQUENCES"),
                 EMPTY,
                 "probe privileged sequence dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeAllSequences => (
-                health_probe_sql!("ALL_SEQUENCES"),
+                health_probe_sql!("SYS.ALL_SEQUENCES"),
                 EMPTY,
                 "probe visible sequence dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeDbaConstraints => (
-                health_probe_sql!("DBA_CONSTRAINTS"),
+                health_probe_sql!("SYS.DBA_CONSTRAINTS"),
                 EMPTY,
                 "probe privileged constraint dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeAllConstraints => (
-                health_probe_sql!("ALL_CONSTRAINTS"),
+                health_probe_sql!("SYS.ALL_CONSTRAINTS"),
                 EMPTY,
                 "probe visible constraint dictionary access",
                 InternalProof,
                 Diagnostic,
             ),
             Self::HealthProbeSysstat => (
-                health_probe_sql!("V$SYSSTAT"),
+                health_probe_sql!("SYS.V_$SYSSTAT"),
                 EMPTY,
                 "probe instance statistic access",
                 InternalProof,
@@ -2148,7 +2150,7 @@ impl CatalogQueryId {
             ),
             Self::LineageColumns => (
                 "SELECT column_name, data_type \
-                 FROM all_tab_columns \
+                 FROM SYS.all_tab_columns \
                  WHERE owner = :1 AND table_name = :2 \
                  ORDER BY column_id",
                 TT,
@@ -2176,7 +2178,7 @@ impl CatalogQueryId {
   owner, object_name, object_type, status,
   to_char(last_ddl_time, 'YYYY-MM-DD"T"HH24:MI:SS') as last_ddl_time_iso,
   editionable, edition_name
-from all_objects
+from SYS.all_objects
 where owner in ("#,
                     r#")
   and object_type in ('TABLE', 'VIEW', 'MATERIALIZED VIEW', 'SEQUENCE', 'TYPE',
@@ -2194,7 +2196,7 @@ order by owner, object_type, object_name"#
   owner, table_name, column_name, nvl(column_id, internal_column_id) as column_position,
   data_type_owner, data_type, data_length, data_precision, data_scale, char_used,
   nullable, data_default_vc, virtual_column, hidden_column
-from all_tab_cols
+from SYS.all_tab_cols
 where owner in ("#,
                     r#")
 order by owner, table_name, nvl(column_id, internal_column_id)"#
@@ -2209,7 +2211,7 @@ order by owner, table_name, nvl(column_id, internal_column_id)"#
                     r#"SELECT owner, table_name, column_name, nvl(column_id, internal_column_id) as column_position,
   data_type_owner, data_type, data_length, data_precision, data_scale, char_used,
   nullable, cast(null as varchar2(4000)) as data_default_vc, virtual_column, hidden_column
-from all_tab_cols
+from SYS.all_tab_cols
 where owner in ("#,
                     r#")
 order by owner, table_name, nvl(column_id, internal_column_id)"#
@@ -2229,10 +2231,10 @@ order by owner, table_name, nvl(column_id, internal_column_id)"#
   case when c.deferred = 'DEFERRED' then 'Y' else 'N' end as is_deferred,
   child.column_name, child.position as column_position,
   parent.column_name as referenced_column_name
-from all_constraints c
-left join all_constraints p on p.owner = c.r_owner and p.constraint_name = c.r_constraint_name
-left join all_cons_columns child on child.owner = c.owner and child.constraint_name = c.constraint_name
-left join all_cons_columns parent on parent.owner = p.owner and parent.constraint_name = p.constraint_name
+from SYS.all_constraints c
+left join SYS.all_constraints p on p.owner = c.r_owner and p.constraint_name = c.r_constraint_name
+left join SYS.all_cons_columns child on child.owner = c.owner and child.constraint_name = c.constraint_name
+left join SYS.all_cons_columns parent on parent.owner = p.owner and parent.constraint_name = p.constraint_name
   and parent.position = child.position
 where c.owner in ("#,
                     r#")
@@ -2250,8 +2252,8 @@ order by c.owner, c.constraint_name, child.position"#
   i.owner, i.index_name, i.table_owner, i.table_name,
   case when i.uniqueness = 'UNIQUE' then 'Y' else 'N' end as is_unique,
   i.index_type, i.status, c.column_name, c.column_position
-from all_indexes i
-left join all_ind_columns c on c.index_owner = i.owner and c.index_name = i.index_name
+from SYS.all_indexes i
+left join SYS.all_ind_columns c on c.index_owner = i.owner and c.index_name = i.index_name
   and c.table_owner = i.table_owner and c.table_name = i.table_name
 where i.owner in ("#,
                     r#")
@@ -2266,7 +2268,7 @@ order by i.owner, i.index_name, c.column_position"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, trigger_name, table_owner, table_name, trigger_type, triggering_event, when_clause
-from all_triggers
+from SYS.all_triggers
 where owner in ("#,
                     r#") and base_object_type in ('TABLE', 'VIEW')
 order by owner, trigger_name"#
@@ -2280,7 +2282,7 @@ order by owner, trigger_name"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, synonym_name, table_owner, table_name, db_link
-from all_synonyms
+from SYS.all_synonyms
 where (owner <> 'PUBLIC' and owner in ("#,
                     r#"))
    or (owner = 'PUBLIC' and :33 = 1)
@@ -2296,7 +2298,7 @@ order by owner, synonym_name"#
                     r#"SELECT 
   owner, object_name, procedure_name, subprogram_id, overload, object_type,
   deterministic, pipelined
-from all_procedures
+from SYS.all_procedures
 where owner in ("#,
                     r#")
   and (procedure_name is not null or object_type in ('FUNCTION', 'PROCEDURE'))
@@ -2313,7 +2315,7 @@ order by owner, object_name, procedure_name, subprogram_id"#
   owner, package_name, object_name, subprogram_id, overload, argument_name,
   position, sequence, data_type, type_owner, type_name, data_length,
   data_precision, data_scale, in_out, defaulted
-from all_arguments
+from SYS.all_arguments
 where owner in ("#,
                     r#") and data_level = 0
 order by owner, package_name, object_name, subprogram_id, sequence"#
@@ -2327,7 +2329,7 @@ order by owner, package_name, object_name, subprogram_id, sequence"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, view_name, text_vc, read_only
-from all_views
+from SYS.all_views
 where owner in ("#,
                     r#")
 order by owner, view_name"#
@@ -2341,7 +2343,7 @@ order by owner, view_name"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, mview_name, refresh_mode, refresh_method, query
-from all_mviews
+from SYS.all_mviews
 where owner in ("#,
                     r#")
 order by owner, mview_name"#
@@ -2356,7 +2358,7 @@ order by owner, mview_name"#
                     r#"SELECT 
   sequence_owner, sequence_name, min_value, max_value, increment_by,
   cycle_flag, order_flag, cache_size
-from all_sequences
+from SYS.all_sequences
 where sequence_owner in ("#,
                     r#")
 order by sequence_owner, sequence_name"#
@@ -2371,7 +2373,7 @@ order by sequence_owner, sequence_name"#
                     r#"SELECT 
   owner, type_name, attr_name, attr_no, attr_type_owner, attr_type_name,
   length, precision, scale
-from all_type_attrs
+from SYS.all_type_attrs
 where owner in ("#,
                     r#")
 order by owner, type_name, attr_no"#
@@ -2382,7 +2384,7 @@ order by owner, type_name, attr_no"#
                 Diagnostic,
             ),
             Self::ExtractUsers => (
-                "SELECT username from all_users order by username",
+                "SELECT username from SYS.all_users order by username",
                 EMPTY,
                 "extract visible users once",
                 DictionaryMetadata,
@@ -2392,7 +2394,7 @@ order by owner, type_name, attr_no"#
                 extract_owner_sql!(
                     r#"SELECT 
   table_schema, table_name, grantee, privilege, grantable, hierarchy
-from all_tab_privs
+from SYS.all_tab_privs
 where table_schema in ("#,
                     r#")
 order by table_schema, table_name, grantee, privilege"#
@@ -2406,7 +2408,7 @@ order by table_schema, table_name, grantee, privilege"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, db_link, host
-from all_db_links
+from SYS.all_db_links
 where (owner <> 'PUBLIC' and owner in ("#,
                     r#"))
    or (owner = 'PUBLIC' and :33 = 1)
@@ -2421,7 +2423,7 @@ order by owner, db_link"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, table_name, table_type, comments
-from all_tab_comments
+from SYS.all_tab_comments
 where owner in ("#,
                     r#") and comments is not null
 order by owner, table_name"#
@@ -2435,7 +2437,7 @@ order by owner, table_name"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, table_name, column_name, comments
-from all_col_comments
+from SYS.all_col_comments
 where owner in ("#,
                     r#") and comments is not null
 order by owner, table_name, column_name"#
@@ -2446,7 +2448,7 @@ order by owner, table_name, column_name"#
                 Diagnostic,
             ),
             Self::ExtractEditions => (
-                "SELECT edition_name, parent_edition_name, usable from all_editions order by edition_name",
+                "SELECT edition_name, parent_edition_name, usable from SYS.all_editions order by edition_name",
                 EMPTY,
                 "extract visible editions once",
                 DictionaryMetadata,
@@ -2456,7 +2458,7 @@ order by owner, table_name, column_name"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, view_name, table_name
-from all_editioning_views
+from SYS.all_editioning_views
 where owner in ("#,
                     r#")
 order by owner, view_name"#
@@ -2471,7 +2473,7 @@ order by owner, view_name"#
                     r#"SELECT 
   object_owner, object_name, policy_group, policy_name, pf_owner, package,
   function, sel, ins, upd, del, enable
-from all_policies
+from SYS.all_policies
 where object_owner in ("#,
                     r#")
 order by object_owner, object_name, policy_group, policy_name"#
@@ -2486,7 +2488,7 @@ order by object_owner, object_name, policy_group, policy_name"#
                     r#"SELECT 
   owner, name, type, referenced_owner, referenced_name, referenced_type,
   dependency_type
-from all_dependencies
+from SYS.all_dependencies
 where owner in ("#,
                     r#")
 order by owner, name, referenced_owner, referenced_name"#
@@ -2499,7 +2501,7 @@ order by owner, name, referenced_owner, referenced_name"#
             Self::ClosureIdentity => (
                 "SELECT SYS_CONTEXT('USERENV','DBID') AS dbid, \
                         SYS_CONTEXT('USERENV','CON_NAME') AS container_name, \
-                        SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS edition_name FROM dual",
+                        SYS_CONTEXT('USERENV','CURRENT_EDITION_NAME') AS edition_name FROM SYS.dual",
                 EMPTY,
                 "read stable database, container and edition identity",
                 InternalProof,
@@ -2516,7 +2518,7 @@ order by owner, name, referenced_owner, referenced_name"#
             ),
             Self::ClosureMemberObject => (
                 "SELECT object_id, TO_CHAR(last_ddl_time,'YYYY-MM-DD\"T\"HH24:MI:SS') AS last_ddl_time, status \
-                   FROM (SELECT object_id, last_ddl_time, status FROM all_objects \
+                   FROM (SELECT object_id, last_ddl_time, status FROM SYS.all_objects \
                          WHERE owner = :1 AND object_name = :2 AND object_type = :3 \
                          ORDER BY object_id) WHERE ROWNUM <= :4",
                 TTTI,
@@ -2525,7 +2527,7 @@ order by owner, name, referenced_owner, referenced_name"#
                 Diagnostic,
             ),
             Self::ClosureRoutineAuthid => (
-                "SELECT authid, overload FROM (SELECT authid, overload FROM all_procedures \
+                "SELECT authid, overload FROM (SELECT authid, overload FROM SYS.all_procedures \
                    WHERE owner = :1 AND object_name = :2 \
                      AND ((:3 IS NULL AND procedure_name IS NULL) OR procedure_name = :4) \
                    ORDER BY overload) WHERE ROWNUM <= :5",
@@ -2539,7 +2541,7 @@ order by owner, name, referenced_owner, referenced_name"#
                         plsql_ccflags, nls_length_semantics, plscope_settings \
                    FROM (SELECT plsql_optimize_level, plsql_code_type, plsql_debug, plsql_warnings, \
                                 plsql_ccflags, nls_length_semantics, plscope_settings \
-                         FROM all_plsql_object_settings WHERE owner = :1 AND name = :2 AND type = :3) \
+                         FROM SYS.all_plsql_object_settings WHERE owner = :1 AND name = :2 AND type = :3) \
                   WHERE ROWNUM <= :4",
                 TTTI,
                 "read bounded compiler settings for one exact object",
@@ -2553,7 +2555,7 @@ order by owner, name, referenced_owner, referenced_name"#
                                 o.object_id AS target_object_id, \
                                 TO_CHAR(o.last_ddl_time,'YYYY-MM-DD\"T\"HH24:MI:SS') AS target_last_ddl_time, \
                                 o.status AS target_status \
-                         FROM all_dependencies d LEFT JOIN all_objects o \
+                         FROM SYS.all_dependencies d LEFT JOIN SYS.all_objects o \
                            ON o.owner=d.referenced_owner AND o.object_name=d.referenced_name \
                           AND o.object_type=d.referenced_type \
                          WHERE d.owner=:1 AND d.name=:2 AND d.type=:3 \
@@ -2567,7 +2569,7 @@ order by owner, name, referenced_owner, referenced_name"#
             Self::ClosureTriggers => (
                 "SELECT owner, trigger_name, trigger_type, triggering_event, status, action_type, when_clause \
                    FROM (SELECT owner, trigger_name, trigger_type, triggering_event, status, action_type, when_clause \
-                         FROM all_triggers WHERE table_owner=:1 AND table_name=:2 \
+                         FROM SYS.all_triggers WHERE table_owner=:1 AND table_name=:2 \
                          ORDER BY owner,trigger_name) WHERE ROWNUM <= :3",
                 TTI,
                 "read bounded triggers for a closure DML target",
@@ -2575,7 +2577,7 @@ order by owner, name, referenced_owner, referenced_name"#
                 Diagnostic,
             ),
             Self::ClosureSource => (
-                "SELECT line, text FROM (SELECT line, text FROM all_source \
+                "SELECT line, text FROM (SELECT line, text FROM SYS.all_source \
                    WHERE owner=:1 AND name=:2 AND type=:3 ORDER BY line) WHERE ROWNUM <= :4",
                 TTTI,
                 "read bounded source lines for a closure member",
@@ -2586,7 +2588,7 @@ order by owner, name, referenced_owner, referenced_name"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, plscope_settings
-from all_plsql_object_settings
+from SYS.all_plsql_object_settings
 where owner in ("#,
                     r#")"#
                 ),
@@ -2599,7 +2601,7 @@ where owner in ("#,
                 extract_owner_sql!(
                     r#"SELECT 
   owner, name, type, usage, line, col, object_name
-from all_identifiers
+from SYS.all_identifiers
 where owner in ("#,
                     r#")
 order by owner, object_name, line, col"#
@@ -2665,15 +2667,15 @@ pub async fn run_catalog_query(
 
 pub(crate) const SESSION_CONTEXT_SQL: &str = "SELECT SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user, \
     SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema, \
-    SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME') AS edition_name FROM dual";
-pub(crate) const SESSION_ROLES_SQL: &str = "SELECT role FROM (SELECT role FROM session_roles ORDER BY role) \
+    SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME') AS edition_name FROM SYS.dual";
+pub(crate) const SESSION_ROLES_SQL: &str = "SELECT role FROM (SELECT role FROM SYS.session_roles ORDER BY role) \
     WHERE ROWNUM <= :1";
 pub(crate) const POLICY_OBSERVATION_SESSION_CONTEXT_SQL: &str = "SELECT \
     SYS_CONTEXT('USERENV', 'SESSION_USER') AS session_user, \
     SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA') AS current_schema, \
     SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME') AS edition_name, r.role \
-    FROM dual d LEFT JOIN \
-    (SELECT role FROM (SELECT role FROM session_roles ORDER BY role) WHERE ROWNUM <= :1) r \
+    FROM SYS.dual d LEFT JOIN \
+    (SELECT role FROM (SELECT role FROM SYS.session_roles ORDER BY role) WHERE ROWNUM <= :1) r \
     ON 1 = 1";
 macro_rules! policy_observation_snapshot_sql {
     ($predicate:literal, $policy_limit:literal, $role_limit:literal) => {
@@ -2683,12 +2685,12 @@ macro_rules! policy_observation_snapshot_sql {
             "CAST(NULL AS VARCHAR2(128)) AS edition_name, CAST(NULL AS VARCHAR2(128)) AS role, ",
             "object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, upd, del, enable ",
             "FROM (SELECT object_owner, object_name, policy_name, pf_owner, package, function, sel, ins, upd, del, enable ",
-            "FROM all_policies WHERE ", $predicate,
+            "FROM SYS.all_policies WHERE ", $predicate,
             " ORDER BY object_owner, object_name, policy_name) WHERE ROWNUM <= ", $policy_limit,
             " UNION ALL SELECT 'CONTEXT', SYS_CONTEXT('USERENV', 'SESSION_USER'), ",
             "SYS_CONTEXT('USERENV', 'CURRENT_SCHEMA'), SYS_CONTEXT('USERENV', 'CURRENT_EDITION_NAME'), r.role, ",
             "NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL ",
-            "FROM dual d LEFT JOIN (SELECT role FROM (SELECT role FROM session_roles ORDER BY role) WHERE ROWNUM <= ",
+            "FROM SYS.dual d LEFT JOIN (SELECT role FROM (SELECT role FROM SYS.session_roles ORDER BY role) WHERE ROWNUM <= ",
             $role_limit, ") r ON 1 = 1)"
         )
     };
@@ -2702,69 +2704,201 @@ pub(crate) const POLICY_OBSERVATION_BY_SCHEMA_SQL: &str = policy_observation_sna
 );
 pub(crate) const OBJECTS_SQL: &str = "SELECT owner, object_name, object_type, object_id, status, edition_name \
     FROM (SELECT owner, object_name, object_type, object_id, status, edition_name \
-          FROM all_objects WHERE owner = :1 AND object_name = :2 ORDER BY object_id) \
+          FROM SYS.all_objects WHERE owner = :1 AND object_name = :2 ORDER BY object_id) \
     WHERE ROWNUM <= :3";
 pub(crate) const SYNONYMS_SQL: &str = "SELECT s.owner, s.synonym_name, s.table_owner, s.table_name, s.db_link, \
     o.object_id, o.status, o.edition_name \
-    FROM all_synonyms s LEFT JOIN all_objects o \
+    FROM SYS.all_synonyms s LEFT JOIN SYS.all_objects o \
       ON o.owner = s.owner AND o.object_name = s.synonym_name AND o.object_type = 'SYNONYM' \
     WHERE s.owner = :1 AND s.synonym_name = :2 AND ROWNUM <= :3";
 pub(crate) const STANDALONE_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type \
     FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type, sequence \
-          FROM all_arguments WHERE owner = :1 AND package_name IS NULL AND object_name = :2 \
+          FROM SYS.all_arguments WHERE owner = :1 AND package_name IS NULL AND object_name = :2 \
           ORDER BY subprogram_id, sequence) WHERE ROWNUM <= :3";
 pub(crate) const MEMBER_ARGUMENTS_SQL: &str = "SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type \
     FROM (SELECT subprogram_id, overload, position, data_level, in_out, defaulted, argument_name, data_type, sequence \
-          FROM all_arguments WHERE owner = :1 AND package_name = :2 AND object_name = :3 \
+          FROM SYS.all_arguments WHERE owner = :1 AND package_name = :2 AND object_name = :3 \
           ORDER BY subprogram_id, sequence) WHERE ROWNUM <= :4";
 pub(crate) const STANDALONE_PROCEDURES_SQL: &str = "SELECT subprogram_id, overload \
-    FROM (SELECT subprogram_id, overload FROM all_procedures \
+    FROM (SELECT subprogram_id, overload FROM SYS.all_procedures \
           WHERE owner = :1 AND object_name = :2 AND procedure_name IS NULL \
           ORDER BY subprogram_id) WHERE ROWNUM <= :3";
 pub(crate) const MEMBER_PROCEDURES_SQL: &str = "SELECT subprogram_id, overload \
-    FROM (SELECT subprogram_id, overload FROM all_procedures \
+    FROM (SELECT subprogram_id, overload FROM SYS.all_procedures \
           WHERE owner = :1 AND object_name = :2 AND procedure_name = :3 \
           ORDER BY subprogram_id) WHERE ROWNUM <= :4";
 pub(crate) const COLUMN_CONFLICT_SQL: &str = "SELECT owner, table_name, column_name, column_id \
-    FROM all_tab_columns WHERE column_name = :1 AND ROWNUM <= :2";
-pub(crate) const RELATION_COLUMN_SQL: &str = "SELECT column_name, column_id FROM all_tab_columns \
+    FROM SYS.all_tab_columns WHERE column_name = :1 AND ROWNUM <= :2";
+pub(crate) const RELATION_COLUMN_SQL: &str = "SELECT column_name, column_id FROM SYS.all_tab_columns \
     WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
-pub(crate) const COLUMN_PATH_TYPE_SQL: &str = "SELECT data_type, data_type_owner FROM all_tab_columns \
+pub(crate) const COLUMN_PATH_TYPE_SQL: &str = "SELECT data_type, data_type_owner FROM SYS.all_tab_columns \
     WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
-pub(crate) const JSON_COLUMN_SQL: &str = "SELECT column_name FROM all_json_columns \
+pub(crate) const JSON_COLUMN_SQL: &str = "SELECT column_name FROM SYS.all_json_columns \
     WHERE owner = :1 AND table_name = :2 AND column_name = :3 AND ROWNUM <= 2";
-pub(crate) const JSON_CONSTRAINT_SQL: &str = "SELECT search_condition_vc FROM all_constraints c \
-    JOIN all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
+pub(crate) const JSON_CONSTRAINT_SQL: &str = "SELECT search_condition_vc FROM SYS.all_constraints c \
+    JOIN SYS.all_cons_columns cc ON cc.owner = c.owner AND cc.constraint_name = c.constraint_name \
     WHERE c.owner = :1 AND c.table_name = :2 AND cc.column_name = :3 \
     AND c.constraint_type = 'C' AND c.status = 'ENABLED' AND c.validated = 'VALIDATED' \
     AND ROWNUM <= 65";
-pub(crate) const TYPE_ATTRIBUTE_SQL: &str = "SELECT attr_name, attr_type_owner, attr_type_name, attr_type_mod FROM all_type_attrs \
+pub(crate) const TYPE_ATTRIBUTE_SQL: &str = "SELECT attr_name, attr_type_owner, attr_type_name, attr_type_mod FROM SYS.all_type_attrs \
     WHERE owner = :1 AND type_name = :2 AND attr_name = :3 AND ROWNUM <= 2";
 pub(crate) const SELECT_POLICY_SQL: &str = "SELECT policy_name FROM SYS.ALL_POLICIES \
     WHERE object_owner = :1 AND object_name = :2 \
     AND enable = 'YES' AND sel = 'YES' AND ROWNUM <= 1";
-pub(crate) const ALL_POLICIES_VISIBILITY_SQL: &str =
-    "SELECT COUNT(*) AS VISIBLE_POLICY_ROWS FROM (SELECT 1 FROM all_policies WHERE ROWNUM <= 1)";
+pub(crate) const ALL_POLICIES_VISIBILITY_SQL: &str = "SELECT COUNT(*) AS VISIBLE_POLICY_ROWS FROM (SELECT 1 FROM SYS.all_policies WHERE ROWNUM <= 1)";
 pub(crate) const POLICY_CATALOG_PROOF_SQL: &str =
     "SELECT policy_name FROM SYS.ALL_POLICIES WHERE ROWNUM <= 1";
 pub(crate) const FGA_CATALOG_PROOF_SQL: &str =
-    "SELECT policy_name FROM all_audit_policies WHERE ROWNUM <= 1";
-pub(crate) const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM all_tab_cols \
+    "SELECT policy_name FROM SYS.all_audit_policies WHERE ROWNUM <= 1";
+pub(crate) const VIRTUAL_COLUMN_SQL: &str = "SELECT column_name FROM SYS.all_tab_cols \
     WHERE owner = :1 AND table_name = :2 \
     AND virtual_column = 'YES' AND ROWNUM <= 1";
-pub(crate) const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM all_tab_cols \
+pub(crate) const TARGET_COLUMN_CATALOG_PROOF_SQL: &str = "SELECT column_name FROM SYS.all_tab_cols \
     WHERE owner = :1 AND table_name = :2 AND ROWNUM <= 1";
 pub(crate) const POLICY_ROWS_FOR_RELATIONS_32_SQL: &str = "SELECT object_owner, object_name FROM SYS.ALL_POLICIES \
     WHERE enable = 'YES' AND sel = 'YES' \
     AND (object_owner, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 1";
 pub(crate) const FGA_POLICIES_FOR_RELATIONS_32_SQL: &str = "SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \
     FROM (SELECT object_schema, object_name, policy_name, policy_text, pf_schema, pf_package, pf_function, enabled, sel, ins, upd, del \
-          FROM all_audit_policies \
+          FROM SYS.all_audit_policies \
           WHERE (object_schema, object_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) \
     ORDER BY object_schema, object_name, policy_name) WHERE ROWNUM <= 257";
-pub(crate) const VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL: &str = "SELECT owner, table_name, column_name, hidden_column, user_generated, data_default FROM all_tab_cols \
+pub(crate) const VIRTUAL_COLUMNS_FOR_RELATIONS_32_SQL: &str = "SELECT owner, table_name, column_name, hidden_column, user_generated, data_default FROM SYS.all_tab_cols \
     WHERE virtual_column = 'YES' \
     AND (owner, table_name) IN ((:1, :2), (:3, :4), (:5, :6), (:7, :8), (:9, :10), (:11, :12), (:13, :14), (:15, :16), (:17, :18), (:19, :20), (:21, :22), (:23, :24), (:25, :26), (:27, :28), (:29, :30), (:31, :32), (:33, :34), (:35, :36), (:37, :38), (:39, :40), (:41, :42), (:43, :44), (:45, :46), (:47, :48), (:49, :50), (:51, :52), (:53, :54), (:55, :56), (:57, :58), (:59, :60), (:61, :62), (:63, :64)) AND ROWNUM <= 257";
+
+#[cfg(test)]
+mod dictionary_shadow_live_tests {
+    use super::*;
+    use crate::{
+        HardParseEffectClosureV1, OracleConnectOptions, connect_oracle,
+        prove_hard_parse_effect_closure,
+    };
+    use oraclemcp_guard::{CatalogObjectKind, ResolvedIdentity, ResolvedObject};
+
+    fn check(condition: bool, message: &str) -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.to_owned())
+        }
+    }
+
+    fn live_shadow_contract(source: bool) {
+        let dsn = std::env::var("ORACLEMCP_TEST_DSN").expect("local lab DSN required");
+        assert!(dsn.starts_with("localhost:") || dsn.starts_with("127.0.0.1:"));
+        let options = OracleConnectOptions {
+            connect_string: dsn,
+            username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("lab admin user")),
+            password: Some(std::env::var("ORACLEMCP_TEST_PASSWORD").expect("lab admin password")),
+            ..Default::default()
+        };
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async move {
+            let cx = Cx::current().expect("runtime Cx");
+            let admin = connect_oracle(&cx, options.clone()).await.expect("lab admin");
+            let mut random = [0u8; 12];
+            getrandom::getrandom(&mut random).unwrap();
+            let suffix: String = random.iter().map(|byte| format!("{byte:02X}")).collect();
+            let owner = format!("OMCP_P2G_{suffix}");
+            let password = format!("P2g{suffix}!");
+            let mut created = false;
+            let mut app = None;
+            let result: Result<(), String> = async {
+                admin.execute(&cx, &format!("CREATE USER {owner} IDENTIFIED BY \"{password}\""), &[])
+                    .await.map_err(|error| error.to_string())?;
+                created = true;
+                admin.execute(&cx, &format!("GRANT CREATE SESSION, CREATE TABLE, CREATE PROCEDURE, UNLIMITED TABLESPACE TO {owner}"), &[])
+                    .await.map_err(|error| error.to_string())?;
+                app = Some(connect_oracle(&cx, OracleConnectOptions {
+                    username: Some(owner.clone()), password: Some(password), ..options
+                }).await.map_err(|error| error.to_string())?);
+                let conn = app.as_ref().unwrap();
+                if source {
+                    conn.execute(&cx, "CREATE FUNCTION SHADOW_FX RETURN NUMBER AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN COMMIT; RETURN 1; END;", &[])
+                        .await.map_err(|error| error.to_string())?;
+                    let binds = [OracleBind::String(owner.clone()), OracleBind::String("SHADOW_FX".into()), OracleBind::String("FUNCTION".into()), OracleBind::I64(100)];
+                    let original = run_catalog_query(&cx, conn.as_ref(), CatalogQueryId::ClosureSource, &binds)
+                        .await.map_err(|error| error.to_string())?;
+                    let source_text = |rows: &[OracleRow]| rows.iter().filter_map(|row| row.text("TEXT")).collect::<String>();
+                    let original = source_text(&original);
+                    check(original.contains("AUTONOMOUS_TRANSACTION") && original.contains("COMMIT"), "normal source lookup must expose actual side effects")?;
+                    conn.execute(&cx, "CREATE TABLE ALL_SOURCE (owner VARCHAR2(128), name VARCHAR2(128), type VARCHAR2(30), line NUMBER, text VARCHAR2(4000))", &[])
+                        .await.map_err(|error| error.to_string())?;
+                    conn.execute(&cx, "INSERT INTO ALL_SOURCE VALUES (:1, 'SHADOW_FX', 'FUNCTION', 1, 'FUNCTION SHADOW_FX RETURN NUMBER IS BEGIN /* PURE_SHADOW_CANARY */ RETURN 1; END;')", &[OracleBind::String(owner.clone())])
+                        .await.map_err(|error| error.to_string())?;
+                    let spoof = conn.query_rows(&cx, &CatalogQueryId::ClosureSource.spec().sql.replace("SYS.all_source", "all_source"), &binds)
+                        .await.map_err(|error| error.to_string())?;
+                    check(source_text(&spoof).contains("PURE_SHADOW_CANARY"), "negative control must actually read the shadow")?;
+                    let after = run_catalog_query(&cx, conn.as_ref(), CatalogQueryId::ClosureSource, &binds)
+                        .await.map_err(|error| error.to_string())?;
+                    check(source_text(&after) == original, "source proof changed after installing ALL_SOURCE shadow")?;
+                } else {
+                    conn.execute(&cx, "CREATE TABLE ORDERS (id NUMBER)", &[]).await.map_err(|error| error.to_string())?;
+                    conn.execute(&cx, "CREATE FUNCTION POLICY_FX(s VARCHAR2, o VARCHAR2) RETURN VARCHAR2 IS BEGIN RETURN '1=1'; END;", &[])
+                        .await.map_err(|error| error.to_string())?;
+                    admin.execute(&cx, "BEGIN SYS.DBMS_RLS.ADD_POLICY(object_schema=>:1, object_name=>'ORDERS', policy_name=>'P2G_POLICY', function_schema=>:2, policy_function=>'POLICY_FX', statement_types=>'SELECT'); END;", &[OracleBind::String(owner.clone()), OracleBind::String(owner.clone())])
+                        .await.map_err(|error| error.to_string())?;
+                    let objects = run_catalog_query(&cx, conn.as_ref(), CatalogQueryId::Objects, &[OracleBind::String(owner.clone()), OracleBind::String("ORDERS".into()), OracleBind::I64(2)])
+                        .await.map_err(|error| error.to_string())?;
+                    let object_id = objects.first().and_then(|row| row.parse_i64("OBJECT_ID"))
+                        .and_then(|id| u64::try_from(id).ok()).ok_or("missing actual ORDERS identity")?;
+                    let relations = [ResolvedObject {
+                        owner: owner.clone(), name: "ORDERS".into(), kind: CatalogObjectKind::Table,
+                        container: None, member: None, overloads: Vec::new(), quote_exact: false,
+                        synonym_chain: Vec::new(), db_link: None,
+                        identity: ResolvedIdentity { object_id, edition: None },
+                    }];
+                    let sql = format!("SELECT id FROM {owner}.ORDERS");
+                    let before = prove_hard_parse_effect_closure(&cx, conn.as_ref(), &sql, &relations).await;
+                    check(before == HardParseEffectClosureV1::Refused { reason: "policy_code" }, "normal guard must detect actual VPD policy")?;
+                    conn.execute(&cx, "CREATE TABLE ALL_POLICIES AS SELECT * FROM SYS.ALL_POLICIES WHERE 1=0", &[])
+                        .await.map_err(|error| error.to_string())?;
+                    let binds = [OracleBind::String(owner.clone()), OracleBind::String("ORDERS".into()), OracleBind::I64(257)];
+                    let spoof = conn.query_rows(&cx, &CatalogQueryId::HardParseVpdPolicies.spec().sql.replace("SYS.all_policies", "all_policies"), &binds)
+                        .await.map_err(|error| error.to_string())?;
+                    check(spoof.is_empty(), "negative policy control must see the empty shadow")?;
+                    let after = prove_hard_parse_effect_closure(&cx, conn.as_ref(), &sql, &relations).await;
+                    check(after == before, "ALL_POLICIES shadow changed the real guard refusal")?;
+                    // A fake privileged dictionary must not substitute for an
+                    // unreadable authoritative view, even with convincing rows.
+                    conn.execute(&cx, "CREATE TABLE DBA_USERS (username VARCHAR2(128), editions_enabled VARCHAR2(1))", &[])
+                        .await.map_err(|error| error.to_string())?;
+                    conn.execute(&cx, "INSERT INTO DBA_USERS VALUES (:1, 'Y')", &[OracleBind::String(owner.clone())])
+                        .await.map_err(|error| error.to_string())?;
+                    let denied = run_catalog_query(&cx, conn.as_ref(), CatalogQueryId::EditionsEnabledOwnerDba, &[OracleBind::String(owner.clone())]).await;
+                    check(matches!(denied, Err(DbError::Query(ref message) | DbError::ServerQuery(ref message))
+                        if matches!(oraclemcp_error::parse_ora_code(message), Some(942 | 1031))),
+                        "denied SYS dictionary unexpectedly used a local shadow")?;
+                }
+                Ok(())
+            }.await;
+            let app_close = if let Some(conn) = app { conn.close(&cx).await } else { Ok(()) };
+            let cleanup = if created {
+                admin.execute(&cx, &format!("DROP USER {owner} CASCADE"), &[]).await.map(|_| ())
+            } else { Ok(()) };
+            let admin_close = admin.close(&cx).await;
+            assert!(app_close.is_ok(), "owned application connection cleanup failed");
+            assert!(cleanup.is_ok(), "owned shadow schema cleanup failed: {cleanup:?}");
+            assert!(admin_close.is_ok(), "admin connection cleanup failed");
+            result.expect("native dictionary shadow contract");
+        });
+    }
+
+    #[test]
+    #[ignore = "requires a local Oracle lab admin; creates and drops one isolated shadow schema"]
+    fn closure_source_ignores_application_all_source_shadow() {
+        live_shadow_contract(true);
+    }
+
+    #[test]
+    #[ignore = "requires a local Oracle lab admin; creates and drops one isolated shadow schema"]
+    fn hard_parse_guard_ignores_application_all_policies_shadow() {
+        live_shadow_contract(false);
+    }
+}
 
 #[cfg(test)]
 mod impact_lock_query_tests {
@@ -2775,12 +2909,12 @@ mod impact_lock_query_tests {
         for (id, expected_sql, expected_purpose) in [
             (
                 CatalogQueryId::ImpactDbaDdlLocksForObject,
-                "SELECT owner, name, type, mode_held FROM dba_ddl_locks WHERE owner = :1 AND name = :2 AND ROWNUM <= :3",
+                "SELECT owner, name, type, mode_held FROM SYS.dba_ddl_locks WHERE owner = :1 AND name = :2 AND ROWNUM <= :3",
                 "observe DDL locks held on one exact target object",
             ),
             (
                 CatalogQueryId::ImpactVAccessForObject,
-                "SELECT sid, owner, object, type FROM v$access WHERE owner = :1 AND object = :2 AND ROWNUM <= :3",
+                "SELECT sid, owner, object, type FROM SYS.v_$access WHERE owner = :1 AND object = :2 AND ROWNUM <= :3",
                 "observe sessions currently accessing one exact target object",
             ),
         ] {
@@ -2805,6 +2939,130 @@ mod impact_lock_query_tests {
 #[cfg(test)]
 mod catalog_sql_lexical_tests {
     use super::CatalogQueryId;
+
+    // Inspect the actual expanded closed SQL, including macro-generated reads.
+    // Skip literal contents/comments, and track FROM lists across subqueries so
+    // a comma join cannot hide an application-shadowable dictionary reference.
+    fn shadowable_dictionary_references(sql: &str) -> Vec<String> {
+        static TOKENS: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(
+                r#"(?s)'(?:''|[^'])*'|--[^\r\n]*|/\*.*?\*/|"(?:""|[^"])*"|[A-Za-z_][A-Za-z0-9_$#]*|[().,]"#,
+            )
+            .unwrap()
+        });
+        let tokens: Vec<_> = TOKENS
+            .find_iter(sql)
+            .map(|token| token.as_str())
+            .filter(|token| {
+                !token.starts_with('\'') && !token.starts_with("--") && !token.starts_with("/*")
+            })
+            .map(str::to_ascii_uppercase)
+            .collect();
+        let mut from_lists = vec![false];
+        let mut relation = false;
+        let mut invalid = Vec::new();
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = tokens[index].as_str();
+            match token {
+                "FROM" | "JOIN" => {
+                    *from_lists.last_mut().unwrap() = true;
+                    relation = true;
+                }
+                "(" => {
+                    from_lists.push(false);
+                    relation = false;
+                }
+                ")" => {
+                    if from_lists.len() > 1 {
+                        from_lists.pop();
+                    }
+                    relation = false;
+                }
+                "," => relation = *from_lists.last().unwrap(),
+                "WHERE" | "ON" | "GROUP" | "ORDER" | "HAVING" | "CONNECT" | "START" | "UNION"
+                | "INTERSECT" | "MINUS" | "FETCH" => {
+                    *from_lists.last_mut().unwrap() = false;
+                    relation = false;
+                }
+                _ if relation => {
+                    let mut parts = vec![token.trim_matches('"')];
+                    while index + 2 < tokens.len()
+                        && tokens.get(index + 1).map(String::as_str) == Some(".")
+                    {
+                        index += 2;
+                        parts.push(tokens[index].trim_matches('"'));
+                    }
+                    let name = *parts.last().unwrap();
+                    let dictionary = ["ALL_", "DBA_", "USER_", "V$", "GV$", "V_$", "GV_$"]
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix))
+                        || matches!(
+                            name,
+                            "DUAL"
+                                | "SESSION_ROLES"
+                                | "SESSION_PRIVS"
+                                | "REDACTION_POLICIES"
+                                | "PRODUCT_COMPONENT_VERSION"
+                        );
+                    let owner =
+                        if matches!(name, "ALL_SA_TABLE_POLICIES" | "ALL_SA_SCHEMA_POLICIES") {
+                            "LBACSYS"
+                        } else {
+                            "SYS"
+                        };
+                    if dictionary
+                        && (parts.len() != 2
+                            || parts[0] != owner
+                            || name.starts_with("V$")
+                            || name.starts_with("GV$"))
+                    {
+                        invalid.push(parts.join("."));
+                    }
+                    relation = false;
+                }
+                _ => {}
+            }
+            index += 1;
+        }
+        invalid
+    }
+
+    #[test]
+    fn every_catalog_dictionary_reference_names_its_authoritative_owner() {
+        for id in CatalogQueryId::ALL {
+            let invalid = shadowable_dictionary_references(id.spec().sql);
+            assert!(
+                invalid.is_empty(),
+                "{id:?} can read shadow objects: {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dictionary_reference_check_covers_nested_comma_and_quoted_reads() {
+        for sql in [
+            "SELECT text FROM all_source",
+            "SELECT 1 FROM SYS.DUAL, ALL_POLICIES p",
+            "SELECT 1 FROM (SELECT * FROM ALL_OBJECTS) q",
+            "SELECT 1 FROM SYS.DUAL JOIN \"ALL_SOURCE\" s ON 1=1",
+            "SELECT 1 FROM APP.ALL_POLICIES",
+            "SELECT 1 FROM SYS.ALL_SA_TABLE_POLICIES",
+            "SELECT 1 FROM V$OPTION",
+            "SELECT 1 FROM SYS.V$OPTION",
+        ] {
+            assert!(!shadowable_dictionary_references(sql).is_empty(), "{sql}");
+        }
+        for sql in [
+            "SELECT 'FROM ALL_SOURCE' AS text FROM SYS.DUAL",
+            "SELECT user_generated FROM SYS.ALL_TAB_COLS",
+            "SELECT 1 FROM SYS.DUAL /* JOIN ALL_SOURCE */ JOIN SYS.ALL_POLICIES p ON 1=1",
+            "SELECT 1 FROM LBACSYS.ALL_SA_TABLE_POLICIES",
+            "SELECT 1 FROM SYS.V_$OPTION",
+        ] {
+            assert!(shadowable_dictionary_references(sql).is_empty(), "{sql}");
+        }
+    }
 
     /// Oracle lexes a `"` outside a string literal as the start of a quoted
     /// identifier. A stray `"` therefore swallows the rest of the statement up

@@ -112,13 +112,13 @@ impl OracleConnection for VisibleCatalogQueryMock {
                 ("ROLE", None),
             ])]);
         }
-        if normalized.contains("from session_roles") {
+        if normalized.contains("from sys.session_roles") {
             return Ok(Vec::new());
         }
         if normalized.contains("count(*) as visible_policy_rows") {
             return Ok(vec![row(&[("VISIBLE_POLICY_ROWS", Some("1"))])]);
         }
-        if normalized.contains("from all_objects") {
+        if normalized.contains("from sys.all_objects") {
             let owner = string_bind(binds, 0).unwrap_or_default();
             let name = string_bind(binds, 1).unwrap_or_default();
             if owner == "APP" && name == "ORDERS" {
@@ -133,9 +133,9 @@ impl OracleConnection for VisibleCatalogQueryMock {
             }
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_synonyms")
-            || normalized.contains("from all_arguments")
-            || normalized.contains("from all_tab_columns")
+        if normalized.contains("from sys.all_synonyms")
+            || normalized.contains("from sys.all_arguments")
+            || normalized.contains("from sys.all_tab_columns")
                 && !normalized.contains("table_name = :2")
         {
             return Ok(Vec::new());
@@ -143,18 +143,19 @@ impl OracleConnection for VisibleCatalogQueryMock {
         if normalized.contains("select policy_name from sys.all_policies where rownum <= 1") {
             return Ok(vec![row(&[("POLICY_NAME", Some("VISIBLE_ELSEWHERE"))])]);
         }
-        if normalized.contains("from all_policies") || normalized.contains("from sys.all_policies")
+        if normalized.contains("from sys.all_policies") {
+            return Ok(Vec::new());
+        }
+        if normalized.contains("from sys.all_tab_cols")
+            && normalized.contains("virtual_column = 'yes'")
         {
             return Ok(Vec::new());
         }
-        if normalized.contains("from all_tab_cols") && normalized.contains("virtual_column = 'yes'")
-        {
-            return Ok(Vec::new());
-        }
-        if normalized.contains("from all_tab_cols") {
+        if normalized.contains("from sys.all_tab_cols") {
             return Ok(vec![row(&[("COLUMN_NAME", Some("ID"))])]);
         }
-        if normalized.contains("from all_tab_columns") && normalized.contains("table_name = :2") {
+        if normalized.contains("from sys.all_tab_columns") && normalized.contains("table_name = :2")
+        {
             return Ok((string_bind(binds, 2) == Some("ID"))
                 .then(|| row(&[("COLUMN_NAME", Some("ID")), ("COLUMN_ID", Some("1"))]))
                 .into_iter()
