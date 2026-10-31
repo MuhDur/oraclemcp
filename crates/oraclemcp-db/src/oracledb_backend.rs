@@ -16,8 +16,9 @@ use chrono::{Datelike, Timelike};
 use serde_json::{Number, Value, json};
 
 use crate::connection::{
-    DbRequestQuota, OracleConnection, QueryRowStream, QueryRowStreamStart, WalletFileChoice,
-    db_checkpoint, project_tsltz_rows, timestamp_tz_wall_clock,
+    DbRequestQuota, ExecuteOutcome, OracleConnection, OracleRoutineArg, QueryRowStream,
+    QueryRowStreamStart, WalletFileChoice, db_checkpoint, project_tsltz_rows,
+    timestamp_tz_wall_clock,
 };
 use crate::error::QuarantineOutcome;
 use crate::oracledb_actor::{
@@ -369,6 +370,11 @@ enum OfficialCommand {
         binds: OfficialBinds,
         timeout: Option<Duration>,
     },
+    CallRoutine {
+        sql: String,
+        binds: Vec<OfficialRoutineBind>,
+        timeout: Option<Duration>,
+    },
     Commit {
         timeout: Option<Duration>,
     },
@@ -391,6 +397,7 @@ impl OfficialCommand {
             | Self::NextStream { timeout }
             | Self::RecoverStream { timeout }
             | Self::Execute { timeout, .. }
+            | Self::CallRoutine { timeout, .. }
             | Self::Commit { timeout }
             | Self::Rollback { timeout }
             | Self::Close { timeout } => *timeout,
@@ -425,6 +432,11 @@ impl OfficialCommand {
                 binds,
                 timeout,
             },
+            Self::CallRoutine { sql, binds, .. } => Self::CallRoutine {
+                sql,
+                binds,
+                timeout,
+            },
             Self::Commit { .. } => Self::Commit { timeout },
             Self::Rollback { .. } => Self::Rollback { timeout },
             Self::Close { .. } => Self::Close { timeout },
@@ -450,6 +462,7 @@ enum OfficialReply {
     StreamStarted { columns: Vec<String> },
     NextRow(Option<OracleRow>),
     RowsAffected(u64),
+    Routine(ExecuteOutcome),
 }
 
 #[derive(Clone, Copy)]
@@ -515,6 +528,57 @@ impl OfficialBind {
             Self::I64(value) => value,
             Self::F64(value) => value,
             Self::Bool(value) => value,
+        }
+    }
+}
+
+/// One routine argument for the official driver: an input value, or an OUT
+/// slot of a scalar type this adapter decodes exactly (NUMBER as its exact
+/// decimal text, VARCHAR2). Other OUT kinds are refused before the call.
+#[derive(Clone)]
+enum OfficialRoutineBind {
+    In(OfficialBind),
+    Out(OfficialOutKind),
+}
+
+#[derive(Clone, Copy)]
+enum OfficialOutKind {
+    Number,
+    Varchar2,
+}
+
+impl OfficialOutKind {
+    const NUMBER: &'static oracledb::DbType = &oracledb::DB_TYPE_NUMBER;
+    const VARCHAR: &'static oracledb::DbType = &oracledb::DB_TYPE_VARCHAR;
+
+    fn db_type(&self) -> &&'static oracledb::DbType {
+        match self {
+            Self::Number => &Self::NUMBER,
+            Self::Varchar2 => &Self::VARCHAR,
+        }
+    }
+}
+
+impl OfficialRoutineBind {
+    fn from_routine_arg(arg: &OracleRoutineArg) -> Result<Self, DbError> {
+        match arg.view() {
+            crate::connection::RoutineArgView::Input(value) => {
+                OfficialBind::from_oracle_bind(value).map(Self::In)
+            }
+            // ORA type 2 is NUMBER; type 1 with the implicit character set
+            // form (csfrm 1) is VARCHAR2.
+            crate::connection::RoutineArgView::Output {
+                ora_type_num: 2, ..
+            } => Ok(Self::Out(OfficialOutKind::Number)),
+            crate::connection::RoutineArgView::Output {
+                ora_type_num: 1,
+                csfrm: 1,
+            } => Ok(Self::Out(OfficialOutKind::Varchar2)),
+            crate::connection::RoutineArgView::Output { .. }
+            | crate::connection::RoutineArgView::ObjectOutput => Err(DbError::UnsupportedFeature(
+                "official Oracle backend routine calls support only NUMBER and VARCHAR2 OUT binds"
+                    .to_owned(),
+            )),
         }
     }
 }
@@ -737,6 +801,52 @@ fn execute_actor_command(
                 .execute(&sql, &params)
                 .map_err(|error| official_error(error, OfficialOperation::Execute))?;
             Ok(OfficialReply::RowsAffected(result.rows_affected()))
+        }
+        OfficialCommand::CallRoutine {
+            sql,
+            binds,
+            timeout,
+        } => {
+            let connection = ready_connection(resource)?;
+            set_driver_timeout(connection, timeout, OfficialOperation::Execute)?;
+            let params: Vec<&dyn oracledb::ToDbValue> = binds
+                .iter()
+                .map(|bind| match bind {
+                    OfficialRoutineBind::In(value) => value.as_driver_value(),
+                    OfficialRoutineBind::Out(kind) => kind.db_type() as &dyn oracledb::ToDbValue,
+                })
+                .collect();
+            let mut result = connection
+                .execute(&sql, &params)
+                .map_err(|error| official_error(error, OfficialOperation::Execute))?;
+            let out = result.out_bind_data();
+            let mut cells = Vec::new();
+            // The driver returns OUT values in bind order, inputs omitted.
+            for (index, kind) in binds
+                .iter()
+                .filter_map(|bind| match bind {
+                    OfficialRoutineBind::Out(kind) => Some(*kind),
+                    OfficialRoutineBind::In(_) => None,
+                })
+                .enumerate()
+            {
+                cells.push(match kind {
+                    OfficialOutKind::Number => number_cell(
+                        out.get::<Option<oracledb::OracleNumber>>(index)
+                            .map_err(|error| official_error(error, OfficialOperation::Execute))?,
+                        "NUMBER",
+                    ),
+                    OfficialOutKind::Varchar2 => OracleCell::new(
+                        "VARCHAR2",
+                        out.get::<Option<String>>(index)
+                            .map_err(|error| official_error(error, OfficialOperation::Execute))?,
+                    ),
+                });
+            }
+            Ok(OfficialReply::Routine(ExecuteOutcome::new(
+                result.rows_affected(),
+                cells,
+            )))
         }
         OfficialCommand::Commit { timeout } => {
             let connection = ready_connection(resource)?;
@@ -1558,6 +1668,35 @@ impl OracleConnection for OfficialOracleConnection {
             OfficialReply::RowsAffected(rows) => Ok(rows),
             _ => Err(DbError::Internal(
                 "official Oracle actor returned an unexpected execute reply".to_owned(),
+            )),
+        }
+    }
+
+    async fn call_routine(
+        &self,
+        cx: &Cx,
+        plsql_block: &str,
+        args: &[OracleRoutineArg],
+    ) -> Result<ExecuteOutcome, DbError> {
+        let binds = args
+            .iter()
+            .map(OfficialRoutineBind::from_routine_arg)
+            .collect::<Result<Vec<_>, _>>()?;
+        match self
+            .call(
+                cx,
+                OfficialCommand::CallRoutine {
+                    sql: plsql_block.to_owned(),
+                    binds,
+                    timeout: None,
+                },
+                "official Oracle call_routine before",
+            )
+            .await?
+        {
+            OfficialReply::Routine(outcome) => Ok(outcome),
+            _ => Err(DbError::Internal(
+                "official Oracle actor returned an unexpected routine reply".to_owned(),
             )),
         }
     }

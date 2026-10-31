@@ -903,11 +903,35 @@ def selftest_live(lane, settings):
             admin.close()
 
 
+def run_with_fixture(lane, settings, command):
+    """Run one command against a fresh run-owned fixture, then always tear it down.
+
+    The fixture's owner credentials reach the command only through its
+    environment (ORACLEMCP_TEST_*, ORACLEMCP_PARITY_*); nothing is printed or
+    written. The result is the command's exit status, and a teardown that
+    leaves anything behind is a failure even when the command passed."""
+    if not command:
+        refuse("run needs a command after --")
+    passwords = {}
+    run_id = setup(lane, settings,
+                   owner_password_sink=lambda value: passwords.__setitem__("owner", value),
+                   cross_password_sink=lambda value: passwords.__setitem__("cross", value))
+    try:
+        env = dict(os.environ,
+                   ORACLEMCP_TEST_DSN=settings["dsn"], ORACLEMCP_TEST_USER=owner_name(run_id),
+                   ORACLEMCP_TEST_PASSWORD=passwords["owner"], ORACLEMCP_PARITY_RUN_ID=run_id,
+                   ORACLEMCP_PARITY_CROSS_PASSWORD=passwords["cross"])
+        status = subprocess.run(command, env=env, check=False).returncode
+    finally:
+        teardown(lane, settings, run_id)
+    return status
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selftest", action="store_true", help="render and safety checks; no database access")
     sub = parser.add_subparsers(dest="command")
-    for name in ("setup", "teardown", "janitor", "describe", "selftest-live"):
+    for name in ("setup", "teardown", "janitor", "describe", "selftest-live", "run"):
         command = sub.add_parser(name)
         command.add_argument("--lane", choices=("xe18", "xe21", "free23"), required=True)
         command.add_argument("--config", type=Path, default=CONFIG)
@@ -917,6 +941,9 @@ def main():
             command.add_argument("--run-id")
         elif name == "janitor":
             command.add_argument("--older-than", type=float, required=True, metavar="HOURS")
+        elif name == "run":
+            command.add_argument("argv", nargs=argparse.REMAINDER,
+                                 help="-- then the command to run with the fixture's env")
     args = parser.parse_args()
     try:
         if args.selftest:
@@ -937,6 +964,9 @@ def main():
             describe(args.lane, settings, args.run_id)
         elif args.command == "selftest-live":
             selftest_live(args.lane, settings)
+        elif args.command == "run":
+            argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+            return run_with_fixture(args.lane, settings, argv)
     except FixtureError as exc:
         print(f"fixture: FAIL: {exc}", file=sys.stderr)
         return 1

@@ -55,6 +55,19 @@
       "path_filtered": false
     },
     {
+      "check_name": "Oracle FREE 23ai cross-backend parity",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "oracle-free23-parity",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "Oracle FREE 23ai matrix + VECTOR smoke",
       "tier": "required",
       "workflow": "CI",
@@ -916,6 +929,7 @@
         "Oracle FREE 23ai W4 (http)",
         "Oracle FREE 23ai W4 (stdio)",
         "Oracle FREE 23ai W4 build + manifest units",
+        "Oracle FREE 23ai cross-backend parity",
         "Oracle FREE 23ai matrix + VECTOR smoke",
         "PL/SQL intelligence feature matrix",
         "Rust workspace (Windows)",
@@ -1101,6 +1115,7 @@
       "Oracle FREE 23ai W4 (http)",
       "Oracle FREE 23ai W4 (stdio)",
       "Oracle FREE 23ai W4 build + manifest units",
+      "Oracle FREE 23ai cross-backend parity",
       "Oracle FREE 23ai matrix + VECTOR smoke",
       "PL/SQL intelligence feature matrix",
       "Windows installer PSSA and dry-run",

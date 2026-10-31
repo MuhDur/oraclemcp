@@ -770,6 +770,17 @@ pub struct DbmsOutput {
 #[derive(Clone, PartialEq)]
 pub struct OracleRoutineArg {
     bind: oraclemcp_driver_cx::protocol::thin::BindValue,
+    /// The caller's input value, kept so a backend with its own driver binds
+    /// the same value instead of re-decoding the driver-cx wire form.
+    input: Option<OracleBind>,
+}
+
+/// How a backend other than driver-cx sees one routine argument.
+#[cfg(feature = "oracledb")]
+pub(crate) enum RoutineArgView<'a> {
+    Input(&'a OracleBind),
+    Output { ora_type_num: u8, csfrm: u8 },
+    ObjectOutput,
 }
 
 impl OracleRoutineArg {
@@ -778,6 +789,7 @@ impl OracleRoutineArg {
     pub fn input(value: OracleBind) -> Result<Self, DbError> {
         Ok(Self {
             bind: oracle_bind_to_driver(&value)?,
+            input: Some(value),
         })
     }
 
@@ -791,6 +803,7 @@ impl OracleRoutineArg {
                 csfrm,
                 buffer_size,
             },
+            input: None,
         }
     }
 
@@ -808,6 +821,7 @@ impl OracleRoutineArg {
                 csfrm,
                 buffer_size,
             },
+            input: None,
         }
     }
 
@@ -858,11 +872,32 @@ impl OracleRoutineArg {
                 buffer_size,
                 is_return,
             },
+            input: None,
         }
     }
 
     pub(crate) fn into_driver_bind(self) -> oraclemcp_driver_cx::protocol::thin::BindValue {
         self.bind
+    }
+
+    #[cfg(feature = "oracledb")]
+    pub(crate) fn view(&self) -> RoutineArgView<'_> {
+        use oraclemcp_driver_cx::protocol::thin::BindValue;
+        match (&self.input, &self.bind) {
+            (Some(value), _) => RoutineArgView::Input(value),
+            (
+                None,
+                BindValue::Output {
+                    ora_type_num,
+                    csfrm,
+                    ..
+                },
+            ) => RoutineArgView::Output {
+                ora_type_num: *ora_type_num,
+                csfrm: *csfrm,
+            },
+            (None, _) => RoutineArgView::ObjectOutput,
+        }
     }
 
     fn is_output_bind(&self) -> bool {

@@ -1,53 +1,30 @@
 //! Cross-backend OracleConnection parity evidence.
 //!
-//! This target is compiled only when both the feature-gated official adapter and
-//! the local Oracle lab lane are requested. The test itself is ignored unless
-//! explicitly selected because it connects to the local Free23 fixture and
-//! creates short-lived tables inside an exact run-owned W4 fixture schema. It is not a self-skipping live
-//! claim: missing opt-in environment is an error when the ignored test is run.
+//! Compiled only with both the official adapter (`oracledb`) and the live lane
+//! (`live-xe`). Each live entry point runs when its rig environment is
+//! complete; otherwise it prints a SKIP line, and with
+//! `ORACLEMCP_REQUIRE_LIVE=1` (set by the tier-A FREE 23ai lane) an incomplete
+//! environment is a test failure rather than a skip.
 //!
-//! Run after `scripts/rig/oracle_l1.sh run --log` and provisioning the exact
-//! disposable W4 fixture named by `ORACLEMCP_PARITY_RUN_ID`. The test creates
-//! tables in that fixture's `W4O_<run-id>` schema, so `pythontest` is not a
-//! suitable test identity unless separately granted cross-schema DDL rights.
-//! Use the fixture owner's password from the secure provisioning channel; the
-//! W4 fixture grants that owner CREATE SESSION, CREATE TABLE, and UNLIMITED
-//! TABLESPACE. Do not grant CREATE ANY TABLE or DROP ANY TABLE to pythontest.
+//! Basic-auth parity reads the W4 rig variables: `ORACLEMCP_TEST_DSN`,
+//! `ORACLEMCP_TEST_USER` and `ORACLEMCP_TEST_PASSWORD` for the owner of a
+//! disposable, registered W4 fixture, plus `ORACLEMCP_PARITY_RUN_ID` naming
+//! that fixture (tables are created in `W4O_<run-id>`; the error-taxonomy case
+//! also needs `ORACLEMCP_PARITY_CROSS_PASSWORD` for `W4X_<run-id>`). Create the
+//! fixture with `scripts/e2e/w4/fixture.py setup --lane free23 --run-id <id>`.
 //!
-//! Create/verify the registered fixture with `scripts/e2e/w4/fixture.py setup
-//! --lane free23 --run-id <W4-run-id>` and `scripts/e2e/w4/fixture.py describe
-//! --lane free23 --run-id <W4-run-id>`. Use the corresponding owner credential
-//! supplied by the fixture provisioner, then run:
+//! TCPS/PEM parity reads `ORACLEMCP_TCPS_PEM_DSN`, `_USER`, `_PASSWORD` and
+//! `_WALLET_LOCATION` (a directory with `ewallet.pem` and no `cwallet.sso`).
 //!
 //! ```text
-//! ORACLEMCP_DUAL_BACKEND_LAB=1 \
-//! ORACLEMCP_TEST_DSN=//localhost:1523/FREEPDB1 \
-//! ORACLEMCP_TEST_USER=W4O_<W4-run-id> \
-//! ORACLEMCP_TEST_PASSWORD=<securely-provided W4 owner password> \
-//! ORACLEMCP_PARITY_RUN_ID=<same registered W4 run id> \
-//! cargo test -p oraclemcp-db --features oracledb,live-xe \
-//!   --test cross_backend_parity live_cross_backend_error_and_vector_parity \
-//!   -- --ignored --exact --nocapture
-//! ```
-//!
-//! The PEM-only TCPS connection row is separate and needs an endpoint whose
-//! transport is actually TCPS plus a wallet directory containing `ewallet.pem`
-//! but not `cwallet.sso`:
-//!
-//! ```text
-//! ORACLEMCP_DUAL_BACKEND_TCPS_PEM_LAB=1 \
-//! ORACLEMCP_TCPS_PEM_DSN=<tcps-connect-string> \
-//! ORACLEMCP_TCPS_PEM_USER=<username> \
-//! ORACLEMCP_TCPS_PEM_PASSWORD=<password> \
-//! ORACLEMCP_TCPS_PEM_WALLET_LOCATION=<pem-wallet-directory> \
-//! cargo test -p oraclemcp-db --features oracledb,live-xe \
-//!   --test cross_backend_parity live_cross_backend_tcps_pem_connection_parity -- --ignored --exact
+//! ORACLEMCP_REQUIRE_LIVE=1 cargo test -p oraclemcp-db --features oracledb,live-xe \
+//!   --test cross_backend_parity -- --nocapture --test-threads=1
 //! ```
 //!
 //! The deterministic, feature-on VECTOR projection test remains next to the
-//! official adapter. This target is the live proof for behavior requiring a
+//! official adapter. This target is the live proof for behaviour requiring a
 //! real Oracle: independent backend connections, DATE/TIMESTAMP/TSLTZ/INTERVAL,
-//! LOB/NULL and the existing NUMBER/TSTZ/VECTOR cases, plus DML and errors.
+//! LOB/NULL, NUMBER/TSTZ/VECTOR, PL/SQL, DML, errors and TCPS/PEM.
 
 #![cfg(all(feature = "oracledb", feature = "live-xe"))]
 #![forbid(unsafe_code)]
@@ -55,9 +32,9 @@
 use asupersync::Cx;
 use asupersync::runtime::RuntimeBuilder;
 use oraclemcp_db::{
-    DbError, OfficialOracleConnection, OracleBackend, OracleConnectOptions, OracleConnection,
-    QueryRowStreamStart, RustOracleConnection, SerializeOptions, select_connection_backend,
-    selected_endpoint_uses_tcps, serialize_row,
+    DbError, OfficialOracleConnection, OracleBackend, OracleBind, OracleConnectOptions,
+    OracleConnection, OracleRoutineArg, QueryRowStreamStart, RustOracleConnection,
+    SerializeOptions, select_connection_backend, selected_endpoint_uses_tcps, serialize_row,
 };
 use oraclemcp_guard::{Classifier, DangerLevel, OperatingLevel};
 use serde_json::{Value, json};
@@ -101,6 +78,53 @@ where
     });
 }
 
+const LAB_ENV: [&str; 4] = [
+    "ORACLEMCP_TEST_DSN",
+    "ORACLEMCP_TEST_USER",
+    "ORACLEMCP_TEST_PASSWORD",
+    "ORACLEMCP_PARITY_RUN_ID",
+];
+const TCPS_PEM_ENV: [&str; 4] = [
+    "ORACLEMCP_TCPS_PEM_DSN",
+    "ORACLEMCP_TCPS_PEM_USER",
+    "ORACLEMCP_TCPS_PEM_PASSWORD",
+    "ORACLEMCP_TCPS_PEM_WALLET_LOCATION",
+];
+
+/// Decide whether a live parity entry point runs. A complete environment runs;
+/// an incomplete one is a loud SKIP, or a failure when the lane requires live
+/// proof (`ORACLEMCP_REQUIRE_LIVE=1`), so a required lane can never pass empty.
+fn live_env_ready(lookup: &dyn Fn(&str) -> Option<String>, names: &[&str], test: &str) -> bool {
+    let missing: Vec<&str> = names
+        .iter()
+        .copied()
+        .filter(|name| lookup(name).is_none_or(|value| value.is_empty()))
+        .collect();
+    if missing.is_empty() {
+        return true;
+    }
+    assert_ne!(
+        lookup("ORACLEMCP_REQUIRE_LIVE").as_deref(),
+        Some("1"),
+        "{test}: ORACLEMCP_REQUIRE_LIVE=1 but {} is unset; a required live parity lane must not skip",
+        missing.join(", ")
+    );
+    eprintln!(
+        "[parity] SKIP {test}: set {} to run it (ORACLEMCP_REQUIRE_LIVE=1 makes this a failure)",
+        missing.join(", ")
+    );
+    false
+}
+
+fn process_env(name: &str) -> Option<String> {
+    std::env::var(name).ok()
+}
+
+fn lab_ready(test: &str, extra: &[&str]) -> bool {
+    let names: Vec<&str> = LAB_ENV.iter().chain(extra).copied().collect();
+    live_env_ready(&process_env, &names, test)
+}
+
 fn required_lab_env(name: &str) -> String {
     std::env::var(name).unwrap_or_else(|_| {
         panic!(
@@ -111,11 +135,6 @@ fn required_lab_env(name: &str) -> String {
 }
 
 fn local_lab_options() -> OracleConnectOptions {
-    assert_eq!(
-        required_lab_env("ORACLEMCP_DUAL_BACKEND_LAB"),
-        "1",
-        "set ORACLEMCP_DUAL_BACKEND_LAB=1 to acknowledge the local DDL/DML fixture"
-    );
     OracleConnectOptions {
         connect_string: required_lab_env("ORACLEMCP_TEST_DSN"),
         username: Some(required_lab_env("ORACLEMCP_TEST_USER")),
@@ -125,11 +144,6 @@ fn local_lab_options() -> OracleConnectOptions {
 }
 
 fn tcps_pem_lab_options() -> OracleConnectOptions {
-    assert_eq!(
-        required_lab_env("ORACLEMCP_DUAL_BACKEND_TCPS_PEM_LAB"),
-        "1",
-        "set ORACLEMCP_DUAL_BACKEND_TCPS_PEM_LAB=1 to acknowledge the dedicated TCPS PEM fixture"
-    );
     let wallet_location = PathBuf::from(required_lab_env("ORACLEMCP_TCPS_PEM_WALLET_LOCATION"));
     assert!(
         wallet_location.join("ewallet.pem").is_file(),
@@ -682,8 +696,13 @@ async fn run_vector_variants_scenario(
 }
 
 #[test]
-#[ignore = "requires explicit local Oracle Free23 lab credentials, DDL/DML acknowledgement, and W4 cross-user password"]
 fn live_cross_backend_error_and_vector_parity() {
+    if !lab_ready(
+        "live_cross_backend_error_and_vector_parity",
+        &["ORACLEMCP_PARITY_CROSS_PASSWORD"],
+    ) {
+        return;
+    }
     run_with_cx(|cx| async move {
         let options = local_lab_options();
         let driver = RustOracleConnection::connect(&cx, options.clone())
@@ -1212,12 +1231,33 @@ async fn run_streaming_scenario(
     official: &dyn OracleConnection,
     options: &OracleConnectOptions,
 ) {
+    // Only statements with a semantic read plan stream on driver-cx; an
+    // unplanned hierarchical shape takes the cursor-chunked path (kogf0).
+    match driver
+        .query_row_stream(
+            cx,
+            "SELECT level AS V FROM dual START WITH 1=0 CONNECT BY level <= 1",
+            &[],
+            32,
+            &SerializeOptions::default(),
+        )
+        .await
+        .expect("driver-cx unplanned stream start")
+    {
+        QueryRowStreamStart::Fallback { reason } => assert_eq!(
+            reason, "statement needs the uncached cursor-chunked path",
+            "unplanned shape falls back for the documented reason"
+        ),
+        QueryRowStreamStart::Stream(_) => {
+            panic!("driver-cx streamed a statement with no read plan")
+        }
+    }
     assert_stream_parity(
         cx,
         driver,
         official,
         "parity_stream_empty",
-        "SELECT level AS V FROM dual START WITH 1=0 CONNECT BY level <= 1",
+        "SELECT level AS V FROM dual WHERE 1 = 0 CONNECT BY level <= 1",
         Vec::new(),
     )
     .await;
@@ -1417,12 +1457,12 @@ async fn run_lob_null_scenario(
     result
 }
 
-/// The feature-on, local-Free23 proof for the shared `OracleConnection`
-/// observations. This is intentionally ignored in ordinary test lanes rather
-/// than self-skipping: an operator must opt into the lab and capture its output.
+/// The live FREE 23ai proof for the shared `OracleConnection` observations.
 #[test]
-#[ignore = "requires explicit local Oracle Free23 lab credentials and DDL/DML acknowledgement"]
 fn live_cross_backend_number_and_streaming_parity() {
+    if !lab_ready("live_cross_backend_number_and_streaming_parity", &[]) {
+        return;
+    }
     run_with_cx(|cx| async move {
         let options = local_lab_options();
         let driver_cx = RustOracleConnection::connect(&cx, options.clone())
@@ -1444,8 +1484,10 @@ fn live_cross_backend_number_and_streaming_parity() {
 }
 
 #[test]
-#[ignore = "requires explicit local Oracle Free23 lab credentials and DDL/DML acknowledgement"]
 fn live_cross_backend_parity_for_supported_basic_auth() {
+    if !lab_ready("live_cross_backend_parity_for_supported_basic_auth", &[]) {
+        return;
+    }
     run_with_cx(|cx| async move {
         let options = local_lab_options();
         let driver_cx = RustOracleConnection::connect(&cx, options.clone())
@@ -1603,8 +1645,14 @@ fn live_cross_backend_parity_for_supported_basic_auth() {
 /// intentionally does not exercise the cwallet.sso/IAM routes, which remain
 /// driver-cx capabilities by contract.
 #[test]
-#[ignore = "requires explicit TCPS endpoint plus PEM-only wallet credentials"]
 fn live_cross_backend_tcps_pem_connection_parity() {
+    if !live_env_ready(
+        &process_env,
+        &TCPS_PEM_ENV,
+        "live_cross_backend_tcps_pem_connection_parity",
+    ) {
+        return;
+    }
     run_with_cx(|cx| async move {
         let options = tcps_pem_lab_options();
         assert_eq!(
@@ -1649,4 +1697,253 @@ fn live_cross_backend_tcps_pem_connection_parity() {
             .await
             .expect("driver-cx TCPS PEM close");
     });
+}
+
+/// Run-stamped PL/SQL objects in the disposable W4 owner schema: a function
+/// and a procedure with NUMBER and VARCHAR2 OUT parameters.
+fn plsql_parity_names(run_id: &str) -> (String, String) {
+    validate_parity_run_id(run_id);
+    (
+        format!("W4O_{run_id}.ORACLEMCP_PARITY_FN_{run_id}"),
+        format!("W4O_{run_id}.ORACLEMCP_PARITY_PROC_{run_id}"),
+    )
+}
+
+async fn run_plsql_parity_scenario(
+    cx: &Cx,
+    driver_cx: &dyn OracleConnection,
+    official: &dyn OracleConnection,
+    run_id: &str,
+) {
+    let (function, procedure) = plsql_parity_names(run_id);
+    driver_cx
+        .execute(
+            cx,
+            &format!(
+                "CREATE OR REPLACE FUNCTION {function}(n NUMBER) RETURN NUMBER AS \
+                 BEGIN RETURN n * 2; END;"
+            ),
+            &[],
+        )
+        .await
+        .expect("create the run-owned parity function");
+    driver_cx
+        .execute(
+            cx,
+            &format!(
+                "CREATE OR REPLACE PROCEDURE {procedure}(n IN NUMBER, s IN VARCHAR2, \
+                 r OUT NUMBER, t OUT VARCHAR2) AS BEGIN r := n * 2; t := s || '-ok'; END;"
+            ),
+            &[],
+        )
+        .await
+        .expect("create the run-owned parity procedure");
+
+    let outcome: Result<(), String> = async {
+        let select_sql = format!("SELECT {function}(41) AS V FROM dual");
+        let mut selected = Vec::new();
+        for (backend, connection) in [("driver-cx", driver_cx), ("official", official)] {
+            let rows = connection
+                .query_rows(cx, &select_sql, &[])
+                .await
+                .map_err(|error| format!("{backend} SELECT fn(41): {error}"))?;
+            let value = serialized_single_row(rows, backend);
+            parity_record(
+                "parity_plsql_function",
+                "NUMBER",
+                backend,
+                &json!("82"),
+                &value["V"],
+            );
+            selected.push(value);
+        }
+        if selected[0] != selected[1] || selected[0]["V"] != json!("82") {
+            return Err(format!("SELECT fn(41) differs: {selected:?}"));
+        }
+
+        let block = format!("BEGIN {procedure}(:1, :2, :3, :4); END;");
+        let mut outs = Vec::new();
+        for (backend, connection) in [("driver-cx", driver_cx), ("official", official)] {
+            let args = [
+                OracleRoutineArg::input(OracleBind::I64(41)).expect("NUMBER input"),
+                OracleRoutineArg::input(OracleBind::String("parity".to_owned()))
+                    .expect("VARCHAR2 input"),
+                OracleRoutineArg::output(2, 1, 22),
+                OracleRoutineArg::output(1, 1, 64),
+            ];
+            let outcome = connection
+                .call_routine(cx, &block, &args)
+                .await
+                .map_err(|error| format!("{backend} OUT-bind call: {error}"))?;
+            let cells = serde_json::to_value(outcome.out_binds()).expect("serialize OUT cells");
+            parity_record(
+                "parity_plsql_out_bind",
+                "NUMBER,VARCHAR2",
+                backend,
+                &json!(["82", "parity-ok"]),
+                &cells,
+            );
+            outs.push(cells);
+        }
+        let values: Vec<Value> = outs[0]
+            .as_array()
+            .map(|cells| cells.iter().map(|cell| cell["value"].clone()).collect())
+            .unwrap_or_default();
+        if outs[0] != outs[1] || values != [json!("82"), json!("parity-ok")] {
+            return Err(format!("OUT binds differ: {outs:?}"));
+        }
+
+        // An OUT kind the official adapter cannot decode exactly is a typed
+        // refusal made before any round trip, never a guessed value.
+        match official
+            .call_routine(
+                cx,
+                "BEGIN :1 := SYSDATE; END;",
+                &[OracleRoutineArg::output(12, 0, 7)],
+            )
+            .await
+        {
+            Err(DbError::UnsupportedFeature(message))
+                if message.contains("NUMBER and VARCHAR2") => {}
+            other => {
+                return Err(format!(
+                    "official DATE OUT bind was not refused typed: {:?}",
+                    other.map(|outcome| outcome.out_binds().to_vec())
+                ));
+            }
+        }
+        Ok(())
+    }
+    .await;
+
+    for object in [
+        format!("FUNCTION {function}"),
+        format!("PROCEDURE {procedure}"),
+    ] {
+        driver_cx
+            .execute(cx, &format!("DROP {object}"), &[])
+            .await
+            .expect("drop the run-owned parity PL/SQL object");
+    }
+    outcome.unwrap_or_else(|failure| panic!("PL/SQL parity: {failure}"));
+}
+
+#[test]
+fn parity_plsql_function_and_out_bind() {
+    if !lab_ready("parity_plsql_function_and_out_bind", &[]) {
+        return;
+    }
+    run_with_cx(|cx| async move {
+        let options = local_lab_options();
+        let driver_cx = RustOracleConnection::connect(&cx, options.clone())
+            .await
+            .expect("driver-cx must connect to the explicit local lab");
+        let official = OfficialOracleConnection::connect(&cx, options)
+            .await
+            .expect("official adapter must connect to the explicit local lab");
+        let run_id = required_lab_env("ORACLEMCP_PARITY_RUN_ID");
+        run_plsql_parity_scenario(&cx, &driver_cx, &official, &run_id).await;
+        driver_cx.close(&cx).await.expect("driver-cx close");
+        official.close(&cx).await.expect("official close");
+    });
+}
+
+#[test]
+fn parity_suite_fails_when_required_env_missing() {
+    let none = |_: &str| None;
+    assert!(
+        !live_env_ready(&none, &LAB_ENV, "probe"),
+        "an incomplete environment without ORACLEMCP_REQUIRE_LIVE is a skip"
+    );
+    let required_only = |name: &str| (name == "ORACLEMCP_REQUIRE_LIVE").then(|| "1".to_owned());
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        live_env_ready(&required_only, &LAB_ENV, "probe")
+    }))
+    .expect_err("ORACLEMCP_REQUIRE_LIVE=1 with no DSN must fail, not skip");
+    let message = failure
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        message.contains("ORACLEMCP_TEST_DSN"),
+        "the failure names the missing variable: {message}"
+    );
+    let blank_dsn = |name: &str| match name {
+        "ORACLEMCP_REQUIRE_LIVE" => Some("1".to_owned()),
+        "ORACLEMCP_TEST_DSN" => Some(String::new()),
+        _ => Some("set".to_owned()),
+    };
+    assert!(
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            live_env_ready(&blank_dsn, &LAB_ENV, "probe")
+        }))
+        .is_err(),
+        "an empty value counts as missing"
+    );
+    let complete = |name: &str| Some(format!("value-for-{name}"));
+    assert!(live_env_ready(&complete, &LAB_ENV, "probe"));
+}
+
+/// An endpoint nothing listens on: a refusal must come before any network use.
+const UNREACHABLE_DSN: &str = "127.0.0.1:9/ORACLEMCP_PARITY_UNREACHABLE";
+
+fn assert_official_refusal(options: OracleConnectOptions, expected: &'static str) {
+    run_with_cx(|cx| async move {
+        let error = match OfficialOracleConnection::connect(&cx, options).await {
+            Ok(_) => panic!("official adapter accepted an unsupported auth form"),
+            Err(error) => error,
+        };
+        match &error {
+            DbError::UnsupportedAuth(message) => assert_eq!(message, expected),
+            other => panic!("expected a typed UnsupportedAuth refusal, got {other:?}"),
+        }
+        assert_eq!(
+            error.into_envelope().error_class,
+            oraclemcp_error::ErrorClass::InvalidArguments
+        );
+    });
+}
+
+#[test]
+fn official_adapter_refuses_sso_wallet_typed() {
+    let sso = tempfile::tempdir().expect("temp wallet dir");
+    std::fs::write(sso.path().join("cwallet.sso"), b"synthetic").expect("synthetic sso");
+    let pem = tempfile::tempdir().expect("temp wallet dir");
+    std::fs::write(pem.path().join("ewallet.pem"), b"synthetic").expect("synthetic pem");
+    let options_for = |wallet: &std::path::Path| OracleConnectOptions {
+        connect_string: UNREACHABLE_DSN.to_owned(),
+        username: Some("parity".to_owned()),
+        password: Some("synthetic".to_owned()),
+        wallet_location: Some(wallet.to_path_buf()),
+        ..Default::default()
+    };
+    for wallet in [sso.path(), pem.path()] {
+        assert_eq!(
+            select_connection_backend(&options_for(wallet)),
+            OracleBackend::RustOracle,
+            "wallet acquisition stays driver-cx-primary"
+        );
+    }
+    assert_official_refusal(
+        options_for(sso.path()),
+        "official Oracle backend does not support cwallet.sso auto-login wallets",
+    );
+}
+
+#[test]
+fn official_adapter_refuses_iam_token_typed() {
+    let options = OracleConnectOptions {
+        connect_string: UNREACHABLE_DSN.to_owned(),
+        use_iam_token: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        select_connection_backend(&options),
+        OracleBackend::RustOracle,
+        "IAM token auth stays driver-cx-primary"
+    );
+    assert_official_refusal(
+        options,
+        "official Oracle backend does not support IAM or OAuth database tokens",
+    );
 }
