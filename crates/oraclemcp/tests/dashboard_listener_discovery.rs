@@ -98,6 +98,17 @@ impl Drop for ServeChild {
     }
 }
 
+impl ServeChild {
+    /// The exited child's stderr, so an early exit names its startup error.
+    fn exited_stderr(&mut self) -> String {
+        self.stderr
+            .take()
+            .and_then(|handle| handle.join().ok())
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .unwrap_or_default()
+    }
+}
+
 fn reserve_loopback_addr() -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").expect("reserve loopback port");
     listener.local_addr().expect("read reserved addr")
@@ -174,7 +185,10 @@ fn wait_for_recorded_listener(home: &TestHome, addr: SocketAddr, serve: &mut Ser
             return;
         }
         if let Some(status) = serve.child.try_wait().expect("poll serve") {
-            panic!("serve exited before recording the listener (status {status})");
+            let stderr = serve.exited_stderr();
+            panic!(
+                "serve exited before recording the listener (status {status}); stderr: {stderr}"
+            );
         }
         assert!(
             Instant::now() < deadline,
@@ -199,7 +213,10 @@ fn wait_for_recorded_ephemeral_listener(home: &TestHome, serve: &mut ServeChild)
             return addr;
         }
         if let Some(status) = serve.child.try_wait().expect("poll serve") {
-            panic!("serve exited before recording an ephemeral listener (status {status})");
+            let stderr = serve.exited_stderr();
+            panic!(
+                "serve exited before recording an ephemeral listener (status {status}); stderr: {stderr}"
+            );
         }
         assert!(
             Instant::now() < deadline,
