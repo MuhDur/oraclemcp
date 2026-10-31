@@ -5287,6 +5287,10 @@ fn validate_declared_args(tool: &str, args: &Value) -> Result<(), ErrorEnvelope>
 /// work even though the caller's argument was already invalid.
 fn validate_enum_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope> {
     match canonical_tool_name(tool) {
+        #[cfg(feature = "plsql-intelligence")]
+        "oracle_lineage" | "oracle_plsql_live_snapshot" | "oracle_plsql_blast_radius" => {
+            crate::plsql_tools::validate_advertised_enum_arguments(tool, args)?;
+        }
         "oracle_search_objects" => {
             validate_object_type_field(
                 tool,

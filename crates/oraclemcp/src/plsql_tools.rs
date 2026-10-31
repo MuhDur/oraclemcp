@@ -221,11 +221,14 @@ pub fn dispatch_static(tool: &str, args: Value) -> Result<Value, ErrorEnvelope> 
     }
 }
 
-/// Reject a value outside an advertised static-tool string enum before the
-/// handler can read the filesystem or construct an analysis run. The registry
+/// Reject a value outside an advertised string enum before the handler can
+/// read the filesystem, access Oracle, or construct an analysis run. The registry
 /// schema is the public contract, so this deliberately derives the accepted
 /// values from that schema rather than maintaining a second enum list here.
-fn validate_advertised_enum_arguments(tool: &str, args: &Value) -> Result<(), ErrorEnvelope> {
+pub(crate) fn validate_advertised_enum_arguments(
+    tool: &str,
+    args: &Value,
+) -> Result<(), ErrorEnvelope> {
     let schema = crate::registry::tool_registry()
         .tools
         .into_iter()

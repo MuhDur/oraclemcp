@@ -128,6 +128,16 @@ fn wrong_enum_arguments_are_refused_before_any_oracle_connection_call() {
             json!({ "object_type": "bogus", "owner": "APP", "object_name": "T" }),
         ),
         ("oracle_top_queries", json!({ "metric": "bogus" })),
+        #[cfg(feature = "plsql-intelligence")]
+        (
+            "oracle_plsql_blast_radius",
+            json!({
+                "schemas": ["APP"],
+                "include_plscope": false,
+                "changeset": { "objects": [], "unclassified_files": [] },
+                "mode": "bogus",
+            }),
+        ),
     ];
 
     for (tool, arguments) in cases {
