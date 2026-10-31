@@ -1290,21 +1290,48 @@
       "http"
     ],
     "requires": [],
-    "setup": [],
+    "setup": [
+      {
+        "sql": "CREATE TABLE ${owner}.T_PREVIEW_${run_id} (ID NUMBER PRIMARY KEY, LABEL VARCHAR2(40))"
+      },
+      {
+        "sql": "INSERT INTO ${owner}.T_PREVIEW_${run_id} (ID, LABEL) VALUES (1, 'parent-1')"
+      },
+      {
+        "sql": "INSERT INTO ${owner}.T_PREVIEW_${run_id} (ID, LABEL) VALUES (2, 'parent-2')"
+      }
+    ],
     "call": {
       "arguments": {
-        "sql": "UPDATE ${owner}.T_PARENT_${run_id} SET LABEL = 'w4-preview' WHERE ID IN (1, 2)",
-        "witness": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID"
+        "sql": "UPDATE ${owner}.T_PREVIEW_${run_id} SET LABEL = 'w4-preview' WHERE ID IN (1, 2)",
+        "witness": "SELECT ID, LABEL FROM ${owner}.T_PREVIEW_${run_id} ORDER BY ID"
       }
     },
     "expect": {
       "json_subset": {
-        "rows_affected": 2
+        "rows_affected": 2,
+        "previewed": true,
+        "reversible": true,
+        "rolled_back": true,
+        "committed": false,
+        "sandbox": {"status": "computed", "value": 2},
+        "before": {
+          "columns": ["ID", "LABEL"],
+          "rows": [{"ID": "1", "LABEL": "parent-1"}, {"ID": "2", "LABEL": "parent-2"}],
+          "row_count": 2,
+          "truncated": false
+        },
+        "after": {
+          "columns": ["ID", "LABEL"],
+          "rows": [{"ID": "1", "LABEL": "w4-preview"}, {"ID": "2", "LABEL": "w4-preview"}],
+          "row_count": 2,
+          "truncated": false
+        }
       }
     },
     "db_reread": [
       {
-        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PREVIEW_${run_id} ORDER BY ID",
         "rows": [
           [
             1,
@@ -1317,7 +1344,7 @@
         ]
       },
       {
-        "sql": "SELECT COUNT(*) FROM ${owner}.T_PARENT_${run_id} WHERE ID IN (1, 2)",
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_PREVIEW_${run_id} WHERE ID IN (1, 2)",
         "rows": [
           [
             2
@@ -1325,7 +1352,10 @@
         ]
       }
     ],
-    "audit_expect": [],
+    "audit_expect": [
+      {"tool": "oracle_preview_dml", "decision": "ALLOWED", "outcome": "PENDING"},
+      {"tool": "oracle_preview_dml", "decision": "ALLOWED", "outcome": "ROLLED_BACK", "rows_affected": 2}
+    ],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
     }
