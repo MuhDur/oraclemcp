@@ -964,6 +964,22 @@ jobs:
           mkdir -p target/e2e
           bash scripts/e2e/oracle_version_matrix.sh --log --lane free23 2>&1 \
             | tee target/e2e/oracle-version-matrix-free23.log
+      - name: Native owning-source projection equals the ALL_* projection
+        # The USER_*/ALL_* split of the dependency source projection
+        # (pvlqq.16.7) is only observable against a real dictionary. The test
+        # creates and drops one isolated schema, so it needs the service admin.
+        env:
+          ORACLEMCP_TEST_DSN: localhost:1522/FREEPDB1
+          ORACLEMCP_TEST_USER: system
+          ORACLEMCP_TEST_PASSWORD: E2EOracle23
+        run: |
+          set -euo pipefail
+          mkdir -p target/e2e
+          cargo test -p oraclemcp-db --lib -- --ignored --exact --nocapture \
+            catalog_query::dictionary_shadow_live_tests::owning_source_projection_matches_all_sources_across_schema_and_caps \
+            2>&1 | tee target/e2e/owning-source-projection-free23.log
+          # A renamed test would match nothing and pass vacuously.
+          grep -q '^test result: ok\. 1 passed' target/e2e/owning-source-projection-free23.log
       - name: Live shared broker sessions, isolation, recovery and default HTTP
         env:
           ORACLEMCP_TEST_DSN: localhost:1522/FREEPDB1
@@ -997,6 +1013,7 @@ jobs:
           path: |
             target/e2e/oracle-version-matrix-free23.log
             target/e2e/oracle_version_matrix/**/ladder*.jsonl
+            target/e2e/owning-source-projection-free23.log
           if-no-files-found: error
           retention-days: 30
 

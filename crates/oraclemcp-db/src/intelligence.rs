@@ -2404,6 +2404,8 @@ mod transitive_dependents_tests {
         verification_denied: bool,
         owner_source_denied: bool,
         verification_calls: AtomicUsize,
+        /// The `(:2, :3)` edge and source-line fetch binds of every frontier read.
+        fetch_caps: std::sync::Mutex<Vec<(i64, i64)>>,
         source: String,
         transform: fn(&mut Vec<OracleRow>),
     }
@@ -2435,6 +2437,7 @@ mod transitive_dependents_tests {
                 verification_denied: false,
                 owner_source_denied: false,
                 verification_calls: AtomicUsize::new(0),
+                fetch_caps: std::sync::Mutex::new(Vec::new()),
                 source: "PROCEDURE P AS BEGIN NULL; END;\n".into(),
                 transform: |_| {},
             }
@@ -2532,6 +2535,17 @@ mod transitive_dependents_tests {
                 panic!("JSON frontier bind")
             };
             assert!(json.len() <= 32767);
+            // Like Oracle's `ROWNUM <= :2` / `:3`, the database returns no more
+            // rows than the fetch binds allow, so the binds decide what the
+            // collector can see of each cap.
+            let (Some(OracleBind::I64(edge_cap)), Some(OracleBind::I64(line_cap))) =
+                (binds.get(1), binds.get(2))
+            else {
+                panic!("edge and source-line fetch binds")
+            };
+            self.fetch_caps.lock().unwrap().push((*edge_cap, *line_cap));
+            let edge_cap = usize::try_from(*edge_cap).expect("non-negative edge bind");
+            let line_cap = usize::try_from(*line_cap).expect("non-negative line bind");
             let request: serde_json::Value = serde_json::from_str(json).unwrap();
             let frontier = request
                 .as_array()
@@ -2554,6 +2568,7 @@ mod transitive_dependents_tests {
                 .edges
                 .iter()
                 .filter(|(from, to, _)| frontier.contains(from) || frontier.contains(to))
+                .take(edge_cap)
                 .collect::<Vec<_>>();
             let mut object_ids = frontier.clone();
             object_ids.extend(
@@ -2582,7 +2597,7 @@ mod transitive_dependents_tests {
                 }
                 rows.push(row);
             }
-            for id in object_ids {
+            for id in object_ids.into_iter().take(line_cap) {
                 let mut row = self.row("source", id);
                 for (key, value) in [
                     ("LINE", "1".into()),
@@ -2653,6 +2668,49 @@ mod transitive_dependents_tests {
             assert_eq!(result.nodes.len(), 2);
             assert!(result.truncated && result.truncation.contains(&DependencyTruncation::Count));
             assert_eq!(result.query_count(), 1);
+        });
+    }
+
+    /// pvlqq oraclemcp-pjotx: each frontier read fetches exactly one row past
+    /// the edge and source-line caps. One fewer hides the boundary row; more
+    /// fetches dictionary rows the collector is bound never to read.
+    #[test]
+    fn dependents_fetch_binds_probe_one_row_past_each_cap() {
+        run(|cx| async move {
+            let conn = GraphConnection::new(&[(2, 1), (3, 2)]);
+            probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            let caps = conn.fetch_caps.lock().unwrap();
+            assert_eq!(caps.len(), conn.calls.load(Ordering::SeqCst));
+            assert!(!caps.is_empty());
+            let expected = (
+                i64::try_from(MAX_DEPENDENT_EDGES + 1).unwrap(),
+                i64::try_from(MAX_DEPENDENT_SOURCE_LINES + 1).unwrap(),
+            );
+            assert!(caps.iter().all(|seen| *seen == expected), "{caps:?}");
+        });
+    }
+
+    /// The edge cap is detected only through the boundary row the bind admits:
+    /// one dependency past the cap must surface as `Edges` truncation.
+    #[test]
+    fn dependents_edge_cap_boundary_row_is_seen_through_the_fetch_bind() {
+        run(|cx| async move {
+            let edges = (2..=MAX_DEPENDENT_EDGES as u64 + 2)
+                .map(|id| (id, 1))
+                .collect::<Vec<_>>();
+            assert_eq!(edges.len(), MAX_DEPENDENT_EDGES + 1);
+            let conn = GraphConnection::new(&edges);
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .unwrap();
+            assert!(result.truncated);
+            assert!(
+                result.truncation.contains(&DependencyTruncation::Edges),
+                "{:?}",
+                result.truncation
+            );
         });
     }
 
