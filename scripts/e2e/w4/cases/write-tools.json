@@ -951,6 +951,7 @@
   },
   {
     "case_id": "w4_execute_lob_insert_clob_blob",
+    "profile_variant": "synthetic_owner_rw",
     "tool": "oracle_execute",
     "level": "READ_WRITE",
     "transports": [
@@ -958,7 +959,20 @@
       "http"
     ],
     "requires": [],
-    "setup": [],
+    "setup": [
+      {
+        "sql": "CREATE FUNCTION ${owner}.TO_CLOB(p VARCHAR2) RETURN VARCHAR2 AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id} (ID) VALUES (971); COMMIT; RETURN NULL; END;"
+      },
+      {
+        "sql": "CREATE FUNCTION ${owner}.TO_NCLOB(p VARCHAR2) RETURN VARCHAR2 AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id} (ID) VALUES (972); COMMIT; RETURN NULL; END;"
+      },
+      {
+        "sql": "CREATE FUNCTION ${owner}.HEXTORAW(p VARCHAR2) RETURN RAW AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id} (ID) VALUES (973); COMMIT; RETURN NULL; END;"
+      },
+      {
+        "sql": "DECLARE v VARCHAR2(32); r RAW(32); n NUMBER; BEGIN v := ${owner}.TO_CLOB('control'); v := ${owner}.TO_NCLOB('control'); r := ${owner}.HEXTORAW('control'); SELECT COUNT(*) INTO n FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973); IF n <> 3 THEN RAISE_APPLICATION_ERROR(-20000, 'LOB shadow controls did not execute'); END IF; DELETE FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973); COMMIT; END;"
+      }
+    ],
     "call": {
       "arguments": {
         "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID, C_VAL, NC_VAL, B_VAL) VALUES (201, TO_CLOB(:1), TO_NCLOB(:2), HEXTORAW(:3))",
@@ -986,6 +1000,14 @@
             0
           ]
         ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973,974)",
+        "rows": [
+          [
+            0
+          ]
+        ]
       }
     ],
     "audit_expect": [
@@ -1003,6 +1025,365 @@
     ],
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
+    },
+    "setup_phase": "before_server",
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id}",
+    "cleanup": [
+      {
+        "sql": "DROP FUNCTION ${owner}.HEXTORAW"
+      },
+      {
+        "sql": "DROP FUNCTION ${owner}.TO_NCLOB"
+      },
+      {
+        "sql": "DROP FUNCTION ${owner}.TO_CLOB"
+      }
+    ]
+  },
+  {
+    "case_id": "w4_execute_lob_confirmed_commit_contents",
+    "profile_variant": "synthetic_owner_rw",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "steps": [
+      {
+        "tool": "oracle_preview_sql",
+        "arguments": {
+          "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID, C_VAL, NC_VAL, B_VAL) VALUES (202, TO_CLOB(:1), TO_NCLOB(:2), HEXTORAW(:3))",
+          "binds": [
+            "w4-clob-č",
+            "w4-nclob-نص仮",
+            "CAFEBABE"
+          ],
+          "commit": true
+        },
+        "expect": {
+          "json_subset": {
+            "execute_confirmation": {}
+          }
+        },
+        "capture": {
+          "token": "/execute_confirmation/confirm"
+        }
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID, C_VAL, NC_VAL, B_VAL) VALUES (202, TO_CLOB(:1), TO_NCLOB(:2), HEXTORAW(:3))",
+        "binds": [
+          "w4-clob-č",
+          "w4-nclob-نص仮",
+          "CAFEBABE"
+        ],
+        "commit": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "executed": true,
+        "committed": true,
+        "rolled_back": false,
+        "rows_affected": 1
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, SYS.DBMS_LOB.SUBSTR(C_VAL,100,1), SYS.DBMS_LOB.SUBSTR(NC_VAL,100,1), RAWTOHEX(SYS.DBMS_LOB.SUBSTR(B_VAL,4,1)), SYS.DBMS_LOB.GETLENGTH(C_VAL), SYS.DBMS_LOB.GETLENGTH(NC_VAL), SYS.DBMS_LOB.GETLENGTH(B_VAL) FROM ${owner}.T_TYPES_${run_id} WHERE ID=202",
+        "rows": [
+          [
+            202,
+            "w4-clob-č",
+            "w4-nclob-نص仮",
+            "CAFEBABE",
+            9,
+            12,
+            4
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_execute",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 1
+      }
+    ],
+    "cleanup": [
+      {
+        "sql": "DELETE FROM ${owner}.T_TYPES_${run_id} WHERE ID=202"
+      }
+    ],
+    "cleanup_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID=202",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_execute_lob_callbacks_remain_refused",
+    "profile_variant": "synthetic_owner_rw",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE FUNCTION ${owner}.TO_CLOB(p VARCHAR2) RETURN VARCHAR2 AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id} (ID) VALUES (971); COMMIT; RETURN NULL; END;"
+      },
+      {
+        "sql": "CREATE FUNCTION ${owner}.TO_NCLOB(p VARCHAR2) RETURN VARCHAR2 AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id} (ID) VALUES (972); COMMIT; RETURN NULL; END;"
+      },
+      {
+        "sql": "CREATE FUNCTION ${owner}.HEXTORAW(p VARCHAR2) RETURN RAW AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id} (ID) VALUES (973); COMMIT; RETURN NULL; END;"
+      },
+      {
+        "sql": "CREATE FUNCTION ${owner}.W4_LOB_IMPURE(p VARCHAR2) RETURN VARCHAR2 AUTHID DEFINER AS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_AUTO_${run_id} (ID) VALUES (974); COMMIT; RETURN NULL; END;"
+      },
+      {
+        "sql": "DECLARE v VARCHAR2(32); r RAW(32); n NUMBER; BEGIN v := ${owner}.TO_CLOB('control'); v := ${owner}.TO_NCLOB('control'); r := ${owner}.HEXTORAW('control'); SELECT COUNT(*) INTO n FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973); IF n <> 3 THEN RAISE_APPLICATION_ERROR(-20000, 'LOB shadow controls did not execute'); END IF; DELETE FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973); COMMIT; END;"
+      },
+      {
+        "sql": "DECLARE v VARCHAR2(32); n NUMBER; BEGIN v := ${owner}.W4_LOB_IMPURE('control'); SELECT COUNT(*) INTO n FROM ${owner}.T_AUTO_${run_id} WHERE ID=974; IF n <> 1 THEN RAISE_APPLICATION_ERROR(-20000, 'Unlisted function control did not execute'); END IF; DELETE FROM ${owner}.T_AUTO_${run_id} WHERE ID=974; COMMIT; END;"
+      }
+    ],
+    "steps": [
+      {
+        "tool": "oracle_execute",
+        "arguments": {
+          "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID,C_VAL) VALUES (203,${owner}.TO_CLOB(:1))",
+          "binds": [
+            "00"
+          ]
+        },
+        "expect": {
+          "error_class": "FORBIDDEN_STATEMENT"
+        }
+      },
+      {
+        "db_reread": [
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973,974)",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID=203",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "tool": "oracle_execute",
+        "arguments": {
+          "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID,C_VAL) VALUES (204,${owner}.TO_NCLOB(:1))",
+          "binds": [
+            "00"
+          ]
+        },
+        "expect": {
+          "error_class": "FORBIDDEN_STATEMENT"
+        }
+      },
+      {
+        "db_reread": [
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973,974)",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID=204",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "tool": "oracle_execute",
+        "arguments": {
+          "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID,B_VAL) VALUES (205,${owner}.HEXTORAW(:1))",
+          "binds": [
+            "00"
+          ]
+        },
+        "expect": {
+          "error_class": "FORBIDDEN_STATEMENT"
+        }
+      },
+      {
+        "db_reread": [
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973,974)",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID=205",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          }
+        ]
+      },
+      {
+        "tool": "oracle_execute",
+        "arguments": {
+          "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID,C_VAL) VALUES (206,TO_CLOB(${owner}.TO_CLOB(:1)))",
+          "binds": [
+            "00"
+          ]
+        },
+        "expect": {
+          "error_class": "FORBIDDEN_STATEMENT"
+        }
+      },
+      {
+        "db_reread": [
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973,974)",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID=206",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          }
+        ]
+      }
+    ],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID,C_VAL) VALUES (207,W4_LOB_IMPURE(:1))",
+        "binds": [
+          "00"
+        ]
+      }
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_AUTO_${run_id} WHERE ID IN (971,972,973,974)",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID BETWEEN 203 AND 207",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "cleanup": [
+      {
+        "sql": "DROP FUNCTION ${owner}.W4_LOB_IMPURE"
+      },
+      {
+        "sql": "DROP FUNCTION ${owner}.HEXTORAW"
+      },
+      {
+        "sql": "DROP FUNCTION ${owner}.TO_NCLOB"
+      },
+      {
+        "sql": "DROP FUNCTION ${owner}.TO_CLOB"
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    }
+  },
+  {
+    "case_id": "w4_execute_lob_non_bind_argument_refused",
+    "profile_variant": "synthetic_owner_rw",
+    "tool": "oracle_execute",
+    "level": "READ_WRITE",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "INSERT INTO ${owner}.T_TYPES_${run_id} (ID,C_VAL) VALUES (211,TO_CLOB('literal'))"
+      }
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ${owner}.T_TYPES_${run_id} WHERE ID=211",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "audit_zero_executions": true,
+    "on_unsupported": {
+      "error_class": "FORBIDDEN_STATEMENT"
     }
   },
   {

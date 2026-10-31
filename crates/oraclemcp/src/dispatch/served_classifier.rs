@@ -1735,6 +1735,39 @@ mod generation_tests {
     use oraclemcp_guard::{RoutineIdentifier, RoutineRef, StatementScope};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
+    #[test]
+    fn lob_bind_conversions_preserve_the_served_routine_proof_boundary() {
+        let prepared = PreparedClassifier::unknown(Some("lob-proof".into()), 1);
+        let sql = "INSERT INTO APP.T (C,N,B) VALUES (TO_CLOB(:1),TO_NCLOB(:2),HEXTORAW(:3))";
+        prepared.require_readonly_routine_closures(sql).unwrap();
+        assert!(prepared.call_effects(sql).is_none());
+        assert_eq!(
+            prepared.classifier.classify(sql).required_level,
+            Some(OperatingLevel::ReadWrite)
+        );
+        for expression in [
+            "APP.TO_CLOB(:1)",
+            "\"TO_CLOB\"(:1)",
+            "TO_CLOB(APP.CALLBACK(:1))",
+            "TO_CLOB(C)",
+            "TO_CLOB('literal')",
+            "W4_LOB_IMPURE(:1)",
+        ] {
+            let sql = format!("INSERT INTO APP.T (C) VALUES ({expression})");
+            let error = prepared
+                .require_readonly_routine_closures(&sql)
+                .unwrap_err();
+            assert_eq!(error.error_class, ErrorClass::ForbiddenStatement);
+            assert!(
+                !prepared
+                    .call_effects(&sql)
+                    .unwrap()
+                    .unknown_reasons
+                    .is_empty()
+            );
+        }
+    }
+
     #[derive(Default)]
     struct RevalidationCatalog {
         changed_schema: AtomicBool,

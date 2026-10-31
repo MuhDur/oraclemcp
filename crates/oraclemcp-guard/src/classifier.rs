@@ -2018,9 +2018,56 @@ pub fn hard_parse_user_calls(sql: &str) -> Result<Vec<ObjectRef>, PlanMismatch> 
     Ok(user_defined_calls(sql, false))
 }
 
+/// A SQL intrinsic with exactly one primitive positional bind cannot invoke an
+/// ADT conversion or evaluate a callback argument. Oracle's SQL intrinsics take
+/// precedence over same-name schema routines; qualified/quoted calls retain
+/// their ordinary routine proof. Do not use this for PL/SQL name resolution.
+fn is_lob_bind_conversion(function: &Function) -> bool {
+    let [name] = function.name.0.as_slice() else {
+        return false;
+    };
+    let Some(name) = name.as_ident() else {
+        return false;
+    };
+    if name.quote_style.is_some()
+        || !matches!(
+            name.value.to_ascii_uppercase().as_str(),
+            "TO_CLOB" | "TO_NCLOB" | "HEXTORAW"
+        )
+        || function.uses_odbc_syntax
+        || !matches!(function.parameters, FunctionArguments::None)
+        || !function.within_group.is_empty()
+        || function.filter.is_some()
+        || function.null_treatment.is_some()
+        || function.over.is_some()
+    {
+        return false;
+    }
+    let FunctionArguments::List(arguments) = &function.args else {
+        return false;
+    };
+    if arguments.duplicate_treatment.is_some() || !arguments.clauses.is_empty() {
+        return false;
+    }
+    let [FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value)))] =
+        arguments.args.as_slice()
+    else {
+        return false;
+    };
+    let sqlparser::ast::Value::Placeholder(bind) = &value.value else {
+        return false;
+    };
+    bind.strip_prefix(':').is_some_and(|position| {
+        !position.is_empty()
+            && !position.starts_with('0')
+            && position.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
 /// Intersect conservative callback tokens with actual SQL function nodes.
 /// DML target column lists are relations, never callable expressions. Parsing
-/// failures remain unknown; this inventory grants no effect authority.
+/// failures remain unknown. Only complete bind-only LOB conversion nodes are
+/// intrinsic; every other occurrence of the same spelling remains a callback.
 pub fn hard_parse_sql_routine_calls(sql: &str) -> Result<Vec<ObjectRef>, PlanMismatch> {
     if exceeds_sqlparser_square_bracket_budget(sql) {
         return Err(PlanMismatch::ParserWorkBudgetExceeded);
@@ -2031,7 +2078,9 @@ pub fn hard_parse_sql_routine_calls(sql: &str) -> Result<Vec<ObjectRef>, PlanMis
     impl Visitor for Names {
         type Break = ();
         fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-            if let Expr::Function(function) = expr {
+            if let Expr::Function(function) = expr
+                && !is_lob_bind_conversion(function)
+            {
                 self.0
                     .insert(function.name.to_string().to_ascii_uppercase());
             }
@@ -9719,6 +9768,96 @@ mod tests {
         assert_eq!(calls[0].schema.as_deref(), Some("app"));
         assert_eq!(calls[0].name, "canary_fn");
         assert!(hard_parse_user_calls("SELECT 'unterminated FROM dual").is_err());
+    }
+
+    #[test]
+    fn lob_bind_conversions_are_intrinsic_only_in_complete_positional_bind_form() {
+        for conversion in ["TO_CLOB", "TO_NCLOB", "HEXTORAW"] {
+            let sql = format!("INSERT INTO APP.T (PAYLOAD) VALUES ({conversion}(:1))");
+            assert!(
+                hard_parse_sql_routine_calls(&sql).unwrap().is_empty(),
+                "{sql}"
+            );
+            assert!(
+                hard_parse_sql_routine_calls(&format!(
+                    "SELECT {conversion}( /* bind */ :17 ) FROM SYS.DUAL"
+                ))
+                .unwrap()
+                .is_empty()
+            );
+            // The raw inventory is also used for PL/SQL, where SQL intrinsic
+            // precedence cannot establish local-name authority.
+            assert!(
+                !hard_parse_user_calls(&format!("BEGIN :2 := {conversion}(:1); END;"))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn lob_conversion_spelling_does_not_authorize_other_call_shapes() {
+        for conversion in ["TO_CLOB", "TO_NCLOB", "HEXTORAW"] {
+            for expression in [
+                format!("APP.{conversion}(:1)"),
+                format!("APP.PKG.{conversion}(:1)"),
+                format!("\"{conversion}\"(:1)"),
+                format!("{conversion}()"),
+                format!("{conversion}(:1, :2)"),
+                format!("{conversion}(PAYLOAD)"),
+                format!("{conversion}('literal')"),
+                format!("{conversion}(:1 || :2)"),
+                format!("{conversion}(:name)"),
+                format!("{conversion}(:0)"),
+                format!("{conversion}(:01)"),
+                format!("{conversion}(DISTINCT :1)"),
+                format!("{conversion}(:1) OVER ()"),
+                format!("{conversion}(APP.CALLBACK(:1))"),
+                format!("{conversion}((SELECT APP.CALLBACK(:1) FROM SYS.DUAL))"),
+            ] {
+                let sql = format!("INSERT INTO APP.T (PAYLOAD) VALUES ({expression})");
+                let calls = hard_parse_sql_routine_calls(&sql).unwrap();
+                assert!(!calls.is_empty(), "conversion name is not proof: {sql}");
+                if expression.contains("CALLBACK") {
+                    assert!(
+                        calls
+                            .iter()
+                            .any(|call| call.name.eq_ignore_ascii_case("CALLBACK")),
+                        "nested callback hidden: {sql}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn lob_bind_conversion_does_not_hide_a_second_unsafe_same_name_call() {
+        let calls = hard_parse_sql_routine_calls(
+            "INSERT INTO APP.T (A,B) VALUES (TO_CLOB(:1), TO_CLOB(APP.CALLBACK(:2)))",
+        )
+        .unwrap();
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.name.eq_ignore_ascii_case("TO_CLOB"))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|call| call.name.eq_ignore_ascii_case("CALLBACK"))
+        );
+    }
+
+    #[test]
+    fn unlisted_functions_with_positional_binds_still_require_routine_proof() {
+        for function in ["W4_LOB_IMPURE", "TO_BLOB", "APP.CALLBACK"] {
+            let sql = format!("INSERT INTO APP.T (PAYLOAD) VALUES ({function}(:1))");
+            let calls = hard_parse_sql_routine_calls(&sql).unwrap();
+            assert!(
+                !calls.is_empty(),
+                "a positional bind does not prove an unlisted function: {sql}"
+            );
+        }
     }
 
     #[test]
