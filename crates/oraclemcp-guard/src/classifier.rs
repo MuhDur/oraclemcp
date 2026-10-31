@@ -1931,18 +1931,15 @@ fn user_defined_calls(sql: &str, verified_local_vector_embedding: bool) -> Vec<O
             let is_qualified = i >= 3
                 && matches!(toks[i - 2], Token::Period)
                 && matches!(toks[i - 3], Token::Word(_));
-            // `owner.package.function(` is richer than the two-part identity
-            // carried by ObjectRef. Never collapse it to `package.function`:
-            // an exact operator declaration for the latter must not prove an
-            // arbitrary owner's package member pure.
+            // Retain the full spelling of richer and quoted identities in the
+            // legacy ObjectRef name. Collapsing either to a bare function can
+            // inherit an unrelated loaded routine's read-only proof.
             let has_owner_chain = is_qualified
                 && i >= 5
                 && matches!(toks[i - 4], Token::Period)
                 && matches!(toks[i - 5], Token::Word(_));
-            // Quoted identifiers are case-sensitive Oracle identities, while
-            // the engine-free ObjectRef stores only the text. Treat them as
-            // unproven rather than letting an unquoted allowlist declaration
-            // accidentally cover a distinct quoted routine.
+            // The quote delimiters are needed by an exact downstream adapter;
+            // unquoted allowlists cannot stand in for this identity.
             let has_quoted_identifier = name.quote_style.is_some()
                 || (is_qualified
                     && matches!(toks[i - 3], Token::Word(schema) if schema.quote_style.is_some()));
@@ -1972,6 +1969,18 @@ fn user_defined_calls(sql: &str, verified_local_vector_embedding: bool) -> Vec<O
                     Token::Word(s) => (Some(s.value.clone()), name.value.clone()),
                     _ => (None, name.value.clone()),
                 }
+            } else if has_owner_chain || has_quoted_identifier {
+                let mut start = i - 1;
+                while start >= 2
+                    && matches!(toks[start - 1], Token::Period)
+                    && matches!(toks[start - 2], Token::Word(_))
+                {
+                    start -= 2;
+                }
+                (
+                    None,
+                    toks[start..i].iter().map(ToString::to_string).collect(),
+                )
             } else {
                 (None, name.value.clone())
             };

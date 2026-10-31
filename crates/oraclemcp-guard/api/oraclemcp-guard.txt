@@ -1645,7 +1645,9 @@ pub const oraclemcp_guard::effective_dml_plan::DML_REWRITE_ALGORITHM_VERSION: u1
 pub mod oraclemcp_guard::enforcement
 pub const oraclemcp_guard::enforcement::SET_TRANSACTION_READ_ONLY: &str
 pub fn oraclemcp_guard::enforcement::is_allowed_alter_session(&str) -> bool
+pub fn oraclemcp_guard::enforcement::is_allowed_alter_session_for_profile(&str, bool) -> bool
 pub fn oraclemcp_guard::enforcement::read_only_setup_statements(oraclemcp_guard::levels::OperatingLevel) -> alloc::vec::Vec<&'static str>
+pub fn oraclemcp_guard::enforcement::requires_change_request(&str, bool) -> bool
 pub mod oraclemcp_guard::exec_grant
 #[non_exhaustive] pub enum oraclemcp_guard::exec_grant::ExecGrantError
 pub oraclemcp_guard::exec_grant::ExecGrantError::DigestMismatch
@@ -20397,6 +20399,7 @@ pub const oraclemcp_guard::INCIDENT_MANIFEST_VERSION: u16
 pub const oraclemcp_guard::SCOPED_GRANT_TOKEN_SCOPE: &str
 pub const oraclemcp_guard::SET_TRANSACTION_READ_ONLY: &str
 pub const oraclemcp_guard::SQL_POLICY_VERSION: u32
+pub const oraclemcp_guard::SYS_EFFECTS_TOML: &str
 pub const oraclemcp_guard::VERDICT_CERTIFICATE_CLASSIFIER_VERSION: &str
 pub const oraclemcp_guard::VERDICT_CERTIFICATE_REGISTRY_GENERATION: u16
 pub trait oraclemcp_guard::CatalogResolver: core::marker::Send + core::marker::Sync
@@ -20431,12 +20434,14 @@ pub fn oraclemcp_guard::enforce_sql_policy_with_effects(&oraclemcp_guard::policy
 pub fn oraclemcp_guard::function_free_virtual_column_expression(&str) -> bool
 pub fn oraclemcp_guard::hard_parse_user_calls(&str) -> core::result::Result<alloc::vec::Vec<oraclemcp_guard::purity::ObjectRef>, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::is_allowed_alter_session(&str) -> bool
+pub fn oraclemcp_guard::is_allowed_alter_session_for_profile(&str, bool) -> bool
 pub fn oraclemcp_guard::is_builtin_dictionary_view(&str, &str) -> bool
 pub fn oraclemcp_guard::named_bind_placeholders(&str) -> alloc::vec::Vec<alloc::string::String>
 pub fn oraclemcp_guard::parse_edition_lifecycle_sql(&str) -> oraclemcp_guard::edition_lifecycle::EditionLifecycleParse
 pub fn oraclemcp_guard::parse_trusted_proof_target(&str) -> core::option::Option<alloc::vec::Vec<alloc::string::String>>
 pub fn oraclemcp_guard::read_only_setup_statements(oraclemcp_guard::levels::OperatingLevel) -> alloc::vec::Vec<&'static str>
 pub fn oraclemcp_guard::reclassify_at_replay(&oraclemcp_guard::classifier::Classifier, &str) -> oraclemcp_guard::classifier::GuardDecision
+pub fn oraclemcp_guard::requires_change_request(&str, bool) -> bool
 pub fn oraclemcp_guard::semantic_read_plan(&str) -> core::option::Option<oraclemcp_guard::resolver::SemanticReadPlan>
 pub fn oraclemcp_guard::semantic_read_plan_checked(&str) -> core::result::Result<oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::sql_digest(&str) -> alloc::string::String

@@ -60,6 +60,11 @@ pub use classifier::{
     stage_a,
 };
 pub use clock::MonotonicDeadline;
+
+/// Reviewed SYS routine effect policy, embedded by its owning package.
+/// Consumers must validate its schema and review marker before serving tools.
+pub const SYS_EFFECTS_TOML: &str = include_str!("sys_effects.toml");
+
 pub use exec_grant::{ExecGrantBinding, ExecGrantError, ExecGrantStore};
 pub use impact_binding::{
     DbIdentity, DecisiveFacts, FieldBudget, FieldCaps, FieldMeasure, FieldStatus,

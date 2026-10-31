@@ -1,0 +1,33 @@
+# Exact SYS routine effects, reviewed for the W7 adapter (.10.8).
+# A change that adds an identity or removes an effect requires review and an
+# updated reviewed_marker in the same commit. The parser verifies the marker
+# against the canonical complete effect map, including every existing entry.
+# Entries constrain a Clean, source-backed closure; they never supply missing
+# source, erase an engine effect, or authorize a different owner/overload.
+schema_version = 1
+reviewed_marker = "sha256:a70072bc57f365ae33b9a2607f4b94791561a02b14c59e74037d4ed90bc1c58e"
+
+# SUBSTR reads the supplied LOB. Its BFILE overload reads an external file,
+# so this identity-wide policy retains ExternalIo conservatively. Restricting
+# that to a particular database-LOB overload needs a separate exact type proof.
+# https://docs.oracle.com/en/database/oracle/oracle-database/23/arpls/DBMS_LOB.html
+[[routine]]
+identity = "SYS.DBMS_LOB.SUBSTR"
+effects = ["ReadDb", "ExternalIo"]
+
+# GET_DDL retrieves metadata text. It does not execute the returned DDL.
+# OPEN/SET_TRANSFORM_PARAM and all metadata mutation APIs remain absent.
+# https://docs.oracle.com/en/database/oracle/oracle-database/19/arpls/DBMS_METADATA.html
+[[routine]]
+identity = "SYS.DBMS_METADATA.GET_DDL"
+effects = ["ReadDb"]
+
+# DISPLAY reads existing plan rows and formats them. It does not EXPLAIN or
+# execute the described SQL. Other DISPLAY_* entrypoints are not implied.
+# filter_preds can invoke arbitrary server functions (Oracle explicitly warns
+# of SQL injection), so an identity-wide policy must retain DynamicSql. A safe
+# server-generated rendering has a separate fixed admission proof.
+# https://docs.oracle.com/en/database/oracle/oracle-database/21/arpls/DBMS_XPLAN.html
+[[routine]]
+identity = "SYS.DBMS_XPLAN.DISPLAY"
+effects = ["ReadDb", "DynamicSql"]

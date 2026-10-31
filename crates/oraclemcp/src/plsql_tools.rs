@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use asupersync::Cx;
 use chrono::Utc;
@@ -13,7 +13,10 @@ use oraclemcp_db::{
     extract_catalog_rowsets, run_catalog_query,
 };
 use oraclemcp_error::{ErrorClass, ErrorEnvelope};
-use oraclemcp_guard::{Classifier, ClassifierConfig, ObjectRef, Purity, SideEffectOracle};
+use oraclemcp_guard::{
+    Classifier, ClassifierConfig, ObjectRef, Purity, RoutineEffect, RoutineEffectsV1, RoutineRef,
+    SideEffectOracle,
+};
 use plsql_catalog::{
     CatalogCapabilities, CatalogRowSet, CatalogSnapshot, CatalogSnapshotBuilder, CatalogSource,
     CatalogSourceKind, OracleRow as CatalogOracleRow,
@@ -29,7 +32,8 @@ use plsql_depgraph::{
 };
 use plsql_doc::{DocSet, extract_doc_comments};
 use plsql_engine::{
-    AnalysisRequest, analyze_project, engine_doctor_report, engine_full_doctor_report,
+    AnalysisRequest, InvocationIndexV1, InvocationShapeV1, analyze_project, engine_doctor_report,
+    engine_full_doctor_report,
 };
 use plsql_ir::{FactPayload, FactStore, FlowEnv, lower_top_level};
 use plsql_lineage::{LineageDirection, column_readers, column_writers, dependencies, impact};
@@ -67,6 +71,9 @@ pub fn is_static_tool(name: &str) -> bool {
 }
 
 pub fn register_tools(registry: &mut ToolRegistry) {
+    // The embedded policy is validated before tools can be served, even if
+    // no analysis-backed classifier is constructed during this process.
+    LazyLock::force(&SYS_EFFECTS);
     registry.register(
         ToolDescriptor::new(
             "oracle_plsql_parse",
@@ -345,14 +352,15 @@ pub fn classifier_from_analysis_run(run: &plsql_engine::AnalysisRun) -> Classifi
 
 /// The PL/SQL-intelligence implementation of `oraclemcp-guard`'s purity port.
 ///
-/// `plsql-depgraph` edges point `dependent -> dependency`. Routine purity walks
-/// outgoing dependencies. Statement purity starts from SELECT base objects,
+/// Routine effects require an exact, Clean engine invocation closure. Graph
+/// edges can only tighten that proof. Statement purity starts from SELECT base objects,
 /// checks VPD/catalog policy functions, then walks incoming trigger-like
 /// dependents and view dependencies. Anything not strongly proven read-only
 /// stays `Unknown`.
 #[derive(Clone)]
 pub struct PlsqlSideEffectOracle {
     graph: Arc<DepGraph>,
+    invocations: Arc<InvocationIndexV1>,
     catalog: Option<Arc<CatalogSnapshot>>,
     catalog_complete: bool,
     source_trustworthy: bool,
@@ -361,12 +369,10 @@ pub struct PlsqlSideEffectOracle {
 impl PlsqlSideEffectOracle {
     #[must_use]
     pub fn from_analysis_run(run: &plsql_engine::AnalysisRun) -> Self {
-        let source_trustworthy = matches!(
-            run.completeness.posture,
-            CompletenessPosture::Clean | CompletenessPosture::Partial
-        );
+        let source_trustworthy = run.completeness.posture == CompletenessPosture::Clean;
         Self {
             graph: Arc::new(run.dep_graph.clone()),
+            invocations: Arc::new(run.invocation_index.clone()),
             catalog: run.catalog.clone().map(Arc::new),
             catalog_complete: run.catalog.is_some(),
             source_trustworthy,
@@ -374,49 +380,211 @@ impl PlsqlSideEffectOracle {
     }
 
     fn routine_purity_by_candidates(&self, candidates: &[String]) -> Purity {
-        let Some(node_id) = self.resolve_candidates(candidates).map(|node| node.id) else {
+        let Some(node) = self.resolve_candidates(candidates) else {
             return Purity::Unknown;
         };
-        self.routine_node_purity(node_id, &mut HashSet::new())
+        effects_purity(&self.effects_for_exact_id(node.logical_id.as_str(), None))
     }
 
-    fn routine_node_purity(&self, node_id: NodeId, stack: &mut HashSet<WalkKey>) -> Purity {
-        let key = WalkKey::routine(node_id);
-        if !stack.insert(key) {
-            return Purity::Unknown;
+    fn routine_node_purity(&self, node_id: NodeId) -> Purity {
+        match self.graph.nodes.get(&node_id) {
+            Some(node) => {
+                effects_purity(&self.effects_for_exact_id(node.logical_id.as_str(), None))
+            }
+            None => Purity::Unknown,
         }
+    }
 
-        let verdict = if !self.source_trustworthy {
-            Purity::Unknown
-        } else if self
-            .graph
-            .nodes
-            .get(&node_id)
-            .is_some_and(|node| self.node_writes_columns_via_lineage(node))
+    fn effects_for_exact_id(&self, id: &str, overload: Option<u32>) -> RoutineEffectsV1 {
+        if !self.source_trustworthy || !self.catalog_complete {
+            return unknown_effects();
+        }
+        // The engine supports lexical package fallback for calls *inside*
+        // source units. An adapter lookup must already identify one exact
+        // unit; never let that fallback resolve an external caller's name.
+        let candidates: Vec<_> = self
+            .invocations
+            .units
+            .values()
+            .filter(|unit| {
+                let (base, suffix) = unit.id.split_once('#').unwrap_or((&unit.id, ""));
+                base == id
+                    && match overload {
+                        Some(number) => {
+                            suffix.parse::<u32>().ok() == Some(number)
+                                || (suffix.is_empty() && number == 1 && unit.kind.is_none())
+                        }
+                        None => suffix.is_empty() || suffix.parse::<u32>().is_ok(),
+                    }
+            })
+            .collect();
+        let [unit] = candidates.as_slice() else {
+            return unknown_effects();
+        };
+        let closure = self.invocations.closure(&InvocationShapeV1 {
+            routine_id: unit.id.clone(),
+            // Include every optional default's effects. The identity-only
+            // port cannot prove that a caller supplied a particular default.
+            named_arguments: unit
+                .params
+                .iter()
+                .filter(|p| !p.has_default)
+                .map(|p| p.name.clone())
+                .collect(),
+            ..InvocationShapeV1::default()
+        });
+        if !closure.clean
+            || !closure.unknown_reasons.is_empty()
+            || closure.root != unit.id
+            || !closure.units.contains(&unit.id)
         {
-            Purity::ProvenSideEffecting
-        } else {
-            let mut verdict = Purity::ProvenReadOnly;
-            for edge in self.outgoing_edges(node_id) {
-                verdict = combine_purity(verdict, self.routine_edge_purity(&edge, stack));
-                if matches!(verdict, Purity::ProvenSideEffecting) {
-                    break;
+            return unknown_effects();
+        }
+        let mut effects = map_engine_effects(&closure.effects);
+        for member in &closure.units {
+            let Some(node) = self.resolve_candidates(std::slice::from_ref(member)) else {
+                return unknown_effects();
+            };
+            if self
+                .outgoing_edges(node.id)
+                .iter()
+                .any(|edge| !is_high_confidence(edge))
+                || self.catalog_unit_invalid(member)
+            {
+                return unknown_effects();
+            }
+            // Graph evidence may tighten a source closure, never stand in for
+            // a missing one. In particular, a source/index disagreement about
+            // a call or a catalog callback is not read-only proof.
+            for edge in self.outgoing_edges(node.id) {
+                let effect = match edge.kind {
+                    EdgeKind::Calls => {
+                        if !self.graph.nodes.get(&edge.to).is_some_and(|target| {
+                            closure.units.contains(target.logical_id.as_str())
+                        }) {
+                            return unknown_effects();
+                        }
+                        None
+                    }
+                    EdgeKind::Reads
+                    | EdgeKind::ReadsColumn
+                    | EdgeKind::ReadsUnknownColumnOfTable => {
+                        if self.read_relation_has_callbacks(edge.to) {
+                            return unknown_effects();
+                        }
+                        Some(RoutineEffect::ReadDb)
+                    }
+                    EdgeKind::References | EdgeKind::DependsOnType => None,
+                    EdgeKind::Writes
+                    | EdgeKind::WritesColumn
+                    | EdgeKind::WritesUnknownColumnOfTable
+                    | EdgeKind::DerivesColumn => Some(RoutineEffect::Dml),
+                    EdgeKind::TransactionControl => Some(RoutineEffect::TxnControl),
+                    EdgeKind::Autonomous => Some(RoutineEffect::Autonomous),
+                    EdgeKind::SequenceAdvance => Some(RoutineEffect::SequenceAdvance),
+                    EdgeKind::RowLock => Some(RoutineEffect::RowLock),
+                    EdgeKind::SessionState => Some(RoutineEffect::SessionState),
+                    EdgeKind::Ddl => Some(RoutineEffect::Ddl),
+                    EdgeKind::Admin => Some(RoutineEffect::Admin),
+                    EdgeKind::OperatorOnly => Some(RoutineEffect::OperatorOnly(
+                        oraclemcp_guard::OperatorStatementClass::DefaultEditionFlip,
+                    )),
+                    EdgeKind::ExternalIo => Some(RoutineEffect::ExternalIo),
+                    EdgeKind::UnresolvedDynamicSql
+                    | EdgeKind::OpaqueDynamic
+                    | EdgeKind::Unknown
+                    | EdgeKind::TriggersOn
+                    | EdgeKind::Constrains
+                    | EdgeKind::DbLink
+                    | EdgeKind::UnresolvedCallee => return unknown_effects(),
+                };
+                if let Some(effect) = effect {
+                    effects = effects.union(&RoutineEffectsV1::new([effect]));
                 }
             }
-            verdict
-        };
-
-        stack.remove(&key);
-        verdict
+            if matches!(member.split('.').next(), Some("SYS" | "SYSTEM")) {
+                let name = member.split('#').next().unwrap_or(member);
+                let Some(reviewed) = SYS_EFFECTS.get(name) else {
+                    return unknown_effects();
+                };
+                // The allowlist can add conservative effects; it cannot erase
+                // anything reported by the source-backed engine closure.
+                effects = effects.union(reviewed);
+            }
+        }
+        effects
     }
 
-    fn statement_node_purity(&self, node_id: NodeId, stack: &mut HashSet<WalkKey>) -> Purity {
-        let key = WalkKey::statement(node_id);
+    fn read_relation_has_callbacks(&self, node_id: NodeId) -> bool {
+        let Some(node) = self.graph.nodes.get(&node_id) else {
+            return true;
+        };
+        self.incoming_edges(node_id)
+            .iter()
+            .any(|edge| edge.kind == EdgeKind::TriggersOn)
+            || self.catalog.iter().any(|catalog| {
+                catalog.schemas.values().any(|schema| {
+                    schema.vpd_policies.iter().any(|policy| {
+                        policy.enabled
+                            && policy.on_select
+                            && catalog_object_matches(
+                                catalog,
+                                policy.object_owner,
+                                policy.object_name,
+                                node,
+                            )
+                    })
+                })
+            })
+    }
+
+    fn catalog_unit_invalid(&self, id: &str) -> bool {
+        use plsql_catalog::{CatalogObject, ObjectStatus};
+        self.catalog
+            .iter()
+            .flat_map(|catalog| {
+                catalog
+                    .schemas
+                    .values()
+                    .flat_map(|schema| schema.objects.values())
+                    .map(move |object| (catalog, object))
+            })
+            .any(|(catalog, object)| {
+                let common = match object {
+                    CatalogObject::Table(value) => &value.common,
+                    CatalogObject::View(value) => &value.common,
+                    CatalogObject::MaterializedView(value) => &value.common,
+                    CatalogObject::Sequence(value) => &value.common,
+                    CatalogObject::Type(value) => &value.common,
+                    CatalogObject::Package(value) => &value.common,
+                    CatalogObject::Procedure(value) => &value.common,
+                    CatalogObject::Function(value) => &value.common,
+                    CatalogObject::Trigger(value) => &value.common,
+                    CatalogObject::SchedulerJob(value) => &value.common,
+                    CatalogObject::EditioningView(value) => &value.common,
+                };
+                let Some(owner) = catalog.interner.resolve(common.owner.symbol()) else {
+                    return true;
+                };
+                let Some(name) = catalog.interner.resolve(common.name.symbol()) else {
+                    return true;
+                };
+                let qualified = format!("{owner}.{name}");
+                (id == qualified
+                    || id
+                        .strip_prefix(&qualified)
+                        .is_some_and(|rest| rest.starts_with(['.', '#'])))
+                    && common.status != ObjectStatus::Valid
+            })
+    }
+
+    fn statement_node_purity(&self, node_id: NodeId, stack: &mut HashSet<NodeId>) -> Purity {
+        let key = node_id;
         if !stack.insert(key) {
             return Purity::Unknown;
-        }
+        };
 
-        let verdict = if !self.catalog_complete {
+        let verdict = if !self.source_trustworthy || !self.catalog_complete {
             Purity::Unknown
         } else {
             let mut verdict = self.catalog_vpd_purity_for_node(node_id);
@@ -426,7 +594,7 @@ impl PlsqlSideEffectOracle {
                     continue;
                 }
                 let edge_purity = if is_high_confidence(&edge) {
-                    self.routine_node_purity(edge.from, stack)
+                    self.routine_node_purity(edge.from)
                 } else {
                     Purity::Unknown
                 };
@@ -452,7 +620,7 @@ impl PlsqlSideEffectOracle {
         verdict
     }
 
-    fn routine_edge_purity(&self, edge: &Edge, stack: &mut HashSet<WalkKey>) -> Purity {
+    fn statement_edge_purity(&self, edge: &Edge, stack: &mut HashSet<NodeId>) -> Purity {
         if is_proven_side_effect_edge(edge.kind) {
             return Purity::ProvenSideEffecting;
         }
@@ -460,51 +628,7 @@ impl PlsqlSideEffectOracle {
             return Purity::Unknown;
         }
         match edge.kind {
-            EdgeKind::Calls => self.routine_node_purity(edge.to, stack),
-            EdgeKind::Reads | EdgeKind::ReadsColumn | EdgeKind::ReadsUnknownColumnOfTable => {
-                if self
-                    .graph
-                    .nodes
-                    .get(&edge.to)
-                    .is_some_and(|node| is_statement_object_kind(node.identity_kind))
-                {
-                    self.statement_node_purity(edge.to, stack)
-                } else {
-                    Purity::ProvenReadOnly
-                }
-            }
-            EdgeKind::References | EdgeKind::DependsOnType => Purity::ProvenReadOnly,
-            EdgeKind::Unknown
-            | EdgeKind::TriggersOn
-            | EdgeKind::Constrains
-            | EdgeKind::OpaqueDynamic
-            | EdgeKind::DbLink => Purity::Unknown,
-            EdgeKind::UnresolvedDynamicSql | EdgeKind::UnresolvedCallee => Purity::Unknown,
-            EdgeKind::Writes
-            | EdgeKind::WritesColumn
-            | EdgeKind::WritesUnknownColumnOfTable
-            | EdgeKind::DerivesColumn
-            | EdgeKind::TransactionControl
-            | EdgeKind::Autonomous
-            | EdgeKind::SequenceAdvance
-            | EdgeKind::RowLock
-            | EdgeKind::SessionState
-            | EdgeKind::Ddl
-            | EdgeKind::Admin
-            | EdgeKind::OperatorOnly
-            | EdgeKind::ExternalIo => Purity::ProvenSideEffecting,
-        }
-    }
-
-    fn statement_edge_purity(&self, edge: &Edge, stack: &mut HashSet<WalkKey>) -> Purity {
-        if is_proven_side_effect_edge(edge.kind) {
-            return Purity::ProvenSideEffecting;
-        }
-        if !is_high_confidence(edge) {
-            return Purity::Unknown;
-        }
-        match edge.kind {
-            EdgeKind::Calls => self.routine_node_purity(edge.to, stack),
+            EdgeKind::Calls => self.routine_node_purity(edge.to),
             EdgeKind::Reads | EdgeKind::ReadsColumn | EdgeKind::ReadsUnknownColumnOfTable => {
                 self.statement_node_purity(edge.to, stack)
             }
@@ -533,7 +657,7 @@ impl PlsqlSideEffectOracle {
 
     fn catalog_vpd_purity_for_node(&self, node_id: NodeId) -> Purity {
         let Some(catalog) = &self.catalog else {
-            return Purity::ProvenReadOnly;
+            return Purity::Unknown;
         };
         let Some(node) = self.graph.nodes.get(&node_id) else {
             return Purity::Unknown;
@@ -565,35 +689,22 @@ impl PlsqlSideEffectOracle {
         verdict
     }
 
-    fn node_writes_columns_via_lineage(&self, source: &Node) -> bool {
-        self.graph
-            .nodes
-            .values()
-            .filter(|node| matches!(node.identity_kind, NodeIdentityKind::Column))
-            .any(|column| {
-                let writers = column_writers(&self.graph, &NodeSelector::NodeId(column.id));
-                writers.accessors.iter().any(|accessor| {
-                    accessor
-                        .accessor_logical_id
-                        .eq_ignore_ascii_case(source.logical_id.as_str())
-                })
-            })
-    }
-
     fn resolve_candidates(&self, candidates: &[String]) -> Option<&Node> {
+        let mut resolved = None;
         for candidate in candidates {
-            if let Ok(node) = self
+            for node in self
                 .graph
-                .resolve_node(&NodeSelector::LogicalObjectId(candidate.clone()))
+                .nodes
+                .values()
+                .filter(|node| node.logical_id.as_str() == candidate)
             {
-                return Some(node);
+                if resolved.is_some_and(|prior: &Node| prior.id != node.id) {
+                    return None;
+                }
+                resolved = Some(node);
             }
         }
-        self.graph.nodes.values().find(|node| {
-            candidates
-                .iter()
-                .any(|candidate| node.logical_id.as_str().eq_ignore_ascii_case(candidate))
-        })
+        resolved
     }
 
     fn outgoing_edges(&self, node_id: NodeId) -> Vec<Edge> {
@@ -616,13 +727,20 @@ impl PlsqlSideEffectOracle {
 }
 
 impl SideEffectOracle for PlsqlSideEffectOracle {
+    fn routine_effects(&self, routine: &RoutineRef) -> RoutineEffectsV1 {
+        let Some(id) = exact_routine_id(routine) else {
+            return unknown_effects();
+        };
+        self.effects_for_exact_id(&id, routine.overload)
+    }
+
     fn routine_purity(&self, routine: &ObjectRef) -> Purity {
         self.routine_purity_by_candidates(&object_ref_candidates(routine))
     }
 
     fn statement_purity(&self, base_objects: &[ObjectRef]) -> Purity {
         if base_objects.is_empty() {
-            return Purity::ProvenReadOnly;
+            return Purity::Unknown;
         }
         let mut verdict = Purity::ProvenReadOnly;
         for base in base_objects {
@@ -644,32 +762,160 @@ impl SideEffectOracle for PlsqlSideEffectOracle {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-enum WalkKind {
-    Routine,
-    Statement,
+fn unknown_effects() -> RoutineEffectsV1 {
+    RoutineEffectsV1::new([RoutineEffect::Unknown])
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
-struct WalkKey {
-    kind: WalkKind,
-    node: NodeId,
+fn effects_purity(effects: &RoutineEffectsV1) -> Purity {
+    if effects
+        .iter()
+        .any(|effect| effect == RoutineEffect::Unknown)
+    {
+        Purity::Unknown
+    } else if effects.iter().all(|effect| effect == RoutineEffect::ReadDb) {
+        Purity::ProvenReadOnly
+    } else {
+        Purity::ProvenSideEffecting
+    }
 }
 
-impl WalkKey {
-    fn routine(node: NodeId) -> Self {
-        Self {
-            kind: WalkKind::Routine,
-            node,
+fn exact_routine_id(routine: &RoutineRef) -> Option<String> {
+    let parts = routine
+        .schema
+        .iter()
+        .chain(routine.package.iter())
+        .chain(std::iter::once(&routine.member));
+    let mut names = Vec::new();
+    for part in parts {
+        // The engine's flattened identity format cannot represent separators
+        // inside a component without ambiguity. Refuse those identities.
+        if part.text.is_empty()
+            || part
+                .text
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '.' | '#' | '@' | '(' | ')' | '"'))
+        {
+            return None;
         }
+        names.push(if part.quoted {
+            part.text.clone()
+        } else {
+            part.text.to_ascii_uppercase()
+        });
     }
+    Some(names.join("."))
+}
 
-    fn statement(node: NodeId) -> Self {
-        Self {
-            kind: WalkKind::Statement,
-            node,
+fn map_engine_effects(effects: &plsql_engine::RoutineEffectsV1) -> RoutineEffectsV1 {
+    use plsql_engine::{OperatorStatementClass as EngineOperator, RoutineEffect as EngineEffect};
+    RoutineEffectsV1::new(effects.iter().map(|effect| match effect {
+        EngineEffect::ReadDb => RoutineEffect::ReadDb,
+        EngineEffect::RowLock => RoutineEffect::RowLock,
+        EngineEffect::SessionState => RoutineEffect::SessionState,
+        EngineEffect::Dml => RoutineEffect::Dml,
+        EngineEffect::Ddl => RoutineEffect::Ddl,
+        EngineEffect::Admin => RoutineEffect::Admin,
+        EngineEffect::SequenceAdvance => RoutineEffect::SequenceAdvance,
+        EngineEffect::OperatorOnly(class) => RoutineEffect::OperatorOnly(match class {
+            EngineOperator::DefaultEditionFlip => {
+                oraclemcp_guard::OperatorStatementClass::DefaultEditionFlip
+            }
+        }),
+        EngineEffect::TxnControl => RoutineEffect::TxnControl,
+        EngineEffect::Autonomous => RoutineEffect::Autonomous,
+        EngineEffect::DynamicSql => RoutineEffect::DynamicSql,
+        EngineEffect::ExternalIo => RoutineEffect::ExternalIo,
+        EngineEffect::Unknown => RoutineEffect::Unknown,
+    }))
+}
+
+const SYS_EFFECTS_SOURCE: &str = oraclemcp_guard::SYS_EFFECTS_TOML;
+static SYS_EFFECTS: LazyLock<BTreeMap<String, RoutineEffectsV1>> = LazyLock::new(|| {
+    parse_sys_effects(SYS_EFFECTS_SOURCE).expect("invalid reviewed sys_effects.toml policy")
+});
+
+fn sys_effects_marker(effects: &BTreeMap<String, RoutineEffectsV1>) -> String {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write;
+    let digest = Sha256::digest(serde_json::to_vec(effects).expect("effect map serializes"));
+    let mut marker = String::from("sha256:");
+    for byte in digest {
+        write!(marker, "{byte:02x}").expect("writing to String");
+    }
+    marker
+}
+
+fn parse_sys_effects(source: &str) -> Result<BTreeMap<String, RoutineEffectsV1>, String> {
+    let document = source
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|error| error.to_string())?;
+    if document
+        .iter()
+        .any(|(key, _)| !matches!(key, "schema_version" | "reviewed_marker" | "routine"))
+        || document
+            .get("schema_version")
+            .and_then(toml_edit::Item::as_integer)
+            != Some(1)
+    {
+        return Err("unsupported SYS effects policy schema".into());
+    }
+    let entries = document
+        .get("routine")
+        .and_then(toml_edit::Item::as_array_of_tables)
+        .ok_or("SYS effects entries are missing")?;
+    let mut effects = BTreeMap::new();
+    for entry in entries {
+        if entry
+            .iter()
+            .any(|(key, _)| !matches!(key, "identity" | "effects"))
+        {
+            return Err("unknown SYS effects entry field".into());
+        }
+        let name = entry
+            .get("identity")
+            .and_then(toml_edit::Item::as_str)
+            .ok_or("SYS effects identity is missing")?;
+        let parts: Vec<_> = name.split('.').collect();
+        if parts.len() != 3
+            || !matches!(parts[0], "SYS" | "SYSTEM")
+            || parts.iter().any(|part| {
+                part.is_empty()
+                    || !part.bytes().all(|b| {
+                        b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b'_' | b'$')
+                    })
+            })
+        {
+            return Err("SYS effects identity must be exact OWNER.PACKAGE.MEMBER".into());
+        }
+        let values = entry
+            .get("effects")
+            .and_then(toml_edit::Item::as_array)
+            .ok_or("SYS effect set is missing")?;
+        let values = values
+            .iter()
+            .map(|value| {
+                let text = value.as_str().ok_or("SYS effect must be a named variant")?;
+                serde_json::from_value::<RoutineEffect>(json!(text))
+                    .map_err(|error| error.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        if values.is_empty()
+            || values.iter().collect::<BTreeSet<_>>().len() != values.len()
+            || effects
+                .insert(name.to_owned(), RoutineEffectsV1::new(values))
+                .is_some()
+        {
+            return Err("empty, duplicate or ambiguous SYS effects entry".into());
         }
     }
+    if document
+        .get("reviewed_marker")
+        .and_then(toml_edit::Item::as_str)
+        != Some(sys_effects_marker(&effects).as_str())
+    {
+        return Err("SYS effects changed without updating the reviewed marker".into());
+    }
+    Ok(effects)
 }
 
 fn combine_purity(left: Purity, right: Purity) -> Purity {
@@ -706,17 +952,28 @@ fn is_high_confidence(edge: &Edge) -> bool {
     matches!(edge.confidence.level, ConfidenceLevel::High)
 }
 
-fn is_statement_object_kind(kind: NodeIdentityKind) -> bool {
-    matches!(
-        kind,
-        NodeIdentityKind::Table
-            | NodeIdentityKind::View
-            | NodeIdentityKind::MaterializedView
-            | NodeIdentityKind::EditioningView
-    )
-}
-
 fn object_ref_candidates(reference: &ObjectRef) -> Vec<String> {
+    for component in reference
+        .schema
+        .iter()
+        .chain(std::iter::once(&reference.name))
+    {
+        if let Some(quoted) = component
+            .strip_prefix('"')
+            .and_then(|s| s.strip_suffix('"'))
+        {
+            if quoted
+                .chars()
+                .any(|ch| ch.is_control() || matches!(ch, '.' | '#' | '@' | '(' | ')' | '"'))
+            {
+                // A quoted separator is part of one identifier, not one of
+                // the engine's flattened multipart identity separators.
+                return Vec::new();
+            }
+        } else if component.contains('"') {
+            return Vec::new();
+        }
+    }
     let name = normalize_identifier(&reference.name);
     if let Some(schema) = &reference.schema {
         // A qualified reference must never inherit proof from an unrelated
@@ -729,7 +986,10 @@ fn object_ref_candidates(reference: &ObjectRef) -> Vec<String> {
 }
 
 fn normalize_identifier(value: &str) -> String {
-    value.trim_matches('"').to_ascii_uppercase()
+    match value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) {
+        Some(quoted) => quoted.replace("\"\"", "\""),
+        None => value.to_ascii_uppercase(),
+    }
 }
 
 fn catalog_object_matches(
@@ -744,10 +1004,9 @@ fn catalog_object_matches(
     let Some(object) = catalog.interner.resolve(object.symbol()) else {
         return false;
     };
-    let bare = normalize_identifier(object);
-    let qualified = format!("{}.{}", normalize_identifier(owner), bare);
-    node.logical_id.as_str().eq_ignore_ascii_case(&bare)
-        || node.logical_id.as_str().eq_ignore_ascii_case(&qualified)
+    // Catalog identifiers are already Oracle's canonical spelling.
+    let qualified = format!("{owner}.{object}");
+    node.logical_id.as_str() == qualified
 }
 
 fn vpd_function_candidates(
@@ -757,20 +1016,16 @@ fn vpd_function_candidates(
     let Some(owner) = catalog
         .interner
         .resolve(policy.function_owner.symbol())
-        .map(normalize_identifier)
+        .map(str::to_owned)
     else {
         return Vec::new();
     };
-    let function = normalize_identifier(&policy.function_name);
-    let mut out = Vec::new();
+    let function = &policy.function_name;
     if let Some(package) = &policy.function_package {
-        let package = normalize_identifier(package);
-        out.push(format!("{owner}.{package}.{function}"));
-        out.push(format!("{package}.{function}"));
+        vec![format!("{owner}.{package}.{function}")]
+    } else {
+        vec![format!("{owner}.{function}")]
     }
-    out.push(format!("{owner}.{function}"));
-    out.push(function);
-    out
 }
 
 fn parse_args<T: for<'de> Deserialize<'de>>(tool: &str, args: Value) -> Result<T, ErrorEnvelope> {
@@ -3197,6 +3452,559 @@ mod tests {
     }
 
     #[test]
+    fn adapter_gap3_no_edges_is_unknown() {
+        let mut graph = DepGraph::new();
+        add_node(
+            &mut graph,
+            1,
+            "APP.EMPTY",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        let oracle =
+            PlsqlSideEffectOracle::from_analysis_run(&analysis_run(graph, Some(empty_catalog())));
+        assert_eq!(
+            oracle.routine_purity(&ObjectRef::parse("APP.EMPTY")),
+            Purity::Unknown
+        );
+        assert_eq!(
+            oracle.routine_effects(&adapter_reference("EMPTY")),
+            unknown_effects()
+        );
+    }
+
+    fn adapter_reference(member: &str) -> RoutineRef {
+        RoutineRef {
+            schema: Some(oraclemcp_guard::RoutineIdentifier::new("APP", false)),
+            package: None,
+            member: oraclemcp_guard::RoutineIdentifier::new(member, false),
+            overload: None,
+        }
+    }
+
+    fn add_source_unit(run: &mut plsql_engine::AnalysisRun, id: &str, body: &str) {
+        run.invocation_index
+            .insert_unit(plsql_engine::effects::EffectUnit {
+                id: id.to_owned(),
+                package: None,
+                kind: None,
+                statements: plsql_ir::stmt::lower_statement_body(body),
+                params: Vec::new(),
+                source_complete: true,
+                source_reasons: BTreeSet::new(),
+            });
+    }
+
+    fn adapter_read_run() -> plsql_engine::AnalysisRun {
+        let mut graph = DepGraph::new();
+        add_node(
+            &mut graph,
+            1,
+            "APP.LOOKUP",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_node(&mut graph, 2, "APP.ORDERS", NodeIdentityKind::Table);
+        add_edge(&mut graph, 1, 1, 2, EdgeKind::Reads);
+        let mut run = analysis_run(graph, Some(empty_catalog()));
+        add_source_unit(
+            &mut run,
+            "APP.LOOKUP",
+            "BEGIN SELECT ID INTO n FROM APP.ORDERS; END;",
+        );
+        run
+    }
+
+    #[test]
+    fn adapter_clean_read_effects_are_admitted_at_read_only() {
+        let run = adapter_read_run();
+        let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+        let effects = oracle.routine_effects(&adapter_reference("LOOKUP"));
+        assert_eq!(effects, RoutineEffectsV1::new([RoutineEffect::ReadDb]));
+        assert_eq!(
+            oraclemcp_guard::admit(&effects, oraclemcp_guard::AdmissionContext::CustomToolCall),
+            Ok(OperatingLevel::ReadOnly)
+        );
+        assert_eq!(
+            oracle.routine_purity(&ObjectRef::parse("APP.LOOKUP")),
+            Purity::ProvenReadOnly
+        );
+    }
+
+    #[test]
+    fn adapter_gap3_unloaded_sys_call_is_unknown() {
+        for name in [
+            "SYS.UTL_HTTP.REQUEST",
+            "SYS.DBMS_SCHEDULER.RUN_JOB",
+            "SYSTEM.UTL_HTTP.REQUEST",
+        ] {
+            let mut run = adapter_read_run();
+            let parts: Vec<_> = name.split('.').collect();
+            add_node(
+                &mut run.dep_graph,
+                3,
+                name,
+                NodeIdentityKind::StandaloneFunction,
+            );
+            // Even a loaded, Clean body does not substitute for a reviewed SYS identity.
+            add_source_unit(&mut run, name, "BEGIN NULL; END;");
+            let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+            let reference = RoutineRef {
+                schema: Some(oraclemcp_guard::RoutineIdentifier::new(parts[0], false)),
+                package: Some(oraclemcp_guard::RoutineIdentifier::new(parts[1], false)),
+                member: oraclemcp_guard::RoutineIdentifier::new(parts[2], false),
+                overload: None,
+            };
+            assert_eq!(
+                oracle.routine_effects(&reference),
+                unknown_effects(),
+                "{name}"
+            );
+            let mut unloaded = run.clone();
+            unloaded.invocation_index.units.remove(name);
+            assert_eq!(
+                PlsqlSideEffectOracle::from_analysis_run(&unloaded).routine_effects(&reference),
+                unknown_effects()
+            );
+        }
+        // Nor may an allowlisted identity synthesize an unavailable source closure.
+        let mut reference = adapter_reference("SUBSTR");
+        reference.schema = Some(oraclemcp_guard::RoutineIdentifier::new("SYS", false));
+        reference.package = Some(oraclemcp_guard::RoutineIdentifier::new("DBMS_LOB", false));
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&adapter_read_run())
+                .routine_effects(&reference),
+            unknown_effects()
+        );
+
+        let mut transitive = adapter_read_run();
+        let callee = "SYS.DBMS_UNREVIEWED.READ";
+        add_node(
+            &mut transitive.dep_graph,
+            3,
+            callee,
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_edge(&mut transitive.dep_graph, 2, 1, 3, EdgeKind::Calls);
+        transitive.invocation_index.units.remove("APP.LOOKUP");
+        add_source_unit(
+            &mut transitive,
+            "APP.LOOKUP",
+            "BEGIN RETURN SYS.DBMS_UNREVIEWED.READ(); END;",
+        );
+        add_source_unit(&mut transitive, callee, "BEGIN NULL; END;");
+        let closure = transitive.invocation_closure(&InvocationShapeV1 {
+            routine_id: "APP.LOOKUP".into(),
+            ..InvocationShapeV1::default()
+        });
+        assert!(
+            closure.clean && closure.units.contains(callee),
+            "exercise a loaded transitive SYS callee: {closure:?}"
+        );
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&transitive)
+                .routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+    }
+
+    #[test]
+    fn adapter_sys_policy_never_erases_engine_effects() {
+        let mut run = adapter_read_run();
+        let id = "SYS.DBMS_LOB.SUBSTR";
+        add_node(
+            &mut run.dep_graph,
+            3,
+            id,
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_source_unit(&mut run, id, "BEGIN UPDATE t SET n=1; END;");
+        let mut reference = adapter_reference("SUBSTR");
+        reference.schema = Some(oraclemcp_guard::RoutineIdentifier::new("SYS", false));
+        reference.package = Some(oraclemcp_guard::RoutineIdentifier::new("DBMS_LOB", false));
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&run).routine_effects(&reference),
+            RoutineEffectsV1::new([
+                RoutineEffect::ReadDb,
+                RoutineEffect::Dml,
+                RoutineEffect::ExternalIo
+            ])
+        );
+    }
+
+    #[test]
+    fn adapter_gap4_no_case_insensitive_fallback() {
+        let mut run = adapter_read_run();
+        add_node(
+            &mut run.dep_graph,
+            3,
+            "APP.MixedCase",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_source_unit(&mut run, "APP.MixedCase", "BEGIN NULL; END;");
+        let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+        assert_eq!(
+            oracle.routine_purity(&ObjectRef::parse("APP.mixedcase")),
+            Purity::Unknown
+        );
+        assert_eq!(
+            oracle.routine_effects(&adapter_reference("mixedcase")),
+            unknown_effects()
+        );
+        let mut exact = adapter_reference("unused");
+        exact.member = oraclemcp_guard::RoutineIdentifier::new("MixedCase", true);
+        assert_eq!(oracle.routine_effects(&exact), RoutineEffectsV1::default());
+        exact.member.text = "Mixed.Case".into();
+        assert_eq!(
+            oracle.routine_effects(&exact),
+            unknown_effects(),
+            "flattened separators cannot identify one unit"
+        );
+    }
+
+    #[test]
+    fn adapter_quoted_and_owner_chain_calls_cannot_inherit_bare_proof() {
+        let mut run = adapter_read_run();
+        add_node(
+            &mut run.dep_graph,
+            3,
+            "LOOKUP",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_source_unit(&mut run, "LOOKUP", "BEGIN NULL; END;");
+        add_node(
+            &mut run.dep_graph,
+            4,
+            "A.B",
+            NodeIdentityKind::StandaloneFunction,
+        );
+        add_source_unit(&mut run, "A.B", "BEGIN NULL; END;");
+        let classifier = classifier_from_analysis_run(&run);
+        assert_eq!(
+            classifier
+                .classify("SELECT LOOKUP(id) FROM APP.ORDERS")
+                .danger,
+            DangerLevel::Safe
+        );
+        for sql in [
+            "SELECT \"EVIL\".\"LOOKUP\"(id) FROM APP.ORDERS",
+            "SELECT EVIL.PKG.LOOKUP(id) FROM APP.ORDERS",
+            "SELECT \"lookup\"(id) FROM APP.ORDERS",
+            "SELECT \"A.B\"(id) FROM APP.ORDERS",
+        ] {
+            assert_eq!(
+                classifier.classify(sql).danger,
+                DangerLevel::Guarded,
+                "a richer or quoted identity must not collapse to the loaded bare LOOKUP: {sql}"
+            );
+        }
+    }
+
+    #[test]
+    fn adapter_gap5_partial_is_untrusted() {
+        let mut run = adapter_read_run();
+        run.completeness.posture = CompletenessPosture::Partial;
+        let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+        assert_eq!(
+            oracle.routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+        assert_eq!(
+            oracle.routine_purity(&ObjectRef::parse("APP.LOOKUP")),
+            Purity::Unknown
+        );
+        assert_eq!(
+            oracle.statement_purity(&[ObjectRef::parse("APP.ORDERS")]),
+            Purity::Unknown
+        );
+    }
+
+    #[test]
+    fn adapter_low_confidence_is_untrusted() {
+        let mut run = adapter_read_run();
+        run.completeness.posture = CompletenessPosture::LowConfidence;
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&run)
+                .routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+        run.completeness.posture = CompletenessPosture::Clean;
+        run.dep_graph.edges[0].confidence.level = ConfidenceLevel::Low;
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&run)
+                .routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+        run.dep_graph.edges[0].confidence.level = ConfidenceLevel::High;
+        run.invocation_index
+            .units
+            .get_mut("APP.LOOKUP")
+            .unwrap()
+            .source_complete = false;
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&run)
+                .routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects(),
+            "a Clean run cannot repair a non-Clean closure"
+        );
+    }
+
+    #[test]
+    fn adapter_missing_catalog_is_unknown() {
+        let mut run = adapter_read_run();
+        run.catalog = None;
+        let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+        assert_eq!(
+            oracle.routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+        assert_eq!(
+            oracle.statement_purity(&[ObjectRef::parse("APP.ORDERS")]),
+            Purity::Unknown
+        );
+        assert_eq!(oracle.statement_purity(&[]), Purity::Unknown);
+        assert_eq!(
+            oracle.catalog_vpd_purity_for_node(NodeId::new(2)),
+            Purity::Unknown
+        );
+    }
+
+    #[test]
+    fn adapter_ambiguous_overload_is_unknown() {
+        let mut run = adapter_read_run();
+        run.invocation_index.units.remove("APP.LOOKUP");
+        for (id, node) in [("APP.LOOKUP#1", 3), ("APP.LOOKUP#2", 4)] {
+            add_node(
+                &mut run.dep_graph,
+                node,
+                id,
+                NodeIdentityKind::StandaloneFunction,
+            );
+            add_source_unit(&mut run, id, "BEGIN NULL; END;");
+        }
+        let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+        assert_eq!(
+            oracle.routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+        let mut exact = adapter_reference("LOOKUP");
+        exact.overload = Some(1);
+        assert_eq!(oracle.routine_effects(&exact), RoutineEffectsV1::default());
+        exact.overload = Some(3);
+        assert_eq!(oracle.routine_effects(&exact), unknown_effects());
+    }
+
+    #[test]
+    fn adapter_invalid_catalog_member_is_unknown() {
+        let mut run = adapter_read_run();
+        let catalog = run.catalog.as_mut().unwrap();
+        let owner = catalog.interner.intern_schema_name("APP").unwrap();
+        let name = plsql_core::ObjectName::from(catalog.interner.intern("LOOKUP").unwrap());
+        let mut function = plsql_catalog::FunctionMetadata::default();
+        function.common.owner = owner;
+        function.common.name = name;
+        function.common.status = plsql_catalog::ObjectStatus::Invalid;
+        catalog
+            .schemas
+            .entry(owner)
+            .or_default()
+            .objects
+            .insert(name, plsql_catalog::CatalogObject::Function(function));
+        assert_eq!(
+            PlsqlSideEffectOracle::from_analysis_run(&run)
+                .routine_effects(&adapter_reference("LOOKUP")),
+            unknown_effects()
+        );
+    }
+
+    #[test]
+    fn effects_contract_parity() {
+        use plsql_engine::{OperatorStatementClass as O, RoutineEffect as E};
+        let engine = plsql_engine::RoutineEffectsV1::new([
+            E::ReadDb,
+            E::RowLock,
+            E::SessionState,
+            E::Dml,
+            E::Ddl,
+            E::Admin,
+            E::SequenceAdvance,
+            E::OperatorOnly(O::DefaultEditionFlip),
+            E::TxnControl,
+            E::Autonomous,
+            E::DynamicSql,
+            E::ExternalIo,
+            E::Unknown,
+        ]);
+        let mapped = map_engine_effects(&engine);
+        assert_eq!(
+            serde_json::to_value(&engine).unwrap(),
+            serde_json::to_value(&mapped).unwrap()
+        );
+        // A new guard variant also makes this reverse contract check fail to
+        // compile, rather than disappearing from a manually counted list.
+        let reverse =
+            plsql_engine::RoutineEffectsV1::new(mapped.iter().map(|effect| match effect {
+                RoutineEffect::ReadDb => E::ReadDb,
+                RoutineEffect::RowLock => E::RowLock,
+                RoutineEffect::SessionState => E::SessionState,
+                RoutineEffect::Dml => E::Dml,
+                RoutineEffect::Ddl => E::Ddl,
+                RoutineEffect::Admin => E::Admin,
+                RoutineEffect::SequenceAdvance => E::SequenceAdvance,
+                RoutineEffect::OperatorOnly(class) => E::OperatorOnly(match class {
+                    oraclemcp_guard::OperatorStatementClass::DefaultEditionFlip => {
+                        O::DefaultEditionFlip
+                    }
+                }),
+                RoutineEffect::TxnControl => E::TxnControl,
+                RoutineEffect::Autonomous => E::Autonomous,
+                RoutineEffect::DynamicSql => E::DynamicSql,
+                RoutineEffect::ExternalIo => E::ExternalIo,
+                RoutineEffect::Unknown => E::Unknown,
+            }));
+        assert_eq!(reverse, engine);
+        assert_eq!(
+            map_engine_effects(&plsql_engine::RoutineEffectsV1::new([E::OperatorOnly(
+                O::DefaultEditionFlip
+            )])),
+            RoutineEffectsV1::new([RoutineEffect::OperatorOnly(
+                oraclemcp_guard::OperatorStatementClass::DefaultEditionFlip
+            )])
+        );
+    }
+
+    #[test]
+    fn sys_effects_toml_parses_and_is_tighten_only() {
+        let effects = parse_sys_effects(SYS_EFFECTS_SOURCE).unwrap();
+        assert_eq!(effects.len(), 3);
+        for (name, effect) in [
+            ("SYS.DBMS_LOB.SUBSTR", RoutineEffect::ExternalIo),
+            ("SYS.DBMS_XPLAN.DISPLAY", RoutineEffect::DynamicSql),
+        ] {
+            assert!(effects[name].iter().any(|actual| actual == effect));
+            assert!(
+                oraclemcp_guard::admit(
+                    &effects[name],
+                    oraclemcp_guard::AdmissionContext::CustomToolCall
+                )
+                .is_err(),
+                "an identity-wide policy cannot prove a safe overload or arbitrary filter: {name}"
+            );
+        }
+        for mutation in [
+            SYS_EFFECTS_SOURCE.replace("schema_version = 1", "schema_version = 2"),
+            SYS_EFFECTS_SOURCE.replace("effects = [\"ReadDb\"]", "effects = []"),
+            SYS_EFFECTS_SOURCE.replace(
+                "effects = [\"ReadDb\", \"ExternalIo\"]",
+                "effects = [\"ReadDb\"]",
+            ),
+            SYS_EFFECTS_SOURCE.replace(
+                "effects = [\"ReadDb\", \"DynamicSql\"]",
+                "effects = [\"ReadDb\"]",
+            ),
+            SYS_EFFECTS_SOURCE.replace("SYS.DBMS_LOB.SUBSTR", "SYS.DBMS_LOB.WRITE"),
+            format!(
+                "{SYS_EFFECTS_SOURCE}\n[[routine]]\nidentity=\"SYS.UTL_HTTP.REQUEST\"\neffects=[\"ReadDb\"]\n"
+            ),
+            format!(
+                "{SYS_EFFECTS_SOURCE}\n[[routine]]\nidentity=\"SYS.DBMS_LOB.SUBSTR\"\neffects=[\"ReadDb\"]\n"
+            ),
+            SYS_EFFECTS_SOURCE.replace(
+                "effects = [\"ReadDb\"]",
+                "effects = [\"ReadDb\",\"ReadDb\"]",
+            ),
+            SYS_EFFECTS_SOURCE.replace("effects = [\"ReadDb\"]", "effects = [\"FutureEffect\"]"),
+        ] {
+            assert!(
+                parse_sys_effects(&mutation).is_err(),
+                "unreviewed or malformed policy was accepted"
+            );
+        }
+        assert_eq!(
+            sys_effects_marker(&effects),
+            "sha256:a70072bc57f365ae33b9a2607f4b94791561a02b14c59e74037d4ed90bc1c58e"
+        );
+    }
+
+    fn assert_engine_adapter_unknown(source: &str) {
+        let project = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("fixture.sql"), source).unwrap();
+        let mut run = analyze_project(AnalysisRequest {
+            project_root: project.path().to_owned(),
+            ..AnalysisRequest::default()
+        })
+        .unwrap();
+        let closure = run.invocation_closure(&InvocationShapeV1 {
+            routine_id: "FX".into(),
+            ..InvocationShapeV1::default()
+        });
+        assert!(
+            !closure.clean
+                && closure
+                    .effects
+                    .effects
+                    .contains(&plsql_engine::RoutineEffect::Unknown),
+            "engine must retain this source uncertainty: {closure:?}"
+        );
+        run.catalog = Some(empty_catalog());
+        let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
+        let mut reference = adapter_reference("FX");
+        reference.schema = None;
+        assert_eq!(oracle.routine_effects(&reference), unknown_effects());
+        assert_eq!(
+            oracle.routine_purity(&ObjectRef::parse("FX")),
+            Purity::Unknown
+        );
+    }
+
+    #[test]
+    fn wrapped_body_refused() {
+        assert_engine_adapter_unknown("CREATE OR REPLACE PROCEDURE fx WRAPPED\na000000\n/");
+    }
+
+    #[test]
+    fn dynamic_execute_immediate_refused() {
+        for body in [
+            "EXECUTE IMMEDIATE query_text;",
+            "EXECUTE IMMEDIATE 'UPDATE t SET n=' || input_value;",
+        ] {
+            assert_engine_adapter_unknown(&format!(
+                "CREATE OR REPLACE PROCEDURE fx IS BEGIN {body} END fx; /"
+            ));
+        }
+    }
+
+    #[test]
+    fn dbms_sql_refused() {
+        for call in [
+            "DBMS_SQL.PARSE(c,query_text,1);",
+            "DBMS_SCHEDULER.RUN_JOB('J');",
+            "DBMS_PIPE.SEND_MESSAGE('P');",
+            "DBMS_AQ.LISTEN(NULL,NULL,NULL);",
+            "UTL_HTTP.REQUEST('http://example.invalid/');",
+        ] {
+            assert_engine_adapter_unknown(&format!(
+                "CREATE OR REPLACE PROCEDURE fx IS BEGIN {call} END fx; /"
+            ));
+        }
+    }
+
+    #[test]
+    fn authid_current_user_refused() {
+        assert_engine_adapter_unknown(
+            "CREATE OR REPLACE PROCEDURE fx AUTHID CURRENT_USER IS BEGIN NULL; END fx; /",
+        );
+    }
+
+    #[test]
+    fn java_and_external_procedure_refused() {
+        for source in [
+            "CREATE OR REPLACE PROCEDURE fx AS LANGUAGE JAVA NAME 'X.f()'; /",
+            "CREATE OR REPLACE PROCEDURE fx AS EXTERNAL NAME 'f' LIBRARY l; /",
+        ] {
+            assert_engine_adapter_unknown(source);
+        }
+    }
+
+    #[test]
     fn plsql_side_effect_oracle_proves_clean_routine_and_statement() {
         let mut graph = DepGraph::new();
         add_node(&mut graph, 1, "APP.ORDERS", NodeIdentityKind::Table);
@@ -3207,7 +4015,8 @@ mod tests {
             NodeIdentityKind::StandaloneFunction,
         );
 
-        let run = analysis_run(graph, Some(empty_catalog()));
+        let mut run = analysis_run(graph, Some(empty_catalog()));
+        add_source_unit(&mut run, "APP.LOOKUP", "BEGIN NULL; END;");
         let classifier = classifier_from_analysis_run(&run);
         let d = classifier.classify("SELECT APP.LOOKUP(id) FROM APP.ORDERS");
 
@@ -3232,7 +4041,12 @@ mod tests {
         add_node(&mut graph, 3, "APP.AUDIT_LOG", NodeIdentityKind::Table);
         add_edge(&mut graph, 1, 2, 3, EdgeKind::Writes);
 
-        let run = analysis_run(graph, Some(empty_catalog()));
+        let mut run = analysis_run(graph, Some(empty_catalog()));
+        add_source_unit(
+            &mut run,
+            "APP.PURGE",
+            "BEGIN UPDATE APP.AUDIT_LOG SET ID=1; END;",
+        );
         let classifier = classifier_from_analysis_run(&run);
 
         assert_eq!(
@@ -3282,10 +4096,9 @@ mod tests {
             add_node(&mut graph, 2, "APP.DEPENDENCY", NodeIdentityKind::Table);
             add_edge(&mut graph, 1, 1, 2, kind);
 
-            let oracle = PlsqlSideEffectOracle::from_analysis_run(&analysis_run(
-                graph,
-                Some(empty_catalog()),
-            ));
+            let mut run = analysis_run(graph, Some(empty_catalog()));
+            add_source_unit(&mut run, "APP.CALLER", "BEGIN NULL; END;");
+            let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
             assert_eq!(
                 oracle.routine_purity(&ObjectRef::parse("APP.CALLER")),
                 Purity::ProvenSideEffecting,
@@ -3328,7 +4141,8 @@ mod tests {
             "LOOKUP",
             NodeIdentityKind::StandaloneFunction,
         );
-        let run = analysis_run(graph, Some(empty_catalog()));
+        let mut run = analysis_run(graph, Some(empty_catalog()));
+        add_source_unit(&mut run, "LOOKUP", "BEGIN NULL; END;");
         let oracle = PlsqlSideEffectOracle::from_analysis_run(&run);
 
         assert_eq!(
