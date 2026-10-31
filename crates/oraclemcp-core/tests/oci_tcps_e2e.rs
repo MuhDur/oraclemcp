@@ -224,9 +224,15 @@ fn spawn_tcps_terminator_without_client_auth(
     spawn_tcps_terminator_with_config(server_config_without_client_auth(&material))
 }
 
+/// Observes one connection if the driver dials, and `None` if it never does.
+/// The verdict waits for `client_done`, sent (or dropped) once the client's
+/// connect attempt has returned, never for a wall-clock window: a dial that
+/// completed before then is already in the accept queue for the final accept.
+/// `backstop` only turns a hung client into a failure, never into a pass.
 fn spawn_optional_tcps_terminator(
     material: SyntheticMaterial,
-    wait_for_dial: Duration,
+    client_done: mpsc::Receiver<()>,
+    backstop: Duration,
 ) -> TerminatorHandle<Option<TerminatorObservation>> {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback TCPS terminator");
     listener
@@ -237,15 +243,21 @@ fn spawn_optional_tcps_terminator(
     let (tx, rx) = mpsc::channel();
     let handle = std::thread::spawn(move || {
         let outcome = (|| -> Result<Option<TerminatorObservation>, String> {
-            let deadline = Instant::now() + wait_for_dial;
+            let deadline = Instant::now() + backstop;
             loop {
+                let finished = !matches!(client_done.try_recv(), Err(mpsc::TryRecvError::Empty));
                 match listener.accept() {
                     Ok((sock, peer)) => {
                         return observe_tcps_connection(sock, peer, config).map(Some);
                     }
                     Err(err) if err.kind() == ErrorKind::WouldBlock => {
-                        if Instant::now() >= deadline {
+                        // `finished` was read before this accept, so a dial
+                        // made before the client returned has been seen.
+                        if finished {
                             return Ok(None);
+                        }
+                        if Instant::now() >= deadline {
+                            return Err(format!("client gave no done signal within {backstop:?}"));
                         }
                         std::thread::sleep(Duration::from_millis(20));
                     }
@@ -726,8 +738,9 @@ fn b6_ssl_cert_dir_public_root_reaches_local_tcps_terminator() {
 #[test]
 fn p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator() {
     let material = synthetic_material();
+    let (client_done, done_rx) = mpsc::channel();
     let (port, rx, server) =
-        spawn_optional_tcps_terminator(material.clone(), Duration::from_millis(1500));
+        spawn_optional_tcps_terminator(material.clone(), done_rx, Duration::from_secs(120));
     let lab_dir = unique_lab_dir();
     let (wallet, token_file) = write_lab_wallet(&lab_dir, port, &material);
     let profile = profile_with_sni(&wallet, &token_file, None);
@@ -747,12 +760,14 @@ fn p2_4_wallet_profile_without_explicit_sni_reaches_local_tcps_terminator() {
             Err(err) => err.to_string(),
         }
     });
+    // The connect attempt has returned: any dial it made is queued or served.
+    drop(client_done);
     assert!(
         !rendered.contains("use_sni=true cannot be honored"),
         "wallet-only profiles must not force an unsupported SNI failure: {rendered}"
     );
     let observed = rx
-        .recv_timeout(Duration::from_secs(3))
+        .recv()
         .expect("terminator reports whether the driver dialed")
         .expect("terminator probe did not fail");
     server.join().expect("terminator thread joins");
