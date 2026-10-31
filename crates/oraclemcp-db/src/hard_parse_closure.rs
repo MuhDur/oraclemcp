@@ -1176,6 +1176,39 @@ mod tests {
         proof.statements[0].security_feature_evidence[0].redaction = RelationSecurityState::Absent;
         assert_ne!(observed, proof.digest(), "unknown is not absence");
         assert!(proof.is_complete());
+        for (feature, name) in ["ols", "ras", "redaction"].into_iter().enumerate() {
+            let fact = &mut proof.statements[0].security_feature_evidence[0];
+            fact.ols = RelationSecurityState::Absent;
+            fact.ras = RelationSecurityState::Absent;
+            fact.redaction = RelationSecurityState::Absent;
+            let absent = proof.digest();
+            let fact = &mut proof.statements[0].security_feature_evidence[0];
+            *[&mut fact.ols, &mut fact.ras, &mut fact.redaction][feature] =
+                RelationSecurityState::Unavailable;
+            assert_eq!(proof.admit(), Ok(()), "default {name} admission");
+            assert!(!proof.is_complete(), "{name} remains unknown");
+            let retained = serde_json::to_value(&proof.statements[0].security_feature_evidence[0])
+                .expect("typed observation");
+            assert_eq!(
+                retained[name], "unavailable",
+                "retain the {name} observation"
+            );
+            assert_eq!(retained["key"]["object_id"], 42);
+            let observed = proof.digest();
+            assert_ne!(absent, observed, "{name} unknown is not absence");
+            proof.require_security_feature_evidence = true;
+            assert_eq!(
+                proof.admit().unwrap_err(),
+                CompileParseUnproven {
+                    statement_ordinal: 1,
+                    callback_class: CompileParseCallbackClass::SecurityPolicy,
+                    reason: CompileUnknown::CatalogUnreadable,
+                },
+                "strict {name} must refuse independently"
+            );
+            assert_ne!(observed, proof.digest(), "strict {name} binds the preview");
+            proof.require_security_feature_evidence = false;
+        }
         for feature in 0..3 {
             for strict in [false, true] {
                 proof.require_security_feature_evidence = strict;
