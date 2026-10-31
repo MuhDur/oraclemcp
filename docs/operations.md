@@ -114,15 +114,14 @@ the classifier or policy.
 
 ## 1. The pinned nightly toolchain is build-time-only
 
-`oraclemcp` builds on a pinned Rust toolchain (`nightly-2026-05-11`, recorded in
-`rust-toolchain.toml`). This checkout resolves **asupersync 0.3.9**. The line
-has no stable MSRV because its
-`nightly-outcome-try` feature (`try_trait_v2` + `try_trait_v2_residual`) is
-opt-in but on by default and reaches the build through the `oraclemcp-driver-cx` 0.9.3
-dependency, and on Windows `oraclemcp-core` also needs
-`windows_by_handle`. The `oraclemcp-driver-cx` 0.9.3 driver's own source is stable-clean —
-it is its asupersync dependency declaration that pulls the nightly feature in.
-[`toolchain.md`](toolchain.md) §1 has the exact mechanism.
+`oraclemcp` keeps `nightly-2026-05-11` as its default and release toolchain.
+Linux and macOS also check, test and package on stable Rust. This checkout
+resolves **asupersync 0.3.9** with default features disabled in both server and
+driver; its optional `nightly-outcome-try` feature must remain absent.
+The `oraclemcp-driver-cx` 0.9.3 driver's own source is stable-clean.
+Windows still needs nightly for `windows_by_handle` in both `oraclemcp-core`
+and `oraclemcp-audit` (link counts and volume/file identity).
+[`toolchain.md`](toolchain.md) §1 describes the enforced feature graph.
 
 **This is invisible at runtime.** Once compiled, `oraclemcp` is an ordinary
 native binary. The toolchain pin matters only when you build the binary or image

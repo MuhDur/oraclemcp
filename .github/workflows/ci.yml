@@ -501,10 +501,57 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: bash scripts/release_acceptance_ci_suite.sh --skip-feature-powerset
 
-  # The thin-native line is pinned to nightly. Asupersync depends on specific nightly-only language features,
-  # pulled in transitively by its dependency declaration; oraclemcp-driver-cx 0.9.3 is stable-clean
-  # (see docs/toolchain.md). This is a build-only ratchet separate from the test job
-  # so toolchain installation failures stay obvious.
+  # Linux/macOS build on stable with nightly-outcome-try disabled.
+  # oraclemcp-driver-cx 0.9.3 is stable-clean; runtime defaults stay disabled.
+  stable-toolchain:
+    name: stable-toolchain (${{ matrix.os }})
+    needs: web-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: stable-${{ matrix.os }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Use the isolated macOS runner without the Linux compiler interceptor
+        if: runner.os == 'macOS'
+        run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
+      - name: Refuse nightly runtime features on every target
+        shell: bash
+        run: |
+          set -euo pipefail
+          features="$(cargo +stable tree --locked -e features --workspace --all-features --target all -i asupersync)"
+          printf '%s\n' "$features"
+          case "$features" in
+            *'asupersync feature "nightly-outcome-try"'*)
+              echo 'nightly-outcome-try is forbidden in the stable runtime graph' >&2
+              exit 1
+              ;;
+          esac
+      - run: cargo +stable check --workspace --all-targets --locked
+      - run: cargo +stable test --workspace --locked
+      - run: cargo +stable package --workspace --no-verify --locked
+
+  # Keep the default/release nightly and Windows nightly qualification separate
+  # from the required stable Linux/macOS jobs (see docs/toolchain.md).
   pinned-nightly:
     name: build on pinned nightly
     needs: web-build

@@ -1,13 +1,19 @@
-# ADR 0001 — Pinned nightly toolchain, no stable MSRV
+# ADR 0001 — Pinned default and release toolchain
 
 ## Status
 
-Accepted (0.4.0). **Decision stands; its stated reason was corrected 2026-07-16
-— see [Correction](#correction-2026-07-16-bead-oraclemcp-yi2z) before relying on
-the Context below.** In short: asupersync does not *require* nightly (the
-feature is opt-in, merely on by default), driver-cx *is* the proximate cause
-(its dependency declaration does not opt out), and Windows needs nightly for a
-second, unrelated reason. The Context is preserved as written for the record.
+Accepted (0.4.0), updated by `.11.12` on 2026-10-31. The default and release
+pin remains `nightly-2026-05-11`; Linux/macOS also check, test and package on
+stable Rust. The pinned `oraclemcp-driver-cx` 0.9.3 driver's own source is stable-clean,
+and both driver and server now disable defaults for asupersync 0.3.9 while
+retaining the features they use. The `nightly-outcome-try` feature is forbidden
+by the feature-tree checks. Windows still requires nightly for
+`windows_by_handle` in `oraclemcp-core` and `oraclemcp-audit`.
+
+The original context, decision and July correction below are historical. The
+implemented opt-out resolves their non-Windows review trigger without changing
+the default/release pin. Current requirements live in
+[`docs/toolchain.md`](../toolchain.md).
 
 ## Context
 

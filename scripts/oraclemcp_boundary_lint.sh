@@ -415,6 +415,17 @@ fi
 
 echo "oraclemcp-boundary-lint: OK — ${#core_crates[@]} core crate(s) are engine-free."
 
+# The driver's asupersync defaults previously re-enabled nightly-only Try
+# implementations for the whole server graph. Inspect every feature/target so
+# an optional or Windows-only edge cannot silently break stable Linux/macOS.
+runtime_features="$(cargo tree --locked -e features --workspace --all-features --target all -i asupersync)"
+case "$runtime_features" in
+  *'asupersync feature "nightly-outcome-try"'*)
+    echo 'BOUNDARY VIOLATION: asupersync nightly-outcome-try breaks stable builds' >&2
+    violations=$((violations + 1))
+    ;;
+esac
+
 check_forbidden_graphs
 show_all_target_dependency_graph
 inspect_opentelemetry_runtime

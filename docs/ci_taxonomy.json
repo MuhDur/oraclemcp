@@ -376,6 +376,32 @@
       "path_filtered": false
     },
     {
+      "check_name": "stable-toolchain (macos-latest)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "stable-toolchain",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
+      "check_name": "stable-toolchain (ubuntu-latest)",
+      "tier": "required",
+      "workflow": "CI",
+      "workflow_file": "ci.yml",
+      "job_id": "stable-toolchain",
+      "triggers": [
+        "pull_request",
+        "push",
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "web bundle (npm ci + vite build)",
       "tier": "required",
       "workflow": "CI",
@@ -954,6 +980,8 @@
         "release acceptance suite (B.12)",
         "rustfmt",
         "sensitive-data lint",
+        "stable-toolchain (macos-latest)",
+        "stable-toolchain (ubuntu-latest)",
         "web bundle (npm ci + vite build)"
       ]
     },
@@ -1137,6 +1165,8 @@
       "release acceptance suite (B.12)",
       "rustfmt",
       "sensitive-data lint",
+      "stable-toolchain (macos-latest)",
+      "stable-toolchain (ubuntu-latest)",
       "web bundle (npm ci + vite build)"
     ],
     "scheduled": [

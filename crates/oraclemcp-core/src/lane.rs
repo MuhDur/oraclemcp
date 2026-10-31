@@ -1921,7 +1921,10 @@ impl ToolDispatch for StatefulLaneDispatch {
                     "stateful lane resolution cancelled before admission",
                 ));
             }
-            let lane = self.resolve_lane(cx, context)?;
+            let lane = match self.resolve_lane(cx, context) {
+                Ok(lane) => lane,
+                Err(error) => return Outcome::Err(error),
+            };
             lane.dispatch(cx, context, name, args).await
         })
     }
@@ -1942,7 +1945,10 @@ impl ToolDispatch for StatefulLaneDispatch {
                     "stateful streaming lane resolution cancelled before admission",
                 ));
             }
-            let lane = self.resolve_lane(cx, context)?;
+            let lane = match self.resolve_lane(cx, context) {
+                Ok(lane) => lane,
+                Err(error) => return Outcome::Err(error),
+            };
             lane.dispatch_stream_start(cx, context, name, args, frames)
                 .await
         })
@@ -1962,7 +1968,10 @@ impl ToolDispatch for StatefulLaneDispatch {
                     "stateful surface resolution cancelled before admission",
                 ));
             }
-            let lane = self.resolve_lane(cx, context)?;
+            let lane = match self.resolve_lane(cx, context) {
+                Ok(lane) => lane,
+                Err(error) => return Outcome::Err(error),
+            };
             lane.mcp_surface_state(cx, context, detail).await
         })
     }
@@ -4898,14 +4907,32 @@ mod tests {
             entered: entered_tx,
         }));
 
-        let err = block_on_lane_bridge(async {
+        let errors = block_on_lane_bridge(async {
             let cx = Cx::current().expect("bridge installs Cx");
-            guarded
+            let dispatch = guarded
                 .dispatch(&cx, DispatchContext::default(), "stateful", Value::Null)
                 .await
-                .expect_err("stateful dispatch without session id is refused")
+                .expect_err("stateful dispatch without session id is refused");
+            let (frames_tx, _frames_rx) = mpsc::channel(1);
+            let stream = guarded
+                .dispatch_stream_start(
+                    &cx,
+                    DispatchContext::default(),
+                    "stateful",
+                    Value::Null,
+                    frames_tx,
+                )
+                .await
+                .expect_err("stream dispatch without session id is refused");
+            let surface = guarded
+                .mcp_surface_state(&cx, DispatchContext::default(), McpSurfaceDetail::LevelOnly)
+                .await
+                .expect_err("surface discovery without session id is refused");
+            [dispatch, stream, surface]
         });
-        assert_eq!(err.error_class, ErrorClass::LeaseRequired);
+        for err in errors {
+            assert_eq!(err.error_class, ErrorClass::LeaseRequired);
+        }
         assert_eq!(
             guarded.lane_count(),
             0,

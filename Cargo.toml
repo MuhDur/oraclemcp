@@ -18,15 +18,13 @@ edition = "2024"
 license = "Apache-2.0 OR MIT"
 repository = "https://github.com/MuhDur/oraclemcp"
 homepage = "https://github.com/MuhDur/oraclemcp"
-# No `rust-version`: the line is pinned to nightly for two independent reasons.
-# (1) asupersync's `nightly-outcome-try` feature enables feature(try_trait_v2) +
-# its residual. It is opt-in but in asupersync's DEFAULT set; we opt out below
-# (default-features = false), and it is re-enabled anyway because driver-cx
-# depends on asupersync WITHOUT opting out, and cargo unifies features. Nobody's
-# source uses the nightly syntax — it arrives transitively (bead oraclemcp-yi2z).
-# (2) Windows only: oraclemcp-core's windows_by_handle (see its lib.rs).
-# asupersync does not "require" nightly. The oraclemcp-driver-cx 0.9.3 driver's own source is stable-clean —
-# it is its dep declaration, not its source, that is the proximate cause. See docs/toolchain.md §1.
+# Default/release builds retain the pinned nightly; Linux/macOS also build on
+# current stable. Both server and driver disable asupersync defaults so its
+# nightly-outcome-try feature stays absent from the resolved graph.
+# Windows needs nightly for windows_by_handle in oraclemcp-core and
+# oraclemcp-audit (link counts and volume/file identity).
+# The oraclemcp-driver-cx 0.9.3 driver's own source is stable-clean.
+# See docs/toolchain.md for the stable jobs and release toolchain policy.
 keywords = ["oracle", "mcp", "database", "sql"]
 categories = ["database", "development-tools"]
 
@@ -97,8 +95,8 @@ plsql-output = { version = "=0.7.0", default-features = false }
 # Train-0.12 development pins. These exact public sibling revisions keep the
 # unreleased driver and PL/SQL crates in sync until R.5 publishes their RCs.
 [patch.crates-io]
-oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "4116fe7bb2355822c34530e1b5bc4a51b7be962b" }
-oraclemcp-driver-cx-protocol = { git = "https://github.com/MuhDur/rust-oracledb", rev = "4116fe7bb2355822c34530e1b5bc4a51b7be962b" }
+oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "39839946fdc2b3e10d58d6e48a060e09dc9f9d0b" }
+oraclemcp-driver-cx-protocol = { git = "https://github.com/MuhDur/rust-oracledb", rev = "39839946fdc2b3e10d58d6e48a060e09dc9f9d0b" }
 plsql-core = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "ca3ded2d720542cba062ba50302a849d41aaf3c1" }
 plsql-engine = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "ca3ded2d720542cba062ba50302a849d41aaf3c1" }
 plsql-catalog = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "ca3ded2d720542cba062ba50302a849d41aaf3c1" }

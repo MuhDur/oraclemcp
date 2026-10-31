@@ -219,16 +219,10 @@ if ! grep -Fq "fn $driver_seam_fn" "$connection_rs"; then
   fail "connection.rs must define fn $driver_seam_fn driver seam regression test"
 fi
 
-# Driver provenance: each doc must name the CURRENTLY PINNED driver version, so
-# a version bump cannot leave stale provenance behind. The anchor deliberately
-# says "own source is stable-clean" rather than the old "driver is stable-clean":
-# the driver's source carries no nightly features, but its asupersync dependency
-# declaration is what pulls `nightly-outcome-try` into the graph. The previous
-# anchor pinned the inaccurate framing in place and is why it survived several
-# doc passes (bead oraclemcp-yi2z). Keep the version interpolation.
-# The README is a user-facing front page, not a provenance surface: driver
-# provenance stays enforced in AGENTS.md, docs/operations.md, docs/toolchain.md,
-# the pinned-nightly ADR, behavior-inventory.md, Cargo.toml, and ci.yml (below).
+# Driver provenance names the currently pinned versions. Runtime defaults are
+# now disabled for stable Linux/macOS; the real feature-tree boundary additionally
+# refuses any reintroduction of asupersync nightly-outcome-try. Keep the version
+# interpolation and current toolchain-policy anchors across release surfaces.
 for provenance_doc in "AGENTS.md" "docs/operations.md"; do
   require_contains \
     "$provenance_doc" \
@@ -277,8 +271,8 @@ require_contains \
   "CI driver provenance"
 require_contains \
   ".github/workflows/ci.yml" \
-  "Asupersync depends on specific nightly-only language features" \
-  "CI nightly provenance"
+  "Linux/macOS build on stable with nightly-outcome-try disabled." \
+  "CI stable runtime provenance"
 require_contains \
   "AGENTS.md" \
   "asupersync $asupersync_version" \

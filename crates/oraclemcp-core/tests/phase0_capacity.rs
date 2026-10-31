@@ -48,11 +48,14 @@ impl ToolDispatch for DbProbeDispatch {
         Box::pin(async move {
             let lane_thread = format!("{:?}", std::thread::current().id());
             let started = Instant::now();
-            let rows = self
+            let rows = match self
                 .pool
                 .query_rows(cx, "SELECT 1 AS lane_ok FROM dual", Vec::new())
                 .await
-                .map_err(|err| db_error(&self.lane_id, "query", err))?;
+            {
+                Ok(rows) => rows,
+                Err(err) => return Outcome::Err(db_error(&self.lane_id, "query", err)),
+            };
             let elapsed_us = started.elapsed().as_micros();
             let observed = rows
                 .first()
