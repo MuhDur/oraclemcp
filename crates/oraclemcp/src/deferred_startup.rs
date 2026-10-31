@@ -546,7 +546,12 @@ mod tests {
     }
 
     fn audit_path(dir: &Path) -> std::path::PathBuf {
-        dir.join("audit").join("audit.jsonl")
+        // The sink refuses symlinked components, and macOS temp dirs sit under
+        // the /var -> /private/var symlink, so resolve the real path first.
+        dir.canonicalize()
+            .expect("canonical tempdir")
+            .join("audit")
+            .join("audit.jsonl")
     }
 
     #[test]
