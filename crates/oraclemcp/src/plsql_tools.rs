@@ -43,6 +43,7 @@ use plsql_sast::{CompletenessSnapshot, Rule};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+mod catalog_impact;
 mod sast_source;
 mod source_limits;
 
@@ -327,7 +328,8 @@ fn live_schema(include_changeset: bool) -> Value {
     let mut props = json!({
         "schemas": { "type": "array", "items": { "type": "string" }, "description": "Schema owners to extract. Omit to use the current schema." },
         "include_plscope": { "type": "boolean", "description": "Include PL/Scope rowsets when available. Defaults to true." },
-        "include_snapshot": { "type": "boolean", "description": "Include the full normalized CatalogSnapshot in the response. Defaults to false." }
+        "include_snapshot": { "type": "boolean", "description": "Include the normalized catalog with an explicit bounded PUBLIC synonym page. Inspect snapshot_export.status and counts. Defaults to false." },
+        "public_synonym_offset": { "type": "integer", "minimum": 0, "description": "Offset into the PUBLIC synonym page when include_snapshot=true. Follow snapshot_export.public_synonyms.next_offset. Defaults to 0." }
     });
     let mut required = Vec::new();
     if include_changeset {
@@ -1170,6 +1172,7 @@ struct LiveSnapshotArgs {
     schemas: Option<Vec<String>>,
     include_plscope: Option<bool>,
     include_snapshot: Option<bool>,
+    public_synonym_offset: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -1178,6 +1181,7 @@ struct BlastRadiusArgs {
     schemas: Option<Vec<String>>,
     include_plscope: Option<bool>,
     include_snapshot: Option<bool>,
+    public_synonym_offset: Option<u32>,
     changeset: ChangeSet,
     mode: Option<String>,
 }
@@ -2899,11 +2903,12 @@ async fn run_live_snapshot(
 ) -> Result<Value, ErrorEnvelope> {
     let report = extract_live_report(cx, conn, &args.schemas, args.include_plscope).await?;
     let snapshot = snapshot_from_report(&report)?;
-    Ok(snapshot_response(
+    snapshot_response(
         &report,
         snapshot,
         args.include_snapshot.unwrap_or(false),
-    ))
+        args.public_synonym_offset.unwrap_or(0),
+    )
 }
 
 async fn run_blast_radius(
@@ -2914,11 +2919,22 @@ async fn run_blast_radius(
     let report = extract_live_report(cx, conn, &args.schemas, args.include_plscope).await?;
     let snapshot = snapshot_from_report(&report)?;
     let mode = parse_predict_mode(args.mode.as_deref(), PredictMode::LiveSnapshot)?;
-    let prediction = predict(&args.changeset, mode);
-    Ok(json!({
-        "snapshot": snapshot_response(&report, snapshot, args.include_snapshot.unwrap_or(false)),
+    let prediction = catalog_impact::predict(&snapshot, &report, &args.changeset, mode)?;
+    let object_count = snapshot
+        .schemas
+        .values()
+        .map(|schema| schema.objects.len())
+        .sum();
+    let symbol_count = snapshot.interner.len();
+    let response = json!({
+        "snapshot": snapshot_response(&report, snapshot, args.include_snapshot.unwrap_or(false), args.public_synonym_offset.unwrap_or(0))?,
         "prediction": change_impact_envelope(&prediction, Vec::new()),
-    }))
+    });
+    Ok(catalog_impact::bound_response(
+        response,
+        object_count,
+        symbol_count,
+    ))
 }
 
 async fn extract_live_report(
@@ -2947,7 +2963,14 @@ fn snapshot_response(
     report: &CatalogExtractReport,
     snapshot: CatalogSnapshot,
     include_snapshot: bool,
-) -> Value {
+    public_synonym_offset: u32,
+) -> Result<Value, ErrorEnvelope> {
+    let object_count = snapshot
+        .schemas
+        .values()
+        .map(|schema| schema.objects.len())
+        .sum();
+    let symbol_count = snapshot.interner.len();
     let row_counts: Vec<Value> = report
         .batches
         .iter()
@@ -2966,9 +2989,17 @@ fn snapshot_response(
         "doctor": doctor,
     });
     if include_snapshot && let Value::Object(map) = &mut value {
-        map.insert("catalog_snapshot".to_owned(), json!(snapshot));
+        let exported = catalog_impact::export(snapshot, public_synonym_offset)?;
+        map.insert("snapshot_export".to_owned(), json!(exported.status));
+        if let Some(body) = exported.body {
+            map.insert("catalog_snapshot".to_owned(), body);
+        }
     }
-    value
+    Ok(catalog_impact::bound_response(
+        value,
+        object_count,
+        symbol_count,
+    ))
 }
 
 fn snapshot_from_report(report: &CatalogExtractReport) -> Result<CatalogSnapshot, ErrorEnvelope> {

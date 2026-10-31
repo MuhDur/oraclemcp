@@ -33,6 +33,7 @@ from fixture import (admin_password, connect_admin, kill_session_sql, load_lane,
                      set_flashback_grant, setup as fixture_setup, teardown as fixture_teardown)
 from scrub import scrub
 import aliases
+import plsql
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -99,8 +100,11 @@ def expand_case(value, run_id, transport, lane=None):
     if lane is not None:
         # Version-specific output (DBMS_METADATA DDL text) has one golden per lane.
         replacements["${lane}"] = lane
-        replacements["${project_root}"] = str(plsql_project_path(run_id, transport, lane))
+        if lane != "offline":
+            replacements["${project_root}"] = str(plsql_project_path(run_id, transport, lane))
     if isinstance(value, str):
+        if value.startswith("${plsql_"):
+            return plsql.expand_fixture(sys.modules[__name__], value, run_id, transport, lane)
         if value == "${http_transport}":
             return transport == "http"
         for key, replacement in replacements.items():
@@ -1008,8 +1012,11 @@ def contract_baselines(cases):
 
 class StdioClient:
     def __init__(self, binary, profile, env):
+        command = [str(binary), "serve", "--allow-no-auth"]
+        if profile is not None:
+            command.extend(["--profile", profile])
         self.process = subprocess.Popen(
-            [str(binary), "serve", "--profile", profile, "--allow-no-auth"],
+            command,
             env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, bufsize=1)
         self.lines = queue.Queue()
@@ -1108,7 +1115,10 @@ class HttpClient:
         command = [str(binary), "--json", "serve", "--listen", f"127.0.0.1:{port}"]
         if not streaming:
             command.append("--http-json-response")
-        command.extend(["--profile", profile])
+        if profile is None:
+            command.append("--allow-no-auth")
+        else:
+            command.extend(["--profile", profile])
         self.process = subprocess.Popen(
             command,
             env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -1120,7 +1130,7 @@ class HttpClient:
             require(self.process.poll() is None,
                     f"HTTP server exited before readiness: {list(self.stderr_tail)}")
             try:
-                status, _, _ = self._request("GET", "/readyz", None, auth=False)
+                status, _, _ = self._request("GET", "/healthz" if profile is None else "/readyz", None, auth=False)
                 if status == 200:
                     return
             except (OSError, http.client.HTTPException):
@@ -1153,7 +1163,7 @@ class HttpClient:
                  session_id=CURRENT_SESSION):
         headers = {"Accept": "application/json, text/event-stream",
                    "Content-Type": "application/json"}
-        if auth:
+        if auth and self.secret is not None:
             headers["Authorization"] = f"Bearer {token or self.token()}"
         selected_session = self.session_id if session_id is CURRENT_SESSION else session_id
         if selected_session:
@@ -2755,6 +2765,9 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
             return aliases.run_proof(sys.modules[__name__], client, case, row, transport, lane, capabilities, connection, barriers, binary, audit_path, env, list_tools(client))
         if case.get("setup_phase", "before_call") == "before_call":
             apply_setup(connection, case["setup"])
+        plsql.prepare_case(sys.modules[__name__], client, case, row, connection)
+        input_value["arguments"] = case["call"]["arguments"]
+        row["input_sha256"] = sha256(input_value)
         if "baseline_arguments" in case["call"]:
             baseline = client.rpc("tools/call", {
                 "name": case["tool"], "arguments": case["call"]["baseline_arguments"]})
@@ -2853,7 +2866,9 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
         if expected.get("awr_timeline_exact"):
             arguments = fill_captures(case["call"]["arguments"], captures)
             awr_context = (connection, arguments["sql_id"], arguments["max_points"])
-        verify_expect(expected, reply, ROOT / "tests/golden/w4", awr_context)
+        verify_expect(expected, plsql.golden_reply(sys.modules[__name__], case, reply),
+                      ROOT / "tests/golden/w4", awr_context)
+        plsql.verify_case(sys.modules[__name__], case, reply, row, connection)
         if case.get("catalog_rows_positive") and supported:
             verify_positive_catalog_rows(reply)
         if "row_contains" in case:
@@ -3831,6 +3846,9 @@ def run_lane(args):
         output["run_failure"] = {"class": type(exc).__name__, "detail": str(exc)[:240]}
         persist_run_results(base, output)
         raise
+    finally:
+        if output.get("run_dir"):
+            persist_run_results(Path(output["run_dir"]), output)
 
 
 def _run_lane(args, output):
@@ -3844,6 +3862,7 @@ def _run_lane(args, output):
     run_id = "w4-" + secrets.token_hex(8)
     work = base / run_id
     work.mkdir(parents=True, exist_ok=True)
+    output["run_dir"] = str(work)
     port = pick_port()
     audience = write_lab_config(work / "profiles.toml", args.lane, settings["dsn"], port,
                                metadata_pool=args.metadata_pool,
@@ -3983,6 +4002,8 @@ def _run_lane(args, output):
                     rows.append(run_http_parallel_discovery(client, args.lane, barriers))
                 elevate(client, "ADMIN")
                 discovered = list_tools(client)
+                output["plsql_registry"] = plsql.registry_coverage(
+                    sys.modules[__name__], discovered, family_cases)
                 for case in family_cases:
                     if set(case["requires"]) <= capabilities:
                         require(case["tool"] in discovered,
@@ -4094,6 +4115,8 @@ def _run_lane(args, output):
                     if replacement is not None:
                         client = replacement
                 audit_verified = audit_path.exists() and audit_verify(binary, audit_path, client_env)
+                output.setdefault("audit_verification", {})[transport] = {
+                    "verified": audit_verified, "records": len(audit_records(audit_path))}
                 aliases.finalize_audit_rows(rows, args.lane, transport, audit_verified)
                 require(audit_verified, f"{transport}: final audit chain verification failed")
             finally:
@@ -5771,7 +5794,7 @@ def main():
     parser.add_argument("--ci-verdict", type=Path,
                         help="CI verdict step: check results, JSONL, release manifest (both transports) and summarize")
     parser.add_argument("--manifest-enforcement-integration", action="store_true")
-    parser.add_argument("--lane", choices=("free23", "xe18", "xe21"))
+    parser.add_argument("--lane", choices=("offline", "free23", "xe18", "xe21"))
     parser.add_argument("--transport", choices=("stdio", "http"),
                         help="run (or, with --ci-verdict, check) one transport only; default both")
     parser.add_argument("--manifest-units-only", type=Path, metavar="LOG",
@@ -5816,6 +5839,8 @@ def main():
             metadata_pool_reachability_probe(args)
         elif args.manifest_enforcement_integration:
             manifest_enforcement_integration()
+        elif args.lane == "offline":
+            plsql.run_offline(sys.modules[__name__], args)
         else:
             require(args.lane, "--lane is required for a live run")
             run_lane(args)

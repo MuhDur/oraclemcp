@@ -1,0 +1,12 @@
+{
+  "matches": [
+    {
+      "source_span": {
+        "end": 106,
+        "start": 0
+      },
+      "tag": null,
+      "text": "Return a recorded order amount.\n@param p_id Order identifier.\n@returns The stored amount."
+    }
+  ]
+}

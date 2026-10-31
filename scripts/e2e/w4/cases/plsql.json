@@ -1,0 +1,679 @@
+[
+  {
+    "case_id": "w4_plsql_parse_ok_ast_summary_golden",
+    "tool": "oracle_plsql_parse",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source": "${plsql_source:parse_ok.sql}"
+      }
+    },
+    "expect": {
+      "golden": "plsql/parse.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_analyze_findings_golden",
+    "tool": "oracle_plsql_analyze",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${plsql_project:project}"
+      }
+    },
+    "expect": {
+      "golden": "plsql/analyze.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_what_breaks_change_impact_golden",
+    "tool": "oracle_plsql_what_breaks",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "changeset": "${plsql_json:changeset.json}",
+        "mode": "source_only"
+      }
+    },
+    "expect": {
+      "golden": "plsql/what_breaks.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_lineage_table_columns_golden",
+    "tool": "oracle_plsql_lineage",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${plsql_project:project}",
+        "target": "APP.ORDERS",
+        "direction": "downstream"
+      }
+    },
+    "expect": {
+      "golden": "plsql/lineage_down.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_sast_concat_dynamic_sql_finding",
+    "tool": "oracle_plsql_sast",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${plsql_project:sast_unsafe}"
+      }
+    },
+    "expect": {
+      "golden": "plsql/sast_unsafe.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_sast_clean_source_no_findings",
+    "tool": "oracle_plsql_sast",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${plsql_project:sast_clean}"
+      }
+    },
+    "expect": {
+      "golden": "plsql/sast_clean.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_doc_markdown_golden",
+    "tool": "oracle_plsql_doc",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "docset": "${plsql_json:docset.json}",
+        "format": "markdown",
+        "project_label": "W4 synthetic order project"
+      }
+    },
+    "expect": {
+      "golden": "plsql/doc_markdown.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_doc_source_comments_golden",
+    "tool": "oracle_plsql_doc",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source": "${plsql_source:documented_package.sql}"
+      }
+    },
+    "expect": {
+      "golden": "plsql/doc_source.json"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_parse_syntax_error_typed",
+    "tool": "oracle_plsql_parse",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "source": "${plsql_source:parse_error.sql}"
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_analyze_invalid_arguments_typed",
+    "tool": "oracle_plsql_analyze",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_doc_invalid_arguments_typed",
+    "tool": "oracle_plsql_doc",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_lineage_invalid_arguments_typed",
+    "tool": "oracle_plsql_lineage",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_sast_invalid_arguments_typed",
+    "tool": "oracle_plsql_sast",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_what_breaks_invalid_arguments_typed",
+    "tool": "oracle_plsql_what_breaks",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_lineage_fixture_package_edges",
+    "tool": "oracle_lineage",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${plsql_project:live}",
+        "owner": "${owner}",
+        "object": "V_TYPES_${run_id}",
+        "column": "N_VAL"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "found": true,
+        "catalog_marker": {
+          "status": "verified"
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_live_snapshot_fixture_objects",
+    "tool": "oracle_plsql_live_snapshot",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE TABLE ${owner}.T_DELTA_${run_id} (ID NUMBER)"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "schemas": [
+          "${owner}"
+        ],
+        "include_plscope": false,
+        "include_snapshot": true
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "schemas": [
+          "${owner}"
+        ]
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT object_name,object_type,status FROM SYS.all_objects WHERE owner='${owner}' AND object_name='T_DELTA_${run_id}' ORDER BY object_type",
+        "rows": [
+          [
+            "T_DELTA_${run_id}",
+            "TABLE",
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "cleanup": [
+      {
+        "sql": "DROP TABLE ${owner}.T_DELTA_${run_id} PURGE"
+      }
+    ],
+    "cleanup_reread": [
+      {
+        "sql": "SELECT object_name,object_type,status FROM SYS.all_objects WHERE owner='${owner}' AND object_name='T_DELTA_${run_id}' ORDER BY object_type",
+        "rows": []
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_live_snapshot_public_page",
+    "tool": "oracle_plsql_live_snapshot",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "schemas": [
+          "${owner}"
+        ],
+        "include_plscope": false,
+        "include_snapshot": true,
+        "public_synonym_offset": 128
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "snapshot_export": {
+          "status": "partial",
+          "public_synonyms": {
+            "offset": 128
+          }
+        }
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_blast_radius_dependents_exact",
+    "tool": "oracle_plsql_blast_radius",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_DEP_${run_id} AS v NUMBER; BEGIN v := ${owner}.PKG_W4_${run_id}.PURE_FN(1); END;"
+      },
+      {
+        "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_DEP2_${run_id} AS BEGIN ${owner}.P_DEP_${run_id}; END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "schemas": [
+          "${owner}"
+        ],
+        "include_plscope": false,
+        "include_snapshot": false,
+        "changeset": {
+          "objects": []
+        },
+        "mode": "live_snapshot"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "prediction": {
+          "payload": {
+            "summary": {
+              "invalidation_count": 4,
+              "recompile_count": 3,
+              "uncertainty_count": 0
+            }
+          }
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT object_name,status FROM SYS.all_objects WHERE owner='${owner}' AND object_name IN ('P_DEP_${run_id}','P_DEP2_${run_id}') ORDER BY object_name",
+        "rows": [
+          [
+            "P_DEP2_${run_id}",
+            "VALID"
+          ],
+          [
+            "P_DEP_${run_id}",
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "cleanup": [
+      {
+        "sql": "DROP PROCEDURE ${owner}.P_DEP2_${run_id}"
+      },
+      {
+        "sql": "DROP PROCEDURE ${owner}.P_DEP_${run_id}"
+      }
+    ],
+    "cleanup_reread": [
+      {
+        "sql": "SELECT object_name,status FROM SYS.all_objects WHERE owner='${owner}' AND object_name IN ('P_DEP_${run_id}','P_DEP2_${run_id}') ORDER BY object_name",
+        "rows": []
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_live_tool_readonly_level_ok",
+    "tool": "oracle_plsql_live_snapshot",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "schemas": [
+          "${owner}"
+        ],
+        "include_plscope": false,
+        "include_snapshot": false
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "schemas": [
+          "${owner}"
+        ]
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_live_missing_object_not_found",
+    "tool": "oracle_lineage",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "project_root": "${plsql_project:live}",
+        "owner": "${owner}",
+        "object": "ABSENT_${run_id}",
+        "column": "N_VAL"
+      }
+    },
+    "expect": {
+      "json_subset": {
+        "found": false
+      }
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_lineage_invalid_arguments_typed",
+    "tool": "oracle_lineage",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_live_snapshot_invalid_arguments_typed",
+    "tool": "oracle_plsql_live_snapshot",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_plsql_blast_radius_invalid_arguments_typed",
+    "tool": "oracle_plsql_blast_radius",
+    "level": "READ_ONLY",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "__w4_unexpected": true
+      }
+    },
+    "expect": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  }
+]

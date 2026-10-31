@@ -1,0 +1,3 @@
+{
+  "markdown": "# W4 synthetic order project object index\n\n**Total objects:** 1\n\n## package\n\n| ID | Name | Summary |\n|----|------|---------|\n| `app.order_api` | ORDER_API | Return a recorded order amount. |\n\n\n---\n\n# ORDER_API\n\n**Kind:** package  \n**ID:** `app.order_api`\n\n> Return a recorded order amount.\n\n## Parameters\n\n- **`p_id`** \u2014 Order identifier.\n\n## Other tags\n\n- **`@returns`** \u2014 The stored amount.\n\n\n---\n\n"
+}

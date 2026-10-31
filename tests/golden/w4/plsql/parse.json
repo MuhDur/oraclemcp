@@ -1,0 +1,33 @@
+{
+  "declaration_count": 1,
+  "declaration_kinds": [
+    "Procedure"
+  ],
+  "declarations": [
+    {
+      "callable": true,
+      "kind": "Procedure",
+      "name": "W4_PARSE",
+      "parent": null,
+      "schema": null,
+      "schema_object": false,
+      "span": {
+        "end": {
+          "column": 138,
+          "line": 1,
+          "offset": 137
+        },
+        "file_id": 1,
+        "start": {
+          "column": 1,
+          "line": 1,
+          "offset": 0
+        }
+      }
+    }
+  ],
+  "diagnostics": [],
+  "error_count": 0,
+  "recovered": false,
+  "warning_count": 0
+}

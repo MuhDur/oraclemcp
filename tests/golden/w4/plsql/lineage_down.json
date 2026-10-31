@@ -1,0 +1,29 @@
+{
+  "direction": "downstream",
+  "found": true,
+  "result": {
+    "affected_nodes": [
+      {
+        "hops": 1,
+        "logical_id": "ORDER_API.TOTAL",
+        "path_confidence": "heuristic"
+      }
+    ],
+    "edges": [
+      {
+        "confidence": "heuristic",
+        "kind": "Reads",
+        "source": "ORDER_API.TOTAL",
+        "target": "APP.ORDERS"
+      }
+    ],
+    "query": {
+      "anchor": "APP.ORDERS",
+      "direction": "downstream",
+      "max_depth": null,
+      "min_confidence": null
+    },
+    "unknown_edges": []
+  },
+  "target": "APP.ORDERS"
+}

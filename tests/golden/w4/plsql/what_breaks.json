@@ -1,0 +1,83 @@
+{
+  "format": "plsql-robot-json",
+  "payload": {
+    "attributes": {},
+    "compile_error_flags": [],
+    "completeness": {
+      "catalog_available": false,
+      "db_link_edges": {
+        "unmeasured": true
+      },
+      "diagnostics_total": 1,
+      "dynamic_sql_sites": {
+        "unmeasured": true
+      },
+      "extracted_semantics_ratio": 1.0,
+      "files_parsed_cleanly": 0,
+      "files_recovered": 0,
+      "files_total": 0,
+      "missing_package_bodies": {
+        "unmeasured": true
+      },
+      "objects_catalog_only": 0,
+      "objects_total": 1,
+      "objects_unrecognized": 0,
+      "objects_with_extracted_semantics": 1,
+      "objects_with_source": 0,
+      "opaque_dynamic_sql_sites": {
+        "unmeasured": true
+      },
+      "plscope_available": false,
+      "posture": "LowConfidence",
+      "skipped_token_ratio": 0.0,
+      "unresolved_references": {
+        "unmeasured": true
+      },
+      "wrapped_units": {
+        "unmeasured": true
+      }
+    },
+    "invalidated_objects_by_kind": [
+      {
+        "count": 1,
+        "object_type": "PACKAGE"
+      }
+    ],
+    "invalidations": [
+      {
+        "confidence": "low",
+        "confidence_explanation": "source-only predict \u2014 no catalog confirmation",
+        "distance": 1,
+        "name_symbol": 2,
+        "object_type": "PACKAGE",
+        "owner_symbol": 1,
+        "reason_code": "package_spec_changed",
+        "reason_detail": "dependent of changed package specification"
+      }
+    ],
+    "lineage_notes": [],
+    "recompile_plan": [],
+    "summary": {
+      "compile_error_flag_count": 0,
+      "invalidation_count": 1,
+      "max_distance": 1,
+      "mode": "SourceOnly",
+      "recompile_count": 0,
+      "uncertainty_count": 1
+    },
+    "uncertainties": [
+      {
+        "affected_name_symbol": 2,
+        "affected_owner_symbol": 1,
+        "description": "source-only mode \u2014 catalog-confirmed dependents not consulted",
+        "reason": "MissingCatalogObject"
+      }
+    ]
+  },
+  "schema_id": "plsql.cicd.change_impact",
+  "schema_version": {
+    "major": 1,
+    "minor": 0,
+    "patch": 0
+  }
+}

@@ -1,0 +1,259 @@
+{
+  "completeness": {
+    "catalog_available": false,
+    "db_link_edges": {
+      "unmeasured": true
+    },
+    "diagnostics_total": 1,
+    "dynamic_sql_sites": {
+      "unmeasured": true
+    },
+    "extracted_semantics_ratio": 1.0,
+    "files_parsed_cleanly": 4,
+    "files_recovered": 0,
+    "files_total": 4,
+    "missing_package_bodies": {
+      "unmeasured": true
+    },
+    "objects_catalog_only": 0,
+    "objects_total": 3,
+    "objects_unrecognized": 0,
+    "objects_with_extracted_semantics": 3,
+    "objects_with_source": 3,
+    "opaque_dynamic_sql_sites": {
+      "unmeasured": true
+    },
+    "plscope_available": false,
+    "posture": "Partial",
+    "skipped_token_ratio": 0.0,
+    "unresolved_references": {
+      "unmeasured": true
+    },
+    "wrapped_units": {
+      "unmeasured": true
+    }
+  },
+  "diagnostic_count": 1,
+  "file_count": 4,
+  "full_doctor": {
+    "cache_hit_ratio": null,
+    "cache_status": "not_wired",
+    "catalog_available": false,
+    "catalog_status": "not_wired",
+    "completeness": {
+      "catalog_available": false,
+      "db_link_edges": {
+        "unmeasured": true
+      },
+      "diagnostics_total": 1,
+      "dynamic_sql_sites": {
+        "unmeasured": true
+      },
+      "extracted_semantics_ratio": 1.0,
+      "files_parsed_cleanly": 4,
+      "files_recovered": 0,
+      "files_total": 4,
+      "missing_package_bodies": {
+        "unmeasured": true
+      },
+      "objects_catalog_only": 0,
+      "objects_total": 3,
+      "objects_unrecognized": 0,
+      "objects_with_extracted_semantics": 3,
+      "objects_with_source": 3,
+      "opaque_dynamic_sql_sites": {
+        "unmeasured": true
+      },
+      "plscope_available": false,
+      "posture": "Partial",
+      "skipped_token_ratio": 0.0,
+      "unresolved_references": {
+        "unmeasured": true
+      },
+      "wrapped_units": {
+        "unmeasured": true
+      }
+    },
+    "diagnostic_count": 1,
+    "fact_count": 5,
+    "graph_edge_count": 2,
+    "graph_node_count": 6,
+    "parser_backend": "antlr4rust",
+    "plscope_available": false,
+    "schema_id": "plsql.engine.doctor_full",
+    "schema_version": {
+      "major": 1,
+      "minor": 0,
+      "patch": 0
+    }
+  },
+  "graph": {
+    "edge_count": 2,
+    "node_count": 6
+  },
+  "ide": {
+    "definition_count": 6,
+    "definition_sample": [
+      {
+        "kind": "Unknown",
+        "logical_id": "APP.ORDERS",
+        "node_id": 6,
+        "revision_id": "source"
+      },
+      {
+        "kind": "Unknown",
+        "logical_id": "EFFECT::Unknown",
+        "node_id": 2,
+        "revision_id": "effect"
+      },
+      {
+        "kind": "PackageBody",
+        "logical_id": "ORDER_API",
+        "node_id": 3,
+        "revision_id": "source"
+      },
+      {
+        "kind": "PackageBody",
+        "logical_id": "ORDER_API",
+        "node_id": 5,
+        "revision_id": "source"
+      },
+      {
+        "kind": "PackageFunction",
+        "logical_id": "ORDER_API.TOTAL",
+        "node_id": 4,
+        "revision_id": "source"
+      },
+      {
+        "kind": "View",
+        "logical_id": "V_ORDERS",
+        "node_id": 1,
+        "revision_id": "source"
+      }
+    ],
+    "dependency_count": 2,
+    "dependency_sample": [
+      {
+        "confidence": {
+          "explanation": null,
+          "level": "Medium"
+        },
+        "edge_id": 1,
+        "from": "V_ORDERS",
+        "has_evidence": false,
+        "kind": "Unknown",
+        "notes": [
+          "source effect Unknown"
+        ],
+        "resolution_strategy": "LocalLexical",
+        "span": {
+          "end": {
+            "column": 70,
+            "line": 1,
+            "offset": 69
+          },
+          "file_id": 1,
+          "start": {
+            "column": 1,
+            "line": 1,
+            "offset": 0
+          }
+        },
+        "to": "EFFECT::Unknown"
+      },
+      {
+        "confidence": {
+          "explanation": null,
+          "level": "Medium"
+        },
+        "edge_id": 2,
+        "from": "ORDER_API.TOTAL",
+        "has_evidence": true,
+        "kind": "Reads",
+        "notes": [
+          "Reads APP.ORDERS"
+        ],
+        "resolution_strategy": "LocalLexical",
+        "span": {
+          "end": {
+            "column": 217,
+            "line": 1,
+            "offset": 216
+          },
+          "file_id": 3,
+          "start": {
+            "column": 51,
+            "line": 1,
+            "offset": 50
+          }
+        },
+        "to": "APP.ORDERS"
+      }
+    ],
+    "fact_sample": {
+      "declarations": [
+        {
+          "decl_id": 1,
+          "fact_id": "fact:669756ccf0dde163cfbd248bd0e2df4f84b0a36f8668911df11a386f839c0631",
+          "logical_id": "V_ORDERS",
+          "source_file": "02_v_orders.sql",
+          "source_logical_id": "V_ORDERS"
+        },
+        {
+          "decl_id": 3,
+          "fact_id": "fact:f558e62abd3d1010352b162e872def9437ee67584946ba472c19cb19c96524fe",
+          "logical_id": "ORDER_API",
+          "source_file": "03_order_api.pks",
+          "source_logical_id": "ORDER_API"
+        },
+        {
+          "decl_id": 5,
+          "fact_id": "fact:fe3905641d9fab180ff412ccd4d4d6dbfaeba9ebd3b84c44f27ea93e0720e8e6",
+          "logical_id": "ORDER_API",
+          "source_file": "04_order_api.pkb",
+          "source_logical_id": "ORDER_API"
+        }
+      ],
+      "dependency_edges": [
+        {
+          "fact_id": "fact:d4721cb8e90c9c93ff5b589cc7609723ad0c272709cd9e9c33a18b5dfbeb4227",
+          "from": "V_ORDERS",
+          "kind": "Unknown",
+          "source_file": "02_v_orders.sql",
+          "source_logical_id": "V_ORDERS",
+          "to": "EFFECT::Unknown"
+        },
+        {
+          "fact_id": "fact:0304c7104c645d7631f9f39f70810d7a3168f12c21e1dc90f83ddc964a27236e",
+          "from": "ORDER_API.TOTAL",
+          "kind": "Reads",
+          "source_file": "04_order_api.pkb",
+          "source_logical_id": "ORDER_API.TOTAL",
+          "to": "APP.ORDERS"
+        }
+      ],
+      "references": []
+    },
+    "truncated": false
+  },
+  "project_root": "<plsql-fixture>/project",
+  "summary": {
+    "catalog_available": false,
+    "declaration_count": 3,
+    "diagnostic_count": 1,
+    "fact_count": 5,
+    "files_parsed_cleanly": 4,
+    "files_recovered": 0,
+    "files_total": 4,
+    "objects_total": 3,
+    "objects_unrecognized": 0,
+    "plscope_available": false,
+    "posture": "Partial",
+    "schema_id": "plsql.engine.doctor",
+    "schema_version": {
+      "major": 1,
+      "minor": 0,
+      "patch": 0
+    }
+  }
+}

@@ -1,0 +1,6 @@
+CREATE OR REPLACE PROCEDURE w4_parse(p_id NUMBER) AS
+  v_count NUMBER;
+BEGIN
+  SELECT COUNT(*) INTO v_count FROM dual WHERE p_id > 0;
+END;
+/

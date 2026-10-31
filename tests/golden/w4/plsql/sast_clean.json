@@ -1,0 +1,255 @@
+{
+  "completeness": {
+    "catalog_available": false,
+    "files_recovered": 0,
+    "files_total": 1,
+    "plscope_available": false
+  },
+  "histogram": {
+    "rows": [
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "DEP001",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "PERF001",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "PERF002",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "PERF003",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL001",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL002",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL003",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL004",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL005",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL006",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL007",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "QUAL008",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "SEC002",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "SEC003",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "SEC004",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "SEC005",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "SEC006",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "SEC007",
+        "skipped": 1
+      },
+      {
+        "findings": 0,
+        "max_severity": null,
+        "rule_id": "STYLE001",
+        "skipped": 1
+      }
+    ],
+    "rules_gated": 19,
+    "schema_id": "plsql.sast.rule_firing_histogram",
+    "schema_version": 1,
+    "total_findings": 0,
+    "total_skipped": 19
+  },
+  "project_root": "<plsql-fixture>/sast_clean",
+  "report": {
+    "findings": [],
+    "rules_gated": 19,
+    "rules_run": 1,
+    "skipped": [
+      {
+        "detail": "no facts of required kind CrossSchemaWrite",
+        "reason": "missing_flow_facts",
+        "rule_id": "DEP001",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind CursorForLoop",
+        "reason": "missing_flow_facts",
+        "rule_id": "PERF001",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind CursorForLoop",
+        "reason": "missing_flow_facts",
+        "rule_id": "PERF002",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind IsNullOnIndexedColumn",
+        "reason": "missing_flow_facts",
+        "rule_id": "PERF003",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind ExceptionHandler",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL001",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind LogWithoutReraise",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL002",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind UnboundedBulkCollect",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL003",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind ExceptionHandler",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL004",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind DeprecatedFeature",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL005",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind MutatingTableTrigger",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL006",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind DmlInFunction",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL007",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind DeterministicMisuse",
+        "reason": "missing_flow_facts",
+        "rule_id": "QUAL008",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind Opacity",
+        "reason": "missing_flow_facts",
+        "rule_id": "SEC002",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind HardcodedCredential",
+        "reason": "missing_flow_facts",
+        "rule_id": "SEC003",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind InvokerRights",
+        "reason": "missing_flow_facts",
+        "rule_id": "SEC004",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind SensitivePublicSynonym",
+        "reason": "missing_flow_facts",
+        "rule_id": "SEC005",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "rule requires catalog; analysis ran without one",
+        "reason": "precondition_unmet",
+        "rule_id": "SEC006",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind RefCursorReturn",
+        "reason": "missing_flow_facts",
+        "rule_id": "SEC007",
+        "unit": "W4_CLEAN"
+      },
+      {
+        "detail": "no facts of required kind MissingInstrumentation",
+        "reason": "missing_flow_facts",
+        "rule_id": "STYLE001",
+        "unit": "W4_CLEAN"
+      }
+    ]
+  },
+  "rule_evaluation_count": 20,
+  "unit_count": 1
+}

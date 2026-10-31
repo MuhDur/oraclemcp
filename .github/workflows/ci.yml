@@ -984,6 +984,17 @@ jobs:
           python-version: "3.12"
       - name: Release-manifest Rust units (unmodified log)
         run: python3 scripts/e2e/w4/driver.py --manifest-units-only target/e2e/w4/manifest-units.log
+      - name: Offline PL/SQL fixtures over stdio and HTTP without database profiles
+        run: python3 scripts/e2e/w4/driver.py --lane offline --binary target/debug/oraclemcp --binary-source-sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: w4-plsql-offline-${{ github.run_number }}
+          path: |
+            target/e2e/w4/offline/results.json
+            target/e2e/w4/offline/cases.jsonl
+          if-no-files-found: error
+          retention-days: 3
       - uses: actions/upload-artifact@v7
         with:
           name: oracle-free23-w4-build-${{ github.run_number }}

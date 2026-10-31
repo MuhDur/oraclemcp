@@ -1,0 +1,15 @@
+{
+  "objects": [
+    {
+      "object_id": "app.order_api",
+      "name": "ORDER_API",
+      "kind": "package",
+      "summary": "Return a recorded order amount.",
+      "comments": [
+        {"tag": "param", "text": "p_id Order identifier.", "source_span": null},
+        {"tag": "returns", "text": "The stored amount.", "source_span": null}
+      ],
+      "source_span": null
+    }
+  ]
+}
