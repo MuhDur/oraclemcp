@@ -534,6 +534,12 @@ jobs:
       - name: Use the isolated macOS runner without the Linux compiler interceptor
         if: runner.os == 'macOS'
         run: echo 'RUSTC_WRAPPER=' >> "$GITHUB_ENV"
+      # macOS TMPDIR sits under the root-owned /var -> /private/var symlink, and
+      # the audit sink refuses symlinked components; test fixtures use the real
+      # path (product behaviour for system symlinks is tracked in oraclemcp-drc9d).
+      - name: Resolve TMPDIR to its real path on macOS
+        if: runner.os == 'macOS'
+        run: echo "TMPDIR=$(cd "${TMPDIR:-/tmp}" && pwd -P)" >> "$GITHUB_ENV"
       - name: Refuse nightly runtime features on every target
         shell: bash
         run: |
