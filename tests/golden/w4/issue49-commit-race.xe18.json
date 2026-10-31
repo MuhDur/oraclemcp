@@ -4,6 +4,7 @@
   "executed": true,
   "non_transactional_effect": false,
   "objects_affected": [],
+  "observed_rows": 1,
   "reason": "classified 1 statement(s) as Guarded",
   "required_level": "READ_WRITE",
   "rolled_back": false,
