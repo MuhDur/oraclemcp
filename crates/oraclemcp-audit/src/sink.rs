@@ -3913,12 +3913,14 @@ mod tests {
     fn writer_lock_probe_refuses_a_fifo_sidecar_instead_of_blocking() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("audit.jsonl");
-        rustix::fs::mkfifoat(
-            rustix::fs::CWD,
-            lock_path_for(&path),
-            rustix::fs::Mode::from_raw_mode(0o600),
-        )
-        .expect("mkfifo");
+        // rustix has no mkfifoat on Apple targets; the POSIX tool exists on every unix.
+        let status = std::process::Command::new("mkfifo")
+            .arg("-m")
+            .arg("600")
+            .arg(lock_path_for(&path))
+            .status()
+            .expect("run mkfifo");
+        assert!(status.success(), "mkfifo failed: {status}");
         assert!(matches!(
             probe_audit_writer_lock(&path),
             Err(AuditError::Io(_))
