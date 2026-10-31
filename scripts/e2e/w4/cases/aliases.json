@@ -1,0 +1,917 @@
+{
+  "schema_version": 1,
+  "operations": {
+    "oracle_connection_info": {
+      "case": "w4_connection_info_effective_access_readonly_pinned"
+    },
+    "oracle_switch_profile": {
+      "case": "w4_switch_profile_to_protected_resets_level"
+    },
+    "oracle_set_session_level": {
+      "case": "w4_set_session_level_elevate_confirm"
+    },
+    "oracle_query": {
+      "case": "w4_query_cte_read"
+    },
+    "oracle_preview_sql": {
+      "case": "w4_preview_sql_verdict_level_read_write"
+    },
+    "oracle_execute": {
+      "case": "w4_execute_update_confirmed_commit",
+      "setup_prefix": [
+        {
+          "sql": "DELETE FROM ${owner}.T_CHILD_AUD_${run_id} WHERE CHILD_ID IN (402,403)"
+        }
+      ]
+    },
+    "oracle_undo_to": {
+      "case": "w4_checkpoint_then_undo_to_restores_rows"
+    },
+    "oracle_preview_dml": {
+      "case": "w4_preview_dml_row_estimate_matches_reread"
+    },
+    "oracle_compile_object": {
+      "prototype": {
+        "case_id": "w4_compile_object_procedure_valid",
+        "tool": "oracle_compile_object",
+        "level": "DDL",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [
+          {
+            "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_SRC_${run_id} AUTHID DEFINER AS BEGIN NULL; END;"
+          }
+        ],
+        "call": {
+          "arguments": {
+            "object_type": "PROCEDURE",
+            "owner": "${owner}",
+            "name": "P_SRC_${run_id}",
+            "execute": true,
+            "confirm": "${cap:token}"
+          },
+          "mutation": true
+        },
+        "expect": {
+          "json_subset": {
+            "compiled": true,
+            "error_count": 0,
+            "errors": [],
+            "owner": "${owner}",
+            "name": "P_SRC_${run_id}",
+            "object_type": "PROCEDURE"
+          }
+        },
+        "db_reread": [
+          {
+            "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'P_SRC_${run_id}' AND OBJECT_TYPE = 'PROCEDURE'",
+            "rows": [
+              [
+                "VALID"
+              ]
+            ]
+          },
+          {
+            "sql": "SELECT PLSQL_WARNINGS FROM ALL_PLSQL_OBJECT_SETTINGS WHERE OWNER='${owner}' AND NAME='P_SRC_${run_id}' AND TYPE='PROCEDURE'",
+            "rows": [
+              [
+                "ENABLE:ALL"
+              ]
+            ]
+          }
+        ],
+        "audit_expect": [
+          {
+            "tool": "oracle_compile_object",
+            "decision": "ALLOWED",
+            "outcome": "PENDING"
+          },
+          {
+            "tool": "oracle_compile_object",
+            "decision": "ALLOWED",
+            "outcome": "SUCCEEDED",
+            "rows_affected": 0
+          }
+        ],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        },
+        "cleanup": [
+          {
+            "sql": "DROP PROCEDURE ${owner}.P_SRC_${run_id}"
+          }
+        ],
+        "steps": [
+          {
+            "tool": "oracle_compile_object",
+            "arguments": {
+              "object_type": "PROCEDURE",
+              "owner": "${owner}",
+              "name": "P_SRC_${run_id}"
+            },
+            "expect": {
+              "json_subset": {
+                "confirmation": {
+                  "tool": "oracle_compile_object"
+                }
+              }
+            },
+            "capture": {
+              "token": "/confirmation/confirm"
+            }
+          }
+        ]
+      },
+      "arguments": {
+        "warnings": true
+      }
+    },
+    "oracle_create_or_replace": {
+      "case": "w4_create_or_replace_procedure_preview_token_apply",
+      "setup_prefix": [
+        {
+          "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_SRC_${run_id} AS BEGIN NULL; END;"
+        }
+      ]
+    },
+    "oracle_patch_source": {
+      "case": "w4_patch_source_happy_path"
+    },
+    "oracle_list_schemas": {
+      "case": "w4_list_schemas_name_like_filter"
+    },
+    "oracle_schema_inspect": {
+      "case": "w4_schema_inspect_object_type_filter"
+    },
+    "oracle_search_objects": {
+      "case": "w4_search_objects_object_types_filter"
+    },
+    "oracle_orient": {
+      "case": "w4_orient_include_filter"
+    },
+    "oracle_describe": {
+      "prototype": {
+        "case_id": "w4_describe_table_columns_exact",
+        "tool": "oracle_describe",
+        "level": "READ_ONLY",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [
+          {
+            "sql": "CREATE TABLE ${owner}.D7_DESC_${run_id} (ID NUMBER(10) CONSTRAINT D7_PK_DESC_${run_id} PRIMARY KEY, LABEL VARCHAR2(40) DEFAULT 'w4' CONSTRAINT D7_ZNN_DESC_${run_id} NOT NULL, TWICE NUMBER GENERATED ALWAYS AS (ID * 2) VIRTUAL, HIDDEN_NOTE VARCHAR2(10) INVISIBLE, PARENT_ID NUMBER(10) CONSTRAINT D7_FK_DESC_${run_id} REFERENCES ${owner}.T_PARENT_${run_id}(ID), CONSTRAINT D7_CK_DESC_${run_id} CHECK (ID > 0))"
+          }
+        ],
+        "call": {
+          "arguments": {
+            "owner": "${owner}",
+            "table": "D7_DESC_${run_id}"
+          }
+        },
+        "expect": {
+          "json_subset": {
+            "owner": "${owner}",
+            "table": "D7_DESC_${run_id}",
+            "constraints_truncated": false,
+            "columns": [
+              {
+                "COLUMN_NAME": "ID",
+                "DATA_DEFAULT": null,
+                "DATA_LENGTH": "22",
+                "DATA_TYPE": "NUMBER",
+                "NULLABLE": "N"
+              },
+              {
+                "COLUMN_NAME": "LABEL",
+                "DATA_DEFAULT": "'w4' ",
+                "DATA_LENGTH": "40",
+                "DATA_TYPE": "VARCHAR2",
+                "NULLABLE": "N"
+              },
+              {
+                "COLUMN_NAME": "TWICE",
+                "DATA_DEFAULT": "\"ID\"*2",
+                "DATA_LENGTH": "22",
+                "DATA_TYPE": "NUMBER",
+                "NULLABLE": "Y"
+              },
+              {
+                "COLUMN_NAME": "PARENT_ID",
+                "DATA_DEFAULT": null,
+                "DATA_LENGTH": "22",
+                "DATA_TYPE": "NUMBER",
+                "NULLABLE": "Y"
+              },
+              {
+                "COLUMN_NAME": "HIDDEN_NOTE",
+                "DATA_DEFAULT": null,
+                "DATA_LENGTH": "10",
+                "DATA_TYPE": "VARCHAR2",
+                "NULLABLE": "Y"
+              }
+            ],
+            "constraints": [
+              {
+                "CONSTRAINT_NAME": "D7_CK_DESC_${run_id}",
+                "CONSTRAINT_TYPE": "C",
+                "COLUMN_NAME": "ID",
+                "GENERATED": "USER NAME",
+                "STATUS": "ENABLED",
+                "VALIDATED": "VALIDATED"
+              },
+              {
+                "CONSTRAINT_NAME": "D7_FK_DESC_${run_id}",
+                "CONSTRAINT_TYPE": "R",
+                "COLUMN_NAME": "PARENT_ID",
+                "R_OWNER": "${owner}",
+                "POSITION": "1",
+                "GENERATED": "USER NAME",
+                "STATUS": "ENABLED"
+              },
+              {
+                "CONSTRAINT_NAME": "D7_PK_DESC_${run_id}",
+                "CONSTRAINT_TYPE": "P",
+                "COLUMN_NAME": "ID",
+                "POSITION": "1",
+                "GENERATED": "USER NAME",
+                "STATUS": "ENABLED"
+              },
+              {
+                "CONSTRAINT_TYPE": "C",
+                "COLUMN_NAME": "LABEL",
+                "GENERATED": "USER NAME",
+                "STATUS": "ENABLED",
+                "CONSTRAINT_NAME": "D7_ZNN_DESC_${run_id}"
+              }
+            ]
+          }
+        },
+        "expect_by_version": {
+          "23": {
+            "json_subset": {
+              "columns": [
+                {
+                  "COLUMN_NAME": "ID",
+                  "DATA_DEFAULT": null
+                },
+                {
+                  "COLUMN_NAME": "LABEL",
+                  "DATA_DEFAULT": "'w4' "
+                },
+                {
+                  "COLUMN_NAME": "TWICE",
+                  "DATA_DEFAULT": "\"ID\"*2"
+                },
+                {
+                  "COLUMN_NAME": "PARENT_ID",
+                  "DATA_DEFAULT": null
+                },
+                {
+                  "COLUMN_NAME": "HIDDEN_NOTE",
+                  "DATA_DEFAULT": null
+                }
+              ]
+            }
+          },
+          "pre23": {
+            "json_subset": {
+              "columns": [
+                {
+                  "COLUMN_NAME": "ID",
+                  "DATA_DEFAULT": null
+                },
+                {
+                  "COLUMN_NAME": "LABEL",
+                  "DATA_DEFAULT": null
+                },
+                {
+                  "COLUMN_NAME": "TWICE",
+                  "DATA_DEFAULT": null
+                },
+                {
+                  "COLUMN_NAME": "PARENT_ID",
+                  "DATA_DEFAULT": null
+                },
+                {
+                  "COLUMN_NAME": "HIDDEN_NOTE",
+                  "DATA_DEFAULT": null
+                }
+              ]
+            }
+          }
+        },
+        "db_reread": [
+          {
+            "sql": "SELECT COLUMN_NAME, VIRTUAL_COLUMN, HIDDEN_COLUMN FROM ALL_TAB_COLS WHERE OWNER = '${owner}' AND TABLE_NAME = 'D7_DESC_${run_id}' AND COLUMN_NAME IN ('TWICE', 'HIDDEN_NOTE') ORDER BY COLUMN_NAME",
+            "rows": [
+              [
+                "HIDDEN_NOTE",
+                "NO",
+                "YES"
+              ],
+              [
+                "TWICE",
+                "YES",
+                "NO"
+              ]
+            ]
+          }
+        ],
+        "audit_expect": [],
+        "cleanup": [
+          {
+            "sql": "DROP TABLE ${owner}.D7_DESC_${run_id}"
+          }
+        ],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        }
+      }
+    },
+    "oracle_describe_index": {
+      "case": "w4_describe_index_columns_order"
+    },
+    "oracle_describe_trigger": {
+      "case": "w4_describe_trigger_timing_event_body"
+    },
+    "oracle_describe_view": {
+      "case": "w4_describe_view_after_describe_keeps_session_usable"
+    },
+    "oracle_get_ddl": {
+      "case": "w4_get_ddl_table"
+    },
+    "oracle_get_source": {
+      "prototype": {
+        "case_id": "w4_get_source_package_body_line_range",
+        "tool": "oracle_get_source",
+        "level": "READ_ONLY",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [
+          {
+            "sql": "CREATE OR REPLACE PACKAGE ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER; -- w4src:package\nEND;"
+          },
+          {
+            "sql": "CREATE OR REPLACE PACKAGE BODY ${owner}.PKG_SRC_${run_id} AS\n  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n  BEGIN\n    RETURN P_ID * 2; -- w4src:package_body\n  END;\nEND;"
+          }
+        ],
+        "call": {
+          "arguments": {
+            "owner": "${owner}",
+            "name": "PKG_SRC_${run_id}",
+            "object_type": "PACKAGE_BODY",
+            "max_chars": 10000
+          }
+        },
+        "expect": {
+          "json_subset": {
+            "source": {
+              "owner": "${owner}",
+              "name": "PKG_SRC_${run_id}",
+              "object_type": "PACKAGE BODY"
+            }
+          }
+        },
+        "db_reread": [
+          {
+            "sql": "SELECT LINE, TEXT FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'PKG_SRC_${run_id}' AND TYPE = 'PACKAGE BODY' AND LINE BETWEEN 2 AND 4 ORDER BY LINE",
+            "rows": [
+              [
+                2,
+                "  FUNCTION TWICE(P_ID NUMBER) RETURN NUMBER IS\n"
+              ],
+              [
+                3,
+                "  BEGIN\n"
+              ],
+              [
+                4,
+                "    RETURN P_ID * 2; -- w4src:package_body\n"
+              ]
+            ]
+          }
+        ],
+        "audit_expect": [],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        },
+        "cleanup": [
+          {
+            "sql": "DROP PACKAGE ${owner}.PKG_SRC_${run_id}"
+          }
+        ]
+      }
+    },
+    "oracle_sample_rows": {
+      "case": "w4_sample_rows_bounded_max_rows"
+    },
+    "oracle_read_clob": {
+      "case": "w4_read_clob_exact_prefix_and_length"
+    },
+    "oracle_compile_errors": {
+      "case": "w4_compile_errors_lists_exact_line_and_text"
+    },
+    "oracle_search_source": {
+      "case": "w4_search_source_needle_exact_lines"
+    },
+    "oracle_plscope_inspect": {
+      "case": "w4_plscope_inspect_identifiers_for_pkg"
+    },
+    "oracle_db_health": {
+      "case": "w4_db_health_subcheck_filter"
+    },
+    "oracle_diff": {
+      "prototype": {
+        "case_id": "w4_alias_prototype_diff",
+        "tool": "oracle_diff",
+        "level": "READ_ONLY",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [],
+        "call": {
+          "arguments": {
+            "sql": "SELECT p.ID FROM ${owner}.T_PARENT_${run_id} p ORDER BY p.ID",
+            "profile_a": "${lane}_raw",
+            "profile_b": "${lane}_protected",
+            "key": [
+              "ID"
+            ],
+            "max_rows": 10
+          }
+        },
+        "expect": {
+          "json_subset": {
+            "row_count_a": 2,
+            "row_count_b": 2,
+            "added": [],
+            "removed": [],
+            "changed": []
+          }
+        },
+        "db_reread": [],
+        "audit_expect": [],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        }
+      }
+    },
+    "disable_writes": {
+      "prototype": {
+        "case_id": "w4_alias_prototype_set_session_level",
+        "tool": "oracle_set_session_level",
+        "level": "READ_ONLY",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [],
+        "call": {
+          "arguments": {
+            "action": "drop"
+          }
+        },
+        "expect": {
+          "json_subset": {
+            "session": {
+              "current_level": "READ_ONLY"
+            }
+          }
+        },
+        "db_reread": [],
+        "audit_expect": [
+          {
+            "tool": "oracle_set_session_level",
+            "decision": "STEP_UP_REQUIRED",
+            "outcome": "SUCCEEDED"
+          }
+        ],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        },
+        "steps": [
+          {
+            "tool": "oracle_set_session_level",
+            "arguments": {
+              "level": "READ_WRITE"
+            },
+            "expect": {
+              "json_subset": {
+                "confirmation": {}
+              }
+            },
+            "capture": {
+              "elevation": "/confirmation/confirm"
+            }
+          },
+          {
+            "tool": "oracle_set_session_level",
+            "arguments": {
+              "level": "READ_WRITE",
+              "execute": true,
+              "confirm": "${cap:elevation}"
+            },
+            "expect": {
+              "json_subset": {
+                "session": {
+                  "current_level": "READ_WRITE"
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "enable_writes": {
+      "case": "w4_set_session_level_elevate_confirm"
+    },
+    "patch_package": {
+      "prototype": {
+        "case_id": "w4_alias_prototype_patch_source",
+        "tool": "oracle_patch_source",
+        "level": "DDL",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [
+          {
+            "sql": "CREATE OR REPLACE PACKAGE ${owner}.PKGA_${run_id} AS FUNCTION F RETURN NUMBER; END;"
+          },
+          {
+            "sql": "CREATE OR REPLACE PACKAGE BODY ${owner}.PKGA_${run_id} AS FUNCTION F RETURN NUMBER AS BEGIN RETURN 1; END; END;"
+          }
+        ],
+        "call": {
+          "arguments": {
+            "object_type": "PACKAGE BODY",
+            "owner": "${owner}",
+            "name": "PKGA_${run_id}",
+            "old_text": "RETURN 1;",
+            "new_text": "RETURN 7;",
+            "execute": true,
+            "confirm": "${cap:patch}"
+          },
+          "mutation": true
+        },
+        "expect": {
+          "json_subset": {
+            "applied": true,
+            "committed": true,
+            "error_count": 0
+          }
+        },
+        "db_reread": [
+          {
+            "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER='${owner}' AND NAME='PKGA_${run_id}' AND TYPE='PACKAGE BODY' AND INSTR(TEXT,'RETURN 7;')>0",
+            "rows": [
+              [
+                1
+              ]
+            ]
+          }
+        ],
+        "audit_expect": [
+          {
+            "tool": "oracle_patch_source",
+            "decision": "ALLOWED",
+            "outcome": "PENDING"
+          },
+          {
+            "tool": "oracle_patch_source",
+            "decision": "ALLOWED",
+            "outcome": "SUCCEEDED"
+          }
+        ],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        },
+        "steps": [
+          {
+            "tool": "oracle_patch_source",
+            "arguments": {
+              "object_type": "PACKAGE BODY",
+              "owner": "${owner}",
+              "name": "PKGA_${run_id}",
+              "old_text": "RETURN 1;",
+              "new_text": "RETURN 7;"
+            },
+            "expect": {
+              "json_subset": {
+                "confirmation": {}
+              }
+            },
+            "capture": {
+              "patch": "/confirmation/confirm"
+            }
+          }
+        ]
+      }
+    },
+    "patch_view": {
+      "prototype": {
+        "case_id": "w4_alias_prototype_patch_source",
+        "tool": "oracle_patch_source",
+        "level": "DDL",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [
+          {
+            "sql": "CREATE OR REPLACE VIEW ${owner}.VA_${run_id} AS SELECT 1 AS V FROM dual"
+          }
+        ],
+        "call": {
+          "arguments": {
+            "object_type": "VIEW",
+            "owner": "${owner}",
+            "name": "VA_${run_id}",
+            "old_text": "SELECT 1",
+            "new_text": "SELECT 7",
+            "execute": true,
+            "confirm": "${cap:patch}"
+          },
+          "mutation": true
+        },
+        "expect": {
+          "json_subset": {
+            "applied": true,
+            "committed": true,
+            "error_count": 0
+          }
+        },
+        "db_reread": [
+          {
+            "sql": "SELECT v.V FROM ${owner}.VA_${run_id} v",
+            "rows": [
+              [
+                7
+              ]
+            ]
+          }
+        ],
+        "audit_expect": [
+          {
+            "tool": "oracle_patch_source",
+            "decision": "ALLOWED",
+            "outcome": "PENDING"
+          },
+          {
+            "tool": "oracle_patch_source",
+            "decision": "ALLOWED",
+            "outcome": "SUCCEEDED"
+          }
+        ],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        },
+        "steps": [
+          {
+            "tool": "oracle_patch_source",
+            "arguments": {
+              "object_type": "VIEW",
+              "owner": "${owner}",
+              "name": "VA_${run_id}",
+              "old_text": "SELECT 1",
+              "new_text": "SELECT 7"
+            },
+            "expect": {
+              "json_subset": {
+                "confirmation": {}
+              }
+            },
+            "capture": {
+              "patch": "/confirmation/confirm"
+            }
+          }
+        ]
+      }
+    },
+    "read_patch_preview": {
+      "prototype": {
+        "case_id": "w4_alias_prototype_read_patch_preview",
+        "tool": "read_patch_preview",
+        "level": "DDL",
+        "transports": [
+          "stdio",
+          "http"
+        ],
+        "requires": [],
+        "setup": [
+          {
+            "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_AP_${run_id} AS BEGIN NULL; END;"
+          }
+        ],
+        "call": {
+          "arguments": {
+            "name": "${owner}.P_AP_${run_id}",
+            "max_chars": 2000
+          }
+        },
+        "expect": {
+          "json_subset": {
+            "preview_available": true,
+            "source": "in_memory_patch_preview"
+          }
+        },
+        "db_reread": [
+          {
+            "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER='${owner}' AND NAME='P_AP_${run_id}' AND INSTR(TEXT,'alias-preview')>0",
+            "rows": [
+              [
+                0
+              ]
+            ]
+          }
+        ],
+        "audit_expect": [],
+        "on_unsupported": {
+          "error_class": "INVALID_ARGUMENTS"
+        },
+        "steps": [
+          {
+            "tool": "oracle_patch_source",
+            "arguments": {
+              "object_type": "PROCEDURE",
+              "owner": "${owner}",
+              "name": "P_AP_${run_id}",
+              "old_text": "NULL;",
+              "new_text": "NULL; /* alias-preview */"
+            },
+            "expect": {
+              "json_subset": {
+                "confirmation": {}
+              }
+            }
+          }
+        ]
+      }
+    },
+    "execute_approved": {
+      "case": "w4_execute_update_confirmed_commit",
+      "setup_prefix": [
+        {
+          "sql": "DELETE FROM ${owner}.T_CHILD_AUD_${run_id} WHERE CHILD_ID IN (402,403)"
+        }
+      ]
+    },
+    "deploy_ddl": {
+      "case": "w4_create_or_replace_procedure_preview_token_apply",
+      "setup_prefix": [
+        {
+          "sql": "CREATE OR REPLACE PROCEDURE ${owner}.P_SRC_${run_id} AS BEGIN NULL; END;"
+        }
+      ]
+    }
+  },
+  "cases": [
+    {
+      "case_id": "w4_alias_enable_writes_disable_writes_level_transitions",
+      "tool": "oracle_set_session_level",
+      "level": "READ_ONLY",
+      "transports": [
+        "stdio",
+        "http"
+      ],
+      "requires": [],
+      "setup": [],
+      "call": {
+        "arguments": {
+          "action": "status"
+        }
+      },
+      "expect": {
+        "json_subset": {
+          "session": {
+            "current_level": "READ_ONLY"
+          }
+        }
+      },
+      "db_reread": [],
+      "audit_expect": [
+        {
+          "tool": "oracle_set_session_level",
+          "decision": "STEP_UP_REQUIRED",
+          "outcome": "SUCCEEDED"
+        }
+      ],
+      "on_unsupported": {
+        "error_class": "INVALID_ARGUMENTS"
+      },
+      "steps": [
+        {
+          "tool": "enable_writes",
+          "arguments": {},
+          "expect": {
+            "json_subset": {
+              "confirmation": {}
+            }
+          },
+          "capture": {
+            "elevation": "/confirmation/confirm"
+          }
+        },
+        {
+          "tool": "enable_writes",
+          "arguments": {
+            "execute": true,
+            "confirm": "${cap:elevation}"
+          },
+          "expect": {
+            "json_subset": {
+              "session": {
+                "current_level": "READ_WRITE"
+              }
+            }
+          }
+        },
+        {
+          "tool": "disable_writes",
+          "arguments": {},
+          "expect": {
+            "json_subset": {
+              "session": {
+                "current_level": "READ_ONLY"
+              }
+            }
+          }
+        }
+      ]
+    },
+    {
+      "case_id": "w4_contract_refusal_has_next_steps",
+      "tool": "oracle_query",
+      "level": "READ_ONLY",
+      "transports": [
+        "stdio",
+        "http"
+      ],
+      "requires": [],
+      "setup": [],
+      "call": {
+        "arguments": {
+          "sql": "SELECT 1 AS N FROM dual",
+          "__w4_unknown_argument": true
+        }
+      },
+      "expect": {
+        "error_class": "INVALID_ARGUMENTS"
+      },
+      "db_reread": [],
+      "audit_expect": [],
+      "on_unsupported": {
+        "error_class": "INVALID_ARGUMENTS"
+      }
+    }
+  ],
+  "wrapper_cases": [
+    {
+      "kind": "execute",
+      "case_id": "w4_alias_execute_approved_requires_token_then_executes_like_execute"
+    },
+    {
+      "kind": "without_token",
+      "case_id": "w4_alias_execute_approved_without_token_refused"
+    },
+    {
+      "kind": "deploy",
+      "case_id": "w4_alias_deploy_ddl_preview_token_apply_equivalent"
+    },
+    {
+      "kind": "wait_timeout",
+      "case_id": "w4_alias_deploy_ddl_wait_timeout_behaviour"
+    },
+    {
+      "kind": "read_preview",
+      "case_id": "w4_alias_read_patch_preview_returns_preview_without_apply"
+    },
+    {
+      "kind": "schema",
+      "case_id": "w4_alias_get_schema_compact_projection_and_pagination"
+    }
+  ],
+  "argument_values": {
+    "max_rows": 200,
+    "capture_dbms_output": true,
+    "dbms_output_max_lines": 50,
+    "dbms_output_max_chars": 2048,
+    "export": false,
+    "streaming": false,
+    "warnings": true,
+    "profile": "${lane}"
+  }
+}

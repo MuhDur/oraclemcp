@@ -32,6 +32,7 @@ import tomllib
 from fixture import (admin_password, connect_admin, kill_session_sql, load_lane, new_run_id,
                      set_flashback_grant, setup as fixture_setup, teardown as fixture_teardown)
 from scrub import scrub
+import aliases
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -217,6 +218,7 @@ def verify_envelope(reply, descriptor=None):
         if isinstance(data, dict) and "error_class" in data:
             require(isinstance(data["error_class"], str) and data["error_class"],
                     "malformed JSON-RPC error class")
+            verify_refusal_next_steps(data)
         return
     result = reply.get("result")
     require(isinstance(result, dict) and isinstance(result.get("content"), list)
@@ -228,6 +230,7 @@ def verify_envelope(reply, descriptor=None):
                 and isinstance(structured.get("error_class"), str)
                 and structured["error_class"],
                 "typed tool error lacks structured error class")
+        verify_refusal_next_steps(structured)
     elif descriptor and isinstance(descriptor.get("outputSchema"), dict):
         schema = descriptor["outputSchema"]
         structured = result.get("structuredContent")
@@ -236,6 +239,13 @@ def verify_envelope(reply, descriptor=None):
         for key in schema.get("required", []):
             require(isinstance(structured, dict) and key in structured,
                     f"outputSchema missing required key {key}")
+
+
+def verify_refusal_next_steps(structured):
+    steps = structured.get("next_steps")
+    require(isinstance(steps, list) and steps
+            and all(isinstance(step, str) and step.strip() for step in steps),
+            "typed refusal needs nonempty safe next_steps")
 
 
 def golden_path(golden_root, name):
@@ -364,6 +374,10 @@ def verify_finding_row_contains(reply, expected_row):
 
 def verify_audit(expected, records, verified, optional_prefix=None):
     require(verified, "audit chain verification failed")
+    return verify_audit_records(expected, records, optional_prefix)
+
+
+def verify_audit_records(expected, records, optional_prefix=None):
     if optional_prefix and records and records[0].get("tool") == optional_prefix["record"]["tool"]:
         require(deep_subset(optional_prefix["record"], records[0]),
                 "wrong optional audit prefix record")
@@ -962,7 +976,7 @@ def load_cases():
     cases, seen = [], set()
     vocabulary = set(json.loads(CAPABILITIES.read_text())["vocabulary"])
     for path in sorted(CASES.glob("*.json")):
-        if path.name == "schema.json":
+        if path.name in {"schema.json", "aliases.json"}:
             continue
         data = json.loads(path.read_text())
         require(isinstance(data, list), f"{path.name}: family must be an array")
@@ -973,6 +987,11 @@ def load_cases():
             require(case["case_id"] not in seen, f"duplicate case_id {case['case_id']}")
             seen.add(case["case_id"])
             cases.append(case)
+    for value in aliases.load_rules(sys.modules[__name__])["cases"]:
+        case = validate_case(value, "aliases.json")
+        require(case["case_id"] not in seen, f"duplicate case_id {case['case_id']}")
+        seen.add(case["case_id"])
+        cases.append(case)
     return cases
 
 
@@ -1708,6 +1727,8 @@ def generic_contract_cases(descriptors, lane, baselines=None):
         schema = descriptor.get("inputSchema", {})
         properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
         minimal = baselines.get(name)
+        if minimal is not None:
+            minimal = aliases.canonical_arguments(sys.modules[__name__], name, minimal, {name: {"argument_aliases": schema.get("x-deprecated-aliases", [])}})
         if minimal is None:
             minimal = schema_placeholder(schema, lane=lane)
         require(isinstance(minimal, dict), f"{name}: inputSchema is not an object")
@@ -2695,6 +2716,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
     expected = expected_for_case(case, capabilities)
     input_value = {"tool": case["tool"], "arguments": case["call"]["arguments"]}
     input_value["profile_variant"] = case.get("profile_variant", "masked")
+    if "alias_proof" in case:
+        input_value["alias_proof"] = {k: v for k, v in case["alias_proof"].items() if k != "index"}
     if "raw_arguments" in case["call"]:
         input_value["raw_arguments"] = case["call"]["raw_arguments"]
     if case["call"].get("retry"):
@@ -2728,6 +2751,8 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
     if "retention_probe" in case:
         row["retention_probe"] = scrub(case["retention_probe"])
     try:
+        if "alias_proof" in case:
+            return aliases.run_proof(sys.modules[__name__], client, case, row, transport, lane, capabilities, connection, barriers, binary, audit_path, env, list_tools(client))
         if case.get("setup_phase", "before_call") == "before_call":
             apply_setup(connection, case["setup"])
         if "baseline_arguments" in case["call"]:
@@ -2810,6 +2835,7 @@ def run_case(client, case, transport, lane, capabilities, connection, barriers,
                                                "arguments": fill_captures(case["call"]["arguments"],
                                                                           captures)},
                                raw_arguments=case["call"].get("raw_arguments"))
+        row["actual"] = scrub(tool_payload(reply))
         verify_envelope(reply, None if "parallel" in case["call"] else descriptor)
         if (case["tool"] == "oracle_explain_plan" and "parallel" not in case["call"]
                 and tool_payload(reply).get("isError") is not True):
@@ -3688,7 +3714,7 @@ def _run_lane(args, output):
                    "capabilities": sorted(capabilities), "cases": rows})
     barriers = BarrierPool()
     try:
-        if not args.case and not args.contract_only:
+        if not args.case and not args.contract_only and not args.alias_contracts_only:
             release_cases = json.loads(RELEASE_MANIFEST.read_text())
             run_manifest_units(work, {**env, "CARGO_TARGET_DIR": str(target_dir)}, output)
             for transport in ("stdio", "http"):
@@ -3724,7 +3750,7 @@ def _run_lane(args, output):
                                      metadata_pool=args.metadata_pool,
                                      metadata_read_only_transaction=args.metadata_read_only_transaction,
                                      diagnostics_pack_licensed=args.diagnostics_pack_licensed)
-                needs_retention_probe = any(
+                needs_retention_probe = not args.alias_contracts_only and any(
                     case.get("runtime_retention_probe")
                     and (not args.case or case["case_id"] in args.case)
                     and transport in case["transports"]
@@ -3741,7 +3767,7 @@ def _run_lane(args, output):
                     retention_probe = None
                     retention_failure = {"class": type(exc).__name__, "detail": str(exc)[:240]}
                 awr_skip = None
-                if any(case.get("runtime_awr_probe")
+                if not args.alias_contracts_only and any(case.get("runtime_awr_probe")
                        and (not args.case or case["case_id"] in args.case)
                        and transport in case["transports"] for case in family_cases):
                     try:
@@ -3761,7 +3787,7 @@ def _run_lane(args, output):
                             case["expect"]["ora_code"] = retention_probe["ora_code"]
                             case["retention_probe"] = retention_probe
                 for case in expanded_family:
-                    if (case.get("setup_phase") == "before_server"
+                    if (not args.alias_contracts_only and case.get("setup_phase") == "before_server"
                             and (not args.case or case["case_id"] in args.case)
                             and set(case["requires"]) <= capabilities):
                         apply_setup(connection, case["setup"])
@@ -3797,12 +3823,17 @@ def _run_lane(args, output):
                     "name": "oracle_set_session_level", "arguments": {"action": "drop"}}))
                 require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
                         "could not return to READ_ONLY after discovery")
-                generated_cases = list(generic_contract_cases(
+                generated_aliases = aliases.generated_cases(sys.modules[__name__], discovered,
+                    json.loads(subprocess.check_output([str(binary), "--json", "robot-docs", "tools"], text=True)),
+                    expanded_family, args.lane, fixture_id, transport) if fixture_id and not args.contract_only else []
+                generated_cases = generated_aliases + list(generic_contract_cases(
                     discovered, args.lane, contract_baselines(expanded_family)))
                 available_here = {case["case_id"] for case in expanded_family + generated_cases}
                 requested_here = set(args.case or ()) & available_here
                 selected_case_ids.update(requested_here)
-                cases = select_requested_cases(expanded_family, generated_cases,
+                selected_family = ([case for case in expanded_family if case["case_id"] in {value["case_id"] for value in aliases.load_rules(sys.modules[__name__])["cases"]}]
+                                   if args.alias_contracts_only else expanded_family)
+                cases = select_requested_cases(selected_family, generated_cases,
                                                requested_here if args.case else None)
                 current_level = "READ_ONLY"
                 current_profile = args.lane
@@ -3873,7 +3904,7 @@ def _run_lane(args, output):
                         initialize(client)
                         current_profile = args.lane
                         current_level = "READ_ONLY"
-                    if "steps" in case:
+                    if "steps" in case or "alias_proof" in case:
                         # Steps may elevate, expire or drop the session level on
                         # their own; re-establish the tracked READ_ONLY baseline.
                         dropped = tool_payload(client.rpc("tools/call", {
@@ -3881,7 +3912,7 @@ def _run_lane(args, output):
                         require(dropped.get("structuredContent", {}).get("session", {}).get("current_level") == "READ_ONLY",
                                 "failed to drop after a multi-step case")
                         current_level = "READ_ONLY"
-                if not args.case and not args.contract_only:
+                if not args.case and not args.contract_only and not args.alias_contracts_only:
                     rows.append(run_doctor_manifest_case(binary, args.lane, transport))
                 if not args.case:
                     restart_row, replacement = run_restart_recovery(
@@ -3890,8 +3921,9 @@ def _run_lane(args, output):
                     rows.append(restart_row)
                     if replacement is not None:
                         client = replacement
-                require(audit_path.exists() and audit_verify(binary, audit_path, client_env),
-                        f"{transport}: final audit chain verification failed")
+                audit_verified = audit_path.exists() and audit_verify(binary, audit_path, client_env)
+                aliases.finalize_audit_rows(rows, args.lane, transport, audit_verified)
+                require(audit_verified, f"{transport}: final audit chain verification failed")
             finally:
                 if client is not None:
                     client.close()
@@ -3903,7 +3935,7 @@ def _run_lane(args, output):
         if args.case:
             missing = set(args.case) - selected_case_ids
             require(not missing, f"unknown scoped W4 case(s): {', '.join(sorted(missing))}")
-        if not args.case and not args.contract_only:
+        if not args.case and not args.contract_only and not args.alias_contracts_only:
             required = set().union(*(manifest_required(args.lane, transport, capabilities)
                                      for transport in ("stdio", "http")))
             map_live_manifest_case_ids(output, json.loads(RELEASE_MANIFEST.read_text()), required)
@@ -3918,10 +3950,10 @@ def _run_lane(args, output):
         if args.coverage_report:
             (base / "coverage.json").write_text(json.dumps(
                 coverage_status(descriptors, family_cases), indent=2, sort_keys=True) + "\n")
-        if not args.contract_only and not args.case:
+        if not args.contract_only and not args.case and not args.alias_contracts_only:
             for transport in ("stdio", "http"):
                 enforce_manifest(results_path, args.lane, transport, capabilities)
-        if (not args.contract_only and not args.case) or args.coverage_report:
+        if (not args.contract_only and not args.case and not args.alias_contracts_only) or args.coverage_report:
             verify_coverage(descriptors, family_cases)
         print(compact({"lane": args.lane, "registry_count": len(descriptors),
                        "cases": len(rows), "verdict": verdict, "results": str(results_path)}))
@@ -4504,7 +4536,7 @@ def json_subset_refusal_selftest():
                     "w4_runtime_issue50_session_busy"):
         case = cases[case_id]
         expected = case["expect"]
-        structured = {"isError": True, **expected["json_subset"]}
+        structured = {"isError": True, "next_steps": ["inspect the current session before retrying"], **expected["json_subset"]}
         reply = {"jsonrpc": "2.0", "id": 1, "result": {
             "content": [], "isError": True, "structuredContent": structured}}
         verify_expect_shape(expected)
@@ -5008,7 +5040,79 @@ def timeout_budget_selftest():
     print(compact({"selftest": "exact_zero_refusal_and_observed_bounded_timeout", "verdict": "pass"}))
 
 
+def alias_and_refusal_verifiers_selftest():
+    # Checker units only. Native Oracle and wire evidence is produced separately.
+    payload = {"error_class": "INVALID_ARGUMENTS", "next_steps": ["inspect the documented schema"]}
+    envelope = {"jsonrpc": "2.0", "id": 1, "result": {"content": [], "isError": True, "structuredContent": payload}}
+    verify_envelope(envelope)
+    for bad in (None, [], "retry", [""], ["   "], ["retry", None]):
+        structured = {**payload, "next_steps": bad}
+        try:
+            verify_envelope({**envelope, "result": {**envelope["result"], "structuredContent": structured}})
+        except DriverError:
+            continue
+        raise DriverError("common refusal verifier accepted missing, empty or malformed next_steps")
+    missing = {key: value for key, value in payload.items() if key != "next_steps"}
+    try:
+        verify_envelope({"jsonrpc": "2.0", "id": 1, "error": {"code": -32602, "message": "invalid arguments", "data": missing}})
+    except DriverError:
+        pass
+    else:
+        raise DriverError("typed JSON-RPC refusal accepted missing next_steps")
+    left = {"case": {"actual": {"rows": [{"ID": "1"}]}, "db_reread_actual": [[[1]]]}, "audit_semantics": [{"tool": "oracle_execute", "outcome": "SUCCEEDED"}]}
+    aliases.verify_equivalent_runs(sys.modules[__name__], left, left, {})
+    for wrong in ({**left, "case": {**left["case"], "actual": {"rows": [{"ID": "2"}]}}},
+                  {**left, "case": {**left["case"], "db_reread_actual": [[[2]]]}},
+                  {**left, "audit_semantics": [{"tool": "oracle_execute", "outcome": "FAILED"}]}):
+        try:
+            aliases.verify_equivalent_runs(sys.modules[__name__], left, wrong, {})
+        except DriverError:
+            continue
+        raise DriverError("alias comparator accepted changed rows, independent state or audit outcome")
+    for column in ("scn", "timestamp", "token", "tool", "custom_catalog_generation"):
+        before = {**left, "case": {"actual": {"rows": [{column: "first-value"}]}}}
+        after = {**left, "case": {"actual": {"rows": [{column: "changed-value"}]}}}
+        try:
+            aliases.verify_equivalent_runs(sys.modules[__name__], before, after, {})
+        except DriverError:
+            continue
+        raise DriverError(f"alias comparator scrubbed semantic row column {column}")
+    certificate = {"audit_entry_hash": "sha256:" + "a" * 64, "profile": "free23", "decisions": []}
+    masking = {key: value for key, value in certificate.items() if key != "audit_entry_hash"}
+    masked = {"case": {"actual": {"structuredContent": {"mask_certificate": certificate}}},
+              "audit": [{"entry_hash": certificate["audit_entry_hash"], "outcome": "SUCCEEDED",
+                         "result_masking": masking}], "audit_semantics": []}
+    aliases.verify_equivalent_runs(sys.modules[__name__], masked, masked, {})
+    try:
+        aliases.verify_equivalent_runs(sys.modules[__name__], masked, {**masked, "audit": []}, {})
+    except DriverError:
+        pass
+    else:
+        raise DriverError("alias comparison accepted an unbound mask certificate")
+    generation = {"case": {"actual": {"structuredContent": {"custom_catalog_generation": 3}}},
+                  "audit_semantics": []}
+    advanced = {**generation, "case": {"actual": {"structuredContent": {"custom_catalog_generation": 5}}}}
+    aliases.verify_equivalent_runs(sys.modules[__name__], generation, advanced, {})
+    try:
+        aliases.verify_equivalent_runs(sys.modules[__name__], generation, generation, {})
+    except DriverError:
+        pass
+    else:
+        raise DriverError("alias comparison accepted a nonadvancing profile catalogue")
+    for verified in (False, True):
+        rows = [{"lane": "free23", "transport": "stdio", "verdict": "fail", "audit_pending_final_chain": True},
+                {"lane": "free23", "transport": "stdio", "verdict": "fail", "failure": {"detail": "semantic failure"}},
+                {"lane": "free23", "transport": "stdio", "verdict": "fail", "audit_pending_final_chain": True,
+                 "verification_failure": {"detail": "late cleanup failed"}}]
+        aliases.finalize_audit_rows(rows, "free23", "stdio", verified)
+        require(rows[0]["verdict"] == ("pass" if verified else "fail")
+                and rows[1]["verdict"] == "fail" and rows[2]["verdict"] == "fail",
+                "audit finalization accepted an invalid chain or overrode semantic failure")
+    print(compact({"selftest": "alias_state_audit_and_all_typed_refusal_next_steps", "verdict": "pass"}))
+
+
 def selftest():
+    alias_and_refusal_verifiers_selftest()
     timeout_budget_selftest()
     argument_deprecations_selftest()
     json_subset_refusal_selftest()
@@ -5214,7 +5318,7 @@ def selftest():
     rejected("unresolved_placeholder", lambda: expand_case("${unknown}", "W41234ABCDEF", "stdio"))
     rejected("non_owned_setup", lambda: apply_setup(object(), [{"sql": "DROP TABLE OTHER_TABLE"}]))
     error = {"jsonrpc": "2.0", "id": 1, "result": {"content": [], "isError": True,
-             "structuredContent": {"error_class": "INVALID_ARGUMENTS"}}}
+             "structuredContent": {"error_class": "INVALID_ARGUMENTS", "next_steps": ["correct the request arguments"]}}}
     rejected("wrong_error_class", lambda: verify_expect({"error_class": "FORBIDDEN_STATEMENT"}, error))
     plan_reply = {"result": {"content": [], "isError": False, "structuredContent": {
         "diagnostic_write": {"statement_id": "OMCP_" + "A" * 24,
@@ -5338,7 +5442,7 @@ def selftest():
             accepted = self.executions == 1 or self.replay_accepted
             require(args.get("confirm") == "tok-synthetic-1", "stub received an unfilled capture")
             structured = ({"executed": True, "committed": True} if accepted
-                          else {"error_class": "CHALLENGE_REQUIRED"})
+                          else {"error_class": "CHALLENGE_REQUIRED", "next_steps": ["obtain a fresh preview token"]})
             return {"jsonrpc": "2.0", "id": 1, "result": {
                 "content": [], "isError": not accepted, "structuredContent": structured}}
 
@@ -5440,7 +5544,7 @@ def selftest():
             require(self.released.wait(5), "stub cancellation notification absent")
             return {"jsonrpc": "2.0", "id": self.next_id,
                     "result": {"content": [], "isError": True,
-                               "structuredContent": {"error_class": "CANCELLED"}}}
+                               "structuredContent": {"error_class": "CANCELLED", "next_steps": ["retry a short read"]}}}
 
         def notify(self, method, params):
             self.notification = (method, params)
@@ -5502,6 +5606,8 @@ def main():
                         help="use the same two-slot metadata pool for baseline/off/on proofs")
     parser.add_argument("--metadata-read-only-transaction", choices=("on", "off"),
                         help="explicit profile option; on implies --metadata-pool, off preserves pool selection")
+    parser.add_argument("--alias-contracts-only", action="store_true",
+                        help="run generated aliases, compatibility wrappers and W3 contracts only")
     parser.add_argument("--contract-only", action="store_true",
                         help="run generated W3 contracts without the release manifest")
     parser.add_argument("--case", action="append",
@@ -5513,7 +5619,7 @@ def main():
         args.metadata_pool = args.metadata_pool or args.metadata_read_only_transaction == "on"
         args.metadata_read_only_transaction = args.metadata_read_only_transaction == "on"
     try:
-        require(not (args.case and args.contract_only), "--case and --contract-only cannot be combined")
+        require(sum(bool(value) for value in (args.case, args.contract_only, args.alias_contracts_only)) <= 1, "--case, --contract-only and --alias-contracts-only are exclusive")
         require(not args.binary_source_sha or re.fullmatch(r"[0-9a-f]{40}", args.binary_source_sha),
                 "--binary-source-sha needs a full Git SHA")
         if args.ci_summary:
