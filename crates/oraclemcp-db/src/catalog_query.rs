@@ -2487,7 +2487,7 @@ order by object_owner, object_name, policy_group, policy_name"#
                 extract_owner_sql!(
                     r#"SELECT 
   owner, name, type, referenced_owner, referenced_name, referenced_type,
-  dependency_type
+  referenced_link_name, dependency_type
 from SYS.all_dependencies
 where owner in ("#,
                     r#")
@@ -2549,9 +2549,9 @@ order by owner, name, referenced_owner, referenced_name"#
                 Diagnostic,
             ),
             Self::ClosureDependencies => (
-                "SELECT referenced_owner, referenced_name, referenced_type, dependency_type, \
+                "SELECT referenced_owner, referenced_name, referenced_type, referenced_link_name, dependency_type, \
                         target_object_id, target_last_ddl_time, target_status \
-                   FROM (SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.dependency_type, \
+                   FROM (SELECT d.referenced_owner, d.referenced_name, d.referenced_type, d.referenced_link_name, d.dependency_type, \
                                 o.object_id AS target_object_id, \
                                 TO_CHAR(o.last_ddl_time,'YYYY-MM-DD\"T\"HH24:MI:SS') AS target_last_ddl_time, \
                                 o.status AS target_status \
