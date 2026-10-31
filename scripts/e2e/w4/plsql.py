@@ -40,7 +40,9 @@ def expand_fixture(d, token, run_id, transport, lane):
     if kind == "project":
         d.require(path.is_dir(), "PL/SQL project fixture must be a directory")
         if name == "live":
-            rendered = d.plsql_project_path(run_id, transport, lane) / "catalog-fixture"
+            project = d.plsql_project_path(run_id, transport, lane)
+            # The outer source scanner recurses; keep this project beside it.
+            rendered = project.with_name(project.name + "-catalog")
             rendered.mkdir(parents=True, exist_ok=True)
             for source in sorted(path.glob("*.sql")):
                 (rendered / source.name).write_text(d.expand_case(
