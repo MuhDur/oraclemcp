@@ -72,6 +72,20 @@ fn decisive_action_commitments_are_signed_facts() {
 }
 
 #[test]
+fn decisive_action_commitment_field_identifier_enters_the_digest() {
+    let mut ddl = sample();
+    ddl.decisive
+        .action_fields
+        .insert(DecisiveField::DdlEffectClosure, computed([7; 32]));
+    let mut routine = sample();
+    routine
+        .decisive
+        .action_fields
+        .insert(DecisiveField::RoutineEffects, computed([7; 32]));
+    assert_ne!(ddl.decisive_digest(), routine.decisive_digest());
+}
+
+#[test]
 fn decisive_action_commitments_preserve_unavailable_and_truncated_statuses() {
     for reason in [
         UnavailableReason::NoPrivilege,
