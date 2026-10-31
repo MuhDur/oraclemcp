@@ -97,20 +97,20 @@ plsql-output = { version = "=0.7.0", default-features = false }
 [patch.crates-io]
 oraclemcp-driver-cx = { git = "https://github.com/MuhDur/rust-oracledb", rev = "0cda6761ed4fe42c74dfb96c7f3c2c1713434931" }
 oraclemcp-driver-cx-protocol = { git = "https://github.com/MuhDur/rust-oracledb", rev = "0cda6761ed4fe42c74dfb96c7f3c2c1713434931" }
-plsql-core = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-engine = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-catalog = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-depgraph = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-lineage = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-project = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-ir = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-parser = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-parser-antlr = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-symbols = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-cicd = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-doc = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-sast = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
-plsql-output = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a2c9ac141784172041e48fc09980432a4e8f5bda" }
+plsql-core = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-engine = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-catalog = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-depgraph = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-lineage = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-project = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-ir = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-parser = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-parser-antlr = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-symbols = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-cicd = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-doc = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-sast = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
+plsql-output = { git = "https://github.com/MuhDur/plsql-intelligence", rev = "a19a4126327ad8ad7275fcebfa63fe551c1edef9" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

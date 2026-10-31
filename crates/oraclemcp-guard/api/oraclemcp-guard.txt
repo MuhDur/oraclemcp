@@ -637,8 +637,12 @@ pub fn oraclemcp_guard::classifier::Classifier::classify_verified_local_vector_e
 pub fn oraclemcp_guard::classifier::Classifier::engine_free_baseline(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::served_strict(self) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::shape_oracle(&self) -> core::option::Option<alloc::sync::Arc<dyn oraclemcp_guard::shape_oracle::StatementShapeOracle>>
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::with_shape_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::shape_oracle::StatementShapeOracle>) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_statement_unknown_guarded(self) -> Self
+impl core::clone::Clone for oraclemcp_guard::classifier::Classifier
+pub fn oraclemcp_guard::classifier::Classifier::clone(&self) -> oraclemcp_guard::classifier::Classifier
 impl core::default::Default for oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::default() -> Self
 impl core::marker::Freeze for oraclemcp_guard::classifier::Classifier
@@ -658,6 +662,10 @@ pub fn oraclemcp_guard::classifier::Classifier::try_from(U) -> core::result::Res
 impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::classifier::Classifier where U: core::convert::TryFrom<T>
 pub type oraclemcp_guard::classifier::Classifier::Error = <U as core::convert::TryFrom<T>>::Error
 pub fn oraclemcp_guard::classifier::Classifier::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::classifier::Classifier where T: core::clone::Clone
+pub type oraclemcp_guard::classifier::Classifier::Owned = T
+pub fn oraclemcp_guard::classifier::Classifier::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::classifier::Classifier::to_owned(&self) -> T
 impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::classifier::Classifier
 impl<T> core::any::Any for oraclemcp_guard::classifier::Classifier where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_guard::classifier::Classifier::type_id(&self) -> core::any::TypeId
@@ -665,6 +673,8 @@ impl<T> core::borrow::Borrow<T> for oraclemcp_guard::classifier::Classifier wher
 pub fn oraclemcp_guard::classifier::Classifier::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::classifier::Classifier where T: ?core::marker::Sized
 pub fn oraclemcp_guard::classifier::Classifier::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::classifier::Classifier where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::classifier::Classifier::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::from(T) -> T
 impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::classifier::Classifier
@@ -983,6 +993,7 @@ pub fn oraclemcp_guard::classifier::named_bind_placeholders(&str) -> alloc::vec:
 pub fn oraclemcp_guard::classifier::planned_relations_match_base_objects(&oraclemcp_guard::resolver::SemanticReadPlan, &[oraclemcp_guard::purity::ObjectRef]) -> core::result::Result<(), oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::classifier::semantic_read_plan(&str) -> core::option::Option<oraclemcp_guard::resolver::SemanticReadPlan>
 pub fn oraclemcp_guard::classifier::semantic_read_plan_checked(&str) -> core::result::Result<oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_guard::PlanMismatch>
+pub fn oraclemcp_guard::classifier::semantic_read_plan_checked_with_shape(&str, core::option::Option<&dyn oraclemcp_guard::shape_oracle::StatementShapeOracle>) -> core::result::Result<oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::classifier::stage_a(&str, &oraclemcp_guard::classifier::ClassifierConfig) -> oraclemcp_guard::classifier::StageA
 pub mod oraclemcp_guard::clock
 pub struct oraclemcp_guard::clock::MonotonicDeadline
@@ -13372,6 +13383,1011 @@ pub fn oraclemcp_guard::scoped_grant::match_statement(&oraclemcp_guard::scoped_g
 pub fn oraclemcp_guard::scoped_grant::render_ast(&oraclemcp_guard::scoped_grant::GrantPredicateV1) -> (sqlparser::ast::Expr, alloc::vec::Vec<oraclemcp_guard::scoped_grant::predicate::GrantBind>)
 pub fn oraclemcp_guard::scoped_grant::render_grant_delete(&oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1) -> core::result::Result<&oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
 pub fn oraclemcp_guard::scoped_grant::render_grant_update(&oraclemcp_guard::effective_dml_plan::EffectiveDmlPlanV1) -> core::result::Result<&oraclemcp_guard::scoped_grant::rewrite::GrantRewriteV1, oraclemcp_guard::scoped_grant::rewrite::GrantRewriteError>
+pub mod oraclemcp_guard::shape_oracle
+pub enum oraclemcp_guard::shape_oracle::ShapeBranch
+pub oraclemcp_guard::shape_oracle::ShapeBranch::Query(alloc::boxed::Box<oraclemcp_guard::shape_oracle::ShapeQuery>)
+pub oraclemcp_guard::shape_oracle::ShapeBranch::Select(alloc::boxed::Box<oraclemcp_guard::shape_oracle::ShapeSelect>)
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeBranch
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeBranch
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::eq(&self, &oraclemcp_guard::shape_oracle::ShapeBranch) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeBranch
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeBranch
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeBranch
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeBranch where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeBranch where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeBranch where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeBranch where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeBranch where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeBranch::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeBranch where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeBranch::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeBranch where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeBranch::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeBranch
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeBranch where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeBranch where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeBranch where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeBranch where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeBranch::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeBranch
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeBranch
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeBranch
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeBranch
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeBranch
+pub type oraclemcp_guard::shape_oracle::ShapeBranch::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeBranch where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeBranch where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeBranch::vzip(self) -> V
+pub enum oraclemcp_guard::shape_oracle::ShapeExpr
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Call
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Call::args: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Call::builtin: bool
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Call::name: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Group(alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>)
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Literal
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Name(alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>)
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Star
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Subquery
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Subquery::kind: oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+pub oraclemcp_guard::shape_oracle::ShapeExpr::Subquery::query: alloc::boxed::Box<oraclemcp_guard::shape_oracle::ShapeQuery>
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeExpr
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeExpr
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::eq(&self, &oraclemcp_guard::shape_oracle::ShapeExpr) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeExpr
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeExpr
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeExpr
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeExpr where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeExpr where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeExpr where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeExpr where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeExpr where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeExpr::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeExpr where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeExpr::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeExpr where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeExpr::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeExpr
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeExpr where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeExpr where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeExpr where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeExpr where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeExpr::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeExpr
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeExpr
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeExpr
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeExpr
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeExpr
+pub type oraclemcp_guard::shape_oracle::ShapeExpr::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeExpr where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeExpr where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeExpr::vzip(self) -> V
+pub enum oraclemcp_guard::shape_oracle::ShapeJoinKind
+pub oraclemcp_guard::shape_oracle::ShapeJoinKind::Cross
+pub oraclemcp_guard::shape_oracle::ShapeJoinKind::CrossApply
+pub oraclemcp_guard::shape_oracle::ShapeJoinKind::Full
+pub oraclemcp_guard::shape_oracle::ShapeJoinKind::Inner
+pub oraclemcp_guard::shape_oracle::ShapeJoinKind::Left
+pub oraclemcp_guard::shape_oracle::ShapeJoinKind::OuterApply
+pub oraclemcp_guard::shape_oracle::ShapeJoinKind::Right
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeJoinKind
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeJoinKind
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::eq(&self, &oraclemcp_guard::shape_oracle::ShapeJoinKind) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeJoinKind
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeJoinKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeJoinKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeJoinKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeJoinKind where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeJoinKind where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeJoinKind::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeJoinKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeJoinKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeJoinKind where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeJoinKind::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeJoinKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeJoinKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeJoinKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeJoinKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeJoinKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeJoinKind
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeJoinKind
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeJoinKind
+pub type oraclemcp_guard::shape_oracle::ShapeJoinKind::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeJoinKind where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeJoinKind where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeJoinKind::vzip(self) -> V
+pub enum oraclemcp_guard::shape_oracle::ShapePartition
+pub oraclemcp_guard::shape_oracle::ShapePartition::For(alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>)
+pub oraclemcp_guard::shape_oracle::ShapePartition::Named(alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>)
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapePartition
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::clone(&self) -> oraclemcp_guard::shape_oracle::ShapePartition
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapePartition
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::eq(&self, &oraclemcp_guard::shape_oracle::ShapePartition) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapePartition
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapePartition
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapePartition
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapePartition where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapePartition where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapePartition where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapePartition where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapePartition where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapePartition::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapePartition where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapePartition::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapePartition where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapePartition::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapePartition
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapePartition where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapePartition where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapePartition where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapePartition where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapePartition::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapePartition
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapePartition
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapePartition
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapePartition
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapePartition
+pub type oraclemcp_guard::shape_oracle::ShapePartition::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapePartition where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapePartition where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapePartition::vzip(self) -> V
+pub enum oraclemcp_guard::shape_oracle::ShapeSelectItem
+pub oraclemcp_guard::shape_oracle::ShapeSelectItem::Expr
+pub oraclemcp_guard::shape_oracle::ShapeSelectItem::Expr::alias: core::option::Option<oraclemcp_guard::shape_oracle::ShapeIdent>
+pub oraclemcp_guard::shape_oracle::ShapeSelectItem::Expr::expr: oraclemcp_guard::shape_oracle::ShapeExpr
+pub oraclemcp_guard::shape_oracle::ShapeSelectItem::QualifiedWildcard(alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>)
+pub oraclemcp_guard::shape_oracle::ShapeSelectItem::Wildcard
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeSelectItem
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeSelectItem
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::eq(&self, &oraclemcp_guard::shape_oracle::ShapeSelectItem) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeSelectItem
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeSelectItem where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeSelectItem where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeSelectItem where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeSelectItem where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeSelectItem where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSelectItem::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeSelectItem where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSelectItem::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeSelectItem where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeSelectItem::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeSelectItem where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeSelectItem where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeSelectItem where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeSelectItem where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeSelectItem::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeSelectItem
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeSelectItem
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeSelectItem
+pub type oraclemcp_guard::shape_oracle::ShapeSelectItem::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeSelectItem where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeSelectItem where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSelectItem::vzip(self) -> V
+pub enum oraclemcp_guard::shape_oracle::ShapeSetOp
+pub oraclemcp_guard::shape_oracle::ShapeSetOp::Intersect
+pub oraclemcp_guard::shape_oracle::ShapeSetOp::Minus
+pub oraclemcp_guard::shape_oracle::ShapeSetOp::Union
+pub oraclemcp_guard::shape_oracle::ShapeSetOp::UnionAll
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeSetOp
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeSetOp
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::eq(&self, &oraclemcp_guard::shape_oracle::ShapeSetOp) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeSetOp
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeSetOp where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeSetOp where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeSetOp where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeSetOp where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeSetOp where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSetOp::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeSetOp where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSetOp::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeSetOp where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeSetOp::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeSetOp where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeSetOp where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeSetOp where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeSetOp where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeSetOp::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeSetOp
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeSetOp
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeSetOp
+pub type oraclemcp_guard::shape_oracle::ShapeSetOp::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeSetOp where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeSetOp where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSetOp::vzip(self) -> V
+pub enum oraclemcp_guard::shape_oracle::ShapeSource
+pub oraclemcp_guard::shape_oracle::ShapeSource::Derived(alloc::boxed::Box<oraclemcp_guard::shape_oracle::ShapeQuery>)
+pub oraclemcp_guard::shape_oracle::ShapeSource::Table
+pub oraclemcp_guard::shape_oracle::ShapeSource::Table::db_link: core::option::Option<alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>>
+pub oraclemcp_guard::shape_oracle::ShapeSource::Table::name: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>
+pub oraclemcp_guard::shape_oracle::ShapeSource::Table::partition: core::option::Option<oraclemcp_guard::shape_oracle::ShapePartition>
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeSource
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeSource
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeSource
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::eq(&self, &oraclemcp_guard::shape_oracle::ShapeSource) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeSource
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeSource
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeSource
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeSource where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeSource where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeSource where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeSource where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSource::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeSource where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSource::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeSource where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeSource::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeSource
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeSource where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeSource where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeSource where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeSource where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeSource::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeSource
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeSource
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeSource
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeSource
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeSource
+pub type oraclemcp_guard::shape_oracle::ShapeSource::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeSource where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeSource where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSource::vzip(self) -> V
+pub enum oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+pub oraclemcp_guard::shape_oracle::ShapeSubqueryKind::Exists
+pub oraclemcp_guard::shape_oracle::ShapeSubqueryKind::In
+pub oraclemcp_guard::shape_oracle::ShapeSubqueryKind::Quantified
+pub oraclemcp_guard::shape_oracle::ShapeSubqueryKind::Scalar
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::eq(&self, &oraclemcp_guard::shape_oracle::ShapeSubqueryKind) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSubqueryKind::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSubqueryKind::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeSubqueryKind::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeSubqueryKind
+pub type oraclemcp_guard::shape_oracle::ShapeSubqueryKind::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeSubqueryKind where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSubqueryKind::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::NoShapeOracle
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::clone(&self) -> oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::default::Default for oraclemcp_guard::shape_oracle::NoShapeOracle
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::default() -> oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::NoShapeOracle
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl oraclemcp_guard::shape_oracle::StatementShapeOracle for oraclemcp_guard::shape_oracle::NoShapeOracle
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::read_shape(&self, &str) -> core::option::Option<oraclemcp_guard::shape_oracle::ReadShape>
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::marker::Send for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::NoShapeOracle where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::NoShapeOracle where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::NoShapeOracle where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::NoShapeOracle where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::NoShapeOracle::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::NoShapeOracle where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::NoShapeOracle::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::NoShapeOracle where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::NoShapeOracle::Owned = T
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::NoShapeOracle where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::NoShapeOracle where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::NoShapeOracle where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::NoShapeOracle where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::NoShapeOracle::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::NoShapeOracle
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::NoShapeOracle
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::NoShapeOracle
+pub type oraclemcp_guard::shape_oracle::NoShapeOracle::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::NoShapeOracle where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::NoShapeOracle where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ReadShape
+pub oraclemcp_guard::shape_oracle::ReadShape::query: oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ReadShape
+pub fn oraclemcp_guard::shape_oracle::ReadShape::clone(&self) -> oraclemcp_guard::shape_oracle::ReadShape
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ReadShape
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ReadShape
+pub fn oraclemcp_guard::shape_oracle::ReadShape::eq(&self, &oraclemcp_guard::shape_oracle::ReadShape) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ReadShape
+pub fn oraclemcp_guard::shape_oracle::ReadShape::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ReadShape
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ReadShape
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ReadShape
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ReadShape
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ReadShape
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ReadShape
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ReadShape
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ReadShape
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ReadShape where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ReadShape::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ReadShape where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ReadShape where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ReadShape where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ReadShape::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ReadShape where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ReadShape::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ReadShape::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ReadShape where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ReadShape::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ReadShape::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ReadShape where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ReadShape::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ReadShape::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ReadShape::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ReadShape
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ReadShape where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ReadShape::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ReadShape where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ReadShape::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ReadShape where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ReadShape::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ReadShape where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ReadShape::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ReadShape
+pub fn oraclemcp_guard::shape_oracle::ReadShape::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ReadShape
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ReadShape
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ReadShape
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ReadShape
+pub type oraclemcp_guard::shape_oracle::ReadShape::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ReadShape where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ReadShape where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ReadShape::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeCte
+pub oraclemcp_guard::shape_oracle::ShapeCte::columns: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>
+pub oraclemcp_guard::shape_oracle::ShapeCte::name: oraclemcp_guard::shape_oracle::ShapeIdent
+pub oraclemcp_guard::shape_oracle::ShapeCte::query: oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeCte
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeCte
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeCte
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::eq(&self, &oraclemcp_guard::shape_oracle::ShapeCte) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeCte
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeCte
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeCte
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeCte where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeCte where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeCte where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeCte where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeCte where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeCte::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeCte where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeCte::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeCte where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeCte::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeCte
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeCte where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeCte where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeCte where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeCte where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeCte::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeCte
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeCte
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeCte
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeCte
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeCte
+pub type oraclemcp_guard::shape_oracle::ShapeCte::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeCte where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeCte where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeCte::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeFromItem
+pub oraclemcp_guard::shape_oracle::ShapeFromItem::joins: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeJoin>
+pub oraclemcp_guard::shape_oracle::ShapeFromItem::source: oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeFromItem
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeFromItem
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::eq(&self, &oraclemcp_guard::shape_oracle::ShapeFromItem) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeFromItem
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeFromItem where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeFromItem where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeFromItem where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeFromItem where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeFromItem where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeFromItem::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeFromItem where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeFromItem::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeFromItem where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeFromItem::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeFromItem where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeFromItem where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeFromItem where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeFromItem where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeFromItem::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeFromItem
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeFromItem
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeFromItem
+pub type oraclemcp_guard::shape_oracle::ShapeFromItem::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeFromItem where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeFromItem where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeFromItem::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeHierarchy
+pub oraclemcp_guard::shape_oracle::ShapeHierarchy::connect_by: oraclemcp_guard::shape_oracle::ShapeExpr
+pub oraclemcp_guard::shape_oracle::ShapeHierarchy::nocycle: bool
+pub oraclemcp_guard::shape_oracle::ShapeHierarchy::start_with: core::option::Option<oraclemcp_guard::shape_oracle::ShapeExpr>
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeHierarchy
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeHierarchy
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::eq(&self, &oraclemcp_guard::shape_oracle::ShapeHierarchy) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeHierarchy
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeHierarchy where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeHierarchy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeHierarchy where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeHierarchy where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeHierarchy where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeHierarchy::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeHierarchy where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeHierarchy::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeHierarchy where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeHierarchy::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeHierarchy where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeHierarchy where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeHierarchy where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeHierarchy where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeHierarchy::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeHierarchy
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeHierarchy
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeHierarchy
+pub type oraclemcp_guard::shape_oracle::ShapeHierarchy::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeHierarchy where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeHierarchy where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeHierarchy::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeIdent
+pub oraclemcp_guard::shape_oracle::ShapeIdent::quoted: bool
+pub oraclemcp_guard::shape_oracle::ShapeIdent::text: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeIdent
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeIdent
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::eq(&self, &oraclemcp_guard::shape_oracle::ShapeIdent) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeIdent
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeIdent
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeIdent
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeIdent where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeIdent where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeIdent where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeIdent where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeIdent where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeIdent::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeIdent where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeIdent::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeIdent where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeIdent::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeIdent
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeIdent where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeIdent where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeIdent where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeIdent where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeIdent::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeIdent
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeIdent
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeIdent
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeIdent
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeIdent
+pub type oraclemcp_guard::shape_oracle::ShapeIdent::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeIdent where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeIdent where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeIdent::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeJoin
+pub oraclemcp_guard::shape_oracle::ShapeJoin::kind: oraclemcp_guard::shape_oracle::ShapeJoinKind
+pub oraclemcp_guard::shape_oracle::ShapeJoin::natural: bool
+pub oraclemcp_guard::shape_oracle::ShapeJoin::on: core::option::Option<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeJoin::partition_by: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeJoin::table: oraclemcp_guard::shape_oracle::ShapeTableRef
+pub oraclemcp_guard::shape_oracle::ShapeJoin::using: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeIdent>
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeJoin
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeJoin
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::eq(&self, &oraclemcp_guard::shape_oracle::ShapeJoin) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeJoin
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeJoin
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeJoin
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeJoin where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeJoin where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeJoin where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeJoin where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeJoin where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeJoin::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeJoin where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeJoin::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeJoin where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeJoin::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeJoin
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeJoin where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeJoin where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeJoin where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeJoin where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeJoin::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeJoin
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeJoin
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeJoin
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeJoin
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeJoin
+pub type oraclemcp_guard::shape_oracle::ShapeJoin::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeJoin where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeJoin where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeJoin::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeQuery
+pub oraclemcp_guard::shape_oracle::ShapeQuery::ctes: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeCte>
+pub oraclemcp_guard::shape_oracle::ShapeQuery::first: oraclemcp_guard::shape_oracle::ShapeBranch
+pub oraclemcp_guard::shape_oracle::ShapeQuery::order_by: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeQuery::rest: alloc::vec::Vec<(oraclemcp_guard::shape_oracle::ShapeSetOp, oraclemcp_guard::shape_oracle::ShapeBranch)>
+pub oraclemcp_guard::shape_oracle::ShapeQuery::row_limit: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeQuery
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeQuery
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::eq(&self, &oraclemcp_guard::shape_oracle::ShapeQuery) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeQuery
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeQuery
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeQuery
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeQuery where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeQuery where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeQuery where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeQuery where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeQuery where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeQuery::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeQuery where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeQuery::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeQuery where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeQuery::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeQuery
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeQuery where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeQuery where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeQuery where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeQuery where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeQuery::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeQuery
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeQuery
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeQuery
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeQuery
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeQuery
+pub type oraclemcp_guard::shape_oracle::ShapeQuery::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeQuery where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeQuery where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeQuery::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeSelect
+pub oraclemcp_guard::shape_oracle::ShapeSelect::distinct: bool
+pub oraclemcp_guard::shape_oracle::ShapeSelect::from: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeFromItem>
+pub oraclemcp_guard::shape_oracle::ShapeSelect::group_by: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeSelect::having: core::option::Option<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeSelect::hierarchy: core::option::Option<oraclemcp_guard::shape_oracle::ShapeHierarchy>
+pub oraclemcp_guard::shape_oracle::ShapeSelect::items: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeSelectItem>
+pub oraclemcp_guard::shape_oracle::ShapeSelect::order_by: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeSelect::row_limit: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeSelect::where_clause: core::option::Option<oraclemcp_guard::shape_oracle::ShapeExpr>
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeSelect
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeSelect
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::eq(&self, &oraclemcp_guard::shape_oracle::ShapeSelect) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeSelect
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeSelect
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeSelect
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeSelect where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeSelect where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeSelect where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeSelect where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeSelect where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSelect::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeSelect where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeSelect::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeSelect where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeSelect::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeSelect
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeSelect where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeSelect where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeSelect where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeSelect where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeSelect::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeSelect
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeSelect
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeSelect
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeSelect
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeSelect
+pub type oraclemcp_guard::shape_oracle::ShapeSelect::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeSelect where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeSelect where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeSelect::vzip(self) -> V
+pub struct oraclemcp_guard::shape_oracle::ShapeTableRef
+pub oraclemcp_guard::shape_oracle::ShapeTableRef::alias: core::option::Option<oraclemcp_guard::shape_oracle::ShapeIdent>
+pub oraclemcp_guard::shape_oracle::ShapeTableRef::flashback: alloc::vec::Vec<oraclemcp_guard::shape_oracle::ShapeExpr>
+pub oraclemcp_guard::shape_oracle::ShapeTableRef::source: oraclemcp_guard::shape_oracle::ShapeSource
+impl core::clone::Clone for oraclemcp_guard::shape_oracle::ShapeTableRef
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::clone(&self) -> oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::cmp::Eq for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::cmp::PartialEq for oraclemcp_guard::shape_oracle::ShapeTableRef
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::eq(&self, &oraclemcp_guard::shape_oracle::ShapeTableRef) -> bool
+impl core::fmt::Debug for oraclemcp_guard::shape_oracle::ShapeTableRef
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::marker::Freeze for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::marker::Send for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::marker::Sync for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::marker::Unpin for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::marker::UnsafeUnpin for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::shape_oracle::ShapeTableRef where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::shape_oracle::ShapeTableRef where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::shape_oracle::ShapeTableRef where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::shape_oracle::ShapeTableRef where U: core::convert::From<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::shape_oracle::ShapeTableRef where U: core::convert::Into<T>
+pub type oraclemcp_guard::shape_oracle::ShapeTableRef::Error = core::convert::Infallible
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::shape_oracle::ShapeTableRef where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::shape_oracle::ShapeTableRef::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::shape_oracle::ShapeTableRef where T: core::clone::Clone
+pub type oraclemcp_guard::shape_oracle::ShapeTableRef::Owned = T
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl<T> core::any::Any for oraclemcp_guard::shape_oracle::ShapeTableRef where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::shape_oracle::ShapeTableRef where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::shape_oracle::ShapeTableRef where T: ?core::marker::Sized
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::shape_oracle::ShapeTableRef where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::shape_oracle::ShapeTableRef::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::shape_oracle::ShapeTableRef
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::shape_oracle::ShapeTableRef
+impl<T> typenum::type_operators::Same for oraclemcp_guard::shape_oracle::ShapeTableRef
+pub type oraclemcp_guard::shape_oracle::ShapeTableRef::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::shape_oracle::ShapeTableRef where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::shape_oracle::ShapeTableRef where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::shape_oracle::ShapeTableRef::vzip(self) -> V
+pub const oraclemcp_guard::shape_oracle::MAX_FALLBACK_NESTING: usize
+pub const oraclemcp_guard::shape_oracle::MAX_FALLBACK_SQL_BYTES: usize
+pub trait oraclemcp_guard::shape_oracle::StatementShapeOracle: core::marker::Send + core::marker::Sync
+pub fn oraclemcp_guard::shape_oracle::StatementShapeOracle::read_shape(&self, &str) -> core::option::Option<oraclemcp_guard::shape_oracle::ReadShape>
+impl oraclemcp_guard::shape_oracle::StatementShapeOracle for oraclemcp_guard::shape_oracle::NoShapeOracle
+pub fn oraclemcp_guard::shape_oracle::NoShapeOracle::read_shape(&self, &str) -> core::option::Option<oraclemcp_guard::shape_oracle::ReadShape>
+pub fn oraclemcp_guard::shape_oracle::analysis_sql(&oraclemcp_guard::shape_oracle::ReadShape) -> core::option::Option<alloc::string::String>
+pub fn oraclemcp_guard::shape_oracle::fallback_read_analysis(&str, &dyn oraclemcp_guard::shape_oracle::StatementShapeOracle) -> core::option::Option<(alloc::string::String, sqlparser::ast::Statement)>
+pub fn oraclemcp_guard::shape_oracle::fallback_read_statement(&str, &dyn oraclemcp_guard::shape_oracle::StatementShapeOracle) -> core::option::Option<sqlparser::ast::Statement>
+pub fn oraclemcp_guard::shape_oracle::within_fallback_budget(&str) -> bool
 pub mod oraclemcp_guard::stepup
 pub enum oraclemcp_guard::stepup::ChallengeStatus
 pub oraclemcp_guard::stepup::ChallengeStatus::ExpiredOrUnknown
@@ -17752,8 +18768,12 @@ pub fn oraclemcp_guard::classifier::Classifier::classify_verified_local_vector_e
 pub fn oraclemcp_guard::classifier::Classifier::engine_free_baseline(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::new(oraclemcp_guard::classifier::ClassifierConfig) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::served_strict(self) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::shape_oracle(&self) -> core::option::Option<alloc::sync::Arc<dyn oraclemcp_guard::shape_oracle::StatementShapeOracle>>
 pub fn oraclemcp_guard::classifier::Classifier::with_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::purity::SideEffectOracle>) -> Self
+pub fn oraclemcp_guard::classifier::Classifier::with_shape_oracle(self, alloc::sync::Arc<dyn oraclemcp_guard::shape_oracle::StatementShapeOracle>) -> Self
 pub fn oraclemcp_guard::classifier::Classifier::with_statement_unknown_guarded(self) -> Self
+impl core::clone::Clone for oraclemcp_guard::classifier::Classifier
+pub fn oraclemcp_guard::classifier::Classifier::clone(&self) -> oraclemcp_guard::classifier::Classifier
 impl core::default::Default for oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::default() -> Self
 impl core::marker::Freeze for oraclemcp_guard::classifier::Classifier
@@ -17773,6 +18793,10 @@ pub fn oraclemcp_guard::classifier::Classifier::try_from(U) -> core::result::Res
 impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::classifier::Classifier where U: core::convert::TryFrom<T>
 pub type oraclemcp_guard::classifier::Classifier::Error = <U as core::convert::TryFrom<T>>::Error
 pub fn oraclemcp_guard::classifier::Classifier::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::classifier::Classifier where T: core::clone::Clone
+pub type oraclemcp_guard::classifier::Classifier::Owned = T
+pub fn oraclemcp_guard::classifier::Classifier::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::classifier::Classifier::to_owned(&self) -> T
 impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::classifier::Classifier
 impl<T> core::any::Any for oraclemcp_guard::classifier::Classifier where T: 'static + ?core::marker::Sized
 pub fn oraclemcp_guard::classifier::Classifier::type_id(&self) -> core::any::TypeId
@@ -17780,6 +18804,8 @@ impl<T> core::borrow::Borrow<T> for oraclemcp_guard::classifier::Classifier wher
 pub fn oraclemcp_guard::classifier::Classifier::borrow(&self) -> &T
 impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::classifier::Classifier where T: ?core::marker::Sized
 pub fn oraclemcp_guard::classifier::Classifier::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::classifier::Classifier where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::classifier::Classifier::clone_to_uninit(&self, *mut u8)
 impl<T> core::convert::From<T> for oraclemcp_guard::classifier::Classifier
 pub fn oraclemcp_guard::classifier::Classifier::from(T) -> T
 impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::classifier::Classifier
@@ -22511,6 +23537,7 @@ pub fn oraclemcp_guard::reclassify_at_replay(&oraclemcp_guard::classifier::Class
 pub fn oraclemcp_guard::requires_change_request(&str, bool) -> bool
 pub fn oraclemcp_guard::semantic_read_plan(&str) -> core::option::Option<oraclemcp_guard::resolver::SemanticReadPlan>
 pub fn oraclemcp_guard::semantic_read_plan_checked(&str) -> core::result::Result<oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_guard::PlanMismatch>
+pub fn oraclemcp_guard::semantic_read_plan_checked_with_shape(&str, core::option::Option<&dyn oraclemcp_guard::shape_oracle::StatementShapeOracle>) -> core::result::Result<oraclemcp_guard::resolver::SemanticReadPlan, oraclemcp_guard::PlanMismatch>
 pub fn oraclemcp_guard::sql_digest(&str) -> alloc::string::String
 pub fn oraclemcp_guard::stage_a(&str, &oraclemcp_guard::classifier::ClassifierConfig) -> oraclemcp_guard::classifier::StageA
 pub fn oraclemcp_guard::suggest_parameterized_form(&str) -> core::option::Option<alloc::string::String>

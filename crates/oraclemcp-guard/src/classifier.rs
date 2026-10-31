@@ -45,6 +45,8 @@ use sqlparser::ast::{
     Visitor,
 };
 use sqlparser::dialect::OracleDialect;
+
+use crate::shape_oracle::{StatementShapeOracle, fallback_read_analysis, fallback_read_statement};
 use sqlparser::keywords::Keyword;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -3311,6 +3313,16 @@ pub fn semantic_read_plan(sql: &str) -> Option<SemanticReadPlan> {
 
 /// Build and independently cross-check every lexical query block.
 pub fn semantic_read_plan_checked(sql: &str) -> Result<SemanticReadPlan, PlanMismatch> {
+    semantic_read_plan_checked_with_shape(sql, None)
+}
+
+/// [`semantic_read_plan_checked`], but when sqlparser cannot parse `sql` the
+/// optional `shape` oracle may supply its read shape (pvlqq.10.18). The plan
+/// is then built from the rendered analysis statement by the same code.
+pub fn semantic_read_plan_checked_with_shape(
+    sql: &str,
+    shape: Option<&dyn StatementShapeOracle>,
+) -> Result<SemanticReadPlan, PlanMismatch> {
     // This public production read-path API calls sqlparser directly, so it must
     // enforce the same pre-parser budget as classify_raw.  In particular, no
     // caller may reach parser backtracking for an input the classifier refuses.
@@ -3318,8 +3330,14 @@ pub fn semantic_read_plan_checked(sql: &str) -> Result<SemanticReadPlan, PlanMis
         return Err(PlanMismatch::ParserWorkBudgetExceeded);
     }
     let parser_sql = normalize_vector_embedding_for_parser(sql);
-    let statements = Parser::parse_sql(&OracleDialect {}, &parser_sql)
-        .map_err(|_| PlanMismatch::UnsupportedShape)?;
+    let statements = match Parser::parse_sql(&OracleDialect {}, &parser_sql) {
+        Ok(statements) => statements,
+        Err(_) => vec![
+            shape
+                .and_then(|oracle| fallback_read_statement(sql, oracle))
+                .ok_or(PlanMismatch::UnsupportedShape)?,
+        ],
+    };
     let [sqlparser::ast::Statement::Query(query)] = statements.as_slice() else {
         return Err(PlanMismatch::UnsupportedShape);
     };
@@ -3706,12 +3724,15 @@ fn raise_to_leading_floor(class: StatementClass, sql: &str) -> StatementClass {
 fn classify_statement(
     sql: &str,
     oracle: &dyn SideEffectOracle,
+    shape: Option<&dyn StatementShapeOracle>,
     modes: StrictModes,
     verified_local_vector_embedding: bool,
 ) -> StatementClass {
     use sqlparser::ast::Statement;
     let dialect = OracleDialect {};
     let parser_sql = normalize_vector_embedding_for_parser(sql);
+    // The analysis SQL of a read-shape fallback statement (pvlqq.10.18).
+    let mut analysis_sql: Option<String> = None;
     let parsed = match Parser::parse_sql(&dialect, &parser_sql) {
         Ok(stmts) if stmts.len() == 1 => stmts.into_iter().next().expect("len 1"),
         // Unparseable or unexpectedly multi → fail-closed. Before settling on the
@@ -3763,12 +3784,24 @@ fn classify_statement(
             if has_buried_dangerous_verb(&upper) {
                 return StatementClass::forbidden();
             }
-            return StatementClass {
-                danger: DangerLevel::Guarded,
-                required: Some(OperatingLevel::ReadWrite),
-                objects: Vec::new(),
-                r15_derivation: None,
-            };
+            // pvlqq.10.18: a read shape from a grammar that accepts the
+            // statement is classified as its analysis query by the code below.
+            // Only a complete single read can come back; anything else keeps
+            // the ReadWrite fail-closed default.
+            match shape.and_then(|oracle| fallback_read_analysis(sql, oracle)) {
+                Some((text, statement)) => {
+                    analysis_sql = Some(text);
+                    statement
+                }
+                None => {
+                    return StatementClass {
+                        danger: DangerLevel::Guarded,
+                        required: Some(OperatingLevel::ReadWrite),
+                        objects: Vec::new(),
+                        r15_derivation: None,
+                    };
+                }
+            }
         }
     };
     let guarded_rw = |objects: Vec<String>| StatementClass {
@@ -3800,14 +3833,24 @@ fn classify_statement(
             // oracle-derived-dml-body). The reserved-verb canonical scan closes
             // the remaining Expr-embedded case (`WHERE … IN (UPDATE …)`, scalar
             // `(DELETE …)`) the structural walk does not descend into.
-            if set_expr_carries_dml(&query.body) || query_embeds_reserved_dml_verb(sql) {
+            // A fallback statement is scanned in both texts: a verb in either
+            // keeps the statement off the read path.
+            if set_expr_carries_dml(&query.body)
+                || query_embeds_reserved_dml_verb(sql)
+                || analysis_sql
+                    .as_deref()
+                    .is_some_and(query_embeds_reserved_dml_verb)
+            {
                 return guarded_rw(Vec::new());
             }
             // `sequence.NEXTVAL` is syntactically a pseudocolumn rather than a
             // function call, but it permanently advances sequence state even if
             // the surrounding transaction rolls back. It therefore requires the
             // governed READ_WRITE path and must never reach `oracle_query`.
-            let sequence_nextvals = sequence_nextval_refs(sql);
+            let mut sequence_nextvals = sequence_nextval_refs(sql);
+            if let Some(analysis) = analysis_sql.as_deref() {
+                sequence_nextvals.extend(sequence_nextval_refs(analysis));
+            }
             if !sequence_nextvals.is_empty() {
                 return guarded_rw(
                     sequence_nextvals
@@ -3818,7 +3861,12 @@ fn classify_statement(
             }
             // SELECT/WITH: Safe only if it calls no unproven user-defined
             // function (R15). Any UDF not ProvenReadOnly → Guarded.
-            let calls = user_defined_calls(sql, verified_local_vector_embedding);
+            // The analysis text names exactly the calls the grammar found; the
+            // Oracle text has `word (` clauses (`KEEP (…)`) that are not calls.
+            let calls = user_defined_calls(
+                analysis_sql.as_deref().unwrap_or(sql),
+                verified_local_vector_embedding,
+            );
             let all_proven = calls
                 .iter()
                 .all(|c| oracle.routine_purity(c).permits_safe());
@@ -4169,7 +4217,7 @@ fn block_interior_floor(
         {
             continue;
         }
-        let class = classify_statement(&seg, oracle, modes, false);
+        let class = classify_statement(&seg, oracle, None, modes, false);
         if let Some(level) = class.required {
             acc = Some(match acc {
                 Some((d, l)) => (d.max(class.danger), l.max(level)),
@@ -4181,9 +4229,13 @@ fn block_interior_floor(
 }
 
 /// The fail-closed, engine-aware classifier.
+#[derive(Clone)]
 pub struct Classifier {
     config: ClassifierConfig,
     oracle: Arc<dyn SideEffectOracle>,
+    /// Read shapes for statements sqlparser cannot parse (pvlqq.10.18).
+    /// `None`, the engine-free default, keeps every parse failure refused.
+    shape_oracle: Option<Arc<dyn StatementShapeOracle>>,
     statement_unknown_guarded: bool,
 }
 
@@ -4192,6 +4244,7 @@ impl Default for Classifier {
         Classifier {
             config: ClassifierConfig::new(),
             oracle: Arc::new(UnknownOracle),
+            shape_oracle: None,
             statement_unknown_guarded: true,
         }
     }
@@ -4209,6 +4262,7 @@ impl Classifier {
         Classifier {
             config,
             oracle: Arc::new(UnknownOracle),
+            shape_oracle: None,
             statement_unknown_guarded: true,
         }
     }
@@ -4227,6 +4281,7 @@ impl Classifier {
         Classifier {
             config,
             oracle: Arc::new(UnknownOracle),
+            shape_oracle: None,
             statement_unknown_guarded: false,
         }
     }
@@ -4236,6 +4291,21 @@ impl Classifier {
     pub fn with_oracle(mut self, oracle: Arc<dyn SideEffectOracle>) -> Self {
         self.oracle = oracle;
         self
+    }
+
+    /// Bind a read-shape oracle consulted only when sqlparser cannot parse a
+    /// single statement (pvlqq.10.18).
+    #[must_use]
+    pub fn with_shape_oracle(mut self, shape_oracle: Arc<dyn StatementShapeOracle>) -> Self {
+        self.shape_oracle = Some(shape_oracle);
+        self
+    }
+
+    /// The bound read-shape oracle, for read-path consumers that build their
+    /// own plan or classifier from the same statement.
+    #[must_use]
+    pub fn shape_oracle(&self) -> Option<Arc<dyn StatementShapeOracle>> {
+        self.shape_oracle.clone()
     }
 
     /// Tighten statement-level `Unknown` purity to `Guarded` for SELECT base
@@ -4758,6 +4828,7 @@ impl Classifier {
             vec![classify_statement(
                 sql,
                 self.oracle.as_ref(),
+                self.shape_oracle.as_deref(),
                 self.modes(),
                 verified_local_vector_embedding,
             )]
@@ -4775,6 +4846,7 @@ impl Classifier {
                         classify_statement(
                             &s.to_string(),
                             self.oracle.as_ref(),
+                            None,
                             self.modes(),
                             verified_local_vector_embedding,
                         )
@@ -5089,7 +5161,7 @@ mod tests {
     }
 
     fn classify_one_statement(sql: &str) -> StatementClass {
-        classify_statement(sql, &UnknownOracle, StrictModes::default(), false)
+        classify_statement(sql, &UnknownOracle, None, StrictModes::default(), false)
     }
 
     fn oracle_tokens(sql: &str) -> Vec<Token> {

@@ -11,7 +11,10 @@ use oraclemcp_db::{
     RelationSecurityState, VerifiedPlanTable, prove_semantic_read_plan,
     resolve_semantic_read_relations,
 };
+#[cfg(test)]
 use oraclemcp_guard::semantic_read_plan_checked;
+use oraclemcp_guard::semantic_read_plan_checked_with_shape;
+use oraclemcp_guard::shape_oracle::StatementShapeOracle;
 
 /// Await a connection-acquisition phase only for the remaining request
 /// budget. A connector can perform more than one network operation (primary
@@ -650,6 +653,28 @@ pub(super) async fn append_view_proof_admission_audit(
     )
 }
 
+/// The served engine's read-shape fallback for statements sqlparser cannot
+/// parse (pvlqq.10.18). Engine-free builds have none, so their parse failures
+/// stay refused.
+fn read_shape_oracle() -> Option<Arc<dyn StatementShapeOracle>> {
+    #[cfg(feature = "plsql-intelligence")]
+    {
+        Some(Arc::new(crate::read_shape_oracle::EngineReadShapeOracle))
+    }
+    #[cfg(not(feature = "plsql-intelligence"))]
+    {
+        None
+    }
+}
+
+/// `classifier` with the read-shape fallback bound, when one exists.
+fn with_read_shape(classifier: Classifier) -> Classifier {
+    match read_shape_oracle() {
+        Some(oracle) => classifier.with_shape_oracle(oracle),
+        None => classifier,
+    }
+}
+
 /// Resolve relation identities for EXPLAIN's hard-parse closure before the
 /// ordinary purity proof can return a less specific policy refusal.
 pub(super) async fn resolve_hard_parse_relations(
@@ -658,7 +683,7 @@ pub(super) async fn resolve_hard_parse_relations(
     cache: &OracleCatalogResolverCache,
     sql: &str,
 ) -> Result<Vec<ResolvedObject>, ErrorEnvelope> {
-    let plan = semantic_read_plan_checked(sql)
+    let plan = semantic_read_plan_checked_with_shape(sql, read_shape_oracle().as_deref())
         .map_err(|error| unresolved_semantic_read(error.as_str()))?;
     resolve_semantic_read_relations(cx, conn, cache, &plan)
         .await
@@ -705,15 +730,17 @@ async fn resolve_query_block_read_with_routines(
     routines: Option<Arc<dyn oraclemcp_guard::SideEffectOracle>>,
 ) -> Result<ResolvedRead, ErrorEnvelope> {
     let routines = routines.unwrap_or_else(|| Arc::new(oraclemcp_guard::UnknownOracle));
-    let precheck = Classifier::engine_free_baseline(ClassifierConfig::new())
-        .with_oracle(Arc::clone(&routines));
+    let precheck = with_read_shape(
+        Classifier::engine_free_baseline(ClassifierConfig::new())
+            .with_oracle(Arc::clone(&routines)),
+    );
     let initial = if verified_local_vector_embedding {
         precheck.classify_verified_local_vector_embedding(sql)
     } else {
         precheck.classify(sql)
     };
     ensure_read_only_decision(initial).map_err(|error| attach_parameterization_hint(error, sql))?;
-    let plan = semantic_read_plan_checked(sql)
+    let plan = semantic_read_plan_checked_with_shape(sql, precheck.shape_oracle().as_deref())
         .map_err(|error| unresolved_semantic_read(error.as_str()))?;
     let proof = prove_semantic_read_plan(
         cx,
@@ -786,13 +813,14 @@ async fn resolve_query_block_read_with_routines(
             .into_envelope(),
         );
     }
-    let classifier =
+    let classifier = with_read_shape(
         Classifier::new(ClassifierConfig::new().with_unresolved_qualified_calls_guarded())
             .with_oracle(Arc::new(super::served_classifier::ReadAndRoutineOracle {
                 read: proof,
                 routines,
             }))
-            .with_statement_unknown_guarded();
+            .with_statement_unknown_guarded(),
+    );
     let decision = if verified_local_vector_embedding {
         classifier.classify_verified_local_vector_embedding(sql)
     } else {
@@ -1357,12 +1385,11 @@ impl<'a> GuardedReadExecutor<'a> {
                     .prepare(cx, state.conn.as_ref(), &state.catalog_cache, &parsed.sql)
                     .await,
             );
+            let read_precheck = with_read_shape(engine_proof.precheck.clone());
             let base_decision = if verified_local_vector_embedding {
-                engine_proof
-                    .precheck
-                    .classify_verified_local_vector_embedding(&parsed.sql)
+                read_precheck.classify_verified_local_vector_embedding(&parsed.sql)
             } else {
-                engine_proof.precheck.classify(&parsed.sql)
+                read_precheck.classify(&parsed.sql)
             };
             let policy = apply_sql_policy(
                 sql_policy.as_ref(),
@@ -3140,5 +3167,33 @@ mod fga_shape_tests {
         let preliminary = READ_PRECHECK_CLASSIFIER.classify(&sql);
         ensure_read_only_decision(preliminary).expect("LOB shape must pass read precheck");
         semantic_read_plan_checked(&sql).expect("LOB shape must have a semantic read plan");
+    }
+}
+
+#[cfg(test)]
+mod read_shape_binding_tests {
+    use super::*;
+
+    /// A read sqlparser 0.63 cannot parse (flashback `AS OF`).
+    const FLASHBACK: &str = "SELECT ID FROM APP.ORDERS AS OF SCN 12345";
+
+    #[test]
+    fn read_path_binds_the_shape_fallback_only_with_the_engine() {
+        let level = with_read_shape(Classifier::engine_free_baseline(ClassifierConfig::new()))
+            .classify(FLASHBACK)
+            .required_level;
+        let planned =
+            semantic_read_plan_checked_with_shape(FLASHBACK, read_shape_oracle().as_deref())
+                .is_ok();
+        if cfg!(feature = "plsql-intelligence") {
+            assert!(read_shape_oracle().is_some());
+            assert_eq!(level, Some(oraclemcp_guard::OperatingLevel::ReadOnly));
+            assert!(planned);
+        } else {
+            // Engine-free builds keep today's refusal of every parse failure.
+            assert!(read_shape_oracle().is_none());
+            assert_eq!(level, Some(oraclemcp_guard::OperatingLevel::ReadWrite));
+            assert!(!planned);
+        }
     }
 }

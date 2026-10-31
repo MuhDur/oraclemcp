@@ -1,0 +1,167 @@
+[
+  {
+    "case_id": "w4_query_antlr_fallback_read_returns_rows",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} AS OF TIMESTAMP SYSTIMESTAMP ORDER BY ID",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1",
+          "LABEL": "parent-1"
+        },
+        {
+          "ID": "2",
+          "LABEL": "parent-2"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID, LABEL FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1,
+            "parent-1"
+          ],
+          [
+            2,
+            "parent-2"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_antlr_fallback_keep_returns_rows",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT MAX(LABEL) KEEP (DENSE_RANK FIRST ORDER BY ID) AS L FROM ${owner}.T_PARENT_${run_id}",
+        "max_rows": 1
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "L": "parent-1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT MIN(LABEL) FROM ${owner}.T_PARENT_${run_id} WHERE ID = (SELECT MIN(ID) FROM ${owner}.T_PARENT_${run_id})",
+        "rows": [
+          [
+            "parent-1"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_antlr_fallback_conversion_default_returns_rows",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID, TO_NUMBER(LABEL DEFAULT -1 ON CONVERSION ERROR) AS N FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "max_rows": 2
+      }
+    },
+    "expect": {
+      "rows": [
+        {
+          "ID": "1",
+          "N": "-1"
+        },
+        {
+          "ID": "2",
+          "N": "-1"
+        }
+      ]
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} ORDER BY ID",
+        "rows": [
+          [
+            1
+          ],
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  },
+  {
+    "case_id": "w4_query_antlr_fallback_for_update_refused",
+    "tool": "oracle_query",
+    "level": "READ_ONLY",
+    "profile_variant": "synthetic_raw",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup_phase": "before_server",
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "SELECT ID FROM ${owner}.T_PARENT_${run_id} AS OF TIMESTAMP SYSTIMESTAMP FOR UPDATE",
+        "max_rows": 1
+      }
+    },
+    "expect": {
+      "error_class": "FORBIDDEN_STATEMENT"
+    },
+    "db_reread": [],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
+  }
+]

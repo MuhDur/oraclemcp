@@ -22,4 +22,6 @@ pub mod masking_salts;
 pub mod mutation_closure;
 #[cfg(feature = "plsql-intelligence")]
 pub mod plsql_tools;
+#[cfg(feature = "plsql-intelligence")]
+pub mod read_shape_oracle;
 pub mod registry;

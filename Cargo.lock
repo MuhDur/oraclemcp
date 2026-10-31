@@ -3087,7 +3087,7 @@ checksum = "19f132c84eca552bf34cab8ec81f1c1dcc229b811638f9d283dceabe58c5569e"
 [[package]]
 name = "plsql-catalog"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "chrono",
  "plsql-core",
@@ -3102,7 +3102,7 @@ dependencies = [
 [[package]]
 name = "plsql-cicd"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "clap",
  "getrandom 0.3.4",
@@ -3122,7 +3122,7 @@ dependencies = [
 [[package]]
 name = "plsql-core"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "miette",
  "serde",
@@ -3133,7 +3133,7 @@ dependencies = [
 [[package]]
 name = "plsql-depgraph"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "clap",
  "miette",
@@ -3150,7 +3150,7 @@ dependencies = [
 [[package]]
 name = "plsql-doc"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-core",
  "serde",
@@ -3159,7 +3159,7 @@ dependencies = [
 [[package]]
 name = "plsql-engine"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "clap",
  "miette",
@@ -3182,7 +3182,7 @@ dependencies = [
 [[package]]
 name = "plsql-ir"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-catalog",
  "plsql-core",
@@ -3197,7 +3197,7 @@ dependencies = [
 [[package]]
 name = "plsql-lineage"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-catalog",
  "plsql-core",
@@ -3212,7 +3212,7 @@ dependencies = [
 [[package]]
 name = "plsql-output"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-core",
  "serde",
@@ -3223,7 +3223,7 @@ dependencies = [
 [[package]]
 name = "plsql-parser"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-core",
  "serde",
@@ -3234,7 +3234,7 @@ dependencies = [
 [[package]]
 name = "plsql-parser-antlr"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "antlr4rust",
  "plsql-core",
@@ -3244,7 +3244,7 @@ dependencies = [
 [[package]]
 name = "plsql-privileges"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-catalog",
  "plsql-core",
@@ -3257,7 +3257,7 @@ dependencies = [
 [[package]]
 name = "plsql-project"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-core",
  "serde",
@@ -3269,7 +3269,7 @@ dependencies = [
 [[package]]
 name = "plsql-render"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "tracing",
 ]
@@ -3277,7 +3277,7 @@ dependencies = [
 [[package]]
 name = "plsql-sast"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-core",
  "plsql-ir",
@@ -3289,7 +3289,7 @@ dependencies = [
 [[package]]
 name = "plsql-store"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "rusqlite",
  "serde",
@@ -3302,7 +3302,7 @@ dependencies = [
 [[package]]
 name = "plsql-symbols"
 version = "0.7.0"
-source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a2c9ac141784172041e48fc09980432a4e8f5bda#a2c9ac141784172041e48fc09980432a4e8f5bda"
+source = "git+https://github.com/MuhDur/plsql-intelligence?rev=a19a4126327ad8ad7275fcebfa63fe551c1edef9#a19a4126327ad8ad7275fcebfa63fe551c1edef9"
 dependencies = [
  "plsql-core",
  "plsql-ir",

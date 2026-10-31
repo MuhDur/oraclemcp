@@ -33,6 +33,7 @@ pub mod purity;
 pub mod resolver;
 pub mod rewrite;
 pub mod scoped_grant;
+pub mod shape_oracle;
 pub mod stepup;
 pub mod token;
 pub mod view_eligibility;
@@ -59,7 +60,7 @@ pub use classifier::{
     VerdictCertificate, VerdictCertificateBindingError, VerdictDerivationStep, analyze_batch,
     builtin_only_virtual_column_expression, function_free_virtual_column_expression,
     hard_parse_user_calls, named_bind_placeholders, semantic_read_plan, semantic_read_plan_checked,
-    stage_a,
+    semantic_read_plan_checked_with_shape, stage_a,
 };
 pub use clock::MonotonicDeadline;
 
