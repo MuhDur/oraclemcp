@@ -782,6 +782,8 @@ jobs:
         run: cargo build -p oraclemcp --no-default-features
       - name: Verify engine-free artifact omits all nine PL/SQL tools
         run: python3 scripts/release_artifact_acceptance.py --binary target/debug/oraclemcp --target engine-free-linux --expect-engine false
+      - name: Demo dry run prints its plan and changes nothing
+        run: target/debug/oraclemcp --json demo --dry-run | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["outcome"] == "planned" and r["teardown"] == "not started" and r["container"] is None, r'
       - name: Keep engine-free opt-out build and tests green
         run: cargo test -p oraclemcp --all-targets --no-default-features
       - name: Assert all nine PL/SQL tools are registered

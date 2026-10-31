@@ -11,7 +11,8 @@
 //! their fields; visibility is the only change, never behaviour.
 
 use super::{
-    DEFAULT_SETUP_CONFIG_PATH, cli_audit_report::AuditReportArgs, selftest::SelftestCliArgs,
+    DEFAULT_SETUP_CONFIG_PATH, cli_audit_report::AuditReportArgs, demo::DemoCliArgs,
+    selftest::SelftestCliArgs,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
@@ -95,6 +96,10 @@ pub(crate) enum Command {
     /// (defect found) or 3 (environment findings only).
     #[command(alias = "self-test")]
     Selftest(SelftestCliArgs),
+    /// Play the guarded-write demo on a disposable, digest-pinned FREE 23ai
+    /// container: refuse -> preview -> confirm -> rollback -> audit verify.
+    /// Prints the plan only, unless --yes; --dry-run never changes Docker.
+    Demo(DemoCliArgs),
     /// List configured connection profiles without opening a database connection.
     #[command(alias = "list-profiles")]
     Profiles,

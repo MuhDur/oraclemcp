@@ -28,6 +28,7 @@ mod audit_report;
 mod broker_diagnostics;
 mod broker_service;
 mod cli_audit_report;
+mod demo;
 mod discover;
 mod readiness;
 #[cfg(test)]
@@ -241,6 +242,7 @@ fn main() -> ExitCode {
             ),
         },
         Command::Selftest(args) => selftest::run(robot_json, args),
+        Command::Demo(args) => demo::run(robot_json, args),
         Command::Profiles => run_profiles(robot_json),
         Command::Capabilities => run_capabilities(robot_json),
         Command::Completions { shell } => run_completions_cmd(binary_name, shell),
