@@ -2460,5 +2460,39 @@
     },
     "profile_variant": "synthetic_raw",
     "setup_phase": "before_server"
+  },
+  {
+    "case_id": "w4_impact_sast_golden",
+    "tool": "oracle_preview_sql",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [],
+    "call": {
+      "arguments": {
+        "sql": "CREATE OR REPLACE PROCEDURE W4X_IMPACT.P_SAST(s VARCHAR2) IS\nBEGIN\n  EXECUTE IMMEDIATE 'DELETE FROM W4X_IMPACT.T WHERE ID = ' || s;\nEND;"
+      }
+    },
+    "expect": {
+      "golden": "impact/sast.json",
+      "golden_pointer": "/impact/sast"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_OBJECTS WHERE OWNER = 'W4X_IMPACT' AND OBJECT_NAME = 'P_SAST'",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
   }
 ]

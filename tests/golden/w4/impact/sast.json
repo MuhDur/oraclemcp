@@ -1,0 +1,120 @@
+{
+  "status": "estimated",
+  "value": {
+    "complete": false,
+    "engine_version": "0.7.0",
+    "findings": [
+      {
+        "confidence": "High",
+        "location": {
+          "byte_span": [
+            0,
+            135
+          ],
+          "line": 1
+        },
+        "message": "Uncleansed tainted value (UserInput) reaches EXECUTE IMMEDIATE at `@SAST:W4X_IMPACT.P_SAST:0` (TaintFact fact:60978bae220508e32ceb8961d75be6ee528ffc9f1c7a42e75df624b3f19de7e3)",
+        "rule": "SEC001",
+        "severity": "critical"
+      }
+    ],
+    "ruleset_digest": "a25d5fa3a8721419fdddbe40f4472c2fbca5dc907660f4f9d3e65c6c63bd43a2",
+    "skipped_rules": [
+      {
+        "detail": "no facts of required kind CrossSchemaWrite",
+        "reason": "missing_flow_facts",
+        "rule": "DEP001"
+      },
+      {
+        "detail": "no facts of required kind CursorForLoop",
+        "reason": "missing_flow_facts",
+        "rule": "PERF001"
+      },
+      {
+        "detail": "no facts of required kind CursorForLoop",
+        "reason": "missing_flow_facts",
+        "rule": "PERF002"
+      },
+      {
+        "detail": "no facts of required kind IsNullOnIndexedColumn",
+        "reason": "missing_flow_facts",
+        "rule": "PERF003"
+      },
+      {
+        "detail": "no facts of required kind ExceptionHandler",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL001"
+      },
+      {
+        "detail": "no facts of required kind LogWithoutReraise",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL002"
+      },
+      {
+        "detail": "no facts of required kind UnboundedBulkCollect",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL003"
+      },
+      {
+        "detail": "no facts of required kind ExceptionHandler",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL004"
+      },
+      {
+        "detail": "no facts of required kind DeprecatedFeature",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL005"
+      },
+      {
+        "detail": "no facts of required kind MutatingTableTrigger",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL006"
+      },
+      {
+        "detail": "no facts of required kind DmlInFunction",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL007"
+      },
+      {
+        "detail": "no facts of required kind DeterministicMisuse",
+        "reason": "missing_flow_facts",
+        "rule": "QUAL008"
+      },
+      {
+        "detail": "no facts of required kind Opacity",
+        "reason": "missing_flow_facts",
+        "rule": "SEC002"
+      },
+      {
+        "detail": "no facts of required kind HardcodedCredential",
+        "reason": "missing_flow_facts",
+        "rule": "SEC003"
+      },
+      {
+        "detail": "no facts of required kind InvokerRights",
+        "reason": "missing_flow_facts",
+        "rule": "SEC004"
+      },
+      {
+        "detail": "no facts of required kind SensitivePublicSynonym",
+        "reason": "missing_flow_facts",
+        "rule": "SEC005"
+      },
+      {
+        "detail": "rule requires catalog; analysis ran without one",
+        "reason": "precondition_unmet",
+        "rule": "SEC006"
+      },
+      {
+        "detail": "no facts of required kind RefCursorReturn",
+        "reason": "missing_flow_facts",
+        "rule": "SEC007"
+      },
+      {
+        "detail": "no facts of required kind MissingInstrumentation",
+        "reason": "missing_flow_facts",
+        "rule": "STYLE001"
+      }
+    ]
+  }
+}

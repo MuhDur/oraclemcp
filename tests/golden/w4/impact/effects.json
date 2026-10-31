@@ -1,0 +1,24 @@
+{
+  "status": "computed",
+  "value": {
+    "contract": "RoutineEffectsV1",
+    "before": [
+      "ReadDb"
+    ],
+    "before_status": "computed",
+    "after": [
+      "ReadDb",
+      "Dml"
+    ],
+    "added": [
+      "Dml"
+    ],
+    "removed": [],
+    "unknown_reasons": {
+      "before": [],
+      "after": []
+    },
+    "engine_version": "0.7.0",
+    "ruleset_digest": "a25d5fa3a8721419fdddbe40f4472c2fbca5dc907660f4f9d3e65c6c63bd43a2"
+  }
+}

@@ -2887,5 +2887,55 @@
     "on_unsupported": {
       "error_class": "INVALID_ARGUMENTS"
     }
+  },
+  {
+    "case_id": "w4_impact_effects_golden",
+    "tool": "oracle_patch_source",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FUNCTION ${owner}.F_IMPACT_${run_id} RETURN NUMBER IS\n  n NUMBER;\nBEGIN\n  SELECT ID INTO n FROM ${owner}.T_PARENT_${run_id} WHERE ID = 1;\n  RETURN n;\nEND;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "FUNCTION",
+        "owner": "${owner}",
+        "name": "F_IMPACT_${run_id}",
+        "old_text": "  RETURN n;\nEND;",
+        "new_text": "  INSERT INTO ${owner}.T_PARENT_${run_id} (ID, LABEL) VALUES (2, 'w4impact');\n  RETURN n;\nEND;"
+      }
+    },
+    "expect": {
+      "golden": "impact/effects.json",
+      "golden_pointer": "/impact/effects"
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_SOURCE WHERE OWNER = '${owner}' AND NAME = 'F_IMPACT_${run_id}' AND INSTR(TEXT, 'w4impact') > 0",
+        "rows": [
+          [
+            0
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'F_IMPACT_${run_id}' AND OBJECT_TYPE = 'FUNCTION'",
+        "rows": [
+          [
+            "VALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    }
   }
 ]

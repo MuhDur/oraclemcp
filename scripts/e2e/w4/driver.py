@@ -295,7 +295,9 @@ def verify_expect(expect, reply, golden_root=None, awr_context=None):
         require(golden_root is not None, "golden root missing")
         name = expect["golden"]
         golden = json.loads(golden_path(golden_root, name).read_text())
-        require(scrub(structured) == golden, "scrubbed golden differs")
+        frozen = (json_pointer(structured, expect["golden_pointer"])
+                  if "golden_pointer" in expect else structured)
+        require(scrub(frozen) == golden, "scrubbed golden differs")
     else:
         require(golden_root is not None, "golden root missing")
         names = expect["goldens"]
@@ -902,7 +904,14 @@ def validate_steps(case):
 def verify_expect_shape(expect):
     require(isinstance(expect, dict) and len(EXPECT_KINDS & expect.keys()) == 1,
             "expect must select one verification mode")
-    require(set(expect) <= EXPECT_KINDS | {"ora_code", "reason_code", "json_keys", "awr_timeline_exact", "deprecations"}, "unknown expect key")
+    require(set(expect) <= EXPECT_KINDS | {"ora_code", "reason_code", "json_keys", "awr_timeline_exact", "deprecations",
+                                           "golden_pointer"}, "unknown expect key")
+    # A golden may freeze one sub-document of a result whose remainder is
+    # volatile (a preview's single-use confirmation token, for example).
+    require("golden_pointer" not in expect
+            or ("golden" in expect and isinstance(expect["golden_pointer"], str)
+                and expect["golden_pointer"].startswith("/") and len(expect["golden_pointer"]) > 1),
+            "golden_pointer needs golden and a nonempty JSON pointer")
     if "deprecations" in expect:
         require(isinstance(expect["deprecations"], list) and all(
             isinstance(note, dict) and set(note) == {"argument", "canonical", "removal", "note"}
@@ -5183,6 +5192,29 @@ def golden_path_selftest():
             else:
                 raise DriverError(f"golden path selftest accepted {name!r} via {selector}")
     verify_expect_shape({"golden": "ops-tools/ops-tools-list-profiles.${lane}.json"})
+    # A pointer freezes only its sub-document; the rest of the reply is free.
+    pointed = {"result": {"structuredContent": {"confirm": secrets.token_hex(8), "impact": expected}}}
+    verify_expect({"golden": "legacy.json", "golden_pointer": "/impact"}, pointed, root)
+    verify_expect_shape({"golden": "impact/effects.json", "golden_pointer": "/impact/effects"})
+    for expectation, why in (
+            ({"golden": "legacy.json", "golden_pointer": "/confirm"}, "pointed sub-document differs"),
+            ({"golden": "legacy.json", "golden_pointer": "/absent"}, "missing pointer"),
+            ({"golden": "legacy.json"}, "whole reply differs")):
+        try:
+            verify_expect(expectation, pointed, root)
+        except DriverError:
+            pass
+        else:
+            raise DriverError(f"golden pointer selftest accepted {why}")
+    for shape in ({"golden": "impact/effects.json", "golden_pointer": "impact"},
+                  {"golden": "impact/effects.json", "golden_pointer": "/"},
+                  {"json_subset": {"a": 1}, "golden_pointer": "/a"}):
+        try:
+            verify_expect_shape(shape)
+        except DriverError:
+            pass
+        else:
+            raise DriverError(f"golden pointer selftest accepted shape {shape}")
     print(compact({"selftest": "golden_relative_paths_and_escape_refusals", "verdict": "pass"}))
 
 
