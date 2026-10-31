@@ -1463,6 +1463,7 @@ pub struct ChangeProposalStatementView {
     pub id: String,
     pub unit: ChangeProposalApplyUnit,
     pub sql_template: String,
+    #[serde(with = "proposal_sql_digest")]
     pub sql_sha256: String,
     pub bind_count: usize,
     pub commit: bool,
@@ -1506,6 +1507,7 @@ pub struct ChangeProposalListView {
 pub struct ChangeProposalStatementListView {
     pub id: String,
     pub unit: ChangeProposalApplyUnit,
+    #[serde(with = "proposal_sql_digest")]
     pub sql_sha256: String,
     pub bind_count: usize,
     pub commit: bool,
@@ -1721,7 +1723,44 @@ fn unix_timestamp() -> String {
 }
 
 fn prefixed_sha256_hex(bytes: &[u8]) -> String {
-    format!("sha256:{}", oraclemcp_audit::sha256_hex(bytes))
+    oraclemcp_audit::sha256_hex(bytes)
+}
+
+// Ordinary stored statements contain SQL, not a digest. Older serialized
+// review/list projections did contain a double-prefixed digest; accept that
+// exact historical form while always emitting the canonical single prefix.
+mod proposal_sql_digest {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    fn canonical(value: &str) -> Result<&str, &'static str> {
+        let value = if value.starts_with("sha256:sha256:") {
+            &value["sha256:".len()..]
+        } else {
+            value
+        };
+        let hex = value.strip_prefix("sha256:").ok_or("invalid SQL digest")?;
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err("invalid SQL digest");
+        }
+        Ok(value)
+    }
+
+    pub(super) fn serialize<S: Serializer>(value: &str, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(canonical(value).map_err(serde::ser::Error::custom)?)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<String, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        canonical(&value)
+            .map(str::to_owned)
+            .map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]
@@ -2463,6 +2502,85 @@ mod tests {
             detail_rendered.contains("UPDATE accounts"),
             "the detail view retains the full sql_template"
         );
+    }
+
+    #[test]
+    fn ordinary_proposal_sql_digest_is_canonical_after_store_reload() {
+        let root = store_root("canonical-digest");
+        let store = ChangeProposalStore::open(&root).expect("store");
+        let sql = "UPDATE accounts SET status = :1 WHERE id = :2";
+        let expected = oraclemcp_audit::sha256_hex(sql.as_bytes());
+        let draft = draft_one(&store, "Canonical digest", sql);
+        assert_eq!(draft.statements[0].sql_sha256, expected);
+        let stored = store.load(&draft.id).expect("stored statement");
+        let stored_json = serde_json::to_value(&stored).expect("stored JSON");
+        assert!(stored_json["statements"][0].get("sql_sha256").is_none());
+        drop(store);
+
+        // Existing full records have no digest field to migrate. Their SQL is
+        // loaded unchanged and both projections compute the corrected digest.
+        let reopened = ChangeProposalStore::open(&root).expect("reopened store");
+        assert_eq!(reopened.load(&draft.id).expect("reload"), stored);
+        let detail = reopened.detail(&draft.id).expect("detail");
+        let page = reopened.list_page(None).expect("list");
+        assert_eq!(detail.statements[0].sql_sha256, expected);
+        assert_eq!(page.proposals[0].statements[0].sql_sha256, expected);
+    }
+
+    #[test]
+    fn ordinary_proposal_sql_digest_reads_old_and_new_projections_writes_canonical() {
+        let store = ChangeProposalStore::open(store_root("legacy-digest")).expect("store");
+        let view = draft_one(&store, "Legacy digest", "SELECT 1 FROM dual");
+        let statement = store.load(&view.id).expect("stored").statements.remove(0);
+        let expected = oraclemcp_audit::sha256_hex(statement.sql_template.as_bytes());
+        let legacy = format!("sha256:{expected}");
+        for digest in [&expected, &legacy] {
+            let mut detail_json = serde_json::to_value(statement.view()).expect("detail JSON");
+            let mut list_json = serde_json::to_value(statement.list_view()).expect("list JSON");
+            detail_json["sql_sha256"] = Value::String(digest.clone());
+            list_json["sql_sha256"] = Value::String(digest.clone());
+            let mut detail: ChangeProposalStatementView =
+                serde_json::from_value(detail_json).expect("read supported detail digest");
+            let mut list: ChangeProposalStatementListView =
+                serde_json::from_value(list_json).expect("read supported list digest");
+            assert_eq!(detail.sql_sha256, expected);
+            assert_eq!(list.sql_sha256, expected);
+            assert_eq!(
+                serde_json::to_value(&detail).unwrap()["sql_sha256"],
+                expected
+            );
+            assert_eq!(serde_json::to_value(&list).unwrap()["sql_sha256"], expected);
+
+            // Public projection structs can also be constructed by callers.
+            detail.sql_sha256.clone_from(&legacy);
+            list.sql_sha256.clone_from(&legacy);
+            assert_eq!(
+                serde_json::to_value(&detail).unwrap()["sql_sha256"],
+                expected
+            );
+            assert_eq!(serde_json::to_value(&list).unwrap()["sql_sha256"], expected);
+        }
+    }
+
+    #[test]
+    fn ordinary_proposal_sql_digest_rejects_other_malformed_projection_forms() {
+        let store = ChangeProposalStore::open(store_root("malformed-digest")).expect("store");
+        let view = draft_one(&store, "Malformed digest", "SELECT 1 FROM dual");
+        let statement = store.load(&view.id).expect("stored").statements.remove(0);
+        let expected = oraclemcp_audit::sha256_hex(statement.sql_template.as_bytes());
+        for invalid in [
+            format!("sha256:sha256:{expected}"),
+            "sha256:abc".to_owned(),
+            format!("sha256:{}", "z".repeat(64)),
+            "0".repeat(64),
+        ] {
+            let mut detail_json = serde_json::to_value(statement.view()).unwrap();
+            let mut list_json = serde_json::to_value(statement.list_view()).unwrap();
+            detail_json["sql_sha256"] = Value::String(invalid.clone());
+            list_json["sql_sha256"] = Value::String(invalid);
+            assert!(serde_json::from_value::<ChangeProposalStatementView>(detail_json).is_err());
+            assert!(serde_json::from_value::<ChangeProposalStatementListView>(list_json).is_err());
+        }
     }
 
     #[test]
