@@ -970,6 +970,11 @@ jobs:
           env = os.environ.copy()
           source = Path('.github/workflows/ci.yml').read_text()
           env['ORACLEMCP_TEST_PASSWORD'] = re.search(r'APP_USER_PASSWORD:\s*(\S+)', source).group(1)
+          # Compile outside the run deadline so a cold cache cannot consume it.
+          subprocess.run([
+              'cargo', 'test', '-p', 'oraclemcp', '--features', 'live-xe,dashboard-bundle',
+              '--test', 'broker_stdio', '--no-run',
+          ], env=env, check=True)
           subprocess.run([
               'cargo', 'test', '-p', 'oraclemcp', '--features', 'live-xe,dashboard-bundle',
               '--test', 'broker_stdio', '--', '--test-threads=1', '--nocapture',
