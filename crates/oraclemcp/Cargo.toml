@@ -86,7 +86,7 @@ getrandom = "0.2"
 interprocess = "2.4.4"
 cap-std = "4.0.2"
 cap-fs-ext = "4.0.2"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 sha2.workspace = true
 tempfile = "3"
 toml_edit = "0.22"

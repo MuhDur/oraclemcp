@@ -2,6 +2,8 @@
 //! listener lifetime; each accepted stream is a separate MCP session.
 
 use std::io::{self, BufReader, Read, Write};
+#[cfg(unix)]
+use std::path::Path;
 use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -26,6 +28,10 @@ use sha2::{Digest, Sha256};
 
 const ATTACH_LIMIT: usize = 16 * 1024;
 const ATTACH_TIMEOUT: Duration = Duration::from_secs(5);
+// Darwin's sun_path includes its trailing NUL. Use the same budget on Unix
+// so Linux tests exercise the portable path rather than its larger limit.
+#[cfg(unix)]
+const UNIX_SOCKET_PATH_CAPACITY: usize = 104;
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Internal process hosting the automatically attached local broker.
@@ -254,8 +260,10 @@ pub struct BrokerListener {
     owner: ServiceOwner,
     identity: BrokerIdentity,
     activity: Arc<Mutex<BrokerActivity>>,
-    #[cfg(target_os = "linux")]
-    _endpoint_directory: Option<std::fs::File>,
+    #[cfg(unix)]
+    _endpoint_directory: std::fs::File,
+    #[cfg(unix)]
+    _state_directory: Option<std::fs::File>,
 }
 
 struct BrokerActivity {
@@ -327,6 +335,145 @@ fn endpoint_name(endpoint: &str) -> io::Result<Name<'_>> {
     {
         endpoint.to_ns_name::<GenericNamespaced>()
     }
+}
+
+#[cfg(unix)]
+fn checked_endpoint_path(path: &Path) -> Result<String, ErrorEnvelope> {
+    use std::os::unix::ffi::OsStrExt;
+    let length = path.as_os_str().as_bytes().len();
+    if length >= UNIX_SOCKET_PATH_CAPACITY {
+        return Err(ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!(
+                "ORACLEMCP_BROKER_SOCKET_PATH_TOO_LONG: {} is {length} bytes; the Unix socket limit is {} bytes plus its terminator",
+                path.display(), UNIX_SOCKET_PATH_CAPACITY - 1,
+            ),
+        ).with_next_step("set XDG_STATE_HOME to a shorter private directory and restart the broker"));
+    }
+    path.to_str().map(str::to_owned).ok_or_else(|| {
+        ErrorEnvelope::new(
+            ErrorClass::InvalidArguments,
+            format!("broker socket path is not UTF-8: {}", path.display()),
+        )
+        .with_next_step("choose a UTF-8 state or temporary directory path")
+    })
+}
+
+#[cfg(unix)]
+fn unsafe_endpoint_directory(path: &Path, detail: impl std::fmt::Display) -> ErrorEnvelope {
+    ErrorEnvelope::new(
+        ErrorClass::PolicyDenied,
+        format!(
+            "ORACLEMCP_BROKER_UNSAFE_DIRECTORY: {}: {detail}",
+            path.display()
+        ),
+    )
+    .with_next_step("use an owner-only 0700 directory without symlinks for the broker endpoint")
+}
+
+#[cfg(unix)]
+fn verify_endpoint_directory(path: &Path, directory: &std::fs::File) -> Result<(), ErrorEnvelope> {
+    use std::os::unix::fs::MetadataExt;
+    let held = directory
+        .metadata()
+        .map_err(|e| unsafe_endpoint_directory(path, e))?;
+    let visible =
+        std::fs::symlink_metadata(path).map_err(|e| unsafe_endpoint_directory(path, e))?;
+    if !held.is_dir()
+        || visible.file_type().is_symlink()
+        || held.uid() != rustix::process::geteuid().as_raw()
+        || held.mode() & 0o777 != 0o700
+        || (held.dev(), held.ino()) != (visible.dev(), visible.ino())
+    {
+        return Err(unsafe_endpoint_directory(
+            path,
+            "directory ownership, mode or identity differs",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn open_endpoint_directory(path: &Path) -> Result<std::fs::File, ErrorEnvelope> {
+    let descriptor = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY
+            | rustix::fs::OFlags::DIRECTORY
+            | rustix::fs::OFlags::NOFOLLOW
+            | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|e| {
+        if e == rustix::io::Errno::NOENT {
+            transient(format!(
+                "broker endpoint directory {} is absent",
+                path.display()
+            ))
+        } else {
+            unsafe_endpoint_directory(path, e)
+        }
+    })?;
+    let directory = std::fs::File::from(descriptor);
+    verify_endpoint_directory(path, &directory)?;
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn short_endpoint_directory(store: &FileStore) -> Result<PathBuf, ErrorEnvelope> {
+    use base64::Engine;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    // A fixed base gives independently launched clients the same namespace,
+    // including when their TMPDIR values differ or are themselves too long.
+    let base = Path::new("/tmp").canonicalize().map_err(internal)?;
+    let metadata = std::fs::symlink_metadata(&base).map_err(internal)?;
+    let uid = rustix::process::geteuid().as_raw();
+    if !metadata.is_dir()
+        || (metadata.uid() != 0 && metadata.uid() != uid)
+        || (metadata.mode() & 0o022 != 0 && metadata.mode() & 0o1000 == 0)
+    {
+        return Err(unsafe_endpoint_directory(
+            &base,
+            "temporary parent is not trusted or sticky",
+        ));
+    }
+    let mut hash = Sha256::new();
+    hash.update(b"oraclemcp:broker-endpoint-directory:v1");
+    hash.update(uid.to_be_bytes());
+    hash.update(store.root().as_os_str().as_bytes());
+    let state_directory = open_endpoint_directory(store.root())?;
+    let state_identity = state_directory.metadata().map_err(internal)?;
+    hash.update(state_identity.dev().to_be_bytes());
+    hash.update(state_identity.ino().to_be_bytes());
+    let name = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash.finalize());
+    Ok(base.join(format!("oraclemcp-{name}")))
+}
+
+#[cfg(unix)]
+fn prepare_endpoint(
+    store: &FileStore,
+    nonce: &str,
+) -> Result<(String, std::fs::File, Option<std::fs::File>), ErrorEnvelope> {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::DirBuilderExt;
+    let filename = format!("b-{}.sock", &nonce[..16]);
+    let direct = store.root().join(&filename);
+    let state_directory = open_endpoint_directory(store.root())?;
+    if direct.as_os_str().as_bytes().len() < UNIX_SOCKET_PATH_CAPACITY && direct.to_str().is_some()
+    {
+        return Ok((checked_endpoint_path(&direct)?, state_directory, None));
+    }
+    // Authenticate the state root as well as the relocated endpoint directory.
+    let path = short_endpoint_directory(store)?;
+    let endpoint = checked_endpoint_path(&path.join(filename))?;
+    match std::fs::DirBuilder::new().mode(0o700).create(&path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(unsafe_endpoint_directory(&path, e)),
+    }
+    let directory = open_endpoint_directory(&path)?;
+    verify_endpoint_directory(store.root(), &state_directory)?;
+    Ok((endpoint, directory, Some(state_directory)))
 }
 
 fn connect_endpoint(endpoint: &str) -> io::Result<Stream> {
@@ -488,48 +635,7 @@ impl BrokerListener {
         })?;
         let nonce = random_id()?;
         #[cfg(unix)]
-        let endpoint = store
-            .root()
-            .join(format!("b-{}.sock", &nonce[..16]))
-            .to_string_lossy()
-            .into_owned();
-        #[cfg(target_os = "linux")]
-        let (endpoint, endpoint_directory) = {
-            use std::os::fd::AsRawFd;
-            use std::os::unix::fs::MetadataExt;
-            if endpoint.len() >= 108 {
-                let descriptor = rustix::fs::open(
-                    store.root(),
-                    rustix::fs::OFlags::RDONLY
-                        | rustix::fs::OFlags::DIRECTORY
-                        | rustix::fs::OFlags::NOFOLLOW
-                        | rustix::fs::OFlags::CLOEXEC,
-                    rustix::fs::Mode::empty(),
-                )
-                .map_err(internal)?;
-                let directory = std::fs::File::from(descriptor);
-                let held = directory.metadata().map_err(internal)?;
-                let expected = std::fs::metadata(store.root()).map_err(internal)?;
-                if (held.dev(), held.ino()) != (expected.dev(), expected.ino()) {
-                    return Err(internal(
-                        "broker state directory changed before socket bind",
-                    ));
-                }
-                // The socket still lives in the 0700 state root. This short
-                // kernel alias avoids sockaddr_un's 108-byte path limit.
-                (
-                    format!(
-                        "/proc/{}/fd/{}/b-{}.sock",
-                        std::process::id(),
-                        directory.as_raw_fd(),
-                        &nonce[..16]
-                    ),
-                    Some(directory),
-                )
-            } else {
-                (endpoint, None)
-            }
-        };
+        let (endpoint, endpoint_directory, state_directory) = prepare_endpoint(store, &nonce)?;
         #[cfg(windows)]
         let endpoint = format!(
             "oraclemcp-{}-{}",
@@ -564,6 +670,17 @@ impl BrokerListener {
             std::fs::set_permissions(&endpoint, std::fs::Permissions::from_mode(0o600))
                 .map_err(internal)?;
         }
+        #[cfg(unix)]
+        verify_endpoint_directory(
+            Path::new(&endpoint)
+                .parent()
+                .expect("absolute broker endpoint"),
+            &endpoint_directory,
+        )?;
+        #[cfg(unix)]
+        if let Some(state_directory) = state_directory.as_ref() {
+            verify_endpoint_directory(store.root(), state_directory)?;
+        }
         let locator = Locator {
             endpoint,
             pid: std::process::id(),
@@ -585,8 +702,10 @@ impl BrokerListener {
                 active: 0,
                 idle_since: Instant::now(),
             })),
-            #[cfg(target_os = "linux")]
+            #[cfg(unix)]
             _endpoint_directory: endpoint_directory,
+            #[cfg(unix)]
+            _state_directory: state_directory,
         })
     }
 
@@ -730,13 +849,42 @@ pub fn attach(store: &FileStore, request: &AttachRequest) -> Result<AttachedStre
     )
     .map_err(transient)?;
     #[cfg(unix)]
+    let state_directory = open_endpoint_directory(store.root())?;
+    #[cfg(unix)]
     if !endpoint_is_in_root(store, &locator)? {
         return Err(ErrorEnvelope::new(
             ErrorClass::InvalidArguments,
-            "broker endpoint is outside the verified state root",
+            "broker endpoint is outside the verified state or derived private runtime directory",
         ));
     }
+    #[cfg(unix)]
+    let endpoint_directory = {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let path = Path::new(&locator.endpoint);
+        checked_endpoint_path(path)?;
+        let directory = open_endpoint_directory(path.parent().expect("validated endpoint parent"))?;
+        let socket = std::fs::symlink_metadata(path).map_err(transient)?;
+        if !socket.file_type().is_socket()
+            || socket.uid() != rustix::process::geteuid().as_raw()
+            || socket.mode() & 0o777 != 0o600
+        {
+            return Err(unsafe_endpoint_directory(
+                path,
+                "socket ownership, type or mode differs",
+            ));
+        }
+        directory
+    };
     let stream = connect_endpoint(&locator.endpoint).map_err(transient)?;
+    #[cfg(unix)]
+    verify_endpoint_directory(
+        Path::new(&locator.endpoint)
+            .parent()
+            .expect("validated endpoint parent"),
+        &endpoint_directory,
+    )?;
+    #[cfg(unix)]
+    verify_endpoint_directory(store.root(), &state_directory)?;
     let credentials = stream.peer_creds().map_err(transient)?;
     #[cfg(unix)]
     {
@@ -852,28 +1000,7 @@ fn endpoint_is_in_root(store: &FileStore, locator: &Locator) -> Result<bool, Err
     if path.parent() == Some(store.root()) {
         return Ok(true);
     }
-    #[cfg(target_os = "linux")]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let prefix = PathBuf::from(format!("/proc/{}/fd", locator.pid));
-        let Some(parent) = path.parent() else {
-            return Ok(false);
-        };
-        if parent.parent() != Some(prefix.as_path())
-            || !parent.file_name().is_some_and(|fd| {
-                fd.to_string_lossy()
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit())
-            })
-        {
-            return Ok(false);
-        }
-        let target = std::fs::metadata(parent).map_err(transient)?;
-        let root = std::fs::metadata(store.root()).map_err(internal)?;
-        Ok((target.dev(), target.ino()) == (root.dev(), root.ino()))
-    }
-    #[cfg(not(target_os = "linux"))]
-    Ok(false)
+    Ok(path.parent() == Some(short_endpoint_directory(store)?.as_path()))
 }
 
 #[cfg(test)]
@@ -976,18 +1103,23 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_os = "linux")]
-    fn broker_long_state_root_uses_verified_directory_handle_without_relocation() {
+    #[cfg(unix)]
+    fn broker_long_state_root_uses_a_private_endpoint_within_the_darwin_limit() {
+        use std::os::unix::fs::MetadataExt;
         let temporary = tempfile::tempdir().unwrap();
         let store = FileStore::open(temporary.path().join("long-state-root".repeat(12))).unwrap();
         let broker = BrokerListener::bind(&store, identity()).unwrap();
         let locator: Locator =
             serde_json::from_slice(&std::fs::read(locator_path(&store).unwrap()).unwrap()).unwrap();
-        assert!(
-            locator
-                .endpoint
-                .starts_with(&format!("/proc/{}/fd/", std::process::id()))
+        assert!(locator.endpoint.len() < 104);
+        assert_eq!(
+            Path::new(&locator.endpoint).parent(),
+            Some(short_endpoint_directory(&store).unwrap().as_path())
         );
+        let directory =
+            std::fs::symlink_metadata(Path::new(&locator.endpoint).parent().unwrap()).unwrap();
+        assert_eq!(directory.mode() & 0o777, 0o700);
+        assert_eq!(directory.uid(), rustix::process::geteuid().as_raw());
         assert!(endpoint_is_in_root(&store, &locator).unwrap());
         let listener = std::thread::spawn(move || {
             broker
@@ -996,6 +1128,131 @@ mod tests {
         });
         let _client = attach(&store, &request()).unwrap();
         listener.join().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn broker_endpoint_names_bind_the_canonical_state_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let a = FileStore::open(root.path().join("a")).unwrap();
+        let b = FileStore::open(root.path().join("b")).unwrap();
+        assert_ne!(
+            short_endpoint_directory(&a).unwrap(),
+            short_endpoint_directory(&b).unwrap()
+        );
+        let a_again = FileStore::open(a.root().join(".")).unwrap();
+        assert_eq!(
+            short_endpoint_directory(&a).unwrap(),
+            short_endpoint_directory(&a_again).unwrap()
+        );
+        let foreign = Locator {
+            endpoint: short_endpoint_directory(&b)
+                .unwrap()
+                .join("b-0123456789abcdef.sock")
+                .to_string_lossy()
+                .into_owned(),
+            pid: std::process::id(),
+        };
+        assert!(!endpoint_is_in_root(&a, &foreign).unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn broker_replaced_state_root_cannot_reuse_the_old_endpoint() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("long-state-root".repeat(12));
+        let store = FileStore::open(&path).unwrap();
+        let _broker = BrokerListener::bind(&store, identity()).unwrap();
+        let locator: Locator =
+            serde_json::from_slice(&std::fs::read(locator_path(&store).unwrap()).unwrap()).unwrap();
+        std::fs::rename(&path, root.path().join("moved")).unwrap();
+        let replacement = FileStore::open(&path).unwrap();
+        assert!(!endpoint_is_in_root(&replacement, &locator).unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn broker_endpoint_rejects_shared_or_symlinked_runtime_directories() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        for mode in [0o755, 0o777] {
+            let store = FileStore::open(
+                root.path()
+                    .join(format!("{mode}-{}", "long-state".repeat(14))),
+            )
+            .unwrap();
+            let directory = short_endpoint_directory(&store).unwrap();
+            std::fs::create_dir(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(mode)).unwrap();
+            let Err(error) = BrokerListener::bind(&store, identity()) else {
+                panic!("shared runtime directory accepted")
+            };
+            assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+            assert_eq!(
+                std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+        let store = FileStore::open(root.path().join("symlink-long-state".repeat(10))).unwrap();
+        let victim = tempfile::tempdir().unwrap();
+        let link = short_endpoint_directory(&store).unwrap();
+        std::os::unix::fs::symlink(victim.path(), &link).unwrap();
+        let Err(error) = BrokerListener::bind(&store, identity()) else {
+            panic!("symlinked runtime directory accepted")
+        };
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn broker_endpoint_revalidates_directory_identity_and_socket_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("private");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let held = open_endpoint_directory(&directory).unwrap();
+        std::fs::rename(&directory, root.path().join("moved")).unwrap();
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            verify_endpoint_directory(&directory, &held)
+                .unwrap_err()
+                .error_class,
+            ErrorClass::PolicyDenied
+        );
+
+        let store = FileStore::open(root.path().join("long-state".repeat(14))).unwrap();
+        let _broker = BrokerListener::bind(&store, identity()).unwrap();
+        let locator: Locator =
+            serde_json::from_slice(&std::fs::read(locator_path(&store).unwrap()).unwrap()).unwrap();
+        std::fs::set_permissions(&locator.endpoint, std::fs::Permissions::from_mode(0o666))
+            .unwrap();
+        let Err(error) = attach(&store, &request()) else {
+            panic!("shared socket accepted")
+        };
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+        std::fs::set_permissions(&locator.endpoint, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let parent = Path::new(&locator.endpoint).parent().unwrap();
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let Err(error) = attach(&store, &request()) else {
+            panic!("changed runtime permissions accepted")
+        };
+        assert_eq!(error.error_class, ErrorClass::PolicyDenied);
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn broker_socket_length_refusal_is_typed_and_actionable() {
+        let path = PathBuf::from(format!("/{}", "x".repeat(103)));
+        let error = checked_endpoint_path(&path).unwrap_err();
+        assert_eq!(error.error_class, ErrorClass::InvalidArguments);
+        assert!(error.message.contains("104 bytes"));
+        assert!(error.message.contains(&path.display().to_string()));
+        assert!(!error.next_steps.is_empty());
+        assert!(checked_endpoint_path(Path::new(&format!("/{}", "x".repeat(102)))).is_ok());
     }
 
     #[test]

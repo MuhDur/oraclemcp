@@ -646,6 +646,67 @@ fn five_stdio_processes_auto_attach_without_a_live_database() {
     five_clients(false);
 }
 
+#[cfg(unix)]
+#[test]
+fn long_home_and_state_directories_use_separate_bounded_broker_endpoints() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let temporary = tempfile::tempdir().unwrap();
+    let home = temporary.path().join("long-home-".repeat(14));
+    let tmp = home.join("temporary");
+    std::fs::create_dir_all(&tmp).unwrap();
+    let roots = [home.join("first"), home.join("second")];
+    for root in &roots {
+        std::fs::create_dir(root).unwrap();
+    }
+    let _reapers: Vec<_> = roots.iter().map(|root| BrokerReaper::new(root)).collect();
+    let mut clients = Vec::new();
+    let mut endpoints = Vec::new();
+    let mut pids = Vec::new();
+    for (index, root) in roots.iter().enumerate() {
+        let path = config(root, false);
+        let mut client = Client::spawn_with_settings(
+            root,
+            &path,
+            index,
+            Some("offline"),
+            None,
+            None,
+            |command| {
+                command.env("HOME", &home).env("TMPDIR", &tmp);
+            },
+        );
+        let initialized = client.response(1);
+        assert!(initialized.get("result").is_some(), "{initialized}");
+        client.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
+        client.send(json!({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}));
+        let listed = client.response(2);
+        assert!(!listed["result"]["tools"].as_array().unwrap().is_empty());
+        let locator: Value = serde_json::from_slice(
+            &std::fs::read(root.join("state/oraclemcp/broker.json")).unwrap(),
+        )
+        .unwrap();
+        let endpoint = std::path::PathBuf::from(locator["endpoint"].as_str().unwrap());
+        assert!(locator["endpoint"].as_str().unwrap().len() < 104);
+        let parent = endpoint.parent().unwrap();
+        assert!(
+            parent
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with("oraclemcp-")
+        );
+        let metadata = std::fs::symlink_metadata(parent).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o700);
+        assert_eq!(metadata.uid(), rustix::process::geteuid().as_raw());
+        endpoints.push(endpoint);
+        pids.push(locator["pid"].as_u64().unwrap());
+        clients.push(client);
+    }
+    assert_ne!(endpoints[0].parent(), endpoints[1].parent());
+    assert_ne!(pids[0], pids[1]);
+}
+
 #[test]
 fn http_listener_does_not_inherit_stdio_remote_bind_authorization() {
     let root = tempfile::tempdir().unwrap();
