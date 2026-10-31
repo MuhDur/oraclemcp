@@ -514,19 +514,19 @@
     "tool": "oracle_query", "level": "READ_ONLY", "profile_variant": "synthetic_raw",
     "transports": ["stdio", "http"], "requires": ["priv:SELECT_V_SQL"], "setup_phase": "before_server",
     "setup": [
-      {"sql": "CREATE TABLE ${owner}.T_FBIA_${run_id}(ID NUMBER PRIMARY KEY, LABEL VARCHAR2(40))"},
-      {"sql": "INSERT INTO ${owner}.T_FBIA_${run_id}(ID,LABEL) VALUES (1,'canary')"},
-      {"sql": "CREATE TABLE ${owner}.T_FBI_CANARY_${run_id}(ID NUMBER)"},
-      {"sql": "CREATE OR REPLACE FUNCTION ${owner}.F_CANARY_${run_id}(P VARCHAR2) RETURN VARCHAR2 DETERMINISTIC AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${owner}.T_FBI_CANARY_${run_id}(ID) VALUES (1); COMMIT; RETURN UPPER(P); END;"},
-      {"sql": "CREATE INDEX ${owner}.IX_CANARY_${run_id} ON ${owner}.T_FBIA_${run_id}(${owner}.F_CANARY_${run_id}(LABEL))"},
-      {"sql": "TRUNCATE TABLE ${owner}.T_FBI_CANARY_${run_id}"}
+      {"sql": "CREATE TABLE ${cross}.T_FBIA_${run_id}(ID NUMBER PRIMARY KEY, LABEL VARCHAR2(40))"},
+      {"sql": "INSERT INTO ${cross}.T_FBIA_${run_id}(ID,LABEL) VALUES (1,'canary')"},
+      {"sql": "CREATE TABLE ${cross}.T_FBI_CANARY_${run_id}(ID NUMBER)"},
+      {"sql": "CREATE OR REPLACE FUNCTION ${cross}.F_CANARY_${run_id}(P VARCHAR2) RETURN VARCHAR2 DETERMINISTIC AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO ${cross}.T_FBI_CANARY_${run_id}(ID) VALUES (1); COMMIT; RETURN UPPER(P); END;"},
+      {"sql": "CREATE INDEX ${cross}.IX_CANARY_${run_id} ON ${cross}.T_FBIA_${run_id}(${cross}.F_CANARY_${run_id}(LABEL))"},
+      {"sql": "TRUNCATE TABLE ${cross}.T_FBI_CANARY_${run_id}"}
     ],
-    "setup_ready_sql": "SELECT COUNT(*) FROM ${owner}.T_FBIA_${run_id}",
-    "call": {"arguments": {"sql": "SELECT ID FROM ${owner}.T_FBIA_${run_id} WHERE ID = 1 /* W4MARK_ISSUE30UDF000001 */", "max_rows": 1}, "vsql_absent_marker": "W4MARK_ISSUE30UDF000001"},
+    "setup_ready_sql": "SELECT COUNT(*) FROM ${cross}.T_FBIA_${run_id}",
+    "call": {"arguments": {"sql": "SELECT ID FROM ${cross}.T_FBIA_${run_id} WHERE ID = 1 /* W4MARK_ISSUE30UDF000001 */", "max_rows": 1}, "vsql_absent_marker": "W4MARK_ISSUE30UDF000001"},
     "expect": {"error_class": "FORBIDDEN_STATEMENT"},
     "db_reread": [
-      {"sql": "SELECT COUNT(*) FROM ${owner}.T_FBI_CANARY_${run_id}", "rows": [[0]]},
-      {"sql": "SELECT COUNT(*) FROM ${owner}.T_FBIA_${run_id}", "rows": [[1]]}
+      {"sql": "SELECT COUNT(*) FROM ${cross}.T_FBI_CANARY_${run_id}", "rows": [[0]]},
+      {"sql": "SELECT COUNT(*) FROM ${cross}.T_FBIA_${run_id}", "rows": [[1]]}
     ],
     "audit_expect": [], "audit_zero_executions": true,
     "on_unsupported": {"error_class": "FORBIDDEN_STATEMENT"}
