@@ -110,7 +110,7 @@
       "arguments": {
         "owner": "${owner}",
         "object_type": "TABLE",
-        "name_like": "T_RUN_${run_id}",
+        "name_like": "%TYPES_${run_id}",
         "detail_level": "names",
         "max_rows": 10
       }
@@ -118,14 +118,16 @@
     "expect": {
       "json_subset": {
         "owner": "${owner}",
-        "object_type": "TABLE",
-        "name_like": "T_RUN_${run_id}",
+        "object_types": [
+          "TABLE"
+        ],
+        "name_like": "%TYPES_${run_id}",
         "detail_level": "names",
         "count": 1,
         "results": [
           {
             "owner": "${owner}",
-            "object_name": "T_RUN_${run_id}",
+            "object_name": "T_TYPES_${run_id}",
             "object_type": "TABLE",
             "status": "VALID"
           }
@@ -162,7 +164,7 @@
       "json_subset": {
         "owner": "${owner}",
         "detail_level": "names",
-        "count": 13,
+        "count": 14,
         "results": [
           {
             "object_name": "<masked>",
@@ -218,6 +220,13 @@
             "object_type": "TABLE",
             "owner": "${owner}",
             "profile": "${lane}_owner",
+            "status": "VALID"
+          },
+          {
+            "object_name": "T_RUN_${run_id}",
+            "object_type": "TABLE",
+            "owner": "${owner}",
+            "profile": "${lane}_owner_short",
             "status": "VALID"
           },
           {
