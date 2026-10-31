@@ -3101,6 +3101,140 @@ pub(crate) fn validate_engine_source(source: &str) -> Result<(), ErrorEnvelope> 
     source_limits::validate_source(source)
 }
 
+/// The pinned PL/SQL engine release behind every served analysis fact.
+pub(crate) const ENGINE_VERSION: &str = env!("OMCP_BUILD_PLSQL_ENGINE_VERSION");
+
+/// Engine facts for one exact unit source, as an approval preview shows them.
+pub(crate) struct SourceImpactAnalysis {
+    pub effects: RoutineEffectsV1,
+    pub unknown_reasons: Vec<String>,
+    /// SAST refuses source with syntax errors; effects are still reported.
+    pub sast: Result<SourceSast, ErrorEnvelope>,
+}
+
+pub(crate) struct SourceSast {
+    pub findings: Vec<plsql_sast::Finding>,
+    pub skipped: Vec<plsql_sast::RuleSkippedDiagnostic>,
+}
+
+/// Analyze one stored or candidate unit with the pinned engine, without a
+/// database. The effect set is the union of every declared routine's
+/// invocation closure. A non-clean run or closure, or a source in which the
+/// engine finds no routine, adds Unknown; it is never reported as no effect.
+pub(crate) fn analyze_source_impact(source: &str) -> Result<SourceImpactAnalysis, ErrorEnvelope> {
+    validate_engine_source(source)?;
+    // Grammar-backed analysis recurses deeply. Previews reach this from
+    // callers on default-sized stacks, so it gets the lane thread's stack
+    // (oraclemcp-core lane.rs) regardless of where it is called from.
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("omcp-source-impact".to_owned())
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, || analyze_source_impact_on_stack(source))
+            .map_err(|_| {
+                ErrorEnvelope::new(ErrorClass::Internal, "PL/SQL analysis thread unavailable")
+            })?
+            .join()
+            .map_err(|_| ErrorEnvelope::new(ErrorClass::Internal, "PL/SQL analysis panicked"))?
+    })
+}
+
+fn analyze_source_impact_on_stack(source: &str) -> Result<SourceImpactAnalysis, ErrorEnvelope> {
+    let workspace_error = |_| {
+        ErrorEnvelope::new(
+            ErrorClass::Internal,
+            "PL/SQL analysis workspace unavailable",
+        )
+    };
+    let project = tempfile::tempdir().map_err(workspace_error)?;
+    std::fs::write(project.path().join("unit.sql"), source).map_err(workspace_error)?;
+    let run = analyze_project(AnalysisRequest {
+        project_root: project.path().to_owned(),
+        cache: plsql_engine::CacheConfig {
+            enabled: false,
+            ..Default::default()
+        },
+        ..AnalysisRequest::default()
+    })
+    .map_err(|error| {
+        ErrorEnvelope::new(
+            ErrorClass::RuntimeStateRequired,
+            format!("PL/SQL analysis failed: {error}"),
+        )
+    })?;
+    let mut effects = RoutineEffectsV1::default();
+    let mut unknown_reasons = BTreeSet::new();
+    if run.completeness.posture != CompletenessPosture::Clean {
+        unknown_reasons.insert(format!(
+            "analysis posture is {:?}",
+            run.completeness.posture
+        ));
+    }
+    if run.invocation_index.units.is_empty() {
+        unknown_reasons.insert("the engine found no routine in this source".to_owned());
+    }
+    for (id, unit) in &run.invocation_index.units {
+        let closure = run.invocation_index.closure(&InvocationShapeV1 {
+            routine_id: id.clone(),
+            named_arguments: unit
+                .params
+                .iter()
+                .filter(|param| !param.has_default)
+                .map(|param| param.name.clone())
+                .collect(),
+            ..InvocationShapeV1::default()
+        });
+        effects = effects.union(&map_engine_effects(&closure.effects));
+        if !closure.clean && closure.unknown_reasons.is_empty() {
+            unknown_reasons.insert(format!("{id}: invocation closure is not clean"));
+        }
+        unknown_reasons.extend(
+            closure
+                .unknown_reasons
+                .iter()
+                .map(|reason| format!("{id}: {reason}")),
+        );
+    }
+    if !unknown_reasons.is_empty() {
+        effects = effects.union(&unknown_effects());
+    }
+    let completeness = CompletenessSnapshot {
+        catalog_available: false,
+        plscope_available: run.completeness.plscope_available,
+        files_total: run.completeness.files_total,
+        files_recovered: run.completeness.files_recovered,
+    };
+    let sast = sast_source::scan(&run, &sast_rules(), &completeness).map(|scan| SourceSast {
+        findings: scan.report.findings,
+        skipped: scan.report.skipped,
+    });
+    Ok(SourceImpactAnalysis {
+        effects,
+        unknown_reasons: unknown_reasons.into_iter().collect(),
+        sast,
+    })
+}
+
+/// Digest of the enabled SAST rule set under the pinned engine release.
+pub(crate) fn sast_ruleset_digest() -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut rules: Vec<_> = sast_rules()
+        .iter()
+        .map(|rule| (rule.id(), format!("{:?}", rule.default_severity())))
+        .collect();
+    rules.sort();
+    let mut hash = Sha256::new();
+    hash.update(b"omcp/impact/sast-ruleset/v1\0");
+    hash.update(ENGINE_VERSION.as_bytes());
+    for (id, severity) in rules {
+        hash.update([0]);
+        hash.update(id.as_bytes());
+        hash.update([0]);
+        hash.update(severity.as_bytes());
+    }
+    hash.finalize().into()
+}
+
 fn parse_predict_mode(
     raw: Option<&str>,
     default_mode: PredictMode,

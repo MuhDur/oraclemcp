@@ -31,6 +31,7 @@ pub enum UnavailableReason {
     NotWired,
     CatalogUnavailable,
     UnresolvedDependency,
+    EngineFailed,
 }
 
 impl UnavailableReason {
@@ -50,6 +51,7 @@ impl UnavailableReason {
             Self::NotWired => 12,
             Self::CatalogUnavailable => 13,
             Self::UnresolvedDependency => 14,
+            Self::EngineFailed => 15,
         }
     }
 }

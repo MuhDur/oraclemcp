@@ -2122,6 +2122,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::impact_binding::ScnBo
 pub fn oraclemcp_guard::impact_binding::ScnBounds::vzip(self) -> V
 pub enum oraclemcp_guard::impact_binding::UnavailableReason
 pub oraclemcp_guard::impact_binding::UnavailableReason::CatalogUnavailable
+pub oraclemcp_guard::impact_binding::UnavailableReason::EngineFailed
 pub oraclemcp_guard::impact_binding::UnavailableReason::EngineNotWired
 pub oraclemcp_guard::impact_binding::UnavailableReason::HardParseCallbacks
 pub oraclemcp_guard::impact_binding::UnavailableReason::LevelBelowRequired
@@ -15131,6 +15132,7 @@ impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::resolver::SyntacticRo
 pub fn oraclemcp_guard::resolver::SyntacticRole::vzip(self) -> V
 pub enum oraclemcp_guard::UnavailableReason
 pub oraclemcp_guard::UnavailableReason::CatalogUnavailable
+pub oraclemcp_guard::UnavailableReason::EngineFailed
 pub oraclemcp_guard::UnavailableReason::EngineNotWired
 pub oraclemcp_guard::UnavailableReason::HardParseCallbacks
 pub oraclemcp_guard::UnavailableReason::LevelBelowRequired

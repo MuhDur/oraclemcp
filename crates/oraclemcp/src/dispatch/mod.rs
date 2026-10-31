@@ -10617,7 +10617,20 @@ async fn compile_object_inner(
     };
 
     if !args.execute {
-        return Ok(preview());
+        let mut preview = preview();
+        // A recompile changes no source: effects describe the stored unit and
+        // there is no changed source for SAST.
+        let stored =
+            impact::read_stored_unit(cx, conn, &owner, &object_name, &object_type, tool_name).await;
+        impact::attach_source_impact(
+            &mut preview,
+            &object_type,
+            &impact::SourceChange {
+                before: stored.source(),
+                after: None,
+            },
+        );
+        return Ok(preview);
     }
     if !matches!(gate, LevelDecision::Allow) {
         return Err(compile_gate_error(gate, session));
@@ -11638,6 +11651,28 @@ async fn patch_source_inner(
                 confirm.as_deref(),
             ),
         });
+        let mut preview = preview;
+        // The stored side goes through the same header normalization as the
+        // candidate, so the engine compares like with like.
+        let stored_ddl = owner_qualified_patch_ddl(
+            &document.text,
+            &owner,
+            &object_name,
+            &object_type,
+            tool_name,
+        )
+        .ok();
+        impact::attach_source_impact(
+            &mut preview,
+            &object_type,
+            &impact::SourceChange {
+                before: stored_ddl.as_deref().map_or(
+                    impact::StoredSource::Unavailable,
+                    impact::StoredSource::Text,
+                ),
+                after: Some(&patched_ddl),
+            },
+        );
         return Ok((preview, preview_entry));
     }
 
@@ -11990,6 +12025,26 @@ async fn create_or_replace_inner(
                 confirm.as_deref(),
             ),
         });
+        let mut preview = preview;
+        if let Some(object) = detected.as_ref() {
+            let stored = impact::read_stored_unit(
+                cx,
+                conn,
+                &object.owner,
+                &object.name,
+                &object.object_type,
+                tool_name,
+            )
+            .await;
+            impact::attach_source_impact(
+                &mut preview,
+                &object.object_type,
+                &impact::SourceChange {
+                    before: stored.source(),
+                    after: Some(&source),
+                },
+            );
+        }
         return Ok(preview);
     }
 
@@ -12203,6 +12258,7 @@ async fn deploy_ddl_inner(ctx: DbToolCtx<'_>, args: DeployDdlArgs) -> Result<Val
                 );
             }
         }
+        impact::attach_ddl_source_impact(&mut preview, ctx.cx, ctx.conn, &ddl, "deploy_ddl").await;
         return Ok(preview);
     }
 
@@ -13733,7 +13789,7 @@ impl OracleDispatcher {
                 .profile_classifier
                 .prepare(cx, state.conn.as_ref(), &state.catalog_cache, &a.sql)
                 .await;
-            let preview = preview_sql(
+            let mut preview = preview_sql(
                 &a,
                 &scoped_level,
                 &state.execute_grants,
@@ -13742,6 +13798,14 @@ impl OracleDispatcher {
                 current_schema.as_deref(),
                 &proof,
             )?;
+            impact::attach_ddl_source_impact(
+                &mut preview,
+                cx,
+                state.conn.as_ref(),
+                &a.sql,
+                "oracle_preview_sql",
+            )
+            .await;
             remember_execute_approved_token(&mut state, &a.sql, &preview);
             return Ok(preview);
         }

@@ -309,6 +309,35 @@ fn impact_attached_to_every_minting_preview() {
                 }
                 continue;
             }
+            // Source-changing previews carry the served engine's facts (.16.5).
+            let source_tool = matches!(
+                canonical_tool_name(&tool.name),
+                "oracle_compile_object" | "oracle_create_or_replace" | "oracle_patch_source"
+            ) || tool.name == "deploy_ddl";
+            if matches!(field, "effects" | "sast") && source_tool {
+                let status = &result["impact"][field];
+                if cfg!(feature = "plsql-intelligence") {
+                    // The mock patch leaves `BEGIN 1;`: SAST refuses the
+                    // malformed candidate with a typed engine failure.
+                    assert!(
+                        matches!(status["status"].as_str(), Some("computed" | "estimated"))
+                            || *status == json!({"status":"not_applicable","reason":"no_source"})
+                            || *status == json!({"status":"unavailable","reason":"engine_failed"}),
+                        "{} {field}: {status}",
+                        tool.name
+                    );
+                } else {
+                    // A non-PL/SQL target has no source fields with or
+                    // without the engine.
+                    assert!(
+                        *status == json!({"status":"unavailable","reason":"engine_not_wired"})
+                            || *status == json!({"status":"not_applicable","reason":"no_source"}),
+                        "{} {field}: {status}",
+                        tool.name
+                    );
+                }
+                continue;
+            }
             assert_eq!(
                 result["impact"][field]["status"], "unavailable",
                 "{} {field}",
@@ -16405,6 +16434,197 @@ mod dependents_preview {
             dispatcher.quarantine.lock().unwrap().is_some(),
             "failed wire cannot be reused"
         );
+    }
+}
+
+/// Source-changing previews carry the served engine's effect and SAST facts.
+#[cfg(feature = "plsql-intelligence")]
+mod source_impact_preview {
+    use super::*;
+
+    /// ALL_SOURCE keeps no schema on line 1; the patch path re-qualifies it.
+    const STORED: [&str; 2] = [
+        "FUNCTION F RETURN NUMBER IS n NUMBER;\n",
+        "BEGIN SELECT ID INTO n FROM APP.T WHERE ID = 1; RETURN n; END;\n",
+    ];
+
+    struct SourceConnection;
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for SourceConnection {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+        async fn close(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn ping(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn describe(&self, _: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo {
+                backend: Some(OracleBackend::RustOracle),
+                current_schema: Some("APP".into()),
+                session_user: Some("APP".into()),
+                ..OracleConnectionInfo::default()
+            })
+        }
+        async fn execute(&self, _: &Cx, _: &str, _: &[OracleBind]) -> Result<u64, DbError> {
+            panic!("preview executed SQL")
+        }
+        async fn commit(&self, _: &Cx) -> Result<(), DbError> {
+            panic!("preview committed")
+        }
+        async fn rollback(&self, _: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+        async fn query_rows(
+            &self,
+            _: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            let stored = matches!(binds.get(1), Some(OracleBind::String(name)) if name == "F");
+            if sql != CatalogQueryId::GetSource.spec().sql || !stored {
+                return Ok(Vec::new());
+            }
+            Ok(STORED
+                .iter()
+                .enumerate()
+                .map(|(index, text)| OracleRow {
+                    columns: vec![
+                        (
+                            "LINE".into(),
+                            OracleCell::new("NUMBER", Some((index + 1).to_string())),
+                        ),
+                        (
+                            "TEXT".into(),
+                            OracleCell::new("VARCHAR2", Some((*text).into())),
+                        ),
+                    ],
+                })
+                .collect())
+        }
+    }
+
+    /// Runs on the default test stack: the engine sizes its own thread.
+    fn preview(tool: &str, args: Value) -> Result<Value, ErrorEnvelope> {
+        OracleDispatcher::new_with_profile_level(
+            Box::new(SourceConnection),
+            Some("dev".into()),
+            ddl_level(),
+        )
+        .dispatch(tool, args)
+    }
+
+    fn effect_names(value: &Value) -> Vec<String> {
+        value
+            .as_array()
+            .unwrap_or_else(|| panic!("effect list expected: {value}"))
+            .iter()
+            .map(|effect| effect.as_str().unwrap_or_default().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn patch_source_preview_reports_engine_effect_diff() {
+        let preview = preview(
+            "oracle_patch_source",
+            json!({
+                "owner":"APP","name":"F","object_type":"FUNCTION",
+                "old_text":"RETURN n; END;",
+                "new_text":"INSERT INTO APP.T (ID) VALUES (2); RETURN n; END;",
+            }),
+        )
+        .expect("patch preview");
+        let effects = &preview["impact"]["effects"];
+        assert_eq!(effects["status"], "computed", "{effects}");
+        assert_eq!(
+            effect_names(&effects["value"]["before"]),
+            ["ReadDb"],
+            "{effects}"
+        );
+        assert_eq!(effect_names(&effects["value"]["after"]), ["ReadDb", "Dml"]);
+        assert_eq!(effect_names(&effects["value"]["added"]), ["Dml"]);
+        assert!(effects["value"]["engine_version"].is_string());
+        assert_eq!(
+            effects["value"]["ruleset_digest"].as_str().unwrap().len(),
+            64
+        );
+        assert_eq!(preview["impact"]["sast"]["status"], "estimated");
+        assert!(preview["confirmation"]["confirm"].is_string());
+    }
+
+    #[test]
+    fn no_preview_reports_engine_not_wired() {
+        let candidate = "CREATE OR REPLACE FUNCTION APP.F RETURN NUMBER IS BEGIN EXECUTE IMMEDIATE 'BEGIN NULL; END;'; RETURN 1; END;";
+        let new_unit = "CREATE OR REPLACE PROCEDURE APP.NEW_P IS BEGIN NULL; END;";
+        for (tool, args) in [
+            (
+                "oracle_compile_object",
+                json!({"owner":"APP","name":"F","object_type":"FUNCTION"}),
+            ),
+            (
+                "oracle_create_or_replace",
+                json!({"source_code": candidate}),
+            ),
+            ("oracle_create_or_replace", json!({"source_code": new_unit})),
+            ("oracle_preview_sql", json!({"sql": candidate})),
+            ("deploy_ddl", json!({"ddl": candidate})),
+            (
+                "oracle_patch_source",
+                json!({
+                    "owner":"APP","name":"F","object_type":"FUNCTION",
+                    "old_text":"WHERE ID = 1","new_text":"WHERE ID = 3",
+                }),
+            ),
+        ] {
+            let preview = preview(tool, args)
+                .unwrap_or_else(|error| panic!("{tool} preview: {}", error.message));
+            let impact = &preview["impact"];
+            assert!(
+                !impact.to_string().contains("engine_not_wired"),
+                "{tool}: {impact}"
+            );
+            for field in ["effects", "sast"] {
+                assert_ne!(
+                    impact[field]["reason"], "not_wired",
+                    "{tool} {field}: {impact}"
+                );
+            }
+            assert_eq!(impact["effects"]["status"], "computed", "{tool}: {impact}");
+        }
+    }
+
+    #[test]
+    fn source_previews_keep_their_unit_specific_sides() {
+        // Recompiling changes no source: effects of the stored unit, no SAST.
+        let compile = preview(
+            "oracle_compile_object",
+            json!({"owner":"APP","name":"F","object_type":"FUNCTION"}),
+        )
+        .unwrap();
+        let effects = &compile["impact"]["effects"]["value"];
+        assert_eq!(effects["before"], effects["after"], "{effects}");
+        assert!(effect_names(&effects["added"]).is_empty());
+        assert_eq!(compile["impact"]["sast"]["reason"], "no_source");
+        // A unit that does not exist yet has no stored side.
+        let new = preview(
+            "oracle_create_or_replace",
+            json!({"source_code":"CREATE OR REPLACE PROCEDURE APP.NEW_P IS BEGIN NULL; END;"}),
+        )
+        .unwrap();
+        let effects = &new["impact"]["effects"]["value"];
+        assert_eq!(effects["before_status"], "no_stored_source", "{effects}");
+        assert!(effects["before"].is_null());
+        // An unmapped construct is Unknown in `after`, never no effect.
+        let dynamic = preview(
+                "oracle_preview_sql",
+                json!({"sql":"CREATE OR REPLACE FUNCTION APP.F(s VARCHAR2) RETURN NUMBER IS BEGIN EXECUTE IMMEDIATE s; RETURN 1; END;"}),
+            )
+            .unwrap();
+        let after = effect_names(&dynamic["impact"]["effects"]["value"]["after"]);
+        assert!(after.iter().any(|effect| effect == "Unknown"), "{after:?}");
     }
 }
 

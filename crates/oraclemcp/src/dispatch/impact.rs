@@ -170,6 +170,332 @@ pub(super) async fn compute_dependents_impact(
     }
 }
 
+/// The stored side of a PL/SQL source change.
+pub(super) enum StoredSource<'a> {
+    /// The object does not exist yet.
+    Absent,
+    /// The stored source could not be read; the diff is then unknown.
+    Unavailable,
+    Text(&'a str),
+}
+
+/// The PL/SQL source an approval preview changes. `after` is the candidate,
+/// None when the preview recompiles stored source without changing it.
+pub(super) struct SourceChange<'a> {
+    pub before: StoredSource<'a>,
+    pub after: Option<&'a str>,
+}
+
+/// The stored unit a preview would replace or recompile, normalized exactly
+/// like a patched candidate so the engine compares like with like.
+pub(super) enum StoredUnit {
+    Absent,
+    Unavailable,
+    Ddl(String),
+}
+
+impl StoredUnit {
+    pub(super) fn source(&self) -> StoredSource<'_> {
+        match self {
+            Self::Absent => StoredSource::Absent,
+            Self::Unavailable => StoredSource::Unavailable,
+            Self::Ddl(ddl) => StoredSource::Text(ddl),
+        }
+    }
+}
+
+/// Units whose source the PL/SQL engine analyzes. Views and other DDL carry no
+/// routine effects or PL/SQL findings.
+pub(super) fn is_plsql_unit_type(object_type: &str) -> bool {
+    matches!(
+        object_type,
+        "PACKAGE" | "PACKAGE BODY" | "PROCEDURE" | "FUNCTION" | "TRIGGER" | "TYPE" | "TYPE BODY"
+    )
+}
+
+/// Read the stored unit with the same dictionary read `oracle_patch_source`
+/// uses. A read failure is an unknown before-side, never an absent object.
+pub(super) async fn read_stored_unit(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    owner: &str,
+    name: &str,
+    object_type: &str,
+    tool_name: &str,
+) -> StoredUnit {
+    match super::fetch_patch_source_document(
+        cx,
+        conn,
+        owner,
+        name,
+        object_type,
+        super::DEFAULT_SOURCE_MAX_CHARS,
+    )
+    .await
+    {
+        Ok(document) => {
+            super::owner_qualified_patch_ddl(&document.text, owner, name, object_type, tool_name)
+                .and_then(|ddl| super::create_or_replace_source_arg(tool_name, Some(ddl)))
+                .map_or(StoredUnit::Unavailable, StoredUnit::Ddl)
+        }
+        Err(error) if error.error_class == oraclemcp_error::ErrorClass::ObjectNotFound => {
+            StoredUnit::Absent
+        }
+        Err(_) => StoredUnit::Unavailable,
+    }
+}
+
+/// Effects and SAST for a confirmation preview of one CREATE OR REPLACE text
+/// (`oracle_preview_sql`, `deploy_ddl`, `oracle_create_or_replace`).
+pub(super) async fn attach_ddl_source_impact(
+    response: &mut Value,
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    sql: &str,
+    tool_name: &str,
+) {
+    if !is_confirmation_preview(response) {
+        return;
+    }
+    let Some(object) = super::detect_create_or_replace_object(cx, conn, sql).await else {
+        return;
+    };
+    let stored = read_stored_unit(
+        cx,
+        conn,
+        &object.owner,
+        &object.name,
+        &object.object_type,
+        tool_name,
+    )
+    .await;
+    attach_source_impact(
+        response,
+        &object.object_type,
+        &SourceChange {
+            before: stored.source(),
+            after: Some(sql),
+        },
+    );
+}
+
+/// Attach the engine's effect and SAST facts for one source change. This is
+/// offline analysis of exact source text: nothing reaches Oracle, and the
+/// preview's gate and confirmation are untouched.
+pub(super) fn attach_source_impact(
+    response: &mut Value,
+    object_type: &str,
+    change: &SourceChange<'_>,
+) {
+    let Some(fields) = response.as_object_mut() else {
+        return;
+    };
+    let mut impact = fields
+        .get("impact")
+        .and_then(|value| serde_json::from_value::<ImpactV1>(value.clone()).ok())
+        .unwrap_or_default();
+    if is_plsql_unit_type(object_type) {
+        impact.effects = compute_effects_impact(change);
+        impact.sast = compute_sast_impact(change.after);
+    } else {
+        impact.effects = FieldStatus::NotApplicable {
+            reason: NotApplicableReason::NoSource,
+        };
+        impact.sast = FieldStatus::NotApplicable {
+            reason: NotApplicableReason::NoSource,
+        };
+    }
+    if let Ok(value) = serde_json::to_value(impact) {
+        fields.insert("impact".into(), value);
+    }
+}
+
+/// W7 effect sets of the stored and the candidate unit, with their diff.
+pub(super) fn compute_effects_impact(change: &SourceChange<'_>) -> FieldStatus<Value> {
+    #[cfg(not(feature = "plsql-intelligence"))]
+    {
+        if let StoredSource::Text(source) = change.before {
+            let _ = (source, change.after);
+        }
+        FieldStatus::Unavailable {
+            reason: UnavailableReason::EngineNotWired,
+        }
+    }
+    #[cfg(feature = "plsql-intelligence")]
+    {
+        use crate::plsql_tools::analyze_source_impact;
+        use std::collections::BTreeSet;
+        let stored = match change.before {
+            StoredSource::Text(source) => Some(source),
+            StoredSource::Absent | StoredSource::Unavailable => None,
+        };
+        let Some(after_source) = change.after.or(stored) else {
+            return FieldStatus::NotApplicable {
+                reason: NotApplicableReason::NoSource,
+            };
+        };
+        let after = match analyze_source_impact(after_source) {
+            Ok(after) => after,
+            Err(error) => {
+                return FieldStatus::Unavailable {
+                    reason: engine_failure_reason(&error),
+                };
+            }
+        };
+        let after_set: BTreeSet<_> = after.effects.iter().collect();
+        let unknown_diff = || {
+            (
+                Value::Null,
+                "unavailable",
+                Value::Array(Vec::new()),
+                Value::Null,
+                Value::Null,
+            )
+        };
+        let names = |set: &BTreeSet<oraclemcp_guard::RoutineEffect>| {
+            Value::Array(
+                set.iter()
+                    .filter_map(|e| serde_json::to_value(e).ok())
+                    .collect(),
+            )
+        };
+        let (before, before_status, before_unknown, added, removed) = match change.before {
+            StoredSource::Absent => (
+                Value::Null,
+                "no_stored_source",
+                Value::Array(Vec::new()),
+                names(&after_set),
+                Value::Array(Vec::new()),
+            ),
+            StoredSource::Text(source) => match analyze_source_impact(source) {
+                Ok(before) => {
+                    let before_set: BTreeSet<_> = before.effects.iter().collect();
+                    (
+                        names(&before_set),
+                        "computed",
+                        json!(before.unknown_reasons),
+                        names(&after_set.difference(&before_set).copied().collect()),
+                        names(&before_set.difference(&after_set).copied().collect()),
+                    )
+                }
+                Err(_) => unknown_diff(),
+            },
+            // The diff needs both sides. Without the stored side it is
+            // unknown, not "everything was added".
+            StoredSource::Unavailable => unknown_diff(),
+        };
+        FieldStatus::Computed {
+            value: json!({
+                "contract": "RoutineEffectsV1",
+                "before": before,
+                "before_status": before_status,
+                "after": names(&after_set),
+                "added": added,
+                "removed": removed,
+                "unknown_reasons": {"before": before_unknown, "after": after.unknown_reasons},
+                "engine_version": crate::plsql_tools::ENGINE_VERSION,
+                "ruleset_digest": hex_digest(&crate::plsql_tools::sast_ruleset_digest()),
+            }),
+        }
+    }
+}
+
+/// SAST findings on the candidate source only. A recompile that changes no
+/// source has no SAST field to compute.
+pub(super) fn compute_sast_impact(changed: Option<&str>) -> FieldStatus<Value> {
+    #[cfg(not(feature = "plsql-intelligence"))]
+    {
+        let _ = changed;
+        FieldStatus::Unavailable {
+            reason: UnavailableReason::EngineNotWired,
+        }
+    }
+    #[cfg(feature = "plsql-intelligence")]
+    {
+        let Some(source) = changed else {
+            return FieldStatus::NotApplicable {
+                reason: NotApplicableReason::NoSource,
+            };
+        };
+        let analysis = match crate::plsql_tools::analyze_source_impact(source) {
+            Ok(analysis) => analysis.sast,
+            Err(error) => Err(error),
+        };
+        let analysis = match analysis {
+            Ok(analysis) => analysis,
+            Err(error) => {
+                return FieldStatus::Unavailable {
+                    reason: engine_failure_reason(&error),
+                };
+            }
+        };
+        let mut findings: Vec<_> = analysis
+            .findings
+            .iter()
+            .map(|finding| {
+                json!({
+                    "severity": finding.severity,
+                    "rule": finding.rule_id,
+                    "location": {
+                        "line": finding.location.line,
+                        "byte_span": [finding.location.byte_span.0, finding.location.byte_span.1],
+                    },
+                    "message": finding.message,
+                    "confidence": finding.confidence.level,
+                })
+            })
+            .collect();
+        findings.sort_by(|a, b| {
+            let key = |v: &Value| {
+                (
+                    v["location"]["line"].as_u64(),
+                    v["location"]["byte_span"][0].as_u64(),
+                    v["rule"].as_str().map(str::to_owned),
+                    v["message"].as_str().map(str::to_owned),
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        let skipped: Vec<_> = analysis
+            .skipped
+            .iter()
+            .map(|skip| json!({"rule": skip.rule_id, "reason": skip.reason, "detail": skip.detail}))
+            .collect();
+        let value = json!({
+            "findings": findings,
+            "skipped_rules": skipped,
+            "complete": skipped.is_empty(),
+            "engine_version": crate::plsql_tools::ENGINE_VERSION,
+            "ruleset_digest": hex_digest(&crate::plsql_tools::sast_ruleset_digest()),
+        });
+        // A skipped rule did not look; its absence of findings is not a pass.
+        if skipped.is_empty() {
+            FieldStatus::Computed { value }
+        } else {
+            FieldStatus::Estimated { value }
+        }
+    }
+}
+
+/// Only the engine's admission limits are a truncation; a source the engine
+/// cannot analyze (for example, one with syntax errors for SAST) is a failure.
+#[cfg(feature = "plsql-intelligence")]
+fn engine_failure_reason(error: &oraclemcp_error::ErrorEnvelope) -> UnavailableReason {
+    if error
+        .message
+        .starts_with("PL/SQL analysis input limit exceeded")
+    {
+        UnavailableReason::Truncated
+    } else {
+        UnavailableReason::EngineFailed
+    }
+}
+
+#[cfg(feature = "plsql-intelligence")]
+fn hex_digest(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 fn quarantine_dependency_observation(
     quarantine: &std::sync::Mutex<Option<super::ConnectionQuarantine>>,
     error: &DbError,
@@ -1518,6 +1844,220 @@ mod tests {
         );
     }
 
+    /// Committed PL/SQL fixtures analyzed by the pinned engine, not stubs.
+    #[cfg(feature = "plsql-intelligence")]
+    mod source_impact {
+        use super::*;
+
+        const READ_ONLY_FN: &str = "CREATE OR REPLACE FUNCTION APP.F RETURN NUMBER IS n NUMBER; BEGIN SELECT ID INTO n FROM APP.T WHERE ID = 1; RETURN n; END;";
+        const DML_FN: &str = "CREATE OR REPLACE FUNCTION APP.F RETURN NUMBER IS n NUMBER; BEGIN SELECT ID INTO n FROM APP.T WHERE ID = 1; INSERT INTO APP.T (ID) VALUES (2); RETURN n; END;";
+        const AUTONOMOUS_FN: &str = "CREATE OR REPLACE FUNCTION APP.F RETURN NUMBER IS PRAGMA AUTONOMOUS_TRANSACTION; n NUMBER; BEGIN SELECT ID INTO n FROM APP.T WHERE ID = 1; INSERT INTO APP.T (ID) VALUES (2); COMMIT; RETURN n; END;";
+        const DYNAMIC_FN: &str = "CREATE OR REPLACE FUNCTION APP.F(s VARCHAR2) RETURN NUMBER IS BEGIN EXECUTE IMMEDIATE s; RETURN 1; END;";
+        const INJECTION_PROC: &str = "CREATE OR REPLACE PROCEDURE APP.P(s VARCHAR2) IS BEGIN EXECUTE IMMEDIATE 'DELETE FROM APP.T WHERE ID = ' || s; END;";
+        const CLEAN_PROC: &str = "CREATE OR REPLACE PROCEDURE APP.P(s VARCHAR2) IS BEGIN DELETE FROM APP.T WHERE ID = s; END;";
+
+        fn effects(before: StoredSource<'_>, after: Option<&str>) -> Value {
+            match compute_effects_impact(&SourceChange { before, after }) {
+                FieldStatus::Computed { value } => value,
+                other => panic!("effects not computed: {other:?}"),
+            }
+        }
+
+        fn names(value: &Value) -> Vec<String> {
+            value
+                .as_array()
+                .unwrap_or_else(|| panic!("effect list expected: {value}"))
+                .iter()
+                .map(|effect| {
+                    effect
+                        .as_str()
+                        .map_or_else(|| effect.to_string(), str::to_owned)
+                })
+                .collect()
+        }
+
+        #[test]
+        fn impact_effects_before_after_dml_added() {
+            let value = effects(StoredSource::Text(READ_ONLY_FN), Some(DML_FN));
+            assert_eq!(names(&value["before"]), ["ReadDb"], "{value}");
+            assert_eq!(names(&value["after"]), ["ReadDb", "Dml"], "{value}");
+            assert_eq!(names(&value["added"]), ["Dml"], "{value}");
+            assert!(names(&value["removed"]).is_empty(), "{value}");
+            assert_eq!(value["before_status"], "computed");
+        }
+
+        #[test]
+        fn impact_effects_autonomous_added_flagged() {
+            let value = effects(StoredSource::Text(DML_FN), Some(AUTONOMOUS_FN));
+            let added = names(&value["added"]);
+            assert!(added.iter().any(|effect| effect == "Autonomous"), "{value}");
+            assert!(added.iter().any(|effect| effect == "TxnControl"), "{value}");
+        }
+
+        #[test]
+        fn impact_effects_unknown_construct_reports_unknown() {
+            let value = effects(StoredSource::Text(READ_ONLY_FN), Some(DYNAMIC_FN));
+            assert!(
+                names(&value["after"]).iter().any(|e| e == "Unknown"),
+                "{value}"
+            );
+            assert!(
+                names(&value["added"]).iter().any(|e| e == "Unknown"),
+                "{value}"
+            );
+            assert!(
+                !value["unknown_reasons"]["after"]
+                    .as_array()
+                    .unwrap()
+                    .is_empty(),
+                "{value}"
+            );
+            // A source in which the engine finds no routine is Unknown, not empty.
+            let spec = effects(
+                StoredSource::Absent,
+                Some("CREATE OR REPLACE PACKAGE APP.PKG AS PROCEDURE P; END;"),
+            );
+            assert_eq!(names(&spec["after"]), ["Unknown"], "{spec}");
+        }
+
+        #[test]
+        fn impact_effects_unreadable_stored_source_never_claims_everything_added() {
+            let value = effects(StoredSource::Unavailable, Some(DML_FN));
+            assert_eq!(value["before_status"], "unavailable");
+            assert!(
+                value["added"].is_null() && value["removed"].is_null(),
+                "{value}"
+            );
+            let new = effects(StoredSource::Absent, Some(DML_FN));
+            assert_eq!(names(&new["added"]), ["ReadDb", "Dml"], "{new}");
+        }
+
+        #[test]
+        fn impact_effects_engine_version_and_ruleset_present() {
+            let value = effects(StoredSource::Absent, Some(READ_ONLY_FN));
+            assert_eq!(value["engine_version"], crate::plsql_tools::ENGINE_VERSION);
+            assert!(!crate::plsql_tools::ENGINE_VERSION.is_empty());
+            let digest = value["ruleset_digest"].as_str().unwrap();
+            assert_eq!(digest.len(), 64, "{value}");
+            assert_eq!(
+                digest,
+                hex_digest(&crate::plsql_tools::sast_ruleset_digest()),
+                "the digest is a pure function of the enabled rules"
+            );
+        }
+
+        #[test]
+        fn impact_sast_findings_on_changed_source_only() {
+            // A recompile changes no source: nothing to scan.
+            assert!(matches!(
+                compute_sast_impact(None),
+                FieldStatus::NotApplicable {
+                    reason: NotApplicableReason::NoSource
+                }
+            ));
+            // Without a catalog most rules have no facts to run on. The scan
+            // says so instead of presenting their silence as a pass.
+            let status = compute_sast_impact(Some(INJECTION_PROC));
+            let FieldStatus::Estimated { value } = status else {
+                panic!("a partial scan must be estimated: {status:?}");
+            };
+            assert_eq!(value["complete"], false);
+            assert!(!value["skipped_rules"].as_array().unwrap().is_empty());
+            let findings = value["findings"].as_array().unwrap();
+            assert!(
+                findings
+                    .iter()
+                    .any(|f| f["rule"] == "SEC001" && f["severity"] == "critical"),
+                "{value}"
+            );
+            // The stored side's finding is not reported for a clean candidate.
+            let mut response = json!({"preview": true, "confirmation": {}});
+            attach_source_impact(
+                &mut response,
+                "PROCEDURE",
+                &SourceChange {
+                    before: StoredSource::Text(INJECTION_PROC),
+                    after: Some(CLEAN_PROC),
+                },
+            );
+            let sast = &response["impact"]["sast"];
+            assert_eq!(sast["status"], "estimated", "{sast}");
+            assert_eq!(sast["value"]["complete"], false, "{sast}");
+            assert!(
+                sast["value"]["findings"].as_array().unwrap().is_empty(),
+                "{sast}"
+            );
+        }
+
+        #[test]
+        fn impact_sast_deterministic_order() {
+            let source = "CREATE OR REPLACE PACKAGE BODY APP.PKG AS PROCEDURE B(s VARCHAR2) IS BEGIN EXECUTE IMMEDIATE 'DELETE FROM APP.T WHERE ID = ' || s; END; PROCEDURE A(s VARCHAR2) IS BEGIN EXECUTE IMMEDIATE 'DELETE FROM APP.T WHERE ID = ' || s; END; END;";
+            let first = compute_sast_impact(Some(source));
+            assert_eq!(first, compute_sast_impact(Some(source)));
+            let value = match &first {
+                FieldStatus::Computed { value } | FieldStatus::Estimated { value } => value,
+                other => panic!("scan not computed: {other:?}"),
+            };
+            let lines: Vec<_> = value["findings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|f| {
+                    (
+                        f["location"]["line"].as_u64().unwrap(),
+                        f["location"]["byte_span"][0].as_u64().unwrap(),
+                    )
+                })
+                .collect();
+            let mut sorted = lines.clone();
+            sorted.sort_unstable();
+            assert_eq!(lines, sorted, "{value}");
+        }
+
+        #[test]
+        fn impact_malformed_candidate_keeps_unknown_effects_and_typed_sast() {
+            let broken = "CREATE OR REPLACE PROCEDURE APP.P IS BEGIN 1; END;";
+            let value = effects(StoredSource::Text(CLEAN_PROC), Some(broken));
+            assert!(
+                names(&value["after"]).iter().any(|e| e == "Unknown"),
+                "{value}"
+            );
+            assert_eq!(
+                compute_sast_impact(Some(broken)),
+                FieldStatus::Unavailable {
+                    reason: UnavailableReason::EngineFailed
+                }
+            );
+            let oversized = format!(
+                "CREATE OR REPLACE PROCEDURE APP.P IS BEGIN {} END;",
+                "NULL; ".repeat(2100)
+            );
+            assert_eq!(
+                compute_sast_impact(Some(&oversized)),
+                FieldStatus::Unavailable {
+                    reason: UnavailableReason::Truncated
+                }
+            );
+        }
+
+        #[test]
+        fn impact_non_plsql_unit_has_no_source_fields() {
+            let mut response = json!({"preview": true, "confirmation": {}});
+            attach_source_impact(
+                &mut response,
+                "VIEW",
+                &SourceChange {
+                    before: StoredSource::Absent,
+                    after: Some("CREATE OR REPLACE VIEW APP.V AS SELECT 1 X FROM DUAL"),
+                },
+            );
+            for field in ["effects", "sast"] {
+                assert_eq!(response["impact"][field]["status"], "not_applicable");
+                assert_eq!(response["impact"][field]["reason"], "no_source");
+            }
+        }
+    }
+
     #[cfg(feature = "live-xe")]
     mod live_tests {
         use super::*;
@@ -1567,6 +2107,23 @@ mod tests {
             connect: OracleConnectOptions,
             source: &str,
         ) -> Result<Value, String> {
+            live_preview(
+                cx,
+                connect,
+                "oracle_create_or_replace",
+                json!({"source_code":source}),
+            )
+            .await
+        }
+
+        /// One real DDL-level preview through the dispatcher on a fresh session.
+        #[cfg(feature = "plsql-intelligence")]
+        async fn live_preview(
+            cx: &Cx,
+            connect: OracleConnectOptions,
+            tool: &str,
+            args: Value,
+        ) -> Result<Value, String> {
             use super::super::super::{DispatchContext, OracleDispatcher};
             let conn = RustOracleConnection::connect(cx, connect)
                 .await
@@ -1585,12 +2142,12 @@ mod tests {
                 .dispatch_with_cx_inner(
                     cx,
                     DispatchContext::default(),
-                    "oracle_create_or_replace",
-                    json!({"source_code":source}),
+                    tool,
+                    args,
                     &refusal_recorded,
                 )
                 .await
-                .map_err(|error| format!("dependency preview: {}", error.message));
+                .map_err(|error| format!("{tool} preview: {}", error.message));
             let state = dispatcher
                 .state
                 .lock(cx)
@@ -1695,6 +2252,75 @@ mod tests {
                     conn.close(&cx).await.map_err(|error| error.to_string())
                 }.await;
                 cleanup?;
+                outcome
+            }).unwrap();
+        }
+
+        /// The candidate is a real patch of a real stored function; the engine
+        /// reads the stored side through the dictionary, as the preview does.
+        #[cfg(feature = "plsql-intelligence")]
+        #[test]
+        fn impact_effects_live_patch_source_diff() {
+            if std::env::var("ORACLEMCP_LIVE_XE").as_deref() != Ok("1") {
+                eprintln!("live FREE23 effects disabled; set ORACLEMCP_LIVE_XE=1");
+                return;
+            }
+            run_with_cx(|cx| async move {
+                let connect = options("FREE23");
+                let conn = RustOracleConnection::connect(&cx, connect.clone()).await
+                    .map_err(|error| format!("fixture connection: {error}"))?;
+                let rows = conn.query_rows(&cx, "SELECT USER AS OWNER FROM DUAL", &[]).await
+                    .map_err(|error| error.to_string())?;
+                let owner = rows.first().and_then(|row| row.text("OWNER"))
+                    .filter(|owner| is_plan_table_identifier(owner)).ok_or("fixture owner missing")?.to_owned();
+                let id = PlanStatementId::generate().map_err(|error| error.to_string())?;
+                let suffix = &id.as_str()[5..13];
+                let table = format!("OMCPE_{suffix}_T");
+                let function = format!("OMCPE_{suffix}_F");
+                conn.execute(&cx, &format!("CREATE TABLE \"{owner}\".\"{table}\" (ID NUMBER)"), &[]).await
+                    .map_err(|error| error.to_string())?;
+                let outcome = async {
+                    conn.execute(&cx, &format!(
+                        "CREATE OR REPLACE FUNCTION \"{owner}\".\"{function}\" RETURN NUMBER IS n NUMBER; BEGIN SELECT ID INTO n FROM {owner}.{table} WHERE ID = 1; RETURN n; END;"
+                    ), &[]).await.map_err(|error| error.to_string())?;
+                    let preview = live_preview(&cx, connect, "oracle_patch_source", json!({
+                        "owner": owner, "name": function, "object_type": "FUNCTION",
+                        "old_text": "RETURN n; END;",
+                        "new_text": format!("INSERT INTO {owner}.{table} (ID) VALUES (2); RETURN n; END;"),
+                    })).await?;
+                    let effects = &preview["impact"]["effects"];
+                    let names = |key: &str| effects["value"][key].as_array().map(|items| {
+                        items.iter().filter_map(Value::as_str).map(str::to_owned).collect::<Vec<_>>()
+                    });
+                    if effects["status"] != "computed"
+                        || names("before") != Some(vec!["ReadDb".into()])
+                        || names("after") != Some(vec!["ReadDb".into(), "Dml".into()])
+                        || names("added") != Some(vec!["Dml".into()])
+                        || !effects["value"]["engine_version"].is_string()
+                        || effects["value"]["ruleset_digest"].as_str().map(str::len) != Some(64)
+                    {
+                        return Err(format!("live effect diff: {effects}"));
+                    }
+                    if !preview["confirmation"]["confirm"].is_string() || preview["gate_decision"] != "allow" {
+                        return Err(format!("effects changed the preview's admission: {preview}"));
+                    }
+                    let source_rows = conn.query_rows(&cx,
+                        "SELECT COUNT(*) AS N FROM SYS.ALL_SOURCE WHERE OWNER = :1 AND NAME = :2 AND TEXT LIKE '%INSERT%'",
+                        &[OracleBind::String(owner.clone()), OracleBind::String(function.clone())]).await
+                        .map_err(|error| error.to_string())?;
+                    if source_rows.first().and_then(|row| row.text("N")) != Some("0") {
+                        return Err("the preview applied the patch".into());
+                    }
+                    println!("FREE23 patch_source effects: before [ReadDb] after [ReadDb, Dml] added [Dml]; sast {}", preview["impact"]["sast"]["status"]);
+                    Ok::<(), String>(())
+                }.await;
+                for (kind, name) in [("FUNCTION", &function), ("TABLE", &table)] {
+                    let result = conn.execute(&cx, &format!("DROP {kind} \"{owner}\".\"{name}\""), &[]).await;
+                    if let Err(error) = result && !error.to_string().contains("ORA-04043") && !error.to_string().contains("ORA-00942") {
+                        return Err(format!("fixture cleanup: {error}"));
+                    }
+                }
+                conn.close(&cx).await.map_err(|error| error.to_string())?;
                 outcome
             }).unwrap();
         }
