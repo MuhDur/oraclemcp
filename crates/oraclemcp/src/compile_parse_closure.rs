@@ -101,6 +101,7 @@ pub async fn collect_compile_parse_effect_closure(
     conn: &dyn OracleConnection,
     source: &str,
     resolution_schema: &str,
+    require_security_feature_evidence: bool,
 ) -> Result<CompileParseEffectClosureV1, ErrorEnvelope> {
     #[cfg(feature = "plsql-intelligence")]
     let effects = crate::mutation_closure::EngineMutationEffects;
@@ -113,6 +114,7 @@ pub async fn collect_compile_parse_effect_closure(
         resolution_schema,
         None,
         &effects,
+        require_security_feature_evidence,
     )
     .await;
     closure.admit().map_err(unproven)?;
@@ -433,6 +435,7 @@ async fn stored_source(
 /// reloads stored source and every catalog/callback proof on the target lane.
 pub(crate) struct PreparedCompileParse {
     sql: String,
+    require_security_feature_evidence: bool,
     target_commitments: Vec<[u8; 32]>,
     pub(crate) closures: Vec<CompileParseEffectClosureV1>,
 }
@@ -454,7 +457,7 @@ impl PreparedCompileParse {
         cx: &Cx,
         conn: &dyn OracleConnection,
     ) -> Result<(), ErrorEnvelope> {
-        let fresh = prepare_compile(cx, conn, &self.sql)
+        let fresh = prepare_compile(cx, conn, &self.sql, self.require_security_feature_evidence)
             .await
             .map_err(|_| stale())?
             .ok_or_else(stale)?;
@@ -478,6 +481,7 @@ async fn prepare_compile(
     cx: &Cx,
     conn: &dyn OracleConnection,
     sql: &str,
+    require_security_feature_evidence: bool,
 ) -> Result<Option<PreparedCompileParse>, ErrorEnvelope> {
     let Some(header) = header(sql)? else {
         return Ok(None);
@@ -595,10 +599,20 @@ async fn prepare_compile(
     }
     let mut closures = Vec::new();
     for source in &sources {
-        closures.push(collect_compile_parse_effect_closure(cx, conn, source, &owner).await?);
+        closures.push(
+            collect_compile_parse_effect_closure(
+                cx,
+                conn,
+                source,
+                &owner,
+                require_security_feature_evidence,
+            )
+            .await?,
+        );
     }
     Ok(Some(PreparedCompileParse {
         sql: sql.to_owned(),
+        require_security_feature_evidence,
         target_commitments,
         closures,
     }))
@@ -620,6 +634,21 @@ impl std::ops::Deref for PreparedSqlProof {
 }
 
 impl PreparedSqlProof {
+    pub(super) fn attach_compile_parse_observations(&self, response: &mut serde_json::Value) {
+        let Ok(Some(compile)) = &self.compile else {
+            return;
+        };
+        let observations: Vec<_> = compile.closures.iter().flat_map(|closure| &closure.statements)
+            .flat_map(|statement| statement.security_feature_evidence.iter().filter(|fact| {
+                [fact.ols, fact.ras, fact.redaction].contains(&oraclemcp_db::RelationSecurityState::Unavailable)
+            }).map(|fact| serde_json::json!({"statement_ordinal":statement.ordinal,"security_feature_evidence":fact})))
+            .collect();
+        if !observations.is_empty() {
+            response["compile_parse_observations"] = serde_json::json!({
+                "status":"admitted_with_observation", "statements":observations,
+            });
+        }
+    }
     pub(super) fn require_compile_parse_closure(&self, sql: &str) -> Result<(), ErrorEnvelope> {
         // An already forbidden statement has no execution grant; retain the
         // existing inspectable refusal preview and its stronger guard verdict.
@@ -639,6 +668,7 @@ impl PreparedSqlProof {
         Ok(())
     }
     pub(super) fn attach_compile_parse_binding(&self, response: &mut serde_json::Value) {
+        self.attach_compile_parse_observations(response);
         let Ok(Some(compile)) = &self.compile else {
             return;
         };
@@ -700,7 +730,13 @@ pub(super) async fn prepare(
     {
         Ok(None)
     } else {
-        prepare_compile(cx, conn, sql).await
+        prepare_compile(
+            cx,
+            conn,
+            sql,
+            classifier.requires_security_feature_evidence(),
+        )
+        .await
     };
     PreparedSqlProof {
         runtime,
@@ -1082,6 +1118,7 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
     // the autonomous INSERT + COMMIT canary.
     struct NativeFixtureHarness {
         options: OracleConnectOptions,
+        security_visibility: bool,
     }
     impl oraclemcp_core::ToolDispatch for NativeFixtureHarness {
         fn request_timeout_ceiling(&self) -> Result<Duration, ErrorEnvelope> {
@@ -1095,7 +1132,12 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
             _: Value,
         ) -> oraclemcp_core::DispatchFuture<'a> {
             Box::pin(async move {
-                match native_fixture(cx, self.options.clone()).await {
+                let result = if self.security_visibility {
+                    native_security_visibility(cx, self.options.clone()).await
+                } else {
+                    native_fixture(cx, self.options.clone()).await
+                };
+                match result {
                     Ok(()) => asupersync::Outcome::Ok(json!({"fixture":"passed"})),
                     Err(error) => {
                         asupersync::Outcome::Err(ErrorEnvelope::new(ErrorClass::Internal, error))
@@ -1108,6 +1150,16 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
     #[test]
     #[ignore = "requires administrative local FREE23 fixture setup"]
     fn compile_parse_closure_native_free23_paths_canary_and_drift() {
+        run_native_fixture(false);
+    }
+
+    #[test]
+    #[ignore = "requires CI-equivalent E2E_ORACLE on local FREE23"]
+    fn compile_parse_closure_native_free23_security_visibility() {
+        run_native_fixture(true);
+    }
+
+    fn run_native_fixture(security_visibility: bool) {
         let options = OracleConnectOptions {
             connect_string: std::env::var("ORACLEMCP_TEST_DSN").expect("FREE23 DSN"),
             username: Some(std::env::var("ORACLEMCP_TEST_USER").expect("admin user")),
@@ -1120,7 +1172,10 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
         use oraclemcp_core::ToolDispatch;
         let lane = oraclemcp_core::LaneRuntime::spawn_default(
             "compile-fixture",
-            Arc::new(NativeFixtureHarness { options }),
+            Arc::new(NativeFixtureHarness {
+                options,
+                security_visibility,
+            }),
         );
         let outcome = oraclemcp_core::block_on_lane_bridge(async {
             let cx = Cx::current().unwrap();
@@ -1142,6 +1197,87 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
             outcome
         });
         assert!(matches!(outcome, asupersync::Outcome::Ok(_)), "{outcome:?}");
+    }
+
+    fn observed_security(value: &Value) -> Result<(), String> {
+        let observation = &value["compile_parse_observations"];
+        if observation["status"] != "admitted_with_observation"
+            || !observation["statements"]
+                .as_array()
+                .is_some_and(|statements| {
+                    statements.iter().any(|statement| {
+                        let fact = &statement["security_feature_evidence"];
+                        fact["key"]["owner"] == "SYS"
+                            && fact["key"]["name"] == "DUAL"
+                            && fact["redaction"] == "unavailable"
+                            && fact["key"]["object_id"].as_u64().is_some()
+                    })
+                })
+        {
+            return Err(format!(
+                "unreadable redaction must remain an identity-bound observation: {value}"
+            ));
+        }
+        Ok(())
+    }
+
+    async fn native_security_visibility(
+        cx: &Cx,
+        options: OracleConnectOptions,
+    ) -> Result<(), String> {
+        if options.username.as_deref() != Some("E2E_ORACLE") {
+            return Err(
+                "security-visibility fixture requires the unchanged CI E2E_ORACLE user".into(),
+            );
+        }
+        let admin = RustOracleConnection::connect(cx, options.clone())
+            .await
+            .map_err(|error| error.to_string())?;
+        let nonce = oraclemcp_db::PlanStatementId::generate().map_err(|error| error.to_string())?;
+        let view = format!("OM_CV_{}", &nonce.as_str()[5..]);
+        let source = format!("CREATE OR REPLACE VIEW {view} AS SELECT 1 AS id FROM dual");
+        let compiles = Arc::new(AtomicUsize::new(0));
+        let result = Box::pin(async {
+            for strict in [false, true] {
+                let conn = RustOracleConnection::connect(cx, options.clone()).await.map_err(|error|error.to_string())?;
+                let mut level = SessionLevelState::new(OperatingLevel::Ddl, false);
+                level.set_current_level(OperatingLevel::Ddl).unwrap();
+                let dispatcher = OracleDispatcher::new_with_profile_level(
+                    Box::new(NativeCompileObserver { inner: conn, compiles: Arc::clone(&compiles) }),
+                    Some("compile-security-native".into()), level,
+                ).with_security_feature_evidence_requirement(strict);
+                let outcome = Box::pin(async {
+                    let args = json!({"source_code":source});
+                    if strict {
+                        refuse(cx, &dispatcher, "oracle_create_or_replace", args, &compiles).await?;
+                        let error = call(cx, &dispatcher, "oracle_create_or_replace", json!({"source_code":source,"execute":true,"confirm":"unissued"})).await.expect_err("strict direct apply must refuse");
+                        if error.structured_reason.as_ref().is_none_or(|reason| reason.category != ReasonCategory::ParseCallbackUnproven) {
+                            return Err(envelope(error));
+                        }
+                    } else {
+                        let preview = call(cx, &dispatcher, "oracle_create_or_replace", args).await.map_err(envelope)?;
+                        bound(&preview)?;
+                        observed_security(&preview)?;
+                        let applied = call(cx, &dispatcher, "oracle_create_or_replace", json!({"source_code":source,"execute":true,"confirm":confirmed(&preview)?})).await.map_err(envelope)?;
+                        if applied["applied"] != true {return Err(format!("view was not applied: {applied}"));}
+                        observed_security(&applied)?;
+                        if count(cx, &admin, &format!("SELECT COUNT(*) N FROM {view} WHERE id=1")).await? != 1 {return Err("admitted view is not usable".into());}
+                    }
+                    if compiles.load(Ordering::SeqCst) != 1 {return Err("only the default observed apply may reach candidate DDL".into());}
+                    Ok::<_,String>(())
+                }).await;
+                let close = dispatcher.state.lock(cx).await.unwrap().conn.close(cx).await.map_err(|error|error.to_string());
+                outcome?;
+                close?;
+            }
+            eprintln!("compile security visibility: unchanged CI account, observed preview/apply, strict preview/direct-apply refusal, one real candidate compile PASS");
+            Ok::<_,String>(())
+        }).await;
+        let cleanup = admin.execute(cx, &format!("DROP VIEW {view}"), &[]).await;
+        let close = admin.close(cx).await.map_err(|error| error.to_string());
+        result?;
+        cleanup.map_err(|error| error.to_string())?;
+        close
     }
 
     async fn native_fixture(cx: &Cx, options: OracleConnectOptions) -> Result<(), String> {
@@ -1183,7 +1319,7 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
                 let original_patch=stored_source(&cx,&admin,&schema,"PATCH_ME","PROCEDURE").await.map_err(envelope)?;
                 ddl(&cx,&admin,&format!("CREATE OR REPLACE FUNCTION {schema}.POLICY_FN(s VARCHAR2,o VARCHAR2) RETURN VARCHAR2 AUTHID DEFINER IS PRAGMA AUTONOMOUS_TRANSACTION; BEGIN INSERT INTO {schema}.CANARY(ID) VALUES(1); COMMIT; RETURN '1=1'; END;")).await?;
                 let cross_source=format!("CREATE OR REPLACE PROCEDURE {schema}.CROSS_PROOF AS n NUMBER; BEGIN SELECT COUNT(*) INTO n FROM CLEAN_DATA; SELECT COUNT(*) INTO n FROM dual; END;");
-                let cross=collect_compile_parse_effect_closure(&cx,&admin,&cross_source,&schema).await.map_err(envelope)?;
+                let cross=collect_compile_parse_effect_closure(&cx,&admin,&cross_source,&schema,false).await.map_err(envelope)?;
                 if !cross.statements.iter().flat_map(|statement|&statement.objects).any(|object|object.owner==schema && object.name=="CLEAN_DATA") || !cross.statements.iter().flat_map(|statement|&statement.objects).any(|object|object.owner=="SYS" && object.name=="DUAL") {return Err("explicit owner resolution must retain local tables and PUBLIC synonyms".into());}
                 let mut user=options.clone();user.username=Some(schema.clone());user.password=Some(password);
                 let conn=RustOracleConnection::connect(&cx,user).await.map_err(|error|error.to_string())?;
@@ -1213,7 +1349,7 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
                     ddl(&cx,&admin,&format!("CREATE INDEX {schema}.CLEAN_I ON {schema}.CLEAN_DATA(ID)")).await?;
                     {
                         let state=dispatcher.state.lock(&cx).await.unwrap();
-                        collect_compile_parse_effect_closure(&cx,state.conn.as_ref(),&clean_drift,&schema).await.map_err(envelope)?;
+                        collect_compile_parse_effect_closure(&cx,state.conn.as_ref(),&clean_drift,&schema,false).await.map_err(envelope)?;
                     }
                     match call(&cx,&dispatcher,"oracle_create_or_replace",json!({"source_code":clean_drift,"execute":true,"confirm":confirmed(&clean_preview)?})).await {
                         Err(error) if error.error_class==ErrorClass::RepreviewRequired=>(),
@@ -1248,6 +1384,8 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
                     ddl(&cx,&admin,&format!("DELETE FROM {schema}.CANARY")).await?;admin.commit(&cx).await.map_err(|error|error.to_string())?;
                     let bad=drift.replace("DRIFT_ME","NEW_BAD");
                     refuse(&cx,&dispatcher,"oracle_create_or_replace",json!({"source_code":bad}),&compiles).await?;
+                    let bad_view=format!("CREATE OR REPLACE VIEW {schema}.BAD_VIEW AS SELECT id FROM {schema}.PROTECTED_DATA");
+                    refuse(&cx,&dispatcher,"oracle_create_or_replace",json!({"source_code":bad_view}),&compiles).await?;
                     refuse(&cx,&dispatcher,"oracle_patch_source",json!({"owner":schema,"name":"PATCH_ME","object_type":"PROCEDURE","old_text":"CLEAN_DATA","new_text":"PROTECTED_DATA"}),&compiles).await?;
                     refuse(&cx,&dispatcher,"oracle_compile_object",json!({"owner":schema,"name":"COMPILE_ME","object_type":"PROCEDURE"}),&compiles).await?;
                     refuse(&cx,&dispatcher,"oracle_preview_sql",json!({"sql":bad,"commit":true}),&compiles).await?;
@@ -1264,7 +1402,7 @@ with oracledb.connect(user='sys',password=os.environ['ORACLEMCP_TEST_PASSWORD'],
                     if compiles.load(Ordering::SeqCst)!=9{return Err("real observer must see exactly9 positive/control candidate DDL calls".into());}
                     if stored_source(&cx,&admin,&schema,"PATCH_ME","PROCEDURE").await.map_err(envelope)?!=original_patch{return Err("refused patch changed complete stored source".into());}
                     if count(&cx,&admin,&format!("SELECT COUNT(*) N FROM {schema}.CANARY")).await?!=0{return Err("refused compilation executed the autonomous canary".into());}
-                    if count(&cx,&admin,&format!("SELECT COUNT(*) N FROM SYS.ALL_OBJECTS WHERE OWNER='{schema}' AND OBJECT_NAME IN ('NEW_BAD','DRIFT_ME','CLEAN_DRIFT')")).await?!=0{return Err("refused candidate DDL reached Oracle".into());}
+                    if count(&cx,&admin,&format!("SELECT COUNT(*) N FROM SYS.ALL_OBJECTS WHERE OWNER='{schema}' AND OBJECT_NAME IN ('NEW_BAD','BAD_VIEW','DRIFT_ME','CLEAN_DRIFT')")).await?!=0{return Err("refused candidate DDL reached Oracle".into());}
                     if count(&cx,&admin,&format!("SELECT COUNT(*) N FROM SYS.ALL_OBJECTS WHERE OWNER='{schema}' AND OBJECT_NAME='CLEAN_API' AND STATUS='VALID'")).await?!=2{return Err("clean package did not compile both units".into());}
                     if count(&cx,&admin,&format!("SELECT COUNT(*) N FROM SYS.ALL_OBJECTS WHERE OWNER='{schema}' AND OBJECT_NAME='CLEAN_T' AND OBJECT_TYPE='TYPE BODY' AND STATUS='VALID'")).await?!=1{return Err("clean named TYPE BODY did not compile".into());}
                     eprintln!("compile_parse_closure_native_free23: clean package/create/compile/custom PASS; VPD autonomous INSERT+COMMIT control and create/patch/compile/generic/custom refusals PASS; drift PASS");

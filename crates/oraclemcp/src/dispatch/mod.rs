@@ -10562,6 +10562,7 @@ async fn execute_sql_inner(
     if let Some(reason) = dbms_output_unavailable {
         response["dbms_output_unavailable"] = json!(reason);
     }
+    proof.attach_compile_parse_observations(&mut response);
     Ok(response)
 }
 
@@ -11040,7 +11041,7 @@ async fn compile_object_inner(
         .as_deref()
         .map(compile_diagnostic_counts)
         .unwrap_or((0, 0));
-    Ok(json!({
+    let mut response = json!({
         "compiled": true,
         "preview": false,
         "owner": owner,
@@ -11056,7 +11057,9 @@ async fn compile_object_inner(
         "error_count": errors.as_ref().map(|_| error_count),
         "warning_count": errors.as_ref().map(|_| warning_count),
         "diagnostics_unavailable": diagnostics_unavailable,
-    }))
+    });
+    proof.attach_compile_parse_observations(&mut response);
+    Ok(response)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -12161,36 +12164,35 @@ async fn patch_source_inner(
             )),
         ),
     };
-    Ok((
-        json!({
-            "applied": true,
-            "preview": false,
-            "executed": true,
-            "committed": true,
-            "rows_affected": rows_affected,
-            "patch_tool": tool_name,
+    let mut response = json!({
+        "applied": true,
+        "preview": false,
+        "executed": true,
+        "committed": true,
+        "rows_affected": rows_affected,
+        "patch_tool": tool_name,
+        "owner": owner,
+        "name": object_name,
+        "object_type": object_type,
+        // What actually ran: the statement is bound to this owner and name.
+        "executed_target": {
             "owner": owner,
             "name": object_name,
             "object_type": object_type,
-            // What actually ran: the statement is bound to this owner and name.
-            "executed_target": {
-                "owner": owner,
-                "name": object_name,
-                "object_type": object_type,
-                "statement_head": patched_ddl.lines().next().unwrap_or_default(),
-            },
-            "source_kind": document.source_kind,
-            "required_level": OperatingLevel::Ddl,
-            "danger": decision.danger,
-            "objects_affected": decision.objects_affected,
-            "reason": decision.reason,
-            "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
-            "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
-            "error_count": errors.as_ref().map(Vec::len),
-            "diagnostics_unavailable": diagnostics_unavailable,
-        }),
-        None,
-    ))
+            "statement_head": patched_ddl.lines().next().unwrap_or_default(),
+        },
+        "source_kind": document.source_kind,
+        "required_level": OperatingLevel::Ddl,
+        "danger": decision.danger,
+        "objects_affected": decision.objects_affected,
+        "reason": decision.reason,
+        "diff": patch_diff_json(&document.text, match_idx, &old_text, &new_text),
+        "errors": errors.as_ref().map(|rows| rows_to_json(rows)),
+        "error_count": errors.as_ref().map(Vec::len),
+        "diagnostics_unavailable": diagnostics_unavailable,
+    });
+    proof.attach_compile_parse_observations(&mut response);
+    Ok((response, None))
 }
 
 // Audit context (auditor + subject) is threaded through the DDL path so

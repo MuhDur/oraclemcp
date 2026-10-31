@@ -39,6 +39,9 @@ impl Default for ProfileClassifier {
 }
 
 impl ProfileClassifier {
+    pub(super) fn requires_security_feature_evidence(&self) -> bool {
+        self.read_policy.security
+    }
     pub(super) fn set_read_policy(
         &mut self,
         fga: FgaEvidencePolicy,
@@ -54,7 +57,10 @@ impl ProfileClassifier {
             };
         }
         #[cfg(not(feature = "plsql-intelligence"))]
-        let _ = (fga, security, trusted_views);
+        {
+            self.read_policy.security = security;
+            let _ = (fga, trusted_views);
+        }
     }
     pub(super) fn activate(
         profile: Option<String>,
@@ -180,7 +186,6 @@ impl ProfileClassifier {
 struct RoutineReadPolicy {
     #[cfg(feature = "plsql-intelligence")]
     fga: FgaEvidencePolicy,
-    #[cfg(feature = "plsql-intelligence")]
     security: bool,
     #[cfg(feature = "plsql-intelligence")]
     trusted_views: Arc<[String]>,

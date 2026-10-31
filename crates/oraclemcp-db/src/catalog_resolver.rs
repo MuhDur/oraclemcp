@@ -1528,6 +1528,16 @@ pub(crate) async fn observe_relation_security_for_read(
     observe_relation_security_inner(cx, conn, relations, false).await
 }
 
+/// Compile proofs need every policy flag, including write-only RAS policies.
+/// Preserve unavailable visibility for the caller's R36 admission policy.
+pub(crate) async fn observe_relation_security_for_compile(
+    cx: &Cx,
+    conn: &dyn OracleConnection,
+    relations: &[ResolvedObject],
+) -> Result<Vec<RelationSecurityObservation>, RelationSecurityProofError> {
+    observe_relation_security_inner(cx, conn, relations, true).await
+}
+
 async fn observe_relation_security_inner(
     cx: &Cx,
     conn: &dyn OracleConnection,

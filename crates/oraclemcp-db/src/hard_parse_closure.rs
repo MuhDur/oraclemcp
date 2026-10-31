@@ -351,10 +351,7 @@ use crate::mutation_closure::{
     MutationEffectOracle, MutationRoutineUse, UnknownMutationEffects, flag as mutation_flag,
     optional as mutation_optional, read_mutation_routine_source, required as mutation_required,
 };
-use crate::{
-    OracleCatalogResolver, RelationSecurityState, observe_relation_security,
-    read_closure_database_identity,
-};
+use crate::{OracleCatalogResolver, RelationSecurityState, read_closure_database_identity};
 
 /// Callback class, never policy source text, identifying a compile refusal.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -415,6 +412,8 @@ pub struct CompileParseStatementClosure {
     pub objects: Vec<MutationTarget>,
     /// Observed callback source and effect commitments.
     pub callbacks: Vec<CompileParseCallbackFact>,
+    /// Exact optional-policy evidence; Unavailable is never an absent policy.
+    pub security_feature_evidence: Vec<crate::RelationSecurityObservation>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -433,6 +432,8 @@ pub struct CompileParseEffectClosureV1 {
     pub database: Option<MutationDatabaseIdentity>,
     /// Dictionary-exact schema used to resolve unqualified names.
     pub resolution_schema: String,
+    /// Profile opt-in that makes unavailable optional security evidence block.
+    pub require_security_feature_evidence: bool,
     /// Bounded per-statement catalog and effect proofs.
     pub statements: Vec<CompileParseStatementClosure>,
     /// Every collected uncertainty that prevents admission.
@@ -449,6 +450,7 @@ impl CompileParseEffectClosureV1 {
             source_sha256: Sha256::digest(source.as_bytes()).into(),
             database: None,
             resolution_schema: schema.to_owned(),
+            require_security_feature_evidence: false,
             statements: Vec::new(),
             unavailable: BTreeSet::new(),
             catalog_commitments: BTreeSet::new(),
@@ -465,15 +467,27 @@ impl CompileParseEffectClosureV1 {
     /// admit an effectful callback; use `admit` before candidate DDL.
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.database.is_some() && !self.resolution_schema.is_empty() && self.unavailable.is_empty()
+        self.database.is_some()
+            && !self.resolution_schema.is_empty()
+            && self.unavailable.is_empty()
+            && self
+                .statements
+                .iter()
+                .flat_map(|statement| &statement.security_feature_evidence)
+                .all(|fact| {
+                    [fact.ols, fact.ras, fact.redaction]
+                        .into_iter()
+                        .all(|state| state != RelationSecurityState::Unavailable)
+                })
     }
-    /// A parse callback may read; every stronger, unknown or unsupported effect
-    /// refuses through the shared effect admission rule.
+    /// Enforce essential metadata and proven callback effects. Unavailable
+    /// optional security evidence remains an observation unless the profile
+    /// explicitly requires it; it never proves that a policy is absent.
     pub fn admit(&self) -> Result<(), CompileParseUnproven> {
         if let Some(reason) = self.unavailable.first() {
             return Err(reason.clone());
         }
-        if !self.is_complete() {
+        if self.database.is_none() || self.resolution_schema.is_empty() {
             return Err(CompileParseUnproven {
                 statement_ordinal: 0,
                 callback_class: CompileParseCallbackClass::CatalogVisibility,
@@ -481,6 +495,27 @@ impl CompileParseEffectClosureV1 {
             });
         }
         for statement in &self.statements {
+            if statement.security_feature_evidence.iter().any(|fact| {
+                [fact.ols, fact.ras, fact.redaction].contains(&RelationSecurityState::Protected)
+            }) {
+                return Err(CompileParseUnproven {
+                    statement_ordinal: statement.ordinal,
+                    callback_class: CompileParseCallbackClass::SecurityPolicy,
+                    reason: CompileUnknown::EffectProofUnavailable,
+                });
+            }
+            if self.require_security_feature_evidence
+                && statement.security_feature_evidence.iter().any(|fact| {
+                    [fact.ols, fact.ras, fact.redaction]
+                        .contains(&RelationSecurityState::Unavailable)
+                })
+            {
+                return Err(CompileParseUnproven {
+                    statement_ordinal: statement.ordinal,
+                    callback_class: CompileParseCallbackClass::SecurityPolicy,
+                    reason: CompileUnknown::CatalogUnreadable,
+                });
+            }
             for callback in &statement.callbacks {
                 if oraclemcp_guard::admit(
                     &callback.effects,
@@ -521,7 +556,8 @@ impl CompileParseEffectOracle for UnknownMutationEffects {
     }
 }
 /// Collect a fresh compile proof in a caller-specified schema and authenticated
-/// edition/container. Unknown source or any unreadable catalog family refuses.
+/// edition/container. Unknown essential source or catalog evidence refuses;
+/// optional security visibility follows the profile's explicit strict opt-in.
 pub async fn collect_compile_parse_effect_closure(
     cx: &Cx,
     conn: &dyn OracleConnection,
@@ -529,9 +565,11 @@ pub async fn collect_compile_parse_effect_closure(
     resolution_schema: &str,
     expected_database: Option<&MutationDatabaseIdentity>,
     effects: &dyn CompileParseEffectOracle,
+    require_security_feature_evidence: bool,
 ) -> CompileParseEffectClosureV1 {
     use CompileParseCallbackClass as Class;
     let mut closure = CompileParseEffectClosureV1::new(source, resolution_schema);
+    closure.require_security_feature_evidence = require_security_feature_evidence;
     let sql = match effects.static_sql(source) {
         Ok(sql) if sql.len() <= 256 => sql,
         _ => {
@@ -577,6 +615,7 @@ pub async fn collect_compile_parse_effect_closure(
             sql_sha256: Sha256::digest(sql.as_bytes()).into(),
             objects: Vec::new(),
             callbacks: Vec::new(),
+            security_feature_evidence: Vec::new(),
         };
         match compile_statement(
             cx,
@@ -692,30 +731,21 @@ async fn compile_statement(
     {
         return Err((Class::Optimizer, CompileUnknown::EffectProofUnavailable));
     }
-    let security = observe_relation_security(cx, conn, &relations)
-        .await
-        .map_err(|_| (Class::SecurityPolicy, CompileUnknown::CatalogUnreadable))?;
+    let security =
+        crate::catalog_resolver::observe_relation_security_for_compile(cx, conn, &relations)
+            .await
+            .map_err(|_| (Class::SecurityPolicy, CompileUnknown::CatalogUnreadable))?;
     if security.len() != relations.len()
         || security.iter().any(|fact| {
             fact.key.dbid.as_deref() != Some(database.dbid.as_str())
                 || fact.key.container.as_deref() != Some(database.container.as_str())
                 || fact.key.edition.as_deref() != Some(database.edition.as_str())
-                || !matches!(
-                    fact.ols,
-                    RelationSecurityState::Absent | RelationSecurityState::NotInstalled
-                )
-                || !matches!(
-                    fact.ras,
-                    RelationSecurityState::Absent | RelationSecurityState::NotInstalled
-                )
-                || !matches!(
-                    fact.redaction,
-                    RelationSecurityState::Absent | RelationSecurityState::NotInstalled
-                )
+                || [fact.ols, fact.ras, fact.redaction].contains(&RelationSecurityState::Protected)
         })
     {
         return Err((Class::SecurityPolicy, CompileUnknown::CatalogIncomplete));
     }
+    statement.security_feature_evidence = security;
     for relation in &relations {
         let mut policies = run_catalog_query(
             cx,
@@ -1065,8 +1095,10 @@ mod tests {
         let mock_ref = &mock;
         let oracle_ref = &oracle;
         let proof = run(|cx| async move {
-            collect_compile_parse_effect_closure(&cx, mock_ref, "bad", "APP", None, oracle_ref)
-                .await
+            collect_compile_parse_effect_closure(
+                &cx, mock_ref, "bad", "APP", None, oracle_ref, false,
+            )
+            .await
         });
         assert_eq!(
             proof.admit().unwrap_err().callback_class,
@@ -1080,7 +1112,8 @@ mod tests {
         let mock = ClosureMock::default();
         let oracle = Projection(Ok(vec!["SELECT id FROM app.t".into()]));
         let proof = run(|cx| async move {
-            collect_compile_parse_effect_closure(&cx, &mock, "unit", "APP", None, &oracle).await
+            collect_compile_parse_effect_closure(&cx, &mock, "unit", "APP", None, &oracle, false)
+                .await
         });
         assert!(!proof.is_complete());
         assert_eq!(
@@ -1100,6 +1133,88 @@ mod tests {
     }
 
     #[test]
+    fn compile_security_unknown_is_observed_bound_and_strict_opt_in() {
+        use crate::{RelationSecurityKey, RelationSecurityObservation};
+        let mut proof = empty_compile_proof();
+        proof.statements.push(CompileParseStatementClosure {
+            ordinal: 1,
+            sql_sha256: [1; 32],
+            objects: vec![],
+            callbacks: vec![],
+            security_feature_evidence: vec![RelationSecurityObservation {
+                key: RelationSecurityKey {
+                    dbid: Some("1".into()),
+                    container: Some("3".into()),
+                    edition: Some("ORA$BASE".into()),
+                    owner: "APP".into(),
+                    name: "T".into(),
+                    object_id: 42,
+                    object_edition: None,
+                },
+                ols: RelationSecurityState::NotInstalled,
+                ras: RelationSecurityState::Absent,
+                redaction: RelationSecurityState::Unavailable,
+            }],
+        });
+        assert_eq!(proof.admit(), Ok(()));
+        assert!(
+            !proof.is_complete(),
+            "unknown must not become complete proof"
+        );
+        let observed = proof.digest();
+        proof.require_security_feature_evidence = true;
+        assert_eq!(
+            proof.admit().unwrap_err(),
+            CompileParseUnproven {
+                statement_ordinal: 1,
+                callback_class: CompileParseCallbackClass::SecurityPolicy,
+                reason: CompileUnknown::CatalogUnreadable,
+            }
+        );
+        assert_ne!(observed, proof.digest(), "strictness binds the preview");
+        proof.require_security_feature_evidence = false;
+        proof.statements[0].security_feature_evidence[0].redaction = RelationSecurityState::Absent;
+        assert_ne!(observed, proof.digest(), "unknown is not absence");
+        assert!(proof.is_complete());
+        for feature in 0..3 {
+            for strict in [false, true] {
+                proof.require_security_feature_evidence = strict;
+                let fact = &mut proof.statements[0].security_feature_evidence[0];
+                fact.ols = RelationSecurityState::Absent;
+                fact.ras = RelationSecurityState::Absent;
+                fact.redaction = RelationSecurityState::Absent;
+                *[&mut fact.ols, &mut fact.ras, &mut fact.redaction][feature] =
+                    RelationSecurityState::Protected;
+                assert_eq!(
+                    proof.admit().unwrap_err().callback_class,
+                    CompileParseCallbackClass::SecurityPolicy
+                );
+            }
+        }
+        proof.require_security_feature_evidence = false;
+        let fact = &mut proof.statements[0].security_feature_evidence[0];
+        fact.ols = RelationSecurityState::Absent;
+        fact.ras = RelationSecurityState::Absent;
+        fact.redaction = RelationSecurityState::Unavailable;
+        proof.statements[0]
+            .callbacks
+            .push(CompileParseCallbackFact {
+                owner: "APP".into(),
+                name: "POLICY".into(),
+                source_sha256: "a".repeat(64),
+                routine_closure_fingerprint: "b".repeat(64),
+                effects: oraclemcp_guard::RoutineEffectsV1::new([
+                    oraclemcp_guard::RoutineEffect::Dml,
+                ]),
+            });
+        assert_eq!(
+            proof.admit().unwrap_err().callback_class,
+            CompileParseCallbackClass::VpdPolicy,
+            "optional unknown must never hide a proven unsafe callback"
+        );
+    }
+
+    #[test]
     fn compile_parse_closure_no_static_sql_is_computed_empty() {
         let mock = ClosureMock {
             identity_readable: true,
@@ -1108,7 +1223,8 @@ mod tests {
         let oracle = Projection(Ok(Vec::new()));
         let mock_ref = &mock;
         let proof = run(|cx| async move {
-            collect_compile_parse_effect_closure(&cx, mock_ref, "unit", "APP", None, &oracle).await
+            collect_compile_parse_effect_closure(&cx, mock_ref, "unit", "APP", None, &oracle, false)
+                .await
         });
         assert!(proof.is_complete());
         assert!(proof.statements.is_empty());
@@ -1128,7 +1244,8 @@ mod tests {
         };
         let oracle = Projection(Ok(vec!["SELECT * FROM TABLE(app.callback())".into()]));
         let proof = run(|cx| async move {
-            collect_compile_parse_effect_closure(&cx, &mock, "unit", "APP", None, &oracle).await
+            collect_compile_parse_effect_closure(&cx, &mock, "unit", "APP", None, &oracle, false)
+                .await
         });
         let reason = proof.admit().unwrap_err();
         assert_eq!(reason.statement_ordinal, 1);
@@ -1144,6 +1261,7 @@ mod tests {
             ordinal: 1,
             sql_sha256: [1; 32],
             objects: vec![],
+            security_feature_evidence: Vec::new(),
             callbacks: vec![CompileParseCallbackFact {
                 owner: "APP".into(),
                 name: "POLICY".into(),
