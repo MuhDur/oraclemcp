@@ -12,7 +12,9 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     DispatchContext, DispatchOutcome, OracleMcpServer,
-    change_proposal::{ChangeRequestState, EditionProposal, normalize_edition_identifier},
+    change_proposal::{
+        ChangeRequestState, EditionProposal, validate_dictionary_edition_identifier,
+    },
 };
 
 const CONFIRMATION_TTL: Duration = Duration::from_secs(120);
@@ -110,15 +112,7 @@ impl ValidatedEditionIdent {
         target: EditionFlipTarget,
     ) -> Result<Self, EditionExecutorRefusal> {
         let value = target.edition(proposal);
-        if value.is_empty()
-            || value.len() > 128
-            || value.contains(['"', '\0'])
-            || value.chars().any(char::is_control)
-            || normalize_edition_identifier(value.to_owned())
-                .ok()
-                .as_deref()
-                != Some(value)
-        {
+        if validate_dictionary_edition_identifier(value).is_err() {
             return Err(EditionExecutorRefusal::InvalidIdentifier);
         }
         Ok(Self(value.to_owned()))
@@ -547,6 +541,30 @@ mod tests {
                 ValidatedEditionIdent::from_proposal(&proposal, EditionFlipTarget::Merge)
                     .unwrap_err(),
                 EditionExecutorRefusal::InvalidIdentifier
+            );
+        }
+    }
+
+    #[test]
+    fn executor_preserves_quoted_dictionary_edition_identifiers() {
+        let root = tempfile::tempdir().unwrap();
+        let store = crate::change_proposal::ChangeProposalStore::open(root.path()).unwrap();
+        let view = crate::change_proposal::test_reviewed_edition_request(
+            &store,
+            "synthetic-admin",
+            "\"Child v2\"",
+            "\"Base v1\"",
+        );
+        let proposal = store.edition_proposal(&view.proposal_id).unwrap();
+        for (target, expected) in [
+            (EditionFlipTarget::Merge, "Child v2"),
+            (EditionFlipTarget::Rollback, "Base v1"),
+        ] {
+            let ident = ValidatedEditionIdent::from_proposal(&proposal, target).unwrap();
+            assert_eq!(ident.as_str(), expected);
+            assert_eq!(
+                ident.rendered_sql().unwrap(),
+                format!("ALTER DATABASE DEFAULT EDITION = \"{expected}\"")
             );
         }
     }

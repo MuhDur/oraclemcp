@@ -1024,10 +1024,10 @@ impl EditionProposal {
                 "unsupported edition proposal schema version",
             ));
         }
+        validate_dictionary_edition_identifier(&self.child_edition)?;
+        validate_dictionary_edition_identifier(&self.parent_edition)?;
         if StoreId::from_safe_segment(self.proposal_id.clone()).is_err()
             || normalize_non_empty(self.profile.clone(), "profile")? != self.profile
-            || normalize_edition_identifier(self.child_edition.clone())? != self.child_edition
-            || normalize_edition_identifier(self.parent_edition.clone())? != self.parent_edition
             || self.child_edition == self.parent_edition
             || self.objects.len() > MAX_EDITION_PROPOSAL_OBJECTS
             || self.stage_revision > self.proposal_revision
@@ -1651,6 +1651,29 @@ pub(crate) fn normalize_edition_identifier(value: String) -> Result<String, Chan
     }
 }
 
+/// Validate a stored dictionary name without interpreting its spelling as a
+/// fresh, unquoted SQL identifier. Raw request tokens are normalized once at
+/// creation; persisted names retain the exact case and spaces Oracle uses.
+pub(crate) fn validate_dictionary_edition_identifier(
+    value: &str,
+) -> Result<(), ChangeProposalError> {
+    if value.is_empty()
+        || value.len() > 128
+        || value.contains('"')
+        || value.chars().any(char::is_control)
+    {
+        return Err(ChangeProposalError::Invalid(
+            "invalid dictionary edition identifier",
+        ));
+    }
+    if normalize_edition_identifier(format!("\"{value}\""))? != value {
+        return Err(ChangeProposalError::Invalid(
+            "invalid dictionary edition identifier",
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_edition_object(value: String) -> Result<String, ChangeProposalError> {
     let value = normalize_non_empty(value, "object")?;
     if value.len() > 512
@@ -1746,7 +1769,7 @@ pub(crate) fn test_verified_edition_request(
             },
             &profile,
             Some(identity),
-            &format!("open-{child}"),
+            &format!("open-{}", oraclemcp_audit::sha256_hex(child.as_bytes())),
         )
         .unwrap();
     for state in [ChangeRequestState::Staged, ChangeRequestState::Verified] {
@@ -1839,6 +1862,94 @@ mod tests {
                 assert_eq!(from.permits(to), expected, "{from:?} -> {to:?}");
             }
         }
+    }
+
+    #[test]
+    fn quoted_dictionary_edition_identifiers_round_trip_without_renormalization() {
+        for (child_input, parent_input, child, parent) in [
+            ("\"Child v2\"", "\"Base v1\"", "Child v2", "Base v1"),
+            ("\"child_v2\"", "\"BaseV1\"", "child_v2", "BaseV1"),
+        ] {
+            let root = store_root("quoted-edition-roundtrip");
+            let store = ChangeProposalStore::open(&root).unwrap();
+            let request = lifecycle_request(child_input, parent_input);
+            let created = store
+                .open_change_request(
+                    request.clone(),
+                    &lifecycle_profile(),
+                    Some(database_identity()),
+                    "quoted-open",
+                )
+                .unwrap();
+            assert_eq!(created.child_edition, child);
+            assert_eq!(created.parent_edition, parent);
+            let record = store.edition_proposal(&created.proposal_id).unwrap();
+            record.validate().unwrap();
+            let before = serde_json::to_value(&record).unwrap();
+            drop(store);
+            let reopened = ChangeProposalStore::open(&root).unwrap();
+            let loaded = reopened.edition_proposal(&created.proposal_id).unwrap();
+            loaded.validate().unwrap();
+            assert_eq!(
+                serde_json::to_value(&loaded).unwrap(),
+                before,
+                "persistent dictionary spelling must remain exact"
+            );
+            let replay = reopened
+                .open_change_request(
+                    request,
+                    &lifecycle_profile(),
+                    Some(database_identity()),
+                    "quoted-open",
+                )
+                .unwrap();
+            assert_eq!(replay.proposal_id, created.proposal_id);
+            assert_eq!(replay.child_edition, child);
+            assert_eq!(replay.parent_edition, parent);
+        }
+    }
+
+    #[test]
+    fn dictionary_edition_identifiers_refuse_unsafe_renderings() {
+        let oversized = "X".repeat(129);
+        for value in [
+            "",
+            "name\"escape",
+            "name\0escape",
+            "name\nescape",
+            oversized.as_str(),
+        ] {
+            assert!(
+                validate_dictionary_edition_identifier(value).is_err(),
+                "{value:?}"
+            );
+        }
+        for value in [
+            "CHILD; DROP EDITION BASE",
+            "CHILD EXTRA",
+            "CHILD AS CHILD OF OTHER",
+        ] {
+            assert!(
+                normalize_edition_identifier(value.to_owned()).is_err(),
+                "raw SQL identifier grammar must remain strict"
+            );
+        }
+    }
+
+    #[test]
+    fn unquoted_dictionary_edition_identifiers_still_fold_case() {
+        let store = ChangeProposalStore::open(store_root("unquoted-edition-roundtrip")).unwrap();
+        let created = store
+            .open_change_request(
+                lifecycle_request("child_v2", "base_v1"),
+                &lifecycle_profile(),
+                Some(database_identity()),
+                "unquoted-open",
+            )
+            .unwrap();
+        let loaded = store.edition_proposal(&created.proposal_id).unwrap();
+        assert_eq!(loaded.child_edition, "CHILD_V2");
+        assert_eq!(loaded.parent_edition, "BASE_V1");
     }
 
     #[test]

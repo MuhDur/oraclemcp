@@ -13,7 +13,7 @@ use oraclemcp_error::{ErrorClass, ErrorEnvelope, ReasonCategory, StructuredReaso
 use parking_lot::Mutex;
 
 use crate::admission::{AdmissionController, AdmissionPermit};
-use crate::change_proposal::normalize_edition_identifier;
+use crate::change_proposal::validate_dictionary_edition_identifier;
 
 /// The work permitted on a dedicated child-edition connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -100,20 +100,12 @@ pub fn derived_staging_profile(
     profile: &ConnectionProfile,
     child_edition: &str,
 ) -> Result<ConnectionProfile, ErrorEnvelope> {
-    if child_edition.is_empty()
-        || child_edition.len() > 128
-        || child_edition.contains('"')
-        || child_edition.chars().any(char::is_control)
-    {
-        return Err(unavailable());
-    }
-    let edition =
-        normalize_edition_identifier(format!("\"{child_edition}\"")).map_err(|_| unavailable())?;
+    validate_dictionary_edition_identifier(child_edition).map_err(|_| unavailable())?;
     let mut derived = profile.clone();
     derived
         .session_identity
         .get_or_insert_with(Default::default)
-        .edition = Some(edition);
+        .edition = Some(child_edition.to_owned());
     Ok(derived)
 }
 
@@ -694,6 +686,7 @@ mod tests {
 #[cfg(test)]
 mod live_tests {
     use super::*;
+    use crate::change_proposal::normalize_edition_identifier;
     use crate::lane::block_on_lane_bridge;
     use oraclemcp_db::{OracleBind, OracleSessionIdentity};
     use std::sync::atomic::{AtomicBool, Ordering};
