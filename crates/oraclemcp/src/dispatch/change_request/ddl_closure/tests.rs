@@ -97,6 +97,28 @@ fn w12_event_requests_use_exact_event_and_dictionary_object_type() {
 }
 
 #[test]
+fn w12_request_dictionary_names_are_bounded_and_reject_nul() {
+    let event = W12DdlEvent::AlterCompile {
+        kind: "PROCEDURE".into(),
+    };
+    let limit = "A".repeat(128);
+    W12DdlTriggerRequest::new(event.clone(), &limit, &limit, &limit).unwrap();
+    for invalid in [String::new(), "A".repeat(129), "A\0B".into()] {
+        for (owner, name, container) in [
+            (invalid.as_str(), "P", "FREEPDB1"),
+            ("APP", invalid.as_str(), "FREEPDB1"),
+            ("APP", "P", invalid.as_str()),
+        ] {
+            assert_eq!(
+                W12DdlTriggerRequest::new(event.clone(), owner, name, container),
+                Err(W12DdlTriggerRefusal::Unknown),
+                "owner={owner:?}, name={name:?}, container={container:?}",
+            );
+        }
+    }
+}
+
+#[test]
 fn w12_ddl_trigger_missing_privilege_unknown_refuses() {
     let mut closure = collected([RoutineEffect::ReadDb]);
     closure.database_triggers_visible = false;
@@ -273,4 +295,13 @@ fn w12_refusals_keep_typed_categories_and_not_started_outcomes() {
         assert_eq!(value["structured_reason"]["category"], category);
         assert_eq!(value["statement_outcome"], "not_started");
     }
+    let value =
+        serde_json::to_value(W12DdlTriggerRefusal::RepreviewRequired.into_envelope()).unwrap();
+    assert_eq!(value["error_class"], "REPREVIEW_REQUIRED");
+    assert_eq!(value["statement_outcome"], "not_started");
+    assert_eq!(value["suggested_tool"], "oracle_change_request");
+    assert!(value["next_steps"].as_array().unwrap().iter().any(|step| {
+        step.as_str()
+            == Some("obtain a new change-request preview; the bound DDL-trigger facts changed")
+    }));
 }
