@@ -548,7 +548,7 @@ jobs:
       - name: Provide GNU bash and coreutils for the repository scripts on macOS
         if: runner.os == 'macOS'
         run: |
-          brew install bash coreutils
+          brew install bash coreutils  # honesty-allow: CI runner tooling, not an oraclemcp install channel
           echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
           echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
       - name: Refuse nightly runtime features on every target
