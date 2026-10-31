@@ -1192,6 +1192,59 @@ mod tests {
             "READ_ONLY impact cost preserves the backstop"
         );
     }
+    #[test]
+    fn impact_cost_armed_read_write_preview_does_not_touch_connection() {
+        let conn = CountingConnection::default();
+        let mut backstop = super::super::ReadOnlyBackstop::new();
+        let quarantine = Mutex::new(None);
+        let conn_ref = &conn;
+        let backstop_ref = &mut backstop;
+        run_with_cx(|cx| async move {
+            backstop_ref
+                .ensure_armed(
+                    &cx,
+                    conn_ref,
+                    &oraclemcp_guard::SessionLevelState::new(OperatingLevel::ReadOnly, false),
+                )
+                .await
+                .expect("read-only backstop arms");
+        });
+        conn.calls.lock().expect("calls").clear();
+        let conn_ref = &conn;
+        let backstop_ref = &backstop;
+        let quarantine_ref = &quarantine;
+        let status = run_with_cx(|cx| async move {
+            compute_cost_impact(
+                &cx,
+                conn_ref,
+                backstop_ref,
+                quarantine_ref,
+                "UPDATE accounts SET active=0 WHERE id=1",
+                &[],
+                OperatingLevel::ReadWrite,
+                None,
+                Some(100),
+                false,
+            )
+            .await
+            .expect("advisory cost")
+        });
+        assert_eq!(
+            status,
+            FieldStatus::Unavailable {
+                reason: UnavailableReason::ReadOnlyTxn
+            }
+        );
+        assert!(
+            conn.calls.lock().expect("calls").is_empty(),
+            "an elevated cost preview must not touch an armed connection"
+        );
+        assert!(
+            backstop.is_armed(),
+            "elevation does not disarm the preview backstop"
+        );
+    }
+
     #[cfg(feature = "live-xe")]
     mod live_tests {
         use super::*;
@@ -1364,6 +1417,14 @@ mod tests {
                     Some(OperatingLevel::ReadWrite), true, false, false, false,
                     OperatingLevel::ReadWrite, None, Some(u64::MAX), false)
                     .await.map_err(|error| format!("{name}: armed preview: {error}"))?;
+                // Check Oracle itself before the client flag: a rollback that
+                // accidentally leaves the flag set must also fail this test.
+                let refused = conn.execute(&cx,
+                    &format!("UPDATE {qualified} SET ID=ID WHERE ID=1"), &[]).await
+                    .err().ok_or_else(|| format!("{name}: Oracle accepted UPDATE after armed elevated preview"))?;
+                if !super::super::super::is_read_only_transaction_error(&refused) {
+                    return Err(format!("{name}: armed UPDATE failed without ORA-01456: {refused}"));
+                }
                 if armed.pointer("/impact/cost/reason").and_then(Value::as_str) != Some("read_only_txn")
                     || !backstop.is_armed() {
                     return Err(format!("{name}: elevated preview disarmed backstop or wrote PLAN_TABLE: {} armed={}",
