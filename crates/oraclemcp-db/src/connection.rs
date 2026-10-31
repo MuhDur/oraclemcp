@@ -11576,7 +11576,9 @@ mod driver_seam {
             let mut depth: i32 = 0;
             let mut test_mod_depth: Option<i32> = None;
             let mut pending_cfg_test = false;
-            for (n, line) in contents.lines().enumerate() {
+            // Collected once per file: the boundary lookback below indexes it.
+            let all_lines: Vec<&str> = contents.lines().collect();
+            for (n, line) in all_lines.iter().copied().enumerate() {
                 let trimmed = line.trim_start();
                 if trimmed.starts_with("#[cfg(test)]") {
                     pending_cfg_test = true;
@@ -11598,7 +11600,6 @@ mod driver_seam {
                 // sync→async dispatch ENTRY shims (driven on a one-shot runtime
                 // once per tool call for non-server/test callers) — these are NOT
                 // the per-call DB round-trip path the invariant targets.
-                let all_lines: Vec<&str> = contents.lines().collect();
                 let lookback_start = n.saturating_sub(8);
                 let boundary_marker = all_lines[lookback_start..=n]
                     .iter()
