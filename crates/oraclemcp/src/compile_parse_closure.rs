@@ -19,7 +19,7 @@ use sqlparser::{
 
 /// A stable refusal names only the ordinal and callback family, not code.
 pub fn unproven(reason: CompileParseUnproven) -> ErrorEnvelope {
-    ErrorEnvelope::new(
+    let error = ErrorEnvelope::new(
         ErrorClass::ForbiddenStatement,
         format!(
             "compile-time callback proof is unavailable for static SQL statement {} ({:?})",
@@ -34,7 +34,15 @@ pub fn unproven(reason: CompileParseUnproven) -> ErrorEnvelope {
             ),
         ),
     )
-    .with_statement_outcome(StatementOutcome::NotStarted)
+    .with_statement_outcome(StatementOutcome::NotStarted);
+    if reason.callback_class == CompileParseCallbackClass::Resolution {
+        error.with_next_step(
+            "this compile did not start; use oracle_compile_errors for the existing unit's \
+             diagnostics, then resolve its references before compiling again",
+        )
+    } else {
+        error
+    }
 }
 
 fn unavailable(
@@ -638,11 +646,22 @@ impl PreparedSqlProof {
         let Ok(Some(compile)) = &self.compile else {
             return;
         };
-        let observations: Vec<_> = compile.closures.iter().flat_map(|closure| &closure.statements)
-            .flat_map(|statement| statement.security_feature_evidence.iter().filter(|fact| {
-                [fact.ols, fact.ras, fact.redaction].contains(&oraclemcp_db::RelationSecurityState::Unavailable)
-            }).map(|fact| serde_json::json!({"statement_ordinal":statement.ordinal,"security_feature_evidence":fact})))
-            .collect();
+        let mut observations = Vec::new();
+        for closure in &compile.closures {
+            for statement in &closure.statements {
+                observations.extend(statement.security_feature_evidence.iter().filter(|fact| {
+                    [fact.ols, fact.ras, fact.redaction].contains(&oraclemcp_db::RelationSecurityState::Unavailable)
+                }).map(|fact| serde_json::json!({"statement_ordinal":statement.ordinal,"security_feature_evidence":fact})));
+                if !statement.unresolved_local_names.is_empty() {
+                    observations.push(serde_json::json!({
+                        "statement_ordinal": statement.ordinal,
+                        "resolution_schema": closure.resolution_schema,
+                        "unresolved_local_names": statement.unresolved_local_names,
+                        "visibility_scope": "compiling_identity",
+                    }));
+                }
+            }
+        }
         if !observations.is_empty() {
             response["compile_parse_observations"] = serde_json::json!({
                 "status":"admitted_with_observation", "statements":observations,

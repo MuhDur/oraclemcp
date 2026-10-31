@@ -52,7 +52,7 @@ OPTIONAL_CASE_FIELDS = {"setup_phase", "setup_ready_sql", "profile_variant", "au
                         "environment_skips", "runtime_awr_probe", "audit_optional_prefix", "test_id",
                         "name_alias_matrix", "mask_certificate_audit", "catalog_rows_positive", "view_proof_audit",
                         "runtime_timeout_probe"}
-PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_cross_rw",
+PROFILE_VARIANTS = {"masked", "synthetic_raw", "synthetic_owner", "synthetic_owner_rw", "synthetic_owner_compile", "synthetic_cross_rw",
                     "synthetic_cross_rw_strict", "synthetic_cross_security",
                     "synthetic_cross_security_strict", "protected", "capped_rw", "synthetic_licensed",
                     "trusted_views", "short_admin", "synthetic_owner_short"}
@@ -659,6 +659,13 @@ def validate_case(case, filename):
     if case.get("profile_variant") == "synthetic_owner_rw":
         require(case["level"] == "READ_WRITE",
                 "synthetic owner write profile is restricted to explicit READ_WRITE cases")
+    if case.get("profile_variant") == "synthetic_owner_compile":
+        require(case["level"] == "DDL" and case["tool"] == "oracle_compile_object"
+                and case["case_id"] in {
+                    "w4_compile_object_same_owner_view_with_error_lists_errors",
+                    "w4_compile_object_same_owner_trigger_with_error_lists_errors",
+                    "w4_compile_object_cross_owner_synonym_absence_refused"},
+                "same-owner compile identity is restricted to its explicit DDL diagnostics cases")
     if case.get("profile_variant") in {"synthetic_cross_rw", "synthetic_cross_rw_strict"}:
         require(case["level"] == "READ_WRITE",
                 "least-privilege cross-schema profile is restricted to explicit READ_WRITE cases")
@@ -4071,7 +4078,7 @@ def _run_lane(args, output):
                     wait_for_setup_ready(
                         settings, password,
                         f"SELECT ID FROM {owner}.T_PARENT_{fixture_id} WHERE ROWNUM <= 1")
-                    if any(case.get("profile_variant") in {"synthetic_owner", "synthetic_owner_rw", "synthetic_owner_short"}
+                    if any(case.get("profile_variant") in {"synthetic_owner", "synthetic_owner_rw", "synthetic_owner_compile", "synthetic_owner_short"}
                            for case in family_cases if transport in case["transports"]):
                         # The disposable owner needs the same FGA catalog proof
                         # that every served relation read requires.
@@ -4186,7 +4193,7 @@ def _run_lane(args, output):
                                        else args.lane + "_licensed" if variant == "synthetic_licensed"
                                        else args.lane + "_owner" if variant == "synthetic_owner"
                                        else args.lane + "_owner_short" if variant == "synthetic_owner_short"
-                                       else args.lane + "_owner_rw" if variant == "synthetic_owner_rw"
+                                       else args.lane + "_owner_rw" if variant in {"synthetic_owner_rw", "synthetic_owner_compile"}
                                        else args.lane + "_cross_rw" if variant == "synthetic_cross_rw"
                                        else args.lane + "_cross_rw_strict" if variant == "synthetic_cross_rw_strict"
                                        else args.lane + "_cross_security" if variant == "synthetic_cross_security"
@@ -5018,6 +5025,16 @@ def release_schedule_selftest():
     else:
         raise DriverError("PL/SQL source preparation accepted a foreign identity")
     cases = load_cases()
+    for case in cases:
+        if case.get("profile_variant") != "synthetic_owner_compile":
+            continue
+        for level in ("READ_ONLY", "READ_WRITE", "ADMIN"):
+            try:
+                validate_case({**case, "level": level}, "selftest")
+            except DriverError:
+                pass
+            else:
+                raise DriverError("compile-only identity accepted an unrelated operating level")
     checkpoint_cases = [case for case in cases if any(
         step.get("tool") == "oracle_checkpoint" for step in case.get("steps", []))]
     require(checkpoint_cases and not coverage_status({"oracle_checkpoint": {}}, checkpoint_cases)["missing_positive"],

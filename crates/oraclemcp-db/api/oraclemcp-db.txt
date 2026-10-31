@@ -7075,6 +7075,7 @@ pub oraclemcp_db::CompileParseStatementClosure::objects: alloc::vec::Vec<oraclem
 pub oraclemcp_db::CompileParseStatementClosure::ordinal: u32
 pub oraclemcp_db::CompileParseStatementClosure::security_feature_evidence: alloc::vec::Vec<oraclemcp_db::RelationSecurityObservation>
 pub oraclemcp_db::CompileParseStatementClosure::sql_sha256: [u8; 32]
+pub oraclemcp_db::CompileParseStatementClosure::unresolved_local_names: alloc::vec::Vec<alloc::string::String>
 impl core::clone::Clone for oraclemcp_db::CompileParseStatementClosure
 pub fn oraclemcp_db::CompileParseStatementClosure::clone(&self) -> oraclemcp_db::CompileParseStatementClosure
 impl core::cmp::Eq for oraclemcp_db::CompileParseStatementClosure

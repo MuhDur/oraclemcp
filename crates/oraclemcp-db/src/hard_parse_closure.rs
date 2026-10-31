@@ -513,6 +513,9 @@ pub struct CompileParseStatementClosure {
     pub sql_sha256: [u8; 32],
     /// Resolved local table identities.
     pub objects: Vec<MutationTarget>,
+    /// Direct names proven invisible to the same user compiling in its own
+    /// schema. Oracle still performs the compile and supplies its diagnostics.
+    pub unresolved_local_names: Vec<String>,
     /// Observed callback source and effect commitments.
     pub callbacks: Vec<CompileParseCallbackFact>,
     /// Exact optional-policy evidence; Unavailable is never an absent policy.
@@ -717,6 +720,7 @@ pub async fn collect_compile_parse_effect_closure(
             ordinal,
             sql_sha256: Sha256::digest(sql.as_bytes()).into(),
             objects: Vec::new(),
+            unresolved_local_names: Vec::new(),
             callbacks: Vec::new(),
             security_feature_evidence: Vec::new(),
         };
@@ -786,8 +790,20 @@ async fn compile_statement(
     source_context.current_schema = schema.to_owned();
     let mut relations = Vec::new();
     for name in names {
-        let Resolution::Resolved(object) = resolver.resolve(&name, &source_context) else {
-            return Err((Class::Resolution, CompileUnknown::CatalogIncomplete));
+        let object = match resolver.resolve(&name, &source_context) {
+            Resolution::Resolved(object) => object,
+            Resolution::Unresolved => {
+                let absent = resolver
+                    .prove_direct_local_absence(cx, conn, &name, &source_context)
+                    .await
+                    .map_err(|_| (Class::Resolution, CompileUnknown::CatalogUnreadable))?;
+                let Some(absent) = absent else {
+                    return Err((Class::Resolution, CompileUnknown::CatalogIncomplete));
+                };
+                statement.unresolved_local_names.push(absent);
+                continue;
+            }
+            _ => return Err((Class::Resolution, CompileUnknown::CatalogIncomplete)),
         };
         if object.kind != CatalogObjectKind::Table || object.db_link.is_some() {
             return Err((Class::Resolution, CompileUnknown::UnsupportedMechanism));
@@ -1004,6 +1020,13 @@ mod tests {
     #[derive(Default)]
     struct ClosureMock {
         identity_readable: bool,
+        session_identity: Option<(&'static str, &'static str)>,
+        session_identity_changes: bool,
+        session_reads: Mutex<usize>,
+        objects_unreadable: bool,
+        object_rows: Vec<OracleRow>,
+        synonym_rows: Vec<OracleRow>,
+        public_synonym_only: bool,
         association: Option<OracleRow>,
         association_denied: bool,
         association_denied_first: bool,
@@ -1039,9 +1062,44 @@ mod tests {
             &self,
             _cx: &Cx,
             sql: &str,
-            _binds: &[OracleBind],
+            binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
             self.queries.lock().expect("query log").push(sql.to_owned());
+            if sql == CatalogQueryId::SessionContext.spec().sql
+                && let Some((session, current)) = self.session_identity
+            {
+                let mut reads = self.session_reads.lock().unwrap();
+                *reads += 1;
+                let current = if self.session_identity_changes && *reads >= 3 {
+                    "CHANGED"
+                } else {
+                    current
+                };
+                return Ok(vec![row(&[
+                    ("SESSION_USER", session),
+                    ("CURRENT_SCHEMA", current),
+                    ("EDITION_NAME", "ORA$BASE"),
+                ])]);
+            }
+            if sql == CatalogQueryId::Objects.spec().sql {
+                if self.objects_unreadable {
+                    return Err(DbError::ServerQuery(
+                        "ORA-01031: insufficient privileges".into(),
+                    ));
+                }
+                return Ok(self.object_rows.clone());
+            }
+            if sql == CatalogQueryId::Synonyms.spec().sql {
+                return Ok(
+                    if !self.public_synonym_only
+                        || matches!(binds.first(), Some(OracleBind::String(owner)) if owner == "PUBLIC")
+                    {
+                        self.synonym_rows.clone()
+                    } else {
+                        Vec::new()
+                    },
+                );
+            }
             if sql == CatalogQueryId::ClosureIdentity.spec().sql && self.identity_readable {
                 return Ok(vec![row(&[
                     ("DBID", "1"),
@@ -1250,6 +1308,111 @@ mod tests {
     }
 
     #[test]
+    fn compile_absence_proof_admits_only_own_direct_missing_names_and_binds_observation() {
+        for sql in ["SELECT id FROM APP.MISSING", "SELECT id FROM MISSING"] {
+            let proof = missing_name_proof(own_identity_mock(), "APP", sql);
+            assert_eq!(proof.admit(), Ok(()));
+            assert_eq!(
+                proof.statements[0].unresolved_local_names,
+                ["\"APP\".\"MISSING\""]
+            );
+            let mut changed = proof.clone();
+            changed.statements[0].unresolved_local_names[0] = "\"APP\".\"OTHER\"".into();
+            assert_ne!(proof.digest(), changed.digest());
+            assert!(!proof.catalog_commitments.is_empty());
+        }
+    }
+
+    #[test]
+    fn compile_absence_proof_refuses_cross_schema_and_changed_visibility_identity() {
+        for (session, current, schema, sql) in [
+            ("SYSTEM", "SYSTEM", "APP", "SELECT id FROM APP.MISSING"),
+            ("SYSTEM", "APP", "APP", "SELECT id FROM MISSING"),
+            ("APP", "OTHER", "APP", "SELECT id FROM APP.MISSING"),
+            ("APP", "APP", "APP", "SELECT id FROM OTHER.MISSING"),
+        ] {
+            let mut mock = own_identity_mock();
+            mock.session_identity = Some((session, current));
+            let proof = missing_name_proof(mock, schema, sql);
+            assert_eq!(
+                proof.admit().unwrap_err().callback_class,
+                CompileParseCallbackClass::Resolution
+            );
+            assert!(proof.statements[0].unresolved_local_names.is_empty());
+        }
+        let mut mock = own_identity_mock();
+        mock.session_identity_changes = true;
+        let proof = missing_name_proof(mock, "APP", "SELECT id FROM APP.MISSING");
+        assert_eq!(
+            proof.admit().unwrap_err().callback_class,
+            CompileParseCallbackClass::Resolution
+        );
+    }
+
+    #[test]
+    fn compile_absence_proof_never_converts_incomplete_or_synonym_rows_to_absence() {
+        let mut unreadable = own_identity_mock();
+        unreadable.objects_unreadable = true;
+        let mut malformed_object = own_identity_mock();
+        malformed_object.object_rows = vec![row(&[("OWNER", "APP")])];
+        let mut private_synonym = own_identity_mock();
+        private_synonym.synonym_rows = vec![row(&[("TABLE_OWNER", "OTHER")])];
+        let mut public_synonym = own_identity_mock();
+        public_synonym.public_synonym_only = true;
+        public_synonym.synonym_rows = vec![row(&[("TABLE_OWNER", "OTHER")])];
+        let mut ambiguous_synonyms = own_identity_mock();
+        ambiguous_synonyms.synonym_rows = vec![row(&[("TABLE_OWNER", "OTHER")]); 2];
+        for mock in [
+            unreadable,
+            malformed_object,
+            private_synonym,
+            public_synonym,
+            ambiguous_synonyms,
+        ] {
+            let proof = missing_name_proof(mock, "APP", "SELECT id FROM APP.MISSING");
+            assert_eq!(
+                proof.admit().unwrap_err().callback_class,
+                CompileParseCallbackClass::Resolution
+            );
+            assert!(proof.statements[0].unresolved_local_names.is_empty());
+        }
+    }
+
+    #[test]
+    fn compile_absence_proof_still_refuses_sql_user_routine_callbacks() {
+        let proof = missing_name_proof(
+            own_identity_mock(),
+            "APP",
+            "SELECT APP.CANARY_FN() FROM APP.MISSING",
+        );
+        assert_eq!(
+            proof.admit().unwrap_err().callback_class,
+            CompileParseCallbackClass::SqlRoutine
+        );
+        assert!(proof.statements[0].unresolved_local_names.is_empty());
+    }
+
+    fn own_identity_mock() -> ClosureMock {
+        ClosureMock {
+            identity_readable: true,
+            session_identity: Some(("APP", "APP")),
+            ..ClosureMock::default()
+        }
+    }
+
+    fn missing_name_proof(
+        mock: ClosureMock,
+        schema: &str,
+        sql: &str,
+    ) -> CompileParseEffectClosureV1 {
+        let oracle = Projection(Ok(vec![sql.into()]));
+        run(|cx| async move {
+            collect_compile_parse_effect_closure(&cx, &mock, "unit", schema, None, &oracle, false)
+                .await
+        })
+    }
+
+    #[test]
     fn compile_security_unknown_is_observed_bound_and_strict_opt_in() {
         use crate::{RelationSecurityKey, RelationSecurityObservation};
         let mut proof = empty_compile_proof();
@@ -1257,6 +1420,7 @@ mod tests {
             ordinal: 1,
             sql_sha256: [1; 32],
             objects: vec![],
+            unresolved_local_names: Vec::new(),
             callbacks: vec![],
             security_feature_evidence: vec![RelationSecurityObservation {
                 key: RelationSecurityKey {
@@ -1411,6 +1575,7 @@ mod tests {
             ordinal: 1,
             sql_sha256: [1; 32],
             objects: vec![],
+            unresolved_local_names: Vec::new(),
             security_feature_evidence: Vec::new(),
             callbacks: vec![CompileParseCallbackFact {
                 owner: "APP".into(),

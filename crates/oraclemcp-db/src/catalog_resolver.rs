@@ -2690,6 +2690,66 @@ impl OracleCatalogResolver {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Negative compile evidence is narrower than `Unresolved`: only the
+    /// compiling session user's own schema and a direct local name qualify.
+    /// Any object/synonym row (even malformed or ambiguous) remains unknown.
+    pub(crate) async fn prove_direct_local_absence(
+        &self,
+        cx: &Cx,
+        conn: &dyn OracleConnection,
+        name: &RawName,
+        context: &ResolveCtx,
+    ) -> Result<Option<String>, DbError> {
+        if context != &self.context
+            || context.connected_schema != context.current_schema
+            || name.role != SyntacticRole::FromFactor
+            || name.db_link.is_some()
+            || !matches!(self.entries.get(name), Some(Resolution::Unresolved))
+        {
+            return Ok(None);
+        }
+        let Some(parts) = normalize_parts(&name.parts) else {
+            return Ok(None);
+        };
+        let object = match parts.as_slice() {
+            [object] => object,
+            [owner, object] if owner == &context.connected_schema => object,
+            _ => return Ok(None),
+        };
+        if read_catalog_resolve_context(
+            cx,
+            conn,
+            context.generation,
+            context.statement_scope.clone(),
+        )
+        .await?
+            != *context
+        {
+            return Ok(None);
+        }
+        for (query, owner) in [
+            (CatalogQueryId::Objects, context.connected_schema.as_str()),
+            (CatalogQueryId::Synonyms, context.connected_schema.as_str()),
+            (CatalogQueryId::Synonyms, "PUBLIC"),
+        ] {
+            let rows = run_catalog_query(
+                cx,
+                conn,
+                query,
+                &[owner.into(), object.as_str().into(), 2_i64.into()],
+            )
+            .await?;
+            if !rows.is_empty() {
+                return Ok(None);
+            }
+        }
+        Ok(Some(format!(
+            "\"{}\".\"{}\"",
+            context.connected_schema.replace('"', "\"\""),
+            object.replace('"', "\"\"")
+        )))
+    }
 }
 
 impl CatalogResolver for OracleCatalogResolver {

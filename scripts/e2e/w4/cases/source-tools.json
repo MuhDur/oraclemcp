@@ -1483,27 +1483,18 @@
         "object_type": "VIEW",
         "owner": "${owner}",
         "name": "V_BAD_${run_id}",
-        "execute": true,
-        "confirm": "${cap:token}"
+        "execute": true
       },
       "mutation": true
     },
     "expect": {
       "json_subset": {
-        "compiled": true,
-        "owner": "${owner}",
-        "name": "V_BAD_${run_id}",
-        "object_type": "VIEW",
-        "error_count": 1,
-        "errors": [
-          {
-            "ATTRIBUTE": "ERROR",
-            "LINE": "0",
-            "NAME": "V_BAD_${run_id}",
-            "POSITION": "0",
-            "TYPE": "VIEW"
-          }
-        ]
+        "error_class": "FORBIDDEN_STATEMENT",
+        "statement_outcome": "not_started",
+        "structured_reason": {
+          "category": "PARSE_CALLBACK_UNPROVEN",
+          "offending_construct": "statement=1 callback=Resolution"
+        }
       }
     },
     "db_reread": [
@@ -1527,14 +1518,31 @@
     "audit_expect": [
       {
         "tool": "oracle_compile_object",
+        "decision": "BLOCKED",
+        "outcome": "FAILED",
+        "failure": {
+          "error_class": "FORBIDDEN_STATEMENT",
+          "reason_category": "PARSE_CALLBACK_UNPROVEN"
+        }
+      },
+      {
+        "tool": "oracle_compile_errors",
         "decision": "ALLOWED",
         "outcome": "PENDING"
       },
       {
-        "tool": "oracle_compile_object",
+        "tool": "oracle_compile_errors",
         "decision": "ALLOWED",
-        "outcome": "SUCCEEDED",
-        "rows_affected": 0
+        "outcome": "SUCCEEDED"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "BLOCKED",
+        "outcome": "FAILED",
+        "failure": {
+          "error_class": "FORBIDDEN_STATEMENT",
+          "reason_category": "PARSE_CALLBACK_UNPROVEN"
+        }
       }
     ],
     "on_unsupported": {
@@ -1550,13 +1558,36 @@
         },
         "expect": {
           "json_subset": {
-            "confirmation": {
-              "tool": "oracle_compile_object"
+            "error_class": "FORBIDDEN_STATEMENT",
+            "statement_outcome": "not_started",
+            "structured_reason": {
+              "category": "PARSE_CALLBACK_UNPROVEN",
+              "offending_construct": "statement=1 callback=Resolution"
             }
           }
+        }
+      },
+      {
+        "tool": "oracle_compile_errors",
+        "arguments": {
+          "owner": "${owner}",
+          "name": "V_BAD_${run_id}"
         },
-        "capture": {
-          "token": "/confirmation/confirm"
+        "expect": {
+          "json_subset": {
+            "owner": "${owner}",
+            "name": "V_BAD_${run_id}",
+            "truncated": false,
+            "errors": [
+              {
+                "ATTRIBUTE": "ERROR",
+                "LINE": "0",
+                "NAME": "V_BAD_${run_id}",
+                "POSITION": "0",
+                "TYPE": "VIEW"
+              }
+            ]
+          }
         }
       }
     ]
@@ -1580,35 +1611,18 @@
         "object_type": "TRIGGER",
         "owner": "${owner}",
         "name": "TRG_BAD_${run_id}",
-        "execute": true,
-        "confirm": "${cap:token}"
+        "execute": true
       },
       "mutation": true
     },
     "expect": {
       "json_subset": {
-        "compiled": true,
-        "owner": "${owner}",
-        "name": "TRG_BAD_${run_id}",
-        "object_type": "TRIGGER",
-        "error_count": 2,
-        "errors": [
-          {
-            "ATTRIBUTE": "ERROR",
-            "LINE": "1",
-            "NAME": "TRG_BAD_${run_id}",
-            "POSITION": "36",
-            "TYPE": "TRIGGER"
-          },
-          {
-            "ATTRIBUTE": "ERROR",
-            "LINE": "1",
-            "NAME": "TRG_BAD_${run_id}",
-            "POSITION": "7",
-            "TYPE": "TRIGGER",
-            "TEXT": "PL/SQL: SQL Statement ignored"
-          }
-        ]
+        "error_class": "FORBIDDEN_STATEMENT",
+        "statement_outcome": "not_started",
+        "structured_reason": {
+          "category": "PARSE_CALLBACK_UNPROVEN",
+          "offending_construct": "statement=1 callback=Resolution"
+        }
       }
     },
     "db_reread": [
@@ -1632,14 +1646,31 @@
     "audit_expect": [
       {
         "tool": "oracle_compile_object",
+        "decision": "BLOCKED",
+        "outcome": "FAILED",
+        "failure": {
+          "error_class": "FORBIDDEN_STATEMENT",
+          "reason_category": "PARSE_CALLBACK_UNPROVEN"
+        }
+      },
+      {
+        "tool": "oracle_compile_errors",
         "decision": "ALLOWED",
         "outcome": "PENDING"
       },
       {
-        "tool": "oracle_compile_object",
+        "tool": "oracle_compile_errors",
         "decision": "ALLOWED",
-        "outcome": "SUCCEEDED",
-        "rows_affected": 0
+        "outcome": "SUCCEEDED"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "BLOCKED",
+        "outcome": "FAILED",
+        "failure": {
+          "error_class": "FORBIDDEN_STATEMENT",
+          "reason_category": "PARSE_CALLBACK_UNPROVEN"
+        }
       }
     ],
     "on_unsupported": {
@@ -1655,13 +1686,44 @@
         },
         "expect": {
           "json_subset": {
-            "confirmation": {
-              "tool": "oracle_compile_object"
+            "error_class": "FORBIDDEN_STATEMENT",
+            "statement_outcome": "not_started",
+            "structured_reason": {
+              "category": "PARSE_CALLBACK_UNPROVEN",
+              "offending_construct": "statement=1 callback=Resolution"
             }
           }
+        }
+      },
+      {
+        "tool": "oracle_compile_errors",
+        "arguments": {
+          "owner": "${owner}",
+          "name": "TRG_BAD_${run_id}"
         },
-        "capture": {
-          "token": "/confirmation/confirm"
+        "expect": {
+          "json_subset": {
+            "owner": "${owner}",
+            "name": "TRG_BAD_${run_id}",
+            "truncated": false,
+            "errors": [
+              {
+                "ATTRIBUTE": "ERROR",
+                "LINE": "1",
+                "NAME": "TRG_BAD_${run_id}",
+                "POSITION": "36",
+                "TYPE": "TRIGGER"
+              },
+              {
+                "ATTRIBUTE": "ERROR",
+                "LINE": "1",
+                "NAME": "TRG_BAD_${run_id}",
+                "POSITION": "7",
+                "TYPE": "TRIGGER",
+                "TEXT": "PL/SQL: SQL Statement ignored"
+              }
+            ]
+          }
         }
       }
     ]
@@ -2983,5 +3045,376 @@
     "audit_expect": [],
     "audit_zero_executions": true,
     "on_unsupported": {"error_class": "INVALID_ARGUMENTS"}
+  },
+  {
+    "case_id": "w4_compile_object_same_owner_view_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE FORCE VIEW ${owner}.V_BAD_${run_id} AS SELECT ID FROM ${owner}.T_NO_SUCH_${run_id}"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "VIEW",
+        "owner": "${owner}",
+        "name": "V_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "V_BAD_${run_id}",
+        "object_type": "VIEW",
+        "error_count": 1,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "0",
+            "NAME": "V_BAD_${run_id}",
+            "POSITION": "0",
+            "TYPE": "VIEW"
+          }
+        ],
+        "compile_parse_observations": {
+          "status": "admitted_with_observation",
+          "statements": [
+            {
+              "statement_ordinal": 1,
+              "resolution_schema": "${owner}",
+              "unresolved_local_names": [
+                "\"${owner}\".\"T_NO_SUCH_${run_id}\""
+              ],
+              "visibility_scope": "compiling_identity"
+            }
+          ]
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'V_BAD_${run_id}' AND OBJECT_TYPE = 'VIEW'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'V_BAD_${run_id}' AND TYPE = 'VIEW'",
+        "rows": [
+          [
+            1
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "VIEW",
+          "owner": "${owner}",
+          "name": "V_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            },
+            "compile_parse_observations": {
+              "status": "admitted_with_observation",
+              "statements": [
+                {
+                  "statement_ordinal": 1,
+                  "resolution_schema": "${owner}",
+                  "unresolved_local_names": [
+                    "\"${owner}\".\"T_NO_SUCH_${run_id}\""
+                  ],
+                  "visibility_scope": "compiling_identity"
+                }
+              ]
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ],
+    "profile_variant": "synthetic_owner_compile"
+  },
+  {
+    "case_id": "w4_compile_object_same_owner_trigger_with_error_lists_errors",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE TRIGGER ${owner}.TRG_BAD_${run_id} BEFORE INSERT ON ${owner}.T_AUTO_${run_id} FOR EACH ROW BEGIN INSERT INTO ${owner}.T_NO_SUCH_${run_id} VALUES (1); END;"
+      }
+    ],
+    "call": {
+      "arguments": {
+        "object_type": "TRIGGER",
+        "owner": "${owner}",
+        "name": "TRG_BAD_${run_id}",
+        "execute": true,
+        "confirm": "${cap:token}"
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "compiled": true,
+        "owner": "${owner}",
+        "name": "TRG_BAD_${run_id}",
+        "object_type": "TRIGGER",
+        "error_count": 2,
+        "errors": [
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "TRG_BAD_${run_id}",
+            "POSITION": "36",
+            "TYPE": "TRIGGER"
+          },
+          {
+            "ATTRIBUTE": "ERROR",
+            "LINE": "1",
+            "NAME": "TRG_BAD_${run_id}",
+            "POSITION": "7",
+            "TYPE": "TRIGGER",
+            "TEXT": "PL/SQL: SQL Statement ignored"
+          }
+        ],
+        "compile_parse_observations": {
+          "status": "admitted_with_observation",
+          "statements": [
+            {
+              "statement_ordinal": 1,
+              "resolution_schema": "${owner}",
+              "unresolved_local_names": [
+                "\"${owner}\".\"T_NO_SUCH_${run_id}\""
+              ],
+              "visibility_scope": "compiling_identity"
+            }
+          ]
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT STATUS FROM ALL_OBJECTS WHERE OWNER = '${owner}' AND OBJECT_NAME = 'TRG_BAD_${run_id}' AND OBJECT_TYPE = 'TRIGGER'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT COUNT(*) FROM ALL_ERRORS WHERE OWNER = '${owner}' AND NAME = 'TRG_BAD_${run_id}' AND TYPE = 'TRIGGER'",
+        "rows": [
+          [
+            2
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "PENDING"
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "ALLOWED",
+        "outcome": "SUCCEEDED",
+        "rows_affected": 0
+      }
+    ],
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "object_type": "TRIGGER",
+          "owner": "${owner}",
+          "name": "TRG_BAD_${run_id}"
+        },
+        "expect": {
+          "json_subset": {
+            "confirmation": {
+              "tool": "oracle_compile_object"
+            },
+            "compile_parse_observations": {
+              "status": "admitted_with_observation",
+              "statements": [
+                {
+                  "statement_ordinal": 1,
+                  "resolution_schema": "${owner}",
+                  "unresolved_local_names": [
+                    "\"${owner}\".\"T_NO_SUCH_${run_id}\""
+                  ],
+                  "visibility_scope": "compiling_identity"
+                }
+              ]
+            }
+          }
+        },
+        "capture": {
+          "token": "/confirmation/confirm"
+        }
+      }
+    ],
+    "profile_variant": "synthetic_owner_compile"
+  },
+  {
+    "case_id": "w4_compile_object_cross_owner_synonym_absence_refused",
+    "tool": "oracle_compile_object",
+    "level": "DDL",
+    "profile_variant": "synthetic_owner_compile",
+    "transports": [
+      "stdio",
+      "http"
+    ],
+    "requires": [],
+    "setup": [
+      {
+        "sql": "CREATE OR REPLACE SYNONYM ${owner}.S_MISS_${run_id} FOR ${cross}.T_NO_SUCH_${run_id}"
+      },
+      {
+        "sql": "CREATE OR REPLACE FORCE VIEW ${owner}.V_SYM_${run_id} AS SELECT ID FROM ${owner}.S_MISS_${run_id}"
+      }
+    ],
+    "steps": [
+      {
+        "tool": "oracle_compile_object",
+        "arguments": {
+          "owner": "${owner}",
+          "name": "V_SYM_${run_id}",
+          "object_type": "VIEW"
+        },
+        "expect": {
+          "json_subset": {
+            "error_class": "FORBIDDEN_STATEMENT",
+            "statement_outcome": "not_started",
+            "structured_reason": {
+              "category": "PARSE_CALLBACK_UNPROVEN",
+              "offending_construct": "statement=1 callback=Resolution"
+            }
+          }
+        }
+      }
+    ],
+    "call": {
+      "arguments": {
+        "owner": "${owner}",
+        "name": "V_SYM_${run_id}",
+        "object_type": "VIEW",
+        "execute": true
+      },
+      "mutation": true
+    },
+    "expect": {
+      "json_subset": {
+        "error_class": "FORBIDDEN_STATEMENT",
+        "statement_outcome": "not_started",
+        "structured_reason": {
+          "category": "PARSE_CALLBACK_UNPROVEN",
+          "offending_construct": "statement=1 callback=Resolution"
+        }
+      }
+    },
+    "db_reread": [
+      {
+        "sql": "SELECT TABLE_OWNER, TABLE_NAME FROM SYS.DBA_SYNONYMS WHERE OWNER='${owner}' AND SYNONYM_NAME='S_MISS_${run_id}'",
+        "rows": [
+          [
+            "${cross}",
+            "T_NO_SUCH_${run_id}"
+          ]
+        ]
+      },
+      {
+        "sql": "SELECT STATUS FROM SYS.ALL_OBJECTS WHERE OWNER='${owner}' AND OBJECT_NAME='V_SYM_${run_id}' AND OBJECT_TYPE='VIEW'",
+        "rows": [
+          [
+            "INVALID"
+          ]
+        ]
+      }
+    ],
+    "audit_expect": [
+      {
+        "tool": "oracle_compile_object",
+        "decision": "BLOCKED",
+        "outcome": "FAILED",
+        "failure": {
+          "error_class": "FORBIDDEN_STATEMENT",
+          "reason_category": "PARSE_CALLBACK_UNPROVEN"
+        }
+      },
+      {
+        "tool": "oracle_compile_object",
+        "decision": "BLOCKED",
+        "outcome": "FAILED",
+        "failure": {
+          "error_class": "FORBIDDEN_STATEMENT",
+          "reason_category": "PARSE_CALLBACK_UNPROVEN"
+        }
+      }
+    ],
+    "audit_zero_executions": true,
+    "on_unsupported": {
+      "error_class": "INVALID_ARGUMENTS"
+    },
+    "cleanup": [
+      {
+        "sql": "DROP VIEW ${owner}.V_SYM_${run_id}"
+      },
+      {
+        "sql": "DROP SYNONYM ${owner}.S_MISS_${run_id}"
+      }
+    ],
+    "cleanup_reread": [
+      {
+        "sql": "SELECT OBJECT_NAME FROM SYS.ALL_OBJECTS WHERE OWNER='${owner}' AND OBJECT_NAME IN ('V_SYM_${run_id}','S_MISS_${run_id}')",
+        "rows": []
+      }
+    ]
   }
 ]
