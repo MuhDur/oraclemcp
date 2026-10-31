@@ -5296,7 +5296,8 @@ def alias_and_refusal_verifiers_selftest():
         except DriverError:
             continue
         raise DriverError("alias comparator accepted changed rows, independent state or audit outcome")
-    for column in ("scn", "timestamp", "token", "tool", "custom_catalog_generation"):
+    for column in ("scn", "timestamp", "token", "tool", "custom_catalog_generation",
+                   "compile_parse_closure_digest", "dependency_hash", "last_ddl_time"):
         before = {**left, "case": {"actual": {"rows": [{column: "first-value"}]}}}
         after = {**left, "case": {"actual": {"rows": [{column: "changed-value"}]}}}
         try:
@@ -5304,6 +5305,7 @@ def alias_and_refusal_verifiers_selftest():
         except DriverError:
             continue
         raise DriverError(f"alias comparator scrubbed semantic row column {column}")
+    aliases.freshness_equivalence_selftest(sys.modules[__name__])
     certificate = {"audit_entry_hash": "sha256:" + "a" * 64, "profile": "free23", "decisions": []}
     masking = {key: value for key, value in certificate.items() if key != "audit_entry_hash"}
     masked = {"case": {"actual": {"structuredContent": {"mask_certificate": certificate}}},

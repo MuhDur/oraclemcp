@@ -5,6 +5,7 @@ the fixture and runs the real steps, mutation rereads and audit verification.
 """
 
 import copy
+import datetime
 import itertools
 import json
 import re
@@ -18,6 +19,15 @@ DEFAULTS = {"enable_writes": {"level": "READ_WRITE"},
             "compile_with_warnings": {"warnings": True},
             "patch_package": {"object_type": "PACKAGE BODY"},
             "patch_view": {"object_type": "VIEW"}}
+
+# Canonical DDL advances object freshness before the alias repeats it. These
+# exact impact paths cannot be equal across the two successful executions.
+# Keep every field and compare all source/effect/identity facts unchanged.
+ALIAS_FRESHNESS_PATHS = {
+    ("binding", "decisive", "compile_parse_closure_digest"): "status_sha256",
+    ("dependents", "value", "dependency_hash"): "sha256",
+    ("dependents", "value", "roots", "*", "last_ddl_time"): "ddl_timestamp",
+}
 
 
 def load_rules(api):
@@ -296,10 +306,163 @@ def _audit_projection(records, index):
              for key in keys if key in record} for record in records]
 
 
+def _freshness_digest(api, value):
+    # Rust [u8; 32] is a JSON array, not a free-form string. Validate the wire
+    # representation before deriving its canonical SHA256 hex representation.
+    api.require(isinstance(value, list) and len(value) == 32
+                and all(type(byte) is int and 0 <= byte <= 255 for byte in value),
+                "invalid alias freshness SHA256 bytes")
+    api.require(re.fullmatch(r"[0-9a-f]{64}", bytes(value).hex()),
+                "invalid alias freshness SHA256 hex")
+    return "<freshness_sha256>"
+
+
+def _impact_freshness(api, value, path=()):
+    if path in {("binding",), ("binding", "decisive"), ("dependents",),
+                ("dependents", "value"), ("dependents", "value", "roots", "*")}:
+        api.require(isinstance(value, dict), "invalid alias impact freshness container")
+    if path == ("dependents", "value", "roots"):
+        api.require(isinstance(value, list), "invalid alias dependency roots")
+    rule = ALIAS_FRESHNESS_PATHS.get(path)
+    if rule == "status_sha256":
+        api.require(isinstance(value, dict) and value.get("status") in {
+            "computed", "estimated", "unavailable", "not_applicable"},
+            "invalid alias closure-digest field status")
+        if value["status"] in {"computed", "estimated"}:
+            api.require("value" in value, "missing alias closure digest")
+            return {**value, "value": _freshness_digest(api, value["value"])}
+        api.require("value" not in value, "unavailable alias closure digest has a value")
+        return copy.deepcopy(value)
+    if rule == "sha256":
+        return _freshness_digest(api, value)
+    if rule == "ddl_timestamp":
+        if value is None:
+            return None  # Unknown freshness must remain distinct from a known time.
+        api.require(isinstance(value, str) and len(value) >= 19,
+                    "invalid alias root DDL timestamp")
+        try:
+            datetime.datetime.fromisoformat(value)
+        except ValueError as error:
+            raise api.DriverError("invalid alias root DDL timestamp") from error
+        return "<ddl_freshness>"
+    if isinstance(value, dict):
+        required = {
+            ("binding", "decisive"): {"compile_parse_closure_digest"},
+            ("dependents", "value"): {"dependency_hash", "roots"},
+            ("dependents", "value", "roots", "*"): {"last_ddl_time"},
+        }.get(path, set())
+        api.require(required <= value.keys(), "missing alias impact freshness field")
+        return {key: _impact_freshness(api, item, path + (key,))
+                for key, item in value.items()}
+    if isinstance(value, list):
+        return [_impact_freshness(api, item, path + (
+            "*" if path == ("dependents", "value", "roots") else str(index),))
+                for index, item in enumerate(value)]
+    return value
+
+
+def _equivalence_result(api, run, index):
+    actual = run["case"]
+    normalized = _normal(api, {key: actual[key] for key in (
+        "actual", "steps", "db_reread_actual") if key in actual}, index)
+    # _normal must compare the two wire representations before freshness is
+    # projected across executions. A corrupt text/structured pair still fails.
+    for observed in [normalized, *normalized.get("steps", [])]:
+        result = observed.get("actual")
+        payload = result.get("structuredContent") if isinstance(result, dict) else None
+        if isinstance(payload, dict) and "impact" in payload:
+            api.require(isinstance(payload["impact"], dict), "invalid alias impact object")
+            payload["impact"] = _impact_freshness(api, payload["impact"])
+    return normalized
+
+
+def freshness_equivalence_selftest(api):
+    """Checker units; CI/native replay uses the same comparator separately."""
+    def run(byte, ddl_time):
+        body = {"required_level": "DDL", "statements": ["ALTER PROCEDURE APP.P COMPILE"],
+            "impact": {
+                "binding": {"decisive": {"compile_parse_closure_digest": {
+                    "status": "computed", "value": [byte] * 32}}},
+                "dependents": {"status": "estimated", "value": {
+                    "dependency_hash": [byte] * 32, "requested_roots": 1,
+                    "roots": [{"object": {"owner": "APP", "name": "P", "object_type": "PROCEDURE"},
+                        "last_ddl_time": ddl_time, "object_id": 7, "status": "VALID", "depth": 0,
+                        "source_hash": {"status": "computed", "sha256": [3] * 32}}],
+                    "nodes": [], "edges": [], "predicted_invalid_count": 0}},
+                "effects": {"status": "computed", "value": {"after": ["ReadDb"]}}}}
+        payload = {"isError": False, "content": [{"type": "text", "text": json.dumps(body)}],
+                   "structuredContent": copy.deepcopy(body)}
+        return {"case": {"steps": [{"actual": payload}], "db_reread_actual": [[["VALID"]]]},
+                "audit_semantics": [{"tool": "oracle_compile_object", "outcome": "SUCCEEDED"}]}
+
+    def body(observed):
+        return observed["case"]["steps"][0]["actual"]["structuredContent"]
+
+    def changed(observed, change, synchronize=True):
+        observed = copy.deepcopy(observed)
+        change(body(observed))
+        if synchronize:
+            observed["case"]["steps"][0]["actual"]["content"][0]["text"] = json.dumps(body(observed))
+        return observed
+
+    def rejected(left, right, label):
+        try:
+            verify_equivalent_runs(api, left, right, {})
+        except api.DriverError:
+            return
+        raise api.DriverError(f"alias freshness projection accepted {label}")
+
+    left, right = run(1, "2026-10-31T12:00:00"), run(2, "2026-10-31T12:00:01")
+    verify_equivalent_runs(api, left, right, {})
+    projected = _equivalence_result(api, right, {})["steps"][0]["actual"]["structuredContent"]["impact"]
+    api.require(set(projected["binding"]["decisive"]["compile_parse_closure_digest"]) == {"status", "value"}
+                and "dependency_hash" in projected["dependents"]["value"]
+                and "last_ddl_time" in projected["dependents"]["value"]["roots"][0],
+                "alias freshness projection removed a field")
+    root = lambda value: value["impact"]["dependents"]["value"]["roots"][0]
+    closure = lambda value: value["impact"]["binding"]["decisive"]["compile_parse_closure_digest"]
+    mutations = {
+        "changed root name": lambda value: root(value)["object"].update(name="WRONG"),
+        "changed root owner": lambda value: root(value)["object"].update(owner="OTHER"),
+        "changed root type": lambda value: root(value)["object"].update(object_type="FUNCTION"),
+        "dropped root": lambda value: value["impact"]["dependents"]["value"]["roots"].clear(),
+        "malformed digest": lambda value: closure(value)["value"].pop(),
+        "boolean digest byte": lambda value: closure(value)["value"].__setitem__(0, True),
+        "out-of-range digest byte": lambda value: closure(value)["value"].__setitem__(0, 256),
+        "missing closure digest": lambda value: value["impact"]["binding"]["decisive"].pop("compile_parse_closure_digest"),
+        "missing dependency digest": lambda value: value["impact"]["dependents"]["value"].pop("dependency_hash"),
+        "malformed roots": lambda value: value["impact"]["dependents"]["value"].update(roots={}),
+        "malformed root": lambda value: value["impact"]["dependents"]["value"]["roots"].__setitem__(0, None),
+        "changed source": lambda value: root(value)["source_hash"]["sha256"].__setitem__(0, 99),
+        "changed effects": lambda value: value["impact"]["effects"]["value"].update(after=["Autonomous"]),
+        "changed statement": lambda value: value.update(statements=["DROP PROCEDURE APP.P"]),
+        "changed digest status": lambda value: closure(value).update(status="estimated"),
+        "malformed timestamp": lambda value: root(value).update(last_ddl_time="not-a-timestamp"),
+        "missing timestamp": lambda value: root(value).pop("last_ddl_time"),
+        "lost known freshness": lambda value: root(value).update(last_ddl_time=None),
+    }
+    for label, change in mutations.items():
+        rejected(left, changed(right, change), label)
+    for label in ("malformed digest", "missing closure digest", "missing dependency digest", "missing timestamp",
+                  "malformed roots", "malformed root"):
+        rejected(changed(left, mutations[label]), changed(right, mutations[label]), label + " on both sides")
+    rejected(left, changed(right, lambda value: root(value).update(last_ddl_time="2026-10-31T12:00:02"), False),
+             "one-wire-representation timestamp difference")
+    rejected(left, changed(right, mutations["changed source"], False), "one-wire-representation source difference")
+    two_left, two_right = copy.deepcopy(left), copy.deepcopy(right)
+    for observed in (two_left, two_right):
+        graph = body(observed)["impact"]["dependents"]["value"]
+        second = copy.deepcopy(graph["roots"][0])
+        second["object"]["name"] = "Q"
+        graph["roots"].append(second)
+        graph["requested_roots"] = 2
+        observed["case"]["steps"][0]["actual"]["content"][0]["text"] = json.dumps(body(observed))
+    verify_equivalent_runs(api, two_left, two_right, {})
+    rejected(two_left, changed(two_right, lambda value: value["impact"]["dependents"]["value"]["roots"].reverse()),
+             "changed root order")
+
+
 def verify_equivalent_runs(api, left, right, index):
-    def comparison(run):
-        actual = run["case"]
-        return _normal(api, {key: actual[key] for key in ("actual", "steps", "db_reread_actual") if key in actual}, index)
     for run in (left, right):
         _verify_mask_bindings(api, run["case"], run.get("audit", []))
     first = left["case"].get("actual", {}).get("structuredContent", {})
@@ -308,7 +471,8 @@ def verify_equivalent_runs(api, left, right, index):
         api.require(type(first.get("custom_catalog_generation")) is int
                     and second.get("custom_catalog_generation") == first["custom_catalog_generation"] + 2,
                     "profile restore and repeated switch did not advance the catalog twice")
-    api.require(comparison(left) == comparison(right), "alias result, steps or independent rereads differ")
+    api.require(_equivalence_result(api, left, index) == _equivalence_result(api, right, index),
+                "alias result, steps or independent rereads differ")
     api.require(left["audit_semantics"] == right["audit_semantics"], "alias executed audit paths differ")
 
 
