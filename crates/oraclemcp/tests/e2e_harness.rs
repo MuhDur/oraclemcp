@@ -1492,6 +1492,101 @@ fn real_adb_signoff_dry_run_schedules_wallet_and_iam_doctor_paths() {
 }
 
 #[test]
+#[cfg(unix)]
+fn oci_children_forward_diagnostics_without_leaking_parent_environment() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = repo_root();
+    let temp = tempfile::tempdir().expect("temporary doctor executable");
+    let doctor = temp.path().join("doctor");
+    std::fs::write(
+        &doctor,
+        r##"#!/usr/bin/env bash
+set -eu
+[[ ${RUST_LOG+x} == x && ${ORACLEDB_TRACE_CONNECT+x} == x ]]
+[[ -z ${UNRELATED_SECRET+x} && -z ${ORACLEMCP_REAL_ADB_PASSWORD+x} ]]
+printf '%s\t%s\n' "$RUST_LOG" "$ORACLEDB_TRACE_CONNECT"
+"##,
+    )
+    .expect("write doctor environment probe");
+    std::fs::set_permissions(&doctor, std::fs::Permissions::from_mode(0o700))
+        .expect("make doctor executable");
+    let mut commands = Vec::new();
+    for script in ["oci_adb_terraform.sh", "real_adb_tcps_signoff.sh"] {
+        let text = std::fs::read_to_string(root.join("scripts/e2e").join(script))
+            .expect("read actual harness");
+        let mut lines = text.lines();
+        while let Some(line) = lines.next() {
+            let Some(start) = line.find("env -i ") else {
+                continue;
+            };
+            let mut command = line[start..].to_owned();
+            let mut continued = line.trim_end().ends_with('\\');
+            while continued {
+                let next = lines.next().expect("complete env command");
+                command.push('\n');
+                command.push_str(next);
+                continued = next.trim_end().ends_with('\\');
+            }
+            if command.contains("--json doctor --online") || command.contains("--json serve") {
+                // Capture the child's stdout directly instead of its private
+                // readiness log; retain the real env/argv expansion.
+                commands.push(
+                    command
+                        .trim_end_matches(" || true")
+                        .trim_end_matches(" >\"$output\" 2>&1")
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    assert_eq!(
+        commands.len(),
+        4,
+        "exercise both bootstrap doctor paths, signoff doctor and MCP server"
+    );
+    for command in commands {
+        for configured in [false, true] {
+            let mut child = Command::new(common::bash_bin());
+            child
+                .arg("-c")
+                .arg(&command)
+                .env("binary", &doctor)
+                .env("bootstrap_binary", &doctor)
+                .env("bootstrap_state", temp.path())
+                .env("state_home", temp.path())
+                .env("bootstrap_config", "synthetic-config")
+                .env("config", "synthetic-config")
+                .env("profile", "synthetic-profile")
+                .env("admin_password", "synthetic-admin")
+                .env("wallet_password", "synthetic-wallet")
+                .env("ORACLEMCP_REAL_ADB_PASSWORD", "must-not-leak")
+                .env("ORACLEMCP_REAL_ADB_WALLET_PASSWORD", "synthetic-wallet")
+                .env("ORACLEMCP_REAL_ADB_IAM_TOKEN", "synthetic-token")
+                .env("UNRELATED_SECRET", "must-not-leak");
+            let expected = if configured {
+                child
+                    .env("RUST_LOG", "oraclemcp=debug,oraclemcp_driver_cx=trace")
+                    .env("ORACLEDB_TRACE_CONNECT", "1");
+                "oraclemcp=debug,oraclemcp_driver_cx=trace\t1\n"
+            } else {
+                child
+                    .env_remove("RUST_LOG")
+                    .env_remove("ORACLEDB_TRACE_CONNECT");
+                "\t\n"
+            };
+            let output = child.output().expect("execute isolated doctor command");
+            assert!(
+                output.status.success(),
+                "doctor probe: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(String::from_utf8(output.stdout).unwrap(), expected);
+        }
+    }
+}
+
+#[test]
 fn wallet_dn_fixture_covers_explicit_fallback_and_omitted_certificate_subjects() {
     let output = run_script("scripts/e2e/test_extract_ssl_server_cert_dn.sh", &[]);
     assert!(

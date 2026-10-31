@@ -207,6 +207,8 @@ run_real_adb_doctor() {
   env -i \
     "HOME=$HOME" \
     "PATH=$PATH" \
+    "RUST_LOG=${RUST_LOG:-}" \
+    "ORACLEDB_TRACE_CONNECT=${ORACLEDB_TRACE_CONNECT:-}" \
     "ORACLEMCP_CONFIG=$config" \
     "XDG_STATE_HOME=$state_home" \
     "ADB_PASSWORD=$ORACLEMCP_REAL_ADB_PASSWORD" \
@@ -269,6 +271,8 @@ run_guarded_readonly_query() {
   } | env -i \
     "HOME=$HOME" \
     "PATH=$PATH" \
+    "RUST_LOG=${RUST_LOG:-}" \
+    "ORACLEDB_TRACE_CONNECT=${ORACLEDB_TRACE_CONNECT:-}" \
     "ORACLEMCP_CONFIG=$config" \
     "XDG_STATE_HOME=$state_home" \
     "ADB_PASSWORD=$ORACLEMCP_REAL_ADB_PASSWORD" \

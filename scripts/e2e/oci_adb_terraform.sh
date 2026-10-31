@@ -1009,7 +1009,9 @@ if [ "$mode" = provision-only ]; then
   # Informational until T9.3: the verdict is recorded, never hidden, and does
   # not gate this lane.
   timed_step doctor_online "oraclemcp doctor --online (informational until T9.3)" false \
-    env -i "HOME=$HOME" "PATH=$PATH" "XDG_STATE_HOME=$bootstrap_state" \
+    env -i "HOME=$HOME" "PATH=$PATH" \
+    "RUST_LOG=${RUST_LOG:-}" "ORACLEDB_TRACE_CONNECT=${ORACLEDB_TRACE_CONNECT:-}" \
+    "XDG_STATE_HOME=$bootstrap_state" \
     "ORACLEMCP_CONFIG=$bootstrap_config" "ADB_ADMIN_PASSWORD=$admin_password" \
     "ADB_WALLET_PASSWORD=$wallet_password" \
     "$bootstrap_binary" --json doctor --online --profile oci_adb_bootstrap || true
@@ -1175,6 +1177,8 @@ wait_for_adb_tcps() {
     env -i \
       "HOME=$HOME" \
       "PATH=$PATH" \
+      "RUST_LOG=${RUST_LOG:-}" \
+      "ORACLEDB_TRACE_CONNECT=${ORACLEDB_TRACE_CONNECT:-}" \
       "XDG_STATE_HOME=$bootstrap_state" \
       "ORACLEMCP_CONFIG=$bootstrap_config" \
       "ADB_ADMIN_PASSWORD=$admin_password" \
