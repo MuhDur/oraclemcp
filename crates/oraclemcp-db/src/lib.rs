@@ -66,6 +66,7 @@ pub mod catalog_facts;
 mod catalog_query;
 mod catalog_resolver;
 mod connection;
+pub mod ddl_closure;
 mod doctor;
 mod drcp;
 mod error;

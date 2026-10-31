@@ -18,6 +18,7 @@ pub mod action_envelope;
 pub mod classifier;
 pub mod clock;
 pub mod corpus;
+pub mod ddl_closure;
 pub mod edition_lifecycle;
 pub mod effective_dml_plan;
 pub mod enforcement;

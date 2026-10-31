@@ -1247,6 +1247,466 @@ pub fn oraclemcp_guard::corpus::reclassify_rewrite_at_apply(&oraclemcp_guard::cl
 pub fn oraclemcp_guard::corpus::redact_sql(&str) -> core::result::Result<alloc::string::String, oraclemcp_guard::corpus::CorpusRedactionError>
 pub fn oraclemcp_guard::corpus::safe_why(&str) -> core::result::Result<alloc::string::String, oraclemcp_guard::corpus::CorpusRedactionError>
 pub fn oraclemcp_guard::corpus::validate_redacted_sql(&str) -> core::result::Result<(), oraclemcp_guard::corpus::CorpusRedactionError>
+pub mod oraclemcp_guard::ddl_closure
+pub enum oraclemcp_guard::ddl_closure::DdlClosureRefusal
+pub oraclemcp_guard::ddl_closure::DdlClosureRefusal::Effect(oraclemcp_guard::purity::EffectRefusal)
+pub oraclemcp_guard::ddl_closure::DdlClosureRefusal::Unknown
+impl core::clone::Clone for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::clone(&self) -> oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::cmp::Eq for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::cmp::PartialEq for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::eq(&self, &oraclemcp_guard::ddl_closure::DdlClosureRefusal) -> bool
+impl core::fmt::Debug for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::marker::StructuralPartialEq for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::marker::Freeze for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::marker::Send for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::marker::Sync for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::marker::Unpin for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::marker::UnsafeUnpin for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where U: core::convert::From<T>
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where U: core::convert::Into<T>
+pub type oraclemcp_guard::ddl_closure::DdlClosureRefusal::Error = core::convert::Infallible
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::ddl_closure::DdlClosureRefusal::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::ddl_closure::DdlClosureRefusal where T: core::clone::Clone
+pub type oraclemcp_guard::ddl_closure::DdlClosureRefusal::Owned = T
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl<T> core::any::Any for oraclemcp_guard::ddl_closure::DdlClosureRefusal where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::ddl_closure::DdlClosureRefusal where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+impl<T> typenum::type_operators::Same for oraclemcp_guard::ddl_closure::DdlClosureRefusal
+pub type oraclemcp_guard::ddl_closure::DdlClosureRefusal::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::ddl_closure::DdlClosureRefusal where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::ddl_closure::DdlClosureRefusal::vzip(self) -> V
+pub enum oraclemcp_guard::ddl_closure::DdlEvent
+pub oraclemcp_guard::ddl_closure::DdlEvent::Alter
+pub oraclemcp_guard::ddl_closure::DdlEvent::Analyze
+pub oraclemcp_guard::ddl_closure::DdlEvent::AssociateStatistics
+pub oraclemcp_guard::ddl_closure::DdlEvent::Audit
+pub oraclemcp_guard::ddl_closure::DdlEvent::Comment
+pub oraclemcp_guard::ddl_closure::DdlEvent::Create
+pub oraclemcp_guard::ddl_closure::DdlEvent::Ddl
+pub oraclemcp_guard::ddl_closure::DdlEvent::DisassociateStatistics
+pub oraclemcp_guard::ddl_closure::DdlEvent::Drop
+pub oraclemcp_guard::ddl_closure::DdlEvent::Grant
+pub oraclemcp_guard::ddl_closure::DdlEvent::Noaudit
+pub oraclemcp_guard::ddl_closure::DdlEvent::Rename
+pub oraclemcp_guard::ddl_closure::DdlEvent::Revoke
+pub oraclemcp_guard::ddl_closure::DdlEvent::Truncate
+impl oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::from_catalog(&str) -> core::option::Option<Self>
+impl core::clone::Clone for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::clone(&self) -> oraclemcp_guard::ddl_closure::DdlEvent
+impl core::cmp::Eq for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::cmp::Ord for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::cmp(&self, &oraclemcp_guard::ddl_closure::DdlEvent) -> core::cmp::Ordering
+impl core::cmp::PartialEq for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::eq(&self, &oraclemcp_guard::ddl_closure::DdlEvent) -> bool
+impl core::cmp::PartialOrd for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::partial_cmp(&self, &oraclemcp_guard::ddl_closure::DdlEvent) -> core::option::Option<core::cmp::Ordering>
+impl core::fmt::Debug for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::marker::StructuralPartialEq for oraclemcp_guard::ddl_closure::DdlEvent
+impl serde_core::ser::Serialize for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::marker::Send for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::marker::Sync for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::marker::Unpin for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::marker::UnsafeUnpin for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::ddl_closure::DdlEvent
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::ddl_closure::DdlEvent
+impl<Q, K> equivalent::Comparable<K> for oraclemcp_guard::ddl_closure::DdlEvent where Q: core::cmp::Ord + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::compare(&self, &K) -> core::cmp::Ordering
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::ddl_closure::DdlEvent where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::ddl_closure::DdlEvent where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::ddl_closure::DdlEvent where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::ddl_closure::DdlEvent where U: core::convert::From<T>
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::ddl_closure::DdlEvent where U: core::convert::Into<T>
+pub type oraclemcp_guard::ddl_closure::DdlEvent::Error = core::convert::Infallible
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::ddl_closure::DdlEvent where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::ddl_closure::DdlEvent::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::ddl_closure::DdlEvent where T: core::clone::Clone
+pub type oraclemcp_guard::ddl_closure::DdlEvent::Owned = T
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::ddl_closure::DdlEvent
+impl<T> core::any::Any for oraclemcp_guard::ddl_closure::DdlEvent where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::ddl_closure::DdlEvent where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::ddl_closure::DdlEvent where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::ddl_closure::DdlEvent where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::ddl_closure::DdlEvent::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::ddl_closure::DdlEvent
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::ddl_closure::DdlEvent
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::ddl_closure::DdlEvent where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::ddl_closure::DdlEvent
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::ddl_closure::DdlEvent
+impl<T> typenum::type_operators::Same for oraclemcp_guard::ddl_closure::DdlEvent
+pub type oraclemcp_guard::ddl_closure::DdlEvent::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::ddl_closure::DdlEvent where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::ddl_closure::DdlEvent where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::ddl_closure::DdlEvent::vzip(self) -> V
+pub enum oraclemcp_guard::ddl_closure::DdlPredicate
+pub oraclemcp_guard::ddl_closure::DdlPredicate::DictionaryGuard
+pub oraclemcp_guard::ddl_closure::DdlPredicate::DictionaryGuard::text: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlPredicate::DictionaryGuard::value: bool
+pub oraclemcp_guard::ddl_closure::DdlPredicate::Unconditional
+pub oraclemcp_guard::ddl_closure::DdlPredicate::Unknown
+pub oraclemcp_guard::ddl_closure::DdlPredicate::Unknown::text: alloc::string::String
+impl oraclemcp_guard::ddl_closure::DdlPredicate
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::from_catalog(core::option::Option<&str>, &oraclemcp_guard::ddl_closure::DdlObject) -> Self
+impl core::clone::Clone for oraclemcp_guard::ddl_closure::DdlPredicate
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::clone(&self) -> oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::cmp::Eq for oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::cmp::PartialEq for oraclemcp_guard::ddl_closure::DdlPredicate
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::eq(&self, &oraclemcp_guard::ddl_closure::DdlPredicate) -> bool
+impl core::fmt::Debug for oraclemcp_guard::ddl_closure::DdlPredicate
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::ddl_closure::DdlPredicate
+impl serde_core::ser::Serialize for oraclemcp_guard::ddl_closure::DdlPredicate
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::ddl_closure::DdlPredicate
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::marker::Send for oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::marker::Sync for oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::marker::Unpin for oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::marker::UnsafeUnpin for oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::ddl_closure::DdlPredicate
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::ddl_closure::DdlPredicate
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::ddl_closure::DdlPredicate where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::ddl_closure::DdlPredicate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::ddl_closure::DdlPredicate where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::ddl_closure::DdlPredicate where U: core::convert::From<T>
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::ddl_closure::DdlPredicate where U: core::convert::Into<T>
+pub type oraclemcp_guard::ddl_closure::DdlPredicate::Error = core::convert::Infallible
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::ddl_closure::DdlPredicate where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::ddl_closure::DdlPredicate::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::ddl_closure::DdlPredicate where T: core::clone::Clone
+pub type oraclemcp_guard::ddl_closure::DdlPredicate::Owned = T
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::ddl_closure::DdlPredicate
+impl<T> core::any::Any for oraclemcp_guard::ddl_closure::DdlPredicate where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::ddl_closure::DdlPredicate where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::ddl_closure::DdlPredicate where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::ddl_closure::DdlPredicate where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::ddl_closure::DdlPredicate::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::ddl_closure::DdlPredicate
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::ddl_closure::DdlPredicate
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::ddl_closure::DdlPredicate where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::ddl_closure::DdlPredicate
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::ddl_closure::DdlPredicate
+impl<T> typenum::type_operators::Same for oraclemcp_guard::ddl_closure::DdlPredicate
+pub type oraclemcp_guard::ddl_closure::DdlPredicate::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::ddl_closure::DdlPredicate where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::ddl_closure::DdlPredicate where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::ddl_closure::DdlPredicate::vzip(self) -> V
+pub enum oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub oraclemcp_guard::ddl_closure::DdlTriggerScope::Database
+pub oraclemcp_guard::ddl_closure::DdlTriggerScope::Schema
+impl core::clone::Clone for oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::clone(&self) -> oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::cmp::Eq for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::cmp::PartialEq for oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::eq(&self, &oraclemcp_guard::ddl_closure::DdlTriggerScope) -> bool
+impl core::fmt::Debug for oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::marker::StructuralPartialEq for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl serde_core::ser::Serialize for oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::marker::Send for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::marker::Sync for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::marker::Unpin for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::marker::UnsafeUnpin for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::ddl_closure::DdlTriggerScope where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::ddl_closure::DdlTriggerScope where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::ddl_closure::DdlTriggerScope where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::ddl_closure::DdlTriggerScope where U: core::convert::From<T>
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::ddl_closure::DdlTriggerScope where U: core::convert::Into<T>
+pub type oraclemcp_guard::ddl_closure::DdlTriggerScope::Error = core::convert::Infallible
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::ddl_closure::DdlTriggerScope where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::ddl_closure::DdlTriggerScope::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::ddl_closure::DdlTriggerScope where T: core::clone::Clone
+pub type oraclemcp_guard::ddl_closure::DdlTriggerScope::Owned = T
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl<T> core::any::Any for oraclemcp_guard::ddl_closure::DdlTriggerScope where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::ddl_closure::DdlTriggerScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::ddl_closure::DdlTriggerScope where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::ddl_closure::DdlTriggerScope where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::ddl_closure::DdlTriggerScope::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::ddl_closure::DdlTriggerScope where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::ddl_closure::DdlTriggerScope
+impl<T> typenum::type_operators::Same for oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub type oraclemcp_guard::ddl_closure::DdlTriggerScope::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::ddl_closure::DdlTriggerScope where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::ddl_closure::DdlTriggerScope where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerScope::vzip(self) -> V
+pub struct oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::catalog_row_count: u32
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::catalog_sha256: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::current_schema: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::database: core::option::Option<oraclemcp_guard::mutation_closure::MutationDatabaseIdentity>
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::database_triggers_visible: bool
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::event: oraclemcp_guard::ddl_closure::DdlEvent
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::object: oraclemcp_guard::ddl_closure::DdlObject
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::session_user: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::triggers: alloc::vec::Vec<oraclemcp_guard::ddl_closure::DdlTriggerFact>
+pub oraclemcp_guard::ddl_closure::DdlEffectClosureV1::unavailable: alloc::collections::btree::set::BTreeSet<oraclemcp_guard::mutation_closure::MutationUnavailableReason>
+impl oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::admit(&self) -> core::result::Result<oraclemcp_guard::levels::OperatingLevel, oraclemcp_guard::ddl_closure::DdlClosureRefusal>
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::canonical_bytes(&self) -> alloc::vec::Vec<u8>
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::fingerprint(&self) -> alloc::string::String
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::is_complete(&self) -> bool
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::new(oraclemcp_guard::ddl_closure::DdlEvent, oraclemcp_guard::ddl_closure::DdlObject) -> Self
+impl core::clone::Clone for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::clone(&self) -> oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::cmp::Eq for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::cmp::PartialEq for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::eq(&self, &oraclemcp_guard::ddl_closure::DdlEffectClosureV1) -> bool
+impl core::fmt::Debug for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl serde_core::ser::Serialize for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::marker::Send for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::marker::Sync for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::marker::Unpin for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::marker::UnsafeUnpin for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where U: core::convert::From<T>
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where U: core::convert::Into<T>
+pub type oraclemcp_guard::ddl_closure::DdlEffectClosureV1::Error = core::convert::Infallible
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::ddl_closure::DdlEffectClosureV1::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where T: core::clone::Clone
+pub type oraclemcp_guard::ddl_closure::DdlEffectClosureV1::Owned = T
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl<T> core::any::Any for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+impl<T> typenum::type_operators::Same for oraclemcp_guard::ddl_closure::DdlEffectClosureV1
+pub type oraclemcp_guard::ddl_closure::DdlEffectClosureV1::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::ddl_closure::DdlEffectClosureV1 where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::ddl_closure::DdlEffectClosureV1::vzip(self) -> V
+pub struct oraclemcp_guard::ddl_closure::DdlObject
+pub oraclemcp_guard::ddl_closure::DdlObject::name: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlObject::object_type: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlObject::owner: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::ddl_closure::DdlObject
+pub fn oraclemcp_guard::ddl_closure::DdlObject::clone(&self) -> oraclemcp_guard::ddl_closure::DdlObject
+impl core::cmp::Eq for oraclemcp_guard::ddl_closure::DdlObject
+impl core::cmp::PartialEq for oraclemcp_guard::ddl_closure::DdlObject
+pub fn oraclemcp_guard::ddl_closure::DdlObject::eq(&self, &oraclemcp_guard::ddl_closure::DdlObject) -> bool
+impl core::fmt::Debug for oraclemcp_guard::ddl_closure::DdlObject
+pub fn oraclemcp_guard::ddl_closure::DdlObject::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::ddl_closure::DdlObject
+impl serde_core::ser::Serialize for oraclemcp_guard::ddl_closure::DdlObject
+pub fn oraclemcp_guard::ddl_closure::DdlObject::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::ddl_closure::DdlObject
+pub fn oraclemcp_guard::ddl_closure::DdlObject::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::ddl_closure::DdlObject
+impl core::marker::Send for oraclemcp_guard::ddl_closure::DdlObject
+impl core::marker::Sync for oraclemcp_guard::ddl_closure::DdlObject
+impl core::marker::Unpin for oraclemcp_guard::ddl_closure::DdlObject
+impl core::marker::UnsafeUnpin for oraclemcp_guard::ddl_closure::DdlObject
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::ddl_closure::DdlObject
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::ddl_closure::DdlObject
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::ddl_closure::DdlObject where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlObject::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::ddl_closure::DdlObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::ddl_closure::DdlObject where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::ddl_closure::DdlObject where U: core::convert::From<T>
+pub fn oraclemcp_guard::ddl_closure::DdlObject::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::ddl_closure::DdlObject where U: core::convert::Into<T>
+pub type oraclemcp_guard::ddl_closure::DdlObject::Error = core::convert::Infallible
+pub fn oraclemcp_guard::ddl_closure::DdlObject::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::ddl_closure::DdlObject where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::ddl_closure::DdlObject::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::ddl_closure::DdlObject::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::ddl_closure::DdlObject where T: core::clone::Clone
+pub type oraclemcp_guard::ddl_closure::DdlObject::Owned = T
+pub fn oraclemcp_guard::ddl_closure::DdlObject::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::ddl_closure::DdlObject::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::ddl_closure::DdlObject
+impl<T> core::any::Any for oraclemcp_guard::ddl_closure::DdlObject where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlObject::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::ddl_closure::DdlObject where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlObject::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::ddl_closure::DdlObject where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlObject::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::ddl_closure::DdlObject where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::ddl_closure::DdlObject::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::ddl_closure::DdlObject
+pub fn oraclemcp_guard::ddl_closure::DdlObject::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::ddl_closure::DdlObject
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::ddl_closure::DdlObject where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::ddl_closure::DdlObject
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::ddl_closure::DdlObject
+impl<T> typenum::type_operators::Same for oraclemcp_guard::ddl_closure::DdlObject
+pub type oraclemcp_guard::ddl_closure::DdlObject::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::ddl_closure::DdlObject where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::ddl_closure::DdlObject where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::ddl_closure::DdlObject::vzip(self) -> V
+pub struct oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::computation: oraclemcp_guard::mutation_closure::MutationComputation
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::effects: oraclemcp_guard::purity::RoutineEffectsV1
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::events: alloc::collections::btree::set::BTreeSet<oraclemcp_guard::ddl_closure::DdlEvent>
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::last_ddl_time: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::metadata_sha256: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::name: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::object_id: u64
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::owner: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::predicate: oraclemcp_guard::ddl_closure::DdlPredicate
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::routine_closure_fingerprint: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::schema: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::scope: oraclemcp_guard::ddl_closure::DdlTriggerScope
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::source_sha256: core::option::Option<alloc::string::String>
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::status: alloc::string::String
+pub oraclemcp_guard::ddl_closure::DdlTriggerFact::timing: alloc::string::String
+impl core::clone::Clone for oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::clone(&self) -> oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::cmp::Eq for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::cmp::PartialEq for oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::eq(&self, &oraclemcp_guard::ddl_closure::DdlTriggerFact) -> bool
+impl core::fmt::Debug for oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl serde_core::ser::Serialize for oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::marker::Send for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::marker::Sync for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::marker::Unpin for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::marker::UnsafeUnpin for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::panic::unwind_safe::RefUnwindSafe for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl core::panic::unwind_safe::UnwindSafe for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl<Q, K> equivalent::Equivalent<K> for oraclemcp_guard::ddl_closure::DdlTriggerFact where Q: core::cmp::Eq + ?core::marker::Sized, K: core::borrow::Borrow<Q> + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::equivalent(&self, &K) -> bool
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for oraclemcp_guard::ddl_closure::DdlTriggerFact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for oraclemcp_guard::ddl_closure::DdlTriggerFact where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for oraclemcp_guard::ddl_closure::DdlTriggerFact where U: core::convert::From<T>
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for oraclemcp_guard::ddl_closure::DdlTriggerFact where U: core::convert::Into<T>
+pub type oraclemcp_guard::ddl_closure::DdlTriggerFact::Error = core::convert::Infallible
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for oraclemcp_guard::ddl_closure::DdlTriggerFact where U: core::convert::TryFrom<T>
+pub type oraclemcp_guard::ddl_closure::DdlTriggerFact::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::borrow::ToOwned for oraclemcp_guard::ddl_closure::DdlTriggerFact where T: core::clone::Clone
+pub type oraclemcp_guard::ddl_closure::DdlTriggerFact::Owned = T
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::clone_into(&self, &mut T)
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::to_owned(&self) -> T
+impl<T> asupersync::tracing_compat::Instrument for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl<T> core::any::Any for oraclemcp_guard::ddl_closure::DdlTriggerFact where T: 'static + ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for oraclemcp_guard::ddl_closure::DdlTriggerFact where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for oraclemcp_guard::ddl_closure::DdlTriggerFact where T: ?core::marker::Sized
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::borrow_mut(&mut self) -> &mut T
+impl<T> core::clone::CloneToUninit for oraclemcp_guard::ddl_closure::DdlTriggerFact where T: core::clone::Clone
+pub unsafe fn oraclemcp_guard::ddl_closure::DdlTriggerFact::clone_to_uninit(&self, *mut u8)
+impl<T> core::convert::From<T> for oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::from(T) -> T
+impl<T> opentelemetry::context::future_ext::FutureExt for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl<T> serde_core::de::DeserializeOwned for oraclemcp_guard::ddl_closure::DdlTriggerFact where T: for<'de> serde_core::de::Deserialize<'de>
+impl<T> tracing::instrument::Instrument for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl<T> tracing::instrument::WithSubscriber for oraclemcp_guard::ddl_closure::DdlTriggerFact
+impl<T> typenum::type_operators::Same for oraclemcp_guard::ddl_closure::DdlTriggerFact
+pub type oraclemcp_guard::ddl_closure::DdlTriggerFact::Output = T
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for oraclemcp_guard::ddl_closure::DdlTriggerFact where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for oraclemcp_guard::ddl_closure::DdlTriggerFact where V: ppv_lite86::types::MultiLane<T>
+pub fn oraclemcp_guard::ddl_closure::DdlTriggerFact::vzip(self) -> V
+pub fn oraclemcp_guard::ddl_closure::ddl_event_for_statement(&str) -> core::result::Result<core::option::Option<oraclemcp_guard::ddl_closure::DdlEvent>, oraclemcp_guard::mutation_closure::MutationUnavailableReason>
 pub mod oraclemcp_guard::edition_lifecycle
 pub enum oraclemcp_guard::edition_lifecycle::EditionLifecycleParse
 pub oraclemcp_guard::edition_lifecycle::EditionLifecycleParse::Invalid

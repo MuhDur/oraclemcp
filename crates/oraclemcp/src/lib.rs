@@ -14,6 +14,7 @@
 
 pub mod broker;
 pub mod cost_budget;
+pub mod ddl_closure;
 pub mod deferred_startup;
 pub mod dispatch;
 pub mod masking_salts;

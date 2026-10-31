@@ -408,6 +408,10 @@ pub enum CatalogQueryId {
     ClosureTriggers,
     /// Bounded source lines for one exact closure object.
     ClosureSource,
+    /// Current login schema for SCHEMA-trigger firing semantics.
+    DdlSessionContext,
+    /// Authoritative bounded SCHEMA/DATABASE-trigger snapshot in this container.
+    DdlTriggers,
     /// Exact target identity for a mutation scope.
     MutationTarget,
     /// All enabled and disabled triggers on one mutation target.
@@ -708,7 +712,7 @@ pub enum ReadQueryProvenance {
 
 impl CatalogQueryId {
     /// Every query ID, used by exhaustive contract tests.
-    pub const ALL: [Self; 195] = [
+    pub const ALL: [Self; 197] = [
         Self::SessionContext,
         Self::SessionRoles,
         Self::PolicyObservationSessionContext,
@@ -891,6 +895,8 @@ impl CatalogQueryId {
         Self::ClosureDependencies,
         Self::ClosureTriggers,
         Self::ClosureSource,
+        Self::DdlSessionContext,
+        Self::DdlTriggers,
         Self::MutationTarget,
         Self::MutationTriggers,
         Self::MutationTriggerColumns,
@@ -2719,6 +2725,26 @@ order by owner, name, referenced_owner, referenced_name"#
                 "read bounded triggers for a closure DML target",
                 DictionaryMetadata,
                 Diagnostic,
+            ),
+            Self::DdlSessionContext => (
+                "SELECT SYS_CONTEXT('USERENV','SESSION_USER') AS session_user, \
+                   SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS current_schema FROM SYS.DUAL",
+                EMPTY,
+                "bind current login schema for DDL system-trigger collection",
+                SessionContext,
+                ReadPurity,
+            ),
+            Self::DdlTriggers => (
+                "SELECT owner, trigger_name, table_owner, base_object_type, trigger_type, \
+                   triggering_event, status, when_clause, action_type, crossedition \
+                 FROM (SELECT owner, trigger_name, table_owner, base_object_type, trigger_type, \
+                   triggering_event, status, when_clause, action_type, crossedition \
+                   FROM SYS.DBA_TRIGGERS WHERE base_object_type IN ('SCHEMA','DATABASE') \
+                   ORDER BY owner, trigger_name) WHERE ROWNUM <= :1",
+                I,
+                "collect visible database and schema DDL triggers with positive catalog coverage",
+                InternalProof,
+                ReadPurity,
             ),
             Self::MutationTarget => (
                 "SELECT owner, object_name, object_id, edition_name, status, \
