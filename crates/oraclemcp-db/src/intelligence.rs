@@ -1759,6 +1759,8 @@ const MAX_DEPENDENT_SOURCE_BYTES: usize = 1_048_576;
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DependencyUncertaintyKind {
+    /// Session-visible dependencies were read without verifying full visibility.
+    VisibilityUnverified,
     /// A requested root was not visible as an exact dictionary object.
     UnresolvedRoot,
     /// A dependent's identity, status or modification facts were missing.
@@ -1884,7 +1886,7 @@ pub struct DependentsClosure {
 }
 
 impl DependentsClosure {
-    /// Number of frontier queries, bounded by max_depth + 1.
+    /// Number of statements, bounded by max_depth + 2 with a visibility retry.
     #[must_use]
     pub fn query_count(&self) -> usize {
         self.query_count
@@ -1897,7 +1899,7 @@ pub enum DependentsError {
     /// Caller-supplied roots or ceilings exceeded the closed API contract.
     #[error("dependency closure caps or roots are invalid")]
     InvalidCaps,
-    /// The dictionary comparison was denied or exposed hidden dependencies.
+    /// Session-visible reads were denied, or comparison exposed hidden dependencies.
     #[error("dependency dictionary visibility could not be established")]
     NoPrivilege,
     /// The underlying database operation failed.
@@ -1969,8 +1971,10 @@ fn dependency_node(row: &OracleRow, depth: usize) -> Option<DependentNode> {
     })
 }
 
-/// Read at most one statement per depth level, including the boundary probe
+/// Read one successful statement per depth level, including the boundary probe
 /// that distinguishes a leaf at the depth cap from a silently omitted child.
+/// If full visibility cannot be checked, one denied statement precedes the
+/// session-visible fallback; subsequent levels use that fallback directly.
 /// Values are bound as a bounded JSON frontier; stored object IDs keep a
 /// 1000-object frontier below Oracle's VARCHAR2 bind ceiling. Source is hashed
 /// and discarded, never returned in the approval payload.
@@ -2007,6 +2011,7 @@ pub async fn probe_dependents_transitive(
     let mut source_bytes = 0usize;
     let mut source_lines = 0usize;
     let mut query_count = 0;
+    let mut visibility_verified = true;
     for depth in 0..=caps.max_depth {
         if frontier.is_empty() {
             break;
@@ -2022,24 +2027,58 @@ pub async fn probe_dependents_transitive(
             break;
         }
         query_count += 1;
+        let binds = [
+            OracleBind::from(json),
+            OracleBind::I64((MAX_DEPENDENT_EDGES + 1) as i64),
+            OracleBind::I64((MAX_DEPENDENT_SOURCE_LINES + 1) as i64),
+        ];
         let rows = match run_catalog_query(
             cx,
             conn,
-            CatalogQueryId::DependentsTransitive,
-            &[
-                OracleBind::from(json),
-                OracleBind::I64((MAX_DEPENDENT_EDGES + 1) as i64),
-                OracleBind::I64((MAX_DEPENDENT_SOURCE_LINES + 1) as i64),
-            ],
+            if visibility_verified {
+                CatalogQueryId::DependentsTransitive
+            } else {
+                CatalogQueryId::DependentsTransitiveVisible
+            },
+            &binds,
         )
         .await
         {
             Ok(rows) => rows,
             Err(error)
-                if error.to_string().contains("ORA-00942")
-                    || error.to_string().contains("ORA-01031") =>
+                if matches!(
+                    oraclemcp_error::parse_ora_code(&error.to_string()),
+                    Some(942 | 1031)
+                ) =>
             {
-                return Err(DependentsError::NoPrivilege);
+                if !visibility_verified {
+                    return Err(DependentsError::NoPrivilege);
+                }
+                visibility_verified = false;
+                uncertainties.insert(DependencyUncertainty {
+                    reason: DependencyUncertaintyKind::VisibilityUnverified,
+                    object: None,
+                });
+                query_count += 1;
+                match run_catalog_query(
+                    cx,
+                    conn,
+                    CatalogQueryId::DependentsTransitiveVisible,
+                    &binds,
+                )
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(error)
+                        if matches!(
+                            oraclemcp_error::parse_ora_code(&error.to_string()),
+                            Some(942 | 1031)
+                        ) =>
+                    {
+                        return Err(DependentsError::NoPrivilege);
+                    }
+                    Err(error) => return Err(DependentsError::Database(error)),
+                }
             }
             Err(error) => return Err(DependentsError::Database(error)),
         };
@@ -2350,6 +2389,8 @@ mod transitive_dependents_tests {
         edges: Vec<(u64, u64, bool)>,
         calls: AtomicUsize,
         denied: bool,
+        verification_denied: bool,
+        verification_calls: AtomicUsize,
         source: String,
         transform: fn(&mut Vec<OracleRow>),
     }
@@ -2378,6 +2419,8 @@ mod transitive_dependents_tests {
                 edges: edges.iter().map(|(from, to)| (*from, *to, false)).collect(),
                 calls: AtomicUsize::new(0),
                 denied: false,
+                verification_denied: false,
+                verification_calls: AtomicUsize::new(0),
                 source: "PROCEDURE P AS BEGIN NULL; END;\n".into(),
                 transform: |_| {},
             }
@@ -2436,9 +2479,21 @@ mod transitive_dependents_tests {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
-            assert_eq!(sql, CatalogQueryId::DependentsTransitive.spec().sql);
+            assert!(
+                [
+                    CatalogQueryId::DependentsTransitive,
+                    CatalogQueryId::DependentsTransitiveVisible
+                ]
+                .iter()
+                .any(|id| id.spec().sql == sql),
+                "frontier SQL must stay in the closed dependency projection"
+            );
+            let verified = sql == CatalogQueryId::DependentsTransitive.spec().sql;
             self.calls.fetch_add(1, Ordering::SeqCst);
-            if self.denied {
+            if verified {
+                self.verification_calls.fetch_add(1, Ordering::SeqCst);
+            }
+            if self.denied || (verified && self.verification_denied) {
                 return Err(DbError::Query(
                     "ORA-00942: table or view does not exist".into(),
                 ));
@@ -2630,6 +2685,43 @@ mod transitive_dependents_tests {
                 probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default()).await,
                 Err(DependentsError::NoPrivilege)
             ));
+        });
+    }
+
+    #[test]
+    fn dependents_without_dba_visibility_retains_visible_transitive_nodes() {
+        run(|cx| async move {
+            let mut conn = GraphConnection::new(&[(2, 1), (3, 2)]);
+            conn.verification_denied = true;
+            let result = probe_dependents_transitive(&cx, &conn, &conn.root(), DepCaps::default())
+                .await
+                .expect("session-visible ALL_DEPENDENCIES closure remains available");
+            assert_eq!(
+                result
+                    .nodes
+                    .iter()
+                    .map(|node| node.depth)
+                    .collect::<Vec<_>>(),
+                vec![1, 2]
+            );
+            assert!(!result.truncated);
+            assert!(
+                result
+                    .uncertainties
+                    .iter()
+                    .any(|gap| gap.reason == DependencyUncertaintyKind::VisibilityUnverified)
+            );
+            assert_eq!(
+                conn.verification_calls.load(Ordering::SeqCst),
+                1,
+                "denied DBA verification must not be retried at each level"
+            );
+            assert_eq!(
+                conn.calls.load(Ordering::SeqCst),
+                4,
+                "three successful batched levels plus one denied verification"
+            );
+            assert_eq!(result.query_count(), 4);
         });
     }
 

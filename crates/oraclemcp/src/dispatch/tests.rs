@@ -16216,6 +16216,7 @@ mod dependents_preview {
 
     struct DependentsConnection {
         denied: bool,
+        verification_denied: bool,
         remote: bool,
         lost: bool,
     }
@@ -16268,7 +16269,8 @@ mod dependents_preview {
             sql: &str,
             binds: &[OracleBind],
         ) -> Result<Vec<OracleRow>, DbError> {
-            if sql != CatalogQueryId::DependentsTransitive.spec().sql {
+            let verified = sql == CatalogQueryId::DependentsTransitive.spec().sql;
+            if !verified && sql != CatalogQueryId::DependentsTransitiveVisible.spec().sql {
                 return Ok(Vec::new());
             }
             if self.lost {
@@ -16276,7 +16278,7 @@ mod dependents_preview {
                     "dependency read lost the wire".into(),
                 ));
             }
-            if self.denied {
+            if self.denied || (verified && self.verification_denied) {
                 return Err(DbError::Query("ORA-01031: insufficient privileges".into()));
             }
             let OracleBind::String(json) = &binds[0] else {
@@ -16337,6 +16339,7 @@ mod dependents_preview {
         OracleDispatcher::new_with_profile_level(
             Box::new(DependentsConnection {
                 denied,
+                verification_denied: false,
                 remote,
                 lost: false,
             }),
@@ -16386,6 +16389,42 @@ mod dependents_preview {
     }
 
     #[test]
+    fn dependents_unverified_visibility_lists_visible_objects_with_unknown_count() {
+        let dispatcher = OracleDispatcher::new_with_profile_level(
+            Box::new(DependentsConnection {
+                denied: false,
+                verification_denied: true,
+                remote: false,
+                lost: false,
+            }),
+            Some("dev".into()),
+            ddl_level(),
+        );
+        let preview = dispatcher
+            .dispatch(
+                "oracle_compile_object",
+                json!({
+                    "owner":"APP", "name":"PKG", "object_type":"PACKAGE"
+                }),
+            )
+            .expect("visible dependents preview");
+        assert_eq!(preview["impact"]["dependents"]["status"], "estimated");
+        let value = &preview["impact"]["dependents"]["value"];
+        assert_eq!(value["predicted_invalid_set"][0]["name"], "P_DEP");
+        assert_eq!(value.get("predicted_invalid_count"), Some(&Value::Null));
+        assert!(
+            value["uncertainties"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|gap| gap["reason"] == "visibility_unverified")
+        );
+        assert_eq!(preview["gate_decision"], "allow");
+        assert!(preview["confirmation"]["confirm"].is_string());
+        assert!(dispatcher.quarantine.lock().unwrap().is_none());
+    }
+
+    #[test]
     fn dependents_remote_uncertainty_never_becomes_zero() {
         let preview = dispatcher(false, true)
             .dispatch(
@@ -16411,6 +16450,7 @@ mod dependents_preview {
         let dispatcher = OracleDispatcher::new_with_profile_level(
             Box::new(DependentsConnection {
                 denied: false,
+                verification_denied: false,
                 remote: false,
                 lost: true,
             }),

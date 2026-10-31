@@ -4020,9 +4020,9 @@ fn live_explain_plan_cost_estimate_orders_full_scan_above_pk_lookup() {
     });
 }
 
-/// Real bounded closure for a package, dependent view and procedure. Accounts
-/// without dictionary visibility receive the explicit NoPrivilege outcome;
-/// the privileged FREE23 approval fixture separately requires full prediction.
+/// Real bounded closure for a package, dependent view and procedure. A session
+/// that can read DBA_DEPENDENCIES must obtain an available result; it cannot
+/// turn a collector regression into a successful NoPrivilege observation.
 #[test]
 fn live_probe_dependents_transitive_lists_view_and_proc() {
     run_with_cx(|cx| async move {
@@ -4034,6 +4034,22 @@ fn live_probe_dependents_transitive_lists_view_and_proc() {
         .await
         else {
             return;
+        };
+
+        let dba_readable = match conn
+            .query_rows(&cx, "SELECT OWNER FROM SYS.DBA_DEPENDENCIES WHERE 1=0", &[])
+            .await
+        {
+            Ok(_) => true,
+            Err(error)
+                if matches!(
+                    oraclemcp_error::parse_ora_code(&error.to_string()),
+                    Some(942 | 1031)
+                ) =>
+            {
+                false
+            }
+            Err(error) => panic!("DBA_DEPENDENCIES availability probe failed: {error}"),
         };
 
         // Resolve the owner from the live session (current schema / session user).
@@ -4129,10 +4145,113 @@ fn live_probe_dependents_transitive_lists_view_and_proc() {
                 assert_eq!(proc_dep.object.object_type, "PROCEDURE");
                 assert_eq!(proc_dep.depth, 1);
             }
-            Err(DependentsError::NoPrivilege) => {
+            Err(DependentsError::NoPrivilege) if !dba_readable => {
                 eprintln!("[live] dependency dictionary visibility unavailable(no_privilege)")
             }
             Err(error) => panic!("bounded dependency probe failed: {error}"),
         }
+    });
+}
+
+/// A native three-procedure chain. The last procedure has no direct edge to
+/// the root, so a first-hop-only collector must fail this live case.
+#[test]
+fn live_probe_dependents_transitive_pure_chain() {
+    run_with_cx(|cx| async move {
+        let Some(conn) = connect_or_skip(
+            &cx,
+            "live_probe_dependents_transitive_pure_chain",
+            test_opts(),
+        )
+        .await
+        else {
+            return;
+        };
+        let info = conn
+            .describe(&cx)
+            .await
+            .expect("describe pure-chain session");
+        let owner = info
+            .current_schema
+            .or(info.session_user)
+            .expect("pure-chain owner");
+        let id = PlanStatementId::generate().expect("fixture randomness");
+        let suffix = &id.as_str()[5..13];
+        let names = [
+            format!("D4Q_{suffix}_0"),
+            format!("D4Q_{suffix}_1"),
+            format!("D4Q_{suffix}_2"),
+        ];
+        let qualified = |name: &str| format!("\"{}\".\"{name}\"", owner.replace('"', "\"\""));
+        let outcome=async {
+            for index in 0..3 {
+                let body=if index==0 {"NULL;".to_owned()}else{format!("{};",qualified(&names[index-1]))};
+                conn.execute(&cx,&format!("CREATE OR REPLACE PROCEDURE {} AS BEGIN {body} END;",qualified(&names[index])),&[])
+                    .await.map_err(|error|error.to_string())?;
+            }
+            let status=conn.query_rows(&cx,"SELECT OBJECT_NAME, STATUS FROM SYS.ALL_OBJECTS WHERE OWNER=:1 AND OBJECT_NAME IN (:2,:3,:4) AND OBJECT_TYPE='PROCEDURE'",
+                &[OracleBind::String(owner.clone()),OracleBind::String(names[0].clone()),OracleBind::String(names[1].clone()),OracleBind::String(names[2].clone())]).await.map_err(|error|error.to_string())?;
+            let edges=conn.query_rows(&cx,"SELECT NAME, REFERENCED_NAME FROM SYS.ALL_DEPENDENCIES WHERE OWNER=:1 AND REFERENCED_OWNER=:2 AND NAME IN (:3,:4)",
+                &[OracleBind::String(owner.clone()),OracleBind::String(owner.clone()),OracleBind::String(names[1].clone()),OracleBind::String(names[2].clone())]).await.map_err(|error|error.to_string())?;
+            let closure=probe_dependents_transitive(&cx,&conn,&[DependentObject{owner:owner.clone(),name:names[0].clone(),object_type:"PROCEDURE".into()}],DepCaps::default())
+                .await.map_err(|error|error.to_string())?;
+            Ok::<_,String>((status,edges,closure))
+        }.await;
+        let mut cleanup_errors = Vec::new();
+        for name in names.iter().rev() {
+            if let Err(error) = conn
+                .execute(&cx, &format!("DROP PROCEDURE {}", qualified(name)), &[])
+                .await
+                && !matches!(
+                    oraclemcp_error::parse_ora_code(&error.to_string()),
+                    Some(4043)
+                )
+            {
+                cleanup_errors.push(error.to_string());
+            }
+        }
+        conn.close(&cx)
+            .await
+            .expect("close pure-chain fixture connection");
+        assert!(
+            cleanup_errors.is_empty(),
+            "pure-chain cleanup: {cleanup_errors:?}"
+        );
+        let (status, edges, closure) = outcome.expect("native pure-chain observation");
+        assert_eq!(status.len(), 3, "all fixture procedures must exist");
+        assert!(
+            status.iter().all(|row| row.text("STATUS") == Some("VALID")),
+            "fixture must be valid before observing: {status:?}"
+        );
+        let edges = edges
+            .iter()
+            .map(|row| {
+                (
+                    row.text("NAME").unwrap().to_owned(),
+                    row.text("REFERENCED_NAME").unwrap().to_owned(),
+                )
+            })
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            edges,
+            std::collections::BTreeSet::from([
+                (names[1].clone(), names[0].clone()),
+                (names[2].clone(), names[1].clone())
+            ]),
+            "Oracle must confirm a pure chain with no last-to-root shortcut"
+        );
+        assert!(!closure.truncated);
+        assert_eq!(closure.nodes.len(), 2);
+        for (name, depth) in [(&names[1], 1), (&names[2], 2)] {
+            let node = closure
+                .nodes
+                .iter()
+                .find(|node| &node.object.name == name)
+                .expect("transitive native dependent");
+            assert_eq!(node.depth, depth);
+        }
+        println!(
+            "native pure-chain dependency closure: exact edges, distances 1 and 2; no shortcut to root"
+        );
     });
 }

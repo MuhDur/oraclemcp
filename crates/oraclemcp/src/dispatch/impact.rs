@@ -2348,14 +2348,31 @@ mod tests {
                     let conn=RustOracleConnection::connect(&cx,connect.clone()).await.map_err(|error|error.to_string())?;
                     let source=format!("CREATE OR REPLACE PACKAGE {user}.PKG AS PROCEDURE p; END;");
                     conn.execute(&cx,&source,&[]).await.map_err(|error|error.to_string())?;
+                    conn.execute(&cx,&format!("CREATE PROCEDURE {user}.P1 AS BEGIN {user}.PKG.p; END;"),&[]).await.map_err(|error|error.to_string())?;
+                    conn.execute(&cx,&format!("CREATE PROCEDURE {user}.P2 AS BEGIN {user}.P1; END;"),&[]).await.map_err(|error|error.to_string())?;
+                    match conn.query_rows(&cx,"SELECT OWNER FROM SYS.DBA_DEPENDENCIES WHERE 1=0",&[]).await {
+                        Err(error) if matches!(oraclemcp_error::parse_ora_code(&error.to_string()),Some(942|1031)) => (),
+                        result => return Err(format!("low-privilege fixture must lack DBA_DEPENDENCIES: {result:?}")),
+                    }
+                    let valid=conn.query_rows(&cx,"SELECT OBJECT_NAME FROM USER_OBJECTS WHERE OBJECT_NAME IN ('PKG','P1','P2') AND STATUS='VALID'",&[]).await.map_err(|error|error.to_string())?;
+                    if valid.len()!=3 {return Err(format!("low-privilege dependency fixture is not valid: {valid:?}"));}
                     conn.close(&cx).await.map_err(|error|error.to_string())?;
                     let preview=live_dependency_preview(&cx,connect,&source).await?;
-                    if preview["impact"]["dependents"]["status"]!="unavailable"
-                        || preview["impact"]["dependents"]["reason"]!="no_privilege"
+                    let dependents=&preview["impact"]["dependents"];
+                    let value=&dependents["value"];
+                    if dependents["status"]!="estimated"
+                        || value.get("predicted_invalid_count")!=Some(&Value::Null)
+                        || !value["uncertainties"].as_array().is_some_and(|gaps|gaps.iter().any(|gap|gap["reason"]=="visibility_unverified"))
                         || preview["gate_decision"]!="allow" || !preview["confirmation"]["confirm"].is_string() {
-                        return Err(format!("R36 visibility observation suppressed working preview: {preview}"));
+                        return Err(format!("session-visible closure must be uncertain and preserve confirmation: {preview}"));
                     }
-                    println!("FREE23 native low-privilege preview: unavailable(no_privilege), confirmation preserved");
+                    let predicted=value["predicted_invalid_set"].as_array().ok_or("visible predicted set absent")?;
+                    let actual=predicted.iter().map(|item|Ok((item["owner"].as_str().ok_or("visible owner")?.to_owned(),item["name"].as_str().ok_or("visible name")?.to_owned(),item["object_type"].as_str().ok_or("visible type")?.to_owned())))
+                        .collect::<Result<std::collections::BTreeSet<_>,String>>()?;
+                    let expected=std::collections::BTreeSet::from([(user.clone(),"P1".to_owned(),"PROCEDURE".to_owned()),(user.clone(),"P2".to_owned(),"PROCEDURE".to_owned())]);
+                    if actual!=expected {return Err(format!("own transitive dependents: expected {expected:?}, got {actual:?}"));}
+                    if value["truncated"]!=false {return Err(format!("small visible closure truncated: {value}"));}
+                    println!("FREE23 native low-privilege preview: own P1/P2 transitive dependents, count=null, visibility_unverified, confirmation preserved");
                     Ok::<(),String>(())
                 }.await;
                 admin.execute(&cx,&format!("DROP USER {user} CASCADE"),&[]).await.map_err(|error|format!("fixture user cleanup: {error}"))?;
