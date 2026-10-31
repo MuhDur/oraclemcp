@@ -4,6 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CI_WORKFLOW="${ORACLEMCP_CI_WORKFLOW:-$ROOT/.github/workflows/ci.yml}"
 RELEASE_WORKFLOW="${ORACLEMCP_RELEASE_WORKFLOW:-$ROOT/.github/workflows/release.yml}"
 MCP_WORKFLOW="${ORACLEMCP_MCP_WORKFLOW:-$ROOT/.github/workflows/publish-mcp.yml}"
 DOCKER_WORKFLOW="${ORACLEMCP_DOCKER_WORKFLOW:-$ROOT/.github/workflows/docker.yml}"
@@ -143,6 +144,12 @@ steps_start = next(
 if steps_start is None:
     raise SystemExit(1)
 
+if mode == "pwsh-windows-line":
+    for raw in lines[start + 1 : steps_start]:
+        mapping = re.fullmatch(r"    (if|continue-on-error):\s*(.*)", strip_comment(raw))
+        if mapping and (mapping[1] == "if" or scalar(mapping[2]) != "false"):
+            raise SystemExit(1)
+
 step_fields = {
     "name",
     "run",
@@ -181,6 +188,8 @@ for raw in lines[steps_start + 1 : end]:
         continue
     if current is None:
         continue
+    if block_run and not raw.strip():
+        continue
     if block_run and re.match(r"^          ", raw):
         executable = strip_comment(raw[10:]).strip()
         if executable:
@@ -210,6 +219,15 @@ def run_lines(step: dict[str, str | list[str] | None]) -> list[str]:
 
 
 def fail_closed(step: dict[str, str | list[str] | None]) -> bool:
+    if mode in {"pwsh-line", "pwsh-windows-line"}:
+        expected_if = "runner.os == 'Windows'" if mode == "pwsh-windows-line" else None
+        return (
+            step["uses"] is None
+            and step["if"] == expected_if
+            and step["continue-on-error"] in {None, "false"}
+            and step["shell"] == "pwsh"
+            and step["working-directory"] is None
+        )
     return (
         step["uses"] is None
         and step["if"] is None
@@ -227,6 +245,8 @@ def matches(step: dict[str, str | list[str] | None]) -> bool:
         return executable == [command]
     if mode == "line":
         return command in executable and "set -euo pipefail" in executable
+    if mode in {"pwsh-line", "pwsh-windows-line"}:
+        return command in executable and '$ErrorActionPreference = "Stop"' in executable
     raise SystemExit(2)
 
 
@@ -358,5 +378,63 @@ require "$DOCKER_WORKFLOW" 'if [[ "$VERSION" == *-* ]]; then'
 require "$DOCKER_WORKFLOW" 'rolling_image=""'
 require "$DOCKER_WORKFLOW" 'echo "rolling_image=$rolling_image"'
 require "$DOCKER_WORKFLOW" "if: needs.verify-release.outputs.rolling_image != ''"
+
+# Check executable commands in the actual Windows steps. The runtime job stays
+# advisory until native runs pass; the release acceptance job must fail closed.
+require_exact "$CI_WORKFLOW" '      - name: Windows proof tier'
+while IFS= read -r command; do
+  require_job_run_contract "$CI_WORKFLOW" windows-rust "$command" \
+    "cargo test workspace on Windows" pwsh-line
+done <<'WINDOWS_PROOF_COMMANDS'
+& cargo test -p $Package --lib --bins -- $Filter | Tee-Object -Variable testOutput
+if ($LASTEXITCODE -ne 0) { throw "$Package / $Filter failed: $LASTEXITCODE" }
+foreach ($match in [regex]::Matches(($testOutput -join "`n"), 'test result: ok\. (\d+) passed;')) {
+$passed += [int]$match.Groups[1].Value
+if ($passed -lt 1) { throw "$Package / $Filter selected no passing tests" }
+Invoke-WindowsTest oraclemcp-audit windows_
+Invoke-WindowsTest oraclemcp-core file_store::tests::
+Invoke-WindowsTest oraclemcp worm_parent_
+Invoke-WindowsTest oraclemcp startup_audit_parent_
+Invoke-WindowsTest oraclemcp build_auditor_
+Invoke-WindowsTest oraclemcp startup_performs_authenticated_mixed_key_rotation_end_to_end
+Invoke-WindowsTest oraclemcp service_lifecycle::tests::
+Invoke-WindowsTest oraclemcp broker::tests
+WINDOWS_PROOF_COMMANDS
+
+while IFS= read -r command; do
+  require_job_run_contract "$RELEASE_WORKFLOW" artifact-acceptance "$command" "" pwsh-windows-line
+done <<'WINDOWS_RELEASE_COMMANDS'
+$version = ([regex]::Match((Get-Content crates/oraclemcp/Cargo.toml -Raw), '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')).Groups[1].Value
+if ($LASTEXITCODE -ne 0) { throw "install dry-run failed: $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "install failed: $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "service dry-run failed: $LASTEXITCODE" }
+$env:XDG_STATE_HOME = Join-Path $state "state-home"
+$env:XDG_RUNTIME_DIR = Join-Path $state "runtime"
+$ticketJson = & $binary --json dashboard --url $origin --no-open
+if ([int]$paired.StatusCode -ne 303) { throw "dashboard pairing did not return 303" }
+$route = "/operator/v1/change-proposals/draft"
+if ([int]$draft.StatusCode -ne 200) { throw "operator draft failed: $($draft.StatusCode)" }
+if ($reply.data.proposal.statement_count -ne 1) { throw "operator draft did not persist one statement" }
+if (-not $server.WaitForExit(10000)) { throw "serve did not stop" }
+if (-not (Test-Path -LiteralPath "$audit.anchor" -PathType Leaf)) { throw "signed audit anchor is missing" }
+if (-not ($records | Where-Object { $_.tool -eq "operator_api" -and $_.outcome -eq "SUCCEEDED" })) { throw "no successful operator audit record" }
+& $binary audit verify $audit
+if ($LASTEXITCODE -ne 0) { throw "audit verify failed: $LASTEXITCODE" }
+if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw "wrong owner at $Path" }
+if (-not $acl.AreAccessRulesProtected) { throw "inherited DACL at $Path" }
+if ($rules.Count -ne 1) { throw "DACL is not owner-only at $Path" }
+$rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and $env:ORACLEMCP_WINDOWS_ACL_NEGATIVE -eq "true") {
+$acl.AddAccessRule($broad)
+Set-Acl -LiteralPath $auditDirectory -AclObject $acl
+Assert-PrivateWindowsPath $auditDirectory
+Assert-PrivateWindowsPath $audit
+Assert-PrivateWindowsPath "$audit.anchor"
+Assert-PrivateWindowsPath $store
+Assert-PrivateWindowsPath $proposals
+Assert-PrivateWindowsPath $proposalFiles[0].FullName
+WINDOWS_RELEASE_COMMANDS
+require "$RELEASE_WORKFLOW" 'windows_acl_negative_rehearsal:'
+require_exact "$RELEASE_WORKFLOW" "          ORACLEMCP_WINDOWS_ACL_NEGATIVE: \${{ github.event_name == 'workflow_dispatch' && inputs.windows_acl_negative_rehearsal }}"
 
 echo "release-security-workflows: OK dashboard, MCP, image, artifact, and recovery contracts"

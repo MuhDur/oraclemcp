@@ -21,7 +21,13 @@ name: Release
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      windows_acl_negative_rehearsal:
+        description: "Broaden the run-owned Windows audit DACL; acceptance must fail. Dispatch never publishes."
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -562,39 +568,33 @@ jobs:
           fi
           python3 scripts/release_artifact_acceptance.py --binary "$binary" --target "${{ matrix.target }}"
 
-      - name: Set up Rust for Windows durable-state acceptance
-        if: runner.os == 'Windows'
-        uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
-        with:
-          toolchain: ${{ env.RUST_TOOLCHAIN }}
-
       - name: Windows durable-state acceptance
         if: runner.os == 'Windows'
         shell: pwsh
+        env:
+          ORACLEMCP_WINDOWS_ACL_NEGATIVE: ${{ github.event_name == 'workflow_dispatch' && inputs.windows_acl_negative_rehearsal }}
         run: |
           $ErrorActionPreference = "Stop"
           $target = "${{ matrix.target }}"
           $archive = Join-Path $PWD "oraclemcp-$target.zip"
           $prefix = Join-Path $env:RUNNER_TEMP "oraclemcp-release-installed"
-          $version = ([regex]::Match((Get-Content Cargo.toml -Raw), 'version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')).Groups[1].Value
+          $version = ([regex]::Match((Get-Content crates/oraclemcp/Cargo.toml -Raw), '(?m)^version\s*=\s*"([0-9]+\.[0-9]+\.[0-9]+)"')).Groups[1].Value
           if ([string]::IsNullOrWhiteSpace($version)) { throw "could not derive release version" }
 
-          .\install.ps1 -DryRun -Version $version -Offline $archive -Prefix $prefix -Verify checksum-only
+          & pwsh -NoProfile -File .\install.ps1 -DryRun -Version $version -Offline $archive -Prefix $prefix -Verify checksum-only
+          if ($LASTEXITCODE -ne 0) { throw "install dry-run failed: $LASTEXITCODE" }
           "{check=install_dry_run,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
-          .\install.ps1 -Version $version -Offline $archive -Prefix $prefix -Verify checksum-only
+          & pwsh -NoProfile -File .\install.ps1 -Version $version -Offline $archive -Prefix $prefix -Verify checksum-only
+          if ($LASTEXITCODE -ne 0) { throw "install failed: $LASTEXITCODE" }
           "{check=install,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
           $binary = Join-Path $prefix "bin\oraclemcp.exe"
           if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw "installer did not produce $binary" }
-          & $binary service install --dry-run
-          if ($LASTEXITCODE -ne 0) { throw "service dry-run failed: $LASTEXITCODE" }
-          "{check=service_dry_run,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
-
           $state = Join-Path $env:RUNNER_TEMP "oraclemcp-release-state"
           $audit = Join-Path $state "audit\audit.jsonl"
           New-Item -ItemType Directory -Path $state -Force | Out-Null
           $config = Join-Path $state "profiles.toml"
-          $auditTomlPath = $audit.Replace("\\", "/")
+          $auditTomlPath = $audit.Replace('\', '/')
           @"
           schema_version = 2
           default_profile = "release_acceptance"
@@ -611,26 +611,115 @@ jobs:
           "@ | Set-Content -LiteralPath $config -NoNewline
           $env:ORACLEMCP_CONFIG = $config
           $env:ORACLEMCP_AUDIT_KEY = "release-acceptance-key-0123456789abcdef"
+          $env:XDG_STATE_HOME = Join-Path $state "state-home"
+          $env:XDG_RUNTIME_DIR = Join-Path $state "runtime"
+          & $binary service install --dry-run
+          if ($LASTEXITCODE -ne 0) { throw "service dry-run failed: $LASTEXITCODE" }
+          "{check=service_dry_run,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           $port = 18765
           $stderr = Join-Path $state "serve.stderr"
           $stdout = Join-Path $state "serve.stdout"
           $server = Start-Process -FilePath $binary -ArgumentList @("serve", "--listen", "127.0.0.1:$port", "--allow-no-auth") -PassThru -RedirectStandardError $stderr -RedirectStandardOutput $stdout
+          $client = $null
           try {
-            Start-Sleep -Seconds 3
-            if ($server.HasExited) { throw "serve exited early ($($server.ExitCode)): $(Get-Content -LiteralPath $stderr -Raw)" }
+            $origin = "http://127.0.0.1:$port"
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 30; $attempt++) {
+              if ($server.HasExited) { throw "serve exited early ($($server.ExitCode)): $(Get-Content -LiteralPath $stderr -Raw)" }
+              try {
+                $health = Invoke-WebRequest -Uri "$origin/healthz" -TimeoutSec 1
+                if ($health.StatusCode -eq 200) { $ready = $true; break }
+              } catch {
+                if ($attempt -eq 29) { throw }
+              }
+              Start-Sleep -Milliseconds 100
+            }
+            if (-not $ready) { throw "serve readiness deadline exceeded" }
             "{check=serve,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+            # Drafting uses the actual authenticated operator API and appends
+            # signed records without applying SQL or opening a DB connection.
+            $ticketJson = & $binary --json dashboard --url $origin --no-open
+            if ($LASTEXITCODE -ne 0) { throw "dashboard pairing failed: $LASTEXITCODE" }
+            $ticket = $ticketJson | ConvertFrom-Json
+            $handler = [System.Net.Http.HttpClientHandler]::new()
+            $handler.AllowAutoRedirect = $false
+            $client = [System.Net.Http.HttpClient]::new($handler)
+            $client.Timeout = [TimeSpan]::FromSeconds(10)
+            $client.DefaultRequestHeaders.Add("Origin", $origin)
+            $client.DefaultRequestHeaders.Add("Sec-Fetch-Site", "same-origin")
+            $form = [System.Collections.Generic.Dictionary[string,string]]::new()
+            $form.Add("pairing_code", $ticket.pairing_code)
+            $pairBody = [System.Net.Http.FormUrlEncodedContent]::new($form)
+            $paired = $client.PostAsync("$origin/dashboard/pair", $pairBody).GetAwaiter().GetResult()
+            if ([int]$paired.StatusCode -ne 303) { throw "dashboard pairing did not return 303" }
+            $session = $client.GetStringAsync("$origin/dashboard/session").GetAwaiter().GetResult() | ConvertFrom-Json
+            $route = "/operator/v1/change-proposals/draft"
+            $action = @($session.action_tickets | Where-Object { $_.method -eq "POST" -and $_.path -eq $route })
+            if ($action.Count -ne 1) { throw "missing operator draft action ticket" }
+            $client.DefaultRequestHeaders.Add($session.csrf_header, $session.csrf_token)
+            $client.DefaultRequestHeaders.Add($session.action_ticket_header, $action[0].ticket)
+            $payload = @{
+              profile = "release_acceptance"; author = "human"; title = "Windows release acceptance"
+              statements = @(@{ sql_template = "SELECT 1 FROM SYS.DUAL"; unit = "read" })
+            } | ConvertTo-Json -Depth 5
+            $body = [System.Net.Http.StringContent]::new($payload, [Text.Encoding]::UTF8, "application/json")
+            $draft = $client.PostAsync("$origin$route", $body).GetAwaiter().GetResult()
+            if ([int]$draft.StatusCode -ne 200) { throw "operator draft failed: $($draft.StatusCode)" }
+            $reply = $draft.Content.ReadAsStringAsync().GetAwaiter().GetResult() | ConvertFrom-Json
+            if ($reply.data.proposal.statement_count -ne 1) { throw "operator draft did not persist one statement" }
+            "{check=audit_append,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           } finally {
-            if (-not $server.HasExited) { Stop-Process -Id $server.Id -Force }
+            if ($null -ne $client) { $client.Dispose() }
+            if (-not $server.HasExited) { $server.Kill() }
+            if (-not $server.WaitForExit(10000)) { throw "serve did not stop" }
           }
 
           if (-not (Test-Path -LiteralPath $audit -PathType Leaf)) { throw "serve did not create the signed audit log" }
+          if (-not (Test-Path -LiteralPath "$audit.anchor" -PathType Leaf)) { throw "signed audit anchor is missing" }
+          $records = @(Get-Content -LiteralPath $audit | Where-Object { $_.Trim() } | ForEach-Object { $_ | ConvertFrom-Json })
+          if (-not ($records | Where-Object { $_.tool -eq "operator_api" -and $_.outcome -eq "SUCCEEDED" })) { throw "no successful operator audit record" }
           & $binary audit verify $audit
           if ($LASTEXITCODE -ne 0) { throw "audit verify failed: $LASTEXITCODE" }
           "{check=audit_verify,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
-          cargo test -p oraclemcp-audit --lib -- windows_audit_fresh_parent_and_file_owner_is_token_user_with_exact_dacl
-          if ($LASTEXITCODE -ne 0) { throw "audit ACL verifier failed: $LASTEXITCODE" }
-          "{check=audit_acl_verify,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+          function Assert-PrivateWindowsPath([string]$Path) {
+            $item = Get-Item -LiteralPath $Path -Force
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "reparse point at $Path" }
+            $acl = Get-Acl -LiteralPath $Path
+            $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+            if ($acl.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $sid.Value) { throw "wrong owner at $Path" }
+            if (-not $acl.AreAccessRulesProtected) { throw "inherited DACL at $Path" }
+            $rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]))
+            if ($rules.Count -ne 1) { throw "DACL is not owner-only at $Path" }
+            $rule = $rules[0]
+            $inheritance = [Security.AccessControl.InheritanceFlags]::None
+            if ($item.PSIsContainer) { $inheritance = [Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit" }
+            if ($rule.IdentityReference.Value -ne $sid.Value -or $rule.IsInherited -or
+                $rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+                $rule.FileSystemRights -ne [Security.AccessControl.FileSystemRights]::FullControl -or
+                $rule.InheritanceFlags -ne $inheritance -or
+                $rule.PropagationFlags -ne [Security.AccessControl.PropagationFlags]::None) { throw "unexpected DACL at $Path" }
+          }
+          $auditDirectory = Split-Path -Parent $audit
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and $env:ORACLEMCP_WINDOWS_ACL_NEGATIVE -eq "true") {
+            $acl = Get-Acl -LiteralPath $auditDirectory
+            $world = [Security.Principal.SecurityIdentifier]::new("S-1-1-0")
+            $broad = [Security.AccessControl.FileSystemAccessRule]::new($world, [Security.AccessControl.FileSystemRights]::ReadAndExecute, [Security.AccessControl.InheritanceFlags]"ContainerInherit, ObjectInherit", [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow)
+            $acl.AddAccessRule($broad)
+            Set-Acl -LiteralPath $auditDirectory -AclObject $acl
+          }
+          Assert-PrivateWindowsPath $auditDirectory
+          Assert-PrivateWindowsPath $audit
+          Assert-PrivateWindowsPath "$audit.anchor"
+          $store = Join-Path $env:XDG_STATE_HOME "oraclemcp"
+          Assert-PrivateWindowsPath $store
+          $proposals = Join-Path $store "change-proposals"
+          Assert-PrivateWindowsPath $proposals
+          $proposalFiles = @(Get-ChildItem -LiteralPath $proposals -File -Filter "*.json")
+          if ($proposalFiles.Count -ne 1) { throw "expected one persisted proposal" }
+          Assert-PrivateWindowsPath $proposalFiles[0].FullName
+          "{check=acl_verify,result=pass}" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
 
   release:
     name: publish GitHub release

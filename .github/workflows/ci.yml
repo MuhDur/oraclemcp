@@ -412,12 +412,23 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo test -p oraclemcp-audit --lib -- windows_audit_
-          cargo test -p oraclemcp-core --lib -- file_store::windows
-          cargo test -p oraclemcp --lib --bins -- worm_parent_
-          cargo test -p oraclemcp --lib --bins -- startup_audit_parent_
-          cargo test -p oraclemcp --lib --bins -- build_auditor_
-          cargo test -p oraclemcp --lib -- broker::tests
+          function Invoke-WindowsTest([string]$Package, [string]$Filter) {
+            & cargo test -p $Package --lib --bins -- $Filter | Tee-Object -Variable testOutput
+            if ($LASTEXITCODE -ne 0) { throw "$Package / $Filter failed: $LASTEXITCODE" }
+            $passed = 0
+            foreach ($match in [regex]::Matches(($testOutput -join "`n"), 'test result: ok\. (\d+) passed;')) {
+              $passed += [int]$match.Groups[1].Value
+            }
+            if ($passed -lt 1) { throw "$Package / $Filter selected no passing tests" }
+          }
+          Invoke-WindowsTest oraclemcp-audit windows_
+          Invoke-WindowsTest oraclemcp-core file_store::tests::
+          Invoke-WindowsTest oraclemcp worm_parent_
+          Invoke-WindowsTest oraclemcp startup_audit_parent_
+          Invoke-WindowsTest oraclemcp build_auditor_
+          Invoke-WindowsTest oraclemcp startup_performs_authenticated_mixed_key_rotation_end_to_end
+          Invoke-WindowsTest oraclemcp service_lifecycle::tests::
+          Invoke-WindowsTest oraclemcp broker::tests
       - name: cargo test workspace on Windows
         env:
           # windows-msvc link time is dominated by debuginfo; drop it to cut the

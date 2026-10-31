@@ -71,7 +71,8 @@ exactly. Their result enters the release proof, not the per-push check.
 | `cargo deny check` (supply-chain) | local / `ci.yml:supply-chain` | pre-push + every push+PR | 0 → 1 | required |
 | public-API lock (`cargo public-api` + `cargo semver-checks`) | `ci.yml:api-lock` | every push+PR | 1 | required (planned 0.12.0 breaks are recorded in `CHANGELOG.md`; committed snapshots reject unreviewed API drift) |
 | installer lint + built-artifact smoke, Windows installer/service | `ci.yml:installer`, `windows-installer` | every push+PR | 1 | required |
-| native-Windows runtime workspace tests | `ci.yml:windows-rust` | every push+PR | 1 | advisory (pending `oraclemcp-xuaea`, see README Limitations) |
+| native-Windows runtime workspace tests | `ci.yml:windows-rust`: `Windows proof tier`, then workspace `--lib --bins` | every push+PR+dispatch | 1 | advisory (pending `oraclemcp-xuaea`, see README Limitations) |
+| installed Windows release audit and durable state | `release.yml:artifact-acceptance`: `Windows durable-state acceptance` | tag push + dispatch | 3 | release; native confirmation pending |
 | PL/SQL intelligence feature matrix | `ci.yml:plsql-intelligence` | every push+PR | 1 | advisory (operator steering 2026-09-16: feature build/tests are green locally, but the hosted 2-core runner OOMs/times out; runner sizing/parallelism follow-up `oraclemcp-xoflp.3.2` restores the required gate) |
 | thin-driver build (`cargo build -p oraclemcp --features dashboard-bundle`) | step of `ci.yml:pinned-nightly` (the `thin-db` job was removed as a duplicate) | every push+PR | 1 | required |
 | `sensitive-data` / `secret_scan.sh` structural + denylist scan | `ci.yml:sensitive-data` | every push+PR | 1 | required |
@@ -88,6 +89,15 @@ exactly. Their result enters the release proof, not the per-push check.
 | `scripts/local_release_gate.sh` (D3.2: synthetic TCPS proof, optional real-ADB delegation) | local, pre-tag | on demand before a release tag | 3 | n/a (local, not a CI job) |
 | full release pipeline (cross-platform build, sign, publish crates.io/GHCR/MCP registry) | `release.yml` | push tag `v*` | 3 | release |
 | `docker.yml`, `publish-mcp.yml` | manual recovery/repair auxiliaries (AGENTS.md "Release flow") | `workflow_dispatch` only | 3 | manual |
+
+The Windows proof step checks each Cargo exit status and rejects filters that
+select no passing tests. Release acceptance installs the actual archive, drafts
+one proposal through authenticated loopback HTTP without applying SQL, verifies
+its signed audit records and anchor, and checks the actual audit and state ACLs.
+Dispatching with `windows_acl_negative_rehearsal=true` adds an Everyone ACE to
+the run-owned audit directory; the same ACL check must fail. Native Windows
+rehearsals and three successive green runtime jobs are still required before
+the advisory comments can be removed and the lane promoted.
 
 Live-Oracle Rust test suites (`crates/*/tests/live_*`, `oci_tcps_e2e.rs`) are
 gated behind the `live-xe` Cargo feature **and** a runtime reachability probe:

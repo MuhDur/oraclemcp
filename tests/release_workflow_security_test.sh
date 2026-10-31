@@ -401,6 +401,48 @@ grep -Fx 'rolling_image=ghcr.io/muhdur/oraclemcp:latest' "$TMP/stable-output" >/
 
 # Static contracts reject removal or reordering of each release gate.
 bash "$ROOT/scripts/validate_release_security_workflows.sh" >/dev/null
+python3 - "$ROOT" "$TMP" <<'PY'
+from pathlib import Path
+import sys
+
+root, target = map(Path, sys.argv[1:])
+ci = (root / ".github/workflows/ci.yml").read_text()
+release = (root / ".github/workflows/release.yml").read_text()
+cases = [
+    ("ci-zero-filter", ci, "file_store::tests::", "file_store::windows"),
+    ("ci-hidden-cargo-failure", ci,
+     'if ($LASTEXITCODE -ne 0) { throw "$Package / $Filter failed: $LASTEXITCODE" }', "# removed exit check"),
+    ("ci-zero-tests-pass", ci, 'if ($passed -lt 1)', 'if ($passed -lt 0)'),
+    ("ci-ignored-proof", ci, "      - name: Windows proof tier\n",
+     "      - name: Windows proof tier\n        continue-on-error: true\n"),
+    ("release-wrong-version", release, "Get-Content crates/oraclemcp/Cargo.toml -Raw", "Get-Content Cargo.toml -Raw"),
+    ("release-empty-audit", release,
+     'if (-not ($records | Where-Object { $_.tool -eq "operator_api" -and $_.outcome -eq "SUCCEEDED" })) { throw "no successful operator audit record" }',
+     "# empty audit accepted"),
+    ("release-unchecked-state", release, "          Assert-PrivateWindowsPath $store\n",
+     "          # Assert-PrivateWindowsPath $store\n"),
+    ("release-unchecked-anchor", release, '          Assert-PrivateWindowsPath "$audit.anchor"\n',
+     '          # Assert-PrivateWindowsPath "$audit.anchor"\n'),
+    ("release-disabled-windows", release, "      - name: Windows durable-state acceptance\n        if: runner.os == 'Windows'",
+     "      - name: Windows durable-state acceptance\n        if: false"),
+    ("release-advisory-acceptance", release, "  artifact-acceptance:\n", "  artifact-acceptance:\n    continue-on-error: true\n"),
+    ("release-no-negative-acl", release, "          Set-Acl -LiteralPath $auditDirectory -AclObject $acl\n",
+     "          # Set-Acl -LiteralPath $auditDirectory -AclObject $acl\n"),
+]
+for name, original, old, new in cases:
+    assert original.count(old) == 1, (name, original.count(old))
+    (target / (name + ".yml")).write_text(original.replace(old, new))
+PY
+for case in ci-zero-filter ci-hidden-cargo-failure ci-zero-tests-pass ci-ignored-proof; do
+  expect_fail "$case" env ORACLEMCP_CI_WORKFLOW="$TMP/$case.yml" \
+    bash "$ROOT/scripts/validate_release_security_workflows.sh"
+done
+for case in release-wrong-version release-empty-audit release-unchecked-state \
+  release-unchecked-anchor release-disabled-windows release-advisory-acceptance \
+  release-no-negative-acl; do
+  expect_fail "$case" env ORACLEMCP_RELEASE_WORKFLOW="$TMP/$case.yml" \
+    bash "$ROOT/scripts/validate_release_security_workflows.sh"
+done
 sed "s/cosign-release: 'v3.1.2'/cosign-release: 'v2.4.1'/g" \
   "$ROOT/.github/workflows/release.yml" >"$TMP/release-cosign-v2.yml"
 expect_fail "release reverted to cosign v2" env \
