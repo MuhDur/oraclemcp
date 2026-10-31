@@ -3383,15 +3383,22 @@ def ci_summary(results_path, summary_path, output_path):
         verdict = "fail"
     require(results.get("verdict") == verdict, "W4 declared verdict disagrees with case results")
     slots = collections.defaultdict(lambda: {"pass": 0, "fail": 0, "skip": 0, "duration_ms": 0})
+    family_slots = collections.defaultdict(lambda: {"pass": 0, "fail": 0, "skip": 0, "duration_ms": 0})
+    families = case_families()
     for row in rows:
-        slot = slots[row["transport"]]
-        slot[row["verdict"]] += 1
-        slot["duration_ms"] += row.get("duration_ms", 0)
+        for slot in (slots[row["transport"]],
+                     family_slots[(families.get(row["case_id"], "generated"), row["transport"])]):
+            slot[row["verdict"]] += 1
+            slot["duration_ms"] += row.get("duration_ms", 0)
     with summary_path.open("a") as out:
         out.write(f"W4 disposition: {verdict.upper()}\n\n")
         out.write("| Transport | Passed cases | Failed cases | Skipped cases | Duration ms |\n|---|---:|---:|---:|---:|\n")
         for transport, slot in sorted(slots.items()):
             out.write(f"| {transport} | {slot['pass']} | {slot['fail']} | {slot['skip']} | {slot['duration_ms']} |\n")
+        # Per-family durations decide whether the 25-minute lane must split by family.
+        out.write("\n| Family | Transport | Passed | Failed | Skipped | Duration ms |\n|---|---|---:|---:|---:|---:|\n")
+        for (family, transport), slot in sorted(family_slots.items()):
+            out.write(f"| {family} | {transport} | {slot['pass']} | {slot['fail']} | {slot['skip']} | {slot['duration_ms']} |\n")
         for row in rows:
             if row["verdict"] == "skip":
                 reason = row["skip_reason"]
@@ -3404,6 +3411,126 @@ def ci_summary(results_path, summary_path, output_path):
                    "failed": sum(slot["fail"] for slot in slots.values()),
                    "skipped": sum(slot["skip"] for slot in slots.values())}))
     require(verdict != "fail", "W4 results contain failures")
+
+
+def case_families():
+    """Map each file-backed case to its family file; generated contract cases have none."""
+    families = {}
+    for path in sorted(CASES.glob("*.json")):
+        if path.name == "schema.json":
+            continue
+        data = json.loads(path.read_text())
+        values = data if isinstance(data, list) else data.get("cases", [])
+        for value in values:
+            if isinstance(value, dict) and "case_id" in value:
+                families[value["case_id"]] = path.stem
+    return families
+
+
+def ci_verdict(results_path, lane, summary_path, output_path):
+    """The CI verdict step: pass only when every check over this run's own results passes.
+
+    A missing or unparsable results.json, a cases.jsonl that differs from it, results
+    from another checkout, a recorded run failure (including a run killed by a timeout,
+    which leaves the primed "did not complete" failure), any red case, or a required
+    manifest case missing on either transport is red."""
+    results = json.loads(results_path.read_text())
+    require(results.get("lane") == lane, f"W4 results are for lane {results.get('lane')!r}, not {lane}")
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+    require(results.get("checkout_sha") == head, "W4 results were not produced by this checkout")
+    jsonl = results_path.with_name("cases.jsonl").read_text()
+    require(jsonl.endswith("\n") or not jsonl, "W4 cases.jsonl is truncated")
+    require([json.loads(line) for line in jsonl.splitlines()] == results["cases"],
+            "W4 cases.jsonl differs from results.json")
+    cargo_log = results_path.with_name("cargo-tests.log")
+    cargo_log.write_text(results.get("cargo_test_output", ""))
+    command = [sys.executable, str(MANIFEST), "--check-results", str(results_path), "--lane", lane,
+               "--cargo-test-log", str(cargo_log)]
+    for capability in results.get("capabilities", []):
+        command += ["--capability", capability]
+    for transport in ("stdio", "http"):
+        checked = subprocess.run([*command, "--transport", transport], cwd=ROOT, text=True,
+                                 capture_output=True, check=False)
+        print(checked.stdout, end="")
+        print(checked.stderr, end="", file=sys.stderr)
+        require(checked.returncode == 0, f"W4 release manifest check failed on {lane}/{transport}")
+    ci_summary(results_path, summary_path, output_path)
+
+
+def ci_verdict_selftest():
+    """Each way a W4 run can be incomplete or red must turn the CI verdict red."""
+    lane = "free23"
+    release = {case["case_id"]: case for case in json.loads(RELEASE_MANIFEST.read_text())}
+    required = subprocess.run([sys.executable, str(MANIFEST), "--required-ids", "--lane", lane,
+                               "--transport", "stdio", "--capability", "version:23"],
+                              cwd=ROOT, text=True, capture_output=True, check=True).stdout.split()
+    require(required, "release manifest has no required FREE 23ai cases")
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+
+    def green():
+        return {"lane": lane, "verdict": "pass", "checkout_sha": head, "capabilities": ["version:23"],
+                "cases": [{"case_id": case_id, "lane": lane, "transport": transport, "verdict": "pass",
+                           "test_id": release[case_id]["test_id"], "tool": "oracle_query", "duration_ms": 1}
+                          for transport in ("stdio", "http") for case_id in required],
+                "cargo_test_output": "".join(
+                    f"test {case['test_id'].split('::', 1)[-1]} ... ok\n"
+                    for case in release.values() if case["reproducible"] == "unit")}
+
+    def planted_failure(results):
+        results["cases"][0]["verdict"] = "fail"
+        results["verdict"] = "fail"
+
+    def timed_out(results):
+        # A job killed mid-run leaves run_lane's primed failure record in place.
+        results.update(verdict="fail", run_failure={
+            "class": "DriverError", "detail": "W4 run did not complete"})
+
+    def missing_manifest_case(results):
+        results["cases"] = [row for row in results["cases"]
+                            if (row["case_id"], row["transport"]) != (required[0], "http")]
+
+    directory = ROOT / "target/e2e/w4/selftest/ci-verdict"
+    directory.mkdir(parents=True, exist_ok=True)
+    results_path = directory / "results.json"
+    summary_path, output_path = directory / "summary.md", directory / "output.txt"
+
+    def run(mutate=None, after_write=None):
+        results = green()
+        if mutate:
+            mutate(results)
+        results_path.write_text(json.dumps(results))
+        results_path.with_name("cases.jsonl").write_text(
+            "".join(compact(row) + "\n" for row in results["cases"]))
+        if after_write:
+            after_write()
+        summary_path.write_text("")
+        output_path.write_text("")
+        with contextlib.redirect_stdout(open(os.devnull, "w")), \
+                contextlib.redirect_stderr(open(os.devnull, "w")):
+            ci_verdict(results_path, lane, summary_path, output_path)
+
+    run()
+    require(output_path.read_text() == "verdict=pass\n", "green W4 results did not pass the CI verdict")
+    require("| Family | Transport |" in summary_path.read_text(), "CI summary has no per-family durations")
+
+    def truncate_jsonl():
+        jsonl = results_path.with_name("cases.jsonl")
+        jsonl.write_text(jsonl.read_text()[:-40])
+
+    for label, mutate, after_write in (
+            ("missing_results", None, results_path.unlink),
+            ("truncated_jsonl", None, truncate_jsonl),
+            ("timeout", timed_out, None),
+            ("planted_failing_case", planted_failure, None),
+            ("missing_manifest_case", missing_manifest_case, None),
+            ("other_checkout", lambda results: results.update(checkout_sha="0" * 40), None)):
+        try:
+            run(mutate, after_write)
+        except (DriverError, OSError, ValueError):
+            pass
+        else:
+            raise DriverError(f"CI verdict accepted {label}")
+    print(compact({"selftest": "ci_verdict_fail_closed", "verdict": "pass"}))
 
 
 def select_cases(file_cases, generated_cases, selected):
@@ -5112,6 +5239,7 @@ def alias_and_refusal_verifiers_selftest():
 
 
 def selftest():
+    ci_verdict_selftest()
     alias_and_refusal_verifiers_selftest()
     timeout_budget_selftest()
     argument_deprecations_selftest()
@@ -5595,6 +5723,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--selftest", action="store_true")
     parser.add_argument("--ci-summary", type=Path, help="validate W4 disposition and write CI pass/skip summary")
+    parser.add_argument("--ci-verdict", type=Path,
+                        help="CI verdict step: check results, JSONL, release manifest (both transports) and summarize")
     parser.add_argument("--manifest-enforcement-integration", action="store_true")
     parser.add_argument("--lane", choices=("free23", "xe18", "xe21"))
     parser.add_argument("--binary", type=Path)
@@ -5622,7 +5752,11 @@ def main():
         require(sum(bool(value) for value in (args.case, args.contract_only, args.alias_contracts_only)) <= 1, "--case, --contract-only and --alias-contracts-only are exclusive")
         require(not args.binary_source_sha or re.fullmatch(r"[0-9a-f]{40}", args.binary_source_sha),
                 "--binary-source-sha needs a full Git SHA")
-        if args.ci_summary:
+        if args.ci_verdict:
+            require(args.lane, "--ci-verdict needs --lane")
+            ci_verdict(args.ci_verdict, args.lane, Path(os.environ["GITHUB_STEP_SUMMARY"]),
+                       Path(os.environ["GITHUB_OUTPUT"]))
+        elif args.ci_summary:
             ci_summary(args.ci_summary, Path(os.environ["GITHUB_STEP_SUMMARY"]),
                        Path(os.environ["GITHUB_OUTPUT"]))
         elif args.selftest:

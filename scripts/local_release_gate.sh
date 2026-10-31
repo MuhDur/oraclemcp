@@ -199,14 +199,14 @@ if [ "$run_w4_tier_c" = true ]; then
     e2e_finish_fail "tier-C W4 runner failed"
   fi
   tier_c_summary="$ROOT/target/e2e/tier_c/$(git rev-parse HEAD)/summary.json"
-  if ! jq -e --arg sha "$(git rev-parse HEAD)" '
-      .sha == $sha
-      and (.clients.verdict == "pass")
-      and ([.lanes[] | select(.lane != "adb") | .verdict] | length > 0 and all(.[]; . == "pass"))
-    ' "$tier_c_summary" >/dev/null; then
-    e2e_finish_fail "tier-C W4 summary is missing or has a non-passing lane/client verdict: $tier_c_summary"
+  if [ "$E2E_DRY_RUN" = "1" ]; then
+    e2e_run_command "assert" bash scripts/rig/tier_c.sh --selftest
+    e2e_log_event "w4_tier_c_dry_run" "assert" "skipped" 0 "$tier_c_summary"
+  elif ! bash scripts/rig/tier_c.sh --check "$tier_c_summary" --sha "$(git rev-parse HEAD)"; then
+    e2e_finish_fail "tier-C W4 summary does not prove XE 18, XE 21 and FREE 23ai passed for this clean SHA: $tier_c_summary"
+  else
+    e2e_log_event "w4_tier_c_consumed" "assert" "pass" 0 "$tier_c_summary"
   fi
-  e2e_log_event "w4_tier_c_consumed" "assert" "pass" 0 "$tier_c_summary"
 else
   e2e_log_event "w4_tier_c_deferred" "assert" "skipped" 0 "tier-C W4 runner runs only with --w4-tier-c (release candidate SHA)"
 fi

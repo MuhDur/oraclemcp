@@ -822,6 +822,17 @@
       "path_filtered": false
     },
     {
+      "check_name": "tier-C W4 (XE 18, XE 21, FREE 23ai)",
+      "tier": "manual",
+      "workflow": "Release",
+      "workflow_file": "release.yml",
+      "job_id": "tier-c-w4",
+      "triggers": [
+        "workflow_dispatch"
+      ],
+      "path_filtered": false
+    },
+    {
       "check_name": "verify MCP registry entry",
       "tier": "release",
       "workflow": "Release",
@@ -1000,6 +1011,7 @@
         "publish MCP registry entry",
         "release acceptance suite (B.12)",
         "release gates",
+        "tier-C W4 (XE 18, XE 21, FREE 23ai)",
         "verify MCP registry entry",
         "web bundle (npm ci + vite build)"
       ]
@@ -1023,6 +1035,7 @@
       "Windows audit native workspace",
       "promote attested digest",
       "publish server.json",
+      "tier-C W4 (XE 18, XE 21, FREE 23ai)",
       "validate immutable release",
       "verify immutable release source",
       "verify registry listing"

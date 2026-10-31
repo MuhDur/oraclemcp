@@ -233,6 +233,57 @@ jobs:
           tool: cargo-hack
       - run: bash scripts/release_acceptance_ci_suite.sh
 
+  # Tier C (plan §7): the W4 suite on XE 18, XE 21 and FREE 23ai for this exact
+  # candidate SHA, one lane at a time (scripts/rig/tier_c.sh). Rehearsal only:
+  # a tag run does not repeat it and no publish job needs it; the release proof
+  # (T5.5) binds the summary this job checks. The Always-Free ADB lane is T9.1's.
+  tier-c-w4:
+    name: tier-C W4 (XE 18, XE 21, FREE 23ai)
+    if: github.event_name == 'workflow_dispatch'
+    needs: web-build
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: oraclemcp-dashboard-dist
+          path: web/dist
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+      - name: Install pinned python-oracledb for the W4 fixture
+        run: |
+          set -euo pipefail
+          wheelhouse="$RUNNER_TEMP/oracledb-wheelhouse"
+          mkdir -p "$wheelhouse"
+          python3 -m pip download --disable-pip-version-check --only-binary=:all: \
+            --require-hashes --dest "$wheelhouse" -r containers/python-oracledb-requirements.lock
+          python3 -m pip install --disable-pip-version-check --no-index \
+            --find-links "$wheelhouse" --require-hashes \
+            -r containers/python-oracledb-requirements.lock
+      # The client snippet proofs run against the release binary.
+      - run: cargo build --release -p oraclemcp --bin oraclemcp --features dashboard-bundle
+      - name: Tier-C W4 on XE 18, XE 21 and FREE 23ai
+        run: bash scripts/rig/tier_c.sh --sha "$GITHUB_SHA"
+      - name: Verify the tier-C summary
+        run: bash scripts/rig/tier_c.sh --check "target/e2e/tier_c/$GITHUB_SHA/summary.json" --sha "$GITHUB_SHA"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: tier-c-w4-${{ github.sha }}
+          path: |
+            target/e2e/tier_c/${{ github.sha }}/
+            target/e2e/w4/*/results.json
+          if-no-files-found: error
+          retention-days: 30
+
   build:
     name: build ${{ matrix.target }}
     # release-acceptance is intentionally NOT a dependency here: it consumes

@@ -6,6 +6,12 @@
 # for the release proof (T5.5). Lanes run one at a time (memory discipline);
 # each is brought up by scripts/rig/oracle_l1.sh first. The Always-Free ADB
 # lane belongs to the W9 harness (T9.1) and is recorded as delegated.
+#
+# --check <summary.json> --sha <sha> is the fail-closed consumer used by
+# scripts/local_release_gate.sh and the release rehearsal: it passes only a
+# clean-tree summary for that exact SHA where XE 18, XE 21 and FREE 23ai each
+# passed with at least one case and the client proofs passed. --selftest
+# proves each way a summary can fall short is refused.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -18,13 +24,90 @@ fail() {
 
 usage() {
   echo "Usage: scripts/rig/tier_c.sh --sha <sha> [--lane xe18|xe21|free23]... [--dry-run]"
+  echo "       scripts/rig/tier_c.sh --check <summary.json> --sha <sha>"
+  echo "       scripts/rig/tier_c.sh --selftest"
+}
+
+check_summary() {
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+path, sha = sys.argv[1:]
+try:
+    summary = json.load(open(path))
+except (OSError, ValueError) as exc:
+    sys.exit(f"tier-c check: unreadable summary {path}: {exc}")
+problems = []
+if summary.get("sha") != sha:
+    problems.append(f"summary is for {summary.get('sha')!r}, not {sha}")
+if summary.get("tree_dirty") is not False:
+    problems.append("summary was produced on a dirty tree")
+lanes = {row.get("lane"): row for row in summary.get("lanes", [])}
+for lane in ("xe18", "xe21", "free23"):
+    row = lanes.get(lane)
+    if row is None:
+        problems.append(f"lane {lane} is missing")
+    elif row.get("verdict") != "pass" or not row.get("cases_total") or row.get("cases_failed") != 0:
+        problems.append(f"lane {lane} did not pass: {row.get('verdict')} {row.get('reason', '')}".rstrip())
+if (summary.get("clients") or {}).get("verdict") != "pass":
+    problems.append("client snippet proofs did not pass")
+if problems:
+    sys.exit("tier-c check: FAIL: " + "; ".join(problems))
+print(f"tier-c check: pass ({path})")
+PY
+}
+
+selftest() {
+  local dir sha
+  dir="$ROOT/target/e2e/tier_c/selftest"
+  mkdir -p "$dir"
+  sha="$(printf '%040d' 7)"
+  python3 - "$dir" "$sha" <<'PY'
+import copy, json, sys
+from pathlib import Path
+dir, sha = Path(sys.argv[1]), sys.argv[2]
+good = {"sha": sha, "tree_dirty": False, "clients": {"verdict": "pass", "clients": []},
+        "lanes": [{"lane": lane, "version": None, "cases_total": 3, "cases_failed": 0, "verdict": "pass"}
+                  for lane in ("xe18", "xe21", "free23")]
+        + [{"lane": "adb", "verdict": "delegated"}]}
+def variant(name, mutate):
+    value = copy.deepcopy(good)
+    mutate(value)
+    (dir / f"{name}.json").write_text(json.dumps(value))
+variant("good", lambda v: None)
+variant("missing_lane", lambda v: v["lanes"].pop(1))
+variant("failed_lane", lambda v: v["lanes"][2].update(verdict="fail", cases_failed=1))
+variant("dry_run_lane", lambda v: v["lanes"][0].update(verdict="dry_run", cases_total=0))
+variant("empty_lane", lambda v: v["lanes"][0].update(cases_total=0))
+variant("other_sha", lambda v: v.update(sha="f" * 40))
+variant("dirty_tree", lambda v: v.update(tree_dirty=True))
+variant("client_fail", lambda v: v["clients"].update(verdict="fail"))
+(dir / "truncated.json").write_text(json.dumps(good)[:-20])
+PY
+  check_summary "$dir/good.json" "$sha" >/dev/null || fail "selftest: a passing summary was refused"
+  local name
+  for name in missing_lane failed_lane dry_run_lane empty_lane other_sha dirty_tree client_fail truncated absent; do
+    if check_summary "$dir/$name.json" "$sha" >/dev/null 2>&1; then
+      fail "selftest: accepted $name"
+    fi
+  done
+  echo "tier-c selftest: pass (good summary accepted; 9 short summaries refused)"
 }
 
 sha=''
 dry_run=0
+check=''
 lanes=()
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --check)
+      [ "$#" -ge 2 ] || fail "--check requires a summary path"
+      check="$2"
+      shift 2
+      ;;
+    --selftest)
+      selftest
+      exit 0
+      ;;
     --sha)
       [ "$#" -ge 2 ] || fail "--sha requires a value"
       sha="$2"
@@ -47,6 +130,10 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ -n "$sha" ] || { usage >&2; exit 2; }
+if [ -n "$check" ]; then
+  check_summary "$check" "$sha"
+  exit 0
+fi
 [ "${#lanes[@]}" -gt 0 ] || lanes=(xe18 xe21 free23)
 
 # Results are only meaningful for the tree they ran on: --sha must name HEAD.

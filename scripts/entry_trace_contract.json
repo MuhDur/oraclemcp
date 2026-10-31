@@ -82,8 +82,8 @@
     },
     {
       "path": "scripts/check_test_attestations.py",
-      "kind": "entry_point",
-      "trace": "required-quality"
+      "kind": "helper",
+      "excluded_reason": "retired-r29-attestation"
     },
     {
       "path": "scripts/ci_heartbeat.sh",

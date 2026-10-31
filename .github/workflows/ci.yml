@@ -648,6 +648,8 @@ jobs:
       # fails. Needs no Docker: it only aims checks at broken environments.
       - name: rig doctor selftest (D8)
         run: bash scripts/rig/rig_doctor.sh --selftest
+      - name: tier-C summary check selftest
+        run: bash scripts/rig/tier_c.sh --selftest
       # D9: vendored MIT sample schemas. The gate refuses drift against the
       # pinned upstream commit, a missing licence, AND any file the manifest
       # does not list — the last one is the governance half, so an unvetted
@@ -882,9 +884,9 @@ jobs:
           ORACLEMCP_TEST_LAB_CONTAINER: ${{ job.services.free23.id }}
         run: |
           set -euo pipefail
-          mkdir -p target/test-attestation-evidence
+          mkdir -p target/e2e
           bash scripts/e2e/oracle_version_matrix.sh --log --lane free23 2>&1 \
-            | tee target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
+            | tee target/e2e/oracle-version-matrix-free23.log
       - name: Live shared broker sessions, isolation, recovery and default HTTP
         env:
           ORACLEMCP_TEST_DSN: localhost:1522/FREEPDB1
@@ -906,45 +908,11 @@ jobs:
               '--test', 'broker_stdio', '--', '--test-threads=1', '--nocapture',
           ], env=env, check=True, timeout=300)
           PY
-      - name: Derive e2e attestation outcome
-        if: always()
-        id: e2e-attestation
-        run: |
-          set -euo pipefail
-          case "${{ steps.free23-matrix.outcome }}" in
-            success) outcome=PASS ;;
-            failure) outcome=FAIL ;;
-            cancelled|skipped) outcome=SKIP ;;
-            *) outcome=FAIL ;;
-          esac
-          echo "tests=e2e:oracle-version-matrix-free23=$outcome" >> "$GITHUB_OUTPUT"
-          printf 'e2e:oracle-version-matrix-free23=%s\n' "$outcome"
-      - name: Record e2e-lane attestation status
-        if: always()
-        uses: ./.github/actions/test-attestation
-        env:
-          ORACLEMCP_TEST_ATTESTATION_KEY: ${{ secrets.ORACLEMCP_TEST_ATTESTATION_KEY }}
-          ORACLEMCP_TEST_ATTESTATION_KEY_ID: ${{ vars.TEST_ATTESTATION_KEY_ID || 'github-actions-v1' }}
-        with:
-          enabled: ${{ vars.ENABLE_TEST_ATTESTATION == 'true' }}
-          trusted-context: ${{ github.event_name == 'push' }}
-          lane: e2e-oracle-free23
-          command: bash scripts/e2e/oracle_version_matrix.sh --log --lane free23
-          tests: ${{ steps.e2e-attestation.outputs.tests }}
-          artifacts: target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
-          output-name: e2e-oracle-free23.jsonl
-      - name: Verify the e2e attestation this lane produced
-        if: always()
-        run: |
-          python3 scripts/check_test_attestations.py --selftest
-          python3 scripts/check_test_attestations.py target/test-attestations
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: e2e-oracle-free23-attestation-${{ github.run_number }}
-          path: |
-            target/test-attestation-evidence/e2e-oracle-version-matrix-free23.log
-            target/test-attestations/
+          name: e2e-oracle-free23-matrix-${{ github.run_number }}
+          path: target/e2e/oracle-version-matrix-free23.log
           if-no-files-found: error
           retention-days: 30
 
@@ -1036,6 +1004,8 @@ jobs:
               raise RuntimeError(f"loaded python-oracledb {oracledb.__version__}; expected exactly {expected}")
           print(f"loaded pinned python-oracledb {oracledb.__version__}")
           PY
+      - name: W4 driver and CI verdict selftest
+        run: python3 scripts/e2e/w4/driver.py --selftest
       - name: FREE 23ai W4 (stdio and HTTP)
         env:
           ORACLEMCP_LIVE_XE: "1"
@@ -1046,34 +1016,11 @@ jobs:
       - name: Validate FREE 23ai W4 verdict and summarize duration
         id: w4-summary
         if: always()
-        run: |
-          set -euo pipefail
-          results=target/e2e/w4/free23/results.json
-          mapfile -t capabilities < <(python3 - "$results" <<'PY'
-          import json
-          import sys
-
-          for capability in json.load(open(sys.argv[1]))["capabilities"]:
-              print(capability)
-          PY
-          )
-          # Preserve the unmodified output of W4's exact Rust test runs as
-          # explicit evidence; missing/empty output must fail validation.
-          cargo_log=target/e2e/w4/free23/cargo-tests.log
-          python3 - "$results" "$cargo_log" <<'PYLOG'
-          import json
-          import sys
-          from pathlib import Path
-
-          Path(sys.argv[2]).write_text(json.loads(Path(sys.argv[1]).read_text())["cargo_test_output"])
-          PYLOG
-          manifest_args=(--cargo-test-log "$cargo_log")
-          for capability in "${capabilities[@]}"; do
-            manifest_args+=(--capability "$capability")
-          done
-          python3 scripts/e2e/cases/validate_manifest.py --check-results "$results" --lane free23 --transport stdio "${manifest_args[@]}"
-          python3 scripts/e2e/cases/validate_manifest.py --check-results "$results" --lane free23 --transport http "${manifest_args[@]}"
-          python3 scripts/e2e/w4/driver.py --ci-summary "$results"
+        # Fail-closed: red on a missing or truncated result, another checkout's
+        # results, a run that did not complete (job timeout included), any red
+        # case, or a required release-manifest case missing on stdio or HTTP.
+        # The selftest step above proves each of these turns the verdict red.
+        run: python3 scripts/e2e/w4/driver.py --ci-verdict target/e2e/w4/free23/results.json --lane free23
       - uses: actions/upload-artifact@v7
         if: always()
         with:
