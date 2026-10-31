@@ -1815,7 +1815,8 @@
     },
     "expect": {
       "json_subset": {
-        "unit_count": 4,
+        "unit_count": 2,
+        "rule_evaluation_count": 40,
         "completeness": {
           "files_total": 3,
           "files_recovered": 0
