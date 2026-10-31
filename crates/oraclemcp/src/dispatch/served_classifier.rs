@@ -371,6 +371,260 @@ fn routine_call_key(source: &ObjectRef) -> String {
 #[cfg(test)]
 mod generation_tests {
     use super::*;
+    use oraclemcp_db::{
+        CatalogQueryId, ClosureMember, OracleBackend, OracleCell, OracleRow, extract_closure_facts,
+    };
+    use oraclemcp_guard::{RoutineIdentifier, RoutineRef, StatementScope};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+    #[derive(Default)]
+    struct RevalidationCatalog {
+        changed_schema: AtomicBool,
+        executions: AtomicUsize,
+    }
+
+    fn catalog_row(values: &[(&str, Option<&str>)]) -> OracleRow {
+        OracleRow {
+            columns: values
+                .iter()
+                .map(|(name, value)| {
+                    (
+                        (*name).to_owned(),
+                        OracleCell::new("VARCHAR2", value.map(str::to_owned)),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[async_trait::async_trait(?Send)]
+    impl OracleConnection for RevalidationCatalog {
+        fn backend(&self) -> OracleBackend {
+            OracleBackend::RustOracle
+        }
+
+        async fn close(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn ping(&self, _cx: &Cx) -> Result<(), DbError> {
+            Ok(())
+        }
+
+        async fn describe(&self, _cx: &Cx) -> Result<OracleConnectionInfo, DbError> {
+            Ok(OracleConnectionInfo::default())
+        }
+
+        async fn query_rows(
+            &self,
+            _cx: &Cx,
+            sql: &str,
+            binds: &[OracleBind],
+        ) -> Result<Vec<OracleRow>, DbError> {
+            let row = if sql == CatalogQueryId::SessionContext.spec().sql {
+                catalog_row(&[
+                    ("SESSION_USER", Some("APP")),
+                    (
+                        "CURRENT_SCHEMA",
+                        Some(if self.changed_schema.load(Ordering::SeqCst) {
+                            "OTHER"
+                        } else {
+                            "APP"
+                        }),
+                    ),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])
+            } else if sql == CatalogQueryId::SessionRoles.spec().sql
+                || sql == CatalogQueryId::ClosureDependencies.spec().sql
+            {
+                return Ok(Vec::new());
+            } else if sql == CatalogQueryId::ClosureIdentity.spec().sql {
+                catalog_row(&[
+                    ("DBID", Some("42")),
+                    ("CONTAINER_NAME", Some("FREEPDB1")),
+                    ("EDITION_NAME", Some("ORA$BASE")),
+                ])
+            } else if sql == CatalogQueryId::Objects.spec().sql
+                || sql == CatalogQueryId::ClosureMemberObject.spec().sql
+            {
+                let Some(OracleBind::String(owner)) = binds.first() else {
+                    panic!("object lookup must bind its owner");
+                };
+                assert_eq!(binds.get(1), Some(&OracleBind::from("FX")));
+                catalog_row(&[
+                    ("OWNER", Some(owner)),
+                    ("OBJECT_NAME", Some("FX")),
+                    ("OBJECT_TYPE", Some("FUNCTION")),
+                    ("OBJECT_ID", Some(if owner == "APP" { "1" } else { "2" })),
+                    ("LAST_DDL_TIME", Some("2026-10-31T00:00:00")),
+                    ("STATUS", Some("VALID")),
+                    ("EDITION_NAME", None),
+                ])
+            } else if sql == CatalogQueryId::StandaloneProcedures.spec().sql
+                || sql == CatalogQueryId::ClosureRoutineAuthid.spec().sql
+            {
+                catalog_row(&[
+                    ("SUBPROGRAM_ID", Some("1")),
+                    ("OVERLOAD", None),
+                    ("AUTHID", Some("DEFINER")),
+                ])
+            } else if sql == CatalogQueryId::StandaloneArguments.spec().sql {
+                catalog_row(&[
+                    ("SUBPROGRAM_ID", Some("1")),
+                    ("OVERLOAD", None),
+                    ("POSITION", Some("0")),
+                    ("DATA_LEVEL", Some("0")),
+                    ("IN_OUT", Some("OUT")),
+                    ("DEFAULTED", Some("N")),
+                    ("ARGUMENT_NAME", None),
+                    ("DATA_TYPE", Some("NUMBER")),
+                ])
+            } else if sql == CatalogQueryId::ClosureCompilerSettings.spec().sql {
+                catalog_row(&[
+                    ("PLSQL_OPTIMIZE_LEVEL", Some("2")),
+                    ("PLSQL_CODE_TYPE", Some("INTERPRETED")),
+                    ("PLSQL_DEBUG", Some("FALSE")),
+                    ("PLSQL_WARNINGS", Some("DISABLE:ALL")),
+                    ("PLSQL_CCFLAGS", None),
+                    ("NLS_LENGTH_SEMANTICS", Some("BYTE")),
+                    ("PLSCOPE_SETTINGS", Some("IDENTIFIERS:NONE")),
+                ])
+            } else if sql == CatalogQueryId::ClosureSource.spec().sql {
+                catalog_row(&[
+                    ("LINE", Some("1")),
+                    (
+                        "TEXT",
+                        Some("FUNCTION FX RETURN NUMBER IS BEGIN RETURN 1; END;\n"),
+                    ),
+                ])
+            } else {
+                panic!("unexpected revalidation catalog query: {sql}");
+            };
+            Ok(vec![row])
+        }
+
+        async fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _binds: &[OracleBind],
+        ) -> Result<u64, DbError> {
+            self.executions.fetch_add(1, Ordering::SeqCst);
+            Ok(1)
+        }
+
+        async fn commit(&self, _cx: &Cx) -> Result<(), DbError> {
+            panic!("revalidation must not commit");
+        }
+
+        async fn rollback(&self, _cx: &Cx) -> Result<(), DbError> {
+            panic!("revalidation must not roll back");
+        }
+    }
+
+    #[test]
+    fn served_revalidation_identity_drift_refuses_before_execution() {
+        let runtime = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let cx = Cx::current().unwrap();
+            let conn = RevalidationCatalog::default();
+            let cache = OracleCatalogResolverCache::new();
+            let candidate = RoutineRef {
+                schema: None,
+                package: None,
+                member: RoutineIdentifier::new("FX", false),
+                overload: None,
+            };
+            let context = cache
+                .preload(&cx, &conn, &[], StatementScope::default())
+                .await
+                .unwrap();
+            let root = oraclemcp_db::OracleCatalogResolver::resolve_routine_call(
+                &cx,
+                &conn,
+                &candidate,
+                &[],
+                &context,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(root.schema.as_ref().unwrap().text, "APP");
+            let closure = RoutineClosure {
+                root: root.clone(),
+                members: vec![ClosureMember {
+                    routine: root.clone(),
+                    owner: "APP".into(),
+                    object_name: "FX".into(),
+                    object_type: "FUNCTION".into(),
+                    source_types: vec!["FUNCTION".into()],
+                }],
+                dml_targets: Vec::new(),
+            };
+            let key = extract_closure_facts(&cx, &conn, &closure, Some(cache.generation().0))
+                .await
+                .unwrap()
+                .key;
+            let mut proof = PreparedClassifier::unknown(Some("dev".into()), 0);
+            proof.bindings.push(ClosureBinding {
+                closure: closure.clone(),
+                key: key.clone(),
+                calls: vec![CallResolution {
+                    candidate: candidate.clone(),
+                    arguments: Vec::new(),
+                }],
+            });
+
+            // Positive control: complete unchanged facts allow the caller past
+            // the real revalidation gate and into the recording connection.
+            proof.revalidate(&cx, &conn).await.unwrap();
+            conn.execute(&cx, "SELECT FX() FROM SYS.DUAL", &[])
+                .await
+                .unwrap();
+            assert_eq!(conn.executions.swap(0, Ordering::SeqCst), 1);
+
+            conn.changed_schema.store(true, Ordering::SeqCst);
+            let context = cache
+                .preload(&cx, &conn, &[], StatementScope::default())
+                .await
+                .unwrap();
+            let resolved = oraclemcp_db::OracleCatalogResolver::resolve_routine_call(
+                &cx,
+                &conn,
+                &candidate,
+                &[],
+                &context,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(resolved.schema.as_ref().unwrap().text, "OTHER");
+            assert_ne!(resolved, root);
+            // The old routine still exists unchanged: a closure-key comparison
+            // alone cannot detect that the caller would now invoke OTHER.FX.
+            assert_eq!(
+                extract_closure_facts(&cx, &conn, &closure, Some(cache.generation().0))
+                    .await
+                    .unwrap()
+                    .key,
+                key
+            );
+            let result = async {
+                proof.revalidate(&cx, &conn).await?;
+                conn.execute(&cx, "SELECT FX() FROM SYS.DUAL", &[])
+                    .await
+                    .map_err(DbError::into_envelope)
+            }
+            .await;
+            assert_eq!(conn.executions.load(Ordering::SeqCst), 0);
+            let error = result.expect_err("a different resolved routine must require repreview");
+            assert_eq!(error.error_class, ErrorClass::RepreviewRequired);
+            assert!(error.message.starts_with("REPREVIEW_REQUIRED:"));
+        });
+    }
+
     #[test]
     fn served_generation_change_between_preview_and_apply_refuses() {
         let before = OracleMcpConfig::from_toml_str(
